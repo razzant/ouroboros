@@ -70,10 +70,10 @@ def root(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
     monkeypatch.delenv("OUROBOROS_OBSERVABILITY_KEEP_RAW", raising=False)
     packs._READERS.clear()
-    obs._LISTED_PARTS.clear()
+    obs._TASK_PARTS.clear()
     yield data
     packs._READERS.clear()
-    obs._LISTED_PARTS.clear()
+    obs._TASK_PARTS.clear()
 
 
 def test_a_request_view_stores_each_element_once_and_keeps_the_whole_digest(root):
@@ -356,3 +356,210 @@ def test_a_view_named_outside_a_manifest_brings_its_parts_and_the_child_can_go(t
     assert promoted["trace_refs"]["timeout_repeat"]["first"]["path"].startswith(str(parent))
     shutil.rmtree(child)
     assert packs.blob_bytes(parent, {**ref, "path": ""}) == _json_bytes(payload)
+
+
+def test_a_child_view_beside_a_packed_task_proves_each_shared_part_once_then_checks_each_new_whole(root, monkeypatch):
+    """The parts a child's views share with an already packed task are each decoded once, by their own node: every
+    NEW skeleton is then checked as the whole it splices to from the walk's bounded part cache (a token repeated in
+    ``send_messages`` included), never decoding a part again only to learn the parent already holds it."""
+    from ouroboros import headless
+    from tests._packed_read_probe import count_packed_reads
+
+    settled = _transcript(2)
+    _persist(root, "llm_1_request", _view(settled), task_id="settled")
+    _task_row(root, "settled")
+    assert packer.run_pass(root)["packed"] == 1  # the shared parts are pack members only now
+    task = "promoted"
+    child = headless.prepare_task_drive(root, task, "empty")
+    views = [_view(settled[:2] + [{"role": "user", "content": f"Question {index}"}]) for index in range(3)]
+    for index, view in enumerate(views):
+        obs.persist_call(child, task_id=task, call_id=f"llm_{index}_request", call_type="llm_request", payload=view)
+    reads = count_packed_reads(monkeypatch)
+    _rewritten, state = obs.promote_child_task_refs(root, child, task, {})
+    assert (state["status"], state["pending_refs"]) == ("complete", []), state
+    assert reads and set(reads.values()) == {1}, reads
+    shutil.rmtree(child)
+    for index, view in enumerate(views):
+        _manifest, restored, _ = obs.read_call_payload(root, task_id=task, call_id=f"llm_{index}_request")
+        assert restored == json.loads(_json_bytes(obs.redact_projection(view).value))
+
+
+def test_a_damaged_child_loose_whole_beside_its_healthy_skeleton_keeps_the_child(tmp_path):
+    """The verified bytes come from the child's skeleton, but the loose name the walk links is damaged: the
+    read-back after that write refuses the copy, so the promotion stays pending and the child is kept."""
+    from ouroboros import headless
+
+    parent, task = tmp_path / "canonical", "damaged"
+    child = headless.prepare_task_drive(parent, task, "empty")
+    payload = _view(_transcript(2))
+    ref = obs.write_shared_blob(child, payload, {})
+    with gzip.open(ref["path"], "wb") as handle:
+        handle.write(b'{"damaged": true}')
+    _promoted, state = obs.promote_child_task_refs(parent, child, task, {"trace_refs": {"timeout_repeat": {"first": ref}}})
+    assert state["status"] == "incomplete", state
+    assert any("failed verification" in str(row.get("reason")) for row in state["pending_refs"]), state
+    assert packs.blob_bytes(child, {**ref, "path": ""}) == _json_bytes(payload)
+
+
+def test_a_parent_skeleton_missing_a_part_regains_it_from_the_child(tmp_path):
+    """The parent holds a view's skeleton but lost one part: the walk carries the part, checks the whole again
+    after that write and completes without rewriting the skeleton."""
+    from ouroboros import headless
+
+    parent, task = tmp_path / "canonical", "regained"
+    child = headless.prepare_task_drive(parent, task, "empty")
+    payload = _view(_transcript(2))
+    ref = obs.write_shared_blob(child, payload, {})
+    row = {"trace_refs": {"timeout_repeat": {"first": ref}}}
+    assert obs.promote_child_task_refs(parent, child, task, row)[1]["status"] == "complete"
+    skeleton = packs.shared_placement_path(parent, ref["sha256"])
+    inode = skeleton.stat().st_ino
+    lost = parent / "observability" / "blobs" / f"{token_digests(_skeleton(parent, ref))[-1]}.json.gz"
+    lost.unlink()
+    _promoted, state = obs.promote_child_task_refs(parent, child, task, row)
+    assert (state["status"], state["pending_refs"]) == ("complete", []), state
+    assert lost.is_file() and skeleton.stat().st_ino == inode, "the part is carried; the parent's skeleton stays"
+    shutil.rmtree(child)
+    assert packs.blob_bytes(parent, {**ref, "path": ""}) == _json_bytes(payload)
+
+
+# ---- a part's redaction is worked out once (``redaction.part_fact``; K3) ---------------------------------------
+
+SECRET = "ghp_" + "syntheticfixture0123456789" * 2
+
+
+def _secret_view() -> dict:
+    """Redaction fires inside parts (a token, a secret-named key, a nested block), in the skeleton and in a tool's
+    schema; one secret is split across two messages, which no rule reads across."""
+    messages = _transcript(2) + [
+        {"role": "tool", "tool_call_id": "s", "content": f"token: {SECRET}", "api_key": SECRET},
+        {"role": "assistant", "content": [{"type": "text", "text": f"Authorization: Bearer {SECRET}"},
+                                          {"type": "text", "text": "plain"}]},
+        {"role": "user", "content": "the token is ghp_"}, {"role": "user", "content": "syntheticfixture0123456789" * 2},
+    ]
+    login = {"type": "function", "function": {"name": "login", "parameters": {"type": "object", "properties": {
+        "api_key": {"type": "string", "default": "sk-" + "a" * 30}, "page_token": {"type": "string"}}}}}
+    return {**_view(messages, tools=TOOLS[:3] + [login]), "authorization": f"Bearer {SECRET}"}
+
+
+def _scanned(payload, facts) -> tuple:
+    from ouroboros.context_timing import measured_sections, section_spans
+
+    with measured_sections():
+        result = obs.redact_projection(payload, facts=facts)
+        return result, section_spans()["work"].get("secret_scan", 0)
+
+
+@pytest.mark.parametrize("payload", [_secret_view(), _view(_transcript(3))], ids=["secrets", "public"])
+def test_a_view_redacted_by_parts_is_the_whole_walk_byte_for_byte_cold_and_warm(payload):
+    whole = obs.redact_projection(payload)
+    facts: dict = {}
+    cold, scanned = _scanned(payload, facts)
+    warm, rescanned = _scanned(payload, facts)
+    for parts in (cold, warm):
+        assert _json_bytes(parts.value) == _json_bytes(whole.value)
+        assert parts.manifest() == whole.manifest(), "the same rules fired at the same paths, in walk order"
+    elements = {_json_bytes(e) for e in payload["messages"] + payload["tools"]}
+    assert scanned == sum(map(len, elements)) and rescanned == 0, "each distinct part once, then never again"
+    assert whole.value["messages"][-2:] == payload["messages"][-2:], "a secret split across two parts stays unread"
+
+
+def test_the_same_bytes_under_a_credential_named_parent_are_another_fact():
+    element = {"note": "plain example value 12345"}
+    payload = {"type": "object", "properties": {"api_key": {"type": "array", "examples": [element]}},
+               "messages": [element]}
+    facts: dict = {}
+    parts = obs.redact_projection(payload, facts=facts)
+    whole = obs.redact_projection(payload)
+    assert _json_bytes(parts.value) == _json_bytes(whole.value) and parts.manifest() == whole.manifest()
+    assert parts.value["messages"] == [element], "public where its parent is ordinary"
+    assert parts.value["properties"]["api_key"]["examples"][0]["note"].startswith("***REDACTED["), "masked here"
+    assert len({key[0] for key in facts}) == 1 and {key[1] for key in facts} == {False, True}
+
+
+def test_changed_bytes_are_worked_out_again():
+    payload = _view(_transcript(2))
+    facts: dict = {}
+    obs.redact_projection(payload, facts=facts)
+    known = len(facts)
+    edited = copy.deepcopy(payload)
+    edited["messages"][1]["content"] += "!"  # send_messages is the same list: one changed part
+    result, scanned = _scanned(edited, facts)
+    assert len(facts) == known + 1 and scanned == len(_json_bytes(edited["messages"][1]))
+    assert _json_bytes(result.value) == _json_bytes(obs.redact_projection(edited).value)
+
+
+@pytest.mark.parametrize("names", [["api_key", "password"], ["password", "api_key"]])
+def test_a_schema_in_another_key_order_keeps_the_whole_walk_s_records(names):
+    """A part's fact is held per its bytes in their own order: a schema with secret defaults, met first in one order of
+    its properties and then in the other, is reported in the order of the walk that met it, as the whole walk does."""
+    def request(order):
+        properties = {name: {"type": "string", "default": "sk-" + name * 6} for name in order}
+        return {"tools": [{"type": "function", "function": {"name": "connect", "parameters": {"type": "object",
+                                                                                              "properties": properties}}}]}
+
+    facts: dict = {}
+    obs.redact_projection(request(list(reversed(names))), facts=facts)  # the other order is met first
+    current = request(names)
+    reused, whole = obs.redact_projection(current, facts=facts), obs.redact_projection(current)
+    assert reused.value == whole.value and reused.manifest() == whole.manifest()
+
+
+@pytest.mark.parametrize("odd", ["mixed", object()], ids=["json_value", "no_json_form"])
+def test_a_part_with_keys_of_mixed_types_is_redacted_as_the_whole_walk(tmp_path, odd):
+    """A part whose keys have no sorted form, even with a value that has no JSON form at all, is walked as the whole
+    is: the redaction by parts never serializes it to count, and writing its request record raises nothing."""
+    payload = {"messages": [{"role": "user", "content": "plain", 1: odd, "token": "sk-" + "a" * 40}], "tools": []}
+    facts: dict = {}
+    assert obs.redact_projection(payload, facts=facts).manifest() == obs.redact_projection(payload).manifest()
+    assert obs.redact_projection(payload, facts=facts).value == obs.redact_projection(payload).value
+    assert obs.persist_call(tmp_path, task_id="odd", call_id="c", call_type="llm_request", payload=payload)
+
+
+@pytest.mark.parametrize("count", [2, 80])
+def test_shared_publication_prepares_directories_once_per_operation(tmp_path, monkeypatch, count):
+    """Actual mkdir/chmod traffic stays constant; existing files are still checked and moded."""
+    mkdir, chmod = pathlib.Path.mkdir, obs.os.chmod
+    directories, modes = [], []
+
+    def make_directory(path, *args, **kwargs):
+        directories.append(path)
+        return mkdir(path, *args, **kwargs)
+
+    def private_mode(path, mode, *args, **kwargs):
+        modes.append((pathlib.Path(path), mode))
+        return chmod(path, mode, *args, **kwargs)
+
+    # Precreate the test root so recursive mkdir setup does not enter the comparison.
+    (tmp_path / "observability" / "blobs").mkdir(parents=True)
+    monkeypatch.setattr(pathlib.Path, "mkdir", make_directory)
+    monkeypatch.setattr(obs.os, "chmod", private_mode)
+    payload = {"messages": [{"role": "user", "content": f"message {i} Ω"} for i in range(count)]}
+    for _ in range(2):
+        directories.clear()
+        modes.clear()
+        parts = {}
+        ref = obs.write_shared_blob(tmp_path, payload, parts)
+        assert len(directories) == 2, directories
+        assert sum(mode == obs._PRIVATE_DIR_MODE for _path, mode in modes) == 2
+        assert len(parts) == count
+        assert all(any(path.name == f"{digest}.json.gz" and mode == obs._PRIVATE_FILE_MODE
+                       for path, mode in modes) for digest in parts)
+        assert packs.blob_bytes(tmp_path, ref) == obs._json_bytes(payload)
+
+
+def test_part_batches_prepare_each_root_and_count_only_new_bytes(tmp_path):
+    from ouroboros.context_timing import measured_sections, section_spans
+
+    raw = obs._json_bytes({"content": "same bytes Ω"})
+    digest = hashlib.sha256(raw).hexdigest()
+    for root in (tmp_path / "one", tmp_path / "two"):
+        with measured_sections():
+            ref = obs.write_parts(root, {digest: raw})[digest]
+            assert section_spans()["work"]["new_parts"] == len(raw)
+        assert packs.blob_bytes(root, ref) == raw
+        with measured_sections():
+            assert obs.write_parts(root, {digest: raw})[digest] == ref
+            assert section_spans()["work"].get("new_parts", 0) == 0
+    assert obs.write_parts(tmp_path / "unused", {}) == {}
+    assert not (tmp_path / "unused").exists()

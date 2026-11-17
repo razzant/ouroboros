@@ -28,14 +28,10 @@ never sent again):
   every dispatched wave counts whatever its terminal, and only UNDISPATCHED
   attempts (free refusals/replays, preflight and assembly failures) stay
   outside the count, which is also the only sense in which "infra retries
-  freely" applies to the ceiling. Independently of the number, a
-  byte-identical staged diff whose last terminal is a review-VERDICT block is
-  refused for FREE from the FIRST block (``identical_diff_refused``, quoting
-  the recorded verdict); a rebuttal is content-hashed and a hash new to the
-  streak buys exactly ONE paid re-review (a rebuttal is "spent" only when it
-  bought a dispatched, verdict-answered wave). Exhaustion under blocking is a
-  free typed refusal; under advisory the outcome returns with a typed
-  disclosure for explicit author continuation, without another paid dispatch;
+  freely" applies to the ceiling. A rebuttal is content-hashed into the
+  round's identity, so a new one buys a new paid wave within the ceiling.
+  Exhaustion returns the outcome with a typed disclosure for explicit author
+  continuation, without another paid dispatch;
 * skill review (``skill_review`` → ``review_change(subject="skill")``) — paid skill waves per
   root task for a task-driven review (shared across every skill that task reviews; a
   follow-up starts fresh), counted apart from the task's change and result waves (its own

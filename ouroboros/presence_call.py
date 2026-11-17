@@ -64,12 +64,14 @@ def open_presence_call(*, drive_root, repo_dir, skill_name, binding_id="", event
     from ouroboros.call_protocol import CallSpec, OPENED_BY_SKILL
     from ouroboros.call_peers import open_hub, close_hub
     from ouroboros.live_conversation import LiveConversationTurn, feature_configuration
+    from ouroboros.places import declared_wake_signals
     from supervisor.message_bus import get_bridge
 
     try:
         admission = admit_presence_turn(drive_root=drive_root, authenticated_transport_skill=skill_name,
             binding_id=binding_id, **presence_event_origin(event))
-        turn_event = presence_turn_event(event, admission)
+        # The connector's live declared signals, as /presence/turn admits them (one Host process, one registry).
+        turn_event = presence_turn_event(event, admission, vouched_facts=declared_wake_signals(skill_name))
         # Heard before any decision, as a text event is (host_service_places).
         captured = capture_presence_event(admission, turn_event, drive_root=Path(drive_root))
     except (PresenceAdmissionError, PresenceTurnError) as exc:
@@ -113,8 +115,11 @@ def open_presence_call(*, drive_root, repo_dir, skill_name, binding_id="", event
 
 
 def _event_from_task(task: Mapping[str, Any]) -> PresenceTurnEvent:
+    """The call's opening event as each utterance carries it, with the identity its focus admitted (``focus.identity``):
+    a heard row keeps the account the place sends as, so the room's newest arrivals never lose it to a long call."""
     presence = task["metadata"]["presence"]
     stored = presence["event"]
+    focus = task["metadata"].get("focus")
     return PresenceTurnEvent(
         source_event_id=str(stored["source_event_id"]), provider=str(stored["provider"]),
         account_id=str(stored["account_id"]), conversation_id=str(stored["conversation_id"]),
@@ -122,6 +127,7 @@ def _event_from_task(task: Mapping[str, Any]) -> PresenceTurnEvent:
         actor=dict(stored.get("actor") or {}), conversation=dict(stored.get("conversation") or {}),
         message=dict(stored.get("message") or {}), text=str(presence.get("observed_text") or ""),
         delivery_reporting_version=int(presence.get("delivery_reporting_version") or 0),
+        identity=focus.get("identity") if isinstance(focus, Mapping) else None,
     )
 
 

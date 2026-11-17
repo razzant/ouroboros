@@ -177,7 +177,7 @@ def _terminal_wait(ctx, monkeypatch, *, run_id="run-p1",
             pass
 
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
-    return json.loads(delegate._delegate_wait(ctx, run_id, wait_sec=1))
+    return json.loads(delegate._read_run(ctx, run_id))
 
 
 # -- 1A: selector, authority, custody shape -------------------------------------
@@ -1425,7 +1425,8 @@ def test_host_states_the_typed_access_profile_once_and_says_it_governs():
     # #1609: technical access alone decides the shape, so the read-only run is the
     # explicitly readonly one.
     readonly = _host_instructions(delegated_run_shape(False, "readonly"))
-    assert "ACCESS: you may read and run read-only commands inside this root" in readonly
+    assert "The starting folder is a location, not a read boundary." in readonly
+    assert "parent's existing read authority" in readonly and "Make no edits or writes" in readonly
     assert readonly.count(precedence) == 1  # one sentence, never a paragraph
     assert INVESTIGATION_INSTRUCTION not in readonly
 

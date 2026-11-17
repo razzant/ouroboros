@@ -1,10 +1,12 @@
-"""Actual Settings renderer: a reviewer row's delivery survives Save and reload, and an
-unrelated save through the real settings gateway writes no review lanes."""
+"""Actual Settings renderer: a reviewer's delivery survives its page's Save and a reload, and through the real
+settings gateway the Agents list reads passively, an unrelated row writes only its own key, and a Reviewer mark
+round-trips."""
 import json
 from urllib.parse import urlparse
 
 import pytest
 from tests import test_subscription_role_routes_browser as roles
+from tests.settings_browser_helpers import commit_row, open_settings, press_editor_save, settings_page
 
 pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
@@ -13,33 +15,27 @@ role_ui = roles.role_ui
 
 @pytest.mark.parametrize("width", [1360, 390])
 def test_delivery_choice_saves_and_reloads(role_ui, width):
-    from playwright.sync_api import expect
     ui = role_ui
     roles.configure_mixed(ui)
     roles.api_lane(ui, "openai")
     ui["page"].set_viewport_size({"width": width, "height": 900})
-    page = roles.open_agents(ui)
-    row = page.locator("[data-subagent-row]").nth(1)
+    row = roles.open_agent(ui, "direct")
+    page = ui["page"]
     delivery = row.locator('[data-subagent-field="delivery"]')
     assert delivery.input_value() == "packet"
     delivery.select_option("native")
-    row.scroll_into_view_if_needed()
+    delivery.scroll_into_view_if_needed()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     roles.capture(page, f"reviewer-delivery-native-{width}")
-    with page.expect_response("**/api/settings"):
-        page.locator("#btn-save-settings").click()
+    assert press_editor_save(page).startswith("Saved")
     saved = roles.saved_catalog(ui)["items"][1]
     assert saved["review_eligible"] is True and "delivery" not in saved, "native is the default delivery"
-    # Reload is ignored while a Save is still finishing; it repaints the rows after its pool read.
-    expect(page.locator("#settings-status")).to_contain_text("Settings saved")
-    with page.expect_response("**/api/review-pool"):
-        page.locator("#btn-reload-settings").click()
-    expect(page.locator("#settings-status")).to_have_text("Settings loaded")
-    delivery = page.locator("[data-subagent-row]").nth(1).locator('[data-subagent-field="delivery"]')
+    # The page shows what is stored after its Save, and so does a fresh opening.
+    assert row.locator('[data-subagent-field="delivery"]').input_value() == "native"
+    delivery = roles.open_agent(ui, "direct").locator('[data-subagent-field="delivery"]')
     assert delivery.input_value() == "native"
     delivery.select_option("packet")
-    with page.expect_response("**/api/settings"):
-        page.locator("#btn-save-settings").click()
+    assert press_editor_save(page).startswith("Saved")
     assert roles.saved_catalog(ui)["items"][1]["delivery"] == "packet"
 
 
@@ -132,12 +128,12 @@ def _stored(gateway):
 
 
 @pytest.mark.parametrize("case", ["fresh", "saved"])
-def test_an_unrelated_save_re_posts_the_shown_catalog_and_writes_no_lanes(subscription_ui, settings_gateway, case):
-    """Every Settings save re-posts the catalog: one saved before (no reviewer marked), or the
-    unsaved candidate a fresh install is shown, whose factory review rows come marked (the
-    read seam's never-configured cell). Re-posting either is no catalog change, so an unrelated
-    save is never refused, not even for the saved catalog's empty pool. The fresh catalog stays
-    automatic (#1765); the saved one stays authored, and neither writes a lanes key."""
+def test_showing_the_list_is_passive_and_an_unrelated_row_writes_only_its_own_key(subscription_ui, settings_gateway, case):
+    """The list shows a catalog saved before (no reviewer marked), or the unsaved candidate a fresh install is
+    shown, whose factory review rows come marked (the read seam's never-configured cell). Showing it writes
+    nothing; a row of the same page that is not the roster writes its one key, so the roster is neither authored
+    nor judged by it (not even the saved catalog's empty pool), and no lanes key is written. The fresh catalog
+    stays automatic (#1765); the saved one stays authored."""
     ui, gateway, writes = subscription_ui, settings_gateway, []
     _install(gateway, {"enabled": True, "items": [_OWNER_ROW]} if case == "saved" else None)
     shown = gateway.client.get("/api/settings").json()
@@ -152,24 +148,25 @@ def test_an_unrelated_save_re_posts_the_shown_catalog_and_writes_no_lanes(subscr
     _serve_through(ui, gateway, writes)
     page = ui["page"]
     page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="agents"]').click()
-    page.wait_for_selector("[data-subagent-row]")
-    assert page.locator("[data-review-pool-count]").inner_text() == f"Reviewers: {len(marked)}"
-    assert page.locator("[data-review-pool-empty]").is_visible() is (not marked)
-    assert gateway.path.read_bytes() == before, "both reads are passive"
+    level = open_settings(page, "agents")
+    level.locator("[data-entry-id]").first.wait_for(state="visible")
+    assert [row.get_attribute("data-entry-id") for row in level.locator("[data-entry-id]").all()] == [
+        row["subagent_id"] for row in shown["items"]]
+    assert level.locator("[data-entry-id] .agent-chip", has_text="Reviewer").count() == len(marked)
+    page.wait_for_function("marked => document.querySelector('#page-settings [data-review-pool-empty]')?.hidden === marked",
+                           arg=bool(marked))
+    assert gateway.path.read_bytes() == before and not writes, "both reads are passive"
     roles.capture(page, f"unrelated-save-{case}-before")
-    page.locator('[data-settings-tab="behavior"]').click()
-    with page.expect_response("**/api/settings") as response:
-        page.locator("#btn-save-settings").click()
-    assert response.value.status == 200, response.value.text()
-    assert "not saved" not in page.locator("#settings-status").inner_text()
-    assert "OUROBOROS_REVIEWER_SLOTS" not in writes[-1] and "allow_empty_review_pool" not in writes[-1]
+    level.locator("details[data-settings-fold] > summary").click()
+    line = commit_row(page, "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", 4)
+    assert line.startswith("Saved"), line
+    assert writes == [{"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 4}], "one key: the roster is not re-posted"
     stored = _stored(gateway)
-    assert "OUROBOROS_REVIEWER_SLOTS" not in stored
+    assert stored["OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"] == 4 and "OUROBOROS_REVIEWER_SLOTS" not in stored
     reread = gateway.client.get("/api/settings").json()
     assert reread["_meta"]["available_subagents"]["automatic"] is (case == "fresh")
     if case == "fresh":
-        assert "OUROBOROS_SUBAGENTS" not in stored, "an unrelated save does not author the automatic catalog"
+        assert "OUROBOROS_SUBAGENTS" not in stored, "an unrelated row does not author the automatic catalog"
         catalog = reread["_meta"]["available_subagents"]["candidate"]
     else:
         catalog = json.loads(stored["OUROBOROS_SUBAGENTS"])
@@ -177,29 +174,26 @@ def test_an_unrelated_save_re_posts_the_shown_catalog_and_writes_no_lanes(subscr
 
 
 def test_a_marked_row_round_trips_through_the_real_gateway(subscription_ui, settings_gateway):
-    """The Reviewer box, the real save rules and the real pool read agree: the marked row is
-    stored, the pool lists it, and its card states the review cost it can know."""
+    """The Reviewer switch, the real save rules and the real pool read agree: the mark is written at once through
+    the owner transaction, the pool lists the row, and its page states the review cost it can know."""
     from playwright.sync_api import expect
 
     ui, gateway, writes = subscription_ui, settings_gateway, []
     _install(gateway, {"enabled": True, "items": [_OWNER_ROW]})
     _serve_through(ui, gateway, writes)
+    row = roles.open_agent(ui, "owner-row")
     page = ui["page"]
-    page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="agents"]').click()
-    page.wait_for_selector("[data-subagent-row]")
-    page.locator('[data-subagent-field="review_eligible"]').first.check()
-    assert page.locator("[data-review-pool-count]").inner_text() == "Reviewers: 1"
-    with page.expect_response("**/api/settings") as response:
-        page.locator("#btn-save-settings").click()
-    assert response.value.status == 200, response.value.text()
+    row.locator('.agent-use:has([data-subagent-field="review_eligible"]) .ui-switch').click()
+    page.wait_for_function("""() => { const input = document.querySelector('#page-settings [data-subagent-field="review_eligible"]');
+        return input && input.checked && input.getAttribute('aria-busy') !== 'true'; }""")
+    assert len(writes) == 1 and list(writes[0]["settings"]) == ["OUROBOROS_SUBAGENTS"], "one owner transaction, the roster alone"
     assert json.loads(_stored(gateway)["OUROBOROS_SUBAGENTS"])["items"][0]["review_eligible"] is True
     pool = gateway.client.get("/api/review-pool").json()
-    assert [row["subagent_id"] for row in pool["pool"]] == ["owner-row"] and not pool["config_error"]
-    with page.expect_response("**/api/review-pool"):
-        page.locator("#btn-reload-settings").click()
-    facts = page.locator("[data-subagent-review-facts]").first
-    # Save's own re-read and Reload each repaint the card before their pool read lands.
+    assert [entry["subagent_id"] for entry in pool["pool"]] == ["owner-row"] and not pool["config_error"]
+    facts = settings_page(page, "agents/owner-row").locator("[data-subagent-review-facts]")
+    # The write's own re-read repaints the page before its pool read lands.
     expect(facts, "a custom endpoint has no known tariff; unknown is never zero").to_have_text("cost unknown")
-    expect(page.locator("[data-subagent-delivery-cost]").first).to_have_text("cost unknown")
+    expect(settings_page(page, "agents/owner-row").locator("[data-subagent-delivery-cost]")).to_have_text("cost unknown")
+    open_settings(page, "agents")
+    assert settings_page(page, "agents").locator('[data-agents-filter="reviewers"]').inner_text().strip() == "Reviewers 1"
     roles.capture(page, "reviewer-real-gateway-marked")

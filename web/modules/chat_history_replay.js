@@ -11,6 +11,24 @@ export function historyRowIds(row) {
     return [row.history_id, ...(row.review_group?.attempts || []).map(attempt => attempt.history_id)].filter(Boolean);
 }
 
+/** During a page replay, every identity key a mounted bubble carries (a superset: keys are only added, `note`): a row
+ * looks for its prior bubble only when one could be mounted, not by scanning the feed per row (O(rows²) a page). */
+export function createReplayKeys() {
+    const keys = { history: new Set(), client: new Set(), origin: new Set(), legacy: new Set() };
+    keys.note = (node) => {
+        if (!node) return;
+        const nodes = node.classList?.contains('chat-bubble') ? [node] : [];
+        for (const bubble of [...nodes, ...(node.querySelectorAll?.('.chat-bubble') || [])]) {
+            const { historyId, clientMessageId, originId, messageKey } = bubble.dataset || {};
+            if (historyId) keys.history.add(historyId);
+            if (clientMessageId) keys.client.add(clientMessageId);
+            if (originId) keys.origin.add(originId);
+            if (messageKey) keys.legacy.add(messageKey);
+        }
+    };
+    return keys;
+}
+
 export function stampHistoryNode(node, id, position) {
     if (!node || !id) return;
     node.dataset.historyId = id;

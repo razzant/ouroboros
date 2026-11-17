@@ -30,16 +30,16 @@ def test_role_budget_is_one_frame_and_reply_is_charged_once():
     assert unknown == {"margin": None, "physical": None, "budget": None}
 
 
-def test_order_conversation_before_my_pages_and_oldest_reply_first():
+def test_story_openings_precede_untold_current_replies():
     replies = [syn.spoken(1, "ouroboros", 5_000), syn.spoken(2, "ouroboros", 50_000)]
     snapshot = syn.snapshot(story=syn.pages(2, 12_000), room_facts=syn.room("1", lane1=replies))
     assert mf.LADDER == ("F1", "F6w", "F6g", "F3", "F2", "F4", "F7p", "F5l", "F5", "F5a", "F7", "F7a", "F8", "F8a", "F6a")
     assert mf.fit_memory_view(snapshot, frame(tokens(snapshot))) == mv.FULL_VIEW
     level = mf.fit_memory_view(snapshot, frame(tokens(snapshot) - 100))
-    assert level.addressed == (("F2", (replies[0]["address"],)),)
-    assert replies[0]["line"] not in mv.render_room(snapshot, level)
+    assert level.addressed == (("F5l", ("page-000",)),)
+    assert replies[0]["line"] in mv.render_room(snapshot, level)
     assert replies[1]["line"] in mv.render_room(snapshot, level)
-    assert mv.render_story(snapshot, level) == mv.render_story(snapshot)
+    assert mv.render_story(snapshot, level) != mv.render_story(snapshot)
     owner_target = mf.fit_memory_view(snapshot, {"margin": 10**9, "physical": 10**9, "budget": 0})
     assert "F2" in dict(owner_target.steps) and "F5" in dict(owner_target.steps)
 
@@ -55,8 +55,8 @@ def test_governing_unanswered_and_uncovered_owner_rows_have_distinct_protection(
     physical = mf.fit_memory_view(snapshot, frame(0, 0))
     assert dict(physical.addressed)["F7"] == tuple(r["address"] for r in rows[:2])
     assert rows[2]["line"] in mv.render_room(snapshot, physical)
-    _, text, _ = mf.render_view_for_mode(snapshot, mode="max", owner_mode="max", window_tokens=80_000,
-        known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=10_000)
+    text = mf.render_view_for_mode(snapshot, mode="max", owner_mode="max", window_tokens=80_000,
+        known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=10_000).room
     assert "Start room is smaller" in text
 
 
@@ -114,8 +114,9 @@ def test_a_project_roots_sealed_owner_rows_fold_only_under_physical_pressure_old
 ])
 def test_the_start_room_notice_names_owner_words_only_when_they_keep_the_view_above_it(lane1, owners):
     snapshot = syn.snapshot(room_facts=syn.room("1", lane1=lane1))
-    _, text, facts = mf.render_view_for_mode(snapshot, mode="max", owner_mode="max", window_tokens=200_000,
+    fit = mf.render_view_for_mode(snapshot, mode="max", owner_mode="max", window_tokens=200_000,
         known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=104_464)
+    text, facts = fit.room, fit.facts
     floor = facts["floor"]
     assert (floor["allowance_tokens"], floor["physical_allowance_tokens"]) == (5_000, 30_000)
     assert ("Start room is smaller than requested" in text) is owners
@@ -138,30 +139,79 @@ def test_other_conversations_fold_their_words_then_a_group_to_its_line_and_only_
     worded = mv.render_room(snapshot, mv.FloorLevel((("F6w", words),)))
     lined = mv.render_room(snapshot, mv.FloorLevel((("F6g", (first["key"],)),)))
     keys = tuple(group["key"] for group in groups)
-    counted = mv.render_room(snapshot, mv.FloorLevel((("F6g", keys), ("F6a", ("conversations",)))))
-    assert len(counted) < len(lined) < len(worded) < len(full)
-    assert "from='" in worded and first["rooms"][0]["words"][0]["line"] not in worded
+    counted = mv.render_room(snapshot, mv.FloorLevel((("F6g", keys), ("F6a", keys))))
+    assert len(counted) < len(lined) < len(full) and len(worded) < len(full)
+    assert "from=<first>, to=<last>" in worded and first["rooms"][0]["words"][0]["line"] not in worded
+    assert first["rooms"][0]["words"][0]["address"] in worded
     assert conversations.identity_line(first) in lined and first["rooms"][0]["notes"][0]["text"] in full
-    assert "164 conversations by count (the window's last rung): 164 open rooms" in counted
-    assert "memory_read(room_id='*', start=0)" in counted and len(counted) < 1_200
+    assert "164 conversations by count: 164 open rooms" in counted
+    assert "memory_read(room_id='*', start=0)" in counted and counted.count("No recorded consideration:") == 164
     order = [(step, ident) for step, ident, *_ in mf.floor_elements(snapshot) if step in ("F6w", "F6g", "F6a")]
-    assert [step for step, _ident in order][:3] == ["F6w"] * 3 and order[-1] == ("F6a", "conversations")
+    assert [step for step, _ident in order][:3] == ["F6w"] * 3 and order[-1] == ("F6a", "unread")
     level = mf.fit_memory_view(snapshot, frame(tokens(snapshot) - 1_000))  # the oldest words fold first, alone
     taken = dict(level.addressed)
     assert set(taken) == {"F6w"} and taken["F6w"] == tuple(ident for step, ident in order if step == "F6w")[:len(taken["F6w"])]
 
 
-def test_giveback_restores_small_earlier_elements_but_never_kept_choices():
+def test_giveback_keeps_a_reply_prefix_and_never_returns_kept_choices():
     replies = [syn.spoken(1, "ouroboros", 1_000), syn.spoken(2, "ouroboros", 20_000)]
     snapshot = syn.snapshot(room_facts=syn.room("1", lane1=replies))
     bound = tokens(snapshot) - 2_000
     level = mf.fit_memory_view(snapshot, frame(bound))
-    assert dict(level.addressed)["F2"] == (replies[1]["address"],)
+    assert dict(level.addressed)["F2"] == tuple(r["address"] for r in replies)
     kept = mv.FloorLevel((("F2", (replies[0]["address"],)),))
     later = mf.fit_memory_view(snapshot, frame(10**9), kept=kept)
     assert later == kept
     facts = mf.view_facts(snapshot, level, window_tokens=200_000, mode="max", allowances={})
     assert mf.kept_level(snapshot, facts) == level  # counts alone cannot reconstruct a give-back choice
+
+
+def test_floor_fact_records_index_runs_against_its_element_order():
+    """One representation of the selected forms: index runs in each step's element order, of the forms the fact names,
+    exact for a give-back hole and for the mind's selection (F5l to F5, F8 labels to F8a); a fact written before the
+    forms were versioned and an older fact's ids still read. A fact of counts alone, of another element order or of
+    other forms is read anew, never as a step's first elements. The fact keeps one size whatever the history
+    holds, and the trace keeps what a shortage reads without any element id."""
+    import json
+    from ouroboros.memory_inventory import VIEW_TRACE_KEY, shortage_from_trace
+
+    replies = [syn.spoken(1, "ouroboros", 1_000), syn.spoken(2, "ouroboros", 20_000)]
+    snapshot = syn.snapshot(room_facts=syn.room("1", lane1=replies))
+    hole = mf.level_with(snapshot, mv.FULL_VIEW, ["F2:" + replies[1]["address"]])  # authored selection may have a hole
+    facts = mf.view_facts(snapshot, hole, window_tokens=200_000, mode="max", allowances={})
+    assert facts["floor"]["runs"] == {"F2": [[1, 1]]} and facts["floor"]["forms_version"] == mf.FORMS_VERSION == 2
+    assert "addressed" not in facts["floor"] and mf.kept_level(snapshot, facts) == hole
+    unversioned = {key: value for key, value in facts["floor"].items() if key != "forms_version"}
+    assert mf.kept_level(snapshot, {"floor": unversioned}) == mv.FULL_VIEW
+    older = {"floor": {**unversioned, "addressed": hole.addressed, "runs": None, "element_order": None}}
+    assert mf.kept_level(snapshot, {"floor": {k: v for k, v in older["floor"].items() if k != "runs"}}) == mv.FULL_VIEW
+    for anew in ({"steps": {"F2": 1}}, {**facts["floor"], "element_order": "another order"},
+                 {**facts["floor"], "forms_version": mf.FORMS_VERSION + 1},
+                 {**older["floor"], "forms_version": mf.FORMS_VERSION + 1}):
+        assert mf.kept_level(snapshot, {"floor": anew}) == mv.FULL_VIEW  # never the first reply by its count
+        budget = mf.kept_level(snapshot, {"floor": {**anew, "steps": {"F2": 1}, "by_budget": 1}})
+        assert budget == mv.FloorLevel(by_budget=1)  # the owner's mode budget still frames the walk, no element kept
+    room = syn.room("1", notes=3, lane1=[syn.spoken(i, "ouroboros", 400) for i in range(4)])
+    chosen = syn.snapshot(room_facts=room, story=syn.pages(4, 400))
+    pages, notes = [page["id"] for page in chosen.story], [note["id"] for note in room["notes"]]
+    mind = mf.level_with(chosen, mv.FULL_VIEW, [f"F5l:{pages[0]}", f"F5l:{pages[2]}", f"F2:{room['lane1'][1]['address']}",
+                                                *(f"F8:{ident}" for ident in notes)])
+    mind = mf.level_with(chosen, mind, [f"F5:{pages[2]}", "F8a:1"])
+    assert dict(mind.addressed) == {"F2": (room["lane1"][1]["address"],), "F5l": (pages[0],), "F5": (pages[2],),
+                                    "F8": tuple(notes), "F8a": ("1",)}
+    assert mf.kept_level(chosen, mf.view_facts(chosen, mind, window_tokens=92_000, mode="max", allowances={})) == mind
+    sizes = []
+    for words in (15, 1_500):  # 150 and 15,000 words of ten other conversations, every one by address
+        many = syn.snapshot(room_facts=syn.room("1"), conversations=[syn.conversation(i, words=words) for i in range(10)])
+        level = mf.fit_memory_view(many, frame(0))
+        assert dict(level.steps)["F6w"] == 10 * words
+        trace = {VIEW_TRACE_KEY: mf.trace_facts(mf.view_receipt(many, "", "", mf.view_facts(
+            many, level, window_tokens=92_000, mode="max", allowances={})))}
+        text = json.dumps(trace)
+        assert shortage_from_trace(trace) is None  # the global unread count is a window fact, not a retelling debt
+        assert many.conversations[0]["rooms"][0]["words"][0]["id"] not in text
+        sizes.append(len(text))
+    assert sizes[1] < 1.2 * sizes[0], f"floor fact bytes at 150 and 15,000 words: {sizes}"
 
 
 def test_story_cuts_old_pages_before_fresh_retellings_without_changing_display(tmp_path):
@@ -202,7 +252,7 @@ def test_story_giveback_does_not_restore_an_old_small_page_over_a_newer_retellin
     part = {**syn.pages(1, 20_000)[0], "id": "fresh-part", "kind": "part", "floor_order": [1, 4]}
     snapshot = syn.snapshot(story=[part, old])
     level = mf.fit_memory_view(snapshot, frame(tokens(snapshot) - 2_000))
-    assert dict(level.addressed)["F5"] == (old["id"], part["id"])
+    assert dict(level.addressed)["F5l"] == (old["id"], part["id"])
     assert mf.fit_memory_view(snapshot, frame(tokens(snapshot))) == mv.FULL_VIEW
 
 
@@ -237,12 +287,102 @@ def test_governing_words_protect_rows_by_identity_never_by_substring(tmp_path, g
 
 
 @pytest.mark.parametrize("names, expected", [(None, ""), (("memory_read",), ""),
-    (("enable_tools",), "reachable through enable_tools"), (("list_available_tools",), "my parent task can read")])
+    (("enable_tools",), "(enable_tools loads memory_read if permitted)"),
+    (("list_available_tools",), "list_available_tools shows what this task can call)")])
 def test_floor_receipt_names_reachable_sources_and_never_promises_lossless_recall(names, expected):
     note = mf.floor_note(mv.FloorLevel((("F5", ("p",)),)), window_tokens=200_000, mode="nano", tool_names=names)
     assert expected in note and "Nothing is lost" not in note and "brings it back" not in note
-    assert "memory_read reads each" in note
-    assert ("chronicle_write" in note) == (names is None or "enable_tools" in names)
+    assert "is reachable" not in note and "parent task" not in note  # no grant or reader the request does not carry
+    assert "Read sources with memory_read" in note
+    assert "chronicle_write" not in note
+
+
+@pytest.mark.parametrize("mode", ["max", "low"])
+def test_a_view_that_cut_nothing_still_says_nothing_outside_nano(mode):
+    """Max and Low keep their silence byte for byte: their requests send memory_read's schema whole."""
+    for names in (None, ("enable_tools",), ("memory_read",)):
+        assert mf.floor_note(mv.FULL_VIEW, window_tokens=200_000, mode=mode, tool_names=names) == ""
+
+
+LISTING_PATH = ("(memory_read was not among my tools when this view was rendered; list_available_tools shows what "
+                "this task can call)")
+
+
+@pytest.mark.parametrize("names, path", [
+    (("compact_context", "enable_tools", "list_available_tools"), "(enable_tools loads memory_read if permitted)"),
+    (("compact_context", "list_available_tools"), LISTING_PATH),
+    (("compact_context",), "(memory_read was not among my tools when this view was rendered)"),
+    (("compact_context", "enable_tools", "list_available_tools", "memory_read"), ""),
+    (None, "")])
+def test_a_nano_view_names_how_its_request_reaches_memory_read_even_when_it_cut_nothing(names, path):
+    """The owner's choice: Nano keeps memory_read on demand. A view that cut nothing still names the existing route
+    to it whenever its request lacks the schema -- the cue a quiet Nano lost -- and says nothing when the request
+    sends it or its schemas are unknown (no claim). The note promises no whole memory and no grant: a missing schema
+    is neither a missing permission nor missing memory, enable_tools loads the reader only where this task's policy
+    permits it, and a single row is no ``from`` alone."""
+    quiet = mf.floor_note(mv.FULL_VIEW, window_tokens=200_000, mode="nano", tool_names=names)
+    assert quiet == (f"### Memory check\nAddresses this view shows read with memory_read.\n{path}" if path else "")
+    assert not any(words in quiet for words in ("whole", "not missing", "Nothing is cut", "from=<row: address>"))
+    cut = mf.floor_note(mv.FloorLevel((("F5", ("p",)),)), window_tokens=200_000, mode="nano", tool_names=names)
+    assert cut.startswith("### Physical floor") and "### Memory check" not in cut and cut.endswith(path)
+
+
+def test_a_roomy_nano_projection_carries_the_memory_check_only_while_its_request_lacks_the_reader():
+    """The note reaches a real projection, priced with it, and leaves my story's bytes alone; once the request
+    sends memory_read (loaded by enable_tools) a narrowed rebuild says nothing more."""
+    snap = syn.snapshot(room_facts=syn.room("1", lane1=[syn.spoken(1, "human", 900)]))
+    sent = ("compact_context", "enable_tools", "list_available_tools")
+
+    def roomy(names):
+        return mf.render_view_for_mode(
+            snap, mode="nano", owner_mode="nano", window_tokens=1_000_000, known_window=True, output_reserve=8_192,
+            ratio=1.0, non_memory_tokens=1_000, tool_names=names)
+
+    fit = roomy(sent)
+    assert fit.facts["floor"]["steps"] == {} and "### Physical floor" not in fit.room
+    assert fit.room.endswith("\n\n### Memory check\nAddresses this view shows read with memory_read.\n"
+                             "(enable_tools loads memory_read if permitted)")
+    assert fit.story == mv.render_story(snap)  # the check is this room's block; my story keeps its bytes
+    assert roomy((*sent, "memory_read")).room == mv.render_room(snap)
+
+
+def test_a_selection_keeps_the_reader_path_of_the_request_that_follows_it(monkeypatch):
+    """compact_context(view_address=…) renders the view again (``select_view``): before, its floor note lost the
+    reader path, since no schema names reached it. It now names the path of the schemas the next request sends
+    (the loop's boundary passes them), else those its start priced (a held primary view), and claims nothing
+    when the start priced none."""
+    from ouroboros import capability_evidence as ce
+    from ouroboros import context_fit as cf
+
+    snap = syn.snapshot(story=syn.pages(3, 3_000), room_facts=syn.room("1", lane1=[syn.spoken(1, "human", 900)]))
+    core = cf.ContextCore("Required core", "Constitution", "b" * 4_000, "", "Identity", "f" * 1_000, '"Assignment"',
+                          False, memory_view_json=mv.snapshot_json(snap))
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    schemas = [{"type": "function", "function": {"name": name, "description": name, "parameters": {"type": "object"}}}
+               for name in ("compact_context", "enable_tools", "list_available_tools", "memory_read", "read_file")]
+
+    def start(tools):
+        return cf.build_context_fit_plan(None, core, {"id": "nano-room"}, preferred_mode="nano", tool_schemas=tools,
+            route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"},
+                                              ce.CapabilityEvidence(1_000_000, "confirmed", "metadata", "nano-route")))
+
+    path = "(enable_tools loads memory_read if permitted)"
+
+    def floor(plan):  # the note closes the room block: its lines, from its heading to the next blank line
+        text = "\n\n".join(block["text"] for block in plan.messages_for("nano")[0]["content"])
+        start_at = max(text.find("### Memory check"), text.find("### Physical floor"))
+        end = text.find("\n\n", start_at)
+        return "" if start_at < 0 else text[start_at:] if end < 0 else text[start_at:end]
+
+    plan = start(schemas)
+    assert plan.initial_mode == "nano" and floor(plan) == (
+        f"### Memory check\nAddresses this view shows read with memory_read.\n{path}")
+    address = next(f"{step}:{ident}" for step, ident, *_ in mf.floor_elements(snap) if step == "F5")
+    for names, shown in ((None, True), (("compact_context", "enable_tools", "list_available_tools"), True),
+                         (("compact_context", "enable_tools", "memory_read"), False)):
+        selected = floor(mf.select_view(plan, "nano", [address], tool_names=names))
+        assert selected.startswith("### Physical floor\nNano cuts for ") and selected.endswith(path) is shown, names
+    assert path not in floor(mf.select_view(start(None), "nano", [address]))
 
 
 def test_list_forms_do_not_address_new_or_immune_rows_and_stay_silent_when_fit():
@@ -301,10 +441,10 @@ def test_notes_yield_late_to_shortage_without_taking_uncovered_owner_rows():
 def test_notes_aggregate_only_when_all_the_label_lines_still_do_not_fit():
     snap = note_snapshot()
     lines = mf.level_with(snap, mv.FULL_VIEW, [f'{s}:{i}' for s, i, *_ in mf.floor_elements(snap)
-                                             if s not in ('F8a', 'F6a', 'F7')], owner_note=True)  # no aggregate form
+                                             if s not in ('F8a', 'F7')], owner_note=True)  # remote counts precede note lists
     at_lines = mf.fit_memory_view(snap, frame(tokens(snap, lines)))
     assert dict(at_lines.steps)['F8'] == 6 and 'F8a' not in dict(at_lines.steps)
-    level = mf.fit_memory_view(snap, frame(tokens(snap, lines) - 1))
+    level = mf.fit_memory_view(snap, frame(tokens(snap, lines) - 1), kept=lines)
     assert dict(level.steps)['F8'] == 6 and dict(level.steps)['F8a'] == 1
     text = mv.render_room(snap, level)
     assert mv._notes_line(snap.room['notes']) in text
@@ -319,8 +459,9 @@ def test_note_forms_are_attributed_to_the_owner_target():
     snap.room['notes'][0]['text'] = 'Held meaning. ' + 'detail ' * 1000
     level = mf.fit_memory_view(snap, {'margin': 0, 'budget': 0, 'physical': 500})
     assert dict(level.steps)['F8'] == 1 and level.by_budget > 0
-    _, room, facts = mf.render_view_for_mode(snap, mode='nano', owner_mode='nano', window_tokens=1000000,
+    fit = mf.render_view_for_mode(snap, mode='nano', owner_mode='nano', window_tokens=1000000,
         known_window=True, output_reserve=65536, ratio=1, non_memory_tokens=66000)
+    room, facts = fit.room, fit.facts
     assert 'only physical pressure can narrow them' not in room
     assert facts['floor']['steps']['F8'] == 1 and facts['floor']['by_budget'] > 0
 
@@ -349,17 +490,20 @@ def test_new_forms_do_not_inflate_a_short_notes_minimum_bound(monkeypatch):
 
 
 def test_retold_words_fold_before_considered_ones_and_other_rooms_owner_words_before_this_rooms():
-    """F6w folds by rank, oldest first in each: retold, considered, then the words nobody considered; F7 takes my
+    """F6w folds told work, unread facts, then considered words; F7 takes my
     human's words of my other conversations before this room's; both only as physics demands."""
     group = syn.conversation(0, words=3)
     words = group["rooms"][0]["words"]
     for word, rank in zip(words, (2, 0, 1)):  # the oldest nobody considered, the middle retold, the newest considered
         word["rank"] = rank
+        if rank == 0:
+            word.update(kind="ouroboros", task_id="told", gist={"summary": "The reply settled it.",
+                "room_id": group["rooms"][0]["room_id"], "address": word["address"], "ts": word["ts"]})
     owner = syn.conversation(1, words=2, owner=True)
     room = syn.room(lane1=[syn.spoken(0, "human", 300), syn.spoken(1, "ouroboros", 300)])
     snapshot = syn.snapshot(room_facts=room, conversations=[group, owner])
     order = [(step, ident) for step, ident, *_ in mf.floor_elements(snapshot)]
-    assert [ident for step, ident in order if step == "F6w"] == [words[1]["id"], words[2]["id"], words[0]["id"]]
+    assert [ident for step, ident in order if step == "F6w"] == [words[1]["id"], words[0]["id"], words[2]["id"], "bare:" + words[2]["id"]]
     theirs = [word["id"] for word in owner["rooms"][0]["words"]]
     f7 = [ident for step, ident in order if step == "F7"]
     assert f7[:len(theirs)] == theirs and room["lane1"][0]["address"] in f7[len(theirs):]
@@ -385,11 +529,11 @@ def test_my_humans_words_of_other_conversations_keep_the_work_room_while_this_ro
     theirs = [word["id"] for group in owner for word in group["rooms"][0]["words"]]
     folded = dict(level.addressed).get("F7", ())
     assert folded and tuple(theirs[:len(folded)]) == folded and tokens(snapshot, level) <= full // 3  # oldest first
-    assert here["address"] not in folded and "F6a" not in dict(level.steps)  # the last rung stays last
+    assert here["address"] not in folded and "F6a" in dict(level.steps)  # owner addresses follow the common count
     assert len(calls) < 30, len(calls)
     words = tuple(word["id"] for word in owner[0]["rooms"][0]["words"])  # a group's line still saves once its owner
-    lined = mv.FloorLevel((("F6g", (owner[0]["key"],)), ("F7", words)))  # words are addresses: the savings add
-    assert tokens(snapshot, lined) < tokens(snapshot, mv.FloorLevel((("F7", words),)))
+    lined = mv.FloorLevel((("F6g", ("all:" + owner[0]["key"],)), ("F7", words)))
+    assert all(mv._row_pointer(w, "words") in mv.render_room(snapshot, lined) for w in owner[0]["rooms"][0]["words"])
     paid = mf.fit_memory_view(snapshot, {"margin": None, "physical": full + 10, "budget": None}, saving=full // 2)
     assert dict(paid.addressed).get("F7") and tokens(snapshot, paid) <= full - full // 2  # a refusal's saving
     rows = [{**syn.spoken(i, "human", 4_000), "owner_side": True} for i in range(3)]
@@ -410,14 +554,14 @@ def test_the_last_rung_keeps_my_humans_folded_words_of_other_conversations_by_th
     snapshot = syn.snapshot(room_facts=syn.room(), conversations=groups)
     words = [word for group in groups for word in group["rooms"][0]["words"]]
     keys = tuple(group["key"] for group in groups)
-    counted = mv.FloorLevel((("F6g", keys), ("F7", tuple(word["id"] for word in words)), ("F6a", ("conversations",))))
+    counted = mv.FloorLevel((("F6g", keys), ("F7", tuple(word["id"] for word in words)), ("F6a", keys)))
     full = tokens(snapshot)
     level = mf.fit_memory_view(snapshot, {"margin": tokens(snapshot, counted) - 1, "physical": full + 10, "budget": None})
     text = mv.render_room(snapshot, level)
     assert dict(level.steps).get("F6a") and len(dict(level.addressed)["F7"]) == len(words)  # the last rung was taken
     assert all(mv._row_pointer(word, "words") in text for word in words)  # every folded word keeps its address
     assert tokens(snapshot, counted) - 1 < tokens(snapshot, level) <= full + 10  # above the margin, in the window
-    half = mv.FloorLevel((("F6g", keys), ("F7", tuple(word["id"] for word in words[:24])), ("F6a", ("conversations",))))
+    half = mv.FloorLevel((("F6g", keys), ("F7", tuple(word["id"] for word in words[:24])), ("F6a", keys)))
     shown = mv.render_room(snapshot, half)
     assert all(mv._row_pointer(word, "words") in shown for word in words[:24])
     assert all(word["line"] in shown for word in words[24:])  # one F7 did not fold stays whole

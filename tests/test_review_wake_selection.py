@@ -359,3 +359,30 @@ def test_selectors_read_the_data_root_only_for_selected_task_ids(tmp_path):
     assert model_sleep.selectors(ctx, tasks=["known"])["tasks"] == ["known"]
     with pytest.raises(ValueError, match="unknown"):
         model_sleep.selectors(ctx, tasks=["unknown"])
+
+
+@pytest.mark.parametrize("kind", ["hurry", "owner_text"])
+def test_a_review_park_woken_by_a_hurry_carries_the_hurry_words_into_the_next_round(tmp_path, kind):
+    """STEP4 4.5, at a review park: a Hurry wakes it ahead of the selected review (an owner control); the next
+    round's drain carries one typed ``HURRY_WORDS`` row of the owner's act. Owner words wake it too and carry none."""
+    import queue
+
+    import ouroboros.loop as loop
+    from ouroboros import owner_hurry as oh
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+    from ouroboros.owner_mailbox import KIND_HURRY
+
+    ctx = _ctx(tmp_path)
+    _mail(tmp_path, ctx.task_id, "owner_hurry" if kind == "hurry" else "keep going",
+          kind=KIND_HURRY if kind == "hurry" else "owner_text", msg_id="hurry:r1" if kind == "hurry" else "owner")
+    chosen = {"any_mail": False, "reviewers": [_pin()]}
+    reason = model_sleep.wake_reason(ctx, chosen, review_entries=[_entry(published=False)])
+    assert reason == ("control:hurry" if kind == "hurry" else "owner_text")
+    messages = []
+    loop._drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id,
+                                  SimpleNamespace(put_nowait=lambda _event: None), set(), owner_ctx=ctx)
+    rows = [message for message in messages if message.get("content") == oh.HURRY_WORDS]
+    if kind == "hurry":
+        assert len(rows) == 1 and rows[0][HOST_CONTEXT_KIND_KEY] == OWNER_WORDS_KIND
+    else:
+        assert rows == [] and any("keep going" in str(message.get("content")) for message in messages)

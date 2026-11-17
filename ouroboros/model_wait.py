@@ -49,6 +49,10 @@ from ouroboros.task_store import patch_handoff, put_handoffs
 from ouroboros.utils import utc_now_iso
 
 
+# A granted same-request repeat yielded to unread owner words: the round start drains and rebuilds (``loop_llm_call``).
+OWNER_WORDS_WAITING = "owner_words_waiting"
+
+
 class ModelWaitInterrupted(RuntimeError):
     """A live model wait ended on the task's existing control/deadline rail."""
 
@@ -392,7 +396,7 @@ def control_probe_requires_current() -> bool:
 
 def control_probe_active() -> bool:
     return _STRICT_CONTROL_PROBE.get() is not None
-_REPREPARE: contextvars.ContextVar[dict[str, tuple[Callable, Callable | None]] | None] = contextvars.ContextVar(
+_REPREPARE: contextvars.ContextVar[dict[str, tuple[Callable, Callable | None, bool]] | None] = contextvars.ContextVar(
     "ouroboros_model_wait_reprepare", default=None)
 _CALENDAR: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
     "ouroboros_model_wait_calendar", default=())
@@ -681,8 +685,12 @@ class TaskModelWait:
         separately (#1196) and is subtracted by every finite-lifetime read.
         ``None`` keeps whatever the task row already supplied.
         """
+        from ouroboros.deployment_policy import managed_model_roles
+
         with self.lock:
-            self.overrides = copy.deepcopy(saved.get("overrides") or {})
+            # A deployment's checker route is its policy's: a switch saved before it was managed never returns.
+            self.overrides = {role: override for role, override in copy.deepcopy(saved.get("overrides") or {}).items()
+                              if role not in managed_model_roles()}
             self.auto_continue = dict(saved.get("auto_continue") or {})
             clock = saved.get("quota_clock") or {}
             self.revision = int(clock.get("revision") or 0)
@@ -701,10 +709,14 @@ class TaskModelWait:
 
     @contextlib.contextmanager
     def register_reprepare(self, role: str, callback: Callable[[dict], dict], *,
-                           resource_reason: Callable[[Exception], str] | None = None) -> Iterator[None]:
-        """Bind one caller's reprepare and optional confirmed-refusal classification."""
+                           resource_reason: Callable[[Exception], str] | None = None,
+                           owner_model_wake: bool = False) -> Iterator[None]:
+        """Bind one caller's reprepare and optional confirmed-refusal classification.
+
+        Only ordinary round calls opt into primary wakes. Nested helpers keep their waits.
+        """
         bindings = dict(_REPREPARE.get() or {})
-        bindings[role] = (callback, resource_reason)
+        bindings[role] = (callback, resource_reason, owner_model_wake)
         token = _REPREPARE.set(bindings)
         try:
             yield
@@ -763,7 +775,7 @@ class TaskModelWait:
 
     def _control_reason(self, *, strict_current: bool) -> str | None:
         """Existing task controls and explicit calendar bounds, never model prose."""
-        from ouroboros.cancel_intents import cancel_pending, resolve_owner_stop_intent
+        from ouroboros.cancel_intents import immediate_stop_pending
         from ouroboros.config import resolve_task_execution_timeout_sec
         from ouroboros.deadline_utils import seconds_until
         from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, drain_owner_entries
@@ -774,10 +786,8 @@ class TaskModelWait:
         control_gap = None
         if self.owner_control is None:
             try:
-                if cancel_pending(pathlib.Path(self.canonical_root), self.task_id, propagate_busy=True):
-                    _, graceful = resolve_owner_stop_intent(self.canonical_root, self.task_id, propagate_busy=True)
-                    if not graceful:
-                        return "cancelled"
+                if immediate_stop_pending(self.canonical_root, self.task_id):
+                    return "cancelled"
             except StoreBusy as exc:
                 control_gap = exc  # No wait here; known Stop wins, then clocks, then an admission gap.
         metadata = getattr(self.tool_context, "task_metadata", None)
@@ -928,6 +938,8 @@ class TaskModelWait:
         from ouroboros.provider_models import parse_claudexor_model
 
         role = kwargs["model_role"]
+        binding = (_REPREPARE.get() or {}).get(role)
+        owner_model_wake = bool(binding and binding[2])
         try:
             source, native_model = parse_claudexor_model(kwargs["model"])
         except ValueError:
@@ -946,7 +958,9 @@ class TaskModelWait:
         row = {"wait_id": wait_id, "task_attempt": self.attempt, "role": role,
                "_slot_id": slot_id,
                "model": kwargs["model"], "source": source,
-               "credential_profile_id": "" if reason == "auth_quota" else str(route.get("credentialProfileId") or problem_context.get("credentialProfileId") or account_intent or ""),
+               # The tier this call captured before waiting, which its continuation pays (the picker's catalog price).
+               "processing_preference": str(kwargs.get("processing_preference") or ""),
+               "credential_profile_id":"" if reason == "auth_quota" else str(route.get("credentialProfileId") or problem_context.get("credentialProfileId") or account_intent or ""),
                "credential_harness": "", "reason": reason, "reset_at": str(getattr(error, "reset_at", "") or ""),
                "auto_continue": self.auto_continue.get(role, True) if observes_access else False, "state": "waiting",
                **({"availability_observation": "unavailable"} if not observes_access else {}),
@@ -974,8 +988,11 @@ class TaskModelWait:
         try:
             self._publish(row)
             while True:
+                from ouroboros.owner_model import waiting_wake
+
                 control = ("caller_cancelled" if caller_cancel is not None and caller_cancel.is_set()
-                           else self.control_reason() or self.pre_dispatch_pause())
+                           else self.control_reason() or self.pre_dispatch_pause()
+                           or (waiting_wake(self) if owner_model_wake else None))
                 callback = kwargs.get("model_poll_control")
                 if not control and callback is not None:
                     control = callback()
@@ -1174,21 +1191,6 @@ def dispatch_control_reason(owner, *, handed_off=False, before_task_start=False)
         reason, gap = None, exc
     if reason:
         return reason
-    if owner is not None:
-        from ouroboros.store import acquisition_budget
-        from ouroboros.work_diagnostics import control_reason, withdraw_revoked
-
-        with acquisition_budget(0):
-            reason = control_reason(owner.task, owner.canonical_root, before_handoff=not handed_off)
-        if reason == "cancelled":
-            withdraw_revoked(owner.task, owner.canonical_root)  # custody settles it; never a task exception
-        if reason:
-            if reason == RAIL_OWNER_PAUSE and before_task_start:
-                fence = read_fence(owner.canonical_root, owner.task["root_task_id"])
-                if not fence_closed(fence) or not fence.get("fence_id"):
-                    return "owner_launch_authority_unavailable:diagnostic_pause_unbound"
-                owner.prestart_pause_fence = dict(fence)
-            return reason
     if handed_off:
         if gap is not None:
             raise gap
@@ -1207,8 +1209,8 @@ def dispatch_control_reason(owner, *, handed_off=False, before_task_start=False)
             paused = fence_closed(fence) and owner.task_id not in (fence.get("selected_members") or {})
             if paused:
                 owner.prestart_pause_fence = dict(fence)
-        else:
-            paused = scope_fence()
+        elif (paused := scope_fence()).get("state") == "unknown":
+            return str(paused["reason"])  # an unreadable fence is no Pause; it names the gap, as budget_pause reads it
         if paused:
             return RAIL_OWNER_PAUSE
     except StoreBusy as exc:
@@ -1220,6 +1222,19 @@ def dispatch_control_reason(owner, *, handed_off=False, before_task_start=False)
 
 def current_model_wait() -> TaskModelWait | None:
     return _CURRENT.get()
+
+
+def answer_owner_fields(task_id: Any, *, task_receiver: bool = True) -> dict:
+    """The SENDING process's answer custody at dispatch: its task's bound receiver, else no receiver and
+    only its own death proof (``tool_custody.owner_proof``), which ``local_custody_repair`` may read.
+    ``task_receiver=False``: a send whose own reader is not the task's model wait (a tool's stream) binds
+    nothing, even inside that wait's copied context."""
+    owner = current_model_wait()
+    if task_receiver and owner is not None and owner.task_id == task_id:
+        return owner.bind_answer_consumer()
+    from ouroboros.tool_custody import owner_proof
+
+    return {"local_answer_owner_proof": owner_proof()}
 
 
 _AFTER_THE_REPLY = frozenset({"post_task", "consolidation"})  # the post-task worker's usage categories

@@ -42,7 +42,7 @@ def runtime(tmp_path, monkeypatch):
     ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, budget_drive_root=tmp_path,
                           task_id="requester", task_attempt=1, current_task_type="task",
                           task_metadata={}, pending_events=[], event_queue=events)
-    host = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING,
+    host = SimpleNamespace(DRIVE_ROOT=tmp_path, REPO_DIR=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING,
                            load_state=lambda: {}, persist_queue_snapshot=queue.persist_queue_snapshot)
     return SimpleNamespace(server=server, restart=server_restart, queue=queue, workers=workers,
                            state=state, ctx=ctx, host=host, events=events, root=tmp_path)
@@ -81,7 +81,7 @@ def worker(runtime, monkeypatch):
     slot = affirm_ready(SimpleNamespace(wid=0, busy_task_id=None,
         in_q=SimpleNamespace(put=lambda task: delivered.append(copy.deepcopy(task)))))
     monkeypatch.setattr(runtime.workers, "WORKERS", {0: slot})
-    monkeypatch.setattr(runtime.workers, "MAX_WORKERS", 1)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(1))
     return slot, delivered
 
 
@@ -330,11 +330,11 @@ def test_late_or_unconfirmed_intake_promises_no_execution(runtime, monkeypatch, 
 @pytest.mark.parametrize("boundary", ["before_marks", "after_marks"])
 def test_intent_at_last_dispatch_boundary_spares_committed_handoff(runtime, monkeypatch, boundary):
     from ouroboros import owner_pause
-    from supervisor import worker_assignment as assignment
+    from supervisor import dispatch_choice, worker_assignment as assignment
 
     candidate = enqueue(runtime, "picked")
     slot, delivered = worker(runtime, monkeypatch)
-    assert assignment._choose_candidate(runtime.queue, 10, set(), set(), list(runtime.queue.RUNNING.values()), set())[0] == 0
+    assert dispatch_choice.choose(runtime.queue, 10) == [candidate]
     slot.busy_task_id = candidate["id"]
     candidate["_launch_claim"] = {"token": "claim", "wid": slot.wid}
     event = {"type": "restart_request", "phase": "intent", "request_id": "boundary-proof",
@@ -992,7 +992,7 @@ def test_evolution_completion_retries_unknown_decision_on_existing_restart_tick(
     assert runtime.restart.agent_restart_holds(queued) and queued in runtime.queue.PENDING
 
 
-def test_restart_drain_tells_the_owner_how_many_tasks_it_waits_for_and_logs_their_ids(monkeypatch, caplog):
+def test_restart_drain_tells_the_owner_how_many_tasks_it_waits_for_and_logs_their_ids(monkeypatch, caplog, tmp_path):
     """Audit 05.11 item 8: the drain row in Main says how many tasks it waits for; their ids go to one log line."""
     import logging
     import uuid
@@ -1007,7 +1007,7 @@ def test_restart_drain_tells_the_owner_how_many_tasks_it_waits_for_and_logs_thei
         server = SimpleNamespace(uuid=uuid, time=time, log=server_restart.log, _pending_restart={},
                                  _live_running_task_ids=lambda ctx, live=live: list(live),
                                  _perform_supervisor_restart=lambda *a, **k: pytest.fail("the drain comes first"))
-        ctx = SimpleNamespace(load_state=lambda: {"owner_chat_id": 1},
+        ctx = SimpleNamespace(load_state=lambda: {"owner_chat_id": 1}, REPO_DIR=tmp_path, DRIVE_ROOT=tmp_path,
                               send_with_budget=lambda chat, text, **kwargs: sent.append(text))
         caplog.clear()
         with caplog.at_level(logging.INFO, logger=server_restart.log.name):

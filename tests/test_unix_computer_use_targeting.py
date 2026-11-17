@@ -270,7 +270,7 @@ def test_characters_the_layout_cannot_type_are_an_honest_failure(tmp_path, monke
     out = receipt(api.tools["type_text"](text="ouroboros probe"))
     assert out["ok"] is False and "observed_effect" not in out, out
     assert out["reason"] == "untypable_characters" and out["untyped"] == list("ourbs") and "via=paste" in out["error"]
-    shortcut = receipt(api.tools["key"](keys="cmd+s"))
+    shortcut = receipt(api.tools["key"](keys="cmd+shift+s"))  # Command alone with one character is the chord program's
     assert shortcut["reason"] == "untypable_characters" and "layout" in shortcut["error"] and "via=paste" not in shortcut["error"]
     # The paste chord no longer types the layout's "v" (cliclick's warning above does not reach it); the chord program
     # says the same words when no key of the layout gives v under Command (measured: Turkmen), and posts nothing.

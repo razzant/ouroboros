@@ -1,8 +1,10 @@
 """Panic's installation input and its single durable receipt, not task authority.
 
-Launchers keep writing ``panic``. Boot translates that input into work stops
-before acknowledging it in the existing controls store. A failed unlink cannot
-apply the same input twice; rewriting the file is a new input, regardless of age.
+Launchers keep writing ``panic``. Boot translates that input into work stops and
+disabled controls, then acknowledges it in the existing controls store
+(``panic_ingress_receipt``) and unlinks it; a failed stop or controls write keeps
+the input. A failed unlink cannot apply the same input twice; rewriting the file
+is a new input, regardless of age.
 """
 from __future__ import annotations
 

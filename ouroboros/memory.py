@@ -536,16 +536,19 @@ class Memory:
             return []
 
     def load_identity(self) -> str:
+        """The identity's exact text: its bytes decoded, no newline translation, so the revision of what a context
+        shows is the sha256 of the file it was read from (a missing file is seeded with the default first)."""
         path = self.identity_path()
         if path.exists():
-            return read_text(path)
+            return path.read_bytes().decode("utf-8")
         default = self._default_identity()
         write_text(path, default)
         return default
 
     def load_world_profile(self) -> str:
+        """The map's exact text (bytes decoded, as ``load_identity``), or "" when there is none."""
         p = self.world_path()
-        return read_text(p) if p.exists() else ""
+        return p.read_bytes().decode("utf-8") if p.exists() else ""
 
     def ensure_files(self) -> None:
         for path, default in ((self.scratchpad_path(), self._default_scratchpad), (self.identity_path(), self._default_identity)):

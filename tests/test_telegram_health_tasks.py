@@ -36,6 +36,20 @@ def test_health_snapshot(tmp_path):
     assert "Disk" in txt
 
 
+def test_health_counts_the_workers_the_certificate_names(tmp_path):
+    """The pool's counts ride ``queue.alive`` (``queue_publication._certify``): the document keeps those of its own
+    write, and the health line shows the certified ones while the certificate names that document."""
+    plugin = _load_plugin()
+    api, data = _api_with_data(tmp_path)
+    (data / "state" / "queue_snapshot.json").write_text(json.dumps(
+        {"generation": "g", "running": [], "pending": [], "worker_total": 3, "lane_carrier_total": 1}), encoding="utf-8")
+    alive = data / "state" / "queue.alive"
+    for generation, shown in (("g", "Workers: 2"), ("older", "Workers: 4")):
+        alive.write_text(json.dumps({"generation": generation, "ts": "2026-11-15T20:00:00+00:00", "heartbeats": {},
+                                     "pool": {"worker_total": 1, "lane_carrier_total": 1}}), encoding="utf-8")
+        assert shown in plugin._collect_health(api, "en")
+
+
 def test_health_says_an_unmeasured_pool_is_not_observed_never_zero(tmp_path):
     plugin = _load_plugin()
     api, data = _api_with_data(tmp_path)

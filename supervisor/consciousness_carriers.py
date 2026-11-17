@@ -34,6 +34,33 @@ def autonomous_tasks() -> list[str]:
                                  and is_autonomous_work(task.get("metadata"))))
 
 
+def live_task_rows(task_ids) -> dict[str, dict]:
+    """The pool's own rows of these live tasks, from memory: each one's ``title`` and ``metadata`` (what names them
+    when the switch ends them); nothing is read from a store."""
+    from supervisor import queue as q
+
+    wanted = {str(task_id) for task_id in task_ids}
+    with q._queue_lock:
+        tasks = [*q.PENDING, *(meta.get("task") or {} for meta in q.RUNNING.values())]
+        return {str(task["id"]): {"title": str(task.get("title") or task.get("suggested_name") or ""),
+                                  "metadata": dict(task["metadata"]) if isinstance(task.get("metadata"), dict) else {}}
+                for task in tasks if str(task.get("id") or "") in wanted}
+
+
+def paused_tree_members(root_task_id: str) -> list[tuple[str, str]]:
+    """``(task_id, budget_drive_root)`` of the members of this root's tree the pool holds parked at the graceful
+    ceiling (their ``_budget_pause`` marker), from memory: the members whose pause rows can say a child paused first."""
+    from ouroboros.budget_pause import RAIL_GRACEFUL_CEILING
+    from supervisor import queue as q
+
+    root = str(root_task_id or "")
+    with q._queue_lock:
+        return [(str(task["id"]), str(task.get("budget_drive_root") or "")) for task in q.PENDING
+                if task.get("id") and str(task["id"]) != root and isinstance(task.get("_budget_pause"), dict)
+                and str(task["_budget_pause"].get("root_task_id") or task.get("root_task_id") or "") == root
+                and task["_budget_pause"].get("rail") == RAIL_GRACEFUL_CEILING]
+
+
 def _cited_quote(corpus) -> str:
     """The span a run cited from my human's place words (``cited``; older rows hold only the span as ``content``)."""
     return next((str(row.get("cited") or row.get("content") or "") for row in corpus or []

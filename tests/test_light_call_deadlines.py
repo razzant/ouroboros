@@ -111,8 +111,8 @@ def test_preparation_expiry_prevents_a_physical_send(call_env, monkeypatch, cons
 
 @pytest.mark.parametrize("consumer", ["naming", "translation"])
 def test_slot_wait_spends_the_same_deadline(call_env, monkeypatch, consumer):
-    # Hold the actual per-route slot; its queue and expiry check remain production code.
-    monkeypatch.setattr(model_concurrency, "_max_slot_wait_sec", lambda: 12)
+    # Hold the actual per-route slot; its queue and expiry check remain production code. The caller's deadline is the
+    # wait's only bound: the queue has no clock of its own.
     with model_concurrency.model_call_slot("unseen-light", route=call_env.route):
         refused(call_env, consumer)
     assert call_env.now[0] == pytest.approx(110)
@@ -419,11 +419,10 @@ def test_place_reply_safety_check_ends_by_the_task_deadline_safety_already_uses(
 def test_verdict_extraction_keeps_its_finalization_reserve_after_preparation_or_a_slot_wait(
         call_env, monkeypatch, elapsed):
     """Extraction refuses inside deadline − grace and projects its timeout from it, once, before the send."""
-    from ouroboros import config
     from ouroboros import review_verdict_extraction as extraction
 
     timeouts = no_proxy_timeouts(monkeypatch)
-    monkeypatch.setattr(config, "get_light_model", lambda: "openai-compatible::unseen-light")
+    monkeypatch.setattr("ouroboros.route_choice.following_route", lambda _role: ("openai-compatible::unseen-light", False))
     with ua.usage_scope(ua.UsageScope(drive_root=call_env.root, task_id="review", root_task_id="review")), \
             model_wait.calendar_scope(at(300)), \
             spend_until(call_env, monkeypatch, elapsed, 110) as started:  # review custody's raw request deadline
@@ -458,12 +457,12 @@ def test_vision_caption_keeps_its_reserve_after_image_preparation_or_a_slot_wait
 def light_extraction(call_env, monkeypatch, *, until, owner=True, cancel=False):
     """The review substrate's real verdict extraction, as a review inside a task calls it: its window is the
     review deadline less the grace, 300 − 120 = 180, and its preparation runs to ``until``."""
-    from ouroboros import cancel_intents, config
+    from ouroboros import cancel_intents
     from ouroboros.task_results import write_task_result
 
     write_task_result(call_env.root, "review", "running", root_task_id="review")  # the owner's Pause authority
     timeouts = no_proxy_timeouts(monkeypatch, content="[]")
-    monkeypatch.setattr(config, "get_light_model", lambda: "openai-compatible::unseen-light")
+    monkeypatch.setattr("ouroboros.route_choice.following_route", lambda _role: ("openai-compatible::unseen-light", False))
     spend_preparation(call_env, monkeypatch, until)
     task = {"id": "review", "root_task_id": "review", "deadline_at": at(300)}
     waiter = (model_wait.task_model_wait_scope(task=task, drive_root=call_env.root, event_queue=None,
@@ -645,11 +644,10 @@ def test_a_caption_window_spent_before_its_create_still_sends_nothing(call_env, 
 def test_an_accepted_verdict_extraction_outlives_its_own_window(call_env, monkeypatch):
     """The same class: the review deadline 300 less the 120 s grace admits the managed extraction at 100; it
     finishes at 250, before the review's own deadline, on its one operation."""
-    from ouroboros import config
     from tests.test_llm_claudexor import MODEL
 
     gateway = accepted_operation(call_env, monkeypatch, done_at=250)
-    monkeypatch.setattr(config, "get_light_model", lambda: MODEL)
+    monkeypatch.setattr("ouroboros.route_choice.following_route", lambda _role: (MODEL, False))
     with task_wait_owner(call_env, "review"):
         review_verdict_extraction.canonicalize_session_verdict(
             "The change looks fine; I found nothing to fix.", conformance_passed=False,

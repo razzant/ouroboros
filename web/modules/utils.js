@@ -53,6 +53,20 @@ export function sinceLocalTime(value, now = Date.now()) {
     return ` · since ${at.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${clock}`;
 }
 
+/**
+ * A timestamp in whole microseconds since the epoch, for ordering with `<`; NaN exactly where `Date.parse` is.
+ * `Date.parse` keeps milliseconds, and the host stamps microseconds (Python `isoformat()`, which omits a zero
+ * fraction): two writes of one stored row can land inside one millisecond. Any zone spelling or fraction length reads alike.
+ */
+export function isoMicros(value) {
+    let micros = 0;
+    const whole = String(value ?? '').replace(/(\d\d:\d\d:\d\d)\.(\d+)/, (_match, clock, digits) => {
+        micros = Number(digits.padEnd(6, '0').slice(0, 6));
+        return clock;
+    });
+    return Date.parse(whole) * 1000 + micros;
+}
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const hhmm = date => `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 // English keeps this hand format byte for byte; an install language takes its month
@@ -102,6 +116,9 @@ const zoneName = (date) => {
 // The instant's own minute: local clock text repeats across a DST fallback hour.
 const minuteOf = value => Math.floor(new Date(value).getTime() / 60000);
 
+/** The host observed this end itself: the executor ending its attempt, or the supervisor recording a cancel. */
+const endObserved = (fact) => fact?.source === 'executor_terminal' || fact?.source === 'supervisor_cancel';
+
 /** A task's host-observed end and the time its notification was added are two
  * facts (#1347); an unknown end says so rather than borrowing the second.
  * `full` states both as absolute local dates (two different minutes that read
@@ -110,7 +127,7 @@ const minuteOf = value => Math.floor(new Date(value).getTime() / 60000);
  * the row's own time alone when its task ended in that minute, both facts only
  * when the minutes differ, a day only off today. */
 export function terminalTimeNote(terminalTime, addedAt, now = new Date()) {
-    const ended = terminalTime?.source === 'executor_terminal' ? readDate(terminalTime.occurred_at) : null;
+    const ended = endObserved(terminalTime) ? readDate(terminalTime.occurred_at) : null;
     const added = readDate(addedAt);
     const zone = Boolean(ended && added) && absoluteTime(ended) === absoluteTime(added) && minuteOf(ended) !== minuteOf(added);
     const endFact = ended ? `Task ended ${absoluteTime(ended, zone)}` : 'Task end time not recorded';
@@ -132,7 +149,7 @@ export function terminalTimeNote(terminalTime, addedAt, now = new Date()) {
 export function savedTerminalRowNote(row) {
     const fact = row?.system_type === 'task_summary' ? row.terminal_time : null;
     if (!fact || typeof fact !== 'object' || !absoluteTime(row.ts)) return '';
-    const known = fact.source === 'executor_terminal' && absoluteTime(fact.occurred_at);
+    const known = endObserved(fact) && absoluteTime(fact.occurred_at);
     return known && minuteOf(fact.occurred_at) === minuteOf(row.ts) ? '' : terminalTimeNote(fact, row.ts).full;
 }
 

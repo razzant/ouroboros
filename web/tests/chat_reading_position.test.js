@@ -687,3 +687,55 @@ test('a sideways finger (the drawer, a swipe to reply) is not reading; a vertica
     assert.equal(f.reading.stick, false, 'a vertical move past the slop is reading back: following ends');
     assert.deepEqual(navigation, [-1]);
 });
+
+test('a second finger makes the touch a pinch: no reading, paging or dismissal until a new one-finger touch', t => {
+    const f = fixture(t), navigation = [];
+    f.reading.bindGestures(direction => navigation.push(direction));
+    Object.assign(f.feed, { scrollHeight: 1000, scrollTop: 600, clientHeight: 400 });
+    f.reading.stick = true;
+    const fingers = (...points) => points.map(([clientX, clientY]) => ({ clientX, clientY }));
+    // Fingers spread apart vertically: the first one moves down the feed as a reading swipe would.
+    f.gesture({ type: 'touchstart', touches: fingers([200, 300]) });
+    f.gesture({ type: 'touchstart', touches: fingers([200, 300], [200, 420]) });
+    for (const [a, b] of [[290, 440], [270, 470], [240, 500]]) {
+        f.gesture({ type: 'touchmove', touches: fingers([200, a], [200, b]) }); f.frame();
+    }
+    // One finger lifted: the rest of the pinch is still no reading.
+    f.gesture({ type: 'touchmove', touches: fingers([200, 300]) }); f.frame();
+    f.gesture({ type: 'touchmove', touches: fingers([200, 380]) }); f.frame();
+    assert.equal(f.reading.stick, true, 'a pinch only magnifies: following stays');
+    assert.deepEqual(navigation, []);
+    // A pinch that began as a one-finger read ends that read where the second finger lands.
+    f.gesture({ type: 'touchstart', touches: fingers([200, 300]) });
+    f.gesture({ type: 'touchmove', touches: fingers([200, 306]) }); f.frame();
+    f.gesture({ type: 'touchmove', touches: fingers([200, 360]) }); f.frame();
+    assert.deepEqual(navigation, [-1], 'a new one-finger touch reads again');
+    f.reading.stick = true;
+    f.gesture({ type: 'touchstart', touches: fingers([200, 360], [260, 200]) });
+    f.gesture({ type: 'touchmove', touches: fingers([200, 420], [260, 150]) }); f.frame();
+    assert.deepEqual(navigation, [-1]);
+    assert.equal(f.reading.stick, true);
+});
+
+test('a write between a feed box change and its reflow keeps a reader following the newest message', async () => {
+    // A keyboard room that shrinks leaves the feed short of its newest row until the resize's reflow, a frame later. A
+    // write landing in that frame (a state poll's) found the reader "away" and ended the following for good.
+    const { createChatReadingPosition: create } = await import('../modules/chat_reading_position.js');
+    const feed = { clientWidth: 390, offsetWidth: 390, clientHeight: 253, scrollHeight: 1000, top: 0,
+        get scrollTop() { return this.top; },
+        set scrollTop(value) { this.top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); } };
+    const state = create({ feed, visible: () => true, alive: () => true, ready: () => true, changed() {}, afterWrite() {},
+        activity() {}, updateButton() {}, anchors: { capture: () => feed.scrollTop, restore: () => true, serialize: () => null } });
+    state.reflow();
+    assert.deepEqual([state.stick, feed.scrollTop], [true, 747], 'the room opens following its newest message');
+    feed.clientHeight = 60;  // the room shrinks: the newest row is 193 px below until the reflow
+    assert.equal(state.nearBottom(), false);
+    assert.equal(state.mutate(() => true), true);
+    assert.equal(state.stick, true, 'the write is no reading back');
+    state.reflow();
+    assert.deepEqual([state.stick, feed.scrollTop], [true, 940], 'the reflow brings the newest row back');
+    // In the box the last reflow placed, a reader found away from the newest row is away: a write keeps the place.
+    feed.scrollTop = 300;
+    state.mutate(() => true);
+    assert.deepEqual([state.stick, feed.scrollTop], [false, 300]);
+});

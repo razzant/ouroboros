@@ -999,3 +999,44 @@ def test_history_and_task_detail_project_terminal_canonical_accounting(tmp_path)
     assert progress["accounted_upper_bound_usd_with_children"] == 99.0
     assert progress["cost_final"] is True
     assert progress["cost_with_children_partial"] is False
+
+
+def test_an_answer_saved_before_its_result_replays_finalizing_without_its_own_word(tmp_path):
+    """#2801: answer first saves the root's final (with the status the producer expects) before its result is
+    stored. Until the store answers, history holds the card on Finalizing… and says no outcome; a stored result
+    keeps its row's word, and plain speech of a running result stays `unfinished`."""
+    from ouroboros.gateway.history import _annotate_terminal_task_truth
+
+    def rows(task_id, **final):
+        return [{"task_id": task_id, "role": "assistant", "is_progress": True, "text": "still working",
+                 "ts": "2026-11-09T06:13:59Z"},
+                {"task_id": task_id, "role": "assistant", "text": "answer", "ts": "2026-11-09T06:14:02Z", **final}]
+
+    early, plain, stored = rows("early", task_terminal_status="completed"), rows("plain"), rows(
+        "stored", task_terminal_status="completed")
+    _annotate_terminal_task_truth(early + plain + stored, tmp_path, {
+        "early": {"status": "running"}, "plain": {"status": "running"}, "stored": {"status": "completed"}})
+    for row in early:
+        assert row["task_phase"] == "finalizing" and row["outcome_final"] is False, row
+        assert "task_terminal_status" not in row, row
+    assert [row.get("task_phase") for row in plain] == ["unfinished", "unfinished"]
+    assert stored[1]["task_terminal_status"] == "completed" and "task_phase" not in stored[1]
+
+
+def test_an_unread_result_never_lets_its_answer_claim_done_while_a_known_absent_one_keeps_it(tmp_path):
+    """#2801: a result the store did not answer (``_load_terminal_result``'s {}) confirms no outcome, so the
+    answer's own status is dropped and replay keeps the card open; a result the store says is absent is old
+    history, and its answer keeps its word (the legacy/historical terminal path)."""
+    from ouroboros.gateway.history import _annotate_terminal_task_truth
+
+    def rows(task_id):
+        return [{"task_id": task_id, "role": "assistant", "is_progress": True, "text": "still working",
+                 "ts": "2026-11-09T06:13:59Z"},
+                {"task_id": task_id, "role": "assistant", "text": "answer", "ts": "2026-11-09T06:14:02Z",
+                 "task_terminal_status": "completed"}]
+
+    unread, absent = rows("unread"), rows("absent")
+    _annotate_terminal_task_truth(unread + absent, tmp_path, {
+        "unread": {}, "absent": {"_history_result_absent": True}})
+    assert "task_terminal_status" not in unread[1] and unread[1]["task_phase"] == "unfinished", unread[1]
+    assert absent[1]["task_terminal_status"] == "completed" and "task_phase" not in absent[1], absent[1]

@@ -35,7 +35,9 @@ wake earlier — they wait as observed facts for the scheduled wake (``observe_w
 wake's reason is the heartbeat. Neither does an owner message, nor a health event (``build_health_invariants``
 is read-side; health is visible in the next wake's context).
 Panic and ``/bg stop`` arrive through ``stop()``, which arms ordinary graceful cascade
-cancellation for own wakes, live/lent focuses and autonomous work, off-thread.
+cancellation for own wakes (pooled ones too), live/lent focuses and autonomous work, off-thread. Who stopped it is
+saved beside the switch (``STOP_SOURCE_KEY``): the mind's tool never lifts the owner's, Panic's or an
+unknown stop, after a restart or from a queued request alike.
 The legacy observation inbox, if present, is moved once to the archive unread.
 What a wake OBSERVES is not this clock's business: it starts after the chat-chain position and
 the task-result transition state the last admitted wake observed
@@ -92,6 +94,23 @@ def _iso(ts: float) -> str:
     return _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).isoformat() if ts else ""
 
 
+def model_route() -> Optional[Dict[str, Any]]:
+    """The model the next wake thinks with, read from the settings as they are now (no network, no store), with
+    the route's local flag: ``layer`` ``consciousness`` when its own slot decides the route (a model of its own, or
+    Main's run locally when its box is checked under a cloud Main: ``route_choice.model_role_slot_override``), else
+    ``main``, the route a wake follows (``following_route``). ``None`` when it cannot be read."""
+    from ouroboros.route_choice import following_route, model_role_slot_override
+
+    try:
+        slot = model_role_slot_override({"model_role": "consciousness"})
+        model, local = slot or following_route("consciousness")
+    except Exception:  # every status read asks again; the unknown is the null itself, so the log stays quiet
+        log.debug("The consciousness model route could not be read from the settings", exc_info=True)
+        return None
+    model, layer = str(model or "").strip(), "main" if slot is None else "consciousness"
+    return {"value": model, "layer": layer, "local": bool(local)} if model else None
+
+
 def allowance_fact(window: Dict[str, Any]) -> Dict[str, Any]:
     """The one projection of the allowance window a wake decision met: a wake's preparation and a skip's
     record carry the same keys (known spend, unmetered calls, the limit, spend by cause, the reset time);
@@ -123,6 +142,82 @@ def panic_blocks_wake(drive_root: Any) -> bool:
     return installation_panic(drive_root)
 
 
+# Who turned consciousness off, saved in the same state write as ``bg_consciousness_enabled`` (owner 11.11, 5A; the
+# twin of /evolve off's provenance): the owner's doors (/bg from the app, Telegram or onboarding) and Panic leave a stop
+# only the owner's start lifts, in every mode (P0: the owner's decision binds in Cyber Pro too); toggle_consciousness lifts only
+# a stop it placed. A stop with no saved source (placed before this key, a recovered state) is unknown: owner's.
+STOP_SOURCE_KEY = "bg_consciousness_stop_source"
+OWNER_STOP, PANIC_STOP, AGENT_STOP = "owner", "panic", "agent_tool"
+_STOPPED_BY = {OWNER_STOP: "the owner turned it off", PANIC_STOP: "Panic turned it off"}
+
+
+class _StopHolds(Exception):
+    """Raised inside the state write: the standing stop is not the mind's to lift, and nothing is written."""
+
+
+def held_stop_text(source: Any) -> str:
+    who = _STOPPED_BY.get(str(source or ""), "who turned it off is not recorded")
+    return (f"Background consciousness stayed off: {who}, and that stop holds against toggle_consciousness. "
+            "Only the owner's /bg start (Start in the app or in Telegram) turns it back on.")
+
+
+# The primary copy written, its backup not (``StateUnavailable.primary_written``): the change stands and the next tick
+# reads it, so the reply says it was saved and what it lacks, never that nothing changed.
+_BACKUP_UNSAVED = " Saved, but the state's backup copy was not written ({})."
+
+
+def _persist_start(source: str) -> Tuple[str, str]:
+    """Save an enable; the mind's right to it is decided inside the same locked write. ``(refusal, note)``: why
+    nothing changed, or what the saved enable lacks."""
+    from supervisor.state import StateUnavailable, control_value, update_state
+
+    def enable(live: Dict[str, Any]) -> None:
+        known, enabled = control_value(live, "bg_consciousness_enabled")
+        source_known, stopped_by = control_value(live, STOP_SOURCE_KEY)
+        if source != OWNER_STOP and not (known and (enabled is True or (source_known and stopped_by == AGENT_STOP))):
+            raise _StopHolds(stopped_by if known and source_known else "")
+        live["bg_consciousness_enabled"] = True
+        live.pop(STOP_SOURCE_KEY, None)
+
+    try:
+        update_state(enable, confirm=("bg_consciousness_enabled", STOP_SOURCE_KEY))
+    except _StopHolds as held:
+        return held_stop_text(held.args[0]), ""
+    except StateUnavailable as exc:
+        if exc.primary_written:
+            return "", _BACKUP_UNSAVED.format(exc.reason)
+        return (f"Background consciousness stayed off: runtime state is unavailable ({exc.reason}); "
+                "nothing was started."), ""
+    return "", ""
+
+
+def _persist_stop(source: str) -> str:
+    """Save a stop with who placed it: "" or the disclosure that it holds only in this process. The mind's stop never
+    relabels a standing stop that is not its own (the owner's, Panic's or an unknown one)."""
+    from supervisor.state import StateUnavailable, control_value, update_state
+
+    def disable(live: Dict[str, Any]) -> None:
+        known, enabled = control_value(live, "bg_consciousness_enabled")
+        source_known, stopped_by = control_value(live, STOP_SOURCE_KEY)
+        if source == AGENT_STOP and not (known and enabled is True) and not (source_known and stopped_by == AGENT_STOP):
+            kept = stopped_by if source_known and stopped_by in _STOPPED_BY else ""  # "" stays unknown
+        else:
+            kept = source
+        live["bg_consciousness_enabled"] = False
+        if kept:
+            live[STOP_SOURCE_KEY] = kept
+        else:
+            live.pop(STOP_SOURCE_KEY, None)
+
+    try:
+        update_state(disable, confirm=("bg_consciousness_enabled", STOP_SOURCE_KEY))
+    except StateUnavailable as exc:
+        if exc.primary_written:
+            return _BACKUP_UNSAVED.format(exc.reason)
+        return f" Not saved (runtime state unavailable, {exc.reason}): the stop holds in this process only."
+    return ""
+
+
 class BackgroundConsciousness:
     """The alarm clock; one instance per supervisor, ticked from its loop."""
 
@@ -137,6 +232,7 @@ class BackgroundConsciousness:
         from supervisor.state import control_is
 
         self._stopped = panic_blocks_wake(self._drive_root)  # unknown is suspension, Panic is a stop
+        self._stop_source = PANIC_STOP if self._stopped else ""  # who stopped this process, whatever its write did
         self._enabled = not self._stopped and control_is(state, "bg_consciousness_enabled", True)  # unknown is not on (#1307)
         try:
             persisted = float(state.get(NEXT_WAKE_STATE_KEY) or 0.0)
@@ -179,7 +275,7 @@ class BackgroundConsciousness:
         except (TypeError, ValueError):
             bootstrap = persisted_last_wake or self._booted_at
         self._observation_bootstrap_since = bootstrap
-        self._backoff, self._allowance = 1, (0.0, {})
+        self._backoff, self._allowance = 1, (0.0, {}, False)
         self._skip_basis = _money_skip_basis(state.get(LAST_SKIP_STATE_KEY), persisted)  # memory only
         self._in_flight = ""  # the id this process is binding, until its admission answers
         self._archive_legacy_inbox()
@@ -272,7 +368,7 @@ class BackgroundConsciousness:
             from supervisor.state import control_is
 
             if panic_blocks_wake(self._drive_root):
-                self._stopped, self._enabled = True, False
+                self._stopped, self._enabled, self._stop_source = True, False, PANIC_STOP
                 return "panic_stop"
             self._enabled = not self._stopped and control_is(self._read_state(), "bg_consciousness_enabled", True)
             if not self._enabled:
@@ -384,8 +480,11 @@ class BackgroundConsciousness:
         # fence narrowed below that refused every wake of a nearly spent day before its
         # first call.
         ceiling = min(per_task_cap, remaining) if per_task_cap > 0 else remaining
+        # Which of the two set it, observed for the views that explain a pause (never read by a stop or a Resume).
+        source = ("allowance" if per_task_cap <= 0 or remaining < per_task_cap
+                  else "per_task_cap" if per_task_cap < remaining else "both")
         metadata = {**self._routing_facts(chat_id),
-                    **wake_task_metadata(level, reason, root_cost_ceiling_usd=ceiling)}
+                    **wake_task_metadata(level, reason, root_cost_ceiling_usd=ceiling, root_cost_ceiling_source=source)}
         # Everything since the last ACCEPTED observation — chain positions and transition
         # identities, not this alarm's finish time. Before a verified boundary,
         # the bootstrap survives source failure, completion and restart.
@@ -459,7 +558,7 @@ class BackgroundConsciousness:
         # this clock with the wake's terminal (``_settle_wake``), so the next wake starts after it.
         # A wake that dies before its terminal replays the same window (at-least-once, never a silent skip).
         self._record("consciousness_wake_started", task_id=self._last_wake_task_id, wake_reason=reason,
-                     level=level, root_cost_ceiling_usd=ceiling)
+                     level=level, root_cost_ceiling_usd=ceiling, root_cost_ceiling_source=source)
         return "launched"
 
     def _wake_finished(self, task_id: str, ok: bool, *, metadata=None, pooled: bool = False) -> None:
@@ -502,6 +601,12 @@ class BackgroundConsciousness:
             accepted = bound.get("accepted_boundary") if isinstance(bound, dict) else None
             if isinstance(accepted, dict) and accepted.get("task_id") == task_id:
                 self._set_state(OBSERVATION_STATE_KEY, accepted)
+                # Every time bootstrap starts at this capture, never at the installation's first start: a body that cannot
+                # read the boundary's transition chain, and a chat window re-read by time after a chat position that no
+                # longer matches (docs/PERSISTENCE.md). Persisted with the settlement below.
+                captured = parse_deadline_ts(accepted.get("captured_at"))
+                if captured is not None:
+                    self._observation_bootstrap_since = captured.timestamp()
             if ok:
                 pause = (row or {}).get("budget_pause") or {}
                 owner_pause = (row or {}).get("owner_pause") or {}
@@ -539,51 +644,79 @@ class BackgroundConsciousness:
                     CONTINUITY_STATE_KEY: dict(self._continuity)}))
             except Exception:
                 log.debug("consciousness: wake completion not persisted", exc_info=True)
-        if (row or {}).get("wake_summary"):
+        if (row or {}).get("wake_summary") and not row.get("title"):
             from supervisor.worker_chat_lane import _broadcast_task_named
-            _broadcast_task_named({"type": "task_named", "task_id": task_id, "suggested_name": row["wake_summary"]})
+            from ouroboros.text_sentences import first_sentence
+            _broadcast_task_named({"type": "task_named", "task_id": task_id,
+                                   "suggested_name": first_sentence(row["wake_summary"])})
 
-    def start(self) -> str:
+    def start(self, source: str = OWNER_STOP) -> str:
+        """Turn on by ``source``'s right (the owner's doors; ``AGENT_STOP`` for the mind's tool). A stop this process
+        holds and the saved one are both decided, under the clock's lock, before anything turns on."""
         with self._lock:
             if panic_blocks_wake(self._drive_root):
                 return "Background consciousness stays disabled while Panic controls await persistence."
+            if source != OWNER_STOP and self._stopped and self._stop_source != AGENT_STOP:
+                return held_stop_text(self._stop_source)  # held here even when its own write failed
+            refusal, note = _persist_start(source)
+            if refusal:
+                return refusal
             if self._enabled:
-                return "Background consciousness is already enabled."
-            self._stopped, self._enabled = False, True
+                return "Background consciousness is already enabled." + note
+            self._stopped, self._enabled, self._stop_source = False, True, ""
             # The clock did not advance while disabled: never announce a wake in the past.
             self._set_next_wake(max(self._next_wake_at, time.time()), appointment=True)
-            return f"Background consciousness enabled; next wake-up at {time.strftime('%H:%M', time.localtime(self._next_wake_at))}."
+            at = time.strftime('%H:%M', time.localtime(self._next_wake_at))
+            return f"Background consciousness enabled; next wake-up at {at}." + note
 
-    def stop(self) -> str:
+    def stop(self, source: str = "") -> str:
+        """Stop this process first, then save the stop with ``source`` (``OWNER_STOP`` or ``AGENT_STOP``); Panic names
+        none, its own bounded writer saves its controls. The mind's stop never relabels one this process holds."""
         with self._lock:
-            self._stopped = True
+            if source != AGENT_STOP or not self._stopped or self._stop_source == AGENT_STOP:
+                self._stop_source = source or OWNER_STOP
+            self._stopped, held_by = True, self._stop_source
             was_enabled, self._enabled = self._enabled, False
+        saved = _persist_stop(held_by) if source else ""  # a stop the owner holds here is saved as the owner's
         wake = self.live_wake()
-        from supervisor.consciousness_carriers import autonomous_tasks
+        from supervisor.consciousness_carriers import autonomous_tasks, live_task_rows
         from ouroboros.conversation_lease import live_authors
         from supervisor.active_activity import get_direct_activity_registry
         from supervisor.workers import direct_chat_turn
-        direct = []
+        direct, turns = [], {}
         for entry in get_direct_activity_registry().actors():
             task_id = str(entry.activity_id)
-            metadata = (direct_chat_turn(task_id) or {}).get("metadata") or {}
+            turn = direct_chat_turn(task_id) or {}
+            metadata = turn.get("metadata") or {}
+            if turn:  # its title and metadata name it if the switch ends it
+                turns[task_id] = {"title": str(turn.get("title") or turn.get("suggested_name") or ""), "metadata": metadata}
             if is_consciousness_origin(metadata) and metadata.get("work_kind") != "owner":
                 direct.append(task_id)
         # Its own wake by identity too: bound before delivery, a direct turn is no chat turn yet.
-        wakes = list(dict.fromkeys(([wake] if wake else []) + direct + autonomous_tasks()
-                                   + live_authors(drive_root=self._drive_root)))
+        authors = live_authors(drive_root=self._drive_root)
+        wakes = list(dict.fromkeys(([wake] if wake else []) + direct + autonomous_tasks() + authors))
         # Work started on my human's cited words is theirs: the switch leaves it running and says so, quote and all,
         # in the same Main row every surface shows (owner 06.11, 3A); they cancel it from its card if the cite was wrong.
         from supervisor.consciousness_carriers import cited_owner_roots, cited_owner_schedules
         kept = "".join(f"\nKept running on your words (task {task_id}): «{quote}»" for task_id, quote in cited_owner_roots())
         kept += "".join(f"\nKept firing on your words (schedule {sid}): «{quote}»"
                         for sid, quote in cited_owner_schedules(self._drive_root))
-        if wakes:
-            for task_id in wakes:
-                threading.Thread(target=self._stop_live_wake, args=(task_id,), name="wake-stop", daemon=True).start()
-            return (f"Background consciousness disabled; wake-up {wake} ends at its next step." if wake
-                    else "Background consciousness disabled; autonomous work ends at its next step.") + kept
-        return ("Background consciousness disabled." if was_enabled else "Background consciousness is already disabled.") + kept
+        if not wakes and not was_enabled:
+            return "Background consciousness is already disabled." + saved + kept
+        for task_id in wakes:
+            threading.Thread(target=self._stop_live_wake, args=(task_id,), name="wake-stop", daemon=True).start()
+        # What Off leaves and what it ends, in the same row (owner 09.11, variant A). The stops are already on their
+        # way: the place count is one read that never holds or fails them; what it ends is named from memory.
+        from ouroboros.consciousness_view import off_sentence, stopping_words
+        try:
+            from ouroboros.places import load_places
+            places = load_places(self._drive_root)
+        except Exception:
+            log.debug("consciousness: places unreadable for the stop sentence", exc_info=True)
+            places = None
+        ending = stopping_words(wakes, wake=wake, rows={**live_task_rows(wakes), **turns}, authors=set(authors),
+                                places=places) if wakes else ""
+        return " ".join(part for part in (off_sentence(places), ending) if part) + saved + kept
 
     @staticmethod
     def _stop_live_wake(task_id: str) -> None:
@@ -613,8 +746,16 @@ class BackgroundConsciousness:
                   int(window.get("unknown_unmetered") or 0), bool(window.get("integrity_degraded")))
         places = context.pop("places")
         # Held: its own wake waits in the pool (paused, held or not yet dispatched), not running.
+        held = bool(wake) and wake in queued_wakes(held_only=True)
+        from ouroboros.consciousness_view import held_wake_cause
         return {**dict(zip(SNAPSHOT_KEYS, values)), **context, "appointment_at": _iso(self._appointment_at),
-                "live_wake_held": bool(wake) and wake in queued_wakes(held_only=True),
+                "live_wake_held": held,
+                # What holds it, proven from its records; the current window's own verdict stays beside it.
+                "live_wake_hold": held_wake_cause(self._drive_root, wake) if held else None,
+                "allowance_status": str(window.get("status") or ""),
+                "allowance_open_rows": window.get("accounting_open_rows"),
+                "allowance_room_after": str(window.get("room_after") or ""),
+                "model_route": model_route(),
                 "places_brief": [{key: place.get(key) for key in ("place_id", "label", "state", "unanswered")}
                                  for place in places] if places is not None else None}
 
@@ -655,14 +796,20 @@ class BackgroundConsciousness:
                 "counted_roots": root_views(live_consciousness_roots(), places), "places": places}
 
     def _allowance_view(self, now: float, *, fresh: bool = False) -> Dict[str, Any]:
-        cached_at, cached = self._allowance
-        if not fresh and cached and now - cached_at < ALLOWANCE_VIEW_TTL_SEC:
+        """The status view's window (with its display forecast) or a wake's exact admission read (without one).
+        A view reuses a cached window only while it is still this window: a display read, under the same limit,
+        before its first counted row leaves and inside the TTL; a wake's forecast-less read never stands in."""
+        cached_at, cached, shown = self._allowance
+        changes_at = cached.get("window_changes_at") if cached else None
+        if (not fresh and shown and cached and now - cached_at < ALLOWANCE_VIEW_TTL_SEC
+                and cached.get("limit_usd") == float(get_consciousness_daily_usd())
+                and (changes_at is None or now <= changes_at)):
             return cached
-        try:
-            window = allowance_window(self._drive_root, now=now, allow_stale=not fresh)  # status shows; a wake admits
+        try:  # status shows; a wake admits
+            window = allowance_window(self._drive_root, now=now, allow_stale=not fresh, **({} if fresh else {"forecast": True}))
         except Exception as exc:  # the reader types every failure; this is the last net
             window = {"status": STATUS_UNKNOWN, "error": f"{type(exc).__name__}: {exc}"}
-        self._allowance = (now, window)
+        self._allowance = (now, window, not fresh)
         return window
 
     def _routing_facts(self, chat_id: int) -> Dict[str, Any]:

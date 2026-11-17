@@ -641,7 +641,7 @@ def test_captured_recent_and_drive_sections_carry_one_capture_label(tmp_path, mo
     label = "_Snapshot captured at 2027-01-15T12:00:00+00:00 when this context was built; not refreshed during this run._"
     assert "## Drive state\n" + label in dynamic
     # The chat row is the memory view's (the open conversation): no capture-labelled chat tail.
-    assert "## Recent chat" not in dynamic and "] hello" in dynamic.split("## This room (Main)", 1)[1]
+    assert "## Recent chat" not in dynamic and "] hello" in dynamic.split("## This room (Main [chat_id=1])", 1)[1]
     runtime = json.loads(dynamic.split("## Runtime context\n\n", 1)[1].split("\n\n## ", 1)[0])
     assert runtime["context_captured_at"] == "2027-01-15T12:00:00+00:00"
     headings = [line for line in dynamic.splitlines() if line.startswith(("## Recent ", "## Drive state"))]
@@ -860,18 +860,53 @@ class TestVitalsFact:
         assert vitals["busy_minute"] == "19:59: lag ≤0.4 s; holds dialog w12/0.4 s (message_bus:send:10); queue 5/0.3 s"
         assert vitals["runtime"].startswith("python ") and ", sqlite " in vitals["runtime"]
         assert vitals["boot"] == "18:00 ouroboros@abcdef123456"
-        assert vitals["note"] == "No verdict here, the weighing is mine; clocks UTC; rows: query_data(kind='supervisor_log', op='jsonl')"
+        assert vitals["note"] == ("No verdict here, the weighing is mine; clocks UTC; "
+                                  "rows: query_data(kind='supervisor_log', op='jsonl', plane='canonical')")
         assert "last_update" not in vitals
         for word in ("WARNING", "CRITICAL", "% busy", "current\"", "threshold"):
             assert word not in json.dumps(vitals), word
         assert "## Supervisor" not in section
 
+    def test_program_facts_in_real_context_use_only_the_saved_observation_and_date_both_reads(self, tmp_path, monkeypatch):
+        from ouroboros.harness_program_facts import record_inventory
+        from ouroboros.context_runtime_facts import vitals_line
+        from tests.test_harness_program_facts import inventory
+
+        env = self._env(tmp_path, monkeypatch)
+        record_inventory(inventory(), root=tmp_path)
+        # The pre-existing repository fact runs git twice. Isolate that unrelated
+        # owner; the real vitals/context path below must acquire nothing itself.
+        monkeypatch.setattr("ouroboros.context.get_git_info", lambda *_: ("branch", "sha"))
+        called = []
+
+        def forbidden(*_a, **_k):
+            called.append("forbidden acquisition")
+            raise RuntimeError("context must read local evidence only")
+
+        for target in ("subprocess.Popen", "os.system", "socket.socket", "socket.create_connection",
+                       "httpx.Client.send", "threading.Thread.start",
+                       "ouroboros.claudexor_daemon.ensure_owned_gateway", "ouroboros.claudexor_daemon.read_owned_gateway"):
+            monkeypatch.setattr(target, forbidden)
+        lines = []
+        for day in ("2026-11-10", "2026-12-12"):
+            record_inventory(inventory(day), root=tmp_path)
+            section = build_runtime_section(env, {"id": day, "type": "task", "_is_direct_chat": True},
+                                            captured_at=day + "T14:00:00+00:00")
+            data = json.loads(section.split("## Runtime context\n\n", 1)[1])
+            line = data["vitals"]["vendor_programs"]
+            assert line in vitals_line(data["vitals"])
+            lines.append(line)
+        assert lines[0] == "Harness programs (observed 2026-11-10; newest read 2026-11-10): future-program 2.1.319 (2.1.321 available)."
+        assert lines[1] == lines[0].replace("observed 2026-11-10", "observed 2026-12-12")
+        assert not called
+
     def test_absent_sources_omit_their_keys_and_a_pooled_worker_reads_the_journals_receipts(self, tmp_path, monkeypatch):
         env = self._env(tmp_path, monkeypatch)
         _section, data = self._runtime(env)
         vitals = data["vitals"]
-        assert set(vitals) <= {"owner_turns_note", "runtime", "wal_gate", "note", "engine_pool"}
-        assert {"owner_turns_note", "runtime", "note", "engine_pool"} <= set(vitals)
+        assert set(vitals) <= {"owner_turns_note", "runtime", "wal_gate", "note", "engine_pool", "vendor_programs"}
+        assert {"owner_turns_note", "runtime", "note", "engine_pool", "vendor_programs"} <= set(vitals)
+        assert vitals["vendor_programs"] == "Harness programs: not observed."
         assert "engine" in vitals["engine_pool"]  # the one key that stays: it names the sources it could not read
         assert vitals["owner_turns_note"] == "none since this process started"
         monkeypatch.setenv("OUROBOROS_IN_WORKER", "1")  # a deep self-review's pooled worker: no ring of its own
@@ -923,3 +958,23 @@ class TestVitalsFact:
                         "busy minute M: lag; runtime python 3.10.22, sqlite 3.51.3; "
                         "last update applied abc: first request before B → after A; boot B o@s")
         assert vitals_line({"runtime": "r", "note": "n"}) == "body; runtime r"  # the capture instant stands beside it
+
+
+@pytest.mark.skipif(os.name == "nt", reason="kept-service custody is read by the POSIX launch census")
+def test_runtime_names_the_kept_services_custody_reads_now(tmp_path, monkeypatch):
+    """Every focus sees what tasks left running now, with the launch id a stop names; none: no key at all."""
+    from tests._launch_stop_shared import _ledgered_service, _settle, write_scripts
+
+    env = _make_health_env(tmp_path)
+    task = {"id": "task-1", "type": "task"}
+    assert "kept_services" not in json.loads(build_runtime_section(env, task).split("\n\n", 1)[1])
+    leader, (_port, pid, birth) = _ledgered_service(tmp_path, write_scripts(tmp_path), "preview",
+                                                    owner_task="producer", drive=tmp_path)
+    try:
+        fact = json.loads(build_runtime_section(env, task).split("\n\n", 1)[1])["kept_services"]
+        (service,) = fact["services"]
+        assert service["name"] == "preview" and service["task_id"] == "producer" and service["state"] == "running"
+        assert service["launch_id"].startswith("launch-") and "stop_service(service_id=" in fact["stop"]
+        assert "incomplete" not in fact
+    finally:
+        _settle(leader, identities=[(pid, birth)])

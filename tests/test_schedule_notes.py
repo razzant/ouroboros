@@ -109,6 +109,9 @@ def test_an_overdue_note_reaches_extension_subscribers_on_a_provider_boot(host, 
     monkeypatch.setattr(srv, "has_startup_ready_provider", lambda _settings: True)
     monkeypatch.setattr(srv, "_boot_managed_update_tasks", lambda: None)
     monkeypatch.setattr(srv, "_open_dialogue", lambda *_a, **_k: None)  # this fixture's bus and bridge stay
+    # The supervisor below runs only the first tick: no native event-bus manager for a transport it never uses.
+    monkeypatch.setattr(srv.server_boot, "prepare_event_queue", lambda *_a, **_kw: None)
+    monkeypatch.setattr(srv.server_boot, "_head_start", None)
     delivered = []
     first_tick_finished = threading.Event()
 

@@ -593,8 +593,8 @@ def test_an_owner_screenshot_sent_while_main_runs_survives_the_start_the_restart
 def test_a_drafted_start_keeps_an_owner_mailbox_image_by_reference_through_restart_and_continue(
         tmp_path, monkeypatch):
     """A drafted start (``origin_message_absent``): beside the answered cards, the wake read an owner
-    mailbox message with an attached screenshot. Its row persists as the projection, and Continue
-    admits on the cards with the image's words, reference and original."""
+    mailbox message with an attached screenshot. Its row persists as the projection beside its exact words
+    (``words``, #2941), and Continue admits on the cards with the image's words, reference and original."""
     from ouroboros.review_evidence_sections import _owner_content_projection
     from ouroboros.task_results import load_task_result
     from supervisor.continuation_admission import admit_continuation
@@ -608,8 +608,9 @@ def test_a_drafted_start_keeps_an_owner_mailbox_image_by_reference_through_resta
     assert original.read_bytes() == shot
     projection = _owner_content_projection(recorded["content"])
     assert SHOT_WORDS in projection and str(original) in projection
+    assert recorded["words"] == SHOT_WORDS, "the delivered text beside its rendering"
     row = {"source": "owner_mailbox", "content": projection, "msg_id": "owner-shot-1803",  # no chat row is held for
-           "client_message_id": "owner-shot", "received": recorded["received"]}  # it: when its mail was written
+           "client_message_id": "owner-shot", "received": recorded["received"], "words": SHOT_WORDS}  # it: when its mail was written
     assert root["metadata"]["origin_message_absent"] is True and row in root["metadata"]["owner_corpus"]
     _run_interrupted_by_restart(tmp_path, monkeypatch, queue, workers, bridge, root, own_card=False)
     stored = load_task_result(tmp_path, root["id"])
@@ -623,7 +624,8 @@ def test_a_drafted_start_keeps_an_owner_mailbox_image_by_reference_through_resta
     text = successor["text"]
     assert text.index(QUESTION) < text.index("Yes, start it") and projection in text
     assert "Owner's original instruction" not in text
-    assert ("owner_mailbox", projection) in [(r["source"], r["content"]) for r in successor["metadata"]["owner_corpus"]]
+    assert ("owner_mailbox", projection, SHOT_WORDS) in [(r["source"], r["content"], r.get("words"))
+                                                     for r in successor["metadata"]["owner_corpus"]]
 
 
 def test_the_producer_records_owner_images_by_reference_in_each_opening_state():

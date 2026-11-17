@@ -1,4 +1,5 @@
 """Local capacity is a serving-instance fact, independent of training and health."""
+from ouroboros.local_model import RUNTIME_PROBE
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
@@ -260,8 +261,12 @@ def test_main_forecast_rebinds_remote_local_restart_and_unknown(manager, main_pl
         fit = context_fit.measure_main_fit(plan, messages, None,
             profile="owner_" + mode, rendered_mode=mode, round_id="route-switch:round:2")
         assert fit.action == "send"
-        assert fit.measurement.capacity_total_tokens == (window or None)
         assert fit.measurement.response_reserve_tokens == (min(NANO_MIN_HEADROOM_TOKENS, reserve) if mode == "nano" else reserve)
+        # A local server's window is its one buffer, the reply inside it; the remote route's stated total is read
+        # less the reply floor until a size refusal says otherwise (``WindowRecord.admitted``).
+        line = (window - (fit.measurement.response_reserve_tokens if local else NANO_MIN_HEADROOM_TOKENS)) if window else None
+        capacity = fit.measurement.capacity_total_tokens
+        assert (capacity - fit.measurement.response_reserve_tokens if window else capacity) == line
 
 
 def test_actual_local_connection_error_is_not_a_synthetic_overflow(manager, monkeypatch):
@@ -448,7 +453,7 @@ def test_actual_pooled_worker_reads_the_serving_instance_its_server_process_owns
         return real_popen([cmd[0], str(stand_in), *cmd[3:]], **kwargs)
 
     def run(cmd, **kwargs):  # llama-cpp-python is not installed here.
-        if cmd[1:] == ["-c", "import llama_cpp"]:
+        if cmd[1:] == ["-c", RUNTIME_PROBE]:
             return subprocess.CompletedProcess(cmd, 0, "", "")
         return real_run(cmd, **kwargs)
 

@@ -16,14 +16,11 @@ from typing import Any, Dict, List
 
 log = logging.getLogger(__name__)
 
-# The nanny finalization-nudge stamp (B3, owner decision 3A): written by the
-# WORKER at the loop's injection seam through ``delegate_custody.emit`` — only
-# when the composed reminder was NON-EMPTY (the ctx `_nanny_finalization_injected`
-# flag is set even on suppression, so it can never be the signal). Task-scoped
-# (no run_id — the run-custody replay skips it by design); the type keeps the
-# ``delegate_run`` prefix so the custody scan prefilter still yields it. Defined
-# HERE, beside its one reader, because ``delegate_custody`` sits exactly at its
-# module-size ceiling.
+# The nanny finalization-nudge stamp (B3, owner decision 3A): the row the worker wrote when the finish door
+# returned a nanny's answer with a reminder. Nothing writes it since audit 11.11, item 18 (12.11.2026): the
+# door no longer returns a nanny's answer. Rows already recorded keep this reader
+# (``nanny_nudge_recorded``, a gateway evidence field; absence means no stamp). Task-scoped, ``delegate_run``
+# prefix so the custody scan prefilter yields it.
 NANNY_NUDGE_STAMP = "delegate_run_nanny_nudge_injected"
 
 # A delegate_start attempt the substrate REFUSED before any invocation was
@@ -56,23 +53,6 @@ def record_start_blocked(ctx: Any, task_id: str, reason: str) -> None:
             "task_id": str(task_id or ""), "reason": str(reason or "")})
     except Exception:
         log.debug("start-blocked row failed", exc_info=True)
-
-
-def record_nanny_nudge_stamp(ctx: Any, task_id: str, nanny_code: str) -> None:
-    """Durably stamp "the finalization nudge was really injected" for this task.
-
-    Synchronous same-process append on the CANONICAL (budget) root — the same
-    root ``task_execution_evidence`` reads back at the completion seam, so the
-    fact needs no supervisor round-trip and no O(history) side scan. Fail-soft:
-    a stamp that cannot land loses only the completion-seam disclosure.
-    """
-    try:
-        from ouroboros import delegate_custody as custody
-
-        custody.emit(custody.custody_root(ctx), NANNY_NUDGE_STAMP, {
-            "task_id": str(task_id or ""), "nanny_code": str(nanny_code or "")})
-    except Exception:
-        log.debug("nanny nudge stamp failed", exc_info=True)
 
 
 def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
@@ -231,5 +211,5 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
     }
 
 
-__all__ = ["NANNY_NUDGE_STAMP", "START_BLOCKED", "record_nanny_nudge_stamp",
+__all__ = ["NANNY_NUDGE_STAMP", "START_BLOCKED",
            "record_start_blocked", "task_execution_evidence"]

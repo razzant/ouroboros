@@ -147,6 +147,39 @@ def test_a_registered_route_reads_memory_through_the_plugin_api(tmp_path, monkey
     assert absent == {"refused": "not_found", "current_revision": None}
 
 
+def test_a_registered_route_reads_a_transfer_beside_its_unchanged_words(tmp_path, monkeypatch):
+    """A transfer (``chronicle_import``) read in process: its words stay the body; who wrote them, how they came and
+    the source's dates are fields beside them, as Memory Atlas reads them, never appended to the text."""
+    repo_root, drive_root = _load(tmp_path, "atlas_moves", ATLAS, 'plugin_api: "2.1"\n', isolated=False)
+    monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: str(repo_root))
+    store = ChronicleStore(drive_root)
+    assert store.ensure_activated()["kind"] == "activation"  # the documented order: activation, then the transfer
+    moved = {"operator": None, "tool": "transfer-script 1.0", "task_id": None}
+    author = {"kind": "source_author", "label": "Ada Example", "model": None, "basis": "importer"}
+    stated = {"start": "2026-07-01", "end": None, "incomplete": True}
+    assert store.publish([{"id": "t-one", "kind": "legacy", "room_id": "legacy", "text": "Chapter words.", "author": author,
+                           "metadata": {"transfer": moved, "legacy_written_at": "2026-08-10", "stated_period": stated}}]).ok
+
+    def ask(op, params):
+        status, body = _dispatch(drive_root, "atlas_moves", "atlas/read", {"op": op, "params": json.dumps(params)})
+        assert status == 200, body
+        return body["answer"]
+
+    document = ask("document", {"address": {"kind": "record", "id": "t-one"}})
+    assert document["text"] == "Chapter words." and document["stored"]["author"] == author
+    assert {key: document["record"][key] for key in ("byline", "transfer", "written_at", "stated_period")} == {
+        "byline": 'source_author ("Ada Example"; model not stated; stated by the importer)', "transfer": moved,
+        "written_at": "2026-08-10", "stated_period": stated}
+    assert document["period"] == "2026-07-01 00:00 → ? (incomplete) (stated by its source)"
+    listed = ask("catalog", {"area": "records", "author_kind": "source_author"})["entries"]
+    assert [(entry["id"], entry["ts"] == store.get("t-one")["ts"]) for entry in listed] == [("t-one", True)]
+    story = ask("catalog", {"area": "story"})["entries"]
+    told = next(entry for entry in story if entry["id"] == "t-one")
+    assert told["author"] == author  # Atlas can read typed authorship without parsing a byline or fetching each record
+    assert (told["transfer"], told["written_at"], told["stated_period"], told["period_basis"]) == (
+        moved, "2026-08-10", stated, "stated")
+
+
 def test_both_execution_modes_answer_identically(tmp_path, monkeypatch):
     answers = []
     for isolated in (False, True):
@@ -170,7 +203,7 @@ def test_both_execution_modes_answer_identically(tmp_path, monkeypatch):
 def test_a_2_0_payload_keeps_loading_and_serving_beside_2_1(tmp_path, monkeypatch):
     repo_root, drive_root = _load(tmp_path, "older_widget", LEGACY, 'plugin_api: "2.0"\n', isolated=False)
     monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: str(repo_root))
-    assert _dispatch(drive_root, "older_widget", "hello", {}) == (200, {"generation": "2.3"})
+    assert _dispatch(drive_root, "older_widget", "hello", {}) == (200, {"generation": "2.5"})
 
 
 def test_a_read_after_unload_began_is_refused(tmp_path):

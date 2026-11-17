@@ -806,10 +806,10 @@ def _handle_send_quiz(evt: Dict[str, Any], ctx: Any) -> None:
         )
         if not ok:
             record_quiz_delivery_failure(ctx.DRIVE_ROOT, tid, qid, "publication_send_failed")
-            _log_error(ctx, "send_quiz_error", chat_id=chat_id, error=err)
+            _log_error(ctx, "send_quiz_error", task_id=tid, quiz_id=qid, chat_id=chat_id, error=err)
     except Exception as exc:
         record_quiz_delivery_failure(ctx.DRIVE_ROOT, tid, qid, "publication_write_failed")
-        _log_error(ctx, "send_quiz_event_error", error=repr(exc))
+        _log_error(ctx, "send_quiz_event_error", task_id=tid, quiz_id=qid, error=repr(exc))
 
 
 @_on_consumer

@@ -113,7 +113,8 @@ def test_native_account_repair_rebinds_real_physical_candidate_before_send(main_
     dispatched = dispatched_attempts(ctx.drive_root)
     assert dispatched[0]["physical_context"]["route_fp"] == "capacity-account-a"
     assert dispatched[1]["physical_context"]["route_fp"] == "capacity-account-b"
-    assert dispatched[1]["physical_context"]["capacity_total_tokens"] == 240_000
+    # The round's frame for a stated 240,000 total nothing has proved: less the reply floor, plus the reserve.
+    assert dispatched[1]["physical_context"]["capacity_total_tokens"] == 240_000 - 8_192 + 65_536
     assert observations[0]["model_route"] == ROUTE_B
     assert len(gateway.accepted_operations) == 2 and gateway.creates[0] != gateway.creates[1]
     resent = _without_context_facts(gateway.uploads[1][0]["messages"], physical=True)
@@ -229,7 +230,8 @@ def test_main_authored_checkpoint_after_a_real_projected_image_wait(main_call, m
 def test_reprepare_selected_vision_route_preserves_source_and_accounts_caption(main_call, monkeypatch, inline_first):
     from ouroboros import vision_routing
     from ouroboros.loop_llm_call import _prepare_main_messages
-    from ouroboros.llm_attempt import single_physical_send, single_physical_send_active
+    from ouroboros.llm_attempt import single_physical_send, single_physical_send_active, track_physical_attempts
+    from ouroboros.transport_custody import physical_attempt_tracker
 
     ctx, _gateway, _controller, _events, _decide, _observations = main_call
     image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}}
@@ -240,7 +242,7 @@ def test_reprepare_selected_vision_route_preserves_source_and_accounts_caption(m
     captions = []
     def caption(*args, **kwargs):
         assert ua.current_physical_attempt_context() is None
-        captions.append(single_physical_send_active())
+        captions.append((single_physical_send_active(), physical_attempt_tracker()))
         return "A complete caption", {"prompt_tokens": 2, "completion_tokens": 3, "cost": 0.01}
     monkeypatch.setattr(ctx.llm, "vision_query", caption)
     sent = _prepare_main_messages(ctx.messages, model=MODEL, model_role="main", model_account_override=None,
@@ -248,14 +250,15 @@ def test_reprepare_selected_vision_route_preserves_source_and_accounts_caption(m
         task_id=ctx.task_id, event_queue=ctx.event_queue, use_local=False, task_attempt=1, deadline_ts=None)
     assert (sent[-1]["content"] == [image]) is inline_first
     physical = loop._physical_context_for_fit(loop._measure_round_main_fit(ctx, automatic_pass_used=False))
-    with ua.bind_physical_attempt_context(physical), single_physical_send(lambda _reservation: None):
+    tracker = object()  # no Main send happens in this probe; only its scope is read
+    with ua.bind_physical_attempt_context(physical), single_physical_send(lambda _reservation: None), track_physical_attempts(tracker):
         prepared = _reprepare_waiting_main(ctx, {"messages": sent, "model": "openai::vision-route",
                                                 "model_role": "main", "tools": []})
-        assert single_physical_send_active()  # the Main claim resumes after helper preparation
+        assert single_physical_send_active() and physical_attempt_tracker() is tracker  # Main's scopes resume after helper preparation
     prepared_source = _without_context_facts(prepared.kwargs["messages"])
     assert (prepared_source[-1]["content"] == [image]) is not inline_first
     assert "image caption" in str(prepared_source[-1]["content"] if inline_first else sent[-1]["content"])
-    assert _without_context_facts(ctx.messages)[-1]["content"] == [image] and captions == [False]
+    assert _without_context_facts(ctx.messages)[-1]["content"] == [image] and captions == [(False, None)]
     assert ctx.accumulated_usage["cost"] == 0.01
 
 

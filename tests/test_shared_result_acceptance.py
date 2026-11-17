@@ -537,6 +537,60 @@ def test_direct_folder_outputs_take_the_same_acceptance(tmp_path, monkeypatch, o
     assert _collision(s.verdict_path("A"), hashlib.sha256(observed).hexdigest()).read_bytes() == observed
 
 
+def test_a_resumed_direct_folder_childs_captures_hold_their_outputs_and_the_parent_verifies_the_current(
+        tmp_path, monkeypatch):
+    """#3248 on an ordinary folder: the capture an unfinished child holds (a withdrawn closure's) keeps its registered
+    outputs in its own folder. The resumed execution rewrites one (its store copy is mutable) and registers another;
+    its finish is a version (``captures/<id>``, two levels below the base) that still finds the store's newest
+    registration. Neither capture's published bytes change, and the parent verifies the current capture's outputs."""
+    from ouroboros.artifacts import stream_artifact_file
+    from ouroboros.headless import current_workspace_manifest, prepare_terminal_task_files, reopen_capture_at_entry
+    from ouroboros.task_results import load_task_result
+
+    s = Shared(tmp_path, monkeypatch)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    s.admit("A", plain)
+    task = s.tasks["A"]
+    lineage = {"parent_task_id": s.parent_id, "root_task_id": s.parent_id, "delegation_role": "subagent",
+               "workspace_root": task["workspace_root"], "task_constraint": task["task_constraint"]}
+    child = ToolContext(repo_dir=s.system, drive_root=s.drive, task_id="A", workspace_root=task["workspace_root"],
+                        workspace_mode="external")
+
+    def published(manifest):
+        return {pathlib.Path(item["source_path"]).name: item for item in manifest["registered_outputs"]}
+
+    write_task_result(s.drive, "A", "scheduled", **lineage)
+    s.write({"report.txt": b"A's report before the pause\n"}, plain)
+    copy_file_to_task_artifacts(child, plain / "report.txt")
+    finalize_task_artifacts(s.drive, task)  # the closure's capture of the unfinished child, at the base
+    first_path = current_workspace_manifest(s.drive, "A", load_task_result(s.drive, "A"))
+    first_bytes = first_path.read_bytes()
+    first = json.loads(first_bytes)
+    assert first_path.parent == task_artifacts_dir(s.drive, "A") and set(published(first)) == {"report.txt"}
+    write_task_result(s.drive, "A", "running")
+    reopen_capture_at_entry(s.drive, "A")  # the resumed execution entered
+    s.write({"report.txt": b"A's report after the Resume\n", "notes.txt": b"A's notes after the Resume\n"}, plain)
+    for name in ("report.txt", "notes.txt"):
+        copy_file_to_task_artifacts(child, plain / name)
+    write_task_result(s.drive, "A", "completed", result="A wrote its outputs", **lineage)
+    assert prepare_terminal_task_files(s.drive, task)["error"] == ""
+    current = current_workspace_manifest(s.drive, "A", load_task_result(s.drive, "A"))
+    assert current.parent.parent.name == "captures"
+    outputs = published(json.loads(current.read_bytes()))
+    assert set(outputs) == {"report.txt", "notes.txt"}, outputs  # notes.txt is registered in the store alone
+    assert outputs["report.txt"]["sha256"] == hashlib.sha256(b"A's report after the Resume\n").hexdigest()
+    for manifest, folder in ((outputs, current.parent), (published(first), first_path.parent)):
+        for item in manifest.values():  # each capture's outputs: inside it, and still the bytes it published
+            assert pathlib.Path(item["path"]).parent == folder / "registered_outputs"
+            stream_artifact_file(pathlib.Path(item["path"]), expected=item)
+    assert first_path.read_bytes() == first_bytes
+    assert published(first)["report.txt"]["sha256"] == hashlib.sha256(b"A's report before the pause\n").hexdigest()
+    out = s.integrate("A")
+    assert "Verified 2 registered file postimage(s)" in out and s.states("A") == {
+        "notes.txt": "unchanged", "report.txt": "unchanged"}, out
+
+
 @pytest.mark.parametrize("change", ["self_loop", "inward_twin", "outward_twin", "folder_loop", "member_link",
                                     "policy_on_link", "policy_on_destination"])
 def test_direct_folder_outputs_are_judged_as_entries_never_followed(tmp_path, monkeypatch, change):

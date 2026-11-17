@@ -11,10 +11,13 @@ import { errorWords } from './ui_primitives.js';
 export const failureText = (error) => (error instanceof TypeError && error.response === undefined
     ? errorWords(error).text : error?.message || String(error));
 
-/** Raised on window after a place write the server confirmed: `{place}` or `{placeId, removed: true}`. */
+/** Raised on window after a place or circle write the server confirmed: `{place}`, `{placeId, removed: true}`,
+ *  `{circle}` or `{circleId, removed: true, detached}`. */
 export const PLACES_CHANGED_EVENT = 'ouro:places-changed';
 
 const text = (value) => (value === null || value === undefined ? '' : String(value));
+// Where a place's model comes from (`PlaceModelRoute.layer`).
+const MODEL_LAYERS = ['place', 'circle', 'consciousness'];
 const list = (value) => (Array.isArray(value) ? value : []);
 const object = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : null);
 const count = (value) => (Number.isInteger(Number(value)) && value !== null && value !== '' ? Number(value) : null);
@@ -67,6 +70,8 @@ export function normalizePlace(raw) {
         label: text(place.label),
         revision: count(place.revision),
         state: text(place.state),
+        // The host's derived fact: consciousness is off (or Panic) and the place is not Paused, so it only hears.
+        onlyHears: place.only_hears === true,
         destination: text(place.destination),
         icon: normalizeIcon(place.icon),
         wakes: list(place.wakes).map((item) => ({ fact: text(item?.fact), author: text(item?.author) }))
@@ -79,12 +84,21 @@ export function normalizePlace(raw) {
             actorId: text(account?.platform_actor_id), label: text(account?.label), confirmedAt: text(account?.confirmed_at),
             accountId: text(account?.account_id),
         })).filter((account) => account.actorId),
+        // Confirmed in another place of the same bot or app: they count here too, removed where they were confirmed.
+        sharedOwnerAccounts: list(place.shared_owner_accounts).map((account) => ({
+            actorId: text(account?.platform_actor_id), label: text(account?.label), confirmedAt: text(account?.confirmed_at),
+            accountId: text(account?.account_id), placeLabel: text(account?.place_label),
+        })).filter((account) => account.actorId),
         // People the place has seen, offered for «This is me» when the server lists them (not in contract v1).
         accountCandidates: list(place.account_candidates).map((account) => ({
             actorId: text(account?.platform_actor_id), label: text(account?.label || account?.display_name),
         })).filter((account) => account.actorId),
         workingFolder: text(place.working_folder),
+        // Its own model (empty inherits), and what it thinks with now with the scope that chose it (`place`, `circle`
+        // or `consciousness`) and whether that route is the local runtime; null from a server that does not say.
         model: text(place.model),
+        modelRoute: object(place.model_route) && MODEL_LAYERS.includes(place.model_route.layer)
+            ? { value: text(place.model_route.value), layer: place.model_route.layer, local: place.model_route.local === true } : null,
         readiness: placeReadiness(place.readiness),
         safetyMode: text(place.safety_mode),
         labels: placeLabels(place.labels),
@@ -94,7 +108,21 @@ export function normalizePlace(raw) {
         unanswered: count(place.unanswered),
         lastActivityAt: text(place.last_activity_at),
         spent24hUsd: amount(place.spent_24h_usd),
+        // Its circle and who placed it there (the words are the circle's, in the list's `circles`), and its short
+        // purpose line with who wrote it; absent stays null.
+        circle: object(place.circle) && text(place.circle.circle_id) ? { id: text(place.circle.circle_id),
+            placedBy: text(place.circle.placed_by), placedAt: text(place.circle.placed_at) } : null,
+        description: object(place.description) && text(place.description.text) ? { text: text(place.description.text),
+            author: text(place.description.author), at: text(place.description.at) } : null,
     };
+}
+
+/** One CircleSummary: its name, its whole words and who wrote them, its model (empty inherits), its revision. */
+export function normalizeCircle(raw) {
+    const circle = object(raw) || {};
+    return { id: text(circle.circle_id), name: text(circle.name), text: text(circle.text),
+        textAuthor: text(circle.text_author), textAt: text(circle.text_at), model: text(circle.model),
+        revision: count(circle.revision) };
 }
 
 /** An installed connector with a valid place declaration (`GET /api/places` `connectors`). */
@@ -123,6 +151,8 @@ export function normalizePlacesResponse(raw) {
         places: list(data.places).map(normalizePlace).filter((place) => place.id).map((place) => ({ ...place,
             serviceLabel: connectors.find((connector) => connector.connector === place.connector)?.label || place.provider })),
         connectors,
+        // Each circle once, in the owner's order; null from a server without circles (not "no circle").
+        circles: Array.isArray(data.circles) ? data.circles.map(normalizeCircle).filter((circle) => circle.id) : null,
         // Old connections the places migration could not move (absent on a server without the migration).
         migrationProblems: list(data.migration_problems).map((problem) => ({
             bindingId: text(problem?.binding_id), code: text(problem?.code), detail: text(problem?.detail),
@@ -140,7 +170,7 @@ export function normalizeWake(raw) {
     const wake = object(raw) || {};
     return {
         taskId: text(wake.task_id), chatId: count(wake.chat_id), cause: text(wake.cause),
-        placeLabel: text(wake.place_label), conversation: text(wake.conversation),
+        placeLabel: text(wake.place_label), placeId: text(wake.place_id), conversation: text(wake.conversation),
         as: object(wake.as),
         startedAt: text(wake.started_at), endedAt: text(wake.ended_at), firstReplyAt: text(wake.first_reply_at),
         live: wake.live === true, phase: text(wake.phase), quiet: wake.quiet === true,
@@ -166,6 +196,8 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
         enabled: known,
         status: text(bg.status),
         detail: text(bg.detail),
+        // What follows from that state, said beneath it (a held wake's allowance: what Resume keeps, what ends it).
+        detailNote: text(bg.detail_note),
         coverage: bg.recent_wakes === undefined ? '' : text(bg.recent_wakes_coverage),
         level: text(bg.level),
         nextWakeAt: text(bg.next_wake_at),
@@ -174,11 +206,23 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
         lastWakeOutcome: text(bg.last_wake_outcome),
         liveWakeTaskId: text(bg.live_wake_task_id),
         liveWakeHeld: bg.live_wake_held === true,
+        // What holds that wake, as far as its records prove it (consciousness_view.hold_cause; '' proves nothing).
+        holdCause: text(object(bg.live_wake_hold)?.cause),
+        holdCeilingUsd: amount(object(bg.live_wake_hold)?.ceiling_usd),
         spentUsd: amount(bg.spent_24h_usd),
         dailyUsd: amount(bg.daily_usd),
         unknownUnmetered: count(bg.unknown_unmetered) || 0,
         integrityDegraded: bg.integrity_degraded === true,
         allowanceResetsAt: text(bg.allowance_resets_at),
+        // The current window's own verdict, its rows that can still settle, and when room returns if nothing more
+        // is charged (a display forecast; '' when withheld).
+        allowanceStatus: text(bg.allowance_status),
+        allowanceOpenRows: count(bg.allowance_open_rows),
+        allowanceRoomAfter: text(bg.allowance_room_after),
+        // The model its next wake thinks with, read from the settings (consciousness.model_route): its own slot's or
+        // Main's (`layer`), with the route's local flag; null when unknown.
+        modelRoute: object(bg.model_route) && text(bg.model_route.value) && ['consciousness', 'main'].includes(bg.model_route.layer)
+            ? { value: text(bg.model_route.value), layer: bg.model_route.layer, local: bg.model_route.local === true } : null,
         tasksRunning: count(bg.tasks_running),
         maxTasks: count(bg.max_tasks),
         spendByCause: list(bg.spend_by_cause).map((row) => ({
@@ -262,12 +306,17 @@ function placeAnswer(data) {
     return place;
 }
 
-/** Connect a place from an installed connector's declaration; no id is typed. */
-export async function connectPlace({ connector, accountId = '', conversationId = '', label = '' }) {
+/** Connect a place from an installed connector's declaration; no id is typed. An Add's `note`, `description` and
+ *  `circleId` land with a new place in the same write; a place connected already answers 409 `place_exists`. */
+export async function connectPlace({ connector, accountId = '', conversationId = '', label = '', note = '',
+    description = '', circleId = '' }) {
     const body = { connector };
     if (accountId) body.account_id = accountId;
     if (conversationId) body.conversation_id = conversationId;
     if (label) body.label = label;
+    if (note) body.note = note;
+    if (description) body.description = description;
+    if (circleId) body.circle_id = circleId;
     return placeAnswer(await jsonPost('/api/places', body));
 }
 
@@ -277,6 +326,43 @@ export async function connectPlace({ connector, accountId = '', conversationId =
  */
 export async function updatePlace(placeId, change) {
     return placeAnswer(await jsonPost(`/api/places/${encodeURIComponent(placeId)}`, change));
+}
+
+// ---- circle writes (owner-authored on the server; the places view re-reads after each) ----------------------------
+function circleAnswer(data, what) {
+    if (!data || data.ok !== true || !object(data.circle)) {
+        throw Object.assign(new Error(text(data?.error) || `${what} was not saved.`), { body: data });
+    }
+    return normalizeCircle(data.circle);
+}
+
+/** A new circle, last in the order: `{name, text}`, and `model` when it has one of its own. */
+export async function createCircle({ name, text: words = '', model = '' }) {
+    const circle = circleAnswer(await jsonPost('/api/circles', { name, text: words, ...(model ? { model } : {}) }), 'The circle');
+    announce({ circle });
+    return circle;
+}
+
+/** Rename or reword one circle, or change its model: `change` holds `name`, `text` and/or `model` (empty clears it);
+ *  the revision guards a concurrent edit. */
+export async function updateCircle(circleId, change, expectedRevision) {
+    const body = { ...change, ...(expectedRevision === null || expectedRevision === undefined ? {} : { expected_revision: expectedRevision }) };
+    const circle = circleAnswer(await jsonPost(`/api/circles/${encodeURIComponent(circleId)}`, body), 'The circle');
+    announce({ circle });
+    return circle;
+}
+
+/** Delete one circle; its places stay connected. The answer holds the removed circle (its words) and the places it
+ *  detached: there is nothing to restore it from. */
+export async function deleteCircle(circleId, expectedRevision) {
+    const data = await fetchJson(`/api/circles/${encodeURIComponent(circleId)}`, {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expected_revision: expectedRevision }),
+    });
+    const circle = circleAnswer(data, 'The circle');
+    const detached = list(data.detached).map((row) => ({ placeId: text(row?.place_id), label: text(row?.label) }));
+    announce({ circleId, removed: true, detached });
+    return { circle, detached };
 }
 
 export async function disconnectPlace(placeId, expectedRevision) {
@@ -321,9 +407,10 @@ export const SAFETY_MODEL_KEYS = Object.freeze([
 ]);
 
 /** One owner transaction for any of SAFETY_MODEL_KEYS; a refusal throws the server's sentence. A roster that
- *  leaves no reviewer saves only with the owner's confirmation, sent beside the settings as the generic save does. */
-export async function saveCheckerSettings(settings, { allowEmptyReviewPool = false, headers } = {}) {
-    const body = allowEmptyReviewPool ? { settings, allow_empty_review_pool: true } : { settings };
+ *  leaves no reviewer saves only with the owner's confirmation, sent beside the settings as the generic save does;
+ *  `ifUnchanged` (`{ KEY: token }`) makes the write refuse when one of those keys changed since it was read. */
+export async function saveCheckerSettings(settings, { allowEmptyReviewPool = false, ifUnchanged = null, headers } = {}) {
+    const body = { settings, ...(allowEmptyReviewPool ? { allow_empty_review_pool: true } : {}), ...(ifUnchanged ? { if_unchanged: ifUnchanged } : {}) };
     return ownerAnswer(await jsonPost('/api/owner/safety-model', body, { headers }), 'The change');
 }
 

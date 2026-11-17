@@ -73,7 +73,7 @@ def test_query_model_timeout_becomes_error_actor(monkeypatch, request):
     assert record.to_dict()["late_result_pending"] is True
 
 
-def test_blocking_triad_does_not_finalize_quorum_with_a_pending_reviewer(monkeypatch, tmp_path):
+def test_a_triad_does_not_finalize_quorum_with_a_pending_reviewer(monkeypatch, tmp_path):
     from ouroboros.tools import review
 
     clean = lambda model: {
@@ -98,17 +98,60 @@ def test_blocking_triad_does_not_finalize_quorum_with_a_pending_reviewer(monkeyp
     prepared = {
         "prompt": "p", "stable_prefix_len": 0,
         "models": ["m1", "m2", "m3"], "routes": [], "row_plan": {},
-        "session_task": "", "target_repo": tmp_path, "blocking_review": True,
+        "session_task": "", "target_repo": tmp_path,
     }
 
     blocked = review._dispatch_unified_review(ctx, "message", prepared)
 
-    assert blocked and "REVIEW_PENDING" in blocked
+    signal = " ".join(str(item) for item in ctx._review_advisory)
+    assert blocked is None and "REVIEW_PENDING" in signal  # the pending outcome returns to the author
     assert ctx._last_review_block_reason == "review_late_result_pending"
     [raw] = [row for row in ctx._last_triad_raw_results if row["model_id"] == "m3"]
     assert raw["operation_id"] == "op-m3"
     assert raw["operation_state"] == "in_flight"
     assert raw["late_result_pending"] is True
+
+
+def test_an_adviser_only_pending_wave_does_not_enter_a_second_no_counted_branch(monkeypatch, tmp_path):
+    """An open adviser operation is pending custody, not a second override outcome."""
+    from ouroboros.tools import review
+
+    monkeypatch.setattr(
+        review,
+        "_handle_multi_model_review",
+        lambda *_args, **_kwargs: json.dumps({"results": [{"model": "adviser"}]}),
+    )
+
+    def _adviser_findings(run_ctx, _model_results, _row_plan=None):
+        run_ctx._last_triad_raw_results = [{
+            "slot_id": "adviser",
+            "model_id": "adviser",
+            "status": "error",
+            "operation_state": "in_flight",
+            "late_result_pending": True,
+            "additional": True,
+        }]
+        return [], [], [], run_ctx._last_triad_raw_results
+
+    monkeypatch.setattr(review, "_collect_review_findings", _adviser_findings)
+    captured = []
+    monkeypatch.setattr(
+        review,
+        "_handle_review_block_or_warning",
+        lambda ctx, message, advisory: captured.append((ctx._last_review_block_reason, message)),
+    )
+    ctx = SimpleNamespace(
+        _last_triad_raw_results=[], _triad_withheld_seat_records=[],
+        _review_degraded_reasons=[], _review_advisory=[],
+        drive_logs=lambda: tmp_path, task_id="adviser-pending",
+    )
+    prepared = {
+        "prompt": "p", "stable_prefix_len": 0, "models": ["adviser"], "routes": [],
+        "row_plan": {}, "session_task": "", "target_repo": tmp_path,
+    }
+
+    assert review._dispatch_unified_review(ctx, "message", prepared) is None
+    assert len(captured) == 1 and captured[0][0] == "review_late_result_pending"
 
 
 def test_custody_lost_slot_is_named_in_pending_report(monkeypatch, tmp_path):
@@ -138,13 +181,14 @@ def test_custody_lost_slot_is_named_in_pending_report(monkeypatch, tmp_path):
     prepared = {
         "prompt": "p", "stable_prefix_len": 0,
         "models": ["placeholder"], "routes": [], "row_plan": {},
-        "session_task": "", "target_repo": tmp_path, "blocking_review": True,
+        "session_task": "", "target_repo": tmp_path,
     }
 
     blocked = review._dispatch_unified_review(ctx, "message", prepared)
 
-    assert blocked and "REVIEW_PENDING" in blocked
-    assert "custody_lost_slot_1" in blocked
+    signal = " ".join(str(item) for item in ctx._review_advisory)
+    assert blocked is None and "REVIEW_PENDING" in signal
+    assert "custody_lost_slot_1" in signal
     assert ctx._last_review_block_reason == "review_late_result_pending"
 
 

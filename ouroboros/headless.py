@@ -22,7 +22,7 @@ from ouroboros.post_task_checkpoint import CANONICAL_CUSTODY_FIELDS, project_rep
 from ouroboros.delegate_named_evidence import published_workspace_evidence
 from ouroboros.workspace_file_outputs import _directory_direct_artifacts
 from ouroboros.task_results import (
-    cancellation_blocks_child_result, load_task_result, validate_task_id, write_task_result,
+    STATUS_RUNNING, cancellation_blocks_child_result, load_task_result, validate_task_id, write_task_result,
 )
 from ouroboros.utils import atomic_write_json, utc_now_iso
 from ouroboros.retention import task_result_timestamp as _timestamp_from_result
@@ -32,25 +32,10 @@ from ouroboros.headless_status import (  # noqa: F401
     ARTIFACT_TERMINAL_STATUSES, _ARTIFACT_LIFECYCLE_FIELDS, _FINAL_STATUSES, _LOCAL_READONLY_SUBAGENT_MODE,
 )
 from ouroboros.workspace_patch_capture import (  # noqa: F401
-    SCRATCH_MANIFEST_NAME,
-    _GIT_UNBORN_HEAD,
-    _acting_constraint_from_task,
-    _append_git_output,
-    _empty_patch_manifest,
-    _git_bytes,
-    _git_empty_tree_oid,
-    _git_path_list,
-    _git_stdout,
-    _head_reflog_exists,
-    _looks_like_git_oid,
-    _preflight_head_from_task,
-    _preflight_head_present,
-    _untracked_blob_exclude_reason,
-    _workspace_patch_base,
-    _write_patch_separator,
-    build_workspace_patch,
-    pem_private_key_reason,
-    untracked_capture_veto_reason,
+    SCRATCH_MANIFEST_NAME, _GIT_UNBORN_HEAD, _acting_constraint_from_task, _append_git_output, _empty_patch_manifest,
+    _git_bytes, _git_empty_tree_oid, _git_path_list, _git_stdout, _head_reflog_exists, _looks_like_git_oid,
+    _preflight_head_from_task, _preflight_head_present, _untracked_blob_exclude_reason, _workspace_patch_base,
+    _write_patch_separator, build_workspace_patch, pem_private_key_reason, untracked_capture_veto_reason,
     write_workspace_patch_artifacts,
 )
 
@@ -316,6 +301,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
     from ouroboros.store import StoreBusy, StoreError
     from ouroboros.task_custody import (arrived_drives, forget_departed, layout_basis, record_rest, rested_verdict,
                                         settle_child_drive)
+    from ouroboros.tools.kept_service_outputs import owed_declarations
 
     days = _resolve_retention_days(retention_days)
     cutoff = age_cutoff(days, now)
@@ -347,6 +333,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
     if names is None:
         forget_departed(verdicts(), base.name, _drive_names(base))
     attempts, busy, youngest = 0, False, (None if names is None else rest.get("youngest"))
+    owed = owed_declarations(parent)  # one read of the kept-output debts for this whole pass
     for task_id, status, retention_at, inside_wait, fact in drive_candidates(base, parent, cutoff, stop, after=after,
                                                                                names=names):
         if chosen is not None and task_id not in chosen:
@@ -394,7 +381,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
             attempts += 1
             report["cursor"] = task_id
             if (outcome := settle_child_drive(parent, task_id, drive_of(task_dir), live=live, guard=guard, stop=stop,
-                                              report=report))["status"] == "removed":
+                                              report=report, owed=owed))["status"] == "removed":
                 report["pruned"].append({"task_id": task_id, "path": str(task_dir)})
             record_rest(verdicts(), base.name, parent, task_id, task_dir, drive_of(task_dir), outcome)
             if progress is not None:
@@ -596,9 +583,7 @@ def _copy_child_task_result_locked(parent_drive_root: pathlib.Path, task: Dict[s
             incoming = list(child_result.get("artifacts") or [])
             if (native_capture_owner(parent_drive_root, task_id, _workspace_root_from_task(canonical_existing))
                     and any(row.get("kind") == "workspace_patch_manifest" for row in canonical_existing.get("artifacts", []))):
-                incoming = [{**row, "kind": "workspace_capture_history", "capture_kind": row["kind"],
-                             "immutable": bool(row.get("sha256"))}
-                            if row.get("kind") in _CAPTURE_KINDS else row for row in incoming]
+                incoming = _capture_history(incoming)
             child_result["artifacts"] = _merge_artifacts(
                 list(canonical_existing.get("artifacts") or []), incoming)
             child_result.update({key: canonical_existing[key] for key in _ARTIFACT_LIFECYCLE_FIELDS
@@ -749,11 +734,12 @@ def prepare_terminal_task_files(canonical_root: pathlib.Path, task: Dict[str, An
             current = copy_child_task_result(root, {**task, "id": task_id}) or current
         if str(current.get("status") or "") not in _FINAL_STATUSES:
             raise ValueError("terminal task result is missing or not settled")
-        # Workspace capture and a workspace-free child's memory export share the
-        # existing finalizer. Inline turns have no workspace capture obligation.
+        # Workspace capture and a workspace-free child's memory export share the existing finalizer; inline
+        # turns owe no capture, and recorded native capture debt (native_capture_pending) is still owed here.
         memory_export = child is not None and _workspace_root_from_task(task) is None and not task_is_readonly_subagent(task)
         if (not cancelled and (task_requires_workspace_capture(task) or memory_export)
-                and str(current.get("artifact_status") or "").strip().lower() not in ARTIFACT_TERMINAL_STATUSES):
+                and str(current.get("artifact_status") or "").strip().lower()
+                not in ARTIFACT_TERMINAL_STATUSES):
             finalize_task_artifacts(root, {**task, "id": task_id})
         report["result"] = load_task_result(root, task_id, strict=True)
         from ouroboros.obligations import drive_finished
@@ -779,17 +765,11 @@ def prepare_terminal_task_files(canonical_root: pathlib.Path, task: Dict[str, An
         try:
             existing = load_task_result(canonical_root, task_id, strict=True)
             if existing:
-                from ouroboros.outcomes import artifact_bundle_from_result
                 fields = dict(artifact_status=ARTIFACT_STATUS_FAILED, artifact_error=report["error"],
                               artifact_finalized_at=utc_now_iso())
-                provisional = {**existing, **fields}
-                provisional.pop("artifact_bundle", None)
-                fields["artifact_bundle"] = artifact_bundle_from_result(provisional)
-                report["result"] = write_task_result(
-                    canonical_root, task_id, existing["status"],
-                    _field_projector=lambda live, fields: {**fields, "status": live["status"]},
-                    strict_existing_dict=True, **fields,
-                )
+                report["result"] = write_task_result(  # the live row's bundle and outcome axis take the failure
+                    canonical_root, task_id, existing["status"], strict_existing_dict=True, **fields,
+                    _field_projector=lambda live, _: {**_artifact_projection(live, fields), "status": live["status"]})
         except Exception:
             log.warning("Terminal file failure could not be persisted for %s", task_id, exc_info=True)
     return report
@@ -979,7 +959,13 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
     artifact_base = task_artifacts_dir(parent_drive_root, task_id)
     workspace_root = _workspace_root_from_task(task)
     native = bool(native_capture_owner(parent_drive_root, task_id, workspace_root))
-    artifact_dir = _capture_version_dir(artifact_base, existing) if native else artifact_base
+    # A settled row's repeat rewrites in place only a capture never versioned (its manifest at the base); any other over
+    # a published one is a version, so no published address is rewritten (#3248).
+    in_place = (existing.get("status") in _FINAL_STATUSES and _artifact_state(existing) in ARTIFACT_TERMINAL_STATUSES
+                and all(pathlib.Path(str(row.get("path"))).parent.resolve() == artifact_base.resolve()
+                        for row in existing.get("artifacts") or [] if row.get("kind") == "workspace_patch_manifest"))
+    artifact_dir = artifact_base if in_place and not native else _capture_version_dir(artifact_base, existing)
+    versioned = native or artifact_dir != artifact_base
     status = str(existing.get("status") or "completed")
     artifact_status = ARTIFACT_STATUS_READY
     artifact_error = ""
@@ -998,7 +984,8 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
                 # once (reusing the last published generation while unchanged), held out of any patch (#2711).
                 evidence = {"retain_evidence_dir": artifact_dir / "named_evidence",
                             "retained_evidence": published_workspace_evidence(existing)}
-                direct = _directory_direct_artifacts(workspace_root, artifact_dir, task, existing, **evidence)
+                direct = _directory_direct_artifacts(workspace_root, artifact_dir, task, existing,
+                                                     drive_root=parent_drive_root, **evidence)
                 patch_artifacts, manifest = direct if direct is not None else write_workspace_patch_artifacts(
                     workspace_root, artifact_dir, task=task, scratch_dir=artifact_base, **evidence)
                 summary_path = (manifest.get("named_evidence") or {}).get("summary_path")
@@ -1089,7 +1076,7 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
     if artifacts or workspace_root is not None:
         existing = load_task_result(parent_drive_root, task_id) or {}
         drop_kinds = {"workspace_patch"} if workspace_root is not None and artifact_status == ARTIFACT_STATUS_FAILED else set()
-        merged = (_capture_artifact_rows(existing, artifacts, artifact_base) if native else
+        merged = (_capture_artifact_rows(existing, artifacts, artifact_base) if versioned else
                   _merge_artifacts(list(existing.get("artifacts") or []), artifacts, drop_kinds=drop_kinds))
         fields: Dict[str, Any] = {
             "artifacts": merged,
@@ -1099,21 +1086,11 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
         }
         if native and artifact_status != ARTIFACT_STATUS_FAILED:
             fields["native_capture_pending"] = {}
-        # ``fields`` already carries "artifacts" and "artifact_status".
-        provisional = {**existing, **fields}
-        provisional.pop("artifact_bundle", None)
         try:
-            from ouroboros.outcomes import artifact_bundle_from_result, refresh_verification_ledger_artifacts
+            from ouroboros.outcomes import refresh_verification_ledger_artifacts
 
-            artifact_bundle = artifact_bundle_from_result(provisional)
-            fields["artifact_bundle"] = artifact_bundle
-            axes = existing.get("outcome_axes") if isinstance(existing.get("outcome_axes"), dict) else {}
-            if axes:
-                axes = dict(axes)
-                artifact_axis = dict(axes.get("artifacts") or {})
-                artifact_axis["status"] = str(artifact_bundle.get("status") or artifact_status or "")
-                axes["artifacts"] = artifact_axis
-                fields["outcome_axes"] = axes
+            fields = _artifact_projection(existing, fields)  # ``fields`` carries "artifacts" and "artifact_status"
+            artifact_bundle = fields["artifact_bundle"]
             # The row's ledger gets the current artifact status; a published ledger file keeps
             # its captured bytes, so the identity copy-back recorded stays true (#2472).
             ledger = refresh_verification_ledger_artifacts(existing.get("verification_ledger"), artifact_bundle)
@@ -1134,14 +1111,14 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
 
 
 _CAPTURE_KINDS = {"workspace_patch", "workspace_patch_manifest", "workspace_file_outputs_manifest", "workspace_file_outputs",
-                  "named_evidence_manifest"}
+                  "named_evidence_manifest", "workspace_registered_output"}
 
 
 def current_workspace_manifest(root: pathlib.Path, task_id: str, result: Dict[str, Any]) -> pathlib.Path:
     """Current pointer, with a fixed-name fallback only for pre-publication rows."""
     row = next((item for item in result.get("artifacts", []) if item.get("kind") == "workspace_patch_manifest"), {})
     if not row and any(item.get("kind") == "workspace_capture_history" for item in result.get("artifacts", [])):
-        raise FileNotFoundError("Current native capture has not been published; historical captures remain available.")
+        raise FileNotFoundError("The current capture has not been published; historical captures remain available.")
     return pathlib.Path(row["path"]) if row.get("path") else task_artifacts_dir(root, task_id, create=False) / "workspace_patch.json"
 
 
@@ -1152,10 +1129,17 @@ def _capture_version_dir(base, result):
         or any(row.get("kind") == "workspace_patch_manifest" for row in result.get("artifacts", []))) else base
 
 
+def _capture_history(rows, kinds=_CAPTURE_KINDS):
+    """Published capture rows as history: their kind kept in ``capture_kind``, their bytes at their addresses."""
+    return [{**row, "kind": "workspace_capture_history", "capture_kind": row["kind"], "immutable": bool(row.get("sha256"))}
+            if row.get("kind") in kinds else row for row in rows]
+
+
 def _capture_artifact_rows(result, artifacts, base):
-    previous = [{**row, "kind": "workspace_capture_history", "capture_kind": row["kind"],
-                 "immutable": bool(row.get("sha256"))}
-                if row.get("kind") in _CAPTURE_KINDS else row for row in result.get("artifacts", [])]
+    # A fresh memory export or genesis listing retires the current one too: a Continue reads the first export it finds
+    # (owner_continue), and one listing names the version's outputs.
+    previous = _capture_history(result.get("artifacts", []), _CAPTURE_KINDS | (
+        {"memory_export", "deliverable_manifest"} & {row.get("kind") for row in artifacts}))
     fresh = [{**row, "immutable": bool(row.get("sha256")), "relpath": pathlib.Path(row["path"]).relative_to(base).as_posix()}
              if row.get("kind") in _CAPTURE_KINDS else row for row in artifacts]
     # Paths, not basenames: separate versions can contain identically named files.
@@ -1190,9 +1174,9 @@ def native_capture_custody(root, entry):
 
 
 def _native_capture_gap(root, task_id, pending, reason):
-    """Artifact-only failure BEFORE mutation; settled task lifecycle and old bytes stand."""
-    from ouroboros.outcomes import artifact_bundle_from_result
+    """Artifact-only gap BEFORE mutation; lifecycle and old bytes stand; settled owner: failed, live owner: owed (pending)."""
     row = load_task_result(root, task_id, strict=True) or {}
+    status = ARTIFACT_STATUS_FAILED if row.get("status") in _FINAL_STATUSES else ARTIFACT_STATUS_PENDING
     base = task_artifacts_dir(root, task_id)
     folder = _capture_version_dir(base, row)
     manifest = _empty_patch_manifest(_workspace_root_from_task(row), status=ARTIFACT_STATUS_FAILED,
@@ -1209,18 +1193,62 @@ def _native_capture_gap(root, task_id, pending, reason):
         reason += f" Capture manifest unavailable: {type(exc).__name__}: {exc}"
         artifacts = [{"kind": "workspace_patch_manifest", "name": path.name, "path": str(path),
                       "status": "missing", "measured": False, "errors": [reason]}]
-    fields = {"artifacts": _capture_artifact_rows(row, artifacts, base), "artifact_status": ARTIFACT_STATUS_FAILED,
+    fields = {"artifacts": _capture_artifact_rows(row, artifacts, base), "artifact_status": status,
               "artifact_error": reason, "native_capture_pending": sources}
-    provisional = {**row, **fields}
-    provisional.pop("artifact_bundle", None)
-    fields["artifact_bundle"] = artifact_bundle_from_result(provisional)
-    if row.get("outcome_axes"):
-        fields["outcome_axes"] = {**row["outcome_axes"], "artifacts": {
-            **row["outcome_axes"].get("artifacts", {}), "status": ARTIFACT_STATUS_FAILED}}
-    write_task_result(root, task_id, row["status"], **fields)
+    write_task_result(root, task_id, row["status"], **_artifact_projection(row, fields))
     if failure is not None:
         raise failure
     return artifacts
+
+
+def _artifact_projection(row, fields):
+    """``fields`` with the artifact bundle they imply over ``row``; the row's outcome axis takes that bundle's status."""
+    from ouroboros.outcomes import artifact_bundle_from_result
+
+    bundle = artifact_bundle_from_result({key: value for key, value in {**row, **fields}.items() if key != "artifact_bundle"})
+    projected, axes = {**fields, "artifact_bundle": bundle}, row.get("outcome_axes")
+    if isinstance(axes, dict) and axes:
+        status = str(bundle.get("status") or fields["artifact_status"] or "")
+        projected["outcome_axes"] = {**axes, "artifacts": {**(axes.get("artifacts") or {}), "status": status}}
+    return projected
+
+
+def _reopen_owed(row):
+    """An unfinished row of a task that owes captures, whose earlier capture says done."""
+    return (bool(row) and row.get("status") not in _FINAL_STATUSES and _artifact_state(row) in ARTIFACT_TERMINAL_STATUSES
+            and task_requires_workspace_capture(row))
+
+
+def reopen_capture_at_entry(root, task_id) -> None:
+    """The execution's entry (#3248): after its start consumed the continuation and passed every start check, before
+    its first model or tool effect (``loop._resume_continuation``). An unfinished row whose capture says done (a withdrawn
+    closure's) owes this execution's tree: that capture becomes history beside its bytes and the row's capture is
+    ``pending``, so the finish, a running task's Stop or a closure publishes a version. A Stop of the row queued again
+    (re-parked) captures nothing: it settles ``missing`` (``cancel_publication``), that capture only history. A start
+    that never got here ran nothing, so its row keeps that capture. ``root`` is the canonical row's store
+    (``preflight_receipts.canonical_data_root``: a split task's budget root, as terminal preparation reads it). Other
+    publishers are waited out, attempt after attempt; a first read that fails leaves the decision to the row read under
+    the lock; a write that raises ends the attempt before any effect."""
+    from ouroboros.task_custody import task_custody_lock
+
+    def reopen(current, _fields):
+        if not _reopen_owed(current):
+            return None  # nothing done to reopen: no capture yet, already owed, settled, or no workspace
+        fields = {"artifacts": _capture_history(current.get("artifacts") or []), "artifact_error": "",
+                  "artifact_status": ARTIFACT_STATUS_PENDING, "artifact_finalized_at": None}
+        return {**_artifact_projection(current, fields), "status": current["status"]}
+
+    try:
+        if root is None or not task_id or not _reopen_owed(load_task_result(root, task_id, strict=True) or {}):
+            return  # the ordinary start: nothing is locked or written
+    except Exception:
+        log.warning("The capture of %s was not read at its execution's entry; the row decides", task_id, exc_info=True)
+    while True:
+        with task_custody_lock(root, task_id, timeout_sec=PUBLICATION_LOCK_SEC) as held:
+            if held:
+                write_task_result(root, task_id, STATUS_RUNNING, _field_projector=reopen, strict_existing_dict=True)
+                return
+        log.warning("The capture of %s is held by another publisher; its execution waits to start", task_id)
 
 
 def begin_native_capture_update(root, entry):
@@ -1441,6 +1469,10 @@ def _copy_stable_memory(parent: pathlib.Path, child: pathlib.Path, *, project_id
     dst_knowledge = child_memory / "knowledge"
     if not project and src_knowledge.is_dir():
         shutil.copytree(src_knowledge, dst_knowledge, dirs_exist_ok=True)
+
+
+def _artifact_state(row):
+    return str(row.get("artifact_status") or "").strip().lower()
 
 
 def _child_drive_from_task(task: Dict[str, Any]) -> Optional[pathlib.Path]:

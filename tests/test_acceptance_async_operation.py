@@ -105,6 +105,7 @@ def test_pending_review_rides_beside_the_verb_and_is_recorded_on_every_answer(tm
     registry._ctx._completion_observation = completion_observation(registry._ctx, trace)
     assert json.loads(stage_completion_request(registry._ctx, {
         "action": "finish", "answer_sha256": candidate.content_sha256, "pending_review": choice,
+        **({"rationale": "Needed before the reviewers end."} if choice == "finish" else {}),
     }))["status"] == "completion_requested"
     assert consume_completion_request(registry, ctx, trace)
     assert registry._ctx._delivery_candidate.full_text == candidate.full_text

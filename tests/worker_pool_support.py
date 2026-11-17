@@ -16,5 +16,13 @@ def affirm_ready(worker):
     worker.retiring = False
     worker.quiescence_token = ""
     worker.quiescence_confirmed = False
-    worker.resume_hold = ""
     return worker
+
+
+def fixed_pool(monkeypatch):
+    """A fake pool of the slots a test installs, which never grows: no owner cap on acting tasks
+    (dispatch uses every installed slot) and no new process admitted (``admissible_starts``)."""
+    from supervisor import worker_pool_lifecycle
+
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "")
+    monkeypatch.setattr(worker_pool_lifecycle, "admissible_starts", lambda reading=None: 0)

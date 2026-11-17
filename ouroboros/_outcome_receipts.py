@@ -26,7 +26,7 @@ IDENTITY_PATH_LIMIT = 20
 # (``observed``) — OF THE SAME VERIFICATION (v6.78.0, owner Q28=B: the same typed identity
 # KEY; an identity-LESS red keeps the older any-later-green rule; see `_reconciles`). A
 # later ``declared`` does NOT reconcile a red: that would let an agent see red, then
-# declare-away the finalization nudge. So this is deliberately NARROWER than
+# declare the finish-door notice away. So this is deliberately NARROWER than
 # ``outcomes._RECEIPT_GROUNDING_STATUSES`` (no ``declared``). Lives HERE, next to the
 # reconciliation core, so the outstanding-state helpers have a default and `outcomes.py`
 # keeps re-exporting it under its historical name.
@@ -759,7 +759,7 @@ def _outstanding(
     which the newer one's own clean re-grounding reports nothing outstanding at all —
     fail check A, fail check B, pass check B answered "no red" while A was still red;
     masked c1, masked c2, cleanly-reconciled c2 lost masked c1 the same way. Both flags
-    then told the reviewers and the finalization nudge that no verification
+    then told the reviewers and the finish-door notice that no verification
     was outstanding, which is the one answer that must be unrepresentable here.
 
     Computing the outstanding SET per candidate makes it so; the ``latest_*`` helpers
@@ -846,21 +846,6 @@ def latest_unreconciled_masked(
     return outstanding[-1] if outstanding else None
 
 
-def latest_agent_defined(receipts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Return the latest ungrounded agent-defined passing criterion, if any."""
-    for receipt in reversed(receipts):
-        if not isinstance(receipt, dict):
-            continue
-        if str(receipt.get("status") or "") not in ("pass", "observed"):
-            continue
-        if str(receipt.get("criterion_source") or "") != "agent_defined":
-            return None
-        if str(receipt.get("criterion_basis") or "").strip():
-            return None
-        return receipt
-    return None
-
-
 def latest_unreconciled_failed_receipt(receipts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Pure core: the most recent RED receipt (``status=="fail"``) with NO later genuine
     grounding receipt for the SAME verification (a passing run-kind check or an observed
@@ -873,23 +858,41 @@ def latest_unreconciled_failed_receipt(receipts: List[Dict[str, Any]]) -> Option
     with NO key at all keeps the older any-later-green rule. Advisory, never a gate.
     The NEWEST element of the OUTSTANDING SET (``unreconciled_failed``)
     — never a single latest-pointer, which a newer red would let erase an older still-red
-    one. Shared SSOT by the finalize nudge and the verification_summary so the
-    reconciliation rule lives in one place."""
+    one. No product caller reads this pointer: ``red_check_fact`` (the finish-door notice and the task
+    record) and the verification_summary read the set, so the reconciliation rule lives in one place."""
     return latest_unreconciled_failed(receipts, RED_RECONCILING_STATUSES)
 
 
-def latest_unreconciled_failed_verification(
-    drive_root: Any, task_id: str,
-    *, receipts: Optional[List[Dict[str, Any]]] = None,
-) -> Optional[Dict[str, Any]]:
-    """Disk-backed wrapper of ``latest_unreconciled_failed_receipt`` — reads the task's
-    durable receipts. Feeds the one-shot red-verification finalization nudge: finalizing over
-    your own host-attested red is a self-contradiction (Bible P3/P12), distinct from the
-    receipt_absent case."""
-    from ouroboros.outcome_receipt_store import read_verification_receipts
+RED_CHECK_TEXT_CAP = 200  # the named check in the notice; the whole receipt stays in verification_receipts.jsonl
 
-    rows = receipts if isinstance(receipts, list) else read_verification_receipts(drive_root, task_id)
-    return latest_unreconciled_failed_receipt(rows)
+
+def red_check_fact(receipts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The newest check still red (``unreconciled_failed``) and what the record holds after it: the ONE fact the
+    finish-door notice and the owner's detail sentence read (P7), or ``None``. ``passed_after`` counts later receipts
+    of ANY check that passed or observed their paths: an unrelated pass clears no failure, so the fact stays, and 0
+    says the last recorded verdict is this failure. ``more`` counts the other checks still red. The typed fields are
+    the receipt's own (the words of the card's "Check did not pass" row read the same names); ``check`` is for the
+    notice alone: the command that ran, or what the host found where it ran none (``missing: <paths>``)."""
+    valid = [receipt for receipt in receipts if isinstance(receipt, dict)]
+    reds = unreconciled_failed(valid)
+    if not reds:
+        return None
+    red = reds[-1]
+    later = valid[len(valid) - valid[::-1].index(red):]  # what follows its newest receipt
+    kind, code, matched = str(red.get("contract_kind") or ""), red.get("returncode"), red.get("matched")
+    observed = kind == "artifact_observation"
+    text = " ".join(str((red.get("summary") if observed else red.get("check")) or "").split())
+    return {
+        "kind": kind,
+        "exit_code": code if isinstance(code, int) and not isinstance(code, bool) else None,
+        "signal": str(red.get("signal") or ""),
+        "matched": matched if isinstance(matched, bool) else None,
+        "expected_match": str(red.get("expected_match") or ""),
+        **({"paths_named": len(red.get("paths") or [])} if observed else {}),
+        "passed_after": sum(1 for receipt in later if str(receipt.get("status") or "") in RED_RECONCILING_STATUSES),
+        "more": len(reds) - 1,
+        "check": text[:RED_CHECK_TEXT_CAP] + ("…" if len(text) > RED_CHECK_TEXT_CAP else ""),
+    }
 
 
 def latest_unreconciled_masked_pass(receipts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -902,33 +905,6 @@ def latest_unreconciled_masked_pass(receipts: List[Dict[str, Any]]) -> Optional[
     path's check-text rule would be unclearable (``_reconciles_masked``).
     The NEWEST element of the OUTSTANDING SET (``unreconciled_masked``),
     so a cleanly reconciled newer masked check no longer takes an older one with it.
-    FLAG-driven (typed receipt field); advisory only. Shared SSOT by the finalize nudge and
-    the verification_summary."""
+    FLAG-driven (typed receipt field); advisory only. No product caller reads it: the verification_summary reads
+    the set (``unreconciled_masked``)."""
     return latest_unreconciled_masked(receipts, RED_RECONCILING_STATUSES)
-
-
-def latest_unreconciled_masked_verification(
-    drive_root: Any, task_id: str,
-    *, receipts: Optional[List[Dict[str, Any]]] = None,
-) -> Optional[Dict[str, Any]]:
-    """Disk-backed wrapper of ``latest_unreconciled_masked_pass`` — feeds the one-shot ADVISORY
-    masked-check finalization nudge (the agent may still finalize). Distinct from the red nudge:
-    that fires on a RED check; this fires on a green check whose exit code may be laundered."""
-    from ouroboros.outcome_receipt_store import read_verification_receipts
-
-    rows = receipts if isinstance(receipts, list) else read_verification_receipts(drive_root, task_id)
-    return latest_unreconciled_masked_pass(rows)
-
-
-def latest_agent_defined_verification(
-    drive_root: Any, task_id: str,
-    *, receipts: Optional[List[Dict[str, Any]]] = None,
-) -> Optional[Dict[str, Any]]:
-    """Newest verify receipt whose criterion was AGENT-DEFINED without a stated basis
-    (v6.54.4) — feeds the one-shot advisory criterion-provenance nudge: the check
-    passed, but the success criterion was synthesized by the agent, so the agent is
-    asked once to confirm it is equivalent to what the task actually requires."""
-    from ouroboros.outcome_receipt_store import read_verification_receipts
-
-    rows = receipts if isinstance(receipts, list) else read_verification_receipts(drive_root, task_id)
-    return latest_agent_defined(rows)

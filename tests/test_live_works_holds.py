@@ -64,7 +64,7 @@ def test_live_work_without_a_listed_root_is_visible_but_never_addressable(tmp_pa
     rows = unlisted_live_work(tmp_path, set())
     assert rows == [{"work_id": "p", "title": "Release 7.7", "room": {"chat_id": 42, "project_id": ""},
                      "root_status": "failed", "helpers_running": 3, "helpers_waiting": 0, "tails": [
-                         {"code": "helpers_running", "text": "3 helpers still working", "count": 3,
+                         {"code": "helpers_running", "text": "3 subagents still working", "count": 3,
                           "ids": ["h0", "h1", "h2"], "kind": "helper", "state": "live"}]}]
     assert unlisted_live_work(tmp_path, {"p"}) == []
     present = live_works_present(tmp_path)

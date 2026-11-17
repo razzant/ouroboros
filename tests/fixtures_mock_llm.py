@@ -36,6 +36,9 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions":
             self.send_error(404)
             return
+        request = json.loads(
+            self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}"
+        )
         if HOLD_SECONDS > 0:
             HOLD_RELEASE.wait(HOLD_SECONDS)
         payload = {
@@ -44,9 +47,33 @@ class _Handler(BaseHTTPRequestHandler):
             "choices": [{"message": {"role": "assistant", "content": "OK"}}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         }
-        data = json.dumps(payload).encode("utf-8")
+        if request.get("stream") is True:
+            common = {
+                "id": payload["id"],
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": request.get("model", "mock-model"),
+            }
+            frames = [
+                {**common, "choices": [{
+                    "index": 0, "delta": payload["choices"][0]["message"],
+                    "finish_reason": None,
+                }]},
+                {**common, "choices": [{
+                    "index": 0, "delta": {}, "finish_reason": "stop",
+                }]},
+                {**common, "choices": [], "usage": payload["usage"]},
+            ]
+            data = (
+                "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)
+                + "data: [DONE]\n\n"
+            ).encode("utf-8")
+            content_type = "text/event-stream"
+        else:
+            data = json.dumps(payload).encode("utf-8")
+            content_type = "application/json"
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

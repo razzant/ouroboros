@@ -392,6 +392,20 @@ def _finish_task_done_dispatch(
 
     from ouroboros.post_task_checkpoint import settle_terminal_projection
     from ouroboros.project_dialogue import append_terminal_task_projection
+    from supervisor.ended_work_helpers import WORK_FINISHED, stored_helper_lineage
+
+    # A helper closed with its ended work left the queue before this event: its card still needs the child's notice.
+    if not task and (final_task_result.get("cancel_origin") or {}).get("source") == WORK_FINISHED:
+        task = stored_helper_lineage(final_task_result)
+    # Every terminal producer reaches the live card through here, so a Continue that ends before any
+    # progress frame still names who asked for it; read from the records the admission was stored on.
+    if "continue_requester" not in task_done_event:
+        from ouroboros.subagent_messages import initiator_meta
+
+        for record in (final_task_result, task, evt):
+            if requester := initiator_meta(record).get("continue_requester"):
+                task_done_event["continue_requester"] = requester
+                break
 
     try:  # the durable terminal is established: its own clock settles whatever delivery does next
         from supervisor.consciousness_carriers import finish_pooled_wake
@@ -550,17 +564,13 @@ def _finish_task_done_dispatch(
     with _queue_lock:
         if task_id:
             ctx.RUNNING.pop(str(task_id), None)
-            # Real child results give the parent time to integrate. A diagnostic
-            # settling is no source progress and cannot buy a new silence episode.
-            # Reaper-delivered terminals may have no RUNNING row; the durable
-            # result retains both lineage and diagnostic identity.
-            from ouroboros.work_diagnostics import diagnostic_ref
-
+            # Real child results give the parent time to integrate. Reaper-delivered
+            # terminals may have no RUNNING row; the durable result retains the lineage.
             parent_meta = ctx.RUNNING.get(str(
                 task.get("parent_task_id")
                 or final_task_result.get("parent_task_id") or ""
             ))
-            if isinstance(parent_meta, dict) and not (diagnostic_ref(task) or diagnostic_ref(final_task_result)):
+            if isinstance(parent_meta, dict):
                 parent_meta["last_progress_at"] = _events().time.time()
         if worker_id in ctx.WORKERS and ctx.WORKERS[worker_id].busy_task_id == task_id:
             # A `reaping` slot is OWNED — by the reaper or by an in-flight
@@ -808,7 +818,7 @@ def _resolve_lifecycle_fault(
         "outcome_axes": normalize_outcome_axes(stored),
     }
     for key in ("review_projection", "review_status", "artifact_status", "artifact_bundle", "root_phase_checkpoint",
-                "execution_owner", "_is_direct_chat"):
+                "execution_owner", "_is_direct_chat", "finalization_recovery", "terminal_origin"):
         if key in stored:
             task_done_event[key] = stored[key]
     try:
@@ -1089,8 +1099,11 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         task_done_event["typed_routing_action"] = str(evt.get("typed_routing_action") or "").strip()
     if isinstance(artifact_bundle, dict):
         task_done_event["artifact_bundle"] = artifact_bundle
-    if isinstance(final_task_result.get("cancel_origin"), dict):
-        task_done_event["cancel_origin"] = dict(final_task_result["cancel_origin"])
+    for name in ("cancel_origin", "finalization_recovery"):  # what the status fold reads beside the axes
+        if isinstance(final_task_result.get(name), dict):
+            task_done_event[name] = dict(final_task_result[name])
+    if final_task_result.get("terminal_origin"):
+        task_done_event["terminal_origin"] = str(final_task_result["terminal_origin"])
     review_status = final_task_result.get("review_status") if isinstance(final_task_result, dict) else None
     if not isinstance(review_status, dict):
         review_status = evt.get("review_status")

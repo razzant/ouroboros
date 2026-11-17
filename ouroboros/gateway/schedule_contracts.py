@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-try:
-    from typing import TypedDict
+try:  # Python 3.11+
+    from typing import NotRequired, TypedDict  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - Python 3.10 compatibility.
-    from typing_extensions import TypedDict
+    from typing_extensions import NotRequired, TypedDict  # type: ignore[assignment]
 
 
 class ScheduledTasksResponse(TypedDict):
@@ -32,10 +32,14 @@ class ScheduledTasksResponse(TypedDict):
 class ScheduleUpsertResponse(TypedDict):
     """POST /api/schedules. ``schedule`` is the STORED row plus an ``audit``
     field (``recorded``/``incomplete``); ``ok`` follows it, so a change whose
-    audit outcome record was lost does not read as a clean success."""
+    audit outcome record was lost does not read as a clean success.
+    ``ignored_fields`` names the host facts the request carried (``task.metadata.<key>``:
+    who supplied each text, the words a run carried) that the door set aside: the
+    write keeps the current row's, so a GET's row posted back stays valid."""
 
     ok: bool
     schedule: Dict[str, Any]
+    ignored_fields: NotRequired[List[str]]
 
 
 class ScheduleActionResponse(TypedDict, total=False):

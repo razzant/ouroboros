@@ -52,7 +52,7 @@ def author_settings(model: str) -> dict:
         "OUROBOROS_SAFETY_MODE": "off", "OUROBOROS_TASK_REVIEW_MODE": "off",
         "OUROBOROS_POST_TASK_EVOLUTION": "false", "OUROBOROS_MAX_WORKERS": 1,
         "TOTAL_BUDGET": 10.0, "OUROBOROS_PER_TASK_COST_USD": 10.0,
-        "OUROBOROS_STARTER_SKILLS": "[]", "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
+        "OUROBOROS_STARTER_SKILLS": "[]",
         "OUROBOROS_REVIEW_MAX_CYCLES": REVIEW_CYCLES,
         "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true",
         "OUROBOROS_SUBAGENTS": pool_roster(pool_seat(
@@ -245,7 +245,7 @@ def assert_review_evidence(data: Path, name: str, original_hash: str, task_id: s
                 and row.get("attempt_root_task_id") == task_id), "review group drift"
         assert row.get("content_hash") == original_hash, "review material drift"
         assert row.get("subject_root") == str(loaded.skill_dir.resolve()), "review material root drift"
-        assert row.get("enforcement") == "blocking", "review enforcement drift"
+        assert row.get("enforcement") == "advisory", "recorded review authority drift"
         fingerprint = row.get("review_contract_fingerprint")
         assert fingerprint and fingerprint == row.get("attempt_contract_fingerprint"), "review panel/contract drift"
         contracts.add(fingerprint)

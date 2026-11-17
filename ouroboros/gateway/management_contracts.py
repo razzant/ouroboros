@@ -19,6 +19,20 @@ except ImportError:  # pragma: no cover - CI supports Python 3.10.
 
 # --- Skills and extensions ---------------------------------------------------------------------
 
+class SkillMcpServerFact(TypedDict):
+    """One declared server's passive state in an installed skill's ``mcp_servers`` list."""
+
+    id: str
+    title: str
+    conflict: bool
+    bound: bool  # the saved row belongs to this skill, even when off
+    configured: bool  # bound and both the row and MCP are on
+    tool_count: int
+    listed: bool
+    error: str  # skill refusal or failed listing
+    notes: str  # diagnostics from a successful listing
+
+
 class InstalledSkill(TypedDict, total=False):
     """One ``GET /api/extensions`` ``skills`` row, sorted by name; a name two skills claim gives one
     not-live row each (``identity_collision``). ``live_reason`` says why a skill is or is not live."""
@@ -58,7 +72,11 @@ class InstalledSkill(TypedDict, total=False):
     dispatch_live: bool
     review_findings: List[Dict[str, Any]]
     skill_review: Dict[str, Any]  # {} or {current, history, history_omitted}
+    # Declared secret fields (manifest ``secret_fields``) and whether each holds a value now, never the value:
+    # {fields: [{id, key, state: configured | missing | unknown}]}; null for a skill that declares none.
+    secret_config: Optional[Dict[str, List[Dict[str, str]]]]
     grants: Dict[str, Any]  # requested/granted/missing keys and permissions, all_granted, usable
+    mcp_servers: List[SkillMcpServerFact]  # absent on identity-collision rows
     published: Optional[Dict[str, Any]]
     published_malformed: bool
     presence_runtime: Dict[str, Any]  # a reviewed presence profile's runtime choice
@@ -72,14 +90,22 @@ class InstalledSkill(TypedDict, total=False):
     # source (made here, a local folder, a built-in seed).
     install: Optional[Dict[str, Any]]
     category: List[str]  # the source's category ids for this skill, [] when it has none
+    # A deployment policy requires this name: the server's requirement row with its when_unmet (client
+    # SettingsDeploymentRequirement); the switch is the organization's and no removal, update or repair is offered.
+    deployment: Dict[str, Any]
+    # An extension under an execution domain (deployment_extensions.trust_state): {state: trusted | untrusted,
+    # reason: not_delivered | elsewhere | changed, detail, administered}; administered: its doors refuse all but Off.
+    trust: Dict[str, Any]
 
 
-class ExtensionsIndexResponse(UiContributionsResponse):
+class ExtensionsIndexResponse(UiContributionsResponse, total=False):
     """``GET /api/extensions``: every installed skill and what the extension loader has live.
-    A passive read: no network, no repair."""
+    A passive read: no network, no repair. ``deployment`` (managed, with required extensions only) is
+    ``{when_unmet, required}``: every requirement as the server observes it, a missing package included."""
 
-    skills: List[InstalledSkill]
-    live: ExtensionLiveSnapshot
+    skills: Required[List[InstalledSkill]]
+    live: Required[ExtensionLiveSnapshot]
+    deployment: Dict[str, Any]
 
 
 class ExtensionManifestResponse(TypedDict, total=False):
@@ -484,14 +510,24 @@ class ClaudexorProblem(TypedDict):
 
 
 class ClaudexorMaintenanceProblem(TypedDict):
-    """Engine or host preparation problem: ``{code, message, retryable?, requiredActions?, context?}``.
-    POST may prepare Node/npm: 409 ``maintenance_restart_required`` asks for Restart Claudexor in Accounts;
-    409/503 ``maintenance_preparation_failed`` reports failure. Both use
-    ``context.acceptance=not_submitted, scope=this_attempt``. Optional inspection failure still
-    permits POST. A 503 ``acceptance=unknown`` may have been accepted: retain its body and
-    Idempotency-Key even after a later preparation-only reply, then resend both."""
+    """Engine or host problem: ``{code, message, retryable?, requiredActions?, context?}``.
+    A pre-submit ``not_submitted`` covers this attempt only. After ``acceptance=unknown``,
+    retain the original body and Idempotency-Key until the engine resolves that request."""
 
     error: Dict[str, Any]
+
+
+class ClaudexorLoginJobProblem(TypedDict, total=False):
+    """Typed job errors preserve engine prose/status/code and bounded actions
+    (16 strings, 512 chars each). Covers absent jobs, input/reconcile conflicts,
+    setup 400/409, terminal-probe 503 and Connect maintenance problems/context.
+    Other unmarked transport/discovery failures use the generic proxy 503."""
+
+    error: Required[str]
+    code: str
+    required_actions: List[str]
+    context: Dict[str, Any]
+    retryable: bool
 
 
 class ClaudexorRestartRun(TypedDict):
@@ -587,44 +623,162 @@ class ClaudexorAccountTarget(TypedDict):
     profile_id: str
 
 
+class ClaudexorSelectedProgram(TypedDict):
+    """The selected invocation and its own version answer; never package metadata."""
+
+    path: Optional[str]
+    realPath: Optional[str]
+    version: Optional[str]
+    versionOutput: Optional[str]
+    overrideEnv: Optional[str]
+    overrideValue: Optional[str]
+
+
+class ClaudexorProgramExecCommand(TypedDict):
+    kind: Literal["exec"]
+    command: str
+    args: List[str]
+    env: NotRequired[Dict[str, str]]
+
+
+class ClaudexorProgramScriptCommand(TypedDict):
+    kind: Literal["script"]
+    url: str
+    interpreter: str
+    interpreterArgs: List[str]
+    args: List[str]
+    env: NotRequired[Dict[str, str]]
+
+
+class ClaudexorProgramAction(TypedDict):
+    """Engine capability and display-only plans; unavailable actions carry a reason."""
+
+    available: bool
+    reason: Optional[str]
+    commands: List[ClaudexorProgramExecCommand | ClaudexorProgramScriptCommand]
+
+
+class ClaudexorProgramActions(TypedDict):
+    install: ClaudexorProgramAction
+    update: ClaudexorProgramAction
+    exactVersion: ClaudexorProgramAction
+
+
+class ClaudexorNewestNotRead(TypedDict):
+    status: Literal["not_read"]
+    source: Optional[str]
+
+
+class ClaudexorNewestAvailable(TypedDict):
+    status: Literal["available"]
+    source: str
+    version: str
+    observedAt: str
+
+
+class ClaudexorNewestUnavailable(TypedDict):
+    status: Literal["unavailable"]
+    source: Optional[str]
+    observedAt: str
+    problem: Dict[str, Any]  # Engine ControlProblem, passed through.
+
+
+class ClaudexorMaintenanceLatestTarget(TypedDict):
+    kind: Literal["latest"]
+
+
+class ClaudexorMaintenanceVersionTarget(TypedDict):
+    kind: Literal["version"]
+    version: str  # One exact vendor version; the engine validates its spelling.
+
+
+class ClaudexorMaintenanceLatestReceiptTarget(ClaudexorMaintenanceLatestTarget):
+    version: None
+
+
 class ClaudexorMaintenanceRequest(TypedDict):
-    """``POST /api/claudexor/maintenance/operations`` (engine ControlHarnessMaintenanceCreateRequest),
-    sent with a required ``Idempotency-Key`` header (1-256 printable ASCII characters): the same key
-    and body join the same operation."""
+    """Latest runs the selected updater or installs when missing; version uses the vendor's
+    exact-version command. The same Idempotency-Key (1–256 printable ASCII) and body rejoin."""
 
     harness: str
-    target: Dict[str, Any]  # {kind: latest} | {kind: version, version} | {kind: previous} | {kind: baseline}
+    target: ClaudexorMaintenanceLatestTarget | ClaudexorMaintenanceVersionTarget
 
 
-class ClaudexorMaintenanceOperation(TypedDict, total=False):
-    """Engine ControlHarnessMaintenanceOperation, passed through. ``state``: queued, running,
-    succeeded, failed, cancelled or interrupted; poll while queued or running, and while
-    ``termination`` is ``unconfirmed``."""
+class ClaudexorMaintenanceRequester(TypedDict):
+    source: str
+    requestId: Optional[str]
 
-    id: Required[str]
-    state: Required[str]
+
+class ClaudexorMaintenanceScript(TypedDict):
+    url: str
+    size: int
+    sha256: str
+
+
+class ClaudexorMaintenanceCommand(TypedDict):
+    binary: str
+    args: List[str]
+    env: Dict[str, str]
+    script: Optional[ClaudexorMaintenanceScript]
+
+
+class ClaudexorMaintenanceElsewhere(TypedDict):
+    before: ClaudexorSelectedProgram
+    after: ClaudexorSelectedProgram
+
+
+class ClaudexorMaintenanceProfileCleanup(TypedDict):
+    plannedPaths: List[str]
+    removedPaths: List[str]
+
+
+class ClaudexorMaintenanceOperation(TypedDict):
+    """Full engine receipt, passed through. Acceptance is not completion; unconfirmed
+    termination retains custody even when state is terminal. Outcome compares selected programs."""
+
+    id: str
     harness: str
-    phase: str
-    mechanism: str
-    target: Dict[str, Any]
-    before: Any
-    after: Any
-    mutation: str  # none | applied | unknown
-    termination: str  # not_applicable | confirmed | unconfirmed
-    limitations: Any
-    progress: Any
-    problem: Any
+    state: Literal["queued", "running", "succeeded", "failed", "cancelled", "interrupted"]
+    phase: Literal["accepted", "preparing", "installing", "settled"]
+    target: ClaudexorMaintenanceLatestReceiptTarget | ClaudexorMaintenanceVersionTarget
+    requester: ClaudexorMaintenanceRequester
+    installationHome: Optional[str]
+    commands: List[ClaudexorMaintenanceCommand]
+    profileCleanup: NotRequired[ClaudexorMaintenanceProfileCleanup]
+    before: Optional[ClaudexorSelectedProgram]
+    after: Optional[ClaudexorSelectedProgram]
+    elsewhere: Optional[ClaudexorMaintenanceElsewhere]
+    activeRunsAtStart: Optional[int]
+    exitCode: Optional[int]
+    outcome: Literal["changed", "not_changed", "changed_elsewhere", "unknown"]
+    mutation: Literal["none", "applied", "unknown"]
+    termination: Literal["not_applicable", "confirmed", "unconfirmed"]
+    limitations: List[str]
+    progress: List[str]
+    problem: Optional[Dict[str, Any]]
     createdAt: str
     startedAt: Optional[str]
     finishedAt: Optional[str]
 
 
+class ClaudexorMaintenanceEntry(TypedDict):
+    """No host version ordering or ownership inference: the engine supplies every action."""
+
+    harness: str
+    selection: ClaudexorSelectedProgram
+    newest: ClaudexorNewestNotRead | ClaudexorNewestAvailable | ClaudexorNewestUnavailable
+    actions: ClaudexorProgramActions
+    updateAvailable: Literal["yes", "no", "cannot_tell"]
+    releaseNotesUrl: Optional[str]
+    operation: Optional[ClaudexorMaintenanceOperation]
+    observedAt: str
+
+
 class ClaudexorMaintenanceInventory(TypedDict):
-    """Engine ControlHarnessMaintenanceInventory, passed through: per harness what is installed,
-    tested and available, and its current ``operation`` (rejoin it after a reload)."""
+    """Engine inventory, unchanged: selected program, newest observation, actions and receipt."""
 
     observedAt: str
-    harnesses: List[Dict[str, Any]]
+    harnesses: List[ClaudexorMaintenanceEntry]
 
 
 class ClaudexorQuotaRefreshRequest(TypedDict, total=False):
@@ -633,14 +787,25 @@ class ClaudexorQuotaRefreshRequest(TypedDict, total=False):
     target: ClaudexorAccountTarget
 
 
+class ClaudexorRefreshAttempt(TypedDict):
+    """Host transport attempt dates, not provider observation dates. ``reused``
+    marks an identical attempt joined in flight; its dates stay original."""
+
+    started_at: str
+    completed_at: str
+    reused: bool
+
+
 class ClaudexorAccountResources(TypedDict, total=False):
-    """Engine ControlAccountResourcesResponse (or the older ControlQuotaResponse), passed through."""
+    """Engine ControlAccountResourcesResponse (or the older ControlQuotaResponse),
+    passed through with optional host refresh provenance. Provider dates are unchanged."""
 
     snapshots: Required[List[Dict[str, Any]]]
     absences: List[Dict[str, Any]]
     refreshed_at: str
     refresh_skipped: Any
     resources: List[Dict[str, Any]]
+    refresh_attempt: ClaudexorRefreshAttempt
 
 
 class ClaudexorAccountResetRequest(TypedDict):
@@ -711,12 +876,32 @@ class ReviewPoolResponse(TypedDict):
 
 # --- Local model, MCP and the model catalog ----------------------------------------------------
 
+class ModelPriceTier(TypedDict):
+    """From ``min_prompt_tokens`` input tokens on, a request is charged these USD per 1M tokens."""
+
+    min_prompt_tokens: int
+    input: float
+    output: float
+
+
+class ModelPrice(TypedDict, total=False):
+    """A catalog's published token price, USD per 1M tokens; ``tiers`` only when input length changes it;
+    ``cache_write`` only where the record states the prompt-cache write figure of the tier this install sends, with
+    ``cache_write_ttl`` naming that tier (the resolved ``OUROBOROS_PROMPT_CACHE_TTL`` the catalog was read under)."""
+
+    input: Required[float]
+    output: Required[float]
+    tiers: List[ModelPriceTier]
+    cache_write: float
+    cache_write_ttl: str
+
+
 class ModelCatalogItem(TypedDict, total=False):
     """One selectable model. ``value`` is what a model setting stores: the raw id for OpenRouter,
     ``<provider_id>::<id>`` for another API provider, ``<kind>@<name>::<id>`` for a named API
     connection (its ``provider``/``provider_id`` = ``<kind>@<name>``, ``provider_label`` its
     picker label), ``claudexor::<source>=<model>`` for an agent account's model, which adds
-    that account's facts."""
+    that account's facts. The local model's row says ``use_local``; its ``value`` is a label."""
 
     provider_id: Required[str]
     provider: Required[str]
@@ -742,6 +927,9 @@ class ModelCatalogItem(TypedDict, total=False):
     availability: Any
     problem: Any
     processing: Any
+    use_local: bool
+    price: ModelPrice  # OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
+    price_condition: str  # DeepSeek rows whose published entry prices them only off-peak in USD: ``off_peak_usd``
 
 
 class ModelCatalogResponse(TypedDict, total=False):
@@ -777,7 +965,7 @@ class LocalModelStartRequest(TypedDict):
     filename: NotRequired[str]  # required for a repo
     port: NotRequired[int]  # default 8766
     n_gpu_layers: NotRequired[int]  # default -1
-    n_ctx: NotRequired[int]  # 0 means 16384
+    n_ctx: NotRequired[int]  # 0 means the factory LOCAL_MODEL_CONTEXT_LENGTH
     chat_format: NotRequired[str]
 
 
@@ -861,6 +1049,8 @@ class McpServerStatus(TypedDict, total=False):
     schemas_at_start: bool  # the owner's pin: call schemas in every request from task start
     task_session: bool  # stdio: one task loop's calls share one session (listings stay per call)
     browser_policy: bool  # that session's process may ask the host's browser policy per request
+    skill: str  # owning skill name, or "" for a server configured directly
+    skill_error: str  # why the skill-owned server is unavailable, or ""
     instructions: str  # the server's own usage text from initialize, untrusted
     map_tokens: int  # this server's part of the connections map (Main, Low/Max)
     schema_tokens: int  # all its call schemas, loaded or not
@@ -1085,12 +1275,15 @@ class UpdateStatusResponse(TypedDict, total=False):
     checked_at: str
     checked_target_sha: str
     from_cache: bool
+    managed_by_deployment: str  # its administrator replaces the serving program: why in-app updates refuse
 
 
 class CommandRequest(TypedDict):
     """``POST /api/command``: a slash command (``/restart``, ``/panic``, ``/review``, ``/evolve``,
     ``/bg``, ``/status``) or any other text, which becomes an owner message in Main. ``visible_text``
-    adds a system row; the same ``visible_task_id`` within 5 seconds is answered as deduped."""
+    adds a system row; the same ``visible_task_id`` within 5 seconds is answered as deduped.
+    ``ui_control`` (``{name, owner_text?}``) says a host-drawn control composed ``cmd``: no owner
+    message is written for it, only ``owner_text`` (words typed into the control) is theirs; malformed: 400."""
 
     cmd: str
     if_boot: NotRequired[str]  # optional boot.since precondition, before queueing; Panic ignores it
@@ -1098,6 +1291,7 @@ class CommandRequest(TypedDict):
     visible_text: NotRequired[str]
     visible_task_id: NotRequired[str]
     task_constraint: NotRequired[Dict[str, Any]]
+    ui_control: NotRequired[Dict[str, Any]]
 
 
 class CommandResponse(TypedDict, total=False):
@@ -1168,10 +1362,17 @@ class CostBreakdownResponse(TypedDict, total=False):
     by_task_category: Dict[str, Any]
     accounting: Required[Dict[str, Any]]
     unattributed: Dict[str, Any]
+    # ``?period=24h|7d|30d`` only (``gateway/cost_period.cost_period``): ``{available, period, since, until,
+    # tariff_observed_at, models: [{model, calls, cost (null: no recorded price), priced_rows, open_rows, unpriced_rows,
+    # unshared_cost, unshared_calls, uncounted_calls, uncounted_input_tokens, tokens (all calls), tokens_shared (the
+    # calls in by_class: a money line's tokens), by_class, write_price_in_reads, write_price_lifetime}], cache_writes:
+    # [{class, detail, calls, write_tokens, write_cost, unshared_calls, shared_write_tokens (the tokens write_cost is
+    # of)}]}``, or ``{available: false, period, error_code}`` (``unknown_period`` adds ``periods``).
+    period: Dict[str, Any]
 
 
 __all__ = [
-    "InstalledSkill", "ExtensionsIndexResponse", "ExtensionManifestResponse", "ExtensionSettingsSectionResponse",
+    "SkillMcpServerFact", "InstalledSkill", "ExtensionsIndexResponse", "ExtensionManifestResponse", "ExtensionSettingsSectionResponse",
     "SkillToggleRequest", "SkillRevisionRequest", "SkillReviewRequest", "SkillGrantRequest", "SkillDeleteRequest",
     "SkillToggleResponse", "SkillActionRefusal", "SkillDaemonsResponse", "SkillLifecycleJob",
     "SkillLifecycleQueueResponse",
@@ -1181,12 +1382,14 @@ __all__ = [
     "MarketplaceUninstallResponse", "MarketplaceSearchResponse", "MarketplaceInstalledResponse",
     "HubPublicationClearRequest", "HubPublicationClearResponse",
     "ClaudexorProblem", "ClaudexorMaintenanceProblem", "ClaudexorAccountTarget",
+    "ClaudexorLoginJobProblem",
     "ClaudexorRestartRun", "ClaudexorRestartRuns", "ClaudexorRestartWarning", "ClaudexorRestartPreview",
     "ClaudexorRestartRequest", "ClaudexorRestartReceipt", "ClaudexorRestartResponse", "ClaudexorRestartProblem",
     "ClaudexorMaintenanceRequest", "ClaudexorMaintenanceOperation", "ClaudexorMaintenanceInventory",
-    "ClaudexorQuotaRefreshRequest", "ClaudexorAccountResources", "ClaudexorAccountResetRequest",
+    "ClaudexorQuotaRefreshRequest", "ClaudexorRefreshAttempt", "ClaudexorAccountResources", "ClaudexorAccountResetRequest",
     "ClaudexorAccountResetReceipt", "ClaudexorLoginRequest", "ClaudexorLoginInputRequest",
     "ClaudexorProfileEnabledResponse", "ReviewPoolResponse",
+    "ModelPriceTier", "ModelPrice",
     "ModelCatalogItem", "ModelCatalogResponse", "OpenAICompatibleModelsRequest", "LocalModelStartRequest",
     "LocalModelStartResponse", "LocalModelRuntimeMissingResponse", "LocalModelStatusResponse",
     "LocalModelTestResponse", "McpListingAttempt", "McpSignIn", "McpServerStatus", "McpStatusResponse",

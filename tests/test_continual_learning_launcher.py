@@ -49,7 +49,7 @@ def test_settings_template_contract():
     # Sprint bench-template decisions.
     assert settings["OUROBOROS_MAX_WORKERS"] == 4
     assert settings["OUROBOROS_SAFETY_MODE"] == "light"
-    assert settings["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in settings  # retired: a FAIL is shown to the agent, which decides
     assert settings["OUROBOROS_POST_TASK_EVOLUTION"] == "false"
     actors = json.loads(settings["OUROBOROS_SUBAGENTS"])
     assert actors["enabled"] is True
@@ -191,7 +191,7 @@ def test_dry_run_writes_manifest_and_blanked_settings(tmp_path, monkeypatch):
     assert params["max_workers"] == 4  # within-task subagent pool, not cross-task parallelism
     fidelity = manifest["extra"]["fidelity"]
     assert "OUROBOROS_SAFETY_MODE" in fidelity["declared_only_pinned_adapter_gap"]
-    assert "OUROBOROS_REVIEW_ENFORCEMENT" in fidelity["declared_only_pinned_adapter_gap"]
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in fidelity["declared_only_pinned_adapter_gap"]
     assert "OUROBOROS_SUBAGENTS" in fidelity["declared_only_pinned_adapter_gap"]
     assert manifest["available_subagents"]["items"][0]["route"]["target_id"] == \
         rendered["OUROBOROS_MODEL"]
@@ -593,7 +593,7 @@ def test_fidelity_follows_the_execution_clone_not_the_pinned_commit_constant(tmp
         return json.loads(buf.getvalue())["fidelity"]
 
     unpatched = _fidelity_of()
-    for knob in ("OUROBOROS_SAFETY_MODE", "OUROBOROS_REVIEW_ENFORCEMENT", "OUROBOROS_SUBAGENTS",
+    for knob in ("OUROBOROS_SAFETY_MODE", "OUROBOROS_SUBAGENTS",
                  "CLBENCH_SOLVE_DISABLED_TOOLS"):
         assert knob in unpatched["declared_only_pinned_adapter_gap"]
         assert knob not in unpatched["enforced_via_operator_patch"]
@@ -627,13 +627,12 @@ def test_fidelity_follows_the_execution_clone_not_the_pinned_commit_constant(tmp
     assert set(patched["declared_only_pinned_adapter_gap"]) == unattested
     assert patched["declared_only_pinned_adapter_gap"]["OUROBOROS_TASK_REVIEW_MODE"]["declared"] == "required"
     assert not unattested & set(patched["enforced_via_operator_patch"])
-    for knob in ("OUROBOROS_SAFETY_MODE", "OUROBOROS_REVIEW_ENFORCEMENT", "OUROBOROS_SUBAGENTS",
+    for knob in ("OUROBOROS_SAFETY_MODE", "OUROBOROS_SUBAGENTS",
                  "CLBENCH_SOLVE_DISABLED_TOOLS"):
         assert knob in patched["enforced_via_operator_patch"]
     # The declared values are the ones the patched clone really applies.
     assert patched["enforced_via_operator_patch"]["OUROBOROS_SAFETY_MODE"]["declared"] == "light"
-    assert patched["enforced_via_operator_patch"][
-        "OUROBOROS_REVIEW_ENFORCEMENT"]["declared"] == "blocking"
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in patched["enforced_via_operator_patch"]
     assert json.loads(patched["enforced_via_operator_patch"][
         "OUROBOROS_SUBAGENTS"]["declared"])["items"][0]["route"]["target_id"] == \
         "anthropic/claude-sonnet-4.6"

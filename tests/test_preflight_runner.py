@@ -482,11 +482,11 @@ def test_plugin_verification_ignores_the_candidate_working_directory(tmp_path):
 
 def test_worker_count_respects_physical_room_and_the_parent_allocation(monkeypatch):
     """CPU defaults and operator requests cannot spend unavailable worker slots."""
-    from ouroboros import config, test_parallelism as budget
+    from ouroboros import config, host_memory, test_parallelism as budget
 
     monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
     peak = config.TEST_WORKER_PEAK_RSS_BYTES
-    monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(10 * peak, 4 * peak))
+    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(10 * peak, 4 * peak))
     monkeypatch.setattr(budget, "other_runs", lambda: budget.HostRuns())  # a quiet host; the ledger has its own test
     monkeypatch.setenv(WORKERS_ENV, "1")
     assert preflight_probe._preflight_worker_count() == 1
@@ -1164,6 +1164,144 @@ def test_plugins_are_verified_before_the_candidate_tree_exists(tmp_path, two_pas
     assert not any(args[:2] == ["worktree", "add"] for args in git_calls), (
         "the candidate tree was materialised before the interpreter was verified"
     )
+
+
+def test_the_gate_waits_out_critical_memory_pressure_on_the_tasks_progress_line(tmp_path, two_pass_env, stub_passes,
+                                                                               monkeypatch, capsys):
+    """A gate is a new heavy test launch: while the kernel confirms critical pressure it starts nothing, says so on
+    the task's progress line (the owner's view of the running tool: what waits, that Stop ends it, no CLI key or
+    reading date) and with each reading's date on its stderr, and starts its passes at the
+    first reading that is not critical; ``result.json`` keeps the wait beside the admission (owner choice,
+    2026-11-14). The wait spends none of the lanes' budget: a wait longer than the whole budget still runs both
+    passes. The task's Stop and deadline end its worker as before: the wait holds no lock or ledger row."""
+    from types import SimpleNamespace
+
+    from ouroboros import config, host_memory, preflight_runner as pr, test_parallelism as budget
+
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV)  # a task's gate, not a test's child
+    monkeypatch.setattr(budget, "_ledger_dir", lambda: tmp_path / "slots")
+    monkeypatch.setattr(budget, "_process_table", lambda: ([], ""))
+    monkeypatch.setattr(config, "TEST_PROCESS_SAMPLE_SEC", 0.6)  # five critical readings: a wait past the budget
+    verdicts = [True] * 5 + [False, False]  # the admission, the wait's readings, the admission that starts
+    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(2 ** 40, 2 ** 40, verdicts.pop(0)))
+    events = stub_passes([(0, ""), (0, "")])
+    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    ctx = SimpleNamespace(repo_dir=repo, drive_root=tmp_path / "drive", task_id="task-w",
+                          task_metadata={"budget_drive_root": str(canonical)},
+                          emit_progress_fn=lambda text: events.append(("progress", text)))
+    began = time.monotonic()
+    assert pr.run_hermetic_pytest(repo, timeout=2, ctx=ctx) is None
+    assert time.monotonic() - began > 2, "the wait outlasted the gate's whole budget"
+    assert [event[0] for event in events] == ["progress", "progress", "pass", "pass"] and not verdicts
+    assert events[2][2] > 1.5, "the first pass got the budget the wait did not spend"
+    waiting, cleared = events[0][1], events[1][1]
+    # The owner's words, checked as words (no constant of the code under test): the action they have, never a CLI
+    # key or a reading's raw UTC date, which stay on stderr and in result.json below.
+    raw_date = re.search(r"\d{4}-\d\d-\d\dT\d\d:\d\d", waiting + cleared)
+    assert "Ctrl-C" not in waiting and not raw_date, (waiting, cleared)
+    assert waiting.startswith("Tests preflight waiting for memory: "), waiting
+    assert waiting.endswith("Stop ends the wait"), waiting
+    assert cleared == "Tests preflight starting: memory recovered", cleared
+    record = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
+    since, until, ended = record["workers"]["memory_wait"]
+    stderr = capsys.readouterr().err
+    assert f"PREFLIGHT_MEMORY_WAIT waiting to start: the kernel reports critical memory pressure (read {since})" \
+        in stderr
+    assert (f"PREFLIGHT_MEMORY_WAIT memory pressure no longer critical (read {until}); starting after waiting since "
+            f"{since}") in stderr
+    assert ended == "not_critical"
+    assert record["workers"]["workers"] == 2 and not list((tmp_path / "slots").glob("*.json"))
+
+
+@pytest.mark.parametrize("control", ["carrier_stop", "stop_now", "unknown", "pooled"])
+def test_a_turns_control_ends_its_wait_for_memory_before_anything_starts(tmp_path, two_pass_env, stub_passes,
+                                                                         monkeypatch, control):
+    """Opus, panel on PR3479: an in-process (inline) turn's stop kills no process, so a gate held by critical pressure
+    outlived it. The wait reads the turn's controls (``shell_process.turn_control_reader``: Stop now, and the
+    finalize control ``TaskModelWait.control_reason`` reads). Here a real carrier's ``terminate`` (teardown, Update)
+    arms that control through ``arm_inline_stop``: the gate returns a blocking verdict before any worktree, ledger
+    row or pass exists and leaves the control unread for the loop's own drain. An unreadable Stop projection is
+    unknown and stops nothing; a pooled worker reads no control (its Stop is the kill): both start once a reading
+    is not critical."""
+    import threading
+    from types import SimpleNamespace
+
+    from ouroboros import config, host_memory, preflight_runner as pr, test_parallelism as budget
+    from ouroboros.model_wait import TaskModelWait
+    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, drain_owner_entries
+    from ouroboros.tools.registry import ToolContext
+    from supervisor import inline_carrier, queue
+    from supervisor.active_activity import get_direct_activity_registry
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+    from supervisor.task_reaper import request_finalization_grace
+
+    task_id, data = "inline-stop", tmp_path / "drive"
+    (data / "state").mkdir(parents=True)
+    monkeypatch.setattr(queue, "DRIVE_ROOT", data)
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV)  # a task's gate, not a test's child
+    monkeypatch.setattr(budget, "_ledger_dir", lambda: tmp_path / "slots")
+    monkeypatch.setattr(budget, "_process_table", lambda: ([], ""))
+    monkeypatch.setattr(config, "TEST_PROCESS_SAMPLE_SEC", 0.05)
+    readings, third = [], threading.Event()
+    holds = control in ("carrier_stop", "stop_now")
+
+    def physical_memory():  # a control arrives at the third reading; pressure clears only where nothing may stop it
+        readings.append(time.monotonic())
+        if len(readings) == 3:
+            if control == "stop_now":
+                (data / "state" / "cancel_intents.json").write_text(json.dumps(
+                    {"intents": {task_id: {"stop_policy": "immediate", "request_id": "r1"}}}), encoding="utf-8")
+            elif control == "unknown":
+                (data / "state" / "cancel_intents.json").write_text("{damaged", encoding="utf-8")
+            elif control == "pooled":  # the same finalize control a pooled Wrap up writes
+                request_finalization_grace(data, task_id, REASON_OWNER_STOPPED_DIRECT_TURN, chat_id=0, stamp=0,
+                                           quiet=True)
+            third.set()
+            if control == "carrier_stop":
+                time.sleep(0.5)  # the carrier's terminate arms the control from the stopping thread meanwhile
+        if len(readings) > 200:
+            pytest.fail("the control did not end the wait")
+        return host_memory.MemorySnapshot(2 ** 40, 2 ** 40, holds or len(readings) < 6)
+
+    monkeypatch.setattr(budget, "physical_memory", physical_memory)
+    events = stub_passes([(0, ""), (0, "")])
+    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
+    ctx = ToolContext(repo_dir=repo, drive_root=data, task_id=task_id)
+    ctx.model_wait_context = TaskModelWait(task={"id": task_id}, drive_root=data, event_queue=None,
+                                           worker_slot_held=control == "pooled")
+    ctx.model_wait_context.tool_context = ctx
+    ctx.emit_progress_fn = lambda text: events.append(("progress", text))
+    actor = SimpleNamespace(_busy=True, _accepting_owner_messages=True, _current_task_id=task_id, _current_chat_id=0,
+                            _current_task_metadata={}, _current_task_text="commit", _task_started_ts=1000.0,
+                            _last_activity_ts=1000.0, _owner_message_admission_lock=threading.Lock())
+    get_direct_activity_registry().register(task_id, chat_id=0, actor=actor)  # as start_inline_turn registers it
+    verdicts = []
+    carrier = inline_carrier.InlineCarrier(lambda: verdicts.append(pr.run_hermetic_pytest(repo, timeout=30, ctx=ctx)),
+                                           name=f"inline_degraded-{task_id}",
+                                           on_stop=lambda: inline_carrier.arm_inline_stop(task_id))
+    try:
+        carrier.start()
+        assert third.wait(30)
+        if control == "carrier_stop":
+            carrier.terminate()  # the pool's teardown or a managed Update stopping the executor's thread
+        carrier.join(60)
+        assert not carrier.is_alive()
+    finally:
+        get_direct_activity_registry().unregister(task_id)
+    [verdict] = verdicts
+    worktrees = subprocess.run(["git", "-C", str(repo), "worktree", "list"], capture_output=True, text=True).stdout
+    assert len(worktrees.splitlines()) == 1 and not list((tmp_path / "slots").glob("*.json"))
+    finalize = drain_owner_entries(data, task_id, set(), kinds={KIND_FINALIZE_NOW})
+    assert len(finalize) == (1 if control in ("carrier_stop", "pooled") else 0), "a control is read, never drained"
+    if not holds:
+        assert verdict is None and [event[0] for event in events] == ["progress", "progress", "pass", "pass"]
+        return
+    assert verdict.startswith("⚠️ PRE_PUSH_TEST_ERROR: a stop of this work ended the wait for memory (read ")
+    assert verdict.endswith("; nothing started; no tests ran") and len(readings) <= 4
+    assert [event[0] for event in events] == ["progress"] and ctx._preflight_tests_passed is False
+    assert ctx._preflight_test_proof is None
 
 
 def test_the_legacy_single_pass_does_not_require_the_parallel_plugins(tmp_path, two_pass_env, stub_passes, monkeypatch):

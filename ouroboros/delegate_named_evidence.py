@@ -48,8 +48,11 @@ def _raise(error):
 
 def retain_files(area, paths, files_dir, *, preserve_mode=True):
     """Copy regular files byte-exact and whole into the evidence store."""
+    from ouroboros import work_domain
     from ouroboros.review_checking import _open_regular, _sha
 
+    if work_domain.is_work(area):
+        return _retain_work_files(area, paths, files_dir, preserve_mode=preserve_mode)
     kept = []
     for relative in paths:
         source = area / relative
@@ -69,12 +72,59 @@ def retain_files(area, paths, files_dir, *, preserve_mode=True):
     return kept
 
 
+def _retain_work_files(area, paths, files_dir, *, preserve_mode=True):
+    """``retain_files`` from a work copy: each regular file's bytes through the streamed confined intake
+    (``work_domain.measure``), its mode from its own metadata, never a service open of its pathname."""
+    from ouroboros import work_domain
+
+    kept = []
+    for relative in paths:
+        source = area / relative
+        if work_domain.kind(source) != "file":
+            continue
+        info = work_domain.lstat(source)
+        target = files_dir / relative
+        private_directory(target.parent, files_dir.parent)
+        with target.open("xb") as dst:
+            measured = work_domain.measure(source, dst)
+        mode = stat.S_IMODE(info.st_mode)
+        if preserve_mode:
+            target.chmod(mode)
+        kept.append({"path": relative, "size": measured["size"], "sha256": measured["sha256"], "mode": mode})
+    return kept
+
+
+def _work_evidence_rows(area, declared):
+    """``(relative path, kind)`` of every entry under a work copy's evidence folder, by held descriptors; an
+    unlistable folder raises, as the service walk's ``onerror``."""
+    from ouroboros import work_domain
+
+    for current, _dirs, _files in work_domain.walk(declared, strict=True):
+        for name, kind in work_domain.entries(current):
+            yield (pathlib.Path(current) / name).relative_to(area).as_posix(), kind
+
+
 def named_evidence_witness(area):
     """Stat identity of the copy's evidence folder (paths, types, sizes, times); "" when it cannot be
     listed. A retained summary is reused only while it is unchanged. Not a byte proof: it assumes the
     run's processes stopped writing, so a same-size rewrite within one timestamp tick, or a write
     after the final check, goes unseen."""
+    from ouroboros import work_domain
+
     rows = []
+    if work_domain.is_work(area):  # the same witness from held descriptors
+        try:
+            declared = area / EVIDENCE_DIRNAME
+            seen = work_domain.lstat(declared)
+            rows.append(f"{EVIDENCE_DIRNAME}\0{seen.st_mode}\0{seen.st_size}\0{seen.st_mtime_ns}\0{seen.st_ctime_ns}")
+            if not stat.S_ISDIR(seen.st_mode):
+                return hashlib.sha256(rows[0].encode()).hexdigest()  # never walk a linked root
+            for relative, _kind in _work_evidence_rows(area, declared):
+                seen = work_domain.lstat(area / relative)
+                rows.append(f"{relative}\0{seen.st_mode}\0{seen.st_size}\0{seen.st_mtime_ns}\0{seen.st_ctime_ns}")
+        except OSError:
+            return ""
+        return hashlib.sha256("\n".join(sorted(rows)).encode("utf-8", "surrogateescape")).hexdigest()
     try:
         declared = area / EVIDENCE_DIRNAME
         seen = declared.lstat()
@@ -99,7 +149,30 @@ def retain_named_evidence(area, files_dir, gaps, *, product_paths=(), preserve_m
     a folder that cannot be listed raises. Baseline-owned ``product_paths`` belong to
     capture, including symlinks; never retain them here.
     """
+    from ouroboros import work_domain
+
     declared = area / EVIDENCE_DIRNAME
+    if work_domain.is_work(area):  # held descriptors only: a link is a named gap, never followed
+        what = work_domain.kind(declared)
+        if EVIDENCE_DIRNAME in product_paths and what != "dir":
+            return []
+        if what == "link":
+            gaps.append({"path": EVIDENCE_DIRNAME, "reason": "evidence_symlink"})
+            return []
+        if what not in ("dir", "missing"):
+            gaps.append({"path": EVIDENCE_DIRNAME, "reason": "evidence_root_not_directory"})
+            return []
+        paths = []
+        for relative, kind in (_work_evidence_rows(area, declared) if what == "dir" else ()):
+            if relative in product_paths:
+                continue
+            if kind == "link":
+                gaps.append({"path": relative, "reason": "evidence_symlink"})
+            elif kind == "file":
+                paths.append(relative)
+            elif kind == "other":
+                gaps.append({"path": relative, "reason": "unsupported_entry_type"})
+        return retain_files(area, sorted(paths), files_dir, preserve_mode=preserve_mode)
     if EVIDENCE_DIRNAME in product_paths and (declared.is_symlink() or not declared.is_dir()):
         return []
     if declared.is_symlink():

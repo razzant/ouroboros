@@ -234,6 +234,45 @@ def test_an_in_flight_row_of_an_ended_task_closes_only_by_its_invocations_own_cu
     assert rows["s2"]["operation_state"] == ("not_dispatched" if fate == "definite_refusal" else "late_settled")
 
 
+@pytest.mark.parametrize("phase", ["late_wait", "review"])
+@pytest.mark.parametrize("fate", ["terminal_run", "run_still_going"])
+def test_a_delegated_row_a_deferred_write_left_open_is_repaired_where_the_author_decides(tmp_path, monkeypatch,
+                                                                                          phase, fate):
+    """#2779 (Astra, 9 Nov): a commit row whose collection settled its record while a busy state lock refused the row
+    write keeps its delegated seats in flight with their start tokens. The Advisory author's reference resolves after
+    the exact repair closes them from each start's own custody record (a run custody holds terminal whose outcome the
+    record holds), the task still running. The record alone proves nothing: a run still going keeps every seat, the
+    row as it was and the refusal (still running, or no handback yet in the ``review`` phase)."""
+    from ouroboros import review_ledger as rl
+    from ouroboros.tools.commit_gate import resolve_commit_review_reference
+    from tests.test_review_ledger import _raw
+    from tests.test_unwaited_review_settlement import _commit_world, _reference, _saved
+
+    world = _commit_world(tmp_path, monkeypatch, phase=phase)
+    rl.settle_from_collected(world.data, world.record_id, [
+        {**_raw("s1", "m1", parts=("change", "coupling")), "operation_id": "op-s1"},
+        {**_raw("s2", "m2"), "operation_id": "op-s2"}])
+    assert rl.load_record(world.data, world.record_id)["state"] == "settled"
+    _start(world.data, "s1")
+    _start(world.data, "s2", fate="running" if fate == "run_still_going" else "terminal")
+    stale = _saved(world)
+    assert (stale.status, stale.phase) == ("reviewing", phase)
+    assert all(row["operation_state"] == "in_flight" and row["pending_invocation_id"] for row in stale.triad_raw_results)
+
+    if fate == "run_still_going":
+        with pytest.raises(ValueError, match="still running" if phase == "late_wait" else "no longer has its exact"):
+            resolve_commit_review_reference(world.ctx, _reference(stale))
+        assert _saved(world) == stale, "nothing is closed on the record's word alone"
+        return
+    source = resolve_commit_review_reference(world.ctx, _reference(stale))
+    saved = _saved(world)
+    assert (source.status, source.phase) == (saved.status, saved.phase) == ("reviewed", "review_only")
+    rows = {row["slot_id"]: row for row in saved.triad_raw_results}
+    assert all(row["operation_state"] == "late_settled" and "pending_invocation_id" not in row for row in rows.values())
+    assert {row["custody_closure"]["run_id"] for row in rows.values()} == {"run-s1", "run-s2"}
+    assert saved.paid and rl.load_record(world.data, world.record_id)["verdict"]["aggregate"] == "PASS"
+
+
 def test_a_pass_whose_in_flight_seats_have_only_pending_starts_writes_nothing(tmp_path, monkeypatch):
     from ouroboros import review_checking_prune
     from ouroboros.review_state import load_state

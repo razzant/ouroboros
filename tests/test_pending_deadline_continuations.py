@@ -28,7 +28,7 @@ def expiry(monkeypatch):
     monkeypatch.setattr(queue, "load_state", lambda: {})
     monkeypatch.setattr(workers, "load_state", lambda: {})
     monkeypatch.setattr("supervisor.state.budget_remaining", lambda *_a, **_k: 5)
-    monkeypatch.setattr("supervisor.worker_owner_wait.maintain_owner_wait_capacity", lambda: None)
+    monkeypatch.setattr("supervisor.worker_owner_wait.grant_warm_returns", lambda: None)
 
     def reap():
         while not jobs.empty():

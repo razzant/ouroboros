@@ -176,6 +176,89 @@ def test_a_recheck_closes_only_executed_passes_or_removed_tests(status, closed, 
     assert bool(github.comments) is closed
 
 
+def test_an_issue_loses_each_test_that_passes_and_keeps_what_is_not_green():
+    left = ["tests/t.py::test_red", "tests/t.py::test_skip", "tests/t.py::test_unknown", "tests/t.py::test_xfailed"]
+    github = FakeGitHub(label=True, issues=[_issue(5, {"os": "windows", "kind": "pre-existing",
+                                                       "ids": sorted(["tests/t.py::test_fixed", "tests/t.py::test_gone", *left])})])
+    status = {"tests/t.py::test_fixed": "passed", "tests/t.py::test_gone": "absent", "tests/t.py::test_red": "failed",
+              "tests/t.py::test_skip": "skipped", "tests/t.py::test_unknown": "unknown", "tests/t.py::test_xfailed": "xfailed"}
+    record = _route(github, [], [], recheck=lambda ids: {nodeid: status[nodeid] for nodeid in ids}, system="windows")
+    assert record["closed"] == [] and record["narrowed"] == [{"issue": 5, "ids": ["tests/t.py::test_fixed",
+                                                                                  "tests/t.py::test_gone"]}]
+    body = github.issues[5]["body"]
+    assert routing.parse_machine_block(body)["ids"] == left and github.issues[5]["state"] == "open"
+    assert f"Still not passing at `{HEAD}`" in body and "takes a test off this list when a check on Windows runs it and it passes, or finds it gone" in body
+    [(number, text)] = github.comments  # the record of what left the issue
+    assert number == 5 and text.startswith(f"Green at `{HEAD}` on Windows (https://example.invalid/run/7)")
+    assert "`tests/t.py::test_fixed`" in text and "`tests/t.py::test_gone`" in text and "Still tracked here: 4." in text
+    assert not any(nodeid in text for nodeid in left)
+    asked = []  # the next run rechecks only what is left, and closes the issue once that passes
+    record = _route(github, [], [], recheck=lambda ids: asked.append(ids) or dict.fromkeys(ids, "passed"), system="windows")
+    assert asked == [left] and record["closed"] == [5] and github.issues[5]["state"] == "closed"
+
+
+@pytest.mark.parametrize("refused", [("POST", "issues/5/comments"), ("PATCH", "issues/5")])
+def test_an_issue_is_narrowed_only_after_the_comment_that_names_what_left(refused):
+    ids = ["tests/t.py::test_fixed", "tests/t.py::test_red"]
+    github = FakeGitHub(label=True, issues=[_issue(5, {"kind": "pre-existing", "ids": ids})], fail={refused})
+    record = _route(github, [], [], recheck=lambda asked: {ids[0]: "passed", ids[1]: "failed"})
+    assert record["narrowed"] == [] and routing.parse_machine_block(github.issues[5]["body"])["ids"] == ids
+    assert record["warnings"] == [("comment on #5" if refused[0] == "POST" else "narrow #5") + ": HTTP 502 Bad Gateway"]
+    assert len(github.comments) == (refused[0] == "PATCH")  # a later run names them again; nothing leaves unrecorded
+
+
+def test_a_long_list_of_passing_tests_is_named_over_comments_within_the_limit(monkeypatch):
+    monkeypatch.setattr(routing, "_COMMENT_LIMIT", 600)
+    ids = [f"tests/t.py::test_case_{index:03d}" for index in range(30)]
+    github = FakeGitHub(label=True, issues=[_issue(5, {"kind": "pre-existing", "ids": [*ids, "tests/t.py::test_red"]})])
+    record = _route(github, [], [], recheck=lambda asked: {nodeid: "failed" if nodeid.endswith("red") else "passed"
+                                                          for nodeid in asked})
+    texts = [text for _, text in github.comments]
+    assert len(texts) > 1 and all(len(text) <= 600 for text in texts)
+    assert [line[3:-1] for text in texts for line in text.splitlines() if line.startswith("- `")] == ids
+    assert record["narrowed"] == [{"issue": 5, "ids": ids}]
+    assert routing.parse_machine_block(github.issues[5]["body"])["ids"] == ["tests/t.py::test_red"]
+
+
+def test_narrowing_a_culprit_issue_keeps_the_author_its_opening_names():
+    block = {"format": 1, "kind": "culprit", "pr": 2067, "culprit": "c" * 40, "last_good": "b" * 40,
+             "ids": ["tests/t.py::test_a", "tests/t.py::test_b"]}
+    github = FakeGitHub(label=True, issues=[{"number": 5, "body": routing.issue_body(block, head=HEAD, run_url="u",
+                                                                                    author="dev")}])
+    _route(github, [], [], recheck=lambda ids: {"tests/t.py::test_a": "passed", "tests/t.py::test_b": "failed"})
+    body = github.issues[5]["body"]
+    assert "since #2067 by `dev` landed." in body and routing.parse_machine_block(body)["ids"] == ["tests/t.py::test_b"]
+
+
+def test_the_hand_over_is_recorded_before_the_recheck_which_skips_what_this_run_passed():
+    import copy
+
+    culprit = "c" * 40
+    github = FakeGitHub(label=True, prs={culprit: [_pr(2067, culprit, login="author")]}, issues=[
+        _issue(6, {"kind": "pre-existing", "ids": ["tests/t.py::test_elsewhere", "tests/t.py::test_ran_here"]}),
+        _issue(7, {"kind": "culprit", "culprit": "d" * 40, "pr": 2000, "ids": ["tests/quiet.py::test_not_run"]})])
+    verdicts = [{"id": "tests/t.py::test_new", "verdict": "culprit", "culprit": culprit, "last_good": "b" * 40}]
+    saved, asked = [], []
+
+    def recheck(ids):
+        # This run's red already reached its author and an issue before the long session starts.
+        [handed] = saved
+        assert handed["created"] == [102] and handed["comments"] == [2067] and handed["complete"] is False
+        asked.append(ids)
+        return dict.fromkeys(ids, "passed")
+
+    record = _route(github, ["tests/t.py::test_new"], verdicts, recheck=recheck,
+                    same_run=lambda ids: {"tests/t.py::test_ran_here": "passed", "tests/quiet.py::test_not_run": "kept"},
+                    checkpoint=lambda handed: saved.append(copy.deepcopy(handed)))
+    # A record whose module this run did not run is not run again for it, and stays as it was.
+    assert asked == [["tests/t.py::test_elsewhere"]]
+    assert record["same_run"] == {"tests/t.py::test_ran_here": "passed", "tests/quiet.py::test_not_run": "kept"}
+    assert record["rechecked"] == {"tests/t.py::test_elsewhere": "passed"}
+    assert record["closed"] == [6] and record["complete"] is True and github.issues[7]["state"] == "open"
+    assert routing.parse_machine_block(github.issues[7]["body"])["ids"] == ["tests/quiet.py::test_not_run"]
+    assert [number for number, _ in github.comments] == [2067, 6]
+
+
 def test_a_lint_issue_closes_only_once_a_linted_head_no_longer_has_its_finding():
     def run(lint_checked, failed=()):
         github = FakeGitHub(label=True, issues=[_issue(5, {"kind": "culprit", "pr": 1, "culprit": "c" * 40,
@@ -216,10 +299,11 @@ def test_api_errors_become_warnings_and_the_hand_over_goes_on():
     assert record["warnings"] == ["create the post-merge-red label: HTTP 502 Bad Gateway",
                                   "create an issue: HTTP 502 Bad Gateway"]
     assert "Tracking issue" not in github.comments[0][1]
-    # Unreadable open issues: comments still go out, but no issue that could duplicate one.
+    # Unreadable open issues: comments still go out, but no issue that could duplicate one, and no recheck ran.
     github = FakeGitHub(prs={culprit: [_pr(2067, culprit)]}, fail={("GET", "issues")})
     record = _route(github, ["tests/t.py::test_a"], verdicts)
     assert record["created"] == [] and record["comments"] == [2067] and len(record["warnings"]) == 1
+    assert record["complete"] is False and record["rechecked"] == {}
 
 
 def test_only_the_merge_commit_of_a_merged_pull_request_is_blamed():
@@ -256,7 +340,8 @@ def test_each_leg_extends_and_closes_only_the_issues_of_its_own_system():
     issue = github.issues[102]
     assert issue["title"] == "Post-merge red on Windows: #2067 Change 2067"
     assert routing.parse_machine_block(issue["body"])["os"] == "windows" and "fail on Windows since #2067" in issue["body"]
-    assert [(number, "fail on Windows since" in text) for number, text in github.comments] == [(6, False), (2067, True)]
+    # This run's red reaches its author before the recheck of older issues starts.
+    assert [(number, "fail on Windows since" in text) for number, text in github.comments] == [(2067, True), (6, False)]
     record = _route(github, ["tests/t.py::test_b"], verdicts, recheck=lambda ids: asked.append(ids) or {})
     # The Linux leg extends the issue it opened before the legs and leaves the Windows one alone.
     assert asked[-1] == ["tests/t.py::test_a"] and record["updated"] == [5] and record["created"] == []
@@ -322,6 +407,17 @@ def test_a_size_red_is_handed_over_with_the_base_it_was_measured_against():
     assert "(a test of the size check, `pytest -m size_ratchet`)" in github.comments[0][1]
     assert "OURO_SIZE_RATCHET_BASE_REF" not in routing.issue_body(
         {"kind": "unattributed", "base": "a" * 40, "ids": ["tests/t.py::test_a"]}, head=HEAD, run_url="u")
+    # a book's size id says what a later approved growth does to its base; a module's size id does not
+    book = routing.issue_body({"kind": "unattributed", "base": "a" * 40, "ids": [f"size {routing.BOOK_BUDGETS}::test_x"]},
+                              head=HEAD, run_url="u")
+    assert "`book-growth` label approved still counts against that base" in book
+    assert "book-growth" not in github.issues[100]["body"] and "only by passing against that base" in github.issues[100]["body"]
+    # the closing sentence promises "found gone" only for a test outside the size check
+    plain, mixed = (routing.issue_body({"kind": "unattributed", "base": "a" * 40, "ids": ids}, head=HEAD, run_url="u")
+                    for ids in (["tests/t.py::test_a"], ["tests/t.py::test_a", SIZED]))
+    assert "it passes, or finds it gone, and closes" in plain
+    assert "it passes, and closes" in github.issues[100]["body"] and "it passes, and closes" in book
+    assert "it passes, or finds one outside the size check gone, and closes" in mixed
 
 
 def test_a_label_the_other_leg_created_meanwhile_is_no_warning():

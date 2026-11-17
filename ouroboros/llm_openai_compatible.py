@@ -18,8 +18,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 from ouroboros.llm_attempt import (
-    _applied_payload_cache_ttl, apply_processing_preference, attach_processing_receipt, openai_family_route,
-    supports_message_cache_control,
+    _applied_payload_cache_ttl, apply_processing_preference, attach_processing_receipt, body_error_facts,
+    openai_family_route, supports_message_cache_control,
 )
 from ouroboros.llm_messages import project_declared_system_prefix
 from ouroboros.usage_accounting import UsageScope, usage_scope
@@ -418,6 +418,8 @@ class _OpenAICompatibleLaneMixin:
             ]
             note_provider_metadata_drop_fields(unsupported)
         apply_processing_preference(target, kwargs)
+        if allow_message_cache and cache_model.startswith("anthropic/"):
+            self._cache_declared_system_context(messages, kwargs)
         return kwargs
 
     def _normalize_remote_response(
@@ -464,16 +466,7 @@ class _OpenAICompatibleLaneMixin:
         # a blank finish_reason=null "incomplete response".
         _body_err = self._provider_body_error(resp_dict)
         if _body_err:
-            _body_message = str(_body_err.get("message") or "")
-            usage["provider_error"] = {
-                "code": _body_err.get("code"),
-                "type": _body_err.get("type"),
-                "message": _body_message[:300],
-                # A cut sentence says so: the owner's quote must not read this prefix as whole.
-                **({"message_truncated": True} if len(_body_message) > 300 else {}),
-                "kind": "rate_limit" if self._is_transient_body_error(_body_err) and str(_body_err.get("code")) == "429"
-                else ("provider_transient" if self._is_transient_body_error(_body_err) else "provider_error"),
-            }
+            usage["provider_error"] = body_error_facts(_body_err, self._is_transient_body_error(_body_err))
         choices = resp_dict.get("choices") or [{}]
         first_choice = choices[0] if choices and isinstance(choices[0], dict) else {}
         msg = dict(first_choice.get("message") or {})
@@ -581,6 +574,10 @@ class _OpenAICompatibleLaneMixin:
         _write_split = self._cache_write_split(usage)
         if _write_split and not usage.get("cache_write_tokens_by_ttl"):
             usage["cache_write_tokens_by_ttl"] = _write_split
+        if usage["provider"] == "deepseek" and usage.get("cost") is None and not usage.get("cost_invalid"):
+            from ouroboros._usage_settlement import settled_cost_facts
+
+            usage.update(settled_cost_facts(usage))  # its attempt row's pinned amount, never a fresh price
         if (usage.get("cost") is None and not usage.get("cost_invalid")
                 and (usage.get("prompt_tokens") or usage.get("completion_tokens"))):
             from ouroboros.pricing import estimate_cost_optional

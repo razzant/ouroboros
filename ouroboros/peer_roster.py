@@ -17,7 +17,9 @@ answer, a review, model access, the model's own sleep with its recorded mode
 and wake sources, the owner's Pause with the author it declared, a monetary
 pause; an unrecognized reason stays ``unknown`` with that reason) -- for a root
 that waits, its ``tails`` (what of its tree still runs, typed and worded as the
-owner's card says it, ``gateway/work_status.py``) -- and the dated authored
+owner's card says it, ``gateway/work_status.py``) -- for a queued root another
+tree keeps its folder from and nothing holds or pauses, that holder and its Project as the chooser last saw
+them (``folder_wait``, ``project_lease.note_folder_wait``) -- and the dated authored
 focus of any root that has not settled.  The task result is read per row; the
 open delegated runs are one custody read per roster.  A source a row's read could not
 open is named on that row (``unavailable``): the facts it holds are unknown at
@@ -426,6 +428,11 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str,
         waiting += _queue_hold_facts(task, stored, waiting)
     from ouroboros.work_stop import stop_presentation
     view = stop_presentation({**stored, **task}, {"owner": stored.get("owner_pause") or {}})
+    # Who keeps its folder, as the chooser last noted it on a pass that reached the row's lane; its hold, pause and
+    # sleep gates come first, so a row stopped, refused, asleep or held since waits for that, not for that holder.
+    if (not settled and status == "pending" and isinstance(task.get("_folder_wait"), dict)
+            and not (view["stop"] or view["refusal"] or view["waiting"] or row.get("project_admission_hold"))):
+        row["folder_wait"] = dict(task["_folder_wait"])
     if view["stop"] or view["refusal"]:
         row.update(stop=view["stop"], release=view["release"], refusal=view["refusal"])
     if waiting:
@@ -613,7 +620,8 @@ def _facts_fingerprint(row: Dict[str, Any]) -> str:
     """Recorded names, start, origin, waits and tails, and the sources this read could not open: absolute
     values, so a heartbeat never churns them while a gap that moves to another row does."""
     facts = {key: row[key] for key in ("suggested_name", "started_at", "origin", "waiting", "tails", "open_questions",
-                                     "project_admission_hold", "recorded_status", "project_name", "unavailable")
+                                     "project_admission_hold", "folder_wait", "recorded_status", "project_name",
+                                     "unavailable")
              if row.get(key)}
     return json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":")) if facts else ""
 
@@ -692,7 +700,7 @@ def render_roster_note(roster: Dict[str, Any], *, exclude: str = "") -> str:
                          + "; ".join(_render_wait(wait) for wait in row["waiting"]))
         if row.get("tails"):
             lines.append("  tails: " + "; ".join(tail["text"] for tail in row["tails"]))
-        for key in ("open_questions", "project_admission_hold", "recorded_status"):
+        for key in ("open_questions", "project_admission_hold", "folder_wait", "recorded_status"):
             if row.get(key):
                 lines.append(f"  {key}=" + json.dumps(row[key], ensure_ascii=False, sort_keys=True))
         focus = compact_focus(row.get("focus"))

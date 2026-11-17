@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from tests import test_subscription_role_routes_browser as roles
+from tests.settings_browser_helpers import press_editor_save, settings_page
 
 pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
@@ -84,14 +85,18 @@ def account_catalog_ui(role_ui):
     return ui
 
 
+# Each consumer is its own Settings page: Main's role page, or the agent's page (configure_mixed's ids).
+AGENT_IDS = {"API actor": "native", "Native actor": "agent"}
+
+
 def editor(ui, consumer):
-    page = roles.open_agents(ui)
     if consumer == "Models":
-        page.locator('[data-settings-tab="models"]').click()
-        row = page.locator('[data-model-role="main"]')
+        page = roles.open_models(ui, "main")
+        row = settings_page(page, "models/role/main").locator('[data-model-role="main"]')
         selectors = ('[data-model-role-source]', '[data-model-role-model]', '[data-model-role-account]')
     else:
-        row = page.locator('[data-subagent-row]').nth(0 if consumer == "API actor" else 2)
+        row = roles.open_agent(ui, AGENT_IDS[consumer])
+        page = ui["page"]
         selectors = tuple(f'[data-subagent-field="{field}"]' for field in ("route", "model", "account"))
     return page, row, *(row.locator(selector) for selector in selectors)
 
@@ -127,15 +132,15 @@ def refresh(ui):
 
 def assert_saved(ui, consumer, model, pin):
     page = ui["page"]
-    with page.expect_response("**/api/settings"):
-        page.locator("#btn-save-settings").click()
-    page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
-    saved = roles.settings_saves(ui)[-1]
+    assert press_editor_save(page).startswith("Saved")
     target = f"claudexor::{SOURCE}={model}"
     if consumer == "Models":
+        # Main's Save sends what changed through the checker; the served document is what it saved.
+        saved = ui["settings"]
         assert saved["OUROBOROS_MODEL"] == target
         assert saved["OUROBOROS_MODEL_ACCOUNTS"]["main"] == pin
     else:
+        saved = {"OUROBOROS_SUBAGENTS": roles.saved_catalog(ui)}
         route = saved["OUROBOROS_SUBAGENTS"]["items"][0 if consumer == "API actor" else 2]["route"]
         assert route == {"kind": "api_model" if consumer == "API actor" else "agent_session",
                          "target_id": target if consumer == "API actor" else f"codex={model}",
@@ -169,6 +174,7 @@ def test_account_pin_auto_roundtrip_keeps_saved_custom_model(account_catalog_ui,
 
 @pytest.mark.parametrize("consumer", CONSUMERS)
 def test_partial_account_refresh_keeps_draft_and_only_failed_account_history(account_catalog_ui, consumer):
+    from playwright.sync_api import expect
     ui = account_catalog_ui
     page, row, source, field, account = editor(ui, consumer)
     account.select_option("")
@@ -196,7 +202,8 @@ def test_partial_account_refresh_keeps_draft_and_only_failed_account_history(acc
     assert source.evaluate("e => e === window.accountSourceNode")
     assert account.evaluate("e => e === window.accountPinNode")
     assert account.input_value() == ""
-    assert problem["message"] in page.locator("#settings-model-catalog-status").text_content()
+    # The catalogue's own result line stands on the Models list (model_roles.js mountModels); an editor's page
+    # says the gap on its row (Main's status above, an agent's status below).
     options = suggestions(page, field, {"catalog-shared", "catalog-only-b"})
     assert set(options) - {DRAFT_MODEL} == {"catalog-shared", "catalog-only-b"}
     shared = options["catalog-shared"]
@@ -204,13 +211,14 @@ def test_partial_account_refresh_keeps_draft_and_only_failed_account_history(acc
     assert not any(claim in shared for claim in ACCOUNT_CLAIMS)
     if consumer == "Native actor":
         account.select_option("personal")
-        assert "not in discovery" in suggestions(page, field)[DRAFT_MODEL]
+        # The draft is not in this account's list: the chooser says so beside the field (model_chooser.js).
+        custom = row.locator('[data-model-custom]')
+        expect(custom).to_be_visible()
+        assert custom.inner_text() == "Custom ID · Not in this list"
         account.select_option("work")
-        assert "not checked" in suggestions(page, field)[DRAFT_MODEL]
         status = row.locator("[data-subagent-status]")
-        assert status.inner_text() == "Not checked"
-        # The unread account catalog is disclosed on the row's own status sentence.
-        assert "model list could not be read" in status.get_attribute("title")
+        # The unread account catalog is disclosed in the row's own visible status sentence.
+        assert status.inner_text() == "codex · model availability not checked · model list could not be read"
         account.select_option("")
     roles.capture(page, "account-catalog-partial-" + consumer.lower().replace(" ", "-"))
     assert_saved(ui, consumer, DRAFT_MODEL, "")

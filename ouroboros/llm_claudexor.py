@@ -28,12 +28,11 @@ from ouroboros.llm_attempt import _PhysicalSendNotStarted, _attempt_request, _ca
 from ouroboros.llm_capability_policy import model_catalog as model_catalog, catalog_admits_model as catalog_admits_model
 from ouroboros.send_clock import stamp_clock_note
 from ouroboros.llm_substitution import (
-    AccountRotation, CapabilityRetry, SubstitutionBudget, capability_refusal_text, substitution_fact, failed_account_preference,
-    take_failed_account_preference)
-from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
+    AccountRotation, CapabilityRetry, SubstitutionBudget, capability_refusal_text, substitution_fact, send_account)
 from ouroboros.model_wait import (ModelWaitInterrupted, accepted_operation_scope, current_model_wait,
                                   dispatch_deadline_remaining_sec, prepared_call_scope)
 from ouroboros.observability import persist_call, update_call_manifest_metadata
+from ouroboros.context_timing import host_step, mark, span_since, timed
 from ouroboros.owner_pause import launch_admission, OwnerPauseRefused, model_handed_off
 from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
@@ -74,7 +73,7 @@ def prepare_processing_target(target: dict) -> dict:
         return target
     prepared = {**target, "processing_preferences": []}
     try:
-        sources = model_sources(processing_view=True)
+        sources = timed("claudexor.processing", model_sources, processing_view=True)
     except ClaudexorUnavailable:
         return prepared
     source = next((row for row in sources.get("sources", [])
@@ -133,6 +132,19 @@ class ClaudexorModelError(RuntimeError):
 
 class ClaudexorModelNotDispatched(ClaudexorModelError, ProviderNotDispatched):
     """A failed prepare before create, or an engine receipt proving dispatch.state=not_started."""
+
+
+# The install's own control daemon left unanswered before any model create (no status: not a received refusal).
+DAEMON_UNANSWERED_CODES = frozenset({"daemon_unreachable", "daemon_not_answering", "daemon_starting",
+                                     "daemon_descriptor_changed"})
+
+
+def daemon_not_delivered(failure: object) -> bool:
+    """Whether a recorded failure row (``loop_llm_call``'s ``_last_llm_failure``) is a typed Claudexor prepare
+    failure: the own daemon did not answer before create, so no operation exists and nothing was sent or charged.
+    The model did not fail; its same-route repeats and wait-first gate (``loop_transport``) read this one fact."""
+    return (isinstance(failure, dict) and failure.get("not_dispatched_provider") == "claudexor"
+            and failure.get("operation_id") == "" and failure.get("provider_code") in DAEMON_UNANSWERED_CODES)
 
 
 def presence_refusal_unstarted(error: Exception, round_idx: int) -> bool:
@@ -292,28 +304,11 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
             isinstance(block, dict) and block.get("type") == "text" for block in content
         ):
             message["content"] = context_fit.extract_plain_text_from_content(content)
-    role = parameters.get("model_role", "")
-    override = parameters.get("model_account_override")
-    if override is not None and not isinstance(override, str):
-        raise ValueError("model_account_override must be a profile name, empty Auto, or None")
-    pin = override.strip() if override is not None else model_role_option(MODEL_ACCOUNTS_KEY, role)
-    account = {"mode": "pin", "profileId": pin} if pin else {"mode": "auto"}
-    # The next matching-route DISPATCH only; Pin still consumes it. A prospective
-    # build reads the same fact without spending it, so the priced candidate and
-    # the send it admits stay identical.
-    failed_profile = (take_failed_account_preference if not parameters.get("prospective")
-                      else failed_account_preference)(target, parameters)
-    if not pin and not parameters.get("_no_account_preference"):
-        # Carry the conversation's last account as a preference, not admission;
-        # the engine still chooses. A round already answered by the wrong model
-        # carries none, so its ranking decides where every redo lands.
-        for message in reversed(prepared):
-            native = message.get("nativeContinuation") or {}
-            route = native.get("route") or {}
-            if route.get("source") == target["source"] and route.get("model") == target["resolved_model"]:
-                if route.get("credentialProfileId") and route["credentialProfileId"] != failed_profile:
-                    account["preferredProfileId"] = route["credentialProfileId"]
-                break
+    # The conversation's account, else the account this task's plan rests on, as a preference the engine may overrule
+    # (``send_account``). The failed account is spent by the next matching DISPATCH only; Pin still consumes it. A
+    # prospective build reads that fact without spending it, so the priced candidate and the send it admits stay identical.
+    plan = getattr(getattr(current_model_wait(), "tool_context", None), "context_fit_plan", None)
+    account = send_account(target, prepared, parameters, plan=plan, consume=not parameters.get("prospective"))[0]
     options = {wire: parameters[key] for key, wire in (
         ("reasoning_effort", "reasoningEffort"), ("temperature", "temperature"),
         ("cache_affinity", "cacheKey"),
@@ -428,18 +423,18 @@ class _ModelInvocation:
                 if remaining <= 0:
                     raise last_error or ClaudexorUnavailable("daemon_not_answering", "Call deadline elapsed before model creation")
                 try:
-                    self.gateway = model_gateway(lambda: ensure_owned_gateway(
+                    self.gateway = timed("daemon.gateway", model_gateway, lambda: ensure_owned_gateway(
                         admission_wait_sec=remaining, startup_wait_sec=remaining))
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise ClaudexorUnavailable("daemon_not_answering", "Call deadline elapsed before model creation")
-                    operations = self.gateway.operations(timeout_sec=remaining)
+                    operations = timed("daemon.operations", self.gateway.operations, timeout_sec=remaining)
                     break
                 except ClaudexorUnavailable as error:
                     # No model create has been attempted. Wait on this call's
                     # own transport deadline; received refusals remain refusals.
-                    unanswered = not error.status_code and (error.observation_timeout or error.code in {
-                        "daemon_unreachable", "daemon_not_answering", "daemon_starting", "daemon_descriptor_changed"})
+                    unanswered = not error.status_code and (error.observation_timeout
+                                                            or error.code in DAEMON_UNANSWERED_CODES)
                     if not unanswered or time.monotonic() >= deadline:
                         raise
                     last_error = error
@@ -449,14 +444,15 @@ class _ModelInvocation:
             self.capture_failure_evidence = model_failure_evidence_supported(operations)
             self.capture_effort_evidence = operation_query_supported(operations, method="POST",
                 path="/v2/model-operations", name="captureEffortEvidence", value="true")
-            self.request_ref = self.gateway.upload_model_request(canonical_bytes, sha256=sha256, size_bytes=size_bytes,
-                                                                 idempotency_key=self.invocation_id)
+            self.request_ref = timed("daemon.upload", self.gateway.upload_model_request, canonical_bytes, sha256=sha256,
+                                     size_bytes=size_bytes, idempotency_key=self.invocation_id)
             self.request_manifest_ref = persist_call(self.root, task_id=self.task_id, call_id=f"{self.invocation_id}_model_request",
                          call_type="llm_claudexor_request", payload=self.payload, keep_raw=True,
                          manifest={"invocation_id": self.invocation_id, "request_ref": self.request_ref,
                                    "model_role": self.role,
                                    "capture_failure_evidence": self.capture_failure_evidence,
                                    "capture_effort_evidence": self.capture_effort_evidence})["manifest_ref"]
+            host_step("daemon_upload")
         except ClaudexorUnavailable as error:
             raise ClaudexorModelNotDispatched({"code": error.code, "message": str(error)}, model_role=self.role) from None
 
@@ -524,10 +520,12 @@ class _ModelInvocation:
                 if not self.operation_id:
                     self.observe_operation()
                     self.check_control(starting=True)
-                    detail = self.gateway.create_model_operation(self.request_ref, idempotency_key=self.invocation_id,
+                    detail = timed("daemon.create", self.gateway.create_model_operation, self.request_ref,
+                        idempotency_key=self.invocation_id,
                         **({"capture_failure_evidence": True} if self.capture_failure_evidence else {}),
                         **({"capture_effort_evidence": True} if self.capture_effort_evidence else {}))
                     self.operation_id = detail["id"]
+                    host_step("create_operation")
                     self.detail = detail
                     self.observe_operation(accepted=True)
                 else:
@@ -562,8 +560,8 @@ class _ModelInvocation:
                             and context.get("generationStarted") is False
                             and context.get("processingFallback") == "standard"
                             and context.get("processingRefusal") in {"capacity", "unsupported"}
-                            and self.target.get("processing_preference") in {"fast", "economy"}
-                            and options.get("processingPreference") in {"fast", "economy"}
+                            and self.target.get("processing_preference") in {"fast", "economy", "ultrafast"}
+                            and options.get("processingPreference") in {"fast", "economy", "ultrafast"}
                             and not options.get("serviceTier")):
                         # response_received describes the refusal envelope. The
                         # engine separately proves generation never started.
@@ -685,6 +683,13 @@ class _ModelInvocation:
 
     def finish(self, result: dict) -> tuple[dict, dict]:
         usage, cost, final = self.extract_usage(result)
+        # After the host's Standard retry of a refused tier (``_unstarted_repair``) the engine's receipt answers that
+        # Standard request; this logical call still asked the work's tier, which its receipt keeps beside what was
+        # sent and served (the physical attempt's own row keeps the engine's receipt).
+        wanted, sent = self.target.get("processing_preference"), (self.payload.get("options") or {}).get("processingPreference")
+        receipt = usage.get("processing")
+        if isinstance(receipt, dict) and wanted and sent and sent != wanted and receipt.get("requested") != wanted:
+            usage["processing"] = {**receipt, "requested": wanted, "reason": receipt.get("reason") or "submitted_mode_differs"}
         route = result.get("route") or {}
         usage.pop("wire_layout", None)  # host-owned: the projection fact of THIS call's target
         usage.update(provider="claudexor", resolved_model=self.target["usage_model"], cost=cost, cost_final=final,
@@ -692,6 +697,7 @@ class _ModelInvocation:
                      **({"wire_layout": dict(self.target["wire_layout"])} if isinstance(self.target.get("wire_layout"), dict) else {}),
                      claudexor={"operation_id": self.operation_id, "model_role": self.role,
                                 "requested_profile": str((self.payload.get("account") or {}).get("profileId") or ""),
+                                **_dispatch_facts(self.payload, self.detail, result),
                                 "route": copy.deepcopy(route), "cost_evidence": copy.deepcopy(result.get("cost")),
                                 "outcome": result.get("outcome"), "problem": copy.deepcopy(result.get("problem")),
                                 "requested_options": copy.deepcopy(self.payload.get("options") or {}),
@@ -770,6 +776,23 @@ class _ModelInvocation:
             gateway.close()
 
 
+def _dispatch_facts(payload: dict, detail: dict, result: dict) -> dict:
+    """What the engine's own operation record says of this send's account and start, beside the round's receipt: the
+    profile the send preferred, the engine's ``routing.selectionReason``, and ``engine_until_dispatch_ms``, the time
+    until dispatch started by the engine's record (``startedAt`` to ``dispatch.startedAt``; the dispatch mark precedes
+    the vendor request's bytes, so it is no wire time). An absent field adds nothing."""
+    from ouroboros.deadline_utils import parse_deadline_ts
+
+    preferred = (payload.get("account") or {}).get("preferredProfileId")
+    reason = (result.get("routing") or detail.get("routing") or {}).get("selectionReason")
+    started, dispatched = (parse_deadline_ts(value) for value in (detail.get("startedAt"),
+                                                                    (detail.get("dispatch") or {}).get("startedAt")))
+    return {**({"preferred_profile": str(preferred)} if preferred else {}),
+            **({"selection_reason": reason} if isinstance(reason, str) and reason else {}),
+            **({"engine_until_dispatch_ms": round((dispatched - started).total_seconds() * 1000)}
+               if started and dispatched and dispatched >= started else {})}
+
+
 def _reset_native(payload: dict, error: ClaudexorModelNotDispatched, invocation: _ModelInvocation) -> dict | None:
     from ouroboros.llm_messages import reset_native_payload
 
@@ -798,9 +821,14 @@ def _accounted_request(invocation: _ModelInvocation):
     if not invocation.payload.get("retryOfOperationId"):
         invocation.payload = stamp_clock_note(invocation.payload)
     # The engine relays to the vendor: its loopback address is not where the model runs (a not-started receipt is a remote-hop fact).
-    request = replace(_attempt_request(invocation.target, invocation.payload), route_is_loopback=False,
+    request = replace(timed("candidate.measure", _attempt_request, invocation.target, invocation.payload), route_is_loopback=False,
                       force_unknown_reservation=True, max_completion_tokens=invocation.output_reserve)
-    return request, _candidate_before_dispatch(invocation.payload, request, prepare=invocation.prepare)
+    before, handed = _candidate_before_dispatch(invocation.payload, request, prepare=invocation.prepare), mark()
+
+    def reserved(reservation):  # the ledger reserved this attempt between the hand-over and this call
+        span_since("candidate.reserve", handed)
+        return before(reservation)
+    return request, reserved
 
 
 def _unstarted_retry_preparation(target: dict, payload: dict, parameters: dict, error: ClaudexorModelNotDispatched):
@@ -834,7 +862,7 @@ def _processing_retry_payload(payload: dict, error: ClaudexorModelNotDispatched)
             or context.get("generationStarted") is not False
             or context.get("processingFallback") != "standard"
             or context.get("processingRefusal") not in {"capacity", "unsupported"}
-            or options.get("processingPreference") not in {"fast", "economy"}
+            or options.get("processingPreference") not in {"fast", "economy", "ultrafast"}
             or options.get("serviceTier")):
         return None
     updated = copy.deepcopy(payload)

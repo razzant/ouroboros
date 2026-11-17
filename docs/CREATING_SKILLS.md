@@ -36,7 +36,7 @@ is marked `owner-attested` (distinct from an LLM-clean badge) and does not
 confer publication readiness. Choosing Publish may still start the ordinary
 managed publication task, but attestation alone authorizes no outbound GitHub
 effect. Publication needs fresh critic authority or a later actual independent-review
-outcome acknowledged through qualified Advisory author finish (see Publishing). The
+outcome acknowledged through qualified author finish (see Publishing). The
 agent cannot self-attest (the marker is owner-state).
 
 **Accepted without a review.** A skill installed unchanged from a source the owner
@@ -49,7 +49,7 @@ the current `expected_content_hash` and `owner_source` recording the owner's
 words; its deterministic preflight and exact-byte owner
 attestation keep that edited copy running. This is the owner's authority, not
 an agent's claim that its own edit passed review. Blocker findings in a skill from a source that reviews
-each skill keep it off even under Advisory until the owner skips the review.
+each skill keep it off until the owner skips the review.
 
 There are three skill types:
 
@@ -114,6 +114,8 @@ companion_processes:                # optional; PLURAL, and needs the companion_
   - name: demo_worker               # see "Declaring a companion process"
     command: [python3, scripts/worker.py]
     runtime: python3
+mcp_servers:                        # optional; see "Declaring MCP servers (Connect tools)"
+  - {id: weather, runtime: node, entry: scripts/mcp_server.mjs}
 scheduled_tasks:                    # optional cron suggestions; nothing runs until adopted
   - name: refresh-cache
     cron: "0 * * * *"                # 5-field cron, host-local timezone by default
@@ -417,7 +419,7 @@ flowchart LR
     enable --> execute[skill_exec / dispatch]
     review -- feedback --> reaction[Author reaction]
     reaction -- next permitted panel --> review
-    reaction -- Advisory finish + current preflight --> deps
+    reaction -- author finish + current preflight --> deps
     review -- PREFLIGHT failure --> repair[Repair]
     repair --> review
 ```
@@ -431,7 +433,7 @@ flowchart LR
   Panel composition, verdicts and author acceptance follow the [Skill Review Checklist](CHECKLISTS.md#skill-review-checklist),
   not a separate skill policy. A `surface="skill"` ledger record projects into `review.json`, bound to all runtime-reachable
   payload bytes; edits stale it. Change-focused review sees the manifest, changed files and diff, with unchanged files
-  readable, and judges the whole skill. Advisory authors may finish through
+  readable, and judges the whole skill. Authors may finish through
   `skill_review(author_disposition="accepted", author_rationale=…)` with current preflight; see “Skill Review Checklist” below.
   An addressed owner message can return the tool pending while reviewers finish; the same call later collects at $0.
   `.self_authored.json` and installation history are provenance, never approval; self-authored skills use the same lifecycle.
@@ -545,6 +547,10 @@ Python `allow_source_build: true` and npm `allow_install_scripts: true` opt in
 per entry, each with a declared `check`. Without those flags pip remains
 wheel-only and npm keeps `--ignore-scripts`. An already installed npm package
 can be rebuilt explicitly on retry without rebuilding unrelated packages.
+When no `npm` is on PATH, npm specs use the pinned Node/npm toolchain the host's
+runtime manager delivers with its Claudexor CLI (starting no engine): npm runs as
+that Node with its own CLI, that Node's folder comes first on the install's PATH,
+and the flags, cache and isolated prefix stay as above.
 `deps.json` records resource digests, actual resolved package metadata,
 output hashes and build diagnostics. `installed` records delivery;
 `executable_ready` is unknown without a declared check and true only after
@@ -563,10 +569,9 @@ Out-of-process extensions have near full PluginAPI parity. They proxy tools, HTT
 routes, WS handlers, UI tabs, and settings sections; `on_unload` runs at child
 teardown; `send_ws_message` relays to the browser through the Host Service
 `POST /ui/ws-message` bridge; and `register_companion_process` is cataloged so the
-host spawns and supervises a long-lived companion for background work. Only two
-capabilities have no meaning in a short-lived per-call child and stay unavailable
-there: `subscribe_event` and `register_supervised_task` (an in-process asyncio
-task). For long-running work, host-event subscription, or live progress that must
+host spawns and supervises a long-lived companion for background work. What has no
+meaning in a per-call child stays unavailable there (`OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES`):
+event subscriptions, supervised tasks, realtime registration and a companion refresh. For long-running work, host-event subscription, or live progress that must
 outlast a single call, declare a `companion_process` — a host-supervised
 subprocess that already receives `HOST_SERVICE_URL`/`HOST_SERVICE_TOKEN` and can
 call `POST /ui/ws-message` and connect to `WS /events`. A skill can read
@@ -673,15 +678,13 @@ and currently produces no warning from the parser, `validate()`, or
 `skill_preflight`. The eventual error names only the plural key.
 
 There is no `on_enable` trigger and no `once` flag. After a skill is enabled, the
-host starts a companion whose name `register()` has registered; for an
-out-of-process extension, this handoff can be asynchronous. The companion is
+host starts a companion whose name `register()` has registered (asynchronously out of
+process). The companion is
 supervised from there; `restart_policy: on_failure`
 restarts it only on a non-zero exit, so a one-shot script that exits 0 runs
 once, and `max_restarts` (default 5, counted within a 300-second window) bounds
-the loop before `companion_restart_exhausted` is recorded. For work that must
-happen before the first tool call, remember that an out-of-process extension
-already runs `register()` in every per-call child — see the out-of-process
-caveats above — so cheap idempotent setup belongs there, not in a companion.
+the loop before `companion_restart_exhausted` is recorded. Cheap idempotent setup
+needed before the first tool call belongs in `register()` (caveat 1 above), not a companion.
 
 `env` and `ports` may also be declared on the descriptor. Neither passes as
 written: the host drops `HOST_SERVICE_TOKEN`, `HOST_SERVICE_URL`,
@@ -689,6 +692,49 @@ written: the host drops `HOST_SERVICE_TOKEN`, `HOST_SERVICE_URL`,
 first three itself; the last is the server's PID, telling a container's PID-1
 server from an init adoption. `ports` keeps only all-digit entries; a negative
 or non-numeric one is silently dropped.
+
+### Declaring MCP servers (Connect tools)
+
+A `script` or `extension` skill that ships an MCP stdio server declares it, and the
+owner connects it with one confirmation instead of copying settings by hand:
+
+```yaml
+mcp_servers: [{"id": "chrome_browser", "title": "Chrome (shared tab)", "entry": "scripts/server.mjs", "task_session": true, "browser_policy": true}]
+```
+
+Each item takes only these keys (anything else is a manifest error):
+
+- `id` (required): the MCP server id, lowercase letters and digits joined by single `_`,
+  at most 24 characters. Every tool is named `mcp_<id>__<tool>`, so keep it stable.
+- `entry` (required): a relative path of a file in the skill (no `..`, absolute path or
+  cache/dependency folder such as `node_modules` or `.ouroboros_env`); it is part of the
+  reviewed, hashed payload, and `skill_preflight` checks it by the rule a start applies.
+- `runtime`: currently `node` only; defaults to the manifest's `runtime`.
+- `title`: the Settings display name; defaults to `id`.
+- `task_session`, `browser_policy`: the MCP call-lifetime choices (DEVELOPMENT §12);
+  `browser_policy` needs `task_session: true`.
+
+Once the skill is accepted for its current bytes, on, granted and its packages are
+installed, its Skills card offers **Connect tools**. The confirmation names what will run
+and, when MCP is off, every other server that turning MCP on starts. Confirming writes one
+MCP server row (`id`, `name`, `enabled`, `transport: stdio`, `skill`, the two flags) and turns
+MCP on; nothing else in settings changes, an identical state writes nothing, and a row of
+the same id that this skill did not write is never overwritten. An agent carries the same
+step with `skill_owner_action(action="connect_mcp")`: `preview: true` first, then the
+owner's answer as `owner_source` with the preview's `settings_digest`.
+
+The row stores no command. Every listing, Settings Test and call
+derives the runtime binary, `<skill folder>/<entry>`, the skill folder as working directory and
+both flags from the installed skill (read-only in Settings), so a moved app or runtime
+needs no reconnect. The server gets your scripts' environment: granted settings, state
+folder, packages. Under a deployment's execution domain each start runs the verified work
+copy in its work container, on its runtime (not an extension's: its package stays on the
+service). While the skill is off, missing, edited and not re-accepted, short of grants or
+packages, or no longer declares the server, or the domain cannot start it, only that
+server is unavailable (`MCP_SKILL_UNAVAILABLE`) and nothing starts anywhere; the row
+stays. An accepted update or changed granted value is listed anew and running task
+sessions restart; a row the owner switched off stays off. Steps outside Ouroboros (a browser extension, a sign-in) belong
+in its instructions.
 
 ## The `skill_preflight` tool
 
@@ -835,12 +881,12 @@ calls and runtime behaviours:
 | `tool` | The skill may call `register_tool`. |
 | `realtime_provider` | The skill may call `register_realtime_provider` (PluginAPI 2.1, in-process only). |
 | `live_conversation` | The skill may register the in-process Live Conversation feature (PluginAPI 2.1); the host retains admission, tools, memory, budget and Stop. |
-| `call_peer` | A reviewed companion may join an admitted media call through the Host Service; Presence admission still requires its binding and `presence` grant. External speech conveys no owner authority. |
+| `call_peer` | A reviewed companion may join an admitted media call through the Host Service; opening one needs its place, `presence` grant and a `/presence/turn` event. External speech conveys no owner authority. |
 | `read_settings` | The skill may call `api.get_settings([...])`. |
 | `supervised_task` | The skill may register an in-process host-supervised async task. It runs on the shared host extension loop, not the HTTP loop. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
 | `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound` or `skill.lifecycle`. An async subscriber runs on the shared host extension loop; a synchronous subscriber runs on the publisher's thread. Chat topics require owner permission grants; `skill.lifecycle` does not. |
-| `inject_chat` | With the owner's `inject_chat` grant, `POST /chat/inject` accepts text, an inline image or `attachments` (`[{path, name?, mime?}]`: up to 25 regular files confined to the skill's state root, copied without the former 50 MiB cap to `data/uploads` and staged for the task; file-only messages need no text). Optional `reply_to` carries a host row or `task:<task_id>` address as a reference, never routing. The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — the same words AND the same ordered attachment content (inline image and files, compared by bytes and name, not by the host's stored copy) — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409); an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy, while the image still reaches the model as before (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer, a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
+| `inject_chat` | With the owner's `inject_chat` grant, `POST /chat/inject` accepts text, an inline image or `attachments` (`[{path, name?, mime?}]`: up to 25 regular files confined to the skill's state root, copied without the former 50 MiB cap to `data/uploads` and staged for the task; file-only messages need no text). Optional `reply_to` carries a host row or `task:<task_id>` address as a reference, never routing. Optional `ui_control` (`{name}`) marks text one of the skill's controls composed (an inline button's command): the press is the owner's and the words are not, so the host writes no owner message for it (it takes no `client_message_id`; `owner_text`, malformed or combined: `400`). The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — the same words AND the same ordered attachment content (inline image and files, compared by bytes and name, not by the host's stored copy) — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409); an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy, while the image still reaches the model as before (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer, a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
 | `presence` | A reviewed transport skill may submit authenticated non-owner conversation events to the Host Service Presence boundary and poll only their correlated late work. Requires an explicit content-hash-bound owner grant. |
 | `notify_owner` | The skill may tell the owner one thing through `POST /notify` after an explicit owner permission grant (see "Telling the owner something" below): one bounded plain sentence the host shows in the owner's chat as a System row signed with the skill's name. It wakes no model; narrower than `inject_chat`. |
 
@@ -885,24 +931,33 @@ to the same keys.
 Saving is not a connection and grants nothing. The outcome names what each skill that reads the key can read now:
 a newly saved key needs the owner's grant in Skills. Replacing a key while a skill that reads it is enabled is
 allowed; the skill may read the new value on its next call, while code that copied the value at start (a poller,
-a companion's environment) keeps the old one until it restarts, so say in your SKILL.md what your skill needs
-(Telegram: disable and re-enable it). Chat transports receive such a request as a note saying where to enter it;
-a transport must not offer a reply as an answer to it.
+a companion's environment) keeps the old one until it restarts. A skill can apply saves itself with PluginAPI 2.4:
+`get_settings_state(keys)` tells `ok` values and missing keys from an `unknown` (unreadable) document, and
+`refresh_companion_process(name, expected)`, off the event loop, respawns that companion only when its
+`env_from_settings` values changed; `expected` holds the values you read (empty for missing). It answers
+`unchanged` or `not_running` (nothing to do; a crash's absence is the crash monitor's), `restarted` or `started`
+(also for one a refresh stopped and could not replace), a lifecycle control that wins (`access_closed`, `panic`,
+`disabled`, `missing_grants`, else `not_desired`), no supervisor here (`not_server`, `no_supervisor`), or a state
+to ask about again: `not_started`, `retained`/`stop_unconfirmed` (the old process is not observed dead),
+`settings_unknown` and `settings_changed` (the companion carries a save made after your read: read again). With
+`only_if_differs=True` and `expected` naming every `env_from_settings` key, a companion already carrying your read
+answers from memory, reading no Settings, so you can confirm at each read that one started elsewhere (recovery
+after exhausted restarts) still carries it. A refused spawn raises `OSError`. Say in your SKILL.md which your
+skill does (Telegram applies saves itself). Chat transports receive such a request as a note saying where to
+enter it; a transport must not offer a reply as an answer to it.
 
 ## Grants for protected keys and host permissions
 
-Some settings keys are protected: `OPENROUTER_API_KEY`,
-`OPENAI_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, `ANTHROPIC_API_KEY`, `MINIMAX_API_KEY`, `DEEPSEEK_API_KEY`, `ZAI_API_KEY`,
-`CLOUDRU_FOUNDATION_MODELS_API_KEY`, `GIGACHAT_CREDENTIALS`, `GIGACHAT_PASSWORD`, `TELEGRAM_BOT_TOKEN`,
-`GITHUB_TOKEN`, `OUROBOROS_NETWORK_PASSWORD`. These keys are NEVER
+Some settings keys are protected: the provider, GitHub and network keys of `FORBIDDEN_SKILL_SETTINGS`
+(`ouroboros/contracts/plugin_api.py`) and `TELEGRAM_BOT_TOKEN`. These keys are NEVER
 forwarded to a skill by default, even when listed in
-`env_from_settings`. Custom secret keys stored in Settings → Secrets
+`env_from_settings`. Custom secret keys stored in Settings → Accounts and keys
 are treated the same way; such a key joins a skill's request once it is saved, so a newly saved key is missing
 until the owner grants it, while the skill keeps its other approvals for the same release. A granted key is read as currently saved: each
 `api.get_settings` call, script run, out-of-process call and companion start sees a
 value the owner saved, rotated or deleted during a running task, while that task keeps
 its own model, account and review settings; a value your code already copied or cached,
-a running companion's environment included, is not refreshed for you. Host permissions such as `inject_chat`, `presence`,
+a running companion's environment included, is not refreshed for you ("Asking the owner for a secret"). Host permissions such as `inject_chat`, `presence`,
 `notify_owner` and chat event subscriptions also require explicit, content-hash-bound owner
 consent. The desktop launcher's owner-grant bridge records these grants.
 
@@ -913,10 +968,12 @@ approved (the tool returns `SKILL_TOGGLE_ERROR` with `code: "grants"` and the se
 do not authorize grants or enablement. Automatic grants and first enablement
 follow the setting below; an explicitly authorized task toggle remains separate.
 
-`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Behavior → Skills
+`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Permissions and checks
 (native confirmation on desktop, owner endpoint on web). It grants only declared keys/permissions for the accepted
-release digest. Executability follows the selected enforcement and current author/reviewer authority, not the verdict
-label alone; see the Skill Review Checklist. Editing the payload invalidates grants.
+release digest. Executability follows the skill gate and current author/reviewer authority, not the verdict
+label alone; see the Skill Review Checklist. Editing the payload invalidates grants; readiness, the execution and toggle refusals and the skill card then also say
+that the grant belongs to an earlier version of the files (`grant_status_for_skill` `earlier_grant`); the saved Settings
+values are untouched.
 
 Every review, grant and acceptance is bound to the skill's release digest: its
 payload files plus its declared dependencies, without per-install notes, so the
@@ -943,13 +1000,35 @@ manifest; core reads them from the reviewed, published release:
 icon: ui/icon.svg              # required author asset for provides: place; geometry in currentColor
 tools:
   - name: slack_send
-    effect: message            # read | message | write; absent or unknown = write
+    effect: message            # read | message | gesture | write; absent or unknown = write
     target: channel_or_user    # the argument(s) naming where the effect lands; a list for to/cc/bcc
     conversation: channel_or_user
     thread: thread_ts
+  - name: slack_reaction
+    effect: gesture            # a nonverbal response (a reaction) on one message
+    target: channel
+    conversation: channel
+    message: timestamp         # required for gesture: the message id argument
   - name: slack_history
     effect: read
     target: channel_id
+  - name: slack_api            # a generic tool: its own effect, and the calls that deliver words
+    effect: write
+    target: []
+    sends:
+      when: {path: [chat.postMessage, chat.update]}   # each (dotted) selector holds one of its values
+      target: body.channel
+      conversation: body.channel
+      thread: body.thread_ts
+      text: body.text          # the words (default: the argument named text)
+  - name: mail_send            # words in one conversation, beside further exact addresses (plugin_api "2.5")
+    effect: message
+    target: [account_id, to, cc]  # beside groups, targets other than the conversation are its audience
+    conversation: conversation_id
+    thread: thread_id
+    touches:
+      - {conversation: to, effect: write, match: exact_casefold}   # a recipient's own place restricts it, no other
+      - {conversation: emitted_root, thread: emitted_root, effect: message}   # the new message's own conversation
 contributes:
   - id: place
     provides: place
@@ -962,13 +1041,59 @@ contributes:
 ```
 
 - `effect` is one fact with three consumers: Advises (autonomy) refuses everything but a declared read; a Silent or
-  Paused place refuses `message` and `write` aimed at it; the Safety Supervisor skips declared reads at Light/Full and
-  gives `message` its speech semantics (a flagged message returns to the mind; the identical re-issue is sent and
-  recorded). A tool that reads or writes depending on its arguments is `write`. MCP tools are always `write`.
-- `target`/`conversation`/`thread` attribute each destination. Declare `account_id` for multi-account writes:
+  Paused place refuses all but reads aimed at it; the Safety Supervisor skips declared reads at Outgoing and + Commands and
+  reads `message` as words (a flagged call of any tool returns to the mind once; an identical call from a later step
+  lets a SUSPICIOUS one through, and a DANGEROUS one in Cyber Pro, recorded; elsewhere a DANGEROUS one waits for your
+  human's card holding the words and destination, and with no verdict words wait in every mode). A tool that reads
+  or writes depending on its arguments is `write`, unless its `sends:` block declares which calls deliver words: a
+  call whose every `when` selector holds one of its listed values is `message`, attributed by that block's
+  `target`/`conversation`/`thread`; any other call keeps the row's `effect`. A `write` into a conversation (a pin, a
+  bookmark) or a `gesture` is not words by itself. This is the connector's fact: core lists no provider method, never
+  reads speech from argument names, and no verdict marks a call speech. A built-in tool without declarations, such
+  as `github_write`, declares no words (it can carry a comment body): outside Cyber Pro a DANGEROUS call of it waits
+  for its exact call on your human's card, and in Cyber Pro its unread hold stays advice. An MCP tool is a declared
+  read when its configured server marks it `readOnlyHint: true`, otherwise `write`; that hint is trusted, so a server
+  lying about a write runs it unchecked, and Advises may call the tools a server marks read-only.
+- `gesture` adds or removes a reaction-like response on one message, never speech, a pin or an edit. A focus sees its
+  door beside the send doors, `message` prefilled only from `event.message.message_id`. With no send door a non-silent
+  finish is still posted, so a reaction alone finishes `silent=true`.
+- `target`/`conversation`/`thread` attribute each destination; dotted names select nested arguments. Where Places
+  apply, independent lists of several conversations and several threads refuse non-read calls, even without `touches`.
+  `text` (default: the argument named `text`) names the words: your human's
+  answer on a card holding those exact words as whole lines and every place and address the call reaches (each
+  place's label, and its exact address where another it reaches shares that label; each recipient outside a place's
+  own conversation; each group address with its effect, as `write: Drafts · account A`) sends the message in every
+  mode, held, flagged or before any check (a call declaring neither, such as an MCP tool, uses its exact call for
+  that card); the host checks the card was answered, not the answer.
+  Declare `account_id` for multi-account writes:
   an exact account outside all applicable Place scopes remains an ordinary tool target, including in Acts.
   Unresolved targets inside applicable scopes retain the Silent/Paused hold. Use the same canonical account key
   in credentials, targets and Places; sender aliases are separate. Never resolve an unknown key to another account after dispatch.
+- `touches` lists further addresses one call reaches. Each group names arguments: `conversation` (one id or a flat
+  list), `account` (one id; default: the call's `account_id`) and `thread` (one id, or the conversation argument
+  itself to pair each id with itself; never a second list), and its `effect`, which says what applies there, not how
+  the provider delivers: `message` where words are authored (one author per conversation; beside a message call
+  only; a conversation the call speaks in is one), `gesture` beside a gesture only, `write` where only the place's
+  state and notes apply (a bare recipient, a folder), or `read`; a read call's groups only read. A row's groups ride
+  its own effect, a `sends` block's the calls it selects. By default (`match: scope`) each id meets the matcher a
+  target does: unknown inside its account's places (a Silent or Paused place then holds the call), the account-wide
+  place's where one exists (an exact place outranks it), no place's in an account none covers; real resources
+  (folders, drafts, roots) keep it. An extra address constraint on a write or read group may declare `match: exact`:
+  only a place whose own or destination scope names that id applies (ranked by the scope that matched, a Silent or
+  Paused one first among equals, so change an existing place's state rather than connect a second spelling; an
+  Active place naming it in one account still outranks a global pause), and none is a known absence;
+  `exact_casefold` is the same with the ids compared casefolded, a comparator the connector chooses for its keys. Ids otherwise compare exactly, so the connector
+  owns their canonical spelling: check each id against the object the handler changes, spelled as its places spell
+  it, before acting. With groups and a declared `conversation`, each of its values is the row's own destination; an
+  empty value names none, so the call acts in its account (unknown inside an account with only narrow places), and
+  its other targets are its audience, never destinations. A row declaring no `conversation` keeps its targets as
+  destinations.
+  An absent, null or empty argument or path step reaches nothing; another shape (the row's own target, conversation
+  or thread too), an invalid group, or groups under a `plugin_api` older than `"2.5"` (an older host refuses a 2.5
+  payload before import) refuse the call whole, naming the repair. DANGEROUS words stay held where they are spoken
+  (the places they land in, else their audience), never through a group's write or read beside them; words with no
+  such address, and a rich call declaring no `text`, keep their exact call. What a call ran with, not a later
+  publication, decides what it did.
 - `icon` is reduced at staging to viewBox and geometry (path, circle, ellipse, line, polyline, polygon, rect, g),
   bounded, with fills and strokes set to `currentColor`; anything else falls back to the house glyph.
   Authors of `provides: place` skills must include `ui/icon.svg` and declare `icon: ui/icon.svg`.
@@ -997,15 +1122,17 @@ dropped; a nonempty list with no valid rows is unavailable, not known empty.
 | Source response | Meaning in Connect |
 | --- | --- |
 | `connect` absent | No instance chooser is offered; the connector's declared default scope remains available. |
-| Known nonempty list | Show valid instances and mark exact connected identities as “Connected · Open”. |
+| Known nonempty list | Show valid instances and mark exact connected identities “Connected”, chosen rather than connected again. |
 | `connect: []` | Known empty: “None offered yet”, with the declared connector settings door (Skills if none). |
-| Failed read, malformed response/list, or all rows invalid | Unavailable: keep the gap visible and offer “Try again”; do not invent an instance. A connector with no live source asks to be turned on. |
+| Failed read, malformed response/list, or all rows invalid | Unavailable: keep the gap visible and offer “Try again”; do not invent an instance. A connector that is off asks to be turned on. |
 
-The host's explicit “Whole account” action remains available in all four states; it is independent of the
-instance list and posts only `connector`. Selecting an instance posts its string ids and label through
+Where shows the host's explicit “Whole account” action in all four states; it is independent of the instance
+list and posts only `connector`. Add skips Where only for a ready connector with neither a list nor a place yet,
+connecting its whole account at once. Selecting an instance posts its string ids and label through
 `POST /api/places`; the saved title is `<Service> · <label>`. A new identity starts Silent in one atomic write;
-repeat Connect preserves state, label, wakes and notes. Several identities can coexist without splitting or
-relabeling an existing broad place. Connectors remain listed with a place count and “Connect another”.
+a plain repeat Connect preserves state, label, wakes and notes, and one carrying an Add's words is refused
+(`place_exists`), writing nothing. Several identities can coexist without splitting or relabeling an existing
+broad place. Connectors remain listed with a place count and “Choose where”.
 
 A `provides: place` contribution may include `facts`: core names from `/identity.presence_wake_facts`,
 labelled core kinds `{id: "direct_message", label: "Mail addressed to you"}`, or connector-defined
@@ -1044,7 +1171,7 @@ A name or alias the owner wants to be called by is a connector signal: declare
 (one entry per line), match whole words case-insensitively in the connector, and report the fact on
 the event. Core stores the owner's choice as a wake item and matches membership only. The reference
 implementation is [email-presence 0.7.0](https://github.com/razzant/OuroborosHub/tree/main/skills/email-presence);
-[telegram-bot 0.6.3](https://github.com/razzant/OuroborosHub/tree/main/skills/telegram-bot) is the second (lane F1T, in flight).
+[telegram-bot](https://github.com/razzant/OuroborosHub/tree/main/skills/telegram-bot) is the second.
 
 A place connector reports observations; the host decides attention. While running and
 authenticated, report every supported event within the connected place's granted
@@ -1082,9 +1209,14 @@ must match the query; older responses without it remain supported. The server ne
 Neither carrier adds fields to `places.json`.
 
 The owner's “This is my account” confirms `sends_as.id` using the existing `owner_accounts` writer.
-For `kind: user` only, a matching `platform_actor_id` in the same `account_id` scope derives `owner: true`; revocation removes it.
+For `kind: user` only, a matching `platform_actor_id` in the same `account_id` scope derives `owner: true`, whichever place of
+the same connector and provider holds the confirmation (one confirmation per bot or app, read when used); revoking it
+in every place that holds it removes it.
 This says whose credential writes or reads, independently of who sent an incoming message. Never return your own
-sends as incoming events: from the owner's confirmed account they would read as the owner's words. Where the
+sends as incoming events: from the owner's confirmed account they would read as the owner's words. A post Ouroboros
+makes as that account through another tool (an MCP server signed in as the owner) does come back through you: the
+host knows it by the event's `conversation_id` and `message.message_id`, so report the provider's own ids there
+(the Slack `ts`, the Telegram `message_id`). Where the
 provider lets you tell them apart (GitHub does), do report the account's other activity (its edits, merges and posts
 made by other tools acting as it): the host settles an event whose actor is `sends_as.id`, not reported
 unauthenticated, as heard with reason `own_account`; it stays in the room and the next own wake and never wakes a
@@ -1104,7 +1236,7 @@ Send identity and this actor fact only after the host advertises `presence_ident
 ### Places and focus transport ingress
 
 A reviewed connector declares `permissions: [presence]` and `provides: place`.
-The owner connects it in Consciousness > Places or through `configure_presence`.
+The owner adds it in Circles or through `configure_presence`.
 A place stores its state (Active, Silent or Paused), authored wake facts and notes,
 confirmed owner accounts, working-folder address and model choice. Connector updates
 never replace those choices. The old behavior skill's `presence:` block is migration
@@ -1166,8 +1298,8 @@ Use the connector's ordinary content-hash-bound skill token for:
   provider marks the message as mentioning, with the name the connector resolved (null when it could not) and
   whether the id is the account the connector writes as. Without it the host reads
   `message.provider_facts.mentioned_user_ids` with `is_self` from `provider_facts.self_user_id` and names
-  unknown; a connector that reports neither renders no mention line. `provider_facts.self_user_id` also
-  names the focus's own account when the event carries no credential identity.
+  unknown; a connector that reports neither renders no mention line. `provider_facts.self_user_id` also names the
+  focus's own account when the event carries no credential identity.
 - Optional thread snapshot `event.conversation.thread_history`: `{status, observed_at?, authors?, data:
   {messages: [...], complete?}}`, the conversation as the provider served it at capture. Optional `authors`
   is the connector's directory of the snapshot's authors, `[{"id": str, "name": str|null, "is_self": bool}]`,
@@ -1175,17 +1307,32 @@ Use the connector's ordinary content-hash-bound skill token for:
   mentioned ids through it when `message.mentions` is absent). The frame renders each
   message as author, a `[you]` mark, a `[this message]` mark on the waking message, its time and text;
   per message the host reads an author id (`user`, `actor_id`, `author_id`, `platform_actor_id`, or a nested
-  `actor`/`author` mapping), a name (`user_profile`/`bot_profile` `real_name`/`display_name`/`name`,
-  `author_name`, `display_name`, `username`), a time (`sent_at`, else a numeric `ts`/`timestamp` epoch), the
-  `text` and an id (`message_id`, `id`, `ts`). The snapshot renders whole: the connector's capture is
-  already bounded, and the frame never cuts it.
-- Optional `event.message.forward_origin` (any non-empty value): the message carries words another author wrote
-  (a forward, or another person's text the event copies under the sender). The host never records such an event as
-  its sender's own words. A message from an account the place confirms as the owner's is their words by provenance
-  (said where others can hear) at a turn's opening, mid-turn and when a focus hands it on, and a Continue of that work
-  carries them to the successor whole (citable there, an order only by a cite); a forward of it is not.
-  Provenance is never a verdict: whom the words are for, and whether they ask for work, is the mind's reading. An
-  order exists only where the mind cites their exact words (`owner_words` of `start_task`, `schedule_followup`,
+  `actor`/`author` mapping's `platform_actor_id`/`id`), a name (`user_profile`/`bot_profile`
+  `real_name`/`display_name`/`name`, `author_name`, `display_name`, `username`, or the nested mapping's
+  `display_name`/`username`), a time (`sent_at`, else a numeric `ts`/`timestamp` epoch), the `text` and an id
+  (`message_id`, `id`, `ts`). The snapshot renders whole: the connector's capture is already bounded, and the
+  frame never cuts it.
+- Optional `event.message.attachments[]`, one record per declared file (name `file_name`/`name`/`filename`, type
+  `mime_type`/`content_type`/`mimetype`/`kind`, positive `file_size`/`size`): `status` `staged` (also when absent;
+  only these go in `staged_files`), `too_large`, `failed`, `unsupported` or another word, with a factual
+  `note`/`reason`/`stage_error` (else email's `attachment_stage_note`). Without `status`, `content_available: false`
+  reads as `failed` (`unsupported` for `stage_error: unsupported_mime_type`). Optional `event.message.non_text`:
+  `[{"kind": str, "description": str}]` (sticker, poll, location: neither words nor a file); past 4000 characters a
+  description is cut and counted, naming where it stays whole. The focus (in its own block) and history state these
+  as connector facts beside exact words, never quotable as speech. An event of only these facts is never empty.
+- Optional message facts: `reply_to_message` (`message_id`; author `from`/`sender_chat` with
+  `first_name`/`last_name`/`title`/`display_name`/`name`, `username`, `id`; `text`/`caption`; `forward_origin`;
+  `attachments[].file_name`), `reply_to_message_id`, `quote.text` (alone: author not recorded), `media_group_id`
+  with integer `media_group_position`, and `entities`/`caption_entities` `text_link` entries (UTF-16
+  `offset`/`length` into `event.text`, `url`), rendered without changing `event.text`.
+- Optional `event.message.forward_origin` (any non-empty value; a string as given, or a mapping naming `sender_user`,
+  `sender_user_name`, `sender_chat`/`chat`, `author_signature`, epoch `date`): another author's words (a forward, or
+  another person's text the event copies under the sender), never recorded as the sender's own;
+  `is_automatic_forward: true` marks a channel post opening its comment thread. A confirmed owner account's message
+  is their words by provenance (said where others can hear) at a turn's opening, mid-turn and when a focus hands it
+  on, whole and citable after a Continue; a forward of it is not, though its sender stays their confirmed account
+  (history, the Safety occasion). Whom words address and whether they ask for work is the mind's reading: an order
+  exists only where the mind cites their exact words (`owner_words` of `start_task`, `schedule_followup`,
   `manage_schedules` update) and the host verifies the bytes inside a message of theirs that reached that run.
 - Optional `event.message.reaction` (object with `schema_version: 1`; `text` and files empty; an object
   without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` lists hold provider
@@ -1216,6 +1363,10 @@ Use the connector's ordinary content-hash-bound skill token for:
   The stamp survives ordinary edits and repeated Connect. An older body can read/write Places, but its changed row
   cannot prove connection continuity: prior bindings stay held; a fresh operation captures the newly observed revision.
   `require_place=true` requires a Place for transport-bound replies, not every tool call from a Presence focus.
+  `match=exact|exact_casefold` (default `scope`; another value is 400 `place_binding_invalid`) binds an extra
+  address constraint as a group's exact match does: it needs the `conversation_id`, has no opaque or unknown
+  fallback, and finds no naming place as confirmed unbound (`place_not_connected` under `require_place=true`). The
+  v1 snapshot never records the mode: keep it beside the snapshot and check with the same one.
   Missing/invalid snapshots are not inferred from `origin.kind`; ordinary queries and legacy rows keep their old lookup.
 - `GET /presence/work/{work_ref}?binding_id=...`: reads correlated late work,
   including after a place is Paused or disconnected. The binding query is optional;
@@ -1226,7 +1377,7 @@ Use the connector's ordinary content-hash-bound skill token for:
 
 The host captures an event once into its room before deciding whether to wake.
 Silent remains eligible for a matching wake, subject to consciousness, allowance and
-capacity; it holds `message` and `write` aimed there and automatic replies. Paused
+capacity; it holds every non-read call aimed there and automatic replies. Paused
 keeps accepted new events heard without starting a new focus. Neither state withdraws
 an external request already accepted by the provider.
 Paused, consciousness Off/Panic, or no matching wake returns `silent` (heard).
@@ -1367,7 +1518,7 @@ Never project a retained refusal as `completed/silent` or as a successful handof
 event identity). An author parked on a review it left for an addressed message (a commit, change or result
 review) yields the conversation and answers early: `status: "continuing"` with `continuation_ref` (equal to `turn_ref`) and an
 initial `outcome`/`text`/`output_ref`. `deferred` with empty text means a result may follow; an
-author-selected early output (Advisory `pending_review=finish`) is speech to send once under its
+author-selected early output (`pending_review=finish`) is speech to send once under its
 `output_ref`; `silent`/`tool_delivered` send nothing. A promoted child keeps its own `work_ref`; poll
 both independently. `status: "completed"` (with `continuation_ref: ""`) means the author ended
 within the request. A retry of the same event returns the identical stored envelope, never a rerun;
@@ -1430,7 +1581,13 @@ deduplicate by `output_ref`, never by text, since an identical correction is new
   replay, or the retained refusal), never by regenerating an ended attempt.
 - **Polls.** A version-2 turn's poll echoes `continuation_version: 2`; turns admitted at other
   versions keep `1`. Its terminal adds `reply_anchor: {source_event_id, message}`, where `message`
-  is the exact captured `event.message` of the last input the selected answer covers. Covered
+  is the exact captured `event.message` of the last input the selected answer covers. An event may name the
+  further addresses an automatic reply to it reaches as `message.reply_targets`: a list (`[]`: none) of
+  `{conversation, effect: "write", match: "scope"|"exact"|"exact_casefold", thread?}` literal ids, met in the
+  reply's own route (its place's connector, its retained destination's provider and account, never the source
+  account); anything else is refused 400 `presence_payload_invalid`, absence keeps the old boundary.
+  The Host resolves the anchor's set before Safety and holds the reply where one meets a Silent or Paused place;
+  send exactly to that anchor's envelope and hold, never fall back to another message, when they differ. Covered
   inputs are the turn's own event and arrivals delivered to the model before the answered send
   that selected the answer. After a review park they include the incoming messages its reentry
   facts carry whole, never those named only by address. "Last" is the greatest
@@ -1700,8 +1857,8 @@ The recommended closed-loop workflow is:
    `data/skills/clawhub/<name>/`, or `data/skills/ouroboroshub/<name>/`.
 2. Run `skill_preflight(skill="<name>")` for cheap syntax/manifest checks.
 3. Run `skill_review(skill="<name>")` and address every critical finding.
-4. If `OUROBOROS_REVIEW_ENFORCEMENT=advisory`, inspect each advisory finding
-   and either fix it or record why it is accepted for now.
+4. Inspect each advisory finding and either fix it or record why it is
+   accepted for now.
 5. Enable the skill, grant required keys/permissions (or use the auto-grant
    setting for reviewed closed-loop development), then run `skill_exec`.
 6. Read stdout/stderr and `skill_exec_finished` / `skill_exec_failed` events,
@@ -1721,18 +1878,19 @@ The frozen ABI is documented in
 This section shows the practical shape.
 
 Extensions declare the PluginAPI generation they bind against in the manifest
-(PluginAPI 2.3; declarations of 2.0, 2.1 and 2.2 remain supported):
+(PluginAPI 2.5; a payload declaring any 2.x minimum negotiates the host's 2.5, methods included; a tool row
+with `touches` needs "2.5", which an older host refuses before import):
 
 ```yaml
-plugin_api: "2.3"            # major strict; minor = required minimum
+plugin_api: "2.5"            # major strict; minor = required minimum
 # or, with required capabilities (closed set, validated per execution mode):
 # plugin_api:
-#   version: "2.3"
+#   version: "2.5"
 #   capabilities: [register_tool, subscribe_event]
 ```
 
 A payload without the field binds the legacy "1.3" generation by
-construction: an already-reviewed payload keeps loading on its existing
+construction (2.4's `get_settings_state` and `refresh_companion_process` refuse it): an already-reviewed payload keeps loading on its existing
 hash-bound review PASS, but a NEW review PASS (LLM review, owner attestation,
 or an install-basis acceptance) is refused until the field is declared.
 
@@ -1854,11 +2012,12 @@ def register(api):
         },
     )
 
-    # Settings sub-section on the Settings page.
+    # A settings section: its own page, opened from the skill's card and listed
+    # in Settings as "Skill settings".
     # Settings sections use a narrow declarative subset: form/action for
     # configuration writes and markdown/json for explanatory diagnostics.
     # Rich widget-only components (media, stream, map, kanban, module JS)
-    # belong on the Widgets page, not Settings.
+    # belong on the Widgets page.
     # Hydration: before rendering a form/action that has fields the host issues
     # GET on the component's own route. Answer 2xx with a JSON object
     # {field_name: current_value} (strings) to pre-fill those fields; omit a
@@ -1871,6 +2030,9 @@ def register(api):
     # failed read disables Save and tells the owner to reload. Password
     # fields are never pre-filled, so treat an empty password on save as
     # "unchanged". Reference: skills/telegram/plugin.py, GET+POST settings/save.
+    # A form whose fields are all disabled is a status (Telegram's Connection):
+    # its neutral button checks again (busy_label) and refills them from the
+    # POST answer, announcing no save; a disabled textarea is shown whole.
     api.register_settings_section(
         "config",
         title="Search settings",
@@ -1994,12 +2156,20 @@ same promises through the host-side protocol in
 [`WIDGET_HOST_PROTOCOL.md`](WIDGET_HOST_PROTOCOL.md).
 
 Framed render declarations may add a bounded `height` (320–8,192 pixels).
-When a module omits `height`, the host starts at 320px and measures its
-existing `#root` through a resize message on the bridge's channel. The host
-integer-deduplicates and clamps that value to 8,192px by default; an optional
-module-only `max_height` lowers the ceiling. A fixed `height` disables
+When a module omits `height`, the host starts at 320px and, once your entry has
+run (an `entry_type: "module"` entry's top-level `await` included) or its page
+has loaded, measures `#root` through a resize message on the bridge's channel;
+on the Widgets board the frame is then exactly as tall as the content, however
+short, and measured again whenever anything in the document changes, and when the pointer or the focus moves
+(a menu that `:hover` shows counts).
+The host integer-deduplicates and clamps that value to 8,192px by default; an
+optional module-only `max_height` lowers the ceiling. A fixed `height` disables
 auto-growth. Legacy route iframes accept explicit `height` only because the
-host cannot inspect their opaque document. The parent owns iframe removal and
+host cannot inspect their opaque document. The owner may give any card a
+height of their own, taller or shorter than its content: the frame is then
+exactly that tall and your document scrolls inside it when it needs to (the host
+releases its vertical overflow there), so keep useful controls reachable in a
+shorter or taller viewport. The parent owns iframe removal and
 the module bootstrap rejects pending fetch promises and errors open body streams
 on disposal, so module
 code must not invent a second resize, vertical-scrolling, or teardown protocol:
@@ -2012,25 +2182,31 @@ declarative renders remain content-driven and reject them.
 Any render kind may add `span`: `1` (the default) or `2`, the card's default
 column span on the Widgets masonry (`grid_span` is read as an alias; a larger
 number counts as `2`, anything else as `1`). The board fits it to the columns
-it has (a narrow list is one column), and the owner's width from the card
-menu or the card's edge (1, 2, 3 columns or full width) wins for that card
-until the owner resets it; the card's height always follows its content (the
-board: `docs/DESIGN.md` "Widgets board").
+it has (a narrow list is one column), and the owner's width and height from
+the card menu or the card's edges win for that card until the owner resets
+them (the board: `docs/DESIGN.md` "Widgets board"). Design for a narrow card:
+a one-column card can be 240–360px wide, a phone card about 360px, so let text
+wrap and avoid fixed widths and side-by-side layouts that cannot fold. A body
+may be 100vh or 100% tall: the frame counts what it holds, where drawn, and
+keeps its loading height until something is drawn. A box taller than the
+viewport (110vh), or one its size or at its bottom with margins or padding
+outside it, asks for more than any height the frame can give: the frame stops
+growing a step or two later and your document scrolls to that control there. A
+box sized as a share of the viewport (60vh, `max-height: 70vh`) shrinks with the
+frame until its content stops it. A layout that should fill an area, or a share
+of one, can declare `height`.
 
 For auto-height module CSS, prefer one owner of padding and box geometry between
 `body` and `#root`, and choose `border-box` deliberately. Nested percentage
 `min-height`/padding owners, especially with `overflow-x: hidden`, can compute
-`overflow-y: auto` and feed scrollbar width back into wrapping. This is author
-guidance, not a restriction: legal width-sensitive CSS remains supported by the
-host-owned resize contract. For auto-height modules, the host bootstrap
-suppresses only document-viewport `overflow-y` below the ceiling and releases
-it at the ceiling; horizontal document overflow remains author-controlled and
-reachable. After a `ResizeObserver` notice the bootstrap re-measures and
-toggles in the next animation frame, never inside observer delivery: a layout
-write there can leave a size change undelivered, and the browser's loop error
-would reach the fault channel as a widget script error (WebKit reports
-`Script error.`). An author observer that writes layout in its own callback
-can raise the same error.
+`overflow-y: auto` and feed scrollbar width back into wrapping; such CSS stays
+supported. For auto-height modules, the host bootstrap suppresses only
+document-viewport `overflow-y` below the ceiling and releases it at the ceiling;
+horizontal overflow stays the author's. The bootstrap re-measures in the next
+animation frame after a `ResizeObserver` notice, never inside its delivery,
+where a layout write can leave a change undelivered and the loop error would
+reach the fault channel as a widget script error (WebKit: `Script error.`); an
+author observer that writes layout in its own callback can raise the same error.
 
 #### The in-frame bridge (`window.OuroborosWidget`)
 
@@ -2101,6 +2277,11 @@ below). The bridge exposes:
   the declaration does not gate legacy modules or prove that the source repaints.
   `appearance` is valid only inside a `kind: module` render; adding it to an
   iframe or declarative render is a registration error rather than a theme claim.
+  The frame inherits the page's colour scheme; a document whose own scheme
+  differs gets the browser's opaque canvas of that scheme (white around narrow
+  content on the dark theme, which keeps an unstyled page readable). A module that
+  paints its own dark palette on a transparent page declares `color-scheme: dark`
+  on its root while it is dark; the host changes neither.
 
 - **`OuroborosWidget.download(name, source)`** saves an existing `Blob`, a
   `data:` URL, a URL under this skill's extension route prefix or an ESM
@@ -2186,7 +2367,7 @@ closed. The classic capabilities below are verified on Chromium and WebKit throu
   rules (a user gesture for audible playback) still apply.
 
 A `kind: iframe` route frame is your own page under the same sandbox and
-permissions set, with no bridge and no host CSP, loaded from the mount's route
+permissions set, with no host CSP and no bridge unless it loads one, loaded from the mount's route
 lease (`/api/widget-resources/<lease>/<route>`): your page keeps its own HTTP
 `Content-Security-Policy`, and its own URL is its base, so **relative** URLs
 (images, styles, scripts, `<audio>`/`<video>`, fonts, a relative HLS playlist
@@ -2230,7 +2411,7 @@ declaration, so every framed or declarative widget tab carries an explicit value
 | `start` | Behaviour | Default for |
 |---|---|---|
 | `auto` | Starts when the Widgets page is shown; leaving the page stops it. For cheap instruments (a quota gauge, a status board). | `declarative` — the only value it accepts: the host draws it, there is nothing to start |
-| `manual` | The card shows the title, icon, and a Start button; the program runs only after the owner presses Start. Leaving the page is an ordered Stop: for `kind: module` the host sends the dispose message and gives the widget up to one second to save before the frame is removed; a `kind: iframe` route frame has no bridge and is removed at once. | `module`, `iframe` |
+| `manual` | The card shows the title, icon, and a Start button; the program runs only after the owner presses Start. Leaving the page is an ordered Stop: for `kind: module` (and a route page that loaded `/api/widget-bridge.js`) the host sends the dispose message and gives the widget up to one second to save before the frame is removed; a route page without the bridge is removed at once. | `module`, `iframe` |
 | `retain` | "Keep running": starts on the first Widgets visit like `auto` and keeps running while the owner is on other pages; the card's status reads "Keeps running". It stops on the owner's Stop, on skill disable / unload / delete (also while Widgets is hidden), when the window reloads, and when Ouroboros closes. A server reconnect with the same served code keeps the frame when the skill is live again with the same revision; a changed revision stops it in order and starts it again. An `entry_type: "module"` widget also restarts on a new publication of the same bytes, because its file lease ends with the old one. | — |
 
 Rules every module author follows:
@@ -2299,8 +2480,8 @@ acknowledgement handshake is live for `kind: module`: your
 `__ouroWidgetOnDispose` hooks may be async and may use the fetch bridge, and
 the parent gives them up to one second before it removes the frame — on Stop,
 on leaving the page, and when your skill's revision changes while the card
-runs (the old frame flushes first, then the fresh card mounts). A `kind: iframe`
-route frame has no bridge and is removed at once. Autosave while running plus the one-second flush
+runs (the old frame flushes first, then the fresh card mounts). A route page
+gets the same handshake once it loads the bridge; without it, it is removed at once. Autosave while running plus the one-second flush
 is still the whole durable path — nothing survives a reload or Ouroboros
 closing, kept-running cards included. When the owner disables your skill while
 its widget runs, the dispose hook still runs, but the server unregisters the
@@ -2517,6 +2698,12 @@ compact height, since a message gives it less room than the Widgets page.
 Ouroboros's own component cards (`show_card(components=...)`) reuse this
 catalog without routes: their `action`/`form` controls bind
 `submit: {id, once?}`, and a press returns to Ouroboros as owner input.
+A card draws only inline `data:` media, so the tool copies an image named
+by `file` (a PNG, JPEG, GIF or WebP; a card's images at most 2 MiB
+together) into the card as its `src`, and refuses a card whose image,
+audio or video has no such source instead of showing it without one
+(media shown on a `condition_key` or aimed at a `target` is left to the
+renderer).
 
 ### Async job error contract
 
@@ -2543,7 +2730,7 @@ else:
 ## Skill Review Checklist
 
 Read the authoritative [Skill Review Checklist](CHECKLISTS.md#skill-review-checklist) when authoring or repairing:
-its verdicts, enforcement and Advisory author-finish rules are not a separate policy here. `clean`, `warnings`,
+its verdicts, gate and author-finish rules are not a separate policy here. `clean`, `warnings`,
 `blockers` and `pending` remain independent from `review_gate.executable_review`. Calls: the lifecycle above; runtime gate: ARCHITECTURE §13. A running review is not unavailable.
 
 ## Reference skills
@@ -2593,8 +2780,8 @@ any git repository the owner adds. Until the owner chooses, a source acts on
 its suggested trust: Official installs without review; Community reviews each
 skill. `confirmed: false` does not suspend that choice. Built-ins default to
 trusted only while no list is saved; afterwards the Built in row decides.
-Each source has a trust: `trusted` installs without review; `review` reviews each skill, and blocker findings keep it off,
-even under Advisory, until the owner skips the review. The basis a skill was
+Each source has a trust: `trusted` installs without review; `review` reviews each skill, and blocker findings keep it off
+until the owner skips the review. The basis a skill was
 installed under is recorded in `data/state/skills/<name>/install.json` and does
 not change when the source's trust changes later.
 
@@ -2607,9 +2794,9 @@ record its own check (`check: "self"` after reading the exact release, with
 `basis: "self_check"`; an edit invalidates it, and outside Cyber Pro that basis
 admits nothing. A trusted source ignores this choice and says so in the result.
 Every acceptance path keeps preflight, the owner's auto-grant setting,
-dependencies and readiness. Who reviews follows the review pool: under Blocking
-every marked reviewer; under Advisory Ouroboros may name `reviewers` (one or more
-pool rows) and must state why when it narrows the panel; a review the owner starts
+dependencies and readiness. Who reviews follows the review pool: Ouroboros may name
+`reviewers` (one or more pool rows) and must state why when it narrows the panel;
+outside Cyber Pro at least one counted; a review the owner starts
 uses the whole pool. Unmarked rows it adds are advisers: heard, never counted.
 
 Add source takes any Git address (`https://`, `ssh://`, `git@host:path`,
@@ -2681,7 +2868,7 @@ headless first start installs the selected built-ins before fetching git sources
 
 ### Publishing
 
-Finish the local payload and configure `GITHUB_TOKEN` in Settings → Secrets;
+Finish the local payload and configure `GITHUB_TOKEN` in Settings → Accounts and keys;
 publication uses HTTPS directly and needs no `gh` CLI. Choose **Publish** on
 the skill or ask Ouroboros in chat
 (`submit_skill_to_hub`). The destination is where the skill came from, else the
@@ -2731,7 +2918,7 @@ The preflight returns one of five states:
 
 - `ready` — the current snapshot is locally publication-ready; the managed task
   repeats the authoritative checks before any public effect.
-- `warnings` — redacted scanner warnings or qualified Advisory author acceptance
+- `warnings` — redacted scanner warnings or qualified author acceptance
   remain disclosed; original critic findings retain their actual severity.
   Continuing requires explicit confirmation.
 - `needs_attention` — the content, version, or full review still needs work, but
@@ -2762,7 +2949,7 @@ Only literal Betterleaks `high` confidence blocks an outbound publication call.
 an intentional provider-shaped fixture, Ouroboros may add Betterleaks's
 exact-line `betterleaks:allow` annotation. That byte edit makes the hash-bound
 critic review stale, so the current bytes need fresh critic authority or qualified
-Advisory author finish before retrying; scanner approval alone supplies neither.
+author finish before retrying; scanner approval alone supplies neither.
 The audit pass records the suppressed exact line as an audited false positive.
 Remove or rotate a real credential instead of allowing it.
 
@@ -2775,27 +2962,27 @@ Publish never downloads the scanner automatically. Typed failures return the
 completed stage, external effects, and a repair hint; Ouroboros decides whether
 to inspect, repair, re-review, retry, clean up, or stop.
 
-A successful publication also writes a durable local receipt to
-`data/state/skills/<name>/ouroboroshub.json` (`published` section: slug,
-version, content hash, repository, PR number/url, timestamp). The receipt is
-best-effort: a write failure is disclosed as `publication_recorded: false` in
-the tool result and never cancels the real PR. The skill's details show it as
-quiet submission history: the submitted version (not the current local one),
-the PR link and whether the local files now differ from the submitted copy. It
-is history, not a status: it never claims that the PR merged and never gates an
-action. The receipt survives uninstall (including the startup cleanup of
-uninstalled state) and reinstall; a republish overwrites it, and an explicit
-**Delete** of a local skill removes it with the rest of that skill's state.
+Successful publication best-effort writes a durable `published` receipt in
+`data/state/skills/<name>/ouroboroshub.json`: slug, submitted version, content
+hash, repository, PR number/URL and timestamp. Write failure is disclosed as
+`publication_recorded: false` without cancelling the real PR. Details show quiet
+submission history: that version (not the local one), the PR link and whether
+local files differ. It never claims merge or gates actions. Uninstall (including
+startup cleanup) and reinstall keep it; republishing replaces it; explicit
+**Delete** removes it with the skill's state.
 
-Forgetting the record in that history deliberately clears the local receipt.
-Nothing else needs it: the installed files, review and grants stay, the GitHub
-PR is not closed or changed, and installs and updates never wait for it. It
-clears the receipt shown; if another publication replaced it, refresh first.
+Forget clears only the displayed receipt; refresh if another publication replaced
+it. Installed files, review, grants and the GitHub PR stay unchanged; installs
+and updates never wait for this history.
 
 For an update of a catalog entry, the tool result and PR body name both the
-current catalog version and the proposed version. Versions are opaque strings:
-an older-looking or non-semantic version is allowed, while an identical version
-still needs to change before publishing an update.
+current catalog version and the proposed version; versions are opaque strings,
+so an older-looking or non-semantic one is allowed and only an identical one is
+refused. Before anything is written, the skill's files and entry at the
+destination are compared with the release its install record names for that
+folder: what the destination changed since, or would lose without such a
+release, is replaced only on Ouroboros's decision bound to that comparison,
+which the PR records.
 
 Publication succeeds only when the task records a validated pull-request
 receipt in the destination repository for this exact skill. A branch,
@@ -2829,6 +3016,11 @@ def register(api):
         legacy.unlink()
     # ... continue registration
 ```
+
+An out-of-process extension's `register(api)` runs again on every load on the
+server (start, reconcile, enable, reload); workers take that load's recorded
+catalog. Anything `register` reads from `state_dir` reaches new workers after
+the next load on the server, not when the file changes.
 
 ## Troubleshooting
 

@@ -69,9 +69,10 @@ def test_a_healed_debt_is_never_resurrected_by_its_own_frozen_warning() -> None:
     assert OUTCOME_PHASE_HEADLINE[outcome_phase(unknown, {})] == "Done with warnings"
 
     # Only the custody warning heals; another warning the row earned still heads it.
-    other = _row(outcome_axes=_legacy_axes({"status": "ok"}, "receipt_absent"), delegated_runs_unreconciled=[])
+    other = _row(outcome_axes=_legacy_axes({"status": "ok"}, "expected_output_ungrounded"),
+                 delegated_runs_unreconciled=[])
     assert OUTCOME_PHASE_HEADLINE[outcome_phase(other, {})] == "Done with warnings"
-    assert _completion_verdict(other, {}) == TASK_CAUSE_PHRASES["receipt_absent"]
+    assert _completion_verdict(other, {}) == TASK_CAUSE_PHRASES["expected_output_ungrounded"]
 
     # A new row keeps its own cause; its open debt alone warns, from the list.
     fresh = {"status": "completed", "reason_code": "final_message", "delegated_runs_unreconciled": ["run-a1"],
@@ -83,6 +84,32 @@ def test_a_healed_debt_is_never_resurrected_by_its_own_frozen_warning() -> None:
     railed = _row(outcome_axes=_legacy_axes({"status": "failed", "reason_code": "provider_unavailable"}),
                   delegated_runs_unreconciled=[])
     assert _completion_verdict(railed, {}) == "The task could not get a usable model answer, so it could not finish."
+
+
+@pytest.mark.parametrize("detail", ["receipt_absent", "verification_red_unreconciled", "children_undecided"])
+def test_a_detail_only_warning_keeps_done_and_a_warning_beside_it_still_warns(detail) -> None:
+    """Owner, 9 Nov 2026 (audit 11.11, item 18): nothing examined the result, a failed check no later run of it
+    passed and finished children without a recorded decision ask nothing of the owner. Alone such a fact keeps the
+    headline Done, read from the row or its event, and still says itself in the cause line; a warning that does
+    ask something, beside it, still makes the row Done with warnings."""
+    from ouroboros.outcomes import DETAIL_ONLY_WARNINGS
+    from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, outcome_phase
+
+    def row(*warnings):
+        return {"status": "completed", "reason_code": "final_message",
+                "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"},
+                                 "objective": {"status": "not_evaluated", "source": "none",
+                                               "warning": warnings[0], "warnings": list(warnings)}}}
+
+    assert detail in DETAIL_ONLY_WARNINGS
+    alone = row(detail)
+    assert OUTCOME_PHASE_HEADLINE[outcome_phase(alone, {})] == "Done"
+    assert OUTCOME_PHASE_HEADLINE[outcome_phase({}, alone)] == "Done", "the event reads it alike"
+    assert _completion_verdict(alone, {}) == TASK_CAUSE_PHRASES[detail], "the detail still says itself"
+    beside = row(detail, "expected_output_ungrounded")
+    assert OUTCOME_PHASE_HEADLINE[outcome_phase(beside, {})] == "Done with warnings"
+
+
 @pytest.mark.parametrize("event_only", [False, True])
 @pytest.mark.parametrize("prior", [
     {"status": "completed"},

@@ -40,12 +40,6 @@ from ouroboros.review_status_projection import (
     _review_status_actor_summary as _review_status_actor_summary,
 )
 from ouroboros.review_status_projection import (
-    _review_status_obligation_to_dict as _review_status_obligation_to_dict,
-)
-from ouroboros.review_status_projection import (
-    _review_status_debt_to_dict as _review_status_debt_to_dict,
-)
-from ouroboros.review_status_projection import (
     _review_status_message as _review_status_message,
 )
 
@@ -281,17 +275,17 @@ def collect_review_evidence(
     repo_dir: Any = None,
     canonical_root: Any = None,
     max_attempts: int = 3,
-    max_obligations: int | None = None,
     max_continuations: int = 3,
 ) -> Dict[str, Any]:
     """Project this task's commit review record over the durable ledger.
 
-    Repository readiness (``current_repo``, obligations, debts) stays
-    repository-scoped — that is what "can this checkout be committed" means.
+    Repository readiness (``current_repo``) stays repository-scoped — that is
+    what "can this checkout be committed" means.
     The repository stale marker is shown to every task on the checkout, with
     ``stale_task_id``/``stale_attribution`` naming whose mutation or review
-    wrote it. The retired advisory lane's archived rows are neither this task's
-    record nor the checkout's readiness, so they are not projected. A split-drive
+    wrote it. The retired advisory lane's and obligation layer's archived rows
+    are neither this task's record nor the checkout's readiness, so they are not
+    projected. A split-drive
     task's own ``review_change`` attempts are read from ``canonical_root``; an
     unreadable one is named (``canonical_attempts_unreadable``), never read as none.
     """
@@ -320,8 +314,6 @@ def collect_review_evidence(
     else:
         scoped_attempts = all_attempts
 
-    open_obligations = state.get_open_obligations(repo_key=repo_key or None)
-    open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key or None)
     continuations, corrupt = list_review_continuations(drive_root_path)
     if task_id:
         scoped_continuations = [item for item in continuations if item.task_id == task_id]
@@ -348,9 +340,6 @@ def collect_review_evidence(
         },
         "recent_attempts": [_attempt_to_dict(item) for item in (scoped_attempts[-max_attempts:] if max_attempts > 0 else [])],
         "omitted_attempts": max(0, len(scoped_attempts) - max_attempts) if max_attempts > 0 else len(scoped_attempts),
-        "open_obligations": [_obligation_to_dict(item) for item in (open_obligations[:max_obligations] if max_obligations is not None else open_obligations)],
-        "omitted_obligations": max(0, len(open_obligations) - max_obligations) if max_obligations is not None else 0,
-        "commit_readiness_debts": [_debt_to_dict(item) for item in open_debts],
         "continuations": [_continuation_to_dict(item) for item in scoped_continuations[:max_continuations]],
         "omitted_continuations": max(0, len(scoped_continuations) - max_continuations),
         "corrupt_continuations": [str(item) for item in corrupt[:3]],
@@ -362,8 +351,6 @@ def collect_review_evidence(
         evidence["current_repo"]["preflight_unreadable"] = look_unreadable
     evidence["has_evidence"] = any([
         evidence["recent_attempts"],
-        evidence["open_obligations"],
-        evidence["commit_readiness_debts"],
         evidence["continuations"],
         evidence["corrupt_continuations"],
         # The lens must not report "nothing recorded" when the canonical rows it should hold could not be read.
@@ -371,7 +358,6 @@ def collect_review_evidence(
         bool(look_unreadable),
         # Omission counters signal truncated evidence even when visible lists are empty
         evidence["omitted_attempts"] > 0,
-        evidence["omitted_obligations"] > 0,
         evidence["omitted_continuations"] > 0,
         evidence["omitted_corrupt"] > 0,
     ])
@@ -399,22 +385,9 @@ def _attempt_to_dict(item: Any) -> Dict[str, Any]:
         "triad_raw_results": list(getattr(item, "triad_raw_results", []) or []),
         "scope_raw_result": dict(getattr(item, "scope_raw_result", {}) or {}),
     })
-    for key in ("readiness_warnings", "obligation_ids", "degraded_reasons", "triad_models"):
+    for key in ("readiness_warnings", "degraded_reasons", "triad_models"):
         data[key] = [str(x) for x in (getattr(item, key, []) or [])]
     return data
-
-
-def _obligation_to_dict(item: Any) -> Dict[str, Any]:
-    return {
-        "obligation_id": str(getattr(item, "obligation_id", "") or ""),
-        "fingerprint": str(getattr(item, "fingerprint", "") or ""),
-        "item": str(getattr(item, "item", "") or ""),
-        "severity": str(getattr(item, "severity", "") or ""),
-        "reason": str(getattr(item, "reason", "") or ""),
-        "status": str(getattr(item, "status", "") or ""),
-        "created_ts": str(getattr(item, "created_ts", "") or ""),
-        "updated_ts": str(getattr(item, "updated_ts", "") or ""),
-    }
 
 
 def _continuation_to_dict(item: Any) -> Dict[str, Any]:
@@ -428,16 +401,6 @@ def _continuation_to_dict(item: Any) -> Dict[str, Any]:
         "advisory_findings": list(getattr(item, "advisory_findings", []) or []),
         "readiness_warnings": [str(x) for x in (getattr(item, "readiness_warnings", []) or [])],
     })
-    return data
-
-
-def _debt_to_dict(item: Any) -> Dict[str, Any]:
-    data = {
-        key: str(getattr(item, key, "") or "")
-        for key in ("debt_id", "category", "title", "summary", "status", "severity", "source", "repo_key", "updated_at")
-    }
-    data["source_obligation_ids"] = [str(x) for x in (getattr(item, "source_obligation_ids", []) or [])]
-    data["evidence"] = [str(x) for x in (getattr(item, "evidence", []) or [])]
     return data
 
 

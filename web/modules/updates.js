@@ -4,10 +4,11 @@ import { mountVersionList } from './update_versions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
-import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, bindPreflightDescription, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, verifiedUpdatePlan } from './update_status.js';
+import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, bindPreflightDescription, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, verifiedUpdatePlan } from './update_status.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
+import { mountTabSettings } from './dashboard.js';
 
 // Known non-state warnings are folded into their verdict states; everything
 // else is surfaced verbatim so a backend warning class can never vanish.
@@ -123,7 +124,7 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
     const chips = appVersion ? [{ label: 'App', value: appVersion }] : [];
     if (data.official_repo_url) chips.push({ label: 'Official repo', value: repoSlug(data.official_repo_url) });
     if (data.target_ref) chips.push({ label: 'Target', value: data.target_ref });
-    if (data.update_channel) chips.push({ label: 'Channel', value: data.update_channel, link: 'settings-advanced' });
+    if (data.update_channel) chips.push({ label: 'Channel', value: data.update_channel });
     // Commit counts are history (the updater's own merges count too); whether the
     // checkout holds content of its own is the server's `local_changes` fact.
     const commits = [];
@@ -407,6 +408,9 @@ export function updateLetterView(data = {}, phase = '') {
         ? { ...(letter.checked_key || {}), base_sha: runningBase, target_sha: latestTarget } : null;
     const request = requestView(letter);
     if (!markdown && !offered && !request?.live && state !== 'failed') return noLetterView();
+    // The host's own fact about the update on offer, whatever text is shown and whether or not one exists:
+    // only the check facts of exactly that range speak for it.
+    const over = offered && sameRange(letter.qualification, offered) ? updateOverReview(letter.qualification) : null;
 
     const relation = markdown && LETTER_RELATIONS.has(letter.relation) ? letter.relation : (markdown ? 'other' : '');
     const meta = {
@@ -466,6 +470,8 @@ export function updateLetterView(data = {}, phase = '') {
         covers: markdown ? shortRange(letter.key) : '',
         write,
         request,
+        over: over?.line || '',
+        overDetail: over?.detail || '',
     };
 }
 
@@ -562,13 +568,22 @@ export function bindAppVersionRender({ getStatus, render }) {
     return watchAppVersion(() => { if (getStatus()) render(); });
 }
 
-export function initUpdates({ mount, state, ws, openSettingsTab }) {
+// A fact's value as HTML. A code with no break of its own (a full commit SHA) offers one at its middle, so a column
+// narrower than the code reads it as two even halves instead of leaving its last character on a line of its own
+// (style.css .dashboard-facts dd); copying it still copies it whole.
+export function factValueHtml(value) {
+    return String(value ?? '').split(/(\s+)/).map((part) => {
+        if (part.length < 24 || /\s/.test(part)) return escapeHtml(part);
+        const middle = Math.ceil(part.length / 2);
+        return `${escapeHtml(part.slice(0, middle))}<wbr>${escapeHtml(part.slice(middle))}`;
+    }).join('');
+}
+
+export function initUpdates({ mount, state, ws }) {
     // The tab's one root and scroller (style.css "The Dashboard tab body"): the state of the channel leads as the
     // tab's headline with its facts and one next action; the last attempt, the record's facts, the description and
-    // Recovery follow, each behind its own disclosure.
-    const page = document.createElement('div');
-    page.id = 'page-updates';
-    page.className = 'dashboard-body scroll-fade-y';
+    // Recovery follow, each behind its own disclosure. The channel itself is chosen in the card below.
+    const page = Object.assign(document.createElement('div'), { id: 'page-updates', className: 'dashboard-body scroll-fade-y' });
     page.innerHTML = `
             <section class="ui-card updates-card" id="updates-status-card">
                 <div class="dashboard-hero">
@@ -608,11 +623,13 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                         </div>
                     </div>
                     <div class="updates-letter-note" id="updates-letter-note-line" hidden><span id="updates-letter-note" role="status" aria-live="polite"></span> <span id="updates-letter-task"></span></div>
+                    <p class="ui-status updates-letter-over" id="updates-letter-over" data-tone="warn" hidden></p>
                     <div class="updates-letter-body ui-rich-content" id="updates-letter-body"></div>
                     <button type="button" class="btn btn-ghost btn-sm ui-list-more" id="updates-letter-more" hidden>Read all</button>
                     <details class="ui-disclosure updates-letter-details" id="updates-letter-details">
                         <summary>Details</summary>
                         <p id="updates-letter-provenance"></p>
+                        <p id="updates-letter-over-names" hidden></p>
                         <p id="updates-letter-error" hidden></p>
                         <p id="updates-letter-resources">Check reads the official channel and never writes a description. Writing runs one ordinary Ouroboros task on your Main model, which can read the changes themselves; it may use subscription limits, local resources, or API budget.</p>
                     </details>
@@ -632,8 +649,17 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                     <div id="updates-official-tags" class="updates-restore-list"></div>
                 </details>
             </section>
+            <div class="dashboard-settings-cards" data-updates-settings></div>
     `;
     mount.appendChild(page);
+    // The channel: a card of choices drawn once, out of every repaint below. Each settings read marks the chosen one.
+    const channelCard = page.querySelector('[data-updates-settings]');
+    mountTabSettings(channelCard, 'updates', { state, cards: [{ label: 'Which updates', solo: true }], onSaved: () => loadStatus({ fetchRemote: false }),
+        onPaint: (settings, chosen = String(settings?.OUROBOROS_UPDATE_CHANNEL ?? '')) => channelCard.querySelectorAll('[data-setting-value]')
+            .forEach((choice) => choice.setAttribute('aria-pressed', String(choice.dataset.settingValue === chosen))),
+        custom: (row) => `<div class="settings-choices" role="group" aria-labelledby="setting-${row.id}-name">${row.control.options.map((option) =>
+            `<button type="button" class="settings-choice dashboard-choice" data-setting-value="${option.value}" aria-pressed="false"><span class="settings-choice-name">${option.label}</span>`
+            + `<span class="settings-choice-note">${option.note}</span></button>`).join('')}</div>` });
 
     const primaryBtn = page.querySelector('#btn-update-primary');
     let restartNeeded = false;  // panel-lifetime restart continuation (no durable marker exists for fence/rollback refusals)
@@ -671,15 +697,17 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     const letterRefresh = page.querySelector('#updates-letter-refresh');
     const letterRefreshLabel = page.querySelector('#updates-letter-refresh-label');
     const letterProvenance = page.querySelector('#updates-letter-provenance');
+    const letterOver = page.querySelector('#updates-letter-over');
+    const letterOverNames = page.querySelector('#updates-letter-over-names');
     const letterError = page.querySelector('#updates-letter-error');
     let letterRefreshing = false;
     let letterRefreshError = null;
     let letterRequesting = false;
     let letterRequestError = null;
-    let letterDisposer = null;
-    let letterKey = null;
-    // "Read all" offers the rest only when the clamped body hides some. A body in a hidden tab measures 0 x 0, which
-    // says nothing, so that measure stays owed until the body has a height (the tab shown, or the next render).
+    let letterDisposer = null, letterKey = null;
+    // "Read all" offers the rest only when the clamped body hides some. A body in a hidden tab or page measures 0 x 0,
+    // which says nothing, so that measure stays owed until the body has a height (its tab or the Dashboard shown, or
+    // the next render). A new width refolds a folded text, so it owes the measure again.
     let letterMeasureOwed = false;
     let letterDoor = '';
     let latestStatus = null;
@@ -688,13 +716,11 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     let restartReconcileQueued = false;
     let restartReconcileAfterBootNotice = false;
 
-    // The headline's facts are one flat line (the app, the official repository, the channel, a door to change it); the
-    // rest of the record is the card's Details. A group heading spans both columns of a facts list.
-    const factLine = (chip) => chip.link === 'settings-advanced'
-        ? `<button type="button" class="consciousness-inline-link ui-hit-area" data-open-settings-advanced title="Change in Settings › Advanced">${escapeHtml(chip.value)} channel</button>`
-        : escapeHtml(chip.label === 'App' ? `App ${chip.value}` : chip.value);
+    // The headline's facts are one flat line (the app, the official repository, the channel); the rest of the record is
+    // the card's Details. A group heading spans both columns of a facts list.
+    const factLine = (chip) => escapeHtml(chip.label === 'App' ? `App ${chip.value}` : chip.label === 'Channel' ? `${chip.value} channel` : chip.value);
     const factRowHtml = (row) => (row.head ? `<dt class="updates-facts-head">${escapeHtml(row.head)}</dt>`
-        : `<dt>${escapeHtml(row.label)}</dt><dd>${escapeHtml(row.value)}</dd>`);
+        : `<dt>${escapeHtml(row.label)}</dt><dd>${factValueHtml(row.value)}</dd>`);
 
     // The letter body hosts rendered markdown, so its enhancement owns real
     // resources (Chart instances, mermaid timers, a click handler). Release
@@ -719,8 +745,17 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         root.querySelectorAll('button').forEach((control) => control.remove());
     }
 
-    /** The Apply confirmation's copy of the description: the same pipeline and scrub as the panel. */
-    function mountDescription(container, markdown) {
+    /** The Apply confirmation's copy of the description: the same pipeline and scrub as the panel, under the
+     *  host's line about what the range brings over a review outcome; either may be absent. */
+    function mountDescription(container, markdown, over = '') {
+        if (over) {
+            const line = document.createElement('p');
+            line.className = 'ui-status updates-letter-over';
+            line.dataset.tone = 'warn';
+            line.textContent = over;
+            container.append(line);
+        }
+        if (!markdown) return undefined;
         const heading = document.createElement('h4');
         heading.className = 'updates-letter-label';
         heading.textContent = "What's new";
@@ -786,6 +821,10 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             ? ` about ${view.meta.targetVersion}` : ''}.${view.covers ? ` Changes ${view.covers}.` : ''}`
             : (view.write ? `The update on offer: changes ${shortRange(view.write.key)}.` : '');
         letterProvenance.hidden = !letterProvenance.textContent;
+        letterOver.textContent = view.over;
+        letterOver.hidden = !view.over;
+        letterOverNames.textContent = view.overDetail;
+        letterOverNames.hidden = !view.overDetail;
         const lastFailure = letterRefreshError?.text || letter.error_text || letter.error_kind || '';
         const failedAt = attemptTime(letterRefreshError?.at || letter.failed_at);
         // Failed-attempt provenance must never borrow the shown
@@ -906,7 +945,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         // Rewritten only when the record changes, so a refresh keeps the owner's selection in it.
         const raw = observed ? JSON.stringify(observed, null, 2) : '';
         if (attemptRawText.textContent !== raw) attemptRawText.textContent = raw;
-        attemptRestore.hidden = !view.restoreTarget;
+        attemptRestore.hidden = !view.restoreTarget || Boolean(latestStatus?.managed_by_deployment);
         attemptRestore.dataset.target = view.restoreTarget || '';
         attemptRestore.disabled = replaceInFlight || Boolean(latestStatus?.update_tx?.active)
             || ['preflighting', 'updating', 'restarting'].includes(phase);
@@ -914,6 +953,12 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
 
     function render() {
         const verdict = updateVerdict(latestStatus || {}, phase, lastAppVersion());
+        // A managed deployment's administrator replaces the serving program (deployment_policy): no update, replace,
+        // restore or recovery point is offered here; a restart of the same program stays.
+        const managed = String(latestStatus?.managed_by_deployment || '');
+        if (managed) Object.assign(verdict, { headline: 'Managed by your organization', hint: managed,
+            action: verdict.action?.id === 'restart' ? verdict.action : null });
+        page.querySelector('.updates-recovery').hidden = Boolean(managed);
         paintStatusMark(dot, { shape: TONE_MARKS[verdict.tone] ? 'dot' : 'none', hue: TONE_MARKS[verdict.tone] || 'ink' });
         summary.textContent = verdict.headline;
         const hintText = [verdict.hint, ...(verdict.warnings || []).map((w) => `Warning: ${w}`)]
@@ -1098,11 +1143,14 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             const conflictCount = (plan.code_conflict_paths || []).length + (plan.doc_conflict_paths || []).length;
             const assisted = strategy === 'assisted';
             const description = preflightDescription(preflight);
+            // The host's line reads first, whether or not a description exists, from the facts of exactly these pins.
+            const facts = preflight.qualification;
+            const over = sameRange(facts, plan) ? updateOverReview(facts).line : '';
             // The description reads as rendered prose in its own region; the consequences of
             // applying stay plain text below it, and the per-commit evidence sits in Details.
             const proceed = await openConfirmDialog({
                 title: `Update ${String(plan.base_sha).slice(0, 8)} -> ${String(plan.target_sha).slice(0, 8)}`,
-                content: description ? { label: "What's new", mount: (el) => mountDescription(el, description) } : null,
+                content: description || over ? { label: "What's new", mount: (el) => mountDescription(el, description, over) } : null,
                 body: (description ? '' : 'No description is available for this exact preflight range.\n\n') + (assisted
                     ? `${conflictCount} conflict(s) need resolution. Ouroboros will resolve the merge as a reviewed task (model spend applies); progress lands in chat, and the server restarts after the reviewed commit.`
                     : `Git applies this update directly (${plan.local_dirty_count || 0} uncommitted file(s) are stashed and restored). The server restarts when it lands.`)
@@ -1194,7 +1242,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             const resp = await apiFetch('/api/command', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cmd: '/restart' }),
+                body: JSON.stringify({ cmd: '/restart', ui_control: { name: 'restart' } }),
             });
             if (!resp.ok) throw new Error(`restart command refused (HTTP ${resp.status})`);
             showToast('Restart requested.', 'success');
@@ -1220,11 +1268,6 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     attemptRestore.addEventListener('click', () => rollback({ target: attemptRestore.dataset.target, label: 'the version before this update' }));
     letterMore.addEventListener('click', () => {
         letterMore.textContent = letterBody.classList.toggle('is-open') ? 'Show less' : 'Read all';
-    });
-    meta.addEventListener('click', (event) => {
-        if (event.target.closest?.('[data-open-settings-advanced]')) {
-            openSettingsTab?.('advanced');
-        }
     });
     page.querySelector('#updates-promote').addEventListener('click', async () => {
         const confirmedPromote = await openConfirmDialog({
@@ -1262,4 +1305,17 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         loadStatus({ fetchRemote: false });
         versions.load();
     });
+    // The sidebar's return to the Dashboard announces only the page (app.js showPage); its selected tab stays.
+    window.addEventListener('ouro:page-shown', (event) => {
+        if (event.detail?.page === 'dashboard') requestAnimationFrame(measureLetter);
+    });
+    // A narrower window or interface size folds more of a text that fitted; an open text keeps its Show less.
+    window.addEventListener('resize', () => {
+        if (letterBody.classList.contains('is-open')) return;
+        letterMeasureOwed = true;
+        requestAnimationFrame(measureLetter);
+    });
+    // An owed measure is taken when the body gets a box, whichever door showed it: its page opened from the
+    // Dashboard's list by the row already chosen changes no tab and announces nothing (dashboard.js openLevel).
+    if (typeof ResizeObserver === 'function') new ResizeObserver(() => measureLetter()).observe(letterBody);
 }

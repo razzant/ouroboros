@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import json
 import copy
+import hashlib
 import logging
 import pathlib
 import re
 from typing import Any, List, Optional
 
 from ouroboros.context_budget import LARGE_CONTEXT_SECTION_CHARS
-from ouroboros.context_health import safe_read
 from ouroboros.section_floor import HostSection
 from ouroboros.context_timing import timed_section
 
@@ -22,11 +22,17 @@ log = logging.getLogger(__name__)
 _LARGE_CONTEXT_SECTION_CHARS = LARGE_CONTEXT_SECTION_CHARS
 
 
+def revision_line(noun: str, shown: str, revision: str) -> str:
+    """The line after a resident text naming its revision, so a write needs no read for its token: ``revision`` is the
+    sha256 of the bytes the text shown was decoded from (one capture), never of a second read."""
+    return ("" if shown.endswith("\n") else "\n") + f"\nRevision of this {noun}: {revision}.\n"
+
+
 # An unauthored common orientation is a VISIBLE GAP, never silence. Static text: this
 # section is cached with the semi-stable block, so it carries no timestamp.
 _SHARED_UNDERSTANDING_GAP = (
     "## Shared understanding\n\nNot authored yet. "
-    "knowledge_write(topic='overview', scope='global', content=...) creates it; "
+    "knowledge_write(topic='overview', scope='global', mode='overwrite', content=...) creates it; "
     "it is then loaded here in every context."
 )
 
@@ -56,9 +62,12 @@ def build_knowledge_sections(
             from ouroboros.knowledge import overview_residency
 
             heading = f"## Shared understanding\n\n{overview_residency(overview)}\nSource: {reader}.\n\n"
+            # Its revision rides after the body, so a write needs no read for its token. The revision covers
+            # the whole note, its summary too: a summary-only edit moves this last line and no byte before it.
+            revision = revision_line("overview", overview_text, overview.revision)
             # The whole authored orientation rides whole in every request: the window never
             # shortens the overview (TIER0_ALWAYS_FULL); its headings are no substitute for it.
-            sections.append(HostSection("shared_understanding", heading + overview_text, reader=reader))
+            sections.append(HostSection("shared_understanding", heading + overview_text + revision, reader=reader))
         else:
             sections.append(_SHARED_UNDERSTANDING_GAP)  # present but empty is still unauthored
     except FileNotFoundError:
@@ -80,7 +89,9 @@ def build_knowledge_sections(
                     f"## Project journal ({pid}) — recent milestones\n\n{journal}\n\n"
                     "(journal_read shows the full history; journal_write appends.)"
                 )
-            workpad = safe_read(project_workpad_path(pid))
+            page = project_workpad_path(pid)
+            raw = page.read_bytes() if page.is_file() else b""  # one capture: the page shown and its revision
+            workpad = raw.decode("utf-8")
             if workpad.strip():
                 # Cognitive artifact: never silently prefix-slice (BIBLE P1 — that
                 # is partial amnesia). The project's own working memory rides in
@@ -88,7 +99,8 @@ def build_knowledge_sections(
                 # consolidate, not a reason to amputate context.
                 if len(workpad) > _LARGE_CONTEXT_SECTION_CHARS:
                     log.warning("context: project workpad (%s) is large (%d chars)", pid, len(workpad))
-                sections.append(f"## Project workpad ({pid})\n\n{workpad}")
+                sections.append(f"## Project workpad ({pid})\n\n{workpad}"
+                                + revision_line("workpad", workpad, hashlib.sha256(raw).hexdigest()))
         except Exception:
             log.debug("project journal/workpad context injection failed", exc_info=True)
     return sections
@@ -223,7 +235,7 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
     ]
     if any(isinstance(skill, dict) and skill.get('enabled') and skill.get('executable_review')
            and skill.get('review_gate', {}).get('author_accepted') for skill in summary.get('skills') or []):
-        lines.append("author_accepted=true: Current payload accepted by author under Advisory; "
+        lines.append("author_accepted=true: Current payload accepted by its author; "
                      "reviewer evidence remains at its original hash.")
     operative = list(lines)
     count = 0
@@ -301,7 +313,7 @@ def _drive_state_section(env: Any) -> str:
     authority. P1: disclosed omission — keys NAMED, full file one read away."""
     keys = ("session_id", "current_branch", "current_sha", "evolution_mode_enabled",
             "evolution_owner_stopped", "evolution_cycle", "evolution_consecutive_failures",
-            "last_evolution_task_at", "bg_consciousness_enabled", "post_task_autostop",
+            "last_evolution_task_at", "bg_consciousness_enabled", "bg_consciousness_stop_source", "post_task_autostop",
             "budget_drift_pct", "budget_drift_alert", "last_owner_message_at")
     from supervisor.state import CONTROL_KEYS, RECOVERY_KEY, control_value, read_state
 
@@ -374,9 +386,27 @@ def runtime_host_section(data: dict, coordination: str = "") -> HostSection:
 
 
 # The review-continuity host section (moved from review_state, which keeps its extraction bound).
+def earlier_obligation_lines(state: Any, repo_key: str, limit: Optional[int] = None) -> List[str]:
+    """The open obligations this checkout recorded before obligations retired, until a commit lands in it
+    (``earlier_open_obligations``): one rendering for both Review Continuity views; ``limit`` cuts each reason
+    with the explicit omission notice."""
+    from ouroboros.utils import truncate_review_artifact
+
+    rows = state.earlier_open_obligations(repo_key)
+    if not rows:
+        return []
+    lines = [f"- earlier_open_obligations={len(rows)} (recorded before obligations retired; "
+             "shown until a commit lands in this checkout)"]
+    for row in rows:
+        reason = str(row.get("reason") or "")
+        reason = truncate_review_artifact(reason, limit=limit) if limit is not None else reason
+        lines.append(f"  [{row.get('obligation_id') or '?'}] {row.get('item') or '?'}: {reason.replace(chr(10), ' ')}")
+    return lines
+
+
 def continuity_status_lines(state: Any, repo_dir: pathlib.Path,
                             stale_status: tuple[dict, str] = ({}, "")) -> List[str]:
-    """Current debts and uncertainty once, whole; historical executions have a reader.
+    """Current facts and uncertainty once, whole; historical executions have a reader.
     ``stale_status`` is ``review_state.stale_marker_status`` for this checkout."""
     from ouroboros.review_state import make_repo_key
 
@@ -388,25 +418,20 @@ def continuity_status_lines(state: Any, repo_dir: pathlib.Path,
                   f"  invalidated_by={state.stale_marker_attribution_note(marker=marker)}"]
         if look_unreadable:
             lines.append(f"  preflight_unreadable={look_unreadable} (marker unverified)")
-    debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
-    lines.append(f"- commit_readiness_debt={len(debts)}")
-    for debt in debts:
-        lines += [f"- [{debt.debt_id}] status={debt.status} category={debt.category} source={debt.source}",
-                  f"  {debt.title}: {debt.summary}"]
-        if debt.source_obligation_ids:
-            lines.append(f"  obligation_ids={', '.join(debt.source_obligation_ids)}")
-        lines.extend(f"  evidence={e}" for e in dict.fromkeys(debt.evidence or []) if e != debt.summary)
-    obligations = state.get_open_obligations(repo_key=repo_key)
-    lines.append(f"- open_obligations={len(obligations)}")
-    for ob in obligations:
-        lines += [f"- [{ob.obligation_id}] [{ob.severity}] {ob.item}: {ob.reason}",
-                  f"  Source: {ob.source_attempt_ts} — {ob.source_attempt_msg}"]
-    return lines
+    latest = state.latest_attempt_for(repo_key=repo_key)
+    warnings = [str(w) for w in (getattr(latest, "readiness_warnings", None) or []) if str(w).strip()
+                and getattr(latest, "status", "") != "succeeded"]  # a landed attempt owes none
+    if warnings:
+        lines.append(f"- readiness_warnings={len(warnings)} (latest attempt, {getattr(latest, 'status', '') or '?'})")
+        lines.extend(f"  {warning}" for warning in warnings)
+    return lines + earlier_obligation_lines(state, repo_key)
 
 
 def review_status_host_section(state: Any, repo_dir: pathlib.Path, drive_root: pathlib.Path) -> str:
     from ouroboros.review_state import format_status_section, make_repo_key, stale_marker_status
 
-    return HostSection('review_continuity', format_status_section(state, repo_dir),
-                       '\n'.join(continuity_status_lines(state, repo_dir, stale_marker_status(state, drive_root, make_repo_key(repo_dir)))
+    repo_key = make_repo_key(repo_dir)
+    return HostSection('review_continuity',
+                       '\n'.join([format_status_section(state, repo_dir), *earlier_obligation_lines(state, repo_key, 120)]),
+                       '\n'.join(continuity_status_lines(state, repo_dir, stale_marker_status(state, drive_root, repo_key))
                                  + ['Historical review ledger: review_status().']))

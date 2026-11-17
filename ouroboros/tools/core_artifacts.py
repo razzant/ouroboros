@@ -414,13 +414,12 @@ def validate_quiz_payload(
 ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
     "name": "escalate",
     "description": (
-        "Escalate one decision up the responsibility chain instead of guessing. "
-        "A root task asks its human through a quiz card; a subagent asks its parent "
-        "through a typed mailbox frame, which the parent answers with forward_to_worker "
-        "or escalates higher verbatim. From Presence work that answers a place conversation the card goes privately to Main, not "
-        "into that conversation; when your human is the person you are talking with there, tell them there in one line, through the "
-        "place's connector tool and in the same tool batch (a wait begins right after it), what you asked and where, so they are "
-        "not left in silence.\n\n"
+        "Escalate one decision outside your authority, or one your human asked you to ask, to the nearest "
+        "mind that holds it; within your authority, decide. A root task asks its human through a quiz card; a "
+        "subagent asks its parent through a typed mailbox frame, which the parent answers with forward_to_worker "
+        "or escalates higher verbatim. From Presence work answering a place conversation, the card goes privately to Main. "
+        "In a private place conversation with your human, briefly tell them through its connector what you asked and where "
+        "before any requested wait, so they can find the question. In a shared conversation, judge what is appropriate for that audience.\n\n"
         "The card may be the only thing your human sees. It may be read later, outside "
         "this room, by someone who remembers the purpose of the work without remembering "
         "its mechanisms or your earlier discussion. Issue, specification and question "
@@ -439,8 +438,8 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
         "By default, state the assumption you continue under and keep "
         "working; the card stays answerable and a late answer still arrives. Set "
         "wait_for_answer=true on a live root, including an ordinary conversation, when the "
-        "next step is irreversible or costly to redo, or the choice belongs to the human; "
-        "your judgment decides. Waiting begins after the current tool batch, without model "
+        "next step is irreversible or costly to redo, or the work cannot go on without the answer; "
+        "your judgment decides. A requested wait begins after the current tool batch, without model "
         "calls. Waiting questions in one batch share one wait, ending on the first incoming "
         "message, not necessarily an owner answer. A plain-text clarification ends this "
         "turn; a waited question keeps it alive. How many decisions to raise and when "
@@ -449,7 +448,7 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
         "non-empty reason; question_task_id may identify a recorded Continue or retry predecessor, "
         "or another task that has already finished. Before you finish, close each of your own "
         "unanswered questions whose answer would no longer change anything, saying why; leave the "
-        "rest open. Closing is your decision with an explanation, never the human's approval. "
+        "rest open. Closing is your decision, never the human's approval. "
         "Materials may name existing task artifacts needed for the decision."
     ),
     "parameters": {"type": "object", "properties": {

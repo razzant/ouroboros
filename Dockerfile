@@ -1,7 +1,7 @@
 # Ouroboros — Docker images for the web UI runtime
 # Usage (recipes: packaging/docker/compose.yaml, explained in docs/DEPLOYMENT.md):
 #   docker build -t ouroboros-web .
-#   docker run --rm -p 8765:8765 ouroboros-web
+#   docker run --rm -p 127.0.0.1:8765:8765 ouroboros-web
 #   docker build --target managed --build-context ouroboros-seed=<seed dir> -t ouroboros-managed .
 # The RUN --mount caches and --build-context need BuildKit, Docker's default builder.
 
@@ -29,6 +29,18 @@ RUN apt-get update \
     && rm /tmp/python.tar.gz \
     && /opt/python-standalone/bin/python3 -c "import sqlite3,sys; version=sys.version.split()[0]; sqlite=tuple(int(part) for part in sqlite3.sqlite_version.split('.')); assert version=='3.10.22', version; assert sqlite>=(3, 51, 3), sqlite3.sqlite_version"
 
+# The pinned official Node (ouroboros/claudexor_runtime_pin.json, size/SHA-256 checked) for the build's
+# Playwright CLI, SDK copy and the runtime resolver's standard bundled layout.
+FROM python-standalone AS node-standalone
+WORKDIR /opt/node-pin
+COPY ouroboros/claudexor_runtime_pin.json ./ouroboros/
+COPY scripts/download_node_standalone.py ./scripts/
+RUN URL="$(/opt/python-standalone/bin/python3 scripts/download_node_standalone.py --url)" \
+    && curl -fsSL "$URL" -o "/tmp/${URL##*/}" \
+    && /opt/python-standalone/bin/python3 scripts/download_node_standalone.py \
+        --destination /opt/node-standalone --archive "/tmp/${URL##*/}" \
+    && rm "/tmp/${URL##*/}"
+
 # The browser tools' Chromium: the Chrome for Testing headless shell that
 # ouroboros/chromium_runtime.py pins, fetched here and verified and unpacked by that
 # module. The stage reads only the pin and its verifier, so releases reuse it.
@@ -45,6 +57,7 @@ FROM debian:trixie-slim AS runtime
 
 COPY --from=uv /uv /uvx /bin/
 COPY --from=python-standalone /opt/python-standalone /opt/python-standalone
+COPY --from=node-standalone /opt/node-standalone /opt/node-standalone
 
 # Browsers first, dependencies second, sources last: every release rewrites
 # pyproject.toml/uv.lock, so anything below the lock copy is rebuilt per
@@ -73,8 +86,10 @@ ENV PATH="/opt/python-standalone/bin:${PATH}" \
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=bind,from=node-standalone,source=/opt/node-standalone,target=/opt/node-standalone \
     apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git netbase tzdata \
+    && apt-get install -y --no-install-recommends ca-certificates curl git netbase tzdata \
+    && export PLAYWRIGHT_NODEJS_PATH=/opt/node-standalone/bin/node \
     && uvx --from "playwright==${PLAYWRIGHT_VERSION}" playwright install-deps chromium webkit \
     && uvx --from "playwright==${PLAYWRIGHT_VERSION}" playwright install webkit
 COPY --from=chromium /ms-playwright/ /ms-playwright/
@@ -90,10 +105,13 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --python /opt/python-standalone/bin/python3 --no-dev --extra browser --no-install-project
 
-# Copy application
+# Copy application. The immutable venv's Playwright driver gets the pinned Node bytes and LICENSE.node; the managed
+# target's runtime venv (/ouroboros/body/venv) selects a managed copy seeded from /opt/node-standalone at boot.
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --python /opt/python-standalone/bin/python3 --no-dev --extra browser --no-editable
+    --mount=type=bind,from=node-standalone,source=/opt/node-standalone,target=/opt/node-standalone \
+    uv sync --locked --python /opt/python-standalone/bin/python3 --no-dev --extra browser --no-editable \
+    && python scripts/download_node_standalone.py --replace-playwright /app/.venv --node /opt/node-standalone/bin/node
 
 # Default environment
 ENV OUROBOROS_SERVER_HOST=0.0.0.0 \

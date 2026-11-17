@@ -262,6 +262,13 @@ def test_definite_refusal_reaches_the_zero_dollar_terminal_without_a_model_round
     import ouroboros.subagent_runtime as runtime
     from tests.test_model_slot_role_model import _enqueue_through_supervisor
 
+    # The agent's tool registry below can be the first importer of two modules that bind patched
+    # names by value: ``tools.delegate`` re-exports ``exact_start`` and ``harness_maintenance``
+    # imports ``ensure_owned_gateway``. Import them before the doubles, or a double imported
+    # there outlives this test and later tests in the process run it (#2850).
+    import ouroboros.harness_maintenance  # noqa: F401
+    import ouroboros.tools.delegate  # noqa: F401
+
     monkeypatch.setenv("OUROBOROS_MODEL", "provider::main")
     monkeypatch.setattr(agent_module.OuroborosAgent, "_log_worker_boot_once", lambda self: None)
     monkeypatch.setattr("ouroboros.agent.build_llm_messages", lambda **kwargs: ([], {}))
@@ -346,7 +353,6 @@ def test_unreadable_custody_projects_unknown_not_clean(tmp_path, monkeypatch, fa
     from ouroboros.subagent_bootstrap import (
         actor_first_terminal_projection,
         actor_first_unresolved_fact,
-        configured_actor_finalization_message,
     )
 
     if failure == "marker":
@@ -368,14 +374,6 @@ def test_unreadable_custody_projects_unknown_not_clean(tmp_path, monkeypatch, fa
     }
     # No invented counts: unknown means the log may hold a settled run.
     assert "delegated_runs_started" not in fact
-
-    message = configured_actor_finalization_message(
-        ctx, task_id="actor-started", fallback_root=tmp_path,
-    )
-    assert "CONFIGURED_ACTOR_UNKNOWN" in message
-    # Unknown-safe guidance: never a fresh-start recipe over unreadable custody.
-    assert "Start the exact assigned session now" not in message
-    assert "delegate_wait" in message
 
     projected, usage_out, _trace = actor_first_terminal_projection(
         ctx, {"id": "actor-started"}, {}, {}, tmp_path,

@@ -44,6 +44,18 @@ import sys
 import tempfile
 
 
+def _default_data_root() -> str:
+    """This caller's data root as ``launch_roots.data_dir`` derives it, a ``Path`` in every branch
+    (``OUROBOROS_DATA_DIR``, else ``<OUROBOROS_APP_ROOT or ~/Ouroboros>/data``), ``""`` if unreadable. Derived here:
+    stage one imports nothing from the tree under verification beyond the audited helper
+    (``tests/test_run_tests_script.py`` holds the two equal, empty and unnormalized spellings included)."""
+    try:
+        app_root = Path(os.environ.get("OUROBOROS_APP_ROOT", Path.home() / "Ouroboros"))
+        return str(Path(os.environ.get("OUROBOROS_DATA_DIR", app_root / "data")))
+    except Exception:  # describing the caller's Node never stops the command
+        return ""
+
+
 def _wait_owning(argv: list[str], repo: Path, env: dict) -> int:
     """Start stage two and wait for it; a first POSIX stop signal is passed on, never acted on here."""
     received: list[int] = []
@@ -123,6 +135,9 @@ def main() -> int:
     # caller's data-root fact to stage two so the existing private-copy record can
     # select task-owned evidence; no task data or credentials cross the boundary.
     owner_data_root = os.environ.get("OUROBOROS_DATA_DIR", "")
+    # Where stage two looks for the caller's prepared pinned Node, by record only: that value, else the
+    # launchers' own default (``launch_roots.data_dir``), read before the boundary replaces HOME.
+    node_data_root = owner_data_root or _default_data_root()
     try:
         env = boundary(root, repo, keep=(
             "OUROBOROS_RUN_UI_SMOKE", "OUROBOROS_EXPECT_BROWSER_ENGINES",
@@ -132,6 +147,10 @@ def main() -> int:
             # CI requires these test dependencies; without them a missing plugin or Node skips.
             "OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS", "OUROBOROS_PREFLIGHT_REQUIRE_NODE",
             "PLAYWRIGHT_BROWSERS_PATH", "OUROBOROS_E2E_DEEP",
+            # Playwright's driver Node: an operator's literal choice, or the pinned Node a caller selected (marker
+            # beside it); and the pinned Node a caller carried, which lookups inside find by its record. The
+            # hermetic gate scrubs all three.
+            "PLAYWRIGHT_NODEJS_PATH", "OUROBOROS_PLAYWRIGHT_NODE_SELECTED", "OUROBOROS_PINNED_NODE_CARRIED",
             # The run's shard weights (ci.yml `shard-plan`): tests/default_lane.py, tests/browser_lane.py;
             # and the owner's persisted table every session brings up to date (tests/ci_evidence.py).
             "OUROBOROS_CI_DURATIONS", "OUROBOROS_TEST_DURATIONS",
@@ -158,15 +177,15 @@ def main() -> int:
             "import sys; sys.dont_write_bytecode=True; "
             "sys.path.insert(0, sys.argv[1]); "
             "from ouroboros.safe_test_supervisor import main; "
-            "raise SystemExit(main(sys.argv[2], sys.argv[1], sys.argv[7:], "
+            "raise SystemExit(main(sys.argv[2], sys.argv[1], sys.argv[8:], "
             "evidence_parent=sys.argv[3] or None, keep=sys.argv[4]=='1', "
             "timeout=float(sys.argv[5]) if sys.argv[5] else None, "
-            "owner_data_root=sys.argv[6] or None))"
+            "owner_data_root=sys.argv[6] or None, node_data_root=sys.argv[7] or None))"
         )
         return _wait_owning(
             [sys.executable, "-I", "-S", "-c", bootstrap, str(repo), str(root),
              str(args.evidence_dir.resolve()) if args.evidence_dir else "", "1" if args.keep else "0",
-             repr(args.timeout) if args.timeout is not None else "", owner_data_root, *command],
+             repr(args.timeout) if args.timeout is not None else "", owner_data_root, node_data_root, *command],
             repo, env,
         )
     finally:

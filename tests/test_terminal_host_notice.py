@@ -689,7 +689,7 @@ def test_browser_renders_the_model_answer_without_a_host_bubble(direct_server_wi
             answer.wait_for(state="visible", timeout=15000)
             assert "Plan review remained open" not in answer.inner_text()
             assert page.locator(".chat-bubble.system").count() == 0
-            page.screenshot(path=str(diagnostic_directory(data.parent, "terminal-host-notice") / "terminal-host-notice.png"), full_page=True)
+            page.screenshot(path=str(diagnostic_directory(data.parent, "terminal-host-notice", publish=True) / "terminal-host-notice.png"), full_page=True)
             page.reload(wait_until="domcontentloaded")
             answer.wait_for(state="visible", timeout=15000)
             assert answer.count() == 1 and page.locator(".chat-bubble.system").count() == 0

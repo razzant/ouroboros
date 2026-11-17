@@ -6,6 +6,7 @@ import pytest
 
 from ouroboros import review_ledger as ledger
 from ouroboros import reviewer_slot_config as slots
+from ouroboros.review_ledger import advisers_only, reusable_outcome
 from tests.test_review_ledger import BOTH, CRITICAL, _answer, _facts, _plan, _raw
 from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
 
@@ -53,7 +54,7 @@ def test_quorum_counts_the_seats_asked(count, answers, expected):
 
 
 @pytest.mark.parametrize(("surface", "strictness", "reason", "count"), [
-    ("own_body", "blocking", "", 3),
+    ("own_body", "advisory", "focused change", 1),
     ("skill", "advisory", "focused change", 1),
     ("plan_first", "cyber_pro", "", 1),
 ])
@@ -61,7 +62,7 @@ def test_strictness_composes_the_counted_panel(roster, strictness, reason, count
     panel = slots.compose_review_panel(["b", "adviser"], reason, surface=surface, strictness=strictness)
     assert len([seat for seat in panel.seats if not seat.additional]) == count
     assert panel.additional == ("adviser",)
-    assert panel.facts["widened_from"] == (["b", "adviser"] if strictness == "blocking" else [])
+    assert "widened_from" not in panel.facts and "reviewers_subset_ignored" not in panel.facts
     assert panel.facts["reason"] == reason and panel.facts["chosen_by"] == "ouroboros"
     assert [row["seat_id"] for row in panel.facts["pool"]] == ["a", "b", "c"]
 
@@ -75,9 +76,65 @@ def test_advisory_requires_a_counted_seat_and_a_reason(roster, surface):
     assert len(slots.compose_review_panel(surface=surface, strictness="advisory").seats) == 3
 
 
-def test_optional_blocking_change_and_later_plan_remain_composed(roster):
-    assert len(slots.compose_review_panel(["a"], surface="change", strictness="blocking").seats) == 1
+def test_optional_change_and_later_plan_remain_composed(roster):
+    assert len(slots.compose_review_panel(["a"], surface="change", strictness="advisory").seats) == 1
     assert slots.compose_review_panel(["adviser"], surface="plan", strictness="advisory").additional == ("adviser",)
+
+
+@pytest.mark.parametrize("surface", ["own_body", "change", "skill", "result", "result_required"])
+def test_cyber_pro_may_seat_advisers_alone_and_every_other_strictness_still_refuses(roster, surface):
+    """#3194: Cyber Pro composes freely, an adviser alone included; it stays heard, never counted."""
+    panel = slots.compose_review_panel(["adviser"], "a second look", surface=surface, strictness="cyber_pro")
+    assert [(seat.slot.slot_id, seat.additional) for seat in panel.seats] == [("adviser", True)]
+    assert (panel.facts["seats"], panel.facts["additional_seats"], panel.facts["assigned"]) == (0, 1, [])
+    with pytest.raises(slots.PanelCompositionError, match="REVIEW_PANEL_EMPTY"):  # every other Access: unchanged
+        slots.compose_review_panel(["adviser"], "x", surface=surface, strictness="advisory")
+    mixed = slots.compose_review_panel(["a", "adviser"], "x", surface=surface, strictness="cyber_pro")
+    assert (mixed.facts["assigned"], mixed.additional) == (["a"], ("adviser",))
+    with pytest.raises(slots.PanelCompositionError, match="REVIEWER_UNKNOWN"):
+        slots.compose_review_panel(["nobody"], "x", surface=surface, strictness="cyber_pro")
+    assert slots.compose_review_panel(surface=surface, strictness="cyber_pro").facts["seats"] == 3
+
+
+def test_main_self_review_is_the_main_seat_actually_seated(monkeypatch):
+    set_review_pool(monkeypatch, pool_roster(pool_seat("adviser", "openai/adviser", marked=False)))
+    alone = slots.compose_review_panel(["adviser"], "a second look", surface="change", strictness="cyber_pro")
+    assert (alone.facts["pool_empty"], alone.facts["main_self_review"], alone.facts["assigned"]) == (True, False, [])
+    beside = slots.compose_review_panel(["main", "adviser"], "both", surface="change", strictness="cyber_pro")
+    assert (beside.facts["main_self_review"], beside.facts["assigned"]) == (True, ["main"])
+    assert slots.compose_review_panel(surface="change", strictness="cyber_pro").facts["main_self_review"] is True
+
+
+def _adviser_row(status="responded", **extra):
+    return _raw("adviser", "model-adviser", status, parts=BOTH, **extra)
+
+
+def test_an_advisers_only_wave_reduces_to_no_counted_verdict_and_is_held_by_its_own_operation():
+    """Zero counted seats: never PASS/FAIL and never a false NOT_DISPATCHED; per-seat answers stay. A
+    ``review_change`` record waits for its adviser; a commit record keeps no counted hold."""
+    answered = [_adviser_row(answers={"change": _answer("change", "FAIL", [CRITICAL]), "coupling": _answer("coupling")})]
+    plans = [_plan("adviser", "model-adviser", parts=BOTH, additional=True)]
+    record = ledger.build_wave_record(_facts(answered, rows=plans), surface="change").to_dict()
+    verdict = record["verdict"]
+    assert (verdict["aggregate"], verdict["reason"], record["state"]) == ("NOT_PERFORMED", "no_counted_reviewers", "settled")
+    assert verdict["per_row"] == {"adviser": "FAIL"} and verdict["quorum"]["assigned"] == 0
+    assert advisers_only(record) and reusable_outcome(record)
+
+    running = [_adviser_row("pending", operation_state="in_flight", late_result_pending=True)]
+    assert not ledger.counted_pending(ledger.build_rows(_facts(running, rows=plans))), "its semantics are unchanged"
+    for surface, state in (("change", "pending"), ("result", "pending"), ("commit_gate", "settled")):
+        held = ledger.build_wave_record(_facts(running, rows=plans, pending=True), surface=surface).to_dict()
+        assert (held["state"], held["verdict"]["aggregate"]) == (state, "NOT_PERFORMED"), surface
+
+    for unusable in (_adviser_row("error"), _adviser_row("unparseable")):
+        settled = ledger.build_wave_record(_facts([unusable], rows=plans), surface="change").to_dict()
+        assert settled["verdict"]["reason"] == "no_counted_reviewers" and not reusable_outcome(settled)
+    refused = ledger.build_wave_record(_facts([], rows=plans, dispatch_refusal={"kind": "review_cycles_exhausted"}),
+                                       surface="change").to_dict()
+    assert refused["verdict"]["aggregate"] == "NOT_DISPATCHED"
+    unsent = ledger.build_wave_record(_facts([_adviser_row("not_dispatched", operation_state="not_dispatched")],
+                                             rows=plans), surface="change").to_dict()
+    assert unsent["verdict"]["aggregate"] == "NOT_DISPATCHED"
 
 
 def test_empty_pool_discloses_main_and_subscription_cost_is_never_invented(monkeypatch):
@@ -150,6 +207,14 @@ def test_skill_aggregator_hears_advisers_without_counting_them(additional):
                                               {"critic"} if additional else set())
     assert status_from_findings([*critical, *advisory], "script") == ("clean" if additional else "blockers")
     assert (len(extra) == 1) is additional and any(row["verdict"] == "FAIL" for row in parsed.findings)
+    if additional:  # Cyber Pro may seat the critic alone: its skill stays pending, its findings heard
+        from ouroboros.tools.review_skill import outcome_status
+        rows = [{"seat_id": "critic", "status": "responded", "parts": ["skill"], "additional": True,
+                 "answers": {"skill": {"status": "responded", "verdict": "FAIL", "findings": extra}}}]
+        alone = {"state": "settled", **ledger.reduce_verdict(rows), "findings": {"additional_findings": extra}}
+        assert (alone["aggregate"], alone["reason"]) == ("NOT_PERFORMED", "no_counted_reviewers")
+        status, findings, reason = outcome_status(alone)
+        assert status == "pending" and [f.get("additional") for f in findings] == [True] and "NOT_PERFORMED" in reason
 
 
 def test_owner_skill_job_defaults_to_whole_pool_and_freezes_tick_edits(tmp_path, monkeypatch, roster):
@@ -175,35 +240,30 @@ def test_owner_skill_job_defaults_to_whole_pool_and_freezes_tick_edits(tmp_path,
         _reset_queue()
 
 
-def test_a_required_root_blocks_by_widening_and_advisory_by_requiring_a_reason(roster):
-    """Blocking seats every ticked reviewer and records the request it widened; Advisory
-    refuses the same narrowing with no reason and composes it once a reason is given."""
-    widened = slots.compose_review_panel(["b", "adviser"], surface="result_required", strictness="blocking")
-    assert [seat.slot.slot_id for seat in widened.seats if not seat.additional] == ["a", "b", "c"]
-    assert widened.additional == ("adviser",)
-    assert widened.facts["widened_from"] == ["b", "adviser"] and widened.facts["composition"] == "full_pool"
-
+def test_a_required_root_requires_a_counted_seat_and_a_reason_when_narrowed(roster):
+    """Outside Cyber Pro a Required root refuses a narrowing with no reason and composes it
+    once a reason is given; nothing widens a named subset."""
     with pytest.raises(slots.PanelCompositionError, match="REVIEW_PANEL_REASON_REQUIRED"):
         slots.compose_review_panel(["b"], surface="result_required", strictness="advisory")
     with pytest.raises(slots.PanelCompositionError, match="REVIEW_PANEL_EMPTY"):
         slots.compose_review_panel(["adviser"], "only a critic", surface="result_required", strictness="advisory")
     narrowed = slots.compose_review_panel(["b"], "the risky claim", surface="result_required", strictness="advisory")
     assert [seat.slot.slot_id for seat in narrowed.seats if not seat.additional] == ["b"]
-    assert narrowed.facts["widened_from"] == [] and narrowed.facts["composition"] == "composed"
+    assert "widened_from" not in narrowed.facts and narrowed.facts["composition"] == "composed"
 
 
 def test_auto_result_cyber_pro_and_omission_do_not_take_the_required_root_floor(roster):
     """The floor is the Required-root surface only. Auto (surface ``result``) and Cyber Pro
     keep the named rows; omitting reviewers, or the host seating them, is the whole pool."""
-    auto = slots.compose_review_panel(["b"], surface="result", strictness="blocking")
-    assert [seat.slot.slot_id for seat in auto.seats] == ["b"] and auto.facts["widened_from"] == []
+    auto = slots.compose_review_panel(["b"], surface="result", strictness="advisory")
+    assert [seat.slot.slot_id for seat in auto.seats] == ["b"] and auto.facts["composition"] == "composed"
     cyber = slots.compose_review_panel(["b"], surface="result_required", strictness="cyber_pro")
     assert [seat.slot.slot_id for seat in cyber.seats] == ["b"]
-    assert cyber.facts["widened_from"] == [] and cyber.facts["reason_missing"] is True
+    assert cyber.facts["reason_missing"] is True
     named_all = slots.compose_review_panel(["a", "b", "c"], surface="result_required", strictness="advisory")
-    assert named_all.facts["widened_from"] == [] and sorted(named_all.facts["assigned"]) == ["a", "b", "c"]
-    host = slots.compose_review_panel(surface="result_required", strictness="blocking", chosen_by="host")
-    assert host.facts["chosen_by"] == "host" and host.facts["widened_from"] == []
+    assert named_all.facts["reason_missing"] is False and sorted(named_all.facts["assigned"]) == ["a", "b", "c"]
+    host = slots.compose_review_panel(surface="result_required", strictness="advisory", chosen_by="host")
+    assert host.facts["chosen_by"] == "host"
     assert host.facts["composition"] == "full_pool" and host.facts["assigned"] == ["a", "b", "c"]
     assert slots.compose_review_panel(surface="result_required", strictness="advisory").facts["chosen_by"] == "ouroboros"
 

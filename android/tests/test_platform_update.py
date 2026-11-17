@@ -35,7 +35,7 @@ def platform(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "download", lambda pin, cache: calls.append(("download", pin["name"])) or cache / pin["name"])
     monkeypatch.setattr(module, "run", lambda *argv, **kwargs: calls.append(("run", argv)))
     monkeypatch.setattr(module.subprocess, "check_output", lambda *a, **kw: b"fixture-package\t1\tarm64\n")
-    for name in ("install_node", "install_sdk", "install_browser"):
+    for name in ("install_node", "pin_sdk_node", "install_sdk", "install_browser"):
         monkeypatch.setattr(module, name, lambda *args, _name=name, **kwargs: calls.append((_name, args)))
     receipt = module.APP / "android-sdk/installation.json"
     receipt.parent.mkdir()
@@ -153,6 +153,37 @@ def test_common_node_pin_changes_refresh_node_group(platform):
     assert [name for name, _ in calls if name.startswith('install_')] == ['install_node']
     node_args = next(args for name, args in calls if name == 'install_node')
     assert node_args[-1][0]['url'].endswith('?next')
+    names = [name for name, _ in calls]
+    assert names.index('install_node') < names.index('pin_sdk_node')  # the venv SDK gets the new Node too
+    assert next(args for name, args in calls if name == 'pin_sdk_node')[-1]['url'].endswith('?next')
+
+
+def test_sdk_driver_node_is_replaced_before_the_first_sdk_launch_of_a_browser_update(platform):
+    module, repo, receipt, calls = platform
+    change_pin(repo, 'playwright-chromium', '?next')
+    assert module.ensure_platform(repo)
+    install_deps = ('run', (module.APP / 'venv/bin/python', '-m', 'playwright', 'install-deps', 'chromium'))
+    names = [name for name, _ in calls]
+    assert names.index('pin_sdk_node') < calls.index(install_deps) < names.index('install_browser')
+    node_pin = next(args for name, args in calls if name == 'pin_sdk_node')[-1]
+    common = json.loads((repo / 'ouroboros/claudexor_runtime_pin.json').read_text(encoding="utf-8"))
+    assert node_pin['url'] == common['release']['node_artifacts']['linux-arm64']['archive_url']
+    assert ('download', 'node') in calls  # the cached archive the stager re-verifies
+
+
+def test_pin_sdk_node_stages_the_verified_archive_then_replaces_the_venv_copies(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location('sdk_node_fixture', SOURCE / 'runtime.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.APP, module.PROVISION = tmp_path, tmp_path / 'provision'
+    module.PROVISION.mkdir()
+    commands = []
+    monkeypatch.setattr(module, 'run', lambda *argv, **kwargs: commands.append(argv))
+    module.pin_sdk_node(tmp_path / 'repo', 'venv-python', {'cached_file': '/cache/node.tar.gz'})
+    stager = tmp_path / 'repo/scripts/download_node_standalone.py'
+    staged = commands[0][commands[0].index('--destination') + 1]
+    assert commands == [('venv-python', stager, '--destination', staged, '--archive', '/cache/node.tar.gz'),
+                        ('venv-python', stager, '--replace-playwright', tmp_path / 'venv', '--node', staged / 'bin/node')]
 
 
 def test_browser_pin_change_uses_pinned_installer_and_cache(platform):
@@ -167,7 +198,8 @@ def test_first_install_uses_same_recipe_without_key_generation(platform):
     module, repo, receipt, calls = platform
     receipt.unlink()
     assert module.ensure_platform(repo)
-    assert [name for name, _ in calls if name.startswith('install_')] == ['install_node', 'install_sdk', 'install_browser']
+    assert [name for name, _ in calls if name.startswith(('install_', 'pin_'))] == [
+        'install_node', 'pin_sdk_node', 'install_sdk', 'install_browser']
     assert module.platform_current(repo)[0]
     assert (module.APP / 'signing/host.keystore').read_bytes() == b'permanent private fixture'
 

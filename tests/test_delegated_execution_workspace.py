@@ -109,6 +109,8 @@ def test_retry_binding_keeps_snapshot_as_host_execution_root(tmp_path, monkeypat
         worktrees, "find_execution_snapshot",
         lambda _snapshot_id: {"path": str(snapshot_root)},
     )
+    # The engine holds no accepted start for this token, so the binding is resolved for replay.
+    monkeypatch.setattr(integration, "_accepted_retry", lambda *_args, **_kwargs: None)
 
     binding, refusal = integration._resolve_retry_invocation(
         SimpleNamespace(task_id="task-a"), tmp_path, "invocation-a", "same prompt",

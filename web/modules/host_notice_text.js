@@ -15,10 +15,10 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
         '♻️ Ouroboros did not start its recovery turn '],
     command_reply: ['⚠️ Command ignored: ', '✅ Owner chat registered.', '♻️ Restarting.', '⚠️ Restart cancelled: ',
         '🧬 Evolution campaign: ', '🧬 Evolution stayed OFF: ', '🧬 Evolution did not turn on: ',
-        '🧠 Background consciousness ', '🧠 Background consciousness:'],
+        '🧠 Background consciousness ', '🧠 Background consciousness:', '🧠 Consciousness off: '],
     restart_notice: ['♻️ Restart requested by agent: ', '⏳ Restart drain: ', '🧬 Restart cancelled: ',
         '⚠️ Restart skipped: ', '🧬 Body adoption: '],
-    consciousness_notice: ['🧠 Background consciousness '],
+    consciousness_notice: ['🧠 Background consciousness ', '🧠 Consciousness off: '],
     evolution_notice: ['🧬 Evolution stayed OFF: ', '🧬 Evolution stayed off: ', '🧬 Evolution paused: ',
         '🧬 Evolution: ', '🧬 Evolution campaigns are self-modification work',
         '🛑 Stopped evolution task(s): ', '⚠️ Evolution stop INCOMPLETE — still live: '],
@@ -32,6 +32,9 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     optional_bounds_notice: ['⚙️ Task limits on this install: '],
     legacy_memory_notice: ['🧠 Memory: '],
     command_timeout_notice: ['⏱️ The separate per-call ceiling'],
+    review_enforcement_notice: ['⚙️ This install had reviews set to Blocking.'],
+    model_cap_notice: ['⚙️ "Requests at once per model" held 3 '],
+    light_local_box_notice: ['⚙️ An empty Light model now follows its “Use the local model for this role” box everywhere.'],
     task_admission_notice: ['🚫 Budget exhausted. '],
     budget_notice: ['🚫 Model budget reached. '],
     deep_self_review_queued: ['🔎 Deep self-review queued: '],
@@ -50,8 +53,9 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     skill_review: ['✅ Skill review round ', '⚠️ Skill review round ', '❌ Skill review round ', '⏳ Skill review round '],
     host_progress: ['🌐 Connection restored ', '🌐 The new attempt could not reach the provider ',
         '🌐 Provider connection ', '🌐 The primary provider temporarily refused ', '🌐 No local model slot was free',
-        '🌐 The request did not reach the provider ', '🌐 Primary provider answered after ',
-        '🌐 Stopped waiting for ', '🌐 Still waiting for ', '⚡ Fallback: ', '📐 Plan: ', '✅ PR #', '⚠️ PR #',
+        '🌐 The local Claudexor engine ', '🌐 The request did not reach the provider ', '🌐 Primary provider answered after ',
+        '🌐 Model response received after ', '🌐 Stopped waiting for ', '🌐 Still waiting for ', '⚡ Fallback: ',
+        '📐 Plan: ', '✅ PR #', '⚠️ PR #',
         // web_search legs (`tools/search.py`) and a declared-output baseline (`tools/shell_outputs.py`).
         '🔍 Trying ', '↪ Trying ', '🔍 Searching: ', '🔍 Answer from ', '⚠️ Web search ', '⚠️ Output baseline unavailable: '],
 }));
@@ -69,7 +73,8 @@ export const RETIRED_HOST_NOTICE_PREFIXES = new Map(Object.entries({
     task_admission_notice: ['✅ Repair task ', '⚠️ Cost accounting is unavailable. '],
     task_started: ['🧬 Evolution task ', '🔎 Review task '],
     evolution_notice: ['🛑 Cancelled evolution task(s): ', '🧬⚠️ Evolution paused: ', '💸 Evolution stopped: '],
-    host_progress: ['🌐 Could not establish a provider connection ', '📐 Plan review:', '📐 Plan review so far:'],
+    host_progress: ['🌐 Could not establish a provider connection ', '📐 Plan review:', '📐 Plan review so far:',
+        '🌐 The local Claudexor engine answered again after '],
 }));
 
 const prefixFor = (text, type) => [...(HOST_NOTICE_PREFIXES.get(String(type || '')) || []),
@@ -103,6 +108,10 @@ export function hostSentenceText(text) {
     if (!head || end <= head.length) return tx(source);
     return fmt(`${head}{words}${source.slice(end)}`, { words: source.slice(head.length, end) });
 }
+
+/** A task-mailbox message the host wrote (a silence fact, a control receipt): system provenance and no sending
+ *  task, so its row says who wrote it instead of «Message from task unknown». */
+export const hostTaskMessage = (evt) => evt?.provenance === 'system' && (!evt.source_task_id || evt.source_task_id === 'unknown');
 
 // Authored narration outranks a stale host type, on both bubble and timeline paths.
 export function hostRowDisplayText(row, shown = row.text ?? row.content ?? '') {

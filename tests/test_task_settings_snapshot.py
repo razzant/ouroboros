@@ -3,6 +3,7 @@ live controls or the route keys (models, accounts, provider keys: ``route_choice
 
 import contextvars
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -11,41 +12,10 @@ import pytest
 
 from ouroboros import config, model_wait, subagent_runtime
 from ouroboros.settings_integrity import task_settings_snapshot
-from tests._socket_seal import block_network_except_socketpair
+from tests._safety_fixtures import supervisor as supervisor
+from tests._task_settings_helpers import isolated_runtime, save_owner  # noqa: F401 -- fixture
 
 
-@pytest.fixture(autouse=True)
-def isolated_runtime(tmp_path, monkeypatch):
-    # Env alone does not rebind already imported supervisor writers.
-    from supervisor import git_ops, queue, state, workers
-
-    root = tmp_path / "app"
-    data, repo = root / "data", root / "repo"
-    data.mkdir(parents=True)
-    repo.mkdir()
-    for name, value in (("APP_ROOT", root), ("DATA_DIR", data),
-                        ("REPO_DIR", repo), ("SETTINGS_PATH", data / "settings.json"),
-                        ("HOME", root / "home")):
-        monkeypatch.setattr(config, name, value)
-    for key in set(config.SETTINGS_DEFAULTS) | set(config.RETIRED_COMMA_LIST_SETTING_KEYS):
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.delenv(config.SETTINGS_INTEGRITY_ENV, raising=False)
-    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACK", raising=False)
-    monkeypatch.setenv("OUROBOROS_APP_ROOT", str(root))
-    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
-    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(config.SETTINGS_PATH))
-    monkeypatch.setenv("OUROBOROS_REPO_DIR", str(repo))
-    state.init(data, 200.0)
-    queue.init(data)
-    for module in (git_ops, workers):
-        monkeypatch.setattr(module, "DRIVE_ROOT", data)
-        monkeypatch.setattr(module, "REPO_DIR", repo)
-
-    def no_network(*args, **kwargs):
-        raise AssertionError("Snapshot regressions must never contact a provider")
-
-    block_network_except_socketpair(monkeypatch, no_network)
-    yield data
 
 
 def document(label, *, safety="full", enforcement="blocking"):
@@ -76,11 +46,6 @@ def document(label, *, safety="full", enforcement="blocking"):
     }
 
 
-def save_owner(values):
-    from ouroboros.gateway.owner_settings import _owner_write_settings
-
-    _owner_write_settings(values, authored_keys=tuple(values),
-                          allow_context_lowering=True, allow_safety_lowering=True)
 
 
 def observe():
@@ -192,7 +157,8 @@ def test_two_overlapping_real_task_entries_keep_readers_and_behavior(monkeypatch
     assert initial["fallbacks"] == new_value["fallbacks"] == []
     assert initial["auto_account"] == new_value["auto_account"] == ""
     assert initial["owner_context"] == "max" and new_value["owner_context"] == "low"
-    assert old_decision == (False, False) and new_decision == (True, True)
+    # Safety follows each task's own snapshot; a skill with blockers runs in both (no setting vetoes it any more).
+    assert old_decision == (False, True) and new_decision == (True, True)
     assert calls == ["full"] and mode == "advanced"
     assert config.load_settings()["OWNER_NOTE"] == "openai::new"
     assert not events  # Neither task metadata nor log facts carry the secret snapshot.
@@ -288,8 +254,15 @@ def test_shell_env_keeps_captured_settings_while_scrubbing_external_repo(tmp_pat
     (repo / "sub").mkdir(parents=True)
     ext.mkdir()
     ctx = SimpleNamespace(repo_dir=str(repo))
+    from ouroboros import claudexor_runtime
     from ouroboros.route_choice import ROUTE_SETTING_KEYS
 
+    # The driver Node is a fixed prepared fact, not this host's: an automatic selection carries its marker beside it.
+    node = "/managed/node-24.22.3"
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: SimpleNamespace(
+        reviewed_node=lambda allow_install=False, prepared=False: node))
+    for name in ("PLAYWRIGHT_NODEJS_PATH", "OUROBOROS_PLAYWRIGHT_NODE_SELECTED"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(repo), str(ext)]))
     monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "new-task-effort")
     snapshot = task_settings_snapshot(
@@ -303,7 +276,8 @@ def test_shell_env_keeps_captured_settings_while_scrubbing_external_repo(tmp_pat
     assert os.environ["OUROBOROS_EFFORT_TASK"] == "new-task-effort"
     # Outside a task the shell sees the process environment, its route keys as the document reads now.
     plain = {k: v for k, v in _shell_env_for_cwd(ctx, repo / "sub").items() if k not in ROUTE_SETTING_KEYS}
-    assert plain == {k: v for k, v in os.environ.items() if k not in ROUTE_SETTING_KEYS}
+    assert plain == {**{k: v for k, v in os.environ.items() if k not in ROUTE_SETTING_KEYS},
+                     "PLAYWRIGHT_NODEJS_PATH": node, "OUROBOROS_PLAYWRIGHT_NODE_SELECTED": node}  # the only added pair
 
 
 def test_task_snapshot_does_not_become_explicit_probe_settings(monkeypatch):
@@ -353,7 +327,7 @@ def test_failed_reload_discloses_then_binds_previous_env_and_resets():
     assert config.runtime_setting("OPENAI_API_KEY") == "test-key-new"
     assert model_wait.current_model_wait() is None
     assert len(events) == 1 and events[0][0] == "task_start_settings_reload_failed"
-    assert "JSONDecodeError" in events[0][1]["error"]
+    assert "SettingsDocumentUnknown" in events[0][1]["error"]
     assert "previously applied" in events[0][1]["message"]
     assert "document-only values" in events[0][1]["message"]
     assert "test-key" not in json.dumps(events)
@@ -491,7 +465,10 @@ def test_private_projection_uses_incoming_roster_and_keeps_empty_env(monkeypatch
         assert [row.target_id for row in review_pool_rows()] == ["openai::old"]
         with config.task_settings_scope(new):
             assert [row.target_id for row in review_pool_rows()] == ["openai::new"]
-            assert json.loads(config.runtime_setting("OUROBOROS_SUBAGENTS"))["items"][0]["route"]["target_id"] == "openai::new"
+            # The catalog is the task's own document value; it rides no environment.
+            items = json.loads(config.runtime_settings()["OUROBOROS_SUBAGENTS"])["items"]
+            assert items[0]["route"]["target_id"] == "openai::new"
+            assert config.runtime_setting("OUROBOROS_SUBAGENTS") is None and "OUROBOROS_SUBAGENTS" not in new.environ
         assert [row.target_id for row in review_pool_rows()] == ["openai::old"]
 
 
@@ -585,3 +562,219 @@ def test_bundled_node_child_reads_projected_task_env():
                                 env=config.runtime_environ(), text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout == "old"
+
+
+# --- the catalog rides no environment: its readers take the task's snapshot, else the document ----------------------
+
+_TEXTS = {"ascii": "Reviews the change and names the risk. " * 90,
+          "cyrillic": "Проверяет изменение и называет риск. " * 90,
+          "astral": "🦊 сверяет 𝔘 каждую строку. " * 120}
+
+
+def catalog_rows(text, count=50):
+    """``count`` saved rows sharing one description: API and session rows with pins, efforts and access, every
+    seventh switched off, every third marked Reviewer, the first (an API packet row) rechecking flags."""
+    rows = []
+    for i in range(count):
+        session = i % 5 == 4
+        route = ({"kind": "agent_session", "target_id": f"codex=gpt-row-{i}", "credential_profile_id": f"account-{i}"}
+                 if session else {"kind": "api_model", "target_id": f"openai::row-{i}"})
+        rows.append({"subagent_id": f"row-{i:02d}", "recommended_use": f"{i}: {text}", "route": route,
+                     "effort": ("high", "low", "")[i % 3], "enabled": i % 7 != 6, "review_eligible": i % 3 == 0,
+                     **({"access": "readonly"} if session else {"delivery": "packet" if i % 2 == 0 else "native"})})
+    rows[0]["rechecks_flags"] = True
+    return rows
+
+
+def save_catalog(rows, **values):
+    save_owner({**document("old"), **values, "OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": rows})})
+
+
+def marked(rows):
+    return [row["subagent_id"] for row in rows if row["enabled"] and row["review_eligible"]]
+
+
+def catalog_readers():
+    """What the four catalog readers see: the pool, its error, the configured routes Suggest offers."""
+    from ouroboros.reviewer_slot_config import review_pool_rows, reviewer_slot_config_error
+    from ouroboros.tools.control_models import known_models
+
+    return ([row.slot_id for row in review_pool_rows()], reviewer_slot_config_error(),
+            sorted(row["model"] for row in known_models() if "configured" in row["source"]))
+
+
+@pytest.mark.parametrize("text", list(_TEXTS.values()), ids=list(_TEXTS))
+def test_a_fifty_row_catalog_reaches_its_readers_whole_from_the_document_with_no_environment_copy(text):
+    from ouroboros.composer_cognition import normalize_model_choice
+    from ouroboros.configured_subagents import parse_configured_subagents
+    from ouroboros.settings_integrity import projected_proposals
+
+    rows = catalog_rows(text)
+    save_catalog(rows)
+    config.apply_settings_to_env(config.load_settings())  # a save's publication
+    snapshot = subagent_runtime.apply_task_start_settings()
+    with config.task_settings_scope(snapshot):
+        child, inside, held = config.runtime_environ(), catalog_readers(), config.runtime_settings()
+    for environ in (os.environ, snapshot.environ, child):
+        assert "OUROBOROS_SUBAGENTS" not in environ and "OUROBOROS_SUBAGENTS" not in projected_proposals(environ)
+        # Below one entry's portable ceiling: Windows counts UTF-16 units per variable, Linux bytes per string.
+        assert max(len(f"{key}={value}".encode("utf-16-le")) // 2 for key, value in environ.items()) < 32767
+    api = sorted(normalize_model_choice({"kind": "model", "model": row["route"]["target_id"]})["model"]
+                 for row in rows if row["route"]["kind"] == "api_model")
+    assert inside == catalog_readers() == (marked(rows), "", api)
+    # Every row whole: ids, order, switches, routes, pins, efforts, access, delivery and the full text.
+    assert parse_configured_subagents(held["OUROBOROS_SUBAGENTS"]).items == parse_configured_subagents(
+        {"enabled": True, "items": rows}).items
+
+
+def test_a_task_keeps_its_catalog_while_the_document_moves_and_a_new_task_reads_the_new_one():
+    from ouroboros.settings_integrity import skill_settings
+    from ouroboros.configured_subagents import parse_configured_subagents
+
+    old, new = catalog_rows(_TEXTS["cyrillic"]), catalog_rows(_TEXTS["astral"], count=26)
+    save_catalog(old)
+    snapshot = subagent_runtime.apply_task_start_settings()
+    save_catalog(new)
+    with config.task_settings_scope(snapshot):
+        assert catalog_readers()[0] == marked(old)
+        assert [row.subagent_id for row in parse_configured_subagents(skill_settings()["OUROBOROS_SUBAGENTS"]).items] == [
+            row["subagent_id"] for row in new]
+        with config.task_settings_scope(subagent_runtime.apply_task_start_settings()):
+            assert catalog_readers()[0] == marked(new)
+        assert catalog_readers()[0] == marked(old)
+    assert catalog_readers()[0] == marked(new)
+    with config.task_settings_scope(subagent_runtime.apply_task_start_settings()):
+        assert catalog_readers()[0] == marked(new)
+
+
+def test_a_failed_reload_holds_a_catalog_only_where_one_is_still_available(monkeypatch):
+    """The environment no longer remembers the last catalog, so a failed task-start reload keeps one only where a
+    variable still carries it; otherwise its readers read the document strictly: unknown, never an empty pool."""
+    from ouroboros.reviewer_slot_config import review_pool_rows, review_pool_slots, reviewer_slot_config_error
+    from ouroboros.tools.control_models import known_models
+
+    rows, operator = catalog_rows(_TEXTS["ascii"]), catalog_rows("Operator row.", count=3)
+    save_catalog(rows)
+    events = []
+    disclose = lambda kind, **facts: events.append(kind)  # noqa: E731
+    config.SETTINGS_PATH.write_text("{broken", encoding="utf-8")
+    unknown = subagent_runtime.apply_task_start_settings_or_disclose("unknown", disclose)
+    assert "OUROBOROS_SUBAGENTS" not in unknown.settings
+    with config.task_settings_scope(unknown):
+        with pytest.raises(ValueError, match="OUROBOROS_SUBAGENTS is unknown: settings document is not valid JSON"):
+            review_pool_slots()
+        assert reviewer_slot_config_error().startswith("OUROBOROS_SUBAGENTS is unknown")
+        suggested = known_models()  # the other routes stay, the unknown catalog adds none
+        assert suggested and not [row for row in suggested if "configured" in row["source"]]
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", json.dumps({"enabled": True, "items": operator}))
+    with config.task_settings_scope(subagent_runtime.apply_task_start_settings_or_disclose("operator", disclose)):
+        assert [row.slot_id for row in review_pool_rows()] == marked(operator)  # an operator's input stays usable
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS")
+    config.SETTINGS_PATH.unlink()  # repaired by moving it aside, as an owner would
+    save_catalog(rows)
+
+    def boom():
+        raise RuntimeError("reload failed elsewhere")
+
+    monkeypatch.setattr(subagent_runtime, "apply_task_start_settings", boom)
+    with config.task_settings_scope(subagent_runtime.apply_task_start_settings_or_disclose("readable", disclose)):
+        assert [row.slot_id for row in review_pool_rows()] == marked(rows)  # the readable document answers
+    assert events == ["task_start_settings_reload_failed"] * 3
+
+
+@pytest.mark.parametrize("text", list(_TEXTS.values()), ids=list(_TEXTS))
+@pytest.mark.parametrize("count", [26, 50])
+def test_a_child_started_from_a_task_reads_the_whole_catalog_from_the_document(text, count):
+    """The process boundary: the child's environment carries no catalog; the child reads the document."""
+    import pathlib
+    import subprocess
+    import sys
+
+    rows = catalog_rows(text, count=count)
+    save_catalog(rows)
+    with config.task_settings_scope(subagent_runtime.apply_task_start_settings()):
+        env = config.runtime_environ()
+    assert "OUROBOROS_SUBAGENTS" not in env
+    code = ("import json, os, sys; sys.path.insert(0, sys.argv[1]); from ouroboros import config; "
+            "from ouroboros.configured_subagents import parse_configured_subagents; "
+            "items = parse_configured_subagents(config.load_settings(strict=True)['OUROBOROS_SUBAGENTS']).items; "
+            "uses = [r.recommended_use for r in items]; "
+            "print(json.dumps({'env': 'OUROBOROS_SUBAGENTS' in os.environ, 'uses': uses}))")
+    run = subprocess.run([sys.executable, "-c", code, str(pathlib.Path(__file__).resolve().parents[1])], env=env,
+                         capture_output=True, text=True, timeout=120)
+    assert run.returncode == 0, run.stderr[-4000:]
+    assert json.loads(run.stdout.strip().splitlines()[-1]) == {
+        "env": False, "uses": [row["recommended_use"] for row in rows]}
+
+
+@pytest.mark.parametrize("contents", ["null", "[]", '"settings"'])
+def test_task_start_non_object_document_never_freezes_a_default_catalog(contents):
+    from ouroboros.reviewer_slot_config import review_pool_slots
+    from ouroboros.settings_integrity import SettingsDocumentUnknown
+
+    save_catalog(catalog_rows(_TEXTS["ascii"]))
+    held = subagent_runtime.apply_task_start_settings()
+    config.SETTINGS_PATH.write_text(contents)
+    with pytest.raises(SettingsDocumentUnknown):
+        subagent_runtime.apply_task_start_settings()
+    events = []
+    with config.task_settings_scope(held):
+        failed = subagent_runtime.apply_task_start_settings_or_disclose("broken", lambda *a, **kw: events.append(kw))
+        with config.task_settings_scope(failed), pytest.raises(ValueError, match="OUROBOROS_SUBAGENTS is unknown"):
+            review_pool_slots()
+        assert catalog_readers()[0] == marked(catalog_rows(_TEXTS["ascii"]))
+    assert len(events) == 1
+
+
+def test_unknown_catalog_and_recovery_agree_across_facts_inspection_and_execution(monkeypatch):
+    from ouroboros.reviewer_slot_config import review_pool_rows, review_pool_slots
+    from ouroboros.settings_integrity import runtime_catalog_settings
+    from ouroboros.subagent_inspection import inspect_subagent
+
+    save_owner(document("old"))
+    frozen = subagent_runtime.apply_task_start_settings()
+    config.SETTINGS_PATH.write_text("{broken")
+    failed = subagent_runtime.apply_task_start_settings_or_disclose("broken", lambda *a, **kw: None)
+    assert "OUROBOROS_SUBAGENTS" not in failed.settings
+    with config.task_settings_scope(failed):
+        facts = json.loads(subagent_runtime.review_facts_block().split("\n\n", 1)[1])
+        assert facts["source"] == "unknown" and not facts["pool_empty"] and not facts.get("main_self_review")
+        catalog = subagent_runtime.current_model_visible_subagent_catalog()
+        assert catalog["source"] == "unknown" and "not valid JSON" in catalog["error"]
+        assert "not valid JSON" in subagent_runtime.subagent_catalog_section(catalog).operative_view
+        with pytest.raises(Exception, match="unknown.*not valid JSON"):
+            inspect_subagent("critic")
+        with pytest.raises(ValueError, match="unknown.*not valid JSON"):
+            review_pool_slots()
+    # Recovery permits a real read, without retargeting an already valid frozen catalog
+    # or replacing the failed task's other next-task settings with a new document's.
+    config.SETTINGS_PATH.write_text(json.dumps(document("new")))
+    for snapshot, model in ((failed, "openai::new"), (frozen, "openai::old")):
+        with config.task_settings_scope(snapshot):
+            [row] = review_pool_rows()
+            assert row.target_id == model
+            assert inspect_subagent("critic")["configured"]["route"]["target_id"] == model
+            assert subagent_runtime.current_model_visible_subagent_catalog()["rows"][0]["requested_model"] == model
+            facts = json.loads(subagent_runtime.review_facts_block().split("\n\n", 1)[1])
+            assert facts["source"] == "structured" and facts["pool"][0]["model"] == model
+            assert runtime_catalog_settings()["OUROBOROS_CONTEXT_MODE"] == snapshot.settings["OUROBOROS_CONTEXT_MODE"]
+
+
+def test_safetys_second_check_finds_its_row_in_the_task_or_the_document_and_an_unknown_one_keeps_the_first(
+        supervisor, monkeypatch):
+    from ouroboros import safety
+    from ouroboros.settings_integrity import runtime_catalog_settings
+
+    monkeypatch.setattr(safety, "runtime_catalog_settings", runtime_catalog_settings)  # the real reader, not the stub
+    save_catalog(catalog_rows(_TEXTS["cyrillic"]))
+    snapshot = subagent_runtime.apply_task_start_settings()
+    supervisor.replies.extend([{"status": "DANGEROUS", "reason": "first"}, {"status": "SAFE", "reason": "overturned"}])
+    with config.task_settings_scope(snapshot):
+        assert safety.check_safety("write_remote", {"n": 1}, ctx=supervisor.ctx)[0]
+    assert supervisor.calls[1]["model_role"] == "subagent:row-00"  # the marked row, read with no environment copy
+    config.SETTINGS_PATH.write_text("{broken", encoding="utf-8")
+    supervisor.replies.append({"status": "DANGEROUS", "reason": "first flag"})
+    ok, message = safety.check_safety("write_remote", {"n": 2}, ctx=supervisor.ctx)
+    assert not ok and "first: DANGEROUS — first flag" in message and len(supervisor.calls) == 3
+    failed = [event for event in supervisor.events if event["type"] == "safety_second_check_failed"]
+    assert len(failed) == 1 and "its roster is unreadable" in failed[0]["error"]

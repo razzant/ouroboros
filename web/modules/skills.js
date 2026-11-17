@@ -12,6 +12,7 @@ import { apiClient, apiFetch, skillSourcesApi } from './api_client.js';
 import {
     continuableReview, fillFindingsOnOpen, installedSkillModel, installedSourceLabel, isMadeHere, patchInstalledSkillEnrichment,
     renderInstalledSkillCard,
+    renderRequirementNotice,
 } from './skill_card_renderer.js';
 import { createSkillBrowse } from './skill_browse.js';
 import { createSkillSources, unconfirmedHubRows } from './skill_sources_view.js';
@@ -19,7 +20,8 @@ import { openSkillDetailSheet } from './skill_detail_sheet.js';
 import { getContributions } from './contributions.js';
 import { getHostModules } from './host_modules.js';
 import {
-    openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog, updateWithoutReview,
+    connectSkillTools, openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog,
+    updateWithoutReview,
 } from './skill_dialogs.js';
 import { plural, popularityText, repoLabel, routeExternalLink, skillTitle, versionText } from './skill_presentation.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
@@ -39,6 +41,9 @@ const LIFECYCLE_VISIBLE_STATUSES = new Set(['queued', 'running', 'failed']);
 const INSTALLED_FILTERS = [
     ['all', 'All'], ['needs', 'Needs you'], ['updates', 'Updates'], ['off', 'Off'], ['made', 'Made here'],
 ];
+// The line under an Installed filter that shows no card: an empty Needs you is good news, not a search that missed.
+const FILTER_EMPTY = 'No installed skill matches.';
+const NOTHING_NEEDS_YOU = 'Nothing needs you now.';
 const WORK_POLL_MS = 3000;
 const REVIEW_POLL_MS = 15000;
 
@@ -61,8 +66,9 @@ function skillsPageTemplate() {
             <div class="skills-scroll scroll-fade-y">
                 <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed" role="tabpanel" aria-labelledby="skills-tab-installed">
                     <div id="skills-status" class="ui-status skills-list-status" role="status" aria-live="polite"></div>
+                    <div id="skills-org-requirements" hidden></div>
                     <div id="skills-list" class="skills-list"></div>
-                    <p id="skills-filter-empty" class="skills-empty" hidden>No installed skill matches.</p>
+                    <p id="skills-filter-empty" class="skills-empty" hidden>${FILTER_EMPTY}</p>
                     <div id="skills-empty" class="skills-empty" hidden>
                         <p>No skills yet. Pick one in Browse, or ask Ouroboros: “find a skill for …”.</p>
                         <button type="button" class="btn btn-primary btn-sm" data-skills-goto="browse">Browse skills</button>
@@ -183,6 +189,7 @@ export function updateAllCandidates(skills, sources = null) {
     return skills.filter((skill) => {
         const install = skill.install;
         if (!install?.update_available?.digest || install.modified || install.base_known === false || install.withdrawn || skill.lifecycle_pending) return false;
+        if (!installedSkillModel(skill).update) return false;  // the same change eligibility as its individual card
         if (install.basis !== 'trusted') return false;
         const rowTrust = trust.get(install.source?.id);
         return rowTrust === undefined || rowTrust === 'trusted';
@@ -273,10 +280,12 @@ async function postWithFeedback(url, body) {
 async function fetchSkills() {
     const extResp = await apiClient.extensions();
     if (!Array.isArray(extResp?.skills)) throw new Error('Installed skills response is unavailable.');
-    return { skills: extResp.skills, live: extResp.live || {} };
+    return { skills: extResp.skills, live: extResp.live || {}, deployment: extResp.deployment || null };
 }
 
 export function initSkills(ctx = {}) {
+    // A Settings page opened from here leads back to Skills, where it was opened.
+    const skillsBack = { label: 'Skills', go: () => ctx.showPage?.('skills') };
     const page = document.createElement('div');
     page.innerHTML = skillsPageTemplate();
     document.getElementById('content').appendChild(page.firstElementChild);
@@ -284,6 +293,7 @@ export function initSkills(ctx = {}) {
     const root = document.getElementById('page-skills');
     const container = document.getElementById('skills-list');
     const status = document.getElementById('skills-status');
+    const requirementsEl = document.getElementById('skills-org-requirements');
     const emptyEl = document.getElementById('skills-empty');
     const filterEmpty = document.getElementById('skills-filter-empty');
     const filtersEl = document.getElementById('skills-installed-filters');
@@ -298,6 +308,7 @@ export function initSkills(ctx = {}) {
     let destroyed = false;
     let renderGeneration = 0;
     let filter = 'all';
+    let filterEmptySentence = FILTER_EMPTY;  // the English last written, so a translated line is not rewritten each paint
     let snapshot = null;   // { rawSkills, live, queue, githubTokenConfigured }
     let activeMenu = null;
     let sheet = null;
@@ -346,7 +357,8 @@ export function initSkills(ctx = {}) {
         const facts = host?.pageModuleFacts?.() || { faults: contributions?.faults?.() || [], held: [] };
         return { ...facts, startHeldModule: (key) => host?.startHeldModule?.(key) === true };
     };
-    const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts() });
+    const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts(),
+        contributionVisibility: (name) => contributions?.visibilityForSkill?.(name) || [] });
 
     // ---- Installed view -------------------------------------------------------------------------
     function paintFilters(skills) {
@@ -363,14 +375,19 @@ export function initSkills(ctx = {}) {
         const byName = installedByName() || new Map();
         const pageModules = pageModuleFacts();
         let shown = 0;
+        let members = 0;
         for (const card of container.querySelectorAll(':scope > .skills-card')) {
             const skill = byName.get(card.dataset.skill);
-            const ok = !skill || (matchesInstalledFilter(skill, filter, installedSkillModel(skill, { pageModules }))
-                && (!query || [skill.name, skill.description].some((text) => String(text || '').toLowerCase().includes(query))));
+            const member = !skill || matchesInstalledFilter(skill, filter, installedSkillModel(skill, { pageModules }));
+            const ok = member && (!skill || !query
+                || [skill.name, skill.description].some((text) => String(text || '').toLowerCase().includes(query)));
             card.hidden = !ok;
+            if (member) members += 1;
             if (ok) shown += 1;
         }
         const total = container.querySelectorAll(':scope > .skills-card').length;
+        const sentence = filter === 'needs' && !members ? NOTHING_NEEDS_YOU : FILTER_EMPTY;
+        if (sentence !== filterEmptySentence) filterEmpty.textContent = filterEmptySentence = sentence;
         filterEmpty.hidden = !(total && !shown);
     }
 
@@ -389,7 +406,7 @@ export function initSkills(ctx = {}) {
         if (!snapshot?.rawSkills || destroyed) return;
         const skills = projected();
         const pageFacts = pageModuleFacts();
-        const options = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageFacts });
+        const options = cardOptions;
         const cards = new Map(Array.from(container.querySelectorAll(':scope > .skills-card')).map((card) => [card.dataset.skill, card]));
         let replacementFocus = null;
         if (replace) {
@@ -428,6 +445,9 @@ export function initSkills(ctx = {}) {
             }
         }
         emptyEl.hidden = skills.length > 0;
+        const notice = renderRequirementNotice(snapshot.deployment);  // a missing required package has no card
+        if (requirementsEl.innerHTML !== notice) requirementsEl.innerHTML = notice;
+        requirementsEl.hidden = !notice;
         paintChrome();
         applyInstalledFilter();
         if (replacementFocus && !replacementFocus.hidden) {
@@ -472,6 +492,7 @@ export function initSkills(ctx = {}) {
             if (!current()) return;
             next.rawSkills = primary.skills;
             next.live = primary.live;
+            next.deployment = primary.deployment;
             lastListingRead = Date.now();
         } catch (err) {
             if (!current()) return;
@@ -488,17 +509,19 @@ export function initSkills(ctx = {}) {
         showReads();
     }
 
-    // Local lifecycle progress only (never GitHub): the queue while work runs, the
-    // listing now and then while a review runs outside the lane.
+    // Local progress only (never GitHub): lifecycle work and pending MCP listings,
+    // plus the listing now and then while a review runs outside the lane.
     function schedulePoll() {
         clearTimeout(pollTimer);
-        if (destroyed || !visible || !snapshot) return;
+        if (destroyed || !visible || document.hidden || !snapshot) return;
         const working = inFlightCount(lifecycleEventsFromQueue(snapshot.queue)) > 0;
+        const listingTools = snapshot.rawSkills?.some((skill) => (skill.mcp_servers || [])
+            .some((server) => server.configured && !server.listed && !server.error));
         const reviewing = reviewingSkills.size > 0 || projected().some((skill) => /Reviewing/.test(installedSkillModel(skill).chip));
-        if (!working && !reviewing) return;
+        if (!working && !reviewing && !listingTools) return;
         pollTimer = setTimeout(async () => {
-            if (destroyed || !visible) return;
-            if (Date.now() - lastListingRead >= REVIEW_POLL_MS || working) await readInstalled({ quiet: true });
+            if (destroyed || !visible || document.hidden) return;
+            if (Date.now() - lastListingRead >= REVIEW_POLL_MS || working || listingTools) await readInstalled({ quiet: true });
             else schedulePoll();
         }, WORK_POLL_MS);
     }
@@ -647,6 +670,8 @@ export function initSkills(ctx = {}) {
                 cmd: buildHealPrompt(skill),
                 task_constraint: { mode: 'normal', skill_name: skill.name || name, payload_root: skill.payload_root || '', allow_enable: false, allow_review: true },
                 visible_task_id: `skill_repair_${name}`,
+                // The press is my human's request; the prompt above is the host's words, not theirs (#2778).
+                ui_control: { name: 'skill_repair' },
             });
             showToast(`${name}: Ouroboros is on it — see chat`, 'ok');
             emitSkillLifecycle('repair', name);
@@ -788,8 +813,22 @@ export function initSkills(ctx = {}) {
 
     /** One installed-skill action by name (cards, the menu, Browse and the sheet share it). */
     async function runInstalledAction(name, action, options = {}) {
+        if (action === 'toggle_contribution') {
+            const key = String(options.contributionKey || '');
+            if (!key || !contributions?.setHidden) throw new Error('Composer control is unavailable.');
+            const hidden = options.contributionHidden !== 'true';
+            await contributions.setHidden(key, hidden);
+            showToast(`${contributions.byKey(key)?.label || 'Composer control'} ${hidden ? 'hidden' : 'shown'}`, 'ok');
+            return false;
+        }
         if (action === 'open_detail') { openInstalledSheet(name, options.node); return false; }
         if (action === 'open_widgets') { document.querySelector('[data-nav-page="widgets"]')?.click(); return false; }
+        if (action === 'open_secrets') {
+            // Accounts and keys reveals the row of the first key the button names (a stored key's row is its name).
+            void ctx.openSettings?.('accounts', { row: String(options.keys || '').split(',')[0].trim(), back: skillsBack });
+            return false;
+        }
+        if (action === 'open_settings') { void ctx.openSettings?.(`skill/${encodeURIComponent(name)}`, { back: skillsBack }); return false; }
         if (action === 'read_findings') { openFindings(name); return false; }
         if (action === 'find_in_browse') { selectTab('browse'); browse?.searchFor(name); return false; }
         if (action === 'review' || action === 'rereview') {
@@ -826,6 +865,12 @@ export function initSkills(ctx = {}) {
         if (action === 'submit_hub') return publish(name);
         if (action === 'forget_publication') return forgetPublication(name);
         if (action === 'turn_on') return turnOn(name);
+        if (action === 'connect_tools') {
+            const result = await connectSkillTools(await currentSkill(name));
+            if (stillWorking(name, result)) return true;  // not confirmed yet: the card follows its job
+            if (result?.ok) showToast(`${name}: ${result.changed === false ? 'tools already configured' : 'tools configured'}. Its own instructions say what else they need.`, 'ok');
+            return Boolean(result);
+        }
         if (action === 'grant') {
             const skill = await currentSkill(name);
             const keys = String(options.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
@@ -885,19 +930,25 @@ export function initSkills(ctx = {}) {
             showToast(`${name}: ${actionTarget.dataset.submitReason || 'publishing is not available now'}`, 'warn');
             return;
         }
+        // Disabling a focused button drops focus to the page in Chromium; the keyboard owner gets it back below.
+        const hadFocus = document.activeElement === actionTarget;
         actionTarget.disabled = true;
         let refresh = true;
         try {
             if (action === 'start_host_module') {
                 refresh = pageModuleFacts().startHeldModule(actionTarget.dataset.hostModuleKey || '') === true;
             } else {
-                refresh = await runInstalledAction(name, action, { keys: actionTarget.dataset.keys || '', payloadRoot: actionTarget.dataset.payloadRoot || '', node: actionTarget }) !== false;
+                refresh = await runInstalledAction(name, action, { keys: actionTarget.dataset.keys || '', payloadRoot: actionTarget.dataset.payloadRoot || '', node: actionTarget,
+                    contributionKey: actionTarget.dataset.contributionKey || '', contributionHidden: actionTarget.dataset.contributionHidden || '' }) !== false;
             }
         } catch (err) {
             if (err.cancelled) refresh = false;
             showToast(`${name}: ${err.message || err}`, err.cancelled ? 'warn' : 'danger');
         } finally {
             actionTarget.disabled = false;
+            if (hadFocus && actionTarget.isConnected && (!document.activeElement || document.activeElement === document.body)) {
+                actionTarget.focus({ preventScroll: true });
+            }
             if (refresh) await readInstalled({ quiet: true });
         }
     };
@@ -968,7 +1019,7 @@ export function initSkills(ctx = {}) {
         pageModuleFacts,
         showInstalled: (name) => { selectTab('installed'); searchInput.value = name; applyInstalledFilter(); },
         showMadeHere: () => { filter = 'made'; selectTab('installed'); },
-        openBehaviorSettings: () => { if (typeof ctx.openSettingsTab === 'function') ctx.openSettingsTab('behavior'); },
+        openSettings: (path, options = {}) => ctx.openSettings?.(path, { back: skillsBack, ...options }),
     };
     const browse = createSkillBrowse({ pane: document.getElementById('skills-pane-browse'), chrome: document.getElementById('skills-browse-chrome'), host });
     const sourcesView = createSkillSources({ pane: document.getElementById('skills-pane-sources'), host });
@@ -1040,6 +1091,7 @@ export function initSkills(ctx = {}) {
     container.addEventListener('change', onChange);
     container.addEventListener('toggle', onToggle, true);
     window.addEventListener('ouro:page-shown', onPageShown);
+    document.addEventListener('visibilitychange', schedulePoll);
 
     // Another surface asks for one installed skill's entry ({skill}), a Browse search ({query}) or a Browse category
     // ({category}): the dictation chooser's engines (dictation_chooser.js), a place's connector (place_sheet.js).
@@ -1084,6 +1136,7 @@ export function initSkills(ctx = {}) {
         container.removeEventListener('change', onChange);
         container.removeEventListener('toggle', onToggle, true);
         window.removeEventListener('ouro:page-shown', onPageShown);
+        document.removeEventListener('visibilitychange', schedulePoll);
         window.removeEventListener('ouro:open-skills', onOpenSkills);
     } };
 }

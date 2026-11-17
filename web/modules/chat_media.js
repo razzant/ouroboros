@@ -12,6 +12,7 @@ import { isFileDrag } from './chat_activity.js';
 import { buildAttachmentBlock } from './chat_attachments.js';
 import { createDocumentReader, documentReaderKind } from './document_reader.js';
 import { createChatCards } from './chat_cards.js';
+import { recordCardSource } from './message_actions.js';
 
 // Player controls draw the house stroke vectors; each button's aria-label names its
 // current action and is rewritten with the icon whenever the state flips.
@@ -122,6 +123,32 @@ export async function cleanupUploadedAttachments(uploaded) {
     if (failed.length) {
         console.warn('Failed to clean up uploaded chat attachments after send failure', failed);
     }
+}
+
+/** A delivered file's whole name on one line (its type is read from it) and the part its card shows. Its bubble
+ *  (below) and the room's search (chat_search_words.js) read it. */
+export function fileNames(msg) {
+    const full = String(msg?.filename || 'file').replace(/[\r\n]+/g, ' ');
+    return { full, shown: full.slice(0, 200) };
+}
+
+/** A delivered links row's `.message`: its title and a button per safe address (an address itself is never
+ *  shown), or '' when no button can be drawn. Its bubble (below) and the room's search (chat_search_words.js) read it. */
+export function linksMessageHtml(msg) {
+    const actions = Array.isArray(msg?.actions) ? msg.actions : [];
+    const rows = actions.map((item) => {
+        const url = safeHttpUrl(item?.url);
+        const label = String(item?.label || '').trim().slice(0, 120);
+        return url && label
+            ? `<a class="chat-link-button" href="${escapeHtmlAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}<span aria-hidden="true">↗</span></a>`
+            : '';
+    }).filter(Boolean).slice(0, MAX_LINK_ACTIONS);
+    if (!rows.length) return '';
+    const title = String(msg.title || '').trim();
+    return `<div class="message chat-links-message">
+            ${title ? `<div class="chat-links-title">${escapeHtml(title)}</div>` : ''}
+            <div class="chat-links-list">${rows.join('')}</div>
+        </div>`;
 }
 
 export function safeHttpUrl(value) {
@@ -239,10 +266,15 @@ export function createChatMedia({
     let fileDialog = null;
     let dialogFile = null;
     let dialogOwner = null;  // the card's item (buildGallery may move it to an earlier group): releasing it or its holder closes the dialog
+    // An overlay a row's action opened over the room (Share's sheet): it closes with the room's reader (closeTransient),
+    // with its row (release) and with the room (reset, destroy).
+    const transients = new Map();  // close -> its row
     let destroyed = false;
-    // Living cards are delivered rows too: Copy takes their fallback text, Reply their row address (chat_cards.js).
-    const cards = createChatCards({ frameNode: bubbleFrameNode, composer, onDomWrite, decorate(bubble, msg, text) {
+    // Living cards are delivered rows too: Copy takes their fallback text, Reply their row address, Share the card
+    // itself (chat_cards.js), with this room's hold on its sheet.
+    const cards = createChatCards({ frameNode: bubbleFrameNode, composer, onDomWrite, decorate(bubble, msg, text, describe) {
         attachCopyControl(bubble, () => bubble.dataset.rowWords ?? text);  // a replaced card's words are its new ones
+        if (describe) recordCardSource(bubble, describe, (close) => holdTransient(bubble, close));
         replies?.decorate(bubble, msg);
     } });
 
@@ -748,8 +780,7 @@ export function createChatMedia({
         const mime = cleanMime(msg.mime, 'application/octet-stream');
         const source = fileSource(msg, mime);
         // The type is read from the whole name; only its display is cut.
-        const fullName = String(msg.filename || 'file').replace(/[\r\n]+/g, ' ');
-        const filename = fullName.slice(0, 200);
+        const { full: fullName, shown: filename } = fileNames(msg);
         const caption = String(msg.caption || '');
         const explicitSize = msg.size_bytes !== null && msg.size_bytes !== undefined
             && msg.size_bytes !== '' && Number.isFinite(Number(msg.size_bytes));
@@ -798,20 +829,8 @@ export function createChatMedia({
 
     function buildLinksMessage(msg) {
         if (destroyed) return null;
-        const actions = Array.isArray(msg.actions) ? msg.actions : [];
-        const rows = actions.map((item) => {
-            const url = safeHttpUrl(item?.url);
-            const label = String(item?.label || '').trim().slice(0, 120);
-            return url && label
-                ? `<a class="chat-link-button" href="${escapeHtmlAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}<span aria-hidden="true">↗</span></a>`
-                : '';
-        }).filter(Boolean).slice(0, MAX_LINK_ACTIONS);
-        if (!rows.length) return null;
-        const title = String(msg.title || '').trim();
-        return bubbleFrame(msg, `<div class="message chat-links-message">
-            ${title ? `<div class="chat-links-title">${escapeHtml(title)}</div>` : ''}
-            <div class="chat-links-list">${rows.join('')}</div>
-        </div>`);
+        const body = linksMessageHtml(msg);
+        return body ? bubbleFrame(msg, body) : null;
     }
 
     function isFeedTailWrapper(wrapper) {
@@ -976,18 +995,36 @@ export function createChatMedia({
         }
     }
 
-    // The chat left the screen: the reader or file dialog a card opened closes, nothing else.
-    function closeTransient() {
+    // The chat left the screen: the reader or file dialog a card opened closes, nothing else; a room another place
+    // replaces (`pause`) also pauses what plays, each player keeping its place.
+    function closeTransient(pause = false) {
+        closeTransients();
         reader.close({ restoreFocus: false });
         closeFileDialog();
+        if (pause) for (const player of playerRegistry) { try { player.pause(); } catch {} }
     }
 
     // Release only the evicted page's subtree; other media and copy controls
     // keep their listeners, playback, focus and outstanding user actions.
+    /** Hold `close` for an overlay opened from `owner` (a row of this room); returns its release. */
+    function holdTransient(owner, close) {
+        transients.set(close, owner);
+        return () => transients.delete(close);
+    }
+
+    function closeTransients(owns = () => true) {
+        for (const [close, owner] of [...transients]) {
+            if (!owns(owner)) continue;
+            transients.delete(close);
+            try { close(); } catch {}
+        }
+    }
+
     function release(root) {
         reader.release(root);
         cards.release(root);
         const owns = (node) => node === root || root?.contains?.(node);
+        closeTransients(owns);
         if (dialogOwner && owns(dialogOwner)) closeFileDialog();  // no actions on a released message's file
         for (const [dispose, owner] of resourceOwners) if (owns(owner)) {
             try { dispose(); } catch {}
@@ -1149,6 +1186,7 @@ export function createChatMedia({
         reset,
         release,
         closeTransient,
+        holdTransient,
         destroy,
     };
 }

@@ -184,7 +184,8 @@ def _module_constants(tree: ast.AST, *, exact_strings: bool = False) -> dict[str
     excluding path expressions, partially known f-strings and function locals.
     """
     seen: dict[str, set] = {}
-    for node in (_own_nodes(tree) if exact_strings else ast.walk(tree)):
+    for node in _own_nodes(
+            tree, skip_classes=isinstance(tree, (ast.FunctionDef, ast.AsyncFunctionDef))):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -207,8 +208,8 @@ def _module_constants(tree: ast.AST, *, exact_strings: bool = False) -> dict[str
     }
 
 
-def _own_nodes(scope: ast.AST) -> list[ast.AST]:
-    """Every node of one scope, NOT descending into nested function bodies.
+def _own_nodes(scope: ast.AST, *, skip_classes: bool = False) -> list[ast.AST]:
+    """Own nodes without nested functions; constants also exclude nested classes.
 
     Return statements of a nested helper describe that helper, not its parent;
     attributing them to the parent made both prefixes ambiguous and dropped.
@@ -218,6 +219,8 @@ def _own_nodes(scope: ast.AST) -> list[ast.AST]:
     def walk(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            if skip_classes and isinstance(child, ast.ClassDef):
                 continue
             out.append(child)
             walk(child)
@@ -315,6 +318,18 @@ class _PathResolver:
                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
             for path, tree in self.trees.items()
         }
+        # Function -> the functions around it, outermost first. A class body is
+        # no scope for its methods' names; a function around the class is.
+        self.enclosing: dict[int, tuple] = {}
+        pending = [(tree, ()) for tree in self.trees.values()]
+        while pending:
+            node, around = pending.pop()
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    self.enclosing[id(child)] = around
+                    pending.append((child, around + (child,)))
+                else:
+                    pending.append((child, around))
         self.prefixes: dict[str, str] = {}
         self.file_prefixes: dict[pathlib.Path, dict[str, str]] = {}
         # The file whose scopes are being resolved right now: name/attribute
@@ -324,6 +339,8 @@ class _PathResolver:
         # so it dies with the parsed trees it describes; the prefix fixed point
         # would otherwise re-walk every scope once per round.
         self._nodes: dict[int, list] = {}
+        # Constants depend only on these fixed trees, not on the prefix round.
+        self._scoped: dict[int, dict[str, str]] = {}
         self._resolve_prefixes()
 
     def own_nodes(self, scope: ast.AST) -> list[ast.AST]:
@@ -459,11 +476,40 @@ class _PathResolver:
                 local[node.target.id] = f"{rel}/{leaf}"
         return local
 
+    def _bound_names(self, scope: ast.AST) -> set[str]:
+        """Parameters and stored names of a function and of every function around it.
+
+        Python reads a free name of a nested function from the nearest enclosing
+        function that binds it, never from the module, so neither a file constant
+        nor a repository one may stand in for such a name. Conservative: no value
+        flows in from outside, and a ``global`` declaration stays unknown too.
+        """
+        names: set[str] = set()
+        for fn in self.enclosing.get(id(scope), ()) + (scope,):
+            names.update(node.arg for node in ast.walk(fn.args) if isinstance(node, ast.arg))
+            names.update(node.id for node in self.own_nodes(fn)
+                         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store))
+        return names
+
+    def _scope_constants(self, path: pathlib.Path, scope: ast.AST):
+        cached = self._scoped.get(id(scope))
+        if cached is not None:
+            return cached
+        consts = dict(self.consts[path])
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # A truthy unknown masks the repository fallback as well as file constants.
+            # Only the function's own single literal is known; an enclosing one is not read.
+            consts.update(dict.fromkeys(self._bound_names(scope), "*"))
+            consts.update(_module_constants(scope))
+        self._scoped[id(scope)] = consts
+        return consts
+
     def _scopes(self, path: pathlib.Path):
         consts = self.consts[path]
         for fn in self.functions[path]:
             nodes = self.own_nodes(fn)
-            yield fn, consts, nodes, self._locals(fn, consts, nodes)
+            scoped = self._scope_constants(path, fn)
+            yield fn, scoped, nodes, self._locals(fn, scoped, nodes)
         module_nodes = self.own_nodes(self.trees[path])
         yield (self.trees[path], consts, module_nodes,
                self._locals(self.trees[path], consts, module_nodes))
@@ -481,9 +527,9 @@ class _PathResolver:
             per_file: dict[pathlib.Path, dict[str, set]] = {}
             for path in self.trees:
                 self.current = path
-                consts = self.consts[path]
                 found: dict[str, set] = {}
                 for fn in self.functions[path]:
+                    consts = self._scope_constants(path, fn)
                     nodes = self.own_nodes(fn)
                     local = self._locals(fn, consts, nodes)
                     for node in nodes:
@@ -531,11 +577,8 @@ class _PathResolver:
         and truncation before becoming a filename. Only exact strings can be
         resolved here; a guessed wildcard must not stand in for those bytes.
         """
-        shadowed = ({arg.arg for arg in ast.walk(scope.args) if isinstance(arg, ast.arg)}
+        shadowed = (self._bound_names(scope)
                     if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) else set())
-        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            shadowed.update(node.id for node in self.own_nodes(scope)
-                            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store))
         own_bindings = {node.id for node in self.own_nodes(self.trees[self.current])
                         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
         imports = {}
@@ -859,8 +902,7 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # accepted-rebuttals file and the dispatch markers, and added the frozen payload view under
 # ``state/review_checkouts/views/`` (one section-2 row each in PERSISTENCE.md): 415 -> 410.
 # #2151's pure observability helper hid two named paths and introduced three false
-# data-root spellings. Resolving its return restores the audited 410-path population;
-# the local evolution export introduced by #2137 is also a sentinel below.
+# data-root spellings. Resolving its return restores the audited 410-path population.
 # 410 -> 411: #2177 retains a parked pre-start task's inline image as
 # ``source_handles/context_checkpoints/inline-image-*.image`` (``budget_pause``; its section-7 row).
 # 411 -> 413: the published MCP catalogs (``state/mcp/catalogs`` and its ``server-*.json`` envelopes,
@@ -925,7 +967,36 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # that admitted it, ``state/core_loss_recovery.json`` (``ouroboros/server_process.py``); its own row.
 # 455 -> 457 (#2896): a remote MCP server's sign-in record ``state/mcp/oauth/server-*.json`` and the ``.lock``
 # its holder keeps while it writes (``ouroboros/mcp_oauth.py``); their own row.
-EXPECTED_SCAN_PATHS = 457
+# 457 -> 458 (safety retro, self-echo): the bounded record of words this install sent through an identity
+# that is also a confirmed owner account, ``state/own_sends.json`` (``ouroboros/own_sends.py``); its own row.
+# 458 -> 456 (#2946): #2921 builds the directory artifact names in ``_pair_names``
+# (``ouroboros/artifact_directories.py``), so the scan no longer sees ``task_results/artifacts/*/*.*.manifest.json``
+# and ``task_results/artifacts/*/*.*.zip``; both are still written, under their artifacts row.
+# 456 -> 457 (owner A, 07.11): the open Low episode of memory-lowered starts, ``state/low_start_episode.json``
+# (``ouroboros/context_view_facts.py``); its own row.
+# 457 -> 459 (pool-capacity WP5b): the body's dated record of each held run for a parent's wait_task,
+# ``state/delegate_observation/<run_id>.json`` and its directory (``ouroboros/delegate_feed.py``); its own row.
+# Result-review retained material/restored source views and published kept-service declarations
+# share the existing inventory; the combined AST census below pins their union.
+# Audited census after function-local isolation, including the pool's two
+# delegate_observation paths. The -5/+3 spelling correction retires no writers.
+# 464 -> 465 (#3127): ``observability._blob_directory`` returns the CAS directory it prepares once
+# per publication, so the scan names ``observability/blobs`` itself (the observability row). The
+# directory always existed as each blob's parent; no writer spelling was added or removed.
+# 465 -> 466: the vendor program observation adds one named singleton,
+# ``state/harness_programs.json`` (``ouroboros/harness_program_facts.py``); its own row.
+# 466 -> 467: the legacy private-copy registry's bytes, kept by its startup import as
+# ``archive/subagent_worktrees_<sha256>.json`` (``subagent_worktrees.import_legacy_registry``; the records row).
+# 467 -> 466: retiring ``generate_evolution_stats`` removes its local export,
+# ``task_results/artifacts/*/evolution-*.json``, and that export's sentinel below.
+# 466 -> 468: the measurement fold a held store refused is a mark any process sees,
+# ``state/subagent_metrics.owed``, and the job's captured ``state/subagent_metrics.taken``
+# (``ouroboros/subagent_metrics.py``); their own row.
+# 468 -> 470: the accepted wake transition chain, ``state/consciousness_transitions`` and its
+# ``<sha256>.json`` links (``ouroboros/consciousness_transitions.py``); its own row.
+# 470 -> 471 (T07 part 3): ``projects/*/workpad_history.jsonl``, the workpad's history beside its page
+# (``project_facts.project_workpad_history_path``, written by ``memory_texts``); its own row beside the project rows.
+EXPECTED_SCAN_PATHS = 471
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -942,13 +1013,13 @@ SENTINELS = frozenset({
     "logs/chat.jsonl",
     "memory/identity.md",
     "task_results/artifacts/*",
-    "task_results/artifacts/*/evolution-*.json",
     "task_results/artifacts/*/source_handles/context_checkpoints/presence-reentry-*.json",
     "task_results/artifacts/*/source_handles/context_checkpoints/presence-transport-queue-*.json",
     "task_trees/*/blackboard.jsonl",
     "uploads",
     # stage-2: names that live in constants, helper returns or f-strings
     "state/claudexor_rotation_provisioning.json",
+    "state/harness_programs.json",
     "state/extension_generation.json",
     "state/post_task_evolution_counter.json",
     "state/post_task_evolution_request.json",
@@ -1128,9 +1199,8 @@ def test_every_scanned_path_has_an_inventory_row():
 
 
 # Rows the backward check must NOT demand a scanned writer for, each with its
-# audited reason: the row itself states there is no writer in this tree, or (one
-# entry) its live writers name every file through a dynamic source id, which the
-# scan refuses to name. Asserted by equality below, so an entry that acquires a
+# audited reason: the old plane has no current writer, or its maintenance
+# resolves the name only at runtime. Asserted by equality below, so an entry that acquires a
 # scanned writer (or a row that quietly loses one) surfaces.
 STALE_ROW_EXEMPTIONS = frozenset({
     # PERSISTENCE.md documents this plane as an orphan of a removed feature:
@@ -1146,15 +1216,6 @@ STALE_ROW_EXEMPTIONS = frozenset({
     # (``review_source_closure._owned_attachment_path`` during child-ref promotion,
     # ``delegate_registration_policy.minted_root``).
     "task_results/artifacts/*/source_handles/review_inputs",
-    # A LIVE plane the scan cannot see: ``delegate_output.retain_terminal_bytes``
-    # and ``delegate_collection._retain`` spell each source id as an f-string over a
-    # run id, and ``artifacts.persist_exact_text_source`` (the result review's
-    # ``review_result.subject_source`` and every other exact-text writer) takes it as
-    # a parameter — never an exact string, and a dynamic id names no file here
-    # (``test_dynamic_source_handle_arguments_do_not_certify_named_rows``). The
-    # population saw this plane only through the retired acceptance tool-trajectory
-    # literal.
-    "task_results/artifacts/*/source_handles/tool_results",
     # The row states no writer in this tree: the automatic post-task reflection and
     # its routed store (``ouroboros/reflection.py``) are gone. The history is still
     # read (``journal_read(source='reflections')``, ``read_file``), and server.py
@@ -1188,10 +1249,8 @@ def test_every_inventory_row_is_still_real():
     rotating handlers (`logs/server.log`, `logs/launcher.log`) and the
     oversized-task-text sink (`logs/tasks/*`) were resolved instead of
     exempted — a real writer must be SEEN, not excused. The exempted rows are
-    named in ``STALE_ROW_EXEMPTIONS`` with their reasons: planes the document
-    itself says nothing in this tree writes, and the one live plane whose
-    writers name every file through a dynamic source id the scan refuses to
-    name.
+    named in ``STALE_ROW_EXEMPTIONS`` with their reasons. A plane that acquires
+    a scanned writer must leave those exemptions.
     """
     text = DOC.read_text(encoding="utf-8")
     stale = stale_rows(text)
@@ -1237,6 +1296,7 @@ def test_constant_named_durable_files_are_visible_to_the_scan():
     paths = scan_data_paths()
     hidden = sorted(p for p in (
         "state/claudexor_rotation_provisioning.json",
+        "state/harness_programs.json",
         "state/extension_generation.json",
         "state/post_task_evolution_counter.json",
         "state/post_task_evolution_request.json",
@@ -1432,3 +1492,70 @@ def test_live_call_evidence_replaces_unused_probe_artifacts():
     assert ".*-extension-imports.lock" not in paths
     assert "task_results/artifacts/*/conversation-wire.jsonl" in paths
     assert not any("/realtime-wire.jsonl" in path or "/realtime-prepared-" in path for path in paths)
+
+
+def test_function_constants_and_parameters_do_not_rename_other_writers(tmp_path):
+    """The returned census follows each function's own bindings, including nested helpers."""
+    module = tmp_path / 'ouroboros' / 'synthetic_writer.py'
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from pathlib import Path\n"
+        "LEAF = 'module.json'\n"
+        "def unrelated(task, digest):\n"
+        "    relative = f'.review-drive/{task}/{digest}.txt'\n"
+        "    LEAF = 'unrelated.json'\n"
+        "def constant(data_dir):\n"
+        "    return Path(data_dir) / 'state' / LEAF\n"
+        "def class_scope(data_dir):\n"
+        "    class Holder:\n"
+        "        LEAF = 'wrong-class.json'\n"
+        "    return Path(data_dir) / 'state' / LEAF\n"
+        "def dynamic(data_dir, relative):\n"
+        "    return Path(data_dir) / 'uploads' / relative\n"
+        "def positional(data_dir, LEAF, /):\n"
+        "    return Path(data_dir) / 'state' / LEAF\n"
+        "def keyword(data_dir, *, LEAF):\n"
+        "    return Path(data_dir) / 'uploads' / LEAF\n"
+        "def local(data_dir):\n"
+        "    relative = 'payload.json'\n"
+        "    return Path(data_dir) / 'state' / relative\n"
+        "def downstream(data_dir):\n"
+        "    return local(data_dir) / 'child.json'\n"
+        "def outer(data_dir):\n"
+        "    LEAF = 'outer.json'\n"
+        "    def inner(data_dir):\n"
+        "        LEAF = 'inner.json'\n"
+        "        return Path(data_dir) / 'state' / LEAF\n"
+        "    return Path(data_dir) / 'state' / LEAF\n",
+        encoding='utf-8')
+    assert scan_data_paths(tmp_path) == frozenset({
+        'state/module.json', 'state/*', 'uploads/*', 'state/payload.json',
+        'state/outer.json', 'state/inner.json', 'state/payload.json/child.json'})
+
+
+def test_an_enclosing_binding_is_unknown_never_the_module_literal(tmp_path):
+    """A nested function reads ``LEAF`` from the function around it (through a
+    class body too), so the module's literal names no file here; the scan says
+    unknown. The same holds for an exact source-store argument."""
+    module = tmp_path / 'ouroboros' / 'synthetic_writer.py'
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from pathlib import Path\n"
+        "LEAF = 'wrong.json'\n"
+        "SOURCE = 'presence-transport-queue'\n"
+        "def outer(data_dir, root, source):\n"
+        "    LEAF = 'right.json'\n"
+        "    SOURCE = source\n"
+        "    def inner():\n"
+        "        return Path(data_dir) / 'state' / LEAF\n"
+        "    def deeper():\n"
+        "        class Holder:\n"
+        "            def method(self):\n"
+        "                return Path(data_dir) / 'logs' / LEAF\n"
+        "        return Holder\n"
+        "    def store():\n"
+        "        store_actor_source_bytes(root, 'inventory', category='context_checkpoints',\n"
+        "                                 source_id=SOURCE, extension='json')\n"
+        "    return inner, deeper, store\n",
+        encoding='utf-8')
+    assert scan_data_paths(tmp_path) == frozenset({'state/*', 'logs/*'})

@@ -1,4 +1,4 @@
-"""Tests for ``ouroboros.tools.search._web_search`` (OpenAI Responses API).
+"""Tests for ``ouroboros.tools.search._web_search``: its legs (OpenAI Responses, DeepSeek Search) and cascade.
 
 Merged from former ``test_search_tool.py`` (provider routing / required-env
 contract) and ``test_web_search_streaming.py`` (streaming events, progress,
@@ -12,10 +12,12 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 import ouroboros.tools.search as search_module
 from ouroboros.tools.search import _web_search
+from tests._tariff_guard import _no_unscripted_tariff_reads  # noqa: F401  (autouse: DeepSeek sends here)
 from tests._usage_store_testing import ledger_rows
 
 
@@ -974,3 +976,250 @@ def test_direct_search_failed_cleanup_retains_reservation_and_refuses_fallback(c
         _web_search(ctx, "one query")
     assert error.value.physical_attempt_capture.state == "reserved"
     mock_openai.responses.create.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek Search: an explicit Source only (owner decision, 11 Nov 2026). The real leg,
+# the installed OpenAI SDK and the real ledger; only the HTTP transport under them is in memory.
+# ---------------------------------------------------------------------------
+
+_DEEPSEEK_ITEM = {"title": "Gates", "url": "https://example.invalid/gates", "snippet": "A short line.",
+                  "summary": "The provider's own summary of the page.", "content": "", "site_name": "Example",
+                  "site_icon": "https://example.invalid/icon.png", "date": "2026-11-01T00:00:00Z", "authority": 3,
+                  "rerank_score": 2.1}
+
+
+@pytest.fixture
+def deepseek(monkeypatch, tmp_path):
+    from ouroboros import net_transport
+    from ouroboros import usage_accounting as ua
+
+    wire = types.SimpleNamespace(root=tmp_path, sent=[], progress=[],
+                                 answer=lambda _request: httpx.Response(200, json={"results": [_DEEPSEEK_ITEM]}))
+
+    def respond(request):
+        wire.sent.append(request)
+        return wire.answer(request)
+
+    monkeypatch.delenv("OUROBOROS_CONNECTIONS", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-deepseek")
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_BACKEND", "deepseek")
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_MODEL", "")
+    # A host proxy would make the SDK build its own transport, past this one, onto the network.
+    monkeypatch.setattr(net_transport, "env_proxies_configured", lambda: False)
+    monkeypatch.setattr(net_transport, "remote_httpx_transport", lambda *a, **k: httpx.MockTransport(respond))
+    wire.ctx = types.SimpleNamespace(task_id="search", task_metadata={}, drive_root=tmp_path, pending_events=[],
+                                     emit_progress_fn=wire.progress.append)
+    with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id="search", root_task_id="search")):
+        yield wire
+
+
+@pytest.mark.parametrize("query", [
+    "q" * 128,  # the documented limit, inclusive
+    "я" * 128,  # characters, not bytes: 256 bytes of UTF-8
+    "😀" * 128,  # code points, not UTF-16 units: 512 bytes of UTF-8 (the live API is unchecked with no key here)
+    '  site:example.invalid "exact phrase" -noise  ',  # operators and surrounding spaces travel unchanged
+], ids=["ascii_limit", "cyrillic_limit", "astral_limit", "operators_and_spaces"])
+def test_deepseek_sends_the_query_as_written_once_and_never_reads_its_unknown_price_as_free(deepseek, query):
+    from ouroboros import usage_accounting as ua
+
+    result = json.loads(_web_search(deepseek.ctx, query))
+    [request] = deepseek.sent
+    assert (request.method, str(request.url)) == ("POST", "https://api.deepseek.com/v1/tools/search")
+    assert request.headers["authorization"] == "Bearer synthetic-deepseek"
+    assert json.loads(request.content) == {"query": query}  # the provider's own count and need_content defaults
+    assert [(leg["source"], leg["outcome"]) for leg in result["legs_tried"]] == [("deepseek", "succeeded")]
+    assert result["backend"] == "deepseek_search_tool" and result["answer_type"] == "summary"
+    assert result["answer"] == "- Gates: The provider's own summary of the page. (https://example.invalid/gates)"
+    assert result["sources"] == [{"url": "https://example.invalid/gates", "title": "Gates", "snippet": "A short line.",
+                                  "site_name": "Example", "date": "2026-11-01T00:00:00Z", "authority": 3,
+                                  "rerank_score": 2.1}]
+    [row] = ledger_rows(deepseek.root)
+    assert (row["state"], row["provider"], row["model"], row["source"]) == ("settled", "deepseek", "", "web_search.deepseek")
+    # The pin needs the catalog, which this case does not read: the outcome is kept, the amount unknown.
+    assert (row["cost_usd"], row["cost_final"]) == (None, False)
+    assert row["cost_evidence"] == {"results": 1, "http_status": 200, "outcome": "results"}
+    assert result["ledger_attempt_ids"] == [row["attempt_id"]]
+    spent = ua.usage_breakdown(deepseek.root)  # the public reader: an unknown amount, never a priced zero
+    assert (spent["unknown_unmetered"], spent["priced_rows"], spent["cost_final"]) == (1, 0, False)
+    assert deepseek.progress[0].startswith("🔍 Trying DeepSeek web search: ")
+
+
+@pytest.mark.parametrize("query,chars", [("q" * 129, 129), ("   ", 3), ("", 0)],
+                         ids=["one_over_the_limit", "only_whitespace", "empty"])
+def test_deepseek_refuses_a_query_its_contract_refuses_before_reserving_or_sending(deepseek, query, chars):
+    result = json.loads(_web_search(deepseek.ctx, query))
+    assert deepseek.sent == [] and ledger_rows(deepseek.root) == []
+    assert (result["reason_code"], result["query_chars"], result["query_max_chars"]) == ("query_limit", chars, 128)
+    assert "Nothing was sent" in result["error"] and "answer" not in result
+    assert deepseek.progress == ["⚠️ Web search not sent: DeepSeek does not accept this query as written"]
+
+
+@pytest.mark.parametrize("query,code_point", [("caf\ud800", "U+D800"), ("\udfff", "U+DFFF"),
+                                              ("\ud83d\ude00 smile", "U+D83D")],
+                         ids=["lone_high", "lone_low", "pair_as_two_code_points"])
+def test_deepseek_refuses_a_query_utf8_cannot_carry_before_reserving_or_sending(deepseek, query, code_point):
+    result = json.loads(_web_search(deepseek.ctx, query))
+    assert deepseek.sent == [] and ledger_rows(deepseek.root) == []  # no claim of a send that never happened
+    assert result["reason_code"] == "argument_invalid" and code_point in result["error"]
+    assert "Nothing was sent" in result["error"] and "answer" not in result
+    assert [(leg["source"], leg["outcome"]) for leg in result["legs_tried"]] == [("deepseek", "argument_invalid")]
+    assert deepseek.progress == ["⚠️ Web search not sent: DeepSeek does not accept this query as written"]
+
+
+def test_deepseek_receives_its_own_key_and_never_the_openai_account_headers(deepseek, monkeypatch):
+    monkeypatch.setenv("OPENAI_ORG_ID", "org-synthetic")  # the SDK reads both for any base URL
+    monkeypatch.setenv("OPENAI_PROJECT_ID", "proj_synthetic")
+    assert "error" not in json.loads(_web_search(deepseek.ctx, "q"))
+    [request] = deepseek.sent
+    assert request.headers["authorization"] == "Bearer synthetic-deepseek"
+    assert "openai-organization" not in request.headers and "openai-project" not in request.headers
+
+
+def test_deepseek_without_a_match_is_an_answered_search(deepseek):
+    deepseek.answer = lambda _request: httpx.Response(200, json={"results": []})
+    result = json.loads(_web_search(deepseek.ctx, "nothing matches this"))
+    assert "error" not in result and (result["answer"], result["sources"]) == ("(no matches)", [])
+    [row] = ledger_rows(deepseek.root)
+    assert (row["state"], row["cost_usd"]) == ("settled", None)
+    assert row["cost_evidence"] == {"results": 0, "http_status": 200, "outcome": "empty"}
+
+
+def _deepseek_tariff(monkeypatch, currency="USD"):
+    """The retained DeepSeek catalog entries (tests/test_deepseek_pricing.py) behind the pin, and a scripted read
+    of the key's currency; the keys it was asked with are returned."""
+    import hashlib
+    import pathlib
+
+    from ouroboros import pricing_catalog
+
+    raw = (pathlib.Path(__file__).parent / "fixtures" / "pricing" / "litellm-deepseek-20261115.json").read_text()
+    snapshot = pricing_catalog._decode({"url": pricing_catalog.CATALOG_URL, "content": raw, "fetched_at": "",
+                                        "sha256": hashlib.sha256(raw.encode()).hexdigest()})
+    from ouroboros.utils import utc_now_iso
+
+    snapshot["fetched_at"] = utc_now_iso()
+    asked = []
+    for name, value in (("_cache", {}), ("_retry_after", {}), ("_currency", {}), ("_currency_fetching", set())):
+        monkeypatch.setattr(pricing_catalog, name, value)
+    monkeypatch.setattr(pricing_catalog, "_fetch_catalog", lambda: snapshot)
+    monkeypatch.setattr(pricing_catalog, "_fetch_currency",
+                        lambda key: asked.append(key) or (currency, "" if currency else "http_401"))
+    return asked
+
+
+@pytest.mark.parametrize("status, results, cost, outcome", [
+    (200, [_DEEPSEEK_ITEM], 0.00075, "results"),
+    (200, [_DEEPSEEK_ITEM] * 3, 0.00075, "results"),  # one request, however many results
+    (200, [], None, "empty"),  # documented as not billed, not yet reconciled: unknown, never $0
+    (200, [{}], None, "malformed_results"),  # an object that names no page is not a result
+    (200, [_DEEPSEEK_ITEM, {"title": "no url"}], None, "malformed_results"),
+    (201, [_DEEPSEEK_ITEM], None, "http_201"),  # outside the documented HTTP 200
+], ids=["one_result", "three_results", "no_results", "blank_item", "partly_blank", "http_201"])
+def test_a_deepseek_search_prices_one_unit_only_for_a_documented_answer_with_results(deepseek, monkeypatch, status,
+                                                                                    results, cost, outcome):
+    asked = _deepseek_tariff(monkeypatch)
+    deepseek.answer = lambda _request: httpx.Response(status, json={"results": results})
+    shown = json.loads(_web_search(deepseek.ctx, "q"))
+    assert "error" not in shown and len(shown["sources"]) == len(results), "what is shown does not follow the price"
+    [row] = ledger_rows(deepseek.root)
+    assert (row["cost_usd"], row["cost_estimated"], row["cost_final"]) == (cost, cost is not None, False)
+    assert row["reservation_upper_bound_usd"] is None, "the reservation stays unknown"
+    evidence = row["cost_evidence"]
+    assert evidence["tariff_quote"]["catalog_id"] == "deepseek/search"
+    assert (evidence["http_status"], evidence["results"], evidence["outcome"]) == (status, len(results), outcome)
+    assert evidence["tariff_pricing"] == ({"billable_requests": 1} if cost else {"unpriced": f"search_{outcome}"})
+    assert row.get("price_source") == (f"litellm@{evidence['tariff_quote']['fetched_at']}" if cost else None)
+    assert asked == ["synthetic-deepseek"], "the selected key's own currency, read before the send"
+
+
+@pytest.mark.parametrize("currency", ["CNY", None])
+def test_a_deepseek_search_on_a_key_not_proven_usd_stays_unknown(deepseek, monkeypatch, currency):
+    _deepseek_tariff(monkeypatch, currency)
+    json.loads(_web_search(deepseek.ctx, "q"))
+    [row] = ledger_rows(deepseek.root)
+    assert (row["cost_usd"], row["cost_estimated"]) == (None, False)
+    assert row["cost_evidence"]["tariff_pricing"]["unpriced"] == ("currency_not_usd" if currency else "currency_unknown")
+
+
+def _read_timeout(request):
+    raise httpx.ReadTimeout("synthetic ReadTimeout", request=request)
+
+
+@pytest.mark.parametrize("answer", [
+    lambda _r: httpx.Response(500, json={"error": {"message": "Internal"}}),
+    lambda _r: httpx.Response(400, json={"error": {"message": "Query refused"}}),
+    lambda _r: httpx.Response(200, json={"data": []}),
+    _read_timeout,
+], ids=["server_error", "refused_400", "malformed_200", "read_timeout"])
+def test_a_failed_or_unreadable_deepseek_search_is_never_priced(deepseek, monkeypatch, answer):
+    _deepseek_tariff(monkeypatch)
+    deepseek.answer = answer
+    json.loads(_web_search(deepseek.ctx, "q"))
+    [row] = ledger_rows(deepseek.root)
+    assert (row["state"], row.get("cost_usd"), row.get("cost_estimated")) == ("unresolved", None, None)
+    assert "tariff_pricing" not in (row.get("cost_evidence") or {})
+
+
+def _raises(error):
+    def respond(request):
+        raise error(f"synthetic {error.__name__}", request=request)
+    return respond
+
+
+@pytest.mark.parametrize("answer,state,outcome,says", [
+    (_raises(httpx.ConnectError), "released", "failed", "(APIConnectionError)"),
+    (_raises(httpx.ConnectTimeout), "released", "failed", "(APITimeoutError)"),
+    (_raises(httpx.ReadTimeout), "unresolved", "provider_outcome_unknown", "provider outcome is unknown"),
+    (_raises(httpx.ReadError), "unresolved", "provider_outcome_unknown", "provider outcome is unknown"),
+    (lambda _r: httpx.Response(302, headers={"location": "https://elsewhere.invalid/"}), "unresolved", "failed", "302"),
+    (lambda _r: httpx.Response(402, json={"error": {"message": "Insufficient Balance"}}), "unresolved", "failed", "402"),
+    (lambda _r: httpx.Response(429, json={"error": {"message": "Rate limited"}}), "unresolved", "failed", "429"),
+    (lambda _r: httpx.Response(500, json={"error": {"message": "Internal"}}), "unresolved", "failed", "500"),
+    (lambda _r: httpx.Response(200, content=b"<html>a proxy page</html>", headers={"content-type": "text/html"}),
+     "unresolved", "failed", "without a readable results list"),
+    (lambda _r: httpx.Response(200, json={"data": []}), "unresolved", "failed", "without a readable results list"),
+    (lambda _r: httpx.Response(200, json={"results": ["text"]}), "unresolved", "failed", "without a readable results list"),
+], ids=["connect_error", "connect_timeout", "read_timeout", "reset_after_send", "redirect", "payment", "rate_limit",
+        "server_error", "html_200", "no_results_200", "results_not_objects_200"])
+def test_a_failed_deepseek_search_keeps_its_cause_and_is_never_sent_again(deepseek, answer, state, outcome, says):
+    deepseek.answer = answer
+    result = json.loads(_web_search(deepseek.ctx, "q"))
+    assert len(deepseek.sent) == 1 and "answer" not in result  # one physical send: no retry, no redirect followed
+    [tried] = result["legs_tried"]
+    assert tried["outcome"] == outcome and says in result["error"]
+    [row] = ledger_rows(deepseek.root)
+    assert row["state"] == state and row.get("cost_usd") is None and tried["ledger_attempt_ids"] == [row["attempt_id"]]
+
+
+def test_a_deepseek_answer_survives_a_failed_settlement_and_its_attempt_stays_open(deepseek, monkeypatch):
+    from ouroboros import usage_accounting as ua
+
+    def unwritable(*_args, **_kwargs):
+        raise OSError("ledger disk full")
+
+    monkeypatch.setattr(ua, "settle_attempt", unwritable)
+    result = json.loads(_web_search(deepseek.ctx, "q"))
+    assert "error" not in result and result["sources"][0]["url"] == _DEEPSEEK_ITEM["url"]
+    [row] = ledger_rows(deepseek.root)
+    assert (row["state"], row.get("cost_usd")) == ("unresolved", None)
+
+
+def test_a_spent_budget_refuses_deepseek_before_any_send(deepseek, monkeypatch):
+    from ouroboros import usage_accounting as ua
+
+    ua.record_received_attempt(ua.AttemptRequest(model="openrouter::spent", provider="openrouter", drive_root=deepseek.root,
+                                                 task_id="earlier", root_task_id="earlier"), {}, cost_usd=5.0)
+    monkeypatch.setenv("TOTAL_BUDGET", "1")
+    with pytest.raises(ua.BudgetExceeded):
+        _web_search(deepseek.ctx, "q")
+    assert deepseek.sent == [] and [row["provider"] for row in ledger_rows(deepseek.root)] == ["openrouter"]
+
+
+def test_a_saved_deepseek_head_sends_on_its_named_connection_only(deepseek, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_CONNECTIONS", json.dumps([{"kind": "deepseek", "name": "work", "api_key": "work-key"}]))
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_MODEL", "deepseek@work::")
+    result = json.loads(_web_search(deepseek.ctx, "q"))
+    [request] = deepseek.sent
+    assert request.headers["authorization"] == "Bearer work-key"
+    assert result["route"]["legs"][0]["connection"] == "work" and "error" not in result

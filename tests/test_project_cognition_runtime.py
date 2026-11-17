@@ -1,6 +1,8 @@
 """Room preferences bind each actor, survive cold return and stay live for new children."""
 
 import json
+import os
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -15,6 +17,9 @@ from ouroboros.settings_integrity import (
     task_settings_scope, task_settings_snapshot,
 )
 from tests.test_task_settings_snapshot import admitted_agent, document, isolated_runtime, save_owner  # noqa: F401
+from tests._process_environment import process_context as _process_context
+
+process_context = _process_context
 
 
 def snapshot(task):
@@ -293,3 +298,58 @@ def test_subagents_changes_are_live_while_context_effort_and_resume_stay_snapsho
             restore_cognition(captured)
             assert captured_cognition() == captured and live_subagents_mode() == mode
             assert "subagents_mode" not in captured
+
+
+@pytest.mark.parametrize("tool", ["run_command", "start_service"])
+@pytest.mark.parametrize("operator", [None, "ultra"])
+@pytest.mark.parametrize("change", ["clear", "delete"])
+def test_room_cognition_never_becomes_the_next_process_settings_fallback(
+        process_context, monkeypatch, tool, operator, change):
+    """Both selection entrypoints keep the pre-room operator source across repeated restores."""
+    from ouroboros.settings_integrity import skill_environ, skill_settings
+
+    registry, _ctx, workspace, _data = process_context
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    key = "OUROBOROS_EFFORT_TASK"
+    initial = {key: "low"} if operator is None else {}
+    if operator is not None:
+        monkeypatch.setenv(key, operator)
+    config.SETTINGS_PATH.write_text(json.dumps(initial), encoding="utf-8")
+    create_project(config.DATA_DIR, "selection")
+    first, second = choice("nano", "high", "low", "max"), choice("max", "none", "low", "ultra")
+    set_room("selection", first)
+    entry = snapshot({"id": "selection-task", "project_id": "selection"})
+    expected = operator if operator is not None else config.SETTINGS_DEFAULTS[key]
+    config.SETTINGS_PATH.write_text(json.dumps({key: ""} if change == "clear" else {}), encoding="utf-8")
+    program = "import os; print('selected=' + os.environ['SELECTED'], flush=True)"
+    with task_settings_scope(entry):
+        for cognition in (first, second, first):
+            restore_cognition(cognition)
+            assert captured_cognition() == cognition
+            assert config.runtime_setting(key) == cognition["effort_range"]["recommended"]
+            assert config.runtime_environ()[key] == cognition["effort_range"]["recommended"]
+            args = {"cwd": str(workspace), "cmd": [sys.executable, "-c", program],
+                    "env_from_settings": {"SELECTED": key}}
+            if tool == "start_service":
+                args["readiness"] = {"stdout_contains": "selected=" + expected, "timeout_sec": 5}
+            result = registry.execute_result(tool, args)
+            assert result.status == "ok", result.text
+            if tool == "start_service":
+                try:
+                    assert "selected=" + expected in registry.execute("service_logs", {})
+                finally:
+                    registry.execute("stop_service", {})
+            else:
+                assert "selected=" + expected in result.text
+            assert skill_environ().get(key) == operator
+            assert skill_settings()[key] == config.selection_settings()[key] == expected
+
+
+def test_repeated_cognition_restore_preserves_an_empty_selection_environment():
+    from ouroboros.settings_integrity import skill_environ
+
+    with task_settings_scope(task_settings_snapshot({}, {})):
+        for cognition in (choice("nano", "high", "low", "max"), choice("max", "low", "low", "high")):
+            restore_cognition(cognition)
+            assert captured_cognition() == cognition
+            assert skill_environ() == {}

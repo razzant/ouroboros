@@ -1,3 +1,19 @@
+/** Reveal in this scroller alone, clear of its actual CSS fade, including rows inside the box but under the mask.
+ * The sheet owns the edge size; Settings and the Dashboard read that same token, never a second pixel constant. */
+export function revealPastFade(scroller, row) {
+    const style = scroller.ownerDocument?.defaultView?.getComputedStyle(scroller);
+    const edge = parseFloat(style?.getPropertyValue?.('--scroll-fade-edge')) || 0;
+    const bounds = scroller.getBoundingClientRect();
+    const rect = row.getBoundingClientRect();
+    const above = scroller.scrollTop > 1 ? edge : 0;
+    const below = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > 1 ? edge : 0;
+    const top = bounds.top + (scroller.clientTop || 0) + (parseFloat(style?.scrollPaddingTop) || 0) + above;
+    const bottom = bounds.top + (scroller.clientTop || 0) + scroller.clientHeight
+        - (parseFloat(style?.scrollPaddingBottom) || 0) - below;
+    if (rect.top < top) scroller.scrollTop += rect.top - top;
+    else if (rect.bottom > bottom) scroller.scrollTop += rect.bottom - bottom;
+}
+
 /** Edge decoration follows actual hidden content, never masks a settled edge. Given a `region` name, a body that
  * scrolls on its axis is also a named region the keyboard can focus and scroll, as a cut table or notice stack is
  * (WebKit gives no other way into a scroller with nothing focusable inside); hidden or short, it is no tab stop. */

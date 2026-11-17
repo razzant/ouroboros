@@ -7,10 +7,13 @@ import {
     mergeStickyCostMeta,
     taskCostMeta,
     taskCostProjection,
-} from '../modules/chat.js';
+} from '../modules/chat_activity.js';
 import { costPresentationDetail, costPresentationMeta, renderLiveCardMeta } from '../modules/chat_activity.js';
-import { costBucketPresentation, costDashboardPresentation } from '../modules/costs.js';
+import { TABLES, allowancePresentation, breakdownRowName, costBucketPresentation, costDashboardPresentation, initCosts,
+    roomTimeText } from '../modules/costs.js';
+import { normalizeConsciousness } from '../modules/consciousness_api.js';
 import { summarizeLogEvent } from '../modules/log_events.js';
+import { setup } from './dashboard_dom_fixture.js';
 import {
     accountedUpperBound,
     accountedUpperBoundWithChildren,
@@ -32,7 +35,7 @@ test('header starts loading and fails closed when ledger money is unavailable', 
 
 test('header accepts the legacy numeric state shape without fabricating null as zero', () => {
     assert.deepEqual(headerBudgetPresentation({ spent_usd: 0, budget_limit: 10 }), {
-        state: 'available', label: '$0 / $10', fillPct: 0, attention: false,
+        state: 'available', label: '$0 of $10', fillPct: 0, attention: false,
     });
 });
 
@@ -252,8 +255,8 @@ test('cost dashboard distinguishes loading, unavailable, pending, and final zero
     };
     const fact = (view, label) => Object.fromEntries(view.facts)[label];
     const pending = costDashboardPresentation(base);
-    assert.equal(pending.figure, '$0.00 of $10.00');
-    assert.equal(pending.left, '$10.00 left');
+    assert.deepEqual([pending.spent, pending.of], ['$0', 'of $10']);
+    assert.equal(pending.left, '$10 left');
     // An older payload carries no cause. Say only what is known — never invent "0 open".
     assert.equal(fact(pending, 'Final'), 'No');
     assert.equal(fact(pending, 'Physical attempts'), '0');
@@ -311,9 +314,9 @@ test('cost dashboard sets the limit against known spend, open holds beside it (#
         },
     });
     // $2 known of $10: the $24 of holds is said beside it and kept in Details, never added in as spending.
-    assert.equal(shown.figure, '$2.00 of $10.00');
-    assert.equal(shown.left, '$8.00 left');
-    assert.equal(shown.open, 'up to $20.00 for calls without a known price', 'the producer\'s words: a worst case, not spending');
+    assert.deepEqual([shown.spent, shown.of], ['$2', 'of $10']);
+    assert.equal(shown.left, '$8 left');
+    assert.equal(shown.open, 'Not counted: up to $20 in calls without a known price', 'the unresolved upper bound, said as a worst case and never as spending');
     assert.equal(shown.reached, false);
     assert.equal(shown.share, 20);
     assert.deepEqual(shown.facts.map(([label]) => label), ['Final', 'Confirmed', 'Estimated', 'Reserved',
@@ -327,8 +330,9 @@ test('the known spend leads grouped like money, says what is left, and a reached
         available: true, cost_final: true, non_final_rows: 0, unknown_unmetered: 0, confirmed_usd: 0, estimated_usd: 0,
         reserved_usd: 0, unresolved_upper_bound_usd: 0, ...accounting } });
     const near = view({ settled_usd: 29438.2, limit_usd: 29800, remaining_known_usd: 361.8 });
-    assert.equal(near.figure, '$29,438.20 of $29,800.00');
-    assert.equal(near.left, '$361.80 left', 'the room the admission rule reports, never recomputed past it');
+    // A whole-dollar limit: the spend rounds up, what is left rounds down, and the two add up to the limit.
+    assert.deepEqual([near.spent, near.of], ['$29,439', 'of $29,800']);
+    assert.equal(near.left, '$361 left', 'the room the admission rule reports, never recomputed past it');
     assert.equal(near.open, '', 'nothing open is said only when something is');
     assert.equal(near.reached, false);
     assert.equal(Object.fromEntries(near.facts)['Physical attempts'], '423,015');
@@ -337,7 +341,7 @@ test('the known spend leads grouped like money, says what is left, and a reached
     assert.equal(reached.left, 'Limit reached: new paid work is refused');
     assert.equal(reached.share, 100);
     const unlimited = view({ settled_usd: 12.5, limit_usd: 0 });
-    assert.deepEqual([unlimited.figure, unlimited.left, unlimited.share], ['$12.50', 'No limit set', null]);
+    assert.deepEqual([unlimited.spent, unlimited.of, unlimited.left, unlimited.share], ['$13', '', 'No limit set', null]);
 });
 
 test('a breakdown cell is its amount in the card\'s words, what it leaves out on the face under it, never a free zero', () => {
@@ -677,4 +681,203 @@ test('unknown legacy descendant rollup cannot retain a narrower own zero', () =>
     // The unreadable-ledger phrase is reserved for the status flag.
     assert.deepEqual(taskCostMeta({ cost_accounting_status: 'unavailable', cost_presentation: null }),
         ['cost unavailable']);
+});
+
+test('#2828 a closed-empty carrier is a versioned clear; closed custody without a receipt reads unknown', () => {
+    const carrier = (over = {}) => ({ scope: 'own', tracked_amount: null, has_unpriced: false, tracked_final: false,
+        accounting_open: false, has_rows: false, ...over });
+    const frame = (over = {}) => ({ cost_accounting_status: 'available', cost_final: false,
+        cost_presentation: carrier(over) });
+    // Closed with an unpriced run and no row: no amount will arrive, so unknown (never pending, never blank).
+    assert.deepEqual(costPresentationMeta(carrier({ has_unpriced: true })), ['Cost unknown']);
+    assert.deepEqual(costPresentationMeta(carrier({ has_unpriced: true, accounting_open: true })), ['Cost pending']);
+    assert.deepEqual(costPresentationMeta(carrier()), []);
+
+    const pending = taskCostProjection(frame({ has_unpriced: true, accounting_open: true }), '2026-11-09T00:00:00Z');
+    const clear = taskCostProjection(frame(), '2026-11-09T00:01:00Z');
+    assert.deepEqual(clear, { meta: [], cleared: true, ts: Date.parse('2026-11-09T00:01:00Z'), scope: 'own',
+        final: false, unavailable: false });
+    // Only a readable, intact closed-empty scope clears; an unreadable one still says unknown.
+    assert.equal(taskCostProjection({ cost_accounting_status: 'unavailable', cost_presentation: carrier() }, '').meta[0],
+        'cost unavailable');
+    assert.deepEqual(taskCostProjection({ ...frame(), ledger_integrity_degraded: true }, '').meta, ['Cost unknown']);
+    assert.equal(taskCostProjection({ cost_usd: 0.03 }, '2026-11-09T00:02:00Z'), null);
+    assert.equal(mergeStickyCostMeta(pending, clear), clear);
+    assert.equal(mergeStickyCostMeta(clear, pending), clear, 'an older pending replay cannot revive a clear');
+    assert.equal(mergeStickyCostMeta(clear, null), clear);
+    const retry = taskCostProjection(frame({ has_unpriced: true, accounting_open: true }), '2026-11-09T00:03:00Z');
+    assert.equal(mergeStickyCostMeta(clear, retry), retry, 'a newer start or retry is pending again');
+    const unavailable = taskCostProjection({ cost_accounting_status: 'unavailable' }, '2026-11-09T00:04:00Z');
+    assert.equal(mergeStickyCostMeta(clear, unavailable), clear, 'an unavailable read never replaces honest evidence');
+    const settled = taskCostProjection({ cost_final: true, cost_presentation: carrier({ has_rows: true,
+        tracked_amount: 0.4, tracked_final: true }) }, '2026-11-09T00:00:30Z');
+    assert.equal(mergeStickyCostMeta(clear, settled), settled, 'a final amount outranks the clear');
+    assert.equal(mergeStickyCostMeta(settled, clear), settled);
+    // Scope precedence comes before rank: a root_tree clear holds over an own pending, and yields to a tree reading.
+    const treeClear = taskCostProjection(frame({ scope: 'root_tree' }), '2026-11-09T00:01:00Z');
+    const ownLater = taskCostProjection(frame({ has_unpriced: true, accounting_open: true }), '2026-11-09T00:09:00Z');
+    assert.equal(mergeStickyCostMeta(treeClear, ownLater), treeClear);
+    assert.equal(mergeStickyCostMeta(clear, treeClear), treeClear);
+    const treePending = taskCostProjection(frame({ scope: 'root_tree', has_unpriced: true, accounting_open: true }),
+        '2026-11-09T00:00:10Z');
+    assert.equal(mergeStickyCostMeta(clear, treePending), treePending, 'an own clear yields to a root_tree reading');
+    // An unstamped clear never defeats a stamped value of equal rank.
+    const unstamped = taskCostProjection(frame(), '');
+    assert.equal(mergeStickyCostMeta(pending, unstamped), pending);
+    // The card draws no money line from a clear.
+    const priorDocument = globalThis.document;
+    globalThis.document = { createElement: () => ({ style: {}, setAttribute() {}, append() {} }) };
+    try {
+        const record = { metaEl: { innerHTML: '', isConnected: true }, finished: true, costMeta: clear };
+        renderLiveCardMeta(record);
+        assert.doesNotMatch(record.metaEl.innerHTML, /Cost|\$/);
+    } finally { globalThis.document = priorDocument; }
+});
+
+test('Costs tables say what they group by: provider, a model over every provider, the roles set now (Track09 A)', () => {
+    assert.deepEqual(TABLES.map(([id, title, column, key]) => [id, title, column, key]), [
+        ['cost-by-model', 'By model', 'Model', 'by_model'],
+        ['cost-by-key', 'By provider', 'Provider', 'by_api_key'],
+        ['cost-by-model-cat', 'By current role', 'Role', 'by_model_category'],
+        ['cost-by-task-cat', 'By task category', 'Category', 'by_task_category'],
+    ]);
+    const notes = Object.fromEntries(TABLES.map(([id, , , , note]) => [id, note]));
+    assert.match(notes['cost-by-model'], /over every provider and connection/);
+    assert.match(notes['cost-by-model-cat'], /roles set in Settings now, not when each call ran/);
+    assert.equal(breakdownRowName('cost-by-key', 'openrouter'), 'OpenRouter');
+    assert.equal(breakdownRowName('cost-by-key', 'claude'), 'Claude Code');
+    assert.equal(breakdownRowName('cost-by-key', 'some-new-provider'), 'some-new-provider', 'an unknown key stays itself');
+    assert.equal(breakdownRowName('cost-by-model-cat', 'other'), 'No current role');
+    assert.equal(breakdownRowName('cost-by-model-cat', 'main'), 'Main');
+    assert.equal(breakdownRowName('cost-by-model-cat', 'unattributed'), 'unattributed');
+    assert.equal(breakdownRowName('cost-by-model', 'anthropic/claude-opus-5.5'), 'anthropic/claude-opus-5.5');
+});
+
+
+// --- Costs › Budget: the consciousness allowance (moved from Settings, owner 10 Nov 2026) ---------------------------
+
+// Its field is a setting row: what a typed limit sends or refuses, and what a save says, are checked in
+// costs_limits.test.js and settings_rows.test.js.
+
+test('room returns by a whole minute after its instant, in a named zone, never early and never from the past', () => {
+    const now = Date.UTC(2026, 10, 10, 19, 0);
+    assert.equal(roomTimeText('2026-11-10T21:40:30+00:00', { now, timeZone: 'UTC' }), '21:41 UTC');
+    assert.equal(roomTimeText('2026-11-10T21:41:00+00:00', { now, timeZone: 'UTC' }), '21:42 UTC', 'after the instant itself');
+    assert.equal(roomTimeText('2026-11-10T21:40:30+00:00', { now, timeZone: 'Europe/Moscow' }), 'Nov 11, 00:41 GMT+3',
+        'another day there carries its date');
+    assert.equal(roomTimeText('2026-11-10T18:59:00+00:00', { now, timeZone: 'UTC' }), '', 'a passed instant says nothing');
+    assert.equal(roomTimeText('', { now }), '');
+    assert.equal(roomTimeText('soon', { now }), '');
+});
+
+const state = (bg) => normalizeConsciousness(bg, { enabled: bg.enabled ?? true });
+const HELD = { status: 'wake_paused', live_wake_task_id: 'wake-1', live_wake_held: true, spent_24h_usd: 301.2, daily_usd: 390,
+    allowance_status: 'available', live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } };
+
+test('the allowance under its field: the clock\'s own spend, what it leaves out, never a zero for unknown', () => {
+    const now = Date.UTC(2026, 10, 10, 19, 0);
+    assert.deepEqual(allowancePresentation(state({ status: 'sleeping', spent_24h_usd: 12.4, daily_usd: 300,
+        allowance_status: 'available', allowance_open_rows: 0 }), { now }),
+        { spend: '$13 of $300 in the last 24 hours', lines: [],
+            meter: { spent: '$13', of: 'of $300', share: (12.4 / 300) * 100, left: '$287 left', reached: false, note: '' } });
+    const open = allowancePresentation(state({ status: 'sleeping', spent_24h_usd: 12.4, daily_usd: 300,
+        allowance_status: 'available', allowance_open_rows: 2, unknown_unmetered: 3 }), { now });
+    // What the number leaves out is said after it in words, where a floor sign stood before it.
+    assert.equal(open.spend, '$13 of $300 in the last 24 hours; 3 calls without a known price and calls in progress are not counted',
+        'calls still open beside calls without a price: both are said, as the meter\'s note says them');
+    assert.equal(open.meter.note, 'Not counted: 3 calls without a known price and calls in progress');
+    const pending = allowancePresentation(state({ status: 'sleeping', spent_24h_usd: 0, daily_usd: 20,
+        allowance_status: 'available', allowance_open_rows: 1 }), { now });
+    assert.equal(pending.spend, '$0 so far of $20 in the last 24 hours', 'a call still open is no final $0');
+    const unread = allowancePresentation(state({ status: 'allowance_unknown', daily_usd: 300, allowance_status: 'allowance_unknown' }), { now });
+    assert.equal(unread.spend, 'What it spent in the last 24 hours is unknown.');
+    assert.deepEqual(unread.lines, [{ text: 'The usage ledger could not be read, so whether consciousness has room is unknown.', tone: 'muted' }]);
+    assert.deepEqual(unread.meter, { spent: '', of: '', share: null, left: '', reached: false, note: '' }, 'an unknown spend draws no meter, never a zero');
+    assert.deepEqual(allowancePresentation(null), { spend: 'What it spent in the last 24 hours could not be read.', lines: [],
+        meter: { spent: '', of: '', share: null, left: '', reached: false, note: '' } });
+});
+
+test('a reached limit says what waits and, only when it can, a conditional time in a named zone', () => {
+    const now = Date.UTC(2026, 10, 10, 19, 0);
+    const reached = { status: 'allowance_exhausted', spent_24h_usd: 300.4, daily_usd: 300, allowance_status: 'exhausted',
+        allowance_room_after: '2026-11-10T21:40:30+00:00' };
+    assert.deepEqual(allowancePresentation(state(reached), { now, timeZone: 'UTC' }).lines, [{ tone: 'warn',
+        text: 'Consciousness limit reached: new wake-ups, replies in places and its own tasks wait.',
+        note: 'If its charges stay as they are, there is room again by 21:41 UTC.' }]);
+    for (const roomAfter of ['', '2026-11-10T18:00:00+00:00']) {  // withheld by the host, or stale by now
+        assert.deepEqual(allowancePresentation(state({ ...reached, allowance_room_after: roomAfter }), { now }).lines, [{ tone: 'warn',
+            text: 'Consciousness limit reached: new wake-ups, replies in places and its own tasks wait.',
+            note: 'When there is room again cannot be said now.' }]);
+    }
+    // The current window decides; a stale skip word does not, and an older server without the verdict keeps its word.
+    assert.deepEqual(allowancePresentation(state({ ...reached, allowance_status: 'available' }), { now }).lines, []);
+    assert.equal(allowancePresentation(state({ ...reached, allowance_status: '' }), { now, timeZone: 'UTC' }).lines.length, 1);
+    // A $0 limit is the owner's setting, said plainly, not an alarm and not a forecast.
+    assert.deepEqual(allowancePresentation(state({ ...reached, daily_usd: 0, spent_24h_usd: 0 }), { now }).lines, [{ tone: 'muted',
+        text: 'At $0 consciousness may not spend: new wake-ups, replies in places and its own tasks do not start.' }]);
+    assert.deepEqual(allowancePresentation(state({ ...reached, enabled: false }), { now }).lines, [{ tone: 'muted',
+        text: 'Consciousness is off: it starts nothing that counts here until it is started again.' }]);
+});
+
+test('a wake held at the allowance it started with is said apart from room returning, with its card\'s door', () => {
+    const now = Date.UTC(2026, 10, 10, 19, 0);
+    const held = { wake: 'wake-1', tone: 'warn', text: 'The consciousness wake-up is paused at the allowance it had left when it started ($2.99).',
+        note: 'Resume keeps that limit, so it pauses again while its known spend is at it; room returning or a higher limit '
+            + 'does not raise it. Stop now on its card ends it and frees the clock for its next check.' };
+    assert.deepEqual(allowancePresentation(state(HELD), { now }).lines, [held], 'room is back, the wake still waits');
+    const both = allowancePresentation(state({ ...HELD, allowance_status: 'exhausted', allowance_room_after: '2026-11-10T21:40:30+00:00',
+        live_wake_hold: { cause: 'allowance_and_cap', ceiling_usd: 50 } }), { now, timeZone: 'UTC' }).lines;
+    assert.equal(both.length, 2, 'the window and the wake are two facts');
+    assert.match(both[0].note, /^If its charges stay as they are, there is room again by 21:41 UTC\.$/);
+    assert.equal(both[1].text, 'The consciousness wake-up is paused at the allowance it had left when it started ($50.00, the per-task cap too).');
+    // Other proven causes are said only where they are money; the rest keep their card's word on the Consciousness tab.
+    assert.deepEqual(allowancePresentation(state({ ...HELD, live_wake_hold: { cause: 'per_task_cap', ceiling_usd: 10 } }), { now }).lines,
+        [{ wake: 'wake-1', tone: 'muted', text: 'The consciousness wake-up is paused at the per-task cost cap it started with; its card shows why.' }]);
+    assert.deepEqual(allowancePresentation(state({ ...HELD, live_wake_hold: { cause: 'launch_ceiling', ceiling_usd: 2.99 } }), { now }).lines,
+        [{ wake: 'wake-1', tone: 'muted', text: 'The consciousness wake-up is paused at the spending limit it started with; its card shows why.' }]);
+    assert.deepEqual(allowancePresentation(state({ ...HELD, live_wake_hold: { cause: 'owner', ceiling_usd: null } }), { now }).lines,
+        [{ wake: 'wake-1', tone: 'muted', text: 'The consciousness wake-up is on an explicit pause; its card shows who paused it and how to continue.' }]);
+    for (const cause of ['sleep', 'technical', 'total_budget', 'per_task_fence', '']) {
+        assert.deepEqual(allowancePresentation(state({ ...HELD, live_wake_hold: { cause, ceiling_usd: null } }), { now }).lines, [], cause);
+    }
+});
+
+test('the model its wake-ups think with: its own slot, or Main\'s said as Main, a local one as Local model; unknown says nothing', () => {
+    const now = Date.UTC(2026, 10, 10, 19, 0);
+    const base = { status: 'sleeping', spent_24h_usd: 1, daily_usd: 20, allowance_status: 'available' };
+    const lines = (route) => allowancePresentation(state({ ...base, model_route: route }), { now }).lines;
+    assert.deepEqual(lines({ value: 'anthropic/claude-opus-5-5', layer: 'consciousness', local: false }),
+        [{ tone: 'muted', text: 'Model: anthropic/claude-opus-5-5.' }]);
+    assert.deepEqual(lines({ value: 'claudexor::codex=gpt-6-astra', layer: 'main', local: false }),
+        [{ tone: 'muted', text: 'Model: gpt-6-astra (Main model).' }]);
+    assert.deepEqual(lines({ value: 'qwen/qwen3-32b', layer: 'main', local: true }),
+        [{ tone: 'muted', text: 'Model: Local model (Main model).' }]);
+    assert.deepEqual(state({ model_route: { value: 'm', layer: 'consciousness', local: 'yes' } }).modelRoute,
+        { value: 'm', layer: 'consciousness', local: false }, 'only a true local flag is local');
+    for (const unknown of [null, undefined, {}, { value: '', layer: 'main' }, { value: 'm', layer: 'place' }]) {
+        assert.equal(state({ ...base, model_route: unknown }).modelRoute, null);
+        assert.deepEqual(lines(unknown), [], 'an unknown route says nothing');
+    }
+    assert.deepEqual(allowancePresentation(state({ ...base, enabled: false, model_route: { value: 'm', layer: 'main' } }), { now }).lines,
+        [{ text: 'Consciousness is off: it starts nothing that counts here until it is started again.', tone: 'muted' }]);
+});
+
+// The Total budget card paints what costDashboardPresentation says (costs.js renderLead): the spend, "of" the limit and
+// what is left, each in its own node, in the limit's money.
+test('the Total budget card paints the spend, its limit and what is left in whole dollars of a whole-dollar limit', async (t) => {
+    const { mount, routes, window } = setup(t);
+    const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
+    routes.set('/api/cost-breakdown', response({ total_calls: 423015, by_model: {}, accounting: {
+        available: true, cost_final: true, non_final_rows: 0, unknown_unmetered: 0, confirmed_usd: 29438.2, estimated_usd: 0,
+        reserved_usd: 0, unresolved_upper_bound_usd: 0, settled_usd: 29438.2, limit_usd: 29800, remaining_known_usd: 361.8 } }));
+    routes.set('/api/settings', response({ TOTAL_BUDGET: 29800 }));
+    routes.set('/api/consciousness', response({ error: 'busy' }, 503));
+    routes.set('/api/state', response({ error: 'busy' }, 503));
+    initCosts({ mount, state: { activePage: 'dashboard' }, openDashboardTab: async () => {} });
+    window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'costs' } }));
+    for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(['#cost-spent', '#cost-of', '#cost-left'].map((id) => mount.querySelector(id).textContent),
+        ['$29,439', 'of $29,800', '$361 left']);
+    assert.equal(mount.querySelector('#cost-spend-bar').getAttribute('style'), '--spend-share: 98.8%');
+    assert.equal(mount.querySelector('#cost-open').hidden, true, 'nothing is left out, so nothing is said of it');
 });

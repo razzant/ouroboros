@@ -87,7 +87,7 @@ test('health is a status sentence: read, reading, couldn’t be read with Try ag
     assert.match(text(sourceHealthHtml(source('ouroboros-community'), health('ouroboros-community'))), /— showing the list from 3 days ago Try again$/);
     const never = sourceHealthHtml(source('ouroboros'), { state: 'error', error: 'repository not found' });
     assert.equal(text(never), 'couldn’t be read: repository not found Try again', 'no list was ever read: no age is claimed');
-    assert.equal(text(sourceHealthHtml(source('clawhub'), { state: 'search' })), 'searched when you search');
+    assert.equal(text(sourceHealthHtml(source('clawhub'), { state: 'search' })), 'read when chosen or searched');
     assert.equal(text(sourceHealthHtml(source('ouroboros'), null)), 'not read yet');
     assert.equal(sourceHealthHtml(source('builtin'), { state: 'ready' }), '', 'built-in skills ship with the app: nothing is read');
 });

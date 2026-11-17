@@ -1,9 +1,9 @@
-"""A review pool none of whose rows reads the repository (every row Packet) under Blocking.
+"""A review pool none of whose rows reads the repository (every row Packet).
 
 No seat is asked the coupling part, so every commit-gate review of the body ends NOT_PERFORMED
-(``coupling_not_performed``). Save warns — never refuses — in the Settings save ``warnings`` and in the
-wizard's summary, and ``## Review`` carries ``coupling_unanswerable: true``, a block fact the shrink
-above four seats keeps. Each rule is pinned in both directions.
+(``coupling_not_performed``), in every Access level. Save warns — never refuses — in the Settings save
+``warnings`` and in the wizard's summary, and ``## Review`` carries ``coupling_unanswerable: true``, a block
+fact the shrink above four seats keeps. Each rule is pinned in both directions.
 """
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ REPO = Path(__file__).resolve().parents[1]
 # Spelled out so a missing warning fails on behaviour, not on a missing name.
 WARNING = (
     "Every reviewer is a Packet row, so none reads the repository and the coupling question (how the "
-    "change fits the rest of the code) goes unanswered: with Blocking review, every commit to Ouroboros "
-    "itself stops as “not performed”. Mark a reviewer that reads the work itself, or choose Advisory.")
+    "change fits the rest of the code) goes unanswered: every review of a commit to Ouroboros itself "
+    "ends without a verdict. Mark a reviewer that reads the work itself.")
 JUDGE = """
 import fs from 'node:fs';
 import * as editor from './web/modules/subagents_settings.js';
@@ -68,7 +68,7 @@ READING = {
 
 @pytest.fixture(autouse=True)
 def _clean_review_plane(monkeypatch):
-    for key in ("OUROBOROS_REVIEW_ENFORCEMENT", "OUROBOROS_REVIEWER_SLOTS", SUBAGENTS_SETTING):
+    for key in ("OUROBOROS_REVIEWER_SLOTS", SUBAGENTS_SETTING):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -85,7 +85,8 @@ def _post(monkeypatch, body: dict, stored: dict | None = None, mode: str = "adva
         from ouroboros.config import SETTINGS_DEFAULTS
         return {**SETTINGS_DEFAULTS, **saved}
 
-    def _write(payload, *, allow_elevation=False, allow_context_lowering=False, authored_keys=(), boundary=None):
+    def _write(payload, *, allow_elevation=False, allow_context_lowering=False, authored_keys=(), boundary=None,
+               expected_digest="", if_unchanged=None, unset=()):
         saved.clear()
         saved.update(payload)
         if boundary is not None:
@@ -109,12 +110,12 @@ def _post(monkeypatch, body: dict, stored: dict | None = None, mode: str = "adva
     return response.status_code, json.loads(response.body), saved
 
 
-@pytest.mark.parametrize("saved, warned", [({}, True), ({"OUROBOROS_REVIEW_ENFORCEMENT": "advisory"}, False)],
-                         ids=["environment-only Blocking", "saved Advisory over environment Blocking"])
-def test_the_save_warning_judges_the_enforcement_the_real_loader_makes_effective(tmp_path, monkeypatch, saved, warned):
-    """Blocking set only in the environment warns on a save that never names it; the owner's saved Advisory wins over
-    it and does not. Real document, real ``load_settings`` and real write: the helper's own blank-enforcement branch
-    is unreachable from this caller, because the merged settings always carry the key."""
+@pytest.mark.parametrize("saved", [{}, {"OUROBOROS_REVIEW_ENFORCEMENT": "advisory"}],
+                         ids=["nothing saved", "a leftover saved Advisory"])
+def test_the_save_warning_judges_the_pool_the_real_loader_makes_effective(tmp_path, monkeypatch, saved):
+    """A save that never names the pool warns from the pool the real loader makes effective; a leftover value of the
+    retired enforcement setting, saved or in the environment, changes nothing. Real document, real ``load_settings``
+    and real write."""
     import asyncio
 
     from starlette.requests import Request
@@ -126,7 +127,7 @@ def test_the_save_warning_judges_the_enforcement_the_real_loader_makes_effective
     path.write_text(json.dumps(saved), encoding="utf-8")
     for attribute, value in (("SETTINGS_PATH", path), ("DATA_DIR", tmp_path), ("_BOOT_RUNTIME_MODE", None)):
         monkeypatch.setattr(cfg, attribute, value)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setattr(gws, "_unrecognised_review_models", lambda models: [])
     monkeypatch.setattr(gws, "_apply_settings_to_env", lambda *a, **k: None)
@@ -140,43 +141,39 @@ def test_the_save_warning_judges_the_enforcement_the_real_loader_makes_effective
     response = asyncio.run(gws.api_settings_post(request))
     answer = json.loads(response.body)
     assert response.status_code == 200 and answer["status"] == "saved", answer
-    assert (WARNING in answer.get("warnings", [])) is warned
+    assert WARNING in answer.get("warnings", [])
 
 
-def test_a_blocking_save_of_a_pool_with_no_reading_row_warns_and_still_saves(subtests, monkeypatch):
+def test_a_save_of_a_pool_with_no_reading_row_warns_and_still_saves(subtests, monkeypatch):
     for catalog in list(PACKET_ONLY.values()):
         with subtests.test(catalog=catalog), monkeypatch.context() as monkeypatch:
-            status, body, saved = _post(monkeypatch, {SUBAGENTS_SETTING: catalog, "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"})
+            status, body, saved = _post(monkeypatch, {SUBAGENTS_SETTING: catalog})
 
             assert status == 200 and body["status"] == "saved", body
             assert json.loads(saved[SUBAGENTS_SETTING])["items"] == catalog["items"], "a warning never refuses the save"
-            assert saved["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
             assert WARNING in body.get("warnings", [])
 
 
-@pytest.mark.parametrize("catalog, enforcement, mode", chosen_rows([
-    *[(catalog, "blocking", "advanced") for catalog in READING.values()],
-    (PACKET_ONLY["two Packet reviewers"], "advisory", "advanced"),
-    (PACKET_ONLY["two Packet reviewers"], "blocking", "cyber_pro"),
-], 0, 2, 3), ids=chosen_rows([*READING, "advisory review", "Cyber Pro"], 0, 2, 3))
-def test_no_warning_with_a_reading_row_under_advisory_or_in_cyber_pro(monkeypatch, catalog, enforcement, mode):
+@pytest.mark.parametrize("catalog, mode, warned", chosen_rows([
+    *[(catalog, "advanced", False) for catalog in READING.values()],
+    (PACKET_ONLY["two Packet reviewers"], "cyber_pro", True),
+], 0, 2), ids=chosen_rows([*READING, "Cyber Pro"], 0, 2))
+def test_the_warning_follows_the_pool_alone_in_every_access_level(monkeypatch, catalog, mode, warned):
     stored = {"OUROBOROS_RUNTIME_MODE": mode}
-    status, body, _saved = _post(
-        monkeypatch, {SUBAGENTS_SETTING: catalog, "OUROBOROS_REVIEW_ENFORCEMENT": enforcement}, stored, mode)
+    status, body, _saved = _post(monkeypatch, {SUBAGENTS_SETTING: catalog}, stored, mode)
 
     assert status == 200, body
-    assert WARNING not in body.get("warnings", [])
+    assert (WARNING in body.get("warnings", [])) is warned
 
 
-def test_switching_to_blocking_over_a_stored_packet_pool_warns_and_every_later_save_says_so(monkeypatch):
-    stored = {SUBAGENTS_SETTING: json.dumps(PACKET_ONLY["two Packet reviewers"]),
-              "OUROBOROS_REVIEW_ENFORCEMENT": "advisory"}
-    status, body, saved = _post(monkeypatch, {"OUROBOROS_REVIEW_ENFORCEMENT": "blocking"}, stored)
-    assert status == 200 and WARNING in body.get("warnings", [])
-
+def test_every_save_over_a_stored_packet_pool_says_so_until_a_row_reads(monkeypatch):
+    stored = {SUBAGENTS_SETTING: json.dumps(PACKET_ONLY["two Packet reviewers"])}
     # While the pool still cannot answer, an unrelated save repeats the fact rather than reading as fine.
-    status, body, _saved = _post(monkeypatch, {"TOTAL_BUDGET": 12.5}, dict(saved))
+    status, body, saved = _post(monkeypatch, {"TOTAL_BUDGET": 12.5}, stored)
     assert status == 200 and WARNING in body.get("warnings", [])
+
+    status, body, _saved = _post(monkeypatch, {SUBAGENTS_SETTING: READING["a reading API reviewer"]}, dict(saved))
+    assert status == 200 and WARNING not in body.get("warnings", [])
 
 
 def _review_block(monkeypatch, catalog: dict) -> dict:

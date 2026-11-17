@@ -8,7 +8,8 @@ import { createTelegramHost, hostCall, isTelegramHost, KEYBOARD_COLLAPSE_PX } fr
 function fakeSdk({ version = '8.0', scheme = 'light', methods = null } = {}) {
     const calls = [];
     const events = new Map();
-    const all = ['ready', 'expand', 'disableVerticalSwipes', 'setHeaderColor', 'setBackgroundColor', 'setBottomBarColor', 'hideKeyboard'];
+    const all = ['ready', 'expand', 'disableVerticalSwipes', 'setHeaderColor', 'setBackgroundColor', 'setBottomBarColor', 'hideKeyboard',
+        'requestFullscreen'];
     const app = {
         version, initData: 'query_id=1', colorScheme: scheme,
         safeAreaInset: { top: 0, bottom: 34, left: 0, right: 0 },
@@ -90,7 +91,9 @@ test('the SDK present at boot: ready, expand, swipes off, chrome painted, insets
     assert.equal(sdk.calls.some((c) => c[0] === 'setBottomBarColor'), false, '7.10 is newer than this client');
     assert.equal(w.rootStyle.get('--tg-safe-area-inset-bottom'), '34px');
     assert.equal(w.rootStyle.get('--tg-content-safe-area-inset-top'), '46px');
-    assert.equal(w.rootStyle.has('--tg-safe-area-inset-left'), false, 'the shell reads vertical insets only');
+    assert.equal(w.rootStyle.get('--tg-safe-area-inset-left'), '0px', 'all four edges are mirrored');
+    assert.equal(sdk.calls.some((c) => c[0] === 'requestFullscreen'), false, 'fullscreen is 8.0, newer than this client');
+    assert.equal(w.doc.documentElement.dataset.telegramFullscreen, 'expanded');
     // The insets move: the tokens follow.
     sdk.app.safeAreaInset.bottom = 0;
     sdk.fire('safeAreaChanged');
@@ -194,5 +197,117 @@ test('a collapsed visual viewport with a focused field blurs it and asks the hos
     // Nothing focused: no recovery, however small the viewport.
     w.win.visualViewport.listeners.get('resize')();
     assert.equal(blurred, 1);
+    adapter.dispose();
+});
+
+test('fullscreen is requested once, after its listeners; only Telegram\'s own state acknowledges it', () => {
+    const sdk = fakeSdk({ version: '8.0' });
+    const w = fakeWorld({ sdk });
+    sdk.app.requestFullscreen = () => {
+        assert.ok(sdk.events.has('fullscreenChanged') && sdk.events.has('fullscreenFailed'), 'listeners first');
+        sdk.calls.push(['requestFullscreen']);
+    };
+    const adapter = createTelegramHost({ win: w.win, doc: w.doc, layers: w.stack, theme: w.theme });
+    adapter.bind(); adapter.bind();
+    const requests = () => sdk.calls.filter((c) => c[0] === 'requestFullscreen').length;
+    assert.equal(requests(), 1);
+    assert.equal(w.doc.documentElement.dataset.telegramFullscreen, 'expanded', 'a dispatched request is not success');
+    sdk.app.isFullscreen = true;
+    sdk.app.safeAreaInset.left = 44;
+    sdk.fire('fullscreenChanged');
+    assert.equal(w.doc.documentElement.dataset.telegramFullscreen, 'active');
+    assert.equal(w.rootStyle.get('--tg-safe-area-inset-left'), '44px', 'the edges are read again with the mode');
+    sdk.app.isFullscreen = false;  // the owner leaves fullscreen
+    sdk.fire('fullscreenChanged');
+    assert.equal(w.doc.documentElement.dataset.telegramFullscreen, 'expanded');
+    assert.equal(requests(), 1, 'an exit the owner made is never undone');
+    adapter.dispose();
+    assert.equal(sdk.events.size, 0);
+    assert.equal(w.doc.documentElement.dataset.telegramFullscreen, undefined);
+});
+
+test('already fullscreen asks nothing; a failure never manufactures success', () => {
+    for (const already of [true, false]) {
+        const sdk = fakeSdk();
+        sdk.app.isFullscreen = already;
+        const w = fakeWorld({ sdk });
+        const adapter = createTelegramHost({ win: w.win, doc: w.doc, layers: w.stack, theme: w.theme });
+        adapter.bind();
+        assert.equal(sdk.calls.filter((c) => c[0] === 'requestFullscreen').length, already ? 0 : 1);
+        sdk.fire('fullscreenFailed', { error: 'UNSUPPORTED' });
+        assert.equal(w.doc.documentElement.dataset.telegramFullscreen, already ? 'active' : 'expanded');
+        // The SDK sets its flag before it reports ALREADY_FULLSCREEN.
+        sdk.app.isFullscreen = true;
+        sdk.fire('fullscreenFailed', { error: 'ALREADY_FULLSCREEN' });
+        assert.equal(w.doc.documentElement.dataset.telegramFullscreen, 'active');
+        adapter.dispose();
+    }
+});
+
+test('an old, missing or throwing fullscreen keeps the expanded fallback and the keyboard recovery', () => {
+    for (const mode of ['old', 'missing', 'throws']) {
+        const sdk = fakeSdk({ version: mode === 'old' ? '7.10' : '9.1' });
+        if (mode === 'missing') delete sdk.app.requestFullscreen;
+        if (mode === 'throws') sdk.app.requestFullscreen = () => { throw new Error('unsupported platform'); };
+        const w = fakeWorld({ sdk });
+        const adapter = createTelegramHost({ win: w.win, doc: w.doc, layers: w.stack, theme: w.theme });
+        assert.doesNotThrow(() => adapter.bind());
+        assert.equal(adapter.bound(), true);
+        assert.equal(w.doc.documentElement.dataset.telegramFullscreen, 'expanded');
+        assert.ok(sdk.calls.some((c) => c[0] === 'expand'));
+        assert.equal(sdk.calls.filter((c) => c[0] === 'requestFullscreen').length, 0);
+        let blurred = 0;
+        w.doc.activeElement = { matches: () => true, blur: () => { blurred += 1; } };
+        w.win.visualViewport.height = KEYBOARD_COLLAPSE_PX - 40;
+        assert.equal(adapter.recoverKeyboard(), true, 'the collapse recovery still works');
+        assert.equal(blurred, 1);
+        adapter.dispose();
+    }
+});
+
+test('four edges: nonfinite insets read as 0, and a late SDK requests fullscreen once', () => {
+    const sdk = fakeSdk();
+    const w = fakeWorld();
+    const adapter = createTelegramHost({ win: w.win, doc: w.doc, layers: w.stack, theme: w.theme });
+    assert.equal(adapter.bind(), false);
+    w.win.Telegram = { WebApp: sdk.app };
+    w.timers[0].fn();
+    assert.equal(sdk.calls.filter((c) => c[0] === 'requestFullscreen').length, 1);
+    sdk.app.contentSafeAreaInset.right = 22;
+    sdk.fire('contentSafeAreaChanged');
+    assert.equal(w.rootStyle.get('--tg-content-safe-area-inset-right'), '22px');
+    sdk.app.contentSafeAreaInset.right = 0;
+    sdk.app.safeAreaInset.left = Infinity;
+    sdk.app.safeAreaInset.top = Number.NaN;
+    sdk.fire('safeAreaChanged');
+    assert.equal(w.rootStyle.get('--tg-content-safe-area-inset-right'), '0px');
+    assert.equal(w.rootStyle.get('--tg-safe-area-inset-left'), '0px');
+    assert.equal(w.rootStyle.get('--tg-safe-area-inset-top'), '0px');
+    adapter.dispose();
+});
+
+test('a page without the stamp waits for a late SDK tag but binds only on Telegram launch data', () => {
+    for (const telegram of [true, false]) {
+        const w = fakeWorld({ host: false });
+        const adapter = createTelegramHost({ win: w.win, doc: w.doc, layers: w.stack, theme: w.theme });
+        assert.equal(adapter.bind(), false);
+        assert.equal(w.timers.length, 1, 'the tag is there: wait for it');
+        const sdk = fakeSdk();
+        if (!telegram) sdk.app.initData = '';  // an ordinary browser loads the same script
+        w.win.Telegram = { WebApp: sdk.app };
+        w.script.handlers.get('load')();
+        w.timers[0].fn();
+        assert.equal(adapter.bound(), telegram);
+        assert.equal(sdk.calls.filter((c) => c[0] === 'requestFullscreen').length, telegram ? 1 : 0);
+        assert.equal(sdk.calls.filter((c) => c[0] === 'disableVerticalSwipes').length, telegram ? 1 : 0);
+        assert.equal(w.doc.documentElement.dataset.telegramFullscreen, telegram ? 'expanded' : undefined);
+        adapter.dispose();
+    }
+    // No tag and no SDK: an ordinary page arms nothing.
+    const w = fakeWorld({ host: false });
+    w.doc.querySelector = () => null;
+    const adapter = createTelegramHost({ win: w.win, doc: w.doc, layers: w.stack, theme: w.theme });
+    assert.equal(adapter.bind(), false);
+    assert.equal(w.timers.length, 0);
     adapter.dispose();
 });

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as _dt
+import errno
 import hashlib
 import io
 import json
@@ -11,7 +12,6 @@ import logging
 import os
 import pathlib
 import re as _re
-import subprocess
 import threading
 import time
 import uuid
@@ -34,8 +34,8 @@ def has_log_sink() -> bool:
     return _log_sink is not None
 
 
-def utc_now_iso() -> str:
-    return _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
+def utc_now_iso(timespec: str = "auto") -> str:
+    return _dt.datetime.now(tz=_dt.timezone.utc).isoformat(timespec=timespec)
 
 
 # Worker processes set OUROBOROS_IN_WORKER=1 before importing the agent stack.
@@ -323,6 +323,29 @@ def write_bytes_atomic(path: pathlib.Path, content: bytes, *, fsync: bool = Fals
     _atomic_overwrite(path, _write)
 
 
+# What fsync of a folder's descriptor may answer where the filesystem cannot sync a folder at all (some
+# network and FUSE mounts); EROFS stays a failure: ext4 and btrfs answer it after a disk error.
+_FOLDER_SYNC_UNSUPPORTED = frozenset({errno.EINVAL, errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP})
+
+
+def fsync_folder(path: pathlib.Path) -> None:
+    """Sync a folder's entries for a caller about to remove the only other copy of what they name.
+
+    Any other failure raises, so that caller keeps its original; ``store.fsync_directory`` is the
+    best-effort sync that never raises. Where a folder cannot be synced at all (Windows, or a filesystem
+    answering as above), file-level durability is the limit and nothing raises."""
+    if os.name == "nt":
+        return
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if exc.errno not in _FOLDER_SYNC_UNSUPPORTED:
+            raise
+    finally:
+        os.close(fd)
+
+
 def write_text_atomic(path: pathlib.Path, content: str, *, fsync: bool = False) -> None:
     """Atomically overwrite ``path`` with ``content`` encoded UTF-8, BYTE-EXACT: the newlines the caller
     wrote are the newlines on disk on every platform — the contract of durable JSON state (``atomic_write_json``),
@@ -332,7 +355,8 @@ def write_text_atomic(path: pathlib.Path, content: str, *, fsync: bool = False) 
 
 
 def machine_json(payload: Any) -> str:
-    """The one compact text of machine JSON state (files and the current store's task bodies)."""
+    """The one compact text of machine JSON: state files, the current store's task bodies and every row
+    ``append_jsonl`` writes (a row keeps each value; only the separators' spaces are not written)."""
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -558,8 +582,7 @@ def append_jsonl(
         raise TypeError(f"append_jsonl: path must be pathlib.Path, got {type(path).__name__}")
     assert_test_data_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(obj, ensure_ascii=False)
-    data = (line + "\n").encode("utf-8")
+    data = (machine_json(obj) + "\n").encode("utf-8")
 
     write_retries = 3
     retry_sleep_base_sec = 0.01
@@ -790,37 +813,46 @@ def jsonl_archive_segments(
     return sorted(found)
 
 
-_CLOSED_SEGMENTS: Dict[str, tuple] = {}  # chain path -> (live identity, archive/ mtime, closed segments)
+_CLOSED_SEGMENTS: Dict[Any, tuple] = {}  # chain path + IO policy -> (live/directory identity, closed segments)
 
 
-def _closed_segments(path: pathlib.Path, live_stat: Any, *, strict: bool) -> List[Tuple[pathlib.Path, Any]]:
+def _closed_segments(path: pathlib.Path, live_stat: Any, *, strict: bool,
+                     listing: Optional[Callable] = None, stat: Optional[Callable] = None,
+                     directory_revision: Optional[tuple] = None) -> List[Tuple[pathlib.Path, Any]]:
     """A chain's rotated segments with their stats, oldest first, without the live file's alias; a complete
-    listing is reused while the live inode and ``archive/``'s mtime hold, the newest archive re-stat'ed."""
-    try:
-        key = (live_stat.st_dev, live_stat.st_ino, os.stat(path.parent.parent / "archive").st_mtime_ns)
+    listing is reused while the live inode and ``archive/``'s mtime hold, the newest archive re-stat'ed.
+    Confined readers supply the held directory's revision and IO seams; their cache key cannot reuse
+    an ordinary path-based capture. Both use this existing per-chain metadata cache, never a body cache."""
+    inspect = stat or pathlib.Path.stat
+    cache_name = str(path) if directory_revision is None else (str(path), "confined")
+    try:  # the live identity first: without a live file the archive is not stat'ed (the boot's cost contract)
+        live = (live_stat.st_dev, live_stat.st_ino)
+        revision = (os.stat(path.parent.parent / "archive").st_mtime_ns if directory_revision is None
+                    else ("confined", *directory_revision))
+        key = (*live, revision)
     except (AttributeError, OSError):
         key = None
-    if key is not None and (cached := _CLOSED_SEGMENTS.get(str(path))) is not None and cached[0] == key:
+    if key is not None and (cached := _CLOSED_SEGMENTS.get(cache_name)) is not None and cached[0] == key:
         with contextlib.suppress(OSError):
-            return [*cached[1][:-1], *((segment, segment.stat()) for segment, _stat in cached[1][-1:])]
+            return [*cached[1][:-1], *((segment, inspect(segment)) for segment, _stat in cached[1][-1:])]
     try:  # a listing that skipped anything is never reused
-        segments, complete, closed = jsonl_archive_segments(path, strict=True), True, []
+        segments, complete, closed = (listing or jsonl_archive_segments)(path, strict=True), True, []
     except JsonlChainUnreadable:
         if strict:
             raise
         segments, complete, closed = [], False, []
     for segment in segments:
         try:
-            stat = segment.stat()
+            observed = inspect(segment)
         except OSError as exc:
             if strict and not isinstance(exc, FileNotFoundError):
                 raise JsonlChainUnreadable(f"cannot stat {segment}: {exc}") from exc
             complete = False
             continue
-        if key is None or (stat.st_dev, stat.st_ino) != key[:2]:
-            closed.append((segment, stat))
+        if key is None or (observed.st_dev, observed.st_ino) != key[:2]:
+            closed.append((segment, observed))
     if key is not None and complete:
-        _CLOSED_SEGMENTS[str(path)] = (key, tuple(closed))
+        _CLOSED_SEGMENTS[cache_name] = (key, tuple(closed))
     return closed
 
 
@@ -830,6 +862,8 @@ def jsonl_chain_handles(
     start_offset: Optional[int] = None,
     snapshot: Optional[Dict[str, Any]] = None,
     sequential: bool = False,
+    open_file: Optional[Callable] = None,
+    closed_segments: Optional[Callable] = None,
 ) -> Iterator[Iterable[Tuple[pathlib.Path, Any]]]:
     """Open binary handles for a rotated JSONL chain; the context owns closing.
 
@@ -860,6 +894,10 @@ def jsonl_chain_handles(
     If the captured live generation rotated between calls, locate its inode
     in the archive and retain that path in the same snapshot.
 
+    ``open_file`` and ``closed_segments`` are server-owned confined IO seams
+    (binary handle; oldest-first path/stat pairs). They must be supplied together
+    on every read of that snapshot; neither accepts client paths as authority.
+
     Snapshot metadata does NOT cap the returned handle's reads: an appending
     file can expose bytes beyond the captured total. The caller must limit
     reads to that total and start a fresh snapshot for the next pass; the
@@ -876,19 +914,21 @@ def jsonl_chain_handles(
     from bisect import bisect_right
 
     path = pathlib.Path(path)
+    opener = open_file or (lambda member: member.open("rb"))
+    segments = closed_segments or _closed_segments
     state = snapshot if snapshot is not None else {}
     with contextlib.ExitStack() as stack:
         live_handle = None
         if not state:
             try:
-                live_handle = stack.enter_context(path.open("rb"))
+                live_handle = stack.enter_context(opener(path))
                 live_stat = os.fstat(live_handle.fileno())
             except OSError as exc:
                 if strict and not isinstance(exc, FileNotFoundError):
                     raise JsonlChainUnreadable(f"cannot open or stat {path}: {exc}") from exc
                 live_stat = None
             entries, ends, total = [], [], 0
-            for segment, stat in [*_closed_segments(path, live_stat, strict=strict), (path, live_stat)]:
+            for segment, stat in [*segments(path, live_stat, strict=strict), (path, live_stat)]:
                 if stat is None:
                     continue
                 total += stat.st_size
@@ -910,23 +950,25 @@ def jsonl_chain_handles(
                     handle = live_handle
                     if handle is None:
                         with contextlib.suppress(FileNotFoundError):
-                            handle = owner.enter_context(segment.open("rb"))
+                            handle = owner.enter_context(opener(segment))
                     identity = (expected.st_dev, expected.st_ino)
                     actual = os.fstat(handle.fileno()) if handle is not None else None
                     if actual is None or (actual.st_dev, actual.st_ino) != identity:
                         if handle is not None:
                             handle.close()
-                        for candidate in jsonl_archive_segments(path, strict=strict):
+                        candidates = (segments(path, None, strict=strict) if closed_segments else
+                                      ((candidate, None) for candidate in jsonl_archive_segments(path, strict=strict)))
+                        for candidate, stat in candidates:
                             with contextlib.suppress(FileNotFoundError):
-                                stat = candidate.stat()
+                                stat = stat or candidate.stat()
                                 if (stat.st_dev, stat.st_ino) == identity:
                                     segment = entries[index][0] = candidate
                                     break
                         else:
                             raise JsonlChainUnreadable(f"original live generation missing at {path}")
-                        handle = owner.enter_context(segment.open("rb"))
+                        handle = owner.enter_context(opener(segment))
                 else:
-                    handle = owner.enter_context(segment.open("rb"))
+                    handle = owner.enter_context(opener(segment))
                 if start_offset is not None:
                     if os.fstat(handle.fileno()).st_size < expected.st_size:
                         raise JsonlChainUnreadable(f"shortened chain segment {segment}")
@@ -1181,9 +1223,10 @@ def run_cmd(
     # depend on the operator's locale: a Russian-locale git answers «метка … уже
     # существует» where the code and its tests match "already exists".
     from ouroboros.git_observation import host_git_env
+    from ouroboros.work_domain import run  # a command in a work folder runs as the work domain, never here
 
     env = host_git_env()
-    res = subprocess.run(
+    res = run(
         cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True, env=env,
         timeout=timeout,
     )

@@ -1,7 +1,7 @@
 // A small DOM double for row-level chat modules (chat_reply.js, chat_row_menu.js): bubbling events, focus,
 // geometry, and the selector grammar those modules use — tags, classes, attributes ([a], [a="v"], [a^="v"]),
 // :not(…), :disabled, :scope, the descendant and child combinators and selector lists. Real engines, hit
-// testing and layout are checked in the browser lane.
+// testing and layout are checked in the browser lane. `appendHtml` builds a module's markup into nodes.
 // A passive listener cannot cancel its event, as in a browser: its preventDefault() does nothing.
 function call(listener, event, passive) {
     if (!passive) return listener(event);
@@ -89,7 +89,14 @@ class Node extends Events {
     set tabIndex(value) { this.attrs.set('tabindex', String(value)); }
     get textContent() { return this._text + this.children.map((child) => child.textContent).join(''); }
     set textContent(value) { this.children = []; this._text = String(value ?? ''); }
-    set innerHTML(value) { this.children = []; this._text = ''; this.html = String(value); }
+    set innerHTML(value) {
+        // A document made with `parseHtml` builds the markup into nodes, as a browser would (appendHtml below).
+        if (this.ownerDocument?.parseHtml) for (const child of [...this.children]) this.removeChild(child);
+        this.children = [];
+        this._text = '';
+        this.html = String(value);
+        if (this.ownerDocument?.parseHtml) appendHtml(this, this.html);
+    }
     get innerHTML() { return this.html || ''; }
     setAttribute(key, value) { this.attrs.set(key, String(value)); }
     getAttribute(key) {
@@ -101,7 +108,11 @@ class Node extends Events {
         return this.attrs.get(key) ?? null;
     }
     hasAttribute(key) { return this.getAttribute(key) !== null; }
-    removeAttribute(key) { this.attrs.delete(key); }
+    removeAttribute(key) {  // a `data-*` drawn from markup lives in the dataset: it goes with the attribute, as in a browser
+        this.attrs.delete(key);
+        if (key.startsWith('data-')) delete this.dataset[key.slice(5).replace(/-([a-z])/g, (_all, c) => c.toUpperCase())];
+    }
+    toggleAttribute(key, force = !this.hasAttribute(key)) { if (force) this.attrs.set(key, ''); else this.removeAttribute(key); return force; }
     matchesCompound(c) {
         if (c.tag && c.tag !== this.tagName.toLowerCase()) return false;
         if (c.disabled && !this.disabled) return false;
@@ -171,13 +182,17 @@ class Node extends Events {
     get offsetWidth() { return this.rect?.width ?? 0; }
     get offsetHeight() { return this.rect?.height ?? 0; }
     focus() { if (this.isConnected) this.ownerDocument.activeElement = this; }
+    select() { this.selected = true; }
     click() { if (!this.disabled) this.emit('click', { target: this }); }
     dispatchEvent(event) { return !this.emit(event.type, { native: event }).defaultPrevented; }
 }
 
-/** A document with a body, focus, selection, capture listeners and a window for popup geometry. */
-export function domDouble() {
+/** A document with a body, focus, selection, capture listeners and a window for popup geometry. With `parseHtml` an
+ *  `innerHTML` assignment builds its markup into nodes (appendHtml), for a module that queries what it wrote (a grid's
+ *  cells, a strip's segments); without it the markup is only kept as the string, as before. */
+export function domDouble({ parseHtml = false } = {}) {
     const doc = new Events();
+    doc.parseHtml = parseHtml;
     doc.captures = new Map();
     const bubble = doc.addEventListener.bind(doc);
     doc.addEventListener = (type, listener, options) => {
@@ -200,6 +215,8 @@ export function domDouble() {
     doc.createElement = (tag) => new Node(doc, tag);
     doc.body = new Node(doc, 'body');
     doc.getElementById = (id) => doc.body.descendants().find((node) => node.id === id) || null;
+    doc.querySelectorAll = (selector) => doc.body.querySelectorAll(selector);
+    doc.createTextNode = (text) => Object.assign(new Node(doc, '#text'), { textContent: text });
     doc.activeElement = doc.body;
     return { doc, el: (tag = 'div', { className = '', attrs = {}, dataset = {}, text = '' } = {}, ...children) => {
         const node = new Node(doc, tag, attrs);
@@ -209,6 +226,37 @@ export function domDouble() {
         node.append(...children);
         return node;
     } };
+}
+
+const VOID_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", '#96': '`' };
+const decodeEntities = (text) => text.replace(/&(amp|lt|gt|quot|#39|#96);/g, (_all, name) => ENTITIES[name]);
+
+/** The markup a module writes (tags, quoted attributes, text, escapeHtmlAttr's entities) built under `parent`, as an
+ *  `innerHTML` assignment would build it: `data-*` fills the dataset, an input's `value` its value, and text joins the
+ *  element's own text, so `textContent` reads it (text before and after a child is not kept apart). */
+export function appendHtml(parent, html) {
+    const stack = [parent];
+    for (const [, closing, tag, attrs, text] of String(html).matchAll(/<(\/?)([a-z][\w-]*)([^>]*)>|([^<]+)/gi)) {
+        if (text !== undefined) { stack.at(-1)._text += decodeEntities(text); continue; }
+        const name = tag.toLowerCase();
+        if (closing) {
+            const at = stack.findLastIndex((node) => node.tagName.toLowerCase() === name);
+            if (at > 0) stack.length = at;
+            continue;
+        }
+        const node = new Node(parent.ownerDocument, name);
+        for (const [, key, value = ''] of attrs.matchAll(/([\w-]+)(?:="([^"]*)")?/g)) {
+            if (key === 'class') node.className = decodeEntities(value);
+            else if (key === 'hidden' || key === 'disabled') node[key] = true;
+            else if (key.startsWith('data-')) node.dataset[key.slice(5).replace(/-([a-z])/g, (_all, c) => c.toUpperCase())] = decodeEntities(value);
+            else node.setAttribute(key, decodeEntities(value));
+        }
+        if (name === 'input') node.value = node.getAttribute('value') ?? '';
+        stack.at(-1).append(node);
+        if (!VOID_TAGS.has(name)) stack.push(node);
+    }
+    return parent;
 }
 
 /** Install the double as the global document/window for modules that read them at call time. */

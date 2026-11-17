@@ -933,9 +933,104 @@ def test_owner_audio_at_fifty_frames_per_second_survives_slow_control_reads(chec
     asyncio.run(scenario())
 
 
-def test_due_audio_is_drained_before_another_control_or_renewal_poll():
-    from ouroboros.contracts.live_conversation import Audio
+@pytest.mark.parametrize('maintenance', ['offer', 'revisit', 'renewal', 'context_view', 'preparation_failure', 'native_quiet',
+                                         'tool_refit'])
+def test_continuous_due_audio_reaches_outer_call_maintenance(maintenance):
+    from ouroboros.call_peers import LiveCallHub
+    from ouroboros.contracts.live_conversation import Audio, ContextUpdate
     from skills.live_conversation.driver import _Call
+
+    async def scenario():
+        host = Host()
+        host.hub = LiveCallHub(cp.CallSpec('maintenance', 1, 'test', 'test'))
+        host.hub.join(cp.PeerInfo('owner', cp.PEER_OWNER, True, True), 24000)
+        call = _Call(host)
+        call.session, call.input_rate = Session(), 24000
+        call.connected.set()
+        delivered, expected, reached, states = [], [], [], []
+        send_state = host.hub.send_state
+        host.hub.send_state = lambda state, *args, **kwargs: states.append(state) or send_state(state, *args, **kwargs)
+
+        def enqueue():
+            index = len(expected) + 1
+            pcm = index.to_bytes(2, 'little') * 480
+            expected.append(pcm)
+            assert host.hub.receive_audio('owner', cp.AudioFrame(cp.FRAME_AUDIO_IN, 0, index, 24000, 0, pcm))
+
+        async def send(command):
+            if isinstance(command, Audio):
+                delivered.append(command.pcm)
+                if len(delivered) == 3:
+                    if maintenance == 'offer':
+                        call.pending_offers.append({'role': 'user', 'content': 'Fresh room fact'})
+                    elif maintenance == 'revisit':
+                        call.attention.revisit_at = 0
+                    elif maintenance in ('renewal', 'native_quiet'):
+                        host.due = True
+                        call.session.renewal_ready = maintenance != 'native_quiet'
+                    elif maintenance == 'preparation_failure':
+                        call.preparing = asyncio.get_running_loop().create_future()
+                        call.preparing.set_exception(RealtimeSetupError('credentials', 'Synthetic preparation refusal'))
+                    elif maintenance == 'tool_refit':
+                        # A withheld result asks for its fit; its open native call never lets the session go quiet.
+                        call.session.renewal_ready, call.renewing = False, True
+                        call.tool_refit.set()
+                if maintenance == 'native_quiet' and len(delivered) == 12:
+                    assert not reached
+                    call.session.renewal_ready = True
+                if len(delivered) >= 80:
+                    host.hub.close('finite negative control')
+                else:
+                    enqueue()  # Keep three frames buffered, so the real mixer never runs out.
+                await asyncio.sleep(.001)  # A nonempty drain may outlive its maintenance cadence.
+            elif isinstance(command, ContextUpdate):
+                reached.append('offer')
+                host.hub.close('offer observed')
+
+        async def apply_context_view():
+            reached.append('context_view')
+            host.hub.close('context view observed')
+            return False
+
+        host.context_view_pending = lambda: maintenance == 'context_view' and len(delivered) >= 3
+        host.apply_context_view = apply_context_view
+        call.session.send = send
+        for _ in range(3):
+            enqueue()
+        try:
+            if maintenance == 'preparation_failure':
+                with pytest.raises(RealtimeSetupError, match='Synthetic preparation refusal'):
+                    await asyncio.wait_for(call.peers(), 2)
+                reached.append('preparation_failure')
+            else:
+                await asyncio.wait_for(call.peers(), 2)
+                if maintenance in ('renewal', 'native_quiet'):
+                    assert call.renewing
+                    reached.append('renewal')
+                elif maintenance == 'tool_refit' and not host.hub.closed:
+                    reached.append('tool_refit')
+            assert reached and 3 <= len(delivered) < 80, (maintenance, len(delivered), reached)
+            # An ordinary renewal announces itself to the page; a result's fit is rechecked by consume first.
+            assert (cp.STATE_RECONNECTING in states) is (maintenance in ('renewal', 'native_quiet')), states
+            assert delivered == expected[:len(delivered)]
+            if maintenance == 'revisit':
+                assert call.attention.revisit_at is None
+            if maintenance == 'native_quiet':
+                assert len(delivered) >= 12
+        finally:
+            host.hub.close('finished')
+            if call.preparing is not None and call.preparing.done():
+                call.preparing.exception()
+    asyncio.run(scenario())
+
+
+def test_short_audio_burst_is_drained_within_one_maintenance_slice(monkeypatch):
+    from types import SimpleNamespace
+    from ouroboros.contracts.live_conversation import Audio
+    from skills.live_conversation import driver
+    from skills.live_conversation.driver import _Call
+    # Driver-local time, not asyncio's clock: scheduler delays do not end this slice.
+    monkeypatch.setattr(driver, 'time', SimpleNamespace(monotonic=lambda: 100.0))
     async def scenario():
         host = Host()
         call = _Call(host)

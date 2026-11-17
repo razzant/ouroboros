@@ -83,25 +83,36 @@ review-only, coupling `implicit_contracts`.
 ### Invariant: Projection over replay (hot readers of growing stores)
 
 Apply ARCHITECTURE §10 invariant 10 to current-state readers. A new fact belongs in its
-transition's transaction; legacy derivation is a named durable job under sequence/source CAS, a
-process-local flag never proves an installation migration, and passive control readers fall
-back only for underived rows. The census snapshots controls/phases in one short transaction per
+transition's transaction. The census snapshots controls/phases in one short transaction per
 addressed store, outside queue locks, released before display consumers; unavailable stays
 unknown for that request (`tests/test_hot_facts*.py` fix Stop/custody results while settled
-history grows 20→2,000 rows). Main batches question display views and warms lineage by
+history grows). Main batches question display views and warms lineage by
 generation, keeping strict per-member gaps if a batch fails (`tests/test_main_decisions_reads.py`);
 `tests/test_cost_contract.py` fixes every boundary and recurring pass as history grows,
 `tests/test_cost_live_set.py` as the live set grows, one axis at a time (flat, at rest).
 
-- **Measure growth:** history, object count, nesting, cold caches and contention, using
-  existing spans and real-reader spies when responsiveness suffers. Telemetry adds no
+- **One stored format:** only imports and history readers decode an old shape; working code knows
+  the current one. An import runs at the startup door, before dependent work, keeping the original
+  bytes; done is a durable fact a restored snapshot or an older body's write reopens, never a
+  process flag. Older imports keep their recorded contracts. History-sized work is a named durable
+  maintenance-child job under sequence/source CAS; passive control readers fall back only for its
+  underived rows. A display read never imports: unknown while owed. Unrewritable input adapts at
+  one ingress seam. An import leaves by owner acceptance naming the lost upgrade, never by age;
+  double readers convert when changed, proven both ways on old-install data.
+- **Store transactions** lease the shared core's per-thread connection, capture rows
+  (`store_capture.py`) and end before decoding or external work; fork only outside them;
+  lifecycle code quiesces users and calls `store.prepare_handoff` before renaming a database
+  or handing it to an older runtime, name-tier callers holding their name lock
+  (`tests/test_store_connections.py`, `tests/test_store.py`; the WAL gate both ways, FULL
+  unchanged: `tests/test_store_journal.py`).
+- **Measure growth:** history, object count, nesting, cold caches and contention, by
+  receipts (`work`, L7) and real-reader spies. Telemetry adds no
   steady-state writes/history reads. Remove repetition or reuse a validated view before
   adding a projection/cache. Unknown is never empty; no universal time limit, benchmark or approval gate.
 - **Passive GET:** rendering/stored display adds no steady-state writes. Already-performed
   external discovery may store typed provider facts through their existing evidence owner;
   this permits no new network or control-state writes. `usage_store.py::read` may initialize
-  an empty store without pending import; otherwise display reports unavailable data and
-  leaves import to startup (`tests/test_usage_store.py`).
+  an empty store without pending import (`tests/test_usage_store.py`).
 - **Reuse precedents:** a writer seam whose transaction also writes the facts readers
   address (`dialogue_store.py::append`) or reduces current rows (`delegate_custody_current.py`);
   bounded filtered tail (`jsonl_tail.py`); transactional summaries (`usage_store.py`, `store.py`);
@@ -113,8 +124,8 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
 
 CHECKLISTS item 9 `perf_lifecycle` covers changed readers, startup/shutdown, batches, endpoints, pollers, subscriptions and timers. Runtime `storage` supplies the last count; `query_data(kind="storage")` its detail. The mind judges growth (P5). New growing stores name their `storage.PLACES` entry and PERSISTENCE retirer.
 
-`tests/test_store_boot.py` fixes `prepare_startup_state` at 50/500 frozen results and 20/200
-child stores (a clean boot is one read transaction, no history access or writes);
+`tests/test_store_boot.py` fixes `prepare_startup_state` (a clean boot is one read
+transaction, no history access or writes);
 `tests/test_store_legacy_reconcile.py` covers both detector outcomes, cursor resume and the
 foreground CLI; the import/switch suites keep downgrade semantics.
 
@@ -166,7 +177,7 @@ ARCHITECTURE §10 "Continuity data-flow map" owns sources, projections and reten
 
 | Store / surface | Complete source → interactive projection | Growth and retention proof |
 |---|---|---|
-| Chat and biography | `state/dialog.sqlite` (`dialogue_store.py`; the frozen archive imported once) and `memory/chronicle/records.jsonl` → the memory view (`memory_view.py`) and `chat_history` | Reads cost the page, never another room's history; import coverage is disclosed; pages and parts compress the horizon, never delete it; size appears in the storage count |
+| Chat and biography | `state/dialog.sqlite` (`dialogue_store.py`; the frozen archive imported once) and `memory/chronicle/records.jsonl` → the memory view (`memory_view.py`) and `chat_history` | Reads and host work cost the page, never another room's history (tail: a named debt); import coverage is disclosed; pages and parts compress the horizon, never delete it |
 | Plan/review evidence | ARCHITECTURE §10.1, "Plan/review authority" | Source and retention rules live in that row |
 | Skill-review root tasks | The review ledger's hot index (`state/review_ledger/index.jsonl`; a `surface="skill"` row names its skill) → `skill_readiness._skill_names_from_review_history`, bounded; a legacy `review_history.jsonl` is only read | Append-only; archived segments are disclosed as truncation; size under App state |
 | Task/project execution | ARCHITECTURE §10.1, "Execution evidence" | Promotion and retention rules live in that row |
@@ -204,8 +215,8 @@ an unresolved destination shows unavailable, keeping the view; Main notices open
 Main); a later click supersedes an unfinished lookup; hydration stays silent.
 
 Classification and gating are pure over a frame and stored preferences, testable
-without DOM or socket. Preferences stay client-local, outside `s-`, settings-dirty
-tracking and `/api/settings`. Delivery degrades rather than disappearing and never
+without DOM or socket. Preferences stay client-local, outside the settings writer
+and `/api/settings`. Delivery degrades rather than disappearing and never
 requests OS permission. Importance adds no host field, text heuristic or model call
 (mechanism: `web/modules/notifications.js` header). Enforcement:
 `web/tests/notifications.test.js`.
@@ -218,14 +229,13 @@ owns a `destroy()` that releases everything it acquired: WS subscriptions
 `MutationObserver`, `IntersectionObserver`), timers, `requestAnimationFrame` loops and
 `EventSource`/streaming connections.
 
-An instance that can be closed, hidden or replaced (canonically, project chat
-panels) is destroyable without leaving an acquisition behind. It may survive
-being hidden only under an explicit, owner-visible retention reason (a project chat
-with pending work, a widget card set to Keep running); even then it owns its disposer,
-and Stop, unload, reload and shutdown stay force-destroy boundaries. "Hide the DOM
-node, keep the handlers" is the leak this invariant forbids; late async continuations
-check a `destroyed` flag before touching state or re-arming loops. A module widget's
-disposer is the ordered dispose with acknowledgement (`WIDGET_DISPOSE_ACK_TIMEOUT_MS`;
+Closed, hidden or replaced instances release acquisitions unless retained for a visible
+purpose: immediate room return with reading, forms and unsent work, or a Keep running
+widget. Retained rooms suspend polling/rendering, keep send custody and still own
+their disposer; Stop, unload, reload and shutdown remain force-destroy boundaries.
+Late async results defer hidden painting and check `destroyed` before touching state
+or re-arming loops. Merely hiding a node while all its handlers keep working is a leak.
+A module widget uses ordered dispose with acknowledgement (`WIDGET_DISPOSE_ACK_TIMEOUT_MS`;
 ARCHITECTURE §3 "Skills and Widgets").
 
 Enforcement: the deterministic leak test runs in the release-tier `ui_browser` lane;

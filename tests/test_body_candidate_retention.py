@@ -1,10 +1,13 @@
-"""Quiescent candidate scratch is classified once, with addressed deletion rechecks."""
+"""Quiescent candidate scratch is classified once, with addressed deletion rechecks; one pass's verdicts read the
+kept-output debts once, and each removal reads them fresh."""
+import json
 from pathlib import Path
 
 import pytest
 
 from ouroboros import body_candidate as body, subagent_worktrees as wt, test_environment as environment
 from ouroboros.task_results import write_task_result
+from ouroboros.tools import kept_service_outputs as kept
 from tests._shared import retire_synthetic_retention
 from tests.body_candidate_support import isolate, make_ctx, make_serving
 
@@ -197,3 +200,113 @@ def test_ownership_change_during_classification_cannot_publish_or_delete(candida
     current = body.find("new-owner", data)
     assert current and "scratch_retention" not in current
     assert root.exists() and ctx.repo_dir.exists()
+
+
+def finished_candidates(tmp_path, monkeypatch, count):
+    serving, data = make_serving(tmp_path), isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    contexts = [make_ctx(serving, data, f"owner-{number}") for number in range(count)]
+    for ctx in contexts:
+        body.prepare(ctx)
+        write_task_result(data, ctx.task_id, "completed")
+    return data, contexts
+
+
+def owe(data, task, cwd, **fields):
+    launch = "launch-" + task.encode("utf-8").hex().ljust(32, "0")[:32]
+    path = kept.declaration_path(data, task, launch)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema": 1, "launch_id": launch, "task_id": task, "cwd": str(cwd),
+                                "outputs": ["report.txt"], **fields}), encoding="utf-8")
+    return path
+
+
+def count_debt_reads(monkeypatch):
+    calls, real = [], kept.owed_declarations
+    monkeypatch.setattr(kept, "owed_declarations", lambda root: calls.append(root) or real(root))
+    return calls
+
+
+def test_the_owner_checks_decode_only_rows_their_columns_cannot_answer(tmp_path, monkeypatch):
+    """Whether a copy's owner ended and whether a recorded process belongs to its lineage are asked for each expired
+    copy on every custody pass: a stable final row answers from its columns and an owner's stated root from one
+    statement, so only a row that states none is decoded (#3399: 7 decodes, 2.5 MB per copy on a live stand)."""
+    from types import SimpleNamespace
+    from ouroboros import launch_custody, store, task_store
+
+    write_task_result(tmp_path, "cand", "completed", root_task_id="cand")
+    write_task_result(tmp_path, "kid", "running", root_task_id="cand", parent_task_id="cand")
+    write_task_result(tmp_path, "other", "running", root_task_id="other")
+    write_task_result(tmp_path, "unrooted", "running")  # its body states no root: read whole, as before
+    # Redirected to kid by a retry: its own stated root is not its effective one, so it is read whole.
+    write_task_result(tmp_path, "moved", "failed", root_task_id="other", superseded_by="kid")
+    (tmp_path / "ws").mkdir()
+    write_task_result(tmp_path, "ws", "completed", root_task_id="ws", workspace_root=str(tmp_path / "ws"),
+                      artifact_status="pending")  # still finalizing its workspace: not a stable final
+    records = [{"owner_task": owner, "host_pid": pid, "unconfirmed_since": "2026-11-15T00:00:00Z", "record_id": owner}
+               for owner, pid in (("kid", 4242), ("other", 4343), ("unrooted", 4444), ("moved", 4545))]
+    monkeypatch.setattr(launch_custody, "read_custody", lambda *_a, **_k: SimpleNamespace(
+        records=records, rows=[], blind=False, readable=True))
+    decoded, materialize = [], store.materialize
+    monkeypatch.setattr(store, "materialize", lambda tid, *rest: decoded.append(tid) or materialize(tid, *rest))
+    asked, capture = [], task_store.capture
+    monkeypatch.setattr(task_store, "capture", lambda conn, sql, *rest: asked.append(sql) or capture(conn, sql, *rest))
+    # An owner with no record answers by its absent row: a custody pass at rest asks no body (tests/test_cost_live_set.py).
+    assert body._recorded_terminal("gone", tmp_path) is False and not [sql for sql in asked if "task_bodies" in sql]
+    assert body._recorded_terminal("cand", tmp_path) is True and decoded == [], "a stable final answers unread"
+    assert body._recorded_terminal("kid", tmp_path) is False and decoded == ["kid"], "a running row is read"
+    assert body._recorded_terminal("ws", tmp_path) is False and decoded[-1] == "ws", "so is a finalizing one"
+    decoded.clear()
+    assert body.live_lineage_processes(tmp_path, "cand") == [4242, 4545], "only the lineage's processes hold it"
+    assert sorted(decoded) == ["cand", "kid", "moved", "unrooted"], "its own row, the unrooted and redirected owners"
+
+
+def test_a_pass_of_held_candidates_reads_the_kept_debts_once(tmp_path, monkeypatch):
+    """Every verdict shares the first one's read: three candidates held by their debts, however many passes repeat them."""
+    data, contexts = finished_candidates(tmp_path, monkeypatch, 3)
+    for ctx in contexts:
+        owe(data, ctx.task_id, body.find(ctx.task_id, data)["path"])
+    calls, reasons = count_debt_reads(monkeypatch), {}
+    assert wt.prune_orphans(retention_days=0, reasons=reasons) == {"removed": 0, "kept": 3}
+    assert sorted(reasons.values()) == ["kept_service_capture_owed"] * 3 and len(calls) == 1, (reasons, calls)
+
+
+def test_each_removal_still_reads_the_debts_fresh(tmp_path, monkeypatch):
+    """One read for the verdicts, then one per removal at its effect: the removal never trusts the pass's read."""
+    data, _contexts = finished_candidates(tmp_path, monkeypatch, 3)
+    owe(data, "elsewhere", tmp_path / "unrelated")
+    calls = count_debt_reads(monkeypatch)
+    assert wt.prune_orphans(retention_days=0) == {"removed": 3, "kept": 0}
+    assert len(calls) == 1 + 3, calls
+
+
+def test_a_debt_declared_after_the_verdicts_keeps_its_candidate(tmp_path, monkeypatch):
+    """A kept service declaring outputs in a candidate once the pass has judged it: the effect's fresh read holds it."""
+    data, contexts = finished_candidates(tmp_path, monkeypatch, 2)
+    rows = {ctx.task_id: body.find(ctx.task_id, data) for ctx in contexts}
+    judged, real = [], body.retention_verdict
+
+    def judge(row, **kwargs):
+        verdict = real(row, **kwargs)
+        judged.append(row)
+        if len(judged) == len(contexts):  # every verdict is in, none has been acted on
+            owe(data, "late-producer", rows["owner-0"]["path"])
+        return verdict
+
+    monkeypatch.setattr(body, "retention_verdict", judge)
+    reasons = {}
+    assert wt.prune_orphans(retention_days=0, reasons=reasons) == {"removed": 1, "kept": 1}
+    assert reasons == {rows["owner-0"]["path"]: "changed"} and Path(rows["owner-0"]["path"]).is_dir(), reasons
+    assert not Path(rows["owner-1"]["path"]).exists()
+
+
+def test_a_damaged_debt_stops_only_a_pass_whose_verdict_reaches_it(tmp_path, monkeypatch):
+    """Read when first needed, as before the shared read: a candidate inside retention never asks, an expired one stops
+    the pass at its own boundary with nothing deleted."""
+    data, contexts = finished_candidates(tmp_path, monkeypatch, 1)
+    owe(data, "damaged", tmp_path / "unrelated", outputs="not a list")
+    path = body.find(contexts[0].task_id, data)["path"]
+    assert wt.prune_orphans(retention_days=30)["removed"] == 0
+    with pytest.raises(kept.KeptDeclarationUnreadable):
+        wt.prune_orphans(retention_days=0)
+    assert Path(path).is_dir() and body.find(contexts[0].task_id, data) is not None

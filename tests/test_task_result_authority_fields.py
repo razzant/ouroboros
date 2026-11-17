@@ -141,7 +141,7 @@ def test_field_pointer_never_qualifies_as_full_authority_even_with_old_flag(tmp_
 
 
 @pytest.mark.parametrize("arguments", [
-    {"authority_fields": "task_contract"}, {"authority_fields": ["not a field"]},
+    {"authority_fields": "task_contract"},
     {"source_only": True}, {"authority_projection_sha256": "f" * 64},
     {"authority_fields": [], "authority_projection_sha256": "bad"},
     {"authority_fields": [], "include_completion_source": True},
@@ -152,6 +152,30 @@ def test_invalid_or_ambiguous_selections_are_typed_argument_errors(tmp_path, arg
     _write(ctx)
     result, _ = _read(ctx, **arguments)
     assert result.status == "error" and result.code == "TOOL_ARG_ERROR", result.text
+
+
+def test_a_name_the_record_does_not_carry_is_answered_not_refused(tmp_path):
+    """The field set is each record's own, so a name it lacks is a fact about the record, not a
+    malformed call: the answer serves the names it has, lists the rest as absent and still indexes
+    every field the record carries. A call naming only real fields is unchanged."""
+    ctx = _ctx(tmp_path)
+    _write(ctx, task_contract={"objective": "exact"})
+    authority = _canonical(ctx)
+    result, view = _read(ctx, authority_fields=["task_contract", "contract", "governing_owner_words"])
+    assert result.status == "ok" and view["absent_fields"] == ["contract", "governing_owner_words"]
+    assert "no field with these names" in view["absent_fields_note"]
+    assert view["selected_fields"] == ["task_contract"]
+    assert view["authority"] == {"task_contract": authority["task_contract"]}
+    assert view["source"]["arguments"]["authority_fields"] == ["task_contract"]  # the reread recipe names real fields
+    assert {row["field"] for row in view["omitted_fields"]} == set(authority) - {"task_contract"}
+
+    missed, miss = _read(ctx, authority_fields=["not a field"])
+    assert missed.status == "ok" and miss["absent_fields"] == ["not a field"]
+    assert miss["authority"] == {} and miss["selected_fields"] == []
+    assert {row["field"] for row in miss["omitted_fields"]} == set(authority)  # the index it needs to repair the name
+
+    _, clean = _read(ctx, authority_fields=["task_contract"])
+    assert "absent_fields" not in clean and "absent_fields_note" not in clean
 
 
 def test_existing_presence_and_restricted_source_ceilings_still_run_first(tmp_path):

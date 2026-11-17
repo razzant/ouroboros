@@ -281,6 +281,33 @@ def test_a_server_before_its_pool_arms_refuses_the_turn_typed_and_touches_no_sav
         assert not path.exists()
 
 
+def test_an_owner_turns_intake_follows_its_own_loop_and_never_another_writers(tmp_path):
+    """An owner turn's fact (``owner:<chat>``, its carrier's) moves with its loop's admission whatever the loop's
+    metadata says; a fact another attempt or another process wrote stays as its writer left it."""
+    import json
+
+    from ouroboros.conversation_lease import (
+        _intake_path,
+        author_intake_accepting,
+        follow_loop_admission,
+        open_author_intake,
+    )
+
+    (tmp_path / "memory" / "owner_mailbox").mkdir(parents=True)
+    loop = SimpleNamespace(task_id="main-turn", drive_root=tmp_path, task_metadata={}, task_attempt=None)
+    assert open_author_intake(tmp_path, "main-turn", "owner:1", attempt=1)
+    follow_loop_admission(loop, False)  # the final drain is about to read
+    assert author_intake_accepting(tmp_path, "main-turn", "owner:1", attempt=1) is False
+    follow_loop_admission(loop, True)  # a follow-up reopened its loop
+    assert author_intake_accepting(tmp_path, "main-turn", "owner:1", attempt=1) is True
+    follow_loop_admission(SimpleNamespace(**{**vars(loop), "task_attempt": 2}), False)  # not this attempt's loop
+    assert author_intake_accepting(tmp_path, "main-turn", "owner:1", attempt=1) is True
+    path = _intake_path(tmp_path, "main-turn")
+    path.write_text(json.dumps({**json.loads(path.read_text()), "pid": 1}))
+    follow_loop_admission(loop, False)  # another process's fact is its own
+    assert json.loads(path.read_text())["accepting"] is True
+
+
 def test_a_dead_carriers_intake_accepts_nothing_and_the_rows_end_closes_it(tmp_path):
     """A carrier that died before its release leaves ``accepting: true`` behind: the fact is its writer's, so a
     dead writer accepts nothing (an arrival would be swallowed), and the row's end in the server closes it."""
@@ -391,7 +418,7 @@ def test_the_carrier_takes_the_hosts_admitted_signal_facts_by_value():
     assert readmitted.facts == ("mention", "signal.words")
     with pytest.raises(PresenceTurnError) as refused:
         presence_turn_event(seed[PRESENCE_RUN_KEY]["event"], _admission())
-    assert refused.value.code == "presence_event_invalid"
+    assert refused.value.code == "presence_payload_invalid"
 
 
 def test_a_version_2_event_finding_the_gate_busy_is_refused_before_any_lane_admission(lane, monkeypatch):

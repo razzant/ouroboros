@@ -225,7 +225,7 @@ class _FakeCtx:
 def ws(tmp_path, monkeypatch):
     repo = tmp_path / "ws"
     repo.mkdir()
-    (repo / "s.py").write_text(SAMPLE, encoding="utf-8")
+    (repo / "s.py").write_bytes(SAMPLE.encode("utf-8"))  # LF bytes: Windows text mode would write CRLF
     ctx = _FakeCtx(repo)
     # Route guard helpers around ToolContext specifics: keep the real access
     # logic out of scope — these tests exercise edit mechanics.
@@ -339,6 +339,44 @@ def test_edit_batch_sequential_edits_see_prior_results(ws):
     )
     assert result.startswith("✅")
     assert "def aaa(value):" in (ws.repo_dir / "s.py").read_text()
+
+
+def _typed(ctx, call):
+    """The handler's text and the typed result it published, read through the registry's own sidecar."""
+    from ouroboros.tools.tool_result import (
+        _install_tool_result_sidecar, _published_tool_result, _restore_tool_result_sidecar,
+    )
+
+    sentinel = object()
+    token = _install_tool_result_sidecar(ctx, sentinel)
+    try:
+        text, typed = call(), _published_tool_result(ctx, sentinel)
+    finally:
+        _restore_tool_result_sidecar(token)
+    return text, None if typed is sentinel else typed
+
+
+def test_patch_and_batch_leave_a_file_already_holding_their_bytes_untouched(ws):
+    """Owner, 8 Nov 2026: a target already holding exactly the bytes an edit would leave is not rewritten. A call that
+    changed nothing is the typed ``completed_no_effect`` (no effect reader counts it as production); a call that
+    changed other files names it in ``unchanged_paths``, which the result review leaves out of what was produced."""
+    target, other = ws.repo_dir / "s.py", ws.repo_dir / "t.py"
+    other.write_bytes(b"T = 1\n")
+    stamp = target.stat().st_mtime_ns
+    same_patch = "*** Update File: s.py\n-def ddd(x):\n+def ddd(x):\n"
+    same_edit = {"path": "s.py", "old_str": "def ddd(x):", "new_str": "def ddd(x):", "count": 1}
+    for call in (lambda: edit_ops._apply_patch(ws, same_patch), lambda: edit_ops._edit_batch(ws, [same_edit])):
+        text, typed = _typed(ws, call)
+        assert text.startswith("✅ Unchanged: active_workspace:s.py already held exactly this content"), text
+        assert typed.code == "OK" and typed.meta["operation_outcome"] == "completed_no_effect"
+        assert target.stat().st_mtime_ns == stamp, "nothing was written"
+    mixed = (lambda: edit_ops._apply_patch(ws, same_patch + "*** Update File: t.py\n-T = 1\n+T = 2\n"),
+             lambda: edit_ops._edit_batch(ws, [same_edit, {"path": "t.py", "old_str": "T = 2", "new_str": "T = 3"}]))
+    for expected, call in zip(("T = 2\n", "T = 3\n"), mixed):
+        text, typed = _typed(ws, call)
+        assert other.read_text() == expected and target.stat().st_mtime_ns == stamp, text
+        assert typed.meta["unchanged_paths"] == ["s.py"] and "operation_outcome" not in typed.meta
+        assert "Unchanged, not rewritten (already held exactly this content): s.py" in text
 
 
 def test_registry_registration():

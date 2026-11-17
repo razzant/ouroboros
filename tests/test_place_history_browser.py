@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from tests._skills_page_harness import URL, _document, fixture, open_skills, skills_browser as skills_browser
+from tests._skills_page_harness import URL, _document, fixture, open_place_sheet, open_skills, skills_browser as skills_browser
 from tests.place_history_scenario import scenario
 
 pytestmark = [pytest.mark.ui_browser]
@@ -61,8 +61,11 @@ def test_skills_place_reader_drafts_facts_and_teardown(skills_browser, tmp_path,
         card = page.locator('.skills-card[data-skill="bridge"]')
         card.locator('.skills-card-name').click()
         details = page.locator('.skills-detail-sheet')
-        details.locator('[data-place-open]').first.wait_for()
-        assert details.locator('[data-place-open]').count() == 2
+        pointer = details.locator('[data-circles-open]')
+        pointer.wait_for()
+        # The connector's places live in Circles: its sheet counts them and points there, with no list of its own.
+        assert ' '.join(pointer.locator('xpath=..').inner_text().split()) == '2 places · Circles ›'
+        assert details.locator('[data-place-open]').count() == 0
         assert details.locator('[data-sheet-action="open_place"]').count() == 0
         observations['connector_sections'] = details.locator('.skills-sheet-section').evaluate_all('''nodes => nodes.map(el => {
             const box=el.getBoundingClientRect(); return {heading:el.querySelector('h3')?.textContent,x:box.x,width:box.width};
@@ -71,13 +74,17 @@ def test_skills_place_reader_drafts_facts_and_teardown(skills_browser, tmp_path,
         assert all(abs(section['x'] - sections[0]['x']) <= 1 for section in sections), sections
         assert all(abs(section['width'] - sections[0]['width']) <= 1 for section in sections), sections
         capture('connector', '.skills-detail-sheet')
-        details.locator(f'[data-place-open="{place.place_id}"]').click()
+        page.evaluate("window.circlesAsked = []; window.addEventListener('ouro:open-circles', event => window.circlesAsked.push(event.detail))")
+        pointer.click()
+        page.wait_for_function("document.querySelectorAll('.skills-detail-sheet').length === 0")
+        assert page.evaluate('window.circlesAsked') == [{}], 'the pointer asks for Circles and leaves the connector sheet'
+        open_place_sheet(page, place.place_id)
         sheet = page.locator('.place-sheet')
         room = sheet.locator('[data-place-room]').first
         room.wait_for()
         assert page.locator('dialog[open]').count() == 1
-        # The readiness line (the connector's status) precedes the state when the connector reports one.
-        assert sheet.locator('[data-place-section]').evaluate_all("nodes => nodes.map(n=>n.dataset.placeSection).slice(0,4)") == ['readiness', 'state', 'conversations', 'wakes']
+        # Its context and conversations come first; the readiness line (the connector's status) precedes the state.
+        assert sheet.locator('[data-place-section]').evaluate_all("nodes => nodes.map(n=>n.dataset.placeSection).slice(0,4)") == ['circle', 'conversations', 'readiness', 'state']
         capture('settings', '.place-sheet')
         note = sheet.locator('[data-place-draft="note"]')
         sheet.locator('[data-place-act="add-note"]').click()  # local validation, no write
@@ -150,8 +157,7 @@ def test_skills_place_reader_drafts_facts_and_teardown(skills_browser, tmp_path,
         assert page.locator('dialog.document-reader').count() == 0, page.evaluate("({dialogs:[...document.querySelectorAll('dialog')].map(el=>({open:el.open,html:el.outerHTML.slice(0,400)})),active:document.activeElement.outerHTML.slice(0,500)})")
         # Native close and Escape both dispose pending reads; late answers cannot remount content.
         for how in ('close', 'escape', 'button'):
-            card.locator('.skills-card-name').click()
-            page.locator(f'[data-place-open="{place.place_id}"]').click()
+            open_place_sheet(page, place.place_id)
             page.locator('[data-place-room]').first.wait_for()
             skills.hold.add('/api/chat/history')
             page.locator('[data-place-room]').first.click()
@@ -275,8 +281,7 @@ def test_place_reader_reads_again_when_an_import_changes_its_room(skills_browser
         page.add_style_tag(url='/static/settings.css')
         page.add_style_tag(url='/static/consciousness.css')
         page.evaluate("({theme,width}) => { document.documentElement.classList.add('ouro-ui'); document.documentElement.dataset.theme=theme; document.documentElement.dataset.layout=width < 720 ? 'stack' : 'docked'; }", {'theme': theme, 'width': width})
-        page.locator('.skills-card[data-skill="bridge"] .skills-card-name').click()
-        page.locator(f'.skills-detail-sheet [data-place-open="{place.place_id}"]').click()
+        open_place_sheet(page, place.place_id)
         room = sheet.locator('[data-place-room]').first
         room.wait_for()
         sheet.locator('[data-place-act="add-note"]').click()
@@ -400,8 +405,7 @@ def test_place_reader_shows_reactions_as_labelled_facts(skills_browser, tmp_path
         page.add_style_tag(url='/static/consciousness.css')
         page.evaluate("({theme,width}) => { document.documentElement.classList.add('ouro-ui'); document.documentElement.dataset.theme=theme; "
                       "document.documentElement.dataset.layout=width < 720 ? 'stacked' : 'wide'; }", {'theme': theme, 'width': width})
-        page.locator('.skills-card[data-skill="bridge"] .skills-card-name').click()
-        page.locator(f'.skills-detail-sheet [data-place-open="{place.place_id}"]').click()
+        open_place_sheet(page, place.place_id)
         sheet = page.locator('.place-sheet')
         sheet.locator('[data-place-room]').first.click()
         reactions = sheet.locator('.place-convo-row:has(.place-convo-reaction)')

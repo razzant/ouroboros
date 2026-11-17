@@ -62,7 +62,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # enable_tools detour to route — though initial_tool_schemas exposes the full
     # set today, this makes the coupling explicit).
     "list_projects", "start_task", "tell_task",
-    "move_to_project", "close_project",
+    "move_to_project", "close_project", "manage_project_folder",
     *COGNITIVE_MEMORY_TOOL_NAMES,
     "chronicle_write",
     "recent_tasks", "live_roots", "update_focus",
@@ -91,8 +91,8 @@ MCP_GATEWAY_TOOL_NAME: str = "call_mcp_tool"
 
 # An actor's own working form: which model thinks (switch_model) and how its own
 # transcript is folded under its own note, exact sources kept (compact_context).
-# Both change cognitive power or the view of what the actor already holds, never
-# authority over anything else, so every restricted actor profile below carries
+# For these actors both change only their own cognitive power or held view; the
+# switch_model handler refuses room/Main writes, so every restricted actor profile below carries
 # them in every context mode: a child that finds the work harder raises itself
 # instead of failing, and one whose window fills folds instead of dying of
 # overflow (BIBLE P1, P5).
@@ -143,22 +143,10 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "delegate_message",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
     # Bounded media projection: writes derived frames only under artifact_store/video_frames.
-    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames",
+    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames", "read_archive",
     # This child's own callable catalog (the name-miss answer points here) and the loader
     # of a permitted schema a route's ceiling or Nano left out; neither grants a tool.
     "list_available_tools", "enable_tools", "list_image_models",
-})
-
-# A host-minted silence diagnostic (#1376, ``ouroboros/work_diagnostics.py``) reads
-# the observed work and may request the existing lifecycle controls on that one
-# source. It writes no product, delegates nothing and discovers no extension/MCP
-# tool; inherited ceilings still intersect this set at schema and dispatch.
-TASK_DIAGNOSTIC_TOOL_NAMES: frozenset[str] = frozenset({
-    "read_file", "list_files", "search_code", "query_code", "query_data", "vcs_read",
-    "inspect_harness", "chat_history", "recent_tasks", "get_task_result", "peek_task",
-    "tree_read", "knowledge_read", "knowledge_list", "journal_read", "workpad_read", "memory_read", "wait_task", "wait_tasks",
-    "await_messages", "forward_to_worker", "pause_task", "resume_task", "continue_task",
-    "finish_task", "list_available_tools", *OWN_FORM_TOOL_NAMES,
 })
 
 ACTING_SUBAGENT_MODE: str = "acting_subagent"
@@ -207,7 +195,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "delegate_message",
     "integrate_delegated_patch",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
-    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames",
+    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames", "read_archive",
     "list_available_tools", "enable_tools", "list_image_models", "generate_image", "recover_image",
 })
 
@@ -232,7 +220,7 @@ def acting_tool_names_for_context(ctx: object, registered_names: Iterable[str]) 
 READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "inspect_harness",
     "inspect_subagent",
-    "read_file", "list_files",
+    "read_file", "list_files", "read_archive",
     "search_code", "query_code", "query_data", "recent_tasks",
     "web_search", "chat_history",
     "vcs_read", "service_status", "service_logs",
@@ -241,9 +229,10 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
 
 # The known pure reads: a failed one stays in a card's details instead of warning that no review checked the result
 # (owner 06.11, A; _outcome_tool_errors.warns_without_review). Every parallel-safe read, plus reads that cannot run in
-# parallel. A tool not named here (an effect, a command, MCP, an extension) stays loud.
+# parallel. A tool not named here stays loud unless its leftover is details-only (a command that ran and failed, a call
+# refused before running: _outcome_tool_errors).
 PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
-    "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript",
+    "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript", "workpad_read",
 })
 
 # Enqueue-only tools safe to emit in parallel within one tool-call round.
@@ -254,7 +243,7 @@ PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
 # serially, so cap/dedup/enqueue remain single-threaded and safe.
 PARALLEL_SAFE_ENQUEUE_TOOLS: frozenset[str] = frozenset({"schedule_subagent"})
 
-# Stateful browser tools need the thread-sticky executor.
+# Browser tools run one at a time on the task's sticky executor.
 STATEFUL_BROWSER_TOOLS: frozenset[str] = frozenset({
     "browse_page", "browser_action",
 })
@@ -362,6 +351,22 @@ def tool_result_limit(tool_name: str) -> int:
     return TOOL_RESULT_LIMITS.get(str(tool_name or ""), DEFAULT_TOOL_RESULT_LIMIT)
 
 
+def result_window(head: str, text: str, start: Any, limit: int, resume: Any, order: str = "") -> str:
+    """One character window of a document a self-paging producer emits within ``limit``: ``head``, then a line naming
+    the window and its continuation (``next_start`` and the call ``resume(next_start)``; ``order`` names the order the
+    document reads in) or completeness, then the window. The continuation line is measured, and a page holds at least
+    one character, so ``next_start`` always advances. Used by memory_read's modes and its version door."""
+    total = len(text)
+    start = min(max(int(start or 0), 0), total)
+    label = f" ({order})" if order else ""
+    widest = f"chars {total}–{total} of {total}; next_start={total}{label}; " + resume(total)
+    room = max(limit - len(head) - len(widest) - 2, 1)
+    end = min(start + room, total)
+    cont = (f"chars {start}–{end} of {total}; next_start={end}{label}; " + resume(end) if end < total
+            else f"chars {start}–{end} of {total}; complete")
+    return head + "\n" + cont + "\n" + text[start:end]
+
+
 # Explicit first-view request a call may carry: how many chars of the head and
 # of the tail to show when the complete result cannot be delivered whole. The
 # complete result is kept as an exact source either way; these only shape the
@@ -378,12 +383,12 @@ RESULT_VIEW_PARAMS: dict[str, dict[str, Any]] = {
                            "description": "Chars of the output's tail to show in this turn (see view_head_chars)."},
 }
 
-# Declared range parameters whose presence means the caller chose the result's
+# Declared range parameters where a non-null value means the caller chose the result's
 # form (a page, a window, a cursor): such a result is a REQUESTED form that may
 # use the free room of the frame, not an unsolicited body sharing the eighth.
 EXPLICIT_RANGE_ARGS: frozenset[str] = frozenset({
     RESULT_VIEW_HEAD_ARG, RESULT_VIEW_TAIL_ARG,
-    "max_chars", "max_lines", "start_char", "start_line",
+    "max_chars", "max_lines", "start_char", "end_char", "start_line",
     "source_start_char", "source_end_char", "offset", "limit", "tail_lines",
     "from", "to", "start", "after_seq",  # chronicle row bounds and continuation pages
 })
@@ -392,6 +397,7 @@ EXPLICIT_RANGE_ARGS: frozenset[str] = frozenset({
 # partial view only; it exempts nothing from source persistence.
 PAGEABLE_TOOL_RESULTS: frozenset[str] = frozenset({
     "read_file", "chat_history", "journal_read", "tree_read", "recent_tasks", "query_code", "query_data",
+    "knowledge_read",
 })
 
 
@@ -407,9 +413,30 @@ def requested_result_view(tool_args: Any) -> Optional[tuple[Optional[int], Optio
     head, tail = tool_args.get(RESULT_VIEW_HEAD_ARG), tool_args.get(RESULT_VIEW_TAIL_ARG)
     if head is not None or tail is not None:
         return (_view_chars(head), _view_chars(tail))
-    if EXPLICIT_RANGE_ARGS & {str(key) for key in tool_args}:
+    if EXPLICIT_RANGE_ARGS & {str(key) for key, value in tool_args.items() if value is not None}:
         return (None, None)
     return None
+
+
+def mcp_gateway_arguments(value: Any) -> Optional[dict]:
+    """The one reading of the ``arguments`` a ``call_mcp_tool`` envelope passes its MCP tool: an object, or ``None``.
+
+    Omitted, ``null``, ``{}``, empty or blank text and the JSON text ``null`` are a call without arguments (``{}``);
+    an object, or JSON text of one, passes as given. Anything else passes no object and is never read as a call
+    without arguments, nor corrected: text that is not JSON, an array, a number, a boolean, or JSON text of one of
+    those or of a further string."""
+    if isinstance(value, str):
+        if not value.strip():
+            return {}
+        import json
+
+        try:
+            value = json.loads(value)
+        except (ValueError, RecursionError):  # nesting past the decoder's depth is no JSON this call can pass
+            return None
+    if value is None:
+        return {}
+    return value if isinstance(value, dict) else None
 
 
 def requested_call_view(name: str, tool_args: Any) -> Optional[tuple[Optional[int], Optional[int]]]:
@@ -418,15 +445,7 @@ def requested_call_view(name: str, tool_args: Any) -> Optional[tuple[Optional[in
     if name == "enable_tools":
         return (None, None)
     if name == MCP_GATEWAY_TOOL_NAME and isinstance(tool_args, dict):
-        inner = tool_args.get("arguments")
-        if isinstance(inner, str):
-            import json
-
-            try:
-                inner = json.loads(inner or "{}")
-            except ValueError:
-                inner = {}
-        tool_args = inner if isinstance(inner, dict) else {}
+        tool_args = mcp_gateway_arguments(tool_args.get("arguments"))
     return requested_result_view(tool_args)
 
 
@@ -493,7 +512,7 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "maintain_harness", "free_storage",
     # starting or steering work (tell_task stays: the nanny of a running campaign)
     "start_task", "schedule_subagent", "schedule_followup", "plan_task",
-    "move_to_project", "close_project", "delegate_start", "initiate_presence",
+    "move_to_project", "close_project", "manage_project_folder", "delegate_start", "initiate_presence",
     "cancel_task", "resume_child_task", "override_delegation_constraint", "request_deep_self_review",
     "set_task_retention",
     # writing files, running processes, integrating patches
@@ -509,8 +528,6 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     # skill payload; an orphan capture may belong to an unrelated earlier task,
     # so a read-only-children rule alone does not cover this path
     "integrate_delegated_patch", "integrate_subagent_patch",
-    # writes a local task artifact; Observe does not grant general file writes
-    "generate_evolution_stats",
     # the world beyond the repository: forms, skills, project notes, the owner's interface wording
     # and the update description shown to the owner
     "browser_action", "submit_skill_to_hub", "toggle_skill", "skill_owner_action",

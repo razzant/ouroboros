@@ -121,7 +121,7 @@ def test_publishing_an_account_freezes_its_sources_and_changes_no_local_fact(tmp
     assert story.replace("\nMy accounts across rooms: 1 written, 0 in the common view (the rest one memory_read away).", "") == story_before
     # Read back through the actual reader: who wrote it, which versions, how to read the originals.
     read = _memory_read(_ctx(tmp_path), node_id=g.record["id"])
-    assert read.startswith(f"[account {g.record['id']}; room 1; mind (root t1); based on 2 sources, ")
+    assert read.startswith(f"[account {g.record['id']}; room 1; mind (root, task t1); based on 2 sources, ")
     assert f"source page {a1} (room {alpha}): revision {a1} used" in read and "changed since" not in read.split("\n")[0]
     assert f"memory_read(node_id={a1}, revision={a1}) reads that version" in read
     assert "shown in the common view only by my selection" in read and G_TEXT in read
@@ -407,11 +407,18 @@ def test_rejecting_a_cited_draft_follows_local_authority_and_the_account_shows_i
     rejected = store.decide(h1, False, shared.MIND, "not what happened in Beta")
     assert rejected.ok and all(r["id"] != h1 for r in store.room_records(beta)) and store.sealed_row_refs(beta) == set()
     assert store.decide(h1, True, shared.MIND, "changed my mind").reason == "invalid"  # one-shot, as before
-    assert store.decide(b1, False, shared.MIND, "mine").reason == "invalid"  # my own page takes no decision
-    src = store.accounts()[0]["sources"][1]
+    # Commit 5: my own page is withdrawn like a draft, its rows reopen; accepting it or deciding again stays refused.
+    assert store.decide(b1, True, shared.MIND, "accept mine").reason == "invalid"  # only an undecided draft is accepted
+    sealed = store.sealed_row_refs("1")
+    assert sealed and store.decide(b1, False, shared.MIND, "mine").ok
+    assert store.sealed_row_refs("1") == set() and all(r["id"] != b1 for r in store.room_records("1"))
+    assert store.decide(b1, False, shared.MIND, "again").reason == "invalid"  # a withdrawn record stays withdrawn
+    own, src = store.accounts()[0]["sources"]
     assert (src["status"], src["status_now"]) == ("draft", "rejected")
+    assert (own["status"], own["status_now"]) == ("final", "rejected")
     story = _story(tmp_path)
     block = _block(story, synthetic["id"])
+    assert f"- my later rejection of its source {b1} (not in this account):\n  mine" in block
     assert f"- my later rejection of its source {h1} (not in this account):\n  not what happened in Beta" in block
     assert f"- source: page {h1} of Project Beta [chat_id={beta}], revision {h1}, a draft then;" in block
     assert "told through this account" not in block  # a rejected draft is no entry of the story
@@ -568,12 +575,12 @@ def test_chronicle_write_publishes_and_selects_an_account_and_a_child_is_refused
     assert chosen["ok"] and chosen["kind"] == "selection" and chosen["replaces"] == 1 and chosen["shown"] is True
     assert "A helper's draft" in _story(tmp_path) and G_TEXT in _story(tmp_path) and "Alpha asked again and I counted." not in _story(tmp_path)
     listing = _memory_read(_ctx(tmp_path))
-    assert re.search(rf"^\[account {written['node_id']}; room 1; mind \(root turn0001\); based on 2 sources, ", listing, re.M)
+    assert re.search(rf"^\[account {written['node_id']}; room 1; mind \(root, task turn0001\); based on 2 sources, ", listing, re.M)
     read = _memory_read(_ctx(tmp_path), node_id=written["node_id"])
-    assert f"selection {chosen['node_id']} by mind (root turn0001) (seq {chosen['sequence']}):\nshown=True; replaces 1: {a1}; through it" in read
+    assert f"selection {chosen['node_id']} by mind (root, task turn0001) (seq {chosen['sequence']}):\nshown=True; replaces 1: {a1}; through it" in read
     withdrawn = _write(tmp_path, kind="selection", target_id=written["node_id"], replaces=[], shown=False, reason="later")
     assert withdrawn["ok"] and withdrawn["shown"] is False and G_TEXT not in _story(tmp_path)
     # The selection record itself reads back with its target and list.
     sel = _memory_read(_ctx(tmp_path), node_id=chosen["node_id"])
-    assert sel.startswith(f"[selection {chosen['node_id']}; room 1; mind (root turn0001); replaces 1; shown in the common view; target {written['node_id']};")
+    assert sel.startswith(f"[selection {chosen['node_id']}; room 1; mind (root, task turn0001); replaces 1; shown in the common view; target {written['node_id']};")
     assert f"account: memory_read(node_id={written['node_id']}); replaces: {a1}; shown=True" in sel

@@ -48,14 +48,19 @@ def test_wizard_navigation_restores_draft_and_back_position(subscription_ui, vie
     assert page.evaluate("window.scrollY") == 0
 
     page.evaluate("window.heldReviewers = document.querySelector('[data-reviewers-note]')")
-    # Test keyboard focus retention explicitly: WebKit's native pointer click
-    # intentionally does not focus a button as Chromium's does.
-    page.locator('[data-review-mode="blocking"]').focus()
-    page.locator('[data-review-mode="blocking"]').press("Enter")
+    # This step's own choice is the Access level: a press changes it in place (the reviewers' note stays the same
+    # node, the pressed state moves, focus stays on the pressed choice). Test keyboard focus retention explicitly:
+    # WebKit's native pointer click intentionally does not focus a button as Chromium's does.
+    was = page.locator('[data-runtime-mode][aria-pressed="true"]').get_attribute("data-runtime-mode")
+    chosen = page.locator('[data-runtime-mode][aria-pressed="false"]').first.get_attribute("data-runtime-mode")
+    assert was and chosen and was != chosen, (was, chosen)
+    page.locator(f'[data-runtime-mode="{chosen}"]').focus()
+    page.locator(f'[data-runtime-mode="{chosen}"]').press("Enter")
     assert page.evaluate("heldReviewers === document.querySelector('[data-reviewers-note]')")
-    assert page.locator('[data-review-mode="blocking"]').get_attribute("aria-pressed") == "true"
-    assert page.locator('[data-review-mode="advisory"]').get_attribute("aria-pressed") == "false"
-    assert page.evaluate("document.activeElement.matches('[data-review-mode=blocking]')")
+    assert page.locator(f'[data-runtime-mode="{chosen}"]').get_attribute("aria-pressed") == "true"
+    assert page.locator(f'[data-runtime-mode="{was}"]').get_attribute("aria-pressed") == "false"
+    assert page.locator('[data-runtime-mode][aria-pressed="true"]').count() == 1
+    assert page.evaluate("mode => document.activeElement.getAttribute('data-runtime-mode') === mode", chosen)
 
     page.click("#back-btn")
     page.wait_for_selector('[data-model-role="main"]')
@@ -102,7 +107,7 @@ def test_wizard_unchanged_preview_preserves_pristine_model_focus(subscription_ui
         window.heldPosition = window.scrollY;
     }""")
     ui["fixture"]["status"]["harnesses"][0]["models"].append({"id": "another-discovered-model"})
-    with page.expect_response("**/api/model-catalog") as catalog:
+    with page.expect_response("**/api/onboarding/model-catalog") as catalog:
         page.evaluate("""async () => {
             const {claudexorStatus} = await import('/onboarding/static/modules/claudexor_status_store.js');
             await claudexorStatus.refresh({includeModels: true});

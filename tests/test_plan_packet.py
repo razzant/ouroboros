@@ -13,41 +13,42 @@ PREVIOUS = {"n": 1, "ts": "2026-10-15T01:00:00+00:00", "goal": "Ship the deck", 
 
 
 def test_stable_prompt_carries_the_delivered_checklist_and_contract_and_no_pack_for_a_non_body_plan():
-    prompt = plan_packet.build_stable_prompt(checklist_section="## Plan Review Checklist\n\nROW ONE", body=False, enforcement="blocking")
+    prompt = plan_packet.build_stable_prompt(checklist_section="## Plan Review Checklist\n\nROW ONE", body=False)
     assert "ROW ONE" in prompt and "## Reply contract" in prompt and '"withdrawn"' in prompt
     assert "weighs an INTENTION" in prompt and "nobody votes" in prompt
     assert "BIBLE" not in prompt and "navigation map" not in prompt and "ARCHITECTURE" not in prompt
-    missing = plan_packet.build_stable_prompt(checklist_section="", body=False, enforcement="advisory")
+    missing = plan_packet.build_stable_prompt(checklist_section="", body=False)
     assert "OMISSION NOTE: Plan Review Checklist section not supplied" in missing
 
 
-def test_the_stable_prompt_scopes_holding_to_plan_revisions_and_tells_a_reading_how_to_answer():
-    """One text for every ask of a task (the cached part): an objection holds only as a reply to a stored
-    revision, and a reading answers in prose; the reading's own words ride after the plan marker."""
-    prompt = plan_packet.build_stable_prompt(checklist_section="x", body=False, enforcement="blocking")
+def test_the_stable_prompt_scopes_standing_objections_to_plan_revisions_and_tells_a_reading_how_to_answer():
+    """One text for every ask of a task (the cached part): an objection stands only as a reply to a stored
+    revision, and a reading answers in prose; the reading's own words ride after the plan marker. No mode line:
+    an objection never holds the author's final answer."""
+    prompt = plan_packet.build_stable_prompt(checklist_section="x", body=False)
     assert "You are one independent participant of the council that weighs an INTENTION before the work starts" in prompt
     assert "Before any plan exists, Ouroboros may ask how you read the request." in prompt
-    assert "an open objection of an owner-marked reviewer to a plan revision holds the author's final answer" in prompt
+    assert "holds the author's final answer" not in prompt and "Review enforcement" not in prompt
     assert ("Only replies to a stored plan revision update standing objections. A reading before any plan neither\n"
             "raises nor withdraws them: put that reading in the JSON object's prose field") in prompt
     assert "No plan yet" not in prompt and plan_packet.PLAN_REPLY_CONTRACT.startswith("Return ONE JSON object")
 
 
 def test_a_body_plan_carries_the_pack_inline_or_as_mandatory_reads_and_refuses_without_it():
-    inline = plan_packet.build_stable_prompt(checklist_section="x", body=True, enforcement="blocking",
+    inline = plan_packet.build_stable_prompt(checklist_section="x", body=True,
                                              bible_text="BIBLE BODY", architecture_text="ARCH BODY", design_nav_map="## DESIGN map")
     assert "## BIBLE.md (constitution" in inline and "BIBLE BODY" in inline and "ARCH BODY" in inline and "## DESIGN map" in inline
     assert "has no repository tools" in inline
-    retrieving = plan_packet.build_stable_prompt(checklist_section="x", body=True, enforcement="blocking",
+    retrieving = plan_packet.build_stable_prompt(checklist_section="x", body=True,
                                                  bible_text="BIBLE BODY", architecture_text="ARCH BODY",
                                                  bible_locator="/repo/BIBLE.md", architecture_locator="/repo/docs/ARCHITECTURE.md",
                                                  governance_by_retrieval=True, design_nav_map="## DESIGN map")
     assert "MANDATORY FULL READS" in retrieving and "/repo/BIBLE.md" in retrieving and "BIBLE BODY" not in retrieving
     assert "Read relevant original DESIGN sections" in retrieving
     with pytest.raises(plan_packet.PlanPacketError):
-        plan_packet.build_stable_prompt(checklist_section="x", body=True, enforcement="blocking", bible_text="", architecture_text="ARCH")
+        plan_packet.build_stable_prompt(checklist_section="x", body=True, bible_text="", architecture_text="ARCH")
     with pytest.raises(plan_packet.PlanPacketError):
-        plan_packet.build_stable_prompt(checklist_section="x", body=True, enforcement="blocking", bible_text="B", architecture_text=None)
+        plan_packet.build_stable_prompt(checklist_section="x", body=True, bible_text="B", architecture_text=None)
 
 
 def _content(**over):
@@ -190,7 +191,7 @@ def test_the_shipped_checklist_speaks_the_reply_contract_and_rides_the_stable_pr
     for retired in ("no_findings", "need_evidence", "breaks", "json array", "| 6 | subtraction |", "aggregate: green",
                     "review_disposition", "acceptance_claims"):
         assert retired not in lowered, retired
-    prompt = plan_packet.build_stable_prompt(checklist_section=section, body=False, enforcement="blocking")
+    prompt = plan_packet.build_stable_prompt(checklist_section=section, body=False)
     assert section in prompt and "## Reply contract" in prompt and '"withdrawn"' in prompt
 
 

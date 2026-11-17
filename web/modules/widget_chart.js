@@ -65,11 +65,36 @@ export function chartConfig(component, data) {
     };
 }
 
+// A value a chart carries: a number at its label, a point (`{x, y}`, a bubble's `r`), or a tuple: `[x, y]` or a
+// bubble's `[x, y, r]` where the chart plots points, a floating bar's `[from, to]` at its label.
+const isChartPoint = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const chartRange = (value) => (Array.isArray(value) ? value.map((part) => part ?? '—').join(' – ') : value);
+
+/** The accessible table of a chart's data, every value kept: one row per label, or, for a chart of points (a scatter
+ *  or bubble chart, a point value, values without labels), one row per point: its series, its label where the chart
+ *  has labels, x, y and radius. */
 export function renderChartDataTable(config, label, expanded) {
     const labels = config.data.labels || [];
     const datasets = config.data.datasets || [];
-    const rows = labels.map((item, idx) => `<tr><th scope="row">${escapeHtml(item)}</th>${datasets.map((dataset) => `<td data-label="${escapeHtml(dataset.label)}">${escapeHtml(dataset.data[idx] ?? '—')}</td>`).join('')}</tr>`).join('');
-    return `<details class="widget-chart-data"${expanded ? ' open' : ''}><summary>View ${escapeHtml(label)} data</summary><div class="widget-table-wrap"><table class="widget-table"><thead><tr><th>Label</th>${datasets.map((dataset) => `<th>${escapeHtml(dataset.label)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div></details>`;
+    const values = (dataset) => (Array.isArray(dataset?.data) ? dataset.data : []);
+    const cell = (name, value) => `<td data-label="${escapeHtml(name)}">${escapeHtml(value ?? '—')}</td>`;
+    let head;
+    let rows;
+    if (['scatter', 'bubble'].includes(config.type) || datasets.some((dataset) => values(dataset).some(isChartPoint))
+        || (!labels.length && datasets.some((dataset) => values(dataset).length))) {
+        const points = datasets.flatMap((dataset) => values(dataset).map((value, idx) => {
+            const point = isChartPoint(value) ? value : Array.isArray(value) ? { x: value[0], y: value[1], r: value[2] } : { y: value };
+            return { series: dataset.label, label: labels[idx], x: point.x, y: point.y, r: point.r };
+        }));
+        const labelled = labels.length > 0;
+        const radius = points.some((point) => point.r !== undefined);
+        head = `<th>Series</th>${labelled ? '<th>Label</th>' : ''}<th>x</th><th>y</th>${radius ? '<th>r</th>' : ''}`;
+        rows = points.map((point) => `<tr><th scope="row">${escapeHtml(point.series ?? '—')}</th>${labelled ? cell('Label', point.label) : ''}${cell('x', point.x)}${cell('y', point.y)}${radius ? cell('r', point.r) : ''}</tr>`).join('');
+    } else {
+        head = `<th>Label</th>${datasets.map((dataset) => `<th>${escapeHtml(dataset.label)}</th>`).join('')}`;
+        rows = labels.map((item, idx) => `<tr><th scope="row">${escapeHtml(item)}</th>${datasets.map((dataset) => cell(dataset.label, chartRange(values(dataset)[idx]))).join('')}</tr>`).join('');
+    }
+    return `<details class="widget-chart-data"${expanded ? ' open' : ''}><summary>View ${escapeHtml(label)} data</summary><div class="widget-table-wrap"><table class="widget-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div></details>`;
 }
 
 function safeTableHref(value) {

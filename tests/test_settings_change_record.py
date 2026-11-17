@@ -32,7 +32,7 @@ def client(install, monkeypatch):
     import supervisor.message_bus as bus
     import supervisor.state as state
     from ouroboros import config
-    from ouroboros.gateway import safety_settings, settings
+    from ouroboros.gateway import safety_settings, settings, owner_effort
 
     rows = []
     monkeypatch.setattr(bus, "send_with_budget", lambda *args, **kwargs: rows.append((args, kwargs)))
@@ -42,7 +42,9 @@ def client(install, monkeypatch):
     monkeypatch.setattr(settings, "_start_supervisor_if_needed_for_request", lambda *a, **kw: False)
     install.write_text(json.dumps({"OPENROUTER_API_KEY": "fixture-router", ALLOWANCE: 20,
                                    "OUROBOROS_MODEL": "openrouter/old-main"}), encoding="utf-8")
-    app = Starlette(routes=[Route("/api/settings", settings.api_settings_post, methods=["POST"]),
+    app = Starlette(routes=[Route("/api/owner/chat-model", owner_effort.api_owner_chat_model, methods=["POST"]),
+                            Route("/api/owner/chat-processing", owner_effort.api_owner_chat_processing, methods=["POST"]),
+                            Route("/api/settings", settings.api_settings_post, methods=["POST"]),
                             Route("/api/owner/safety-model", safety_settings.api_owner_safety_model, methods=["POST"])])
     app.state.drive_root = app.state.repo_dir = install.parent
     with TestClient(app) as test_client:
@@ -197,7 +199,7 @@ def test_a_failed_record_or_row_never_unsaves_the_settings(client, monkeypatch):
     monkeypatch.setattr(bus, "send_with_budget", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no chat")))
     assert save(test_client, "generic", 40).json()["status"] == "saved"
     monkeypatch.setattr(owner_settings, "_withheld", lambda *a: (_ for _ in ()).throw(ValueError("projection")))
-    assert test_client.post("/api/owner/safety-model", json={"settings": {"OUROBOROS_MODEL": "openrouter/x"}}).json() == {"ok": True}
+    assert test_client.post("/api/owner/safety-model", json={"settings": {"OUROBOROS_MODEL": "openrouter/x"}}).json() == {"ok": True, "receipt": "unavailable"}
     stored = json.loads(install.read_text(encoding="utf-8"))
     assert (stored[ALLOWANCE], stored["OUROBOROS_MODEL"]) == (40.0, "openrouter/x")
 
@@ -235,3 +237,19 @@ def test_the_mind_is_told_how_its_own_settings_write_declares_itself(tmp_path, m
     assert "DATA_WRITE_BLOCKED" in result and "/api/settings" in result, result
     assert "X-Ouroboros-Actor: ouroboros" in result and "X-Ouroboros-Task-Id: <your task id>" in result, result
     assert (drive / "settings.json").read_text(encoding="utf-8") == '{"TOTAL_BUDGET": 10}\n'
+
+
+@pytest.mark.parametrize("endpoint,body,key", [
+    ("chat-model", {"kind": "model", "model": "openrouter/new-main", "use_local": False}, "OUROBOROS_MODEL"),
+    ("chat-processing", {"processing": "fast"}, "OUROBOROS_MODEL_PROCESSING_PREFERENCES"),
+])
+@pytest.mark.parametrize("declared", [False, True])
+def test_composer_owner_endpoints_record_app_origin_without_echo(client, endpoint, body, key, declared):
+    test_client, install, rows = client
+    response = test_client.post("/api/owner/" + endpoint, json=body, headers=APP if declared else {})
+    assert response.status_code == 200, response.text
+    [record] = records(install)
+    assert key in record["changes"]
+    assert record["surface"] == ("app" if declared else "api")
+    assert record["actor"] == ("owner" if declared else "not declared")
+    assert len(rows) == (0 if declared else 1)

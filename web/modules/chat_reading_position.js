@@ -13,13 +13,16 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
     let generation = 0, scheduled = false;
     let mutationDepth = 0;
     let viewportAnchor = null, width = feed.clientWidth;
-    // Every room opens following its newest message (owner decision 2026-10-05).
+    // Every room first opens following its newest message (owner decision 2026-10-05).
     let intent = null;
     // dragging: 'held'/'released' feed scrollbar, or 'owed' to a downward gesture's animation.
     let approximate = false, dragging = '', claimed = null, scrolls = 0, arriving = null, relayout = false;
     // The feed's box at a drag's release: the drag's own last scrolls arrive in it, a resize's clamp in another.
     let releasedBox = '';
     const feedBox = () => `${feed.clientWidth}x${feed.clientHeight}`;
+    // The box the place was last applied to (reflow). Until a changed box has had its reflow, a reader following the
+    // newest message follows it still, whatever a write finds in between (mutate).
+    let settledBox = feedBox();
     // Where the app's own write (mutate) moved the feed while a drag was released: a scroll there is that write's.
     let placed = null;
     // WebKit also ends each step of an animated page scroll, and each batch of a
@@ -90,7 +93,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             if (!visible()) return;
             if (state.stick) feed.scrollTop = feed.scrollHeight;
             else anchors.restore(viewportAnchor);
-            state.top = feed.scrollTop; state.remember(true); updateButton();
+            settledBox = feedBox(); state.top = feed.scrollTop; state.remember(true); updateButton();
         },
         scroll() {
             scrolls++;
@@ -120,7 +123,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                 if (remoteContent && result && !state.stick) activity();
                 return result;
             }
-            const follow = forceFollow || (state.stick && state.nearBottom());
+            const follow = forceFollow || (state.stick && (state.nearBottom() || feedBox() !== settledBox));
             const anchor = follow ? null : anchors.capture(excludeAnchorNode);
             const height = feed.scrollHeight, top = feed.scrollTop;
             mutationDepth++;
@@ -193,6 +196,12 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                     dragging = event.target === feed ? 'held' : '';
                     return; // a scrollbar drag owns position, not archive traversal
                 }
+                // A second finger makes the touch a pinch, which only magnifies: no reading, paging or keyboard
+                // dismissal, until a new one-finger touch begins.
+                if (event.type === 'touchstart' || event.type === 'touchmove') {
+                    if (event.touches?.length > 1) axis = 'pinch';
+                    if (axis === 'pinch' && (event.type === 'touchmove' || event.touches?.length > 1)) return;
+                }
                 if (event.type === 'touchstart') {
                     const t = event.touches?.[0];
                     touchY = t?.clientY; touchStart = { x: t?.clientX ?? 0, y: t?.clientY ?? 0 }; axis = null; latched = null;
@@ -212,7 +221,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                 if (event.type === 'keydown' && (event.defaultPrevented
                         || event.target?.closest?.('input, textarea, select, [contenteditable="true"]')
                         || !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)
-                        || !origin)) return;
+                        || !origin || !visible())) return;  // a key pressed elsewhere is no reading of a room left
                 const y = event.touches?.[0]?.clientY;
                 const direction = event.type === 'wheel' ? Math.sign(event.deltaY)
                     : event.type === 'keydown' ? (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey) ? -1 : 1)

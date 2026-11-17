@@ -9,7 +9,9 @@ its own. Each rule is pinned in both directions.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
+import json
 import pathlib
 
 import pytest
@@ -75,6 +77,7 @@ def test_an_import_not_completed_leaves_a_view_with_its_reason_and_reads_no_chai
     assert snapshot.store_status == {"state": receipt["kind"], "reason": receipt["reason"]}
     assert snapshot.story == () and snapshot.conversations == () and snapshot.marks == ()
     assert snapshot.room == {"room_id": "1", "label": "Main"} and snapshot.frontier == {}
+    assert mv.snapshot_json(snapshot) == _old_snapshot_json(snapshot)
 
 
 @pytest.mark.parametrize("error", [ValueError("chronicle authority shortened"), TimeoutError("lock"), OSError("io")])
@@ -89,6 +92,7 @@ def test_a_journal_that_cannot_be_opened_still_leaves_a_view(tmp_path, monkeypat
     assert snapshot.store_status["state"] == "journal_unreadable"
     assert type(error).__name__ in snapshot.store_status["reason"]
     assert not snapshot.active and snapshot.story == ()
+    assert mv.snapshot_json(snapshot) == _old_snapshot_json(snapshot)
 
 
 def test_the_first_capture_on_an_empty_install_creates_the_chronicle_and_the_second_writes_nothing(tmp_path):
@@ -108,10 +112,72 @@ def test_the_snapshot_round_trips_through_its_canonical_json(tmp_path):
     spec = mv.view_spec_for_task(task, tmp_path)
     snapshot = mv.capture_memory_view(tmp_path, task, spec)
     text = mv.snapshot_json(snapshot)
+    assert text == _old_snapshot_json(snapshot)
     assert mv.snapshot_from_json(text) == snapshot and mv.snapshot_json(mv.snapshot_from_json(text)) == text
     assert "Do the inventory" in snapshot.owner_words  # the helper's owner words are captured
     no_words = mv.capture_memory_view(tmp_path, task, mv.ROLE_DEFAULTS["integrator"])
     assert no_words.owner_words == ""
+
+
+def _old_snapshot_json(snapshot):
+    data = dataclasses.asdict(snapshot)
+    data.pop("chronicle_sequence")
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+@pytest.mark.parametrize("name", ["main", "project", "consciousness", "child_project", "child_main", "nanny"])
+def test_snapshot_json_keeps_exact_canonical_bytes(name):
+    from tests import _memory_view_synthetic as syn
+
+    snapshot = dataclasses.replace(
+        syn.actor(name), frontier={"status": "exact", "pos": 2**60},
+        fallback_refusals=({"id": "source", "kind": "unreadable", "path": ""},),
+        waiting={"notes": {"rooms": [("1", 2)]},
+                 "values": [None, True, False, -0.0, 1.25, [], {}, "Кириллица / 雪 / \"quoted\" / \\ / \n"]},
+        owner_words="Exact owner words\nSecond line.", chronicle_sequence=17,
+    )
+    before = dataclasses.asdict(snapshot)
+    expected = _old_snapshot_json(snapshot)
+    assert mv.snapshot_json(snapshot) == expected
+    assert "chronicle_sequence" not in json.loads(expected)
+    assert mv.snapshot_json(dataclasses.replace(snapshot, chronicle_sequence=99)) == expected
+    assert dataclasses.asdict(snapshot) == before
+    assert mv.snapshot_json(mv.snapshot_from_json(expected)) == expected
+
+
+def test_snapshot_json_excludes_local_attributes_and_keeps_payload_unchanged():
+    from ouroboros import memory_floor
+    from tests import _memory_view_synthetic as syn
+
+    snapshot = syn.actor("main")
+    expected, before = _old_snapshot_json(snapshot), dataclasses.asdict(snapshot)
+    story, room, groups = snapshot.story, snapshot.room, snapshot.conversations
+    snapshot.piece(("probe",), lambda: "not canonical")
+    memory_floor.floor_elements(snapshot)
+    object.__setattr__(snapshot.spec, "_not_a_field", object())
+    assert "_pieces" in snapshot.__dict__ and "_floor_elements" in snapshot.__dict__
+    assert mv.snapshot_json(snapshot) == expected
+    assert dataclasses.asdict(snapshot) == before
+    assert snapshot.story is story and snapshot.room is room and snapshot.conversations is groups
+
+
+def test_snapshot_json_does_not_build_an_asdict_copy(monkeypatch):
+    from tests import _memory_view_synthetic as syn
+
+    snapshot = syn.actor("main")
+    expected = _old_snapshot_json(snapshot)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("snapshot serialization rebuilt an asdict tree")
+
+    monkeypatch.setattr(mv.dataclasses, "asdict", forbidden)
+    assert mv.snapshot_json(snapshot) == expected
+
+
+def test_snapshot_json_rejects_unknown_payload_objects():
+    snapshot = mv.MemoryViewSnapshot(mv.ViewSpec("integrator"), {"state": "active"}, {"bad": object()})
+    with pytest.raises(TypeError):
+        mv.snapshot_json(snapshot)
 
 
 def _imports(name: str):

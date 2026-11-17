@@ -66,11 +66,11 @@ from ouroboros.launcher_bootstrap import (
     BootstrapContext,
     bootstrap_repo as _bootstrap_repo,
     check_git as _check_git, launcher_sources_changed, remember_loaded_checkout,
-    install_deps as _install_deps_impl,
+    install_deps,
     embedded_python_env, update_external_host,
     exec_source_launcher, find_embedded_python, macos_source_entry, parse_launch_options, shell_runtime_facts,
     automatic_launch_allowed,
-    sync_existing_repo_from_bundle as _sync_existing_repo_from_bundle_impl,
+    sync_existing_repo_from_bundle,
 )
 from ouroboros.desktop_media import attach_media_permissions, display_ready as _display_ready, host_environment, route_gtk_browser
 from ouroboros.runtime_venv import PREPARATION_DEPS_TIMEOUT_SEC, RuntimeVenvRefused, mark_ready, prepare_runtime_venv
@@ -81,10 +81,10 @@ from ouroboros.launcher_onboarding import (
 )
 from ouroboros.launcher_background import (Background, DesktopApi, activate_running_instance, background_env, other_copy_line,
                                            request_tray_cleanup, restore_tray_after_handoff, stop_tray_before_exit)
-from ouroboros.launcher_server_reaper import reap_same_install_strays as _reap_same_install_strays_impl
+from ouroboros.launcher_server_reaper import QuitEngineStop, reap_same_install_strays as _reap_same_install_strays_impl
 from ouroboros.launcher_context_menu import attach_every_window
 from ouroboros.launcher_readiness import wait_for_server as _wait_for_server
-from ouroboros.launcher_window_chrome import paint_room
+from ouroboros.launcher_window_chrome import paint_room, transfer_when_windowed
 from ouroboros.standalone_page import themed_page
 from ouroboros.launcher_windows_runtime import (  # noqa: F401  (re-exported: same objects, prior launcher surface)
     _prepare_windows_webview_runtime,
@@ -144,17 +144,17 @@ _file_handler = RotatingFileHandler(
     backupCount=2,
     encoding="utf-8",
 )
-_file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
 _handlers: list[logging.Handler] = [_file_handler]
 if not getattr(sys, "frozen", False):
     _handlers.append(logging.StreamHandler())
 logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=_handlers)
 # Shared SSOTs: redaction filter, uncaught exceptions into these handlers; quiet request-URL lines (credentials).
 try:
+    from ouroboros.process_logging import install_exception_hooks, utc_log_formatter
     from ouroboros.observability import SecretRedactingLogFilter as _RedactFilter
     for _handler in _handlers:
+        _handler.setFormatter(utc_log_formatter())  # the JSON logs' clock (UTC, Z) over basicConfig's local fallback
         _handler.addFilter(_RedactFilter())
-    from ouroboros.process_logging import install_exception_hooks
     install_exception_hooks()
 except Exception:
     pass  # defensive: a broken observability import must not kill the launcher
@@ -224,11 +224,11 @@ def _already_running_window(line: str) -> None:
     webview.start(private_mode=False)
 
 
-def _exec_source_launcher() -> None:
+def _exec_source_launcher(windowed=None) -> None:
     exec_source_launcher(_bootstrap_context(), _launch_argv, release_lock=release_pid_lock,
                          acquire_lock=acquire_pid_lock, before_release=lambda: stop_tray_before_exit(lambda: None),
                          on_failure=restore_tray_after_handoff, desktop=not _external_ui, macos=IS_MACOS,
-                         cancelled=_shutdown_event.is_set)
+                         cancelled=_shutdown_event.is_set, windowed=windowed)
 
 
 def _shell_facts() -> dict:
@@ -260,13 +260,6 @@ def bootstrap_repo() -> bool:
     return _bootstrap_repo(_bootstrap_context())
 
 
-def _sync_existing_repo_from_bundle() -> None:
-    _sync_existing_repo_from_bundle_impl(_bootstrap_context())
-
-
-def _install_deps() -> bool:
-    return _install_deps_impl(_bootstrap_context())
-
 _agent_proc: Optional[subprocess.Popen] = None
 _agent_job: Optional[object] = None
 _agent_lock = threading.Condition()  # also tells a waiting stop that a start was published
@@ -275,6 +268,7 @@ _agent_start: object = None  # _SPAWNING inside Popen; then, on Windows, the pub
 _agent_stopping: object = None  # the published child a stop already asked to end; a later stop only waits for it
 _server_record_retire_lock = threading.Lock()  # the two retirers of state/server_process.json
 _shutdown_event = threading.Event()
+_quit = QuitEngineStop(LAUNCHER_STOP_GRACE_SEC)  # only an explicit Quit ends the owned engine (ARCHITECTURE §9)
 # Set by _request_agent_restart(): the next agent exit is a REQUESTED recycle
 # (first-run configuration adopted), not a crash — same shape as the exit-code-42
 # branch, for the case where the launcher, not the agent, decided the restart.
@@ -587,7 +581,8 @@ def stop_agent() -> bool:
         confirmed = True
     except subprocess.TimeoutExpired:
         if IS_WINDOWS and job is not None:
-            terminate_job(job)
+            with _agent_lock:  # its members held first; a generation retired meanwhile has a closed Job: no call
+                _quit.force(job if _agent_proc is proc else None, terminate=terminate_job)
         else:
             try:
                 kill_process_tree(proc, exclude_pids=_retained_shared_daemon_pids())
@@ -608,13 +603,18 @@ def stop_agent() -> bool:
 def _retire_agent(proc, reason: str) -> bool:
     """A reaped generation: retire its publication, the Job it owned and its record; a later one's stay."""
     global _agent_proc, _agent_job, _agent_start, _agent_stopping
-    with _agent_lock:
+    with _agent_lock:  # its Job ends under the lock: a stop waiting here meets no starter of this generation
         job = _agent_job if _agent_proc is proc else None
         if _agent_proc is proc:  # no start begins before the loop retired its generation
             _agent_proc = _agent_job = _agent_start = _agent_stopping = None
-    if IS_WINDOWS and job is not None:
-        close_job(job)
+        _quit.retire(job, terminate=terminate_job, close=close_job,
+                     panic=getattr(proc, "returncode", None) == PANIC_EXIT_CODE)  # Panic's exit never waits
     return _cleanup_recorded_server_group_for_pid(proc.pid, reason)
+
+
+def _startup_teardown(reason: str, stopped: bool) -> None:
+    """A startup exit after ``stop_agent``: stop identity-proven servers, never stale companion rows; then Quit's."""
+    _quit.stop_engine(server_stopped=not _cleanup_recorded_server_process(reason) and stopped)
 
 
 def _read_port_file(default: Optional[int] = AGENT_SERVER_PORT) -> Optional[int]:
@@ -799,15 +799,15 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
 
         if exit_code == RESTART_EXIT_CODE:
             log.info("Agent requested restart (exit code 42). Restarting...")
-            _sync_existing_repo_from_bundle()
-            if not _install_deps():
+            sync_existing_repo_from_bundle(_bootstrap_context())  # a deployment policy's packages are its administrator's: none synced
+            if not os.environ.get("OUROBOROS_DEPLOYMENT_POLICY", "").strip() and not install_deps(_bootstrap_context()):
                 # Retry dependency sync once before letting imports fail under the crash fuse.
                 log.error(
                     "Dependency install failed after the restart request; "
                     "retrying once in %ds.", _DEPS_RETRY_DELAY_SEC,
                 )
                 time.sleep(_DEPS_RETRY_DELAY_SEC)
-                if not _install_deps():
+                if not install_deps(_bootstrap_context()):
                     log.error(
                         "Dependency install failed twice; starting the agent anyway "
                         "under the crash fuse (%d crashes in %ds stops the launcher). "
@@ -816,7 +816,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
                         MAX_CRASH_RESTARTS, CRASH_WINDOW_SEC,
                     )
             if launcher_sources_changed(REPO_DIR, bundle_dir=_bundle_dir(), source_root=pathlib.Path(__file__).parent):
-                _exec_source_launcher()  # a refused successor: this launcher starts the next generation itself
+                _exec_source_launcher(transfer_when_windowed)  # refused: this shell starts the next generation
             continue
 
         now = time.time()
@@ -1030,6 +1030,7 @@ def _detect_headless() -> None:
 def _headless_signal_handler(signum, frame) -> None:
     """SIGINT/SIGTERM in headless mode: ONLY set the shutdown event —
     teardown runs on the main thread (signal-frame work risks re-entrancy)."""
+    _quit.requested.set()
     _shutdown_event.set()
 
 
@@ -1116,10 +1117,11 @@ def _run_headless_main(url: str, port: int, lifecycle_thread: threading.Thread) 
             )
             break
     requested_shutdown = _shutdown_event.is_set()
-    stop_agent()
+    stopped = stop_agent()
     if _external_host_update is not None:
         lifecycle_thread.join()  # The hook observes shutdown and owns its bounded reap.
     _kill_orphaned_children(reason="headless_shutdown" if requested_shutdown else "crash_fuse")
+    _quit.stop_engine(server_stopped=stopped)  # a signal's Quit only, before atexit releases the PID lock
     # NO explicit release_pid_lock(): sys.exit runs the atexit-registered
     # release, and a second release would unconditionally unlink a lock a
     # NEWER launcher may own (explicit calls stay only on os._exit paths).
@@ -1204,27 +1206,26 @@ def main(argv=()):
         __file__).resolve() != (REPO_DIR / "launcher.py").resolve() else None)
 
     def _on_closing() -> None:  # Background's close body: its exit_launcher latched shutdown on the UI thread
-        log.info("Window closing — graceful shutdown.")
+        log.info("Window closing — graceful shutdown.")  # an owner's exit set _quit.requested, a UI failure never
         from ouroboros.launcher_bootstrap import stop_bootstrap_commands
         stop_bootstrap_commands(include_interactive=False)
         if background.panic.is_set():
             return  # Panic owns persistence and hard exit, never ordinary teardown over it
         if _webview_window is None:
             if _agent_proc is not None or _agent_start is not None:  # published, or still inside its Popen
-                stop_agent()
-                _cleanup_recorded_server_process("startup_quit")
-            for window in list(webview.windows):
-                window.destroy()  # release Git/setup's webview.start before main returns
-            return  # startup owns its return; no stale companion rows or hard exit
-        stop_agent()
+                _startup_teardown("startup_quit", stop_agent())
+            _quit.stop_engine(server_stopped=True)  # decided once; a server stop's unconfirmed exit stays disclosed
+            background.end_setup(release_pid_lock, webview.windows)  # an app quit exits here, else main returns
+            return  # no stale companion rows
+        stopped = stop_agent()
         if background.panic.is_set():
             return  # accepted during the stop: no ordinary teardown or exit over it
-        _kill_orphaned_children()
-        background.leave(release_pid_lock)
+        _kill_orphaned_children()  # starters gone first: Quit's engine stop is the exit's last decision
+        background.leave(release_pid_lock, decide=lambda: _quit.stop_engine(server_stopped=stopped))
 
     # Listen before the long boot: a manual second launch meanwhile is kept and opens the window once it exists.
     background = None if _headless else Background(_on_closing, _read_port_file, _shutdown_event,
-        panic_child=lambda: (_agent_proc, _agent_job))
+        panic_child=lambda: (_agent_proc, _agent_job), owner_exit=_quit.requested)
     if background is not None:
         background.listen(PID_FILE)
         atexit.unregister(finalizer)  # after CLR's unload registration: dispose the icon while CLR still lives
@@ -1297,11 +1298,12 @@ def main(argv=()):
             width=520,
             height=300,
         )
-        paint_room(git_window)
+        paint_room(background.attach_setup(git_window))
         webview.start(func=_git_page, args=[git_window], private_mode=False)
         if _shutdown_event.is_set():
             return
-        if not check_git():
+        if not check_git():  # this close ended the app
+            background.ended_before_main(lambda: _quit.stop_engine(server_stopped=True))
             sys.exit(1)
 
     if _shutdown_event.is_set():
@@ -1325,7 +1327,7 @@ def main(argv=()):
             "Continuing startup after a failed dependency install; the agent may "
             "be missing packages (see the pip output above)."
         )
-    elif _runtime_venv is not None and not _runtime_venv.ready and _install_deps():
+    elif _runtime_venv is not None and not _runtime_venv.ready and install_deps(_bootstrap_context()):
         try:
             _runtime_venv = mark_ready(_runtime_venv)  # a failed install stays preparing and retries next start
         except RuntimeVenvRefused as refusal:
@@ -1360,21 +1362,19 @@ def main(argv=()):
 
     # Headless: handlers BEFORE the lifecycle thread spawns server.py — a
     # SIGTERM while the server still boots must reach our teardown.
-    _abort = _shutdown_event
     if _headless:
         install_shutdown_signal_handlers(_headless_signal_handler)
-        _abort = _shutdown_event
 
-    lifecycle_thread = threading.Thread(target=agent_lifecycle_loop, args=(port,), daemon=True)
+    lifecycle_thread = _quit.lifecycle = threading.Thread(target=agent_lifecycle_loop, args=(port,), daemon=True)
     lifecycle_thread.start()
 
-    server_ready, actual_port = _await_server_ready(port, _abort, lifecycle_thread)
+    server_ready, actual_port = _await_server_ready(port, _shutdown_event, lifecycle_thread)
 
     if server_ready and onboarding_required and not _shutdown_event.is_set():
         # The gateway is live and, with no provider configured, runs WITHOUT a
         # supervisor — the supported state that lets the wizard reach /api/*.
         onboarding = _present_first_run_onboarding(
-            onboarding_settings, actual_port, headless=_headless,
+            onboarding_settings, actual_port, headless=_headless, attach=background and background.attach_setup,
             open_external_url=_open_external_url, read_port=lambda: _generation_port,
         )
         if not onboarding["saved"]:
@@ -1385,32 +1385,31 @@ def main(argv=()):
         if onboarding["restart_required"] and not _shutdown_event.is_set():
             # Recycle the owned server to adopt boot-pinned settings instead of leaving a restart nag.
             _request_agent_restart()
-            server_ready, actual_port = _await_server_ready(port, _abort, lifecycle_thread)
+            server_ready, actual_port = _await_server_ready(port, _shutdown_event, lifecycle_thread)
 
     if _shutdown_event.is_set():
         if background is not None and background.panic.is_set():
             return  # the non-daemon Panic owner, not a startup-failure window, owns exit
         # Startup shutdown is no failure; stop owned/proven servers, never stale companion rows.
         log.info("Shutdown requested during startup; tearing down.")
-        stop_agent()
-        _cleanup_recorded_server_process("startup_abort")
+        _startup_teardown("startup_abort", stop_agent())  # Quit only; a desktop closer's outcome is shared
         # atexit releases on sys.exit; a second release could unlink a newer launcher's lock.
         sys.exit(0)
 
     if not server_ready:
         log.error("Agent failed to become healthy on port %d; aborting UI startup.", actual_port)
         _shutdown_event.set()
-        stop_agent()
+        stopped = stop_agent()
         lifecycle_thread.join(timeout=5)
         if _headless:
-            _cleanup_recorded_server_process("startup_failure")
+            _startup_teardown("startup_failure", stopped)  # a Quit signal accepted meanwhile still ends the engine
             print(
                 "Ouroboros failed to start: the local agent server did not become ready.\n"
                 f"See {_log_dir / 'launcher.log'} and {_log_dir / 'agent_stdout.log'} for details.",
                 file=sys.stderr,
             )
             sys.exit(1)
-        paint_room(webview.create_window(
+        paint_room(background.attach_setup(webview.create_window(
             "Ouroboros — Startup Failed",
             html=_window_page("Ouroboros — Startup Failed", (
                 "<h2>Ouroboros failed to start</h2>"
@@ -1419,8 +1418,9 @@ def main(argv=()):
                 "for details.</p>")),
             width=520,
             height=260,
-        ))
+        )))
         webview.start(private_mode=False)
+        background.ended_before_main(lambda: _quit.stop_engine(server_stopped=stopped))  # after the server stop
         return
 
     def _resolve_bridge_file_url(raw_url: str) -> str:

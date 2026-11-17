@@ -6,9 +6,9 @@ the agent is trying to commit. Ouro hit this loop on 2026-05-04 while
 landing the OBC movement tools and burned 16+ rounds working around it
 before the gate retry cap stopped him.
 
-The fix: when checkout fails, check whether we're already on the target
-branch. If so, the failure is incidental (no-op-but-git-complained) and
-we proceed to staging. If on a different branch, abort cleanly.
+Preparation now skips checkout on the target branch, preserving a staged
+merge and dirty work. A required branch switch still reports checkout
+failure and never reaches staging.
 
 Pinned tests so the regression can't reopen.
 """
@@ -101,6 +101,8 @@ def test_checkout_on_different_branch_with_failure_aborts_cleanly(tmp_path):
             raise Exception("would overwrite local changes")
         if cmd[:3] == ["git", "rev-parse", "--abbrev-ref"]:
             return "feature/some-other-branch\n"
+        if cmd == ["git", "rev-parse", "--git-path", "MERGE_HEAD"]:
+            return ".git/MERGE_HEAD"
         return ""
 
     cycle_called = []
@@ -197,8 +199,15 @@ def test_checkout_succeeds_normally_when_clean(tmp_path):
 
     ctx = _ctx(tmp_path)
 
+    captured = []
+
     def fake_run(cmd, cwd=None, **_):
-        return ""  # all calls succeed silently
+        captured.append(cmd)
+        if cmd[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+            return "feature\n"
+        if cmd == ["git", "rev-parse", "--git-path", "MERGE_HEAD"]:
+            return ".git/MERGE_HEAD"
+        return ""
 
     cycle_called = []
 
@@ -223,3 +232,4 @@ def test_checkout_succeeds_normally_when_clean(tmp_path):
             pass
 
     assert cycle_called, "stage cycle must run on the happy path"
+    assert ["git", "checkout", "--no-guess", "ouroboros", "--"] in captured

@@ -1,229 +1,193 @@
-import { showToast } from './toast.js';
+/** Settings › Models › Local model (docs/DESIGN.md "Settings"): what Start launches, as rows that save themselves, and
+ *  the local model's own Start, Stop, Test and Install. A saved change applies when the local model is stopped and
+ *  started again (its row says so); nothing here asks for a restart of Ouroboros. The status is read while this page
+ *  is on screen. */
 import { apiFetch, fetchJson } from './api_client.js';
-import { setInlineStatus } from './ui_helpers.js';
+import { bindSettingRows, setButtonBusy, settingsRow } from './settings_controls.js';
+import { registerSettingsPage } from './settings_pages.js';
+import { checkerUses, deploymentOf } from './settings_policy.js';
+import { rowsOf } from './settings_rows.js';
+import { setResult } from './ui_primitives.js';
 
+const PAGE = 'models/local';
+const POLL_MS = 3000;
+// The fields a deployment's checker binds when it answers from this model (`deployment_policy.local_launch_refusal`).
+const FIXED_KEYS = ['LOCAL_MODEL_SOURCE', 'LOCAL_MODEL_FILENAME', 'LOCAL_MODEL_PORT', 'LOCAL_MODEL_CHAT_FORMAT'];
 
-function readLocalModelBody() {
-    return {
-        source: document.getElementById('s-local-source').value.trim(),
-        filename: document.getElementById('s-local-filename').value.trim(),
-        port: parseInt(document.getElementById('s-local-port').value, 10) || 8766,
-        n_gpu_layers: parseInt(document.getElementById('s-local-gpu-layers').value, 10),
-        n_ctx: parseInt(document.getElementById('s-local-ctx').value, 10) || 16384,
-        chat_format: document.getElementById('s-local-chat-format').value.trim(),
-    };
-}
-
-function setTestResult(text, tone = 'muted') {
-    const el = document.getElementById('local-model-test-result');
-    if (!el) return;
-    el.style.display = text ? 'block' : 'none';
-    el.textContent = text;
-    el.dataset.tone = tone;
-}
-
-function setLocalStatus(text, tone = 'muted') {
-    const el = document.getElementById('local-model-status');
-    if (el) { el.textContent = text; el.dataset.tone = tone; }
-}
-
-function setInstallBtnVisible(visible) {
-    const btn = document.getElementById('btn-local-install-runtime');
-    if (btn) btn.classList.toggle('local-model-hidden', !visible);
-}
-
-function setProgressBar(fraction) {
-    const wrap = document.getElementById('local-model-progress-wrap');
-    const bar = document.getElementById('local-model-progress-bar');
-    if (!wrap || !bar) return;
-    if (fraction === null || fraction === undefined) {
-        wrap.classList.add('local-model-hidden');
-        return;
+/** A deployment checker answering locally binds this server's identity: those fields read only, its note shown
+ *  (the Start endpoint refuses any other launch). */
+export function applyLocalModelPolicy(root, fixed) {
+    for (const key of FIXED_KEYS) {
+        const input = root.querySelector(`[data-setting-row="${key}"] [data-setting-control]`);
+        if (input) input.readOnly = fixed;
     }
-    wrap.classList.remove('local-model-hidden');
-    bar.style.width = Math.round(fraction * 100) + '%';
-    bar.setAttribute('aria-valuenow', Math.round(fraction * 100));
+    const note = root.querySelector('[data-local-model-fixed]');
+    if (note) note.hidden = !fixed;
 }
 
-export function bindLocalModelControls({ state, onApplication } = {}) {
-    let destroyed = false;
+/** The local model's state in words: `{ text, tone }` from one status answer. */
+export function localModelStatusWords(d = {}) {
+    const status = String(d.status || 'offline');
+    const installing = d.runtime_status === 'installing';
+    let text = status.charAt(0).toUpperCase() + status.slice(1);
+    if (status === 'ready' && d.context_length) text += ` · context ${d.context_length}`;
+    if (status === 'downloading' && d.download_progress != null) text += ` · ${Math.round(d.download_progress * 100)}%`;
+    if (installing) text = 'Installing the local runtime…';
+    if (d.runtime_status === 'install_ok') text += ' · runtime installed';
+    if (d.runtime_status === 'install_error') text += ' · the runtime install failed';
+    if (d.error && !installing) text += ` · ${d.error}`;
+    return { text, tone: status === 'ready' ? 'ok' : status === 'error' || d.runtime_status === 'install_error' ? 'danger' : 'muted' };
+}
+
+function mountLocalModel(container, { path, ctx }) {
+    const rows = (fold) => rowsOf(PAGE, { fold }).map((row) => settingsRow(row)).join('');
+    container.innerHTML = `<p class="settings-page-lead">A model file that runs on this computer. Fill this in only if you want one.</p>
+        <section class="ui-card settings-card">
+            <div class="settings-rows">${rows(false)}</div>
+            <p class="settings-card-note" data-local-model-fixed hidden>Your organization’s Safety Supervisor answers from this model: its model, file, port and chat format are set by your organization. Start and Stop stay yours.</p>
+        </section>
+        <section class="ui-card settings-card">
+            <h3 class="settings-card-title">Run it</h3>
+            <p class="ui-status local-model-state" id="local-model-status" role="status" aria-live="polite" data-tone="muted">Offline</p>
+            <p class="settings-card-lead" data-local-model-pending hidden></p>
+            <div id="local-model-progress-wrap" class="local-model-progress-wrap" role="progressbar" aria-label="Download" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
+                <div id="local-model-progress-bar" class="local-model-progress-bar"></div></div>
+            <div class="ui-action-row">
+                <button type="button" class="btn" data-primary id="btn-local-start">Start</button>
+                <button type="button" class="btn btn-default" id="btn-local-stop" disabled>Stop</button>
+                <button type="button" class="btn btn-default" id="btn-local-test" disabled>Test tool calling</button>
+                <button type="button" class="btn btn-default" id="btn-local-install-runtime" hidden>Install the local runtime</button>
+                <span class="ui-result" id="local-model-action-status" role="status" aria-live="polite" aria-atomic="true"></span>
+            </div>
+            <pre class="ui-result-details" id="local-model-test-result" hidden></pre>
+        </section>
+        <section class="ui-card settings-card"><details class="ui-disclosure" data-settings-fold>
+            <summary>More: GPU layers, port, chat format</summary>
+            <div class="settings-rows">${rows(true)}</div></details></section>`;
+    const el = (id) => container.querySelector(`#${id}`);
+    const bound = bindSettingRows(container, { ask: ctx.ask });
+    const [start, stop, test, install] = ['btn-local-start', 'btn-local-stop', 'btn-local-test', 'btn-local-install-runtime'].map(el);
+    const action = (text, tone = 'muted') => setResult(el('local-model-action-status'), text ? { text, tone } : {});
+    const testResult = (text) => Object.assign(el('local-model-test-result'), { textContent: text, hidden: !text });
+    let alive = true;
     let stopPending = false;
     let ready = false;
-    let statusSequence = 0;
-    async function updateLocalStatus() {
-        if (destroyed || state.activePage !== 'settings') return;
-        const sequence = ++statusSequence;
-        try {
-            const d = await fetchJson('/api/local-model/status', { cache: 'no-store' });
-            if (destroyed || sequence !== statusSequence) return;
-            if (d.settings_application && onApplication) onApplication(d.settings_application);
-            const el = document.getElementById('local-model-status');
-            if (!el) return;
-            const isReady = d.status === 'ready';
-            ready = isReady;
-            const isInstalling = d.runtime_status === 'installing';
-            const isDownloading = d.status === 'downloading';
-            const runtimeMissing = d.runtime_status === 'missing' || d.runtime_status === 'install_error';
+    let startAfterInstall = false;
+    let sequence = 0;
+    const onScreen = () => alive && ctx.state?.activePage === 'settings' && ctx.state?.settingsPath === path && !globalThis.document?.hidden;
+    // What Start launches: the fields as they stand now (a field commits when it is left, so these are the saved ones).
+    const typed = (key) => String(container.querySelector(`[data-setting-row="${key}"] [data-setting-control]`)?.value ?? '').trim();
+    const launchBody = () => ({
+        source: typed('LOCAL_MODEL_SOURCE'), filename: typed('LOCAL_MODEL_FILENAME'), port: parseInt(typed('LOCAL_MODEL_PORT'), 10) || 8766,
+        n_gpu_layers: parseInt(typed('LOCAL_MODEL_N_GPU_LAYERS'), 10), n_ctx: parseInt(typed('LOCAL_MODEL_CONTEXT_LENGTH'), 10) || 65536,
+        chat_format: typed('LOCAL_MODEL_CHAT_FORMAT'),
+    });
 
-            let text = 'Status: ' + (d.status || 'offline').charAt(0).toUpperCase() + (d.status || 'offline').slice(1);
-            if (isReady && d.context_length) text += ` (ctx: ${d.context_length})`;
-            if (isDownloading && d.download_progress != null) {
-                const pct = Math.round(d.download_progress * 100);
-                text += ` ${pct}%`;
-                setProgressBar(d.download_progress);
-            } else {
-                setProgressBar(null);
-            }
-            if (isInstalling) text = 'Status: Installing local runtime…';
-            if (d.runtime_status === 'install_ok') text += ' — Runtime installed ✓';
-            if (d.runtime_status === 'install_error') text += ' — Runtime install failed';
-            if (d.error && !isInstalling) text += ' — ' + d.error;
-            if (d.settings_application?.pending_keys?.length) text += ' — Saved changes need Stop, then Start.';
-
-            el.textContent = text;
-            el.dataset.tone = isReady ? 'ok' : (d.status === 'error' || d.runtime_status === 'install_error' ? 'error' : 'muted');
-
-            document.getElementById('btn-local-stop').disabled = stopPending || !isReady;
-            document.getElementById('btn-local-test').disabled = !isReady;
-            document.getElementById('btn-local-start').disabled = isInstalling || isDownloading;
-
-            setInstallBtnVisible(runtimeMissing);
-            const installBtn = document.getElementById('btn-local-install-runtime');
-            if (installBtn) installBtn.disabled = isInstalling;
-
-            if (d.runtime_status === 'install_error' && d.runtime_install_log) {
-                setTestResult('Install failed:\n' + d.runtime_install_log, 'error');
-            }
-
-            if (d.runtime_status === 'install_ok' && state._pendingLocalStart) {
-                state._pendingLocalStart = false;
-                triggerStart();
-            }
-
-            ['s-local-main', 's-local-heavy', 's-local-light', 's-local-consciousness', 's-local-fallback'].forEach((id) => {
-                const cb = document.getElementById(id);
-                const label = cb?.closest('.local-toggle');
-                if (!cb || !label) return;
-                if (cb.checked && !isReady) {
-                    label.title = 'Local server is not running - requests will fail until started';
-                    label.dataset.warning = '1';
-                } else {
-                    label.title = '';
-                    delete label.dataset.warning;
-                }
-            });
-        } catch {}
+    async function readStatus() {
+        if (!onScreen()) return;
+        const mine = ++sequence;
+        let d;
+        try { d = await fetchJson('/api/local-model/status', { cache: 'no-store' }); } catch { return; }
+        if (!alive || mine !== sequence) return;
+        const installing = d.runtime_status === 'installing';
+        const downloading = d.status === 'downloading';
+        ready = d.status === 'ready';
+        const words = localModelStatusWords(d);
+        Object.assign(el('local-model-status'), { textContent: words.text }).dataset.tone = words.tone;
+        // Saved settings the running model does not have yet, and facts it did not report: the server's own sentence.
+        const pending = el('local-model-status').parentElement.querySelector('[data-local-model-pending]');
+        Object.assign(pending, { textContent: d.settings_application?.summary || '', hidden: !d.settings_application?.summary });
+        const wrap = el('local-model-progress-wrap');
+        wrap.hidden = !(downloading && d.download_progress != null);
+        if (!wrap.hidden) {
+            const share = Math.round(d.download_progress * 100);
+            el('local-model-progress-bar').style.width = `${share}%`;
+            wrap.setAttribute('aria-valuenow', String(share));
+        }
+        stop.disabled = stopPending || !ready;
+        test.disabled = !ready;
+        start.disabled = installing || downloading;
+        install.hidden = !(d.runtime_status === 'missing' || d.runtime_status === 'install_error');
+        install.disabled = installing;
+        if (d.runtime_status === 'install_error' && d.runtime_install_log) testResult(`Install failed:\n${d.runtime_install_log}`);
+        if (d.runtime_status === 'install_ok' && startAfterInstall) { startAfterInstall = false; void startModel(); }
     }
 
-    async function triggerStart() {
-        const body = readLocalModelBody();
-        if (!body.source) {
-            showToast('Enter a model source (HuggingFace repo ID or local path)', 'error');
-            return;
-        }
-        setTestResult('');
-        setProgressBar(null);
-        setInlineStatus(document.getElementById('local-model-action-status'), '', 'muted');
+    async function startModel() {
+        const body = launchBody();
+        if (!body.source) { action('Name a model first: a Hugging Face repository or a file on this computer.', 'danger'); return; }
+        testResult('');
+        action('');
         try {
-            const resp = await apiFetch('/api/local-model/start', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
+            const resp = await apiFetch('/api/local-model/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
             const data = await resp.json();
             if (resp.status === 412 && data.error === 'runtime_missing') {
-                setInstallBtnVisible(true);
-                setLocalStatus('Local runtime not installed. Click "Install Local Runtime" below.', 'error');
-                setTestResult(
-                    'llama-cpp-python is not installed.\n' +
-                    'Click "Install Local Runtime" to install it automatically,\n' +
-                    'then the model will start automatically.\n\n' +
-                    'Manual install: ' + (data.hint || 'pip install llama-cpp-python[server]'),
-                    'error'
-                );
-            } else if (data.error) {
-                setLocalStatus('Error: ' + data.error, 'error');
-            } else {
-                updateLocalStatus();
-            }
-        } catch (e) {
-            setLocalStatus('Failed: ' + e.message, 'error');
-        }
+                install.hidden = false;
+                action('The local runtime is not installed. Install it, and the model starts by itself.', 'danger');
+                testResult(`llama-cpp-python is not installed.\nBy hand: ${data.hint || 'pip install llama-cpp-python[server]'}`);
+            } else if (data.error) action(`Not started: ${data.error}`, 'danger');
+            else void readStatus();
+        } catch (e) { action(`Not started: ${e.message}`, 'danger'); }
     }
 
-    document.getElementById('btn-local-start').addEventListener('click', triggerStart);
-
-    document.getElementById('btn-local-stop').addEventListener('click', async () => {
-        if (destroyed || stopPending) return;
-        const button = document.getElementById('btn-local-stop');
-        const status = document.getElementById('local-model-action-status');
+    start.addEventListener('click', () => void startModel());
+    stop.addEventListener('click', async () => {
+        if (!alive || stopPending) return;
         stopPending = true;
-        button.disabled = true;
-        button.setAttribute('aria-busy', 'true');
-        setInlineStatus(status, 'Stopping…', 'muted');
+        setButtonBusy(stop, true);
+        action('Stopping…');
         try {
             const result = await fetchJson('/api/local-model/stop', { method: 'POST' }, { rejectOkFalse: true });
-            if (destroyed) return;
+            if (!alive) return;
             if (result?.status !== 'stopped' || result?.error) throw new Error(result?.error || 'The server did not confirm Stop.');
-            setProgressBar(null);
-            setInlineStatus(status, 'Local model stopped.', 'ok');
-            status?.scrollIntoView({ block: 'nearest', behavior: 'auto' });
-            await updateLocalStatus();
-        } catch (e) {
-            if (!destroyed) {
-                setInlineStatus(status, `Stop failed: ${e.message}. You can retry Stop.`, 'error');
-                status?.scrollIntoView({ block: 'nearest', behavior: 'auto' });
-            }
-        } finally {
-            stopPending = false;
-            if (!destroyed) { button.disabled = !ready; button.removeAttribute('aria-busy'); }
-        }
+            action('The local model stopped.', 'ok');
+            await readStatus();
+        } catch (e) { if (alive) action(`Stop failed: ${e.message}. You can press Stop again.`, 'danger'); }
+        stopPending = false;
+        if (alive) { setButtonBusy(stop, false); stop.disabled = !ready; }
     });
-
-    document.getElementById('btn-local-test').addEventListener('click', async () => {
-        setTestResult('Running tests...', 'muted');
+    test.addEventListener('click', async () => {
+        action('Testing…');
+        testResult('');
         try {
-            const resp = await apiFetch('/api/local-model/test', { method: 'POST' });
-            const r = await resp.json();
-            if (r.error) {
-                setTestResult('Error: ' + r.error, 'error');
-                return;
-            }
-            const lines = [];
-            lines.push((r.chat_ok ? '✓' : '✗') + ' Basic chat' + (r.tokens_per_sec ? ` (${r.tokens_per_sec} tok/s)` : ''));
-            lines.push((r.tool_call_ok ? '✓' : '✗') + ' Tool calling');
-            if (r.details && !r.success) lines.push(r.details);
-            setTestResult(lines.join('\n'), r.success ? 'ok' : 'warn');
-            const el = document.getElementById('local-model-test-result');
-            if (el) el.style.whiteSpace = 'pre-wrap';
+            const r = await (await apiFetch('/api/local-model/test', { method: 'POST' })).json();
+            if (r.error) { action(`Test failed: ${r.error}`, 'danger'); return; }
+            action(r.success ? 'Chat and tool calling work.' : 'The test did not pass.', r.success ? 'ok' : 'warn');
+            testResult([`${r.chat_ok ? 'Passed' : 'Failed'}: basic chat${r.tokens_per_sec ? ` (${r.tokens_per_sec} tokens a second)` : ''}`,
+                `${r.tool_call_ok ? 'Passed' : 'Failed'}: tool calling`, r.details && !r.success ? r.details : ''].filter(Boolean).join('\n'));
+        } catch (e) { action(`Test failed: ${e.message}`, 'danger'); }
+    });
+    install.addEventListener('click', async () => {
+        install.disabled = true;
+        action('Installing the local runtime. This may take a few minutes…');
+        startAfterInstall = Boolean(launchBody().source);
+        try {
+            const d = await (await apiFetch('/api/local-model/install-runtime', { method: 'POST' })).json();
+            if (d.error) throw new Error(d.error);
         } catch (e) {
-            setTestResult('Test failed: ' + e.message, 'error');
+            action(`Install failed: ${e.message}`, 'danger');
+            install.disabled = false;
         }
     });
 
-    const installBtn = document.getElementById('btn-local-install-runtime');
-    if (installBtn) {
-        installBtn.addEventListener('click', async () => {
-            installBtn.disabled = true;
-            setTestResult('Installing llama-cpp-python, this may take a few minutes…', 'muted');
-            setLocalStatus('Status: Installing local runtime…', 'muted');
-            const body = readLocalModelBody();
-            state._pendingLocalStart = !!body.source;
-            try {
-                const resp = await apiFetch('/api/local-model/install-runtime', { method: 'POST' });
-                const d = await resp.json();
-                if (d.error) {
-                    setTestResult('Install request failed: ' + d.error, 'error');
-                    installBtn.disabled = false;
-                }
-            } catch (e) {
-                setTestResult('Install failed: ' + e.message, 'error');
-                installBtn.disabled = false;
-            }
-        });
-    }
-
-    updateLocalStatus();
-    const interval = setInterval(updateLocalStatus, 3000);
-    return () => { destroyed = true; clearInterval(interval); };
+    const read = async () => {
+        try {
+            const settings = await ctx.readSettings();
+            if (alive) applyLocalModelPolicy(container, checkerUses(deploymentOf(settings?._meta), 'local'));
+        } catch { /* the rows keep what they show */ }
+        if (alive) bound.paint();
+        void readStatus();
+    };
+    const onShown = (event) => { if (event.detail?.path === path) void read(); };
+    globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
+    void read();
+    const interval = setInterval(readStatus, POLL_MS);
+    return { unmount() {
+        alive = false;
+        clearInterval(interval);
+        globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown);
+        bound.dispose();
+    } };
 }
+
+registerSettingsPage(PAGE, { title: 'Local model', mount: mountLocalModel });

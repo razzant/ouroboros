@@ -562,7 +562,6 @@ def _onboarding_payload() -> dict:
         "OUROBOROS_MODEL": MOCK_SLUG,
         "OUROBOROS_MODEL_LIGHT": MOCK_SLUG,
         "OUROBOROS_RUNTIME_MODE": "light",
-        "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
         "TOTAL_BUDGET": 10.0,
         "OUROBOROS_PER_TASK_COST_USD": 10.0,
         "skipSubscriptionPresets": True,

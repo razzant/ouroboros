@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from ouroboros.tools.review_helpers import review_history_with_obligations
 from tests.test_review_change_end_to_end import staged_body as _staged_body
 
 staged_body = _staged_body
@@ -106,30 +105,6 @@ def test_failed_and_open_seat_notes_reach_the_next_round(tmp_path):
     ledger.revise_record(tmp_path, rid, lambda r: {**r, "rows": [
         {**row, "source_refs": [stale, *row["source_refs"]]} if row["seat_id"] == "ok" else row for row in r["rows"]]})
     assert seats()["ok"] == ("response", "Received answer\nEND")
-
-
-def test_missing_durable_obligations_are_an_explicit_gap_with_available_history(tmp_path):
-    state = tmp_path / "state"
-    state.mkdir()
-    (state / "advisory_review.json").write_text("{broken", encoding="utf-8")
-    text = review_history_with_obligations(_rounds(), drive_root=tmp_path, repo_root=tmp_path / "repo")
-    assert "REVIEW_HISTORY_SOURCE_UNAVAILABLE" in text
-    assert "The bounded file is the accepted scope." in text
-    assert "I disagree because atomic writes need a proof." in text
-
-
-def test_obligation_reason_is_complete_in_shared_history(tmp_path):
-    from ouroboros.review_state import AdvisoryReviewState, ObligationItem, make_repo_key, save_state
-
-    reason = "Exact reason and rejected alternative. " * 150 + "DECISIVE_REASON_END"
-    state = AdvisoryReviewState()
-    state.open_obligations.append(ObligationItem(
-        obligation_id="ob-1", item="contract", severity="critical", reason=reason,
-        source_attempt_ts="2026-10-09T00:00:00Z", source_attempt_msg="repair", status="still_open",
-        repo_key=make_repo_key(tmp_path)))
-    save_state(tmp_path, state)
-    text = review_history_with_obligations([], drive_root=tmp_path, repo_root=tmp_path)
-    assert reason in text and "OMISSION NOTE" not in text
 
 
 @pytest.mark.parametrize(("structured", "route", "retrieves"), [
@@ -496,3 +471,19 @@ def test_commit_reviewed_keeps_since_review_in_its_round_and_rejoins_with_the_fr
     settled = review_ledger.load_record(drive, reference["review_record_id"])
     assert settled["state"] == "settled" and settled["brief"]["since_review"] == named[0]
     assert settled["brief"]["dispute_input"]["comparison"] == dispatched
+
+
+def test_an_unreadable_review_state_is_a_named_gap_beside_the_supplied_history(tmp_path):
+    """The prior-rounds section names an unreadable source as a gap in its index and still carries the history it
+    was given; a readable state names no gap."""
+    from ouroboros.tools.review_helpers import review_history_brief
+
+    repo = tmp_path / "repo"
+    (tmp_path / "state").mkdir()
+    readable = review_history_brief(_rounds(), drive_root=tmp_path, repo_root=repo, task_id="task-1")
+    (tmp_path / "state" / "advisory_review.json").write_text("{broken", encoding="utf-8")
+    unreadable = review_history_brief(_rounds(), drive_root=tmp_path, repo_root=repo, task_id="task-1")
+    assert "REVIEW_HISTORY_SOURCE_UNAVAILABLE" in unreadable and "attempt bindings could not be read" in unreadable
+    assert "REVIEW_HISTORY_SOURCE_UNAVAILABLE" not in readable
+    for said in ("The bounded file is the accepted scope.", "I disagree because atomic writes need a proof."):
+        assert said in unreadable and said in readable

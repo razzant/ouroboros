@@ -10,7 +10,12 @@ same frozen facts:
   included). It is NOT evidence that the handler ran or that any effect happened.
 - ``tool_call`` — the settlement: the handler's result (or a host refusal after
   the start), with the host-measured ``elapsed_ms`` of the whole call, distinct
-  from a process's own ``duration_ms``.
+  from a process's own ``duration_ms``. ``status`` is the outcome bucket and
+  ``tool_result_code`` the exact published code; a call a control ended before its
+  handler returned is ``interrupted`` with its ``control_reason``. A row the host
+  settles itself (``host_error``, ``interrupted``, a refused browser call) carries
+  no handler bucket or code; a pause can also refuse a launch through the handler,
+  whose typed refusal names it in ``tool_result_meta.control_reason``.
 - ``tool_call_timeout`` — the caller's wait ended; the worker may still settle
   later. Timeout and settlement are independent facts and may land in either order.
   It names where the worker stood at that moment (``worker_position``), so an
@@ -33,17 +38,35 @@ from contextvars import ContextVar
 from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional
 
+from ouroboros._outcome_tool_errors import SAFETY_HELD_STATUSES
 from ouroboros.utils import append_jsonl, truncate_for_log
 
 CALL_STARTED = "tool_call_started"
 CALL_SETTLED = "tool_call"
 CALL_WAIT_ENDED = "tool_call_timeout"
-_FROZEN_KEYS = ("invocation_id", "tool_call_id", "task_attempt", "execution_id", "round_id", "llm_call_id", "args_source_ref", "args_source_status")
+# What the host settles when the handler returned nothing (``host_settlement``): its own failure (``host_error``), or
+# a control that ended the call (Pause, Cancel, a deadline, the spend rail), named in the row's ``control_reason``.
+HOST_INTERRUPTED = "interrupted"
+HOST_SETTLED_STATUSES = frozenset({"host_error", HOST_INTERRUPTED})
+# Words the interruption types also carry when the host itself failed and no control of the work ended the call: an
+# authority the send needs could not be read (the owner-Pause fence, the model-sleep authority, the launch lock) or the
+# accounting wait outlived the turn's window. The loop ends or parks such work on its technical rails
+# (``loop_round_limits._handle_model_wait_control``), and ``tool_result.launch_refusal_result`` reads the same
+# authority words as an authority it could not read.
+_HOST_FAILURE_WORDS = frozenset({"accounting_wait_expired", "owner_pause_authority_unreadable",
+                                 "model_sleep_authority_unreadable", "owner_launch_authority_unavailable"})
+_FROZEN_KEYS = ("invocation_id", "tool_call_id", "task_attempt", "execution_id", "round_id", "llm_call_id", "args_source_ref", "args_source_status", "chronicle_lead_rule")
 _ACTIVE_CALL = ContextVar("active_tool_call", default=None)
 
 
 def current_tool_call_id() -> str:
     return str((_ACTIVE_CALL.get() or {}).get("tool_call_id") or "")
+
+
+def chronicle_lead_metadata() -> Dict[str, Any]:
+    """The producing attempt's lead fact, frozen before this worker was submitted."""
+    rule = (_ACTIVE_CALL.get() or {}).get("chronicle_lead_rule")
+    return {"lead_rule": rule} if rule is not None else {}
 
 
 def current_args_source() -> Dict[str, Any]:
@@ -193,6 +216,20 @@ def start_log_field(invocation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return {"start_log": outcome} if append_failed(outcome) else {}
 
 
+def host_settlement(exc: BaseException) -> Dict[str, str]:
+    """A call's settlement when its handler raised ``exc``: ``interrupted`` naming the control that ended it (the
+    exception's ``control_reason``; ``pausing`` for a send fenced by a pause being written; ``spend_limit_<scope>``
+    when the owner's spend rail refused the tool's own model send), else the host's own failure. The exception and its
+    word travel on unchanged; the row's preview keeps the word."""
+    from ouroboros.usage_accounting import BudgetExceeded
+
+    scope = exc.limit_scope if isinstance(exc, BudgetExceeded) else ""
+    reason = str(getattr(exc, "control_reason", "") or (scope if scope == "pausing" else f"spend_limit_{scope}" if scope else ""))
+    if not reason or reason.partition(":")[0] in _HOST_FAILURE_WORDS:  # the loop's ``<word>:<cause>`` keeps its word
+        return {"status": "host_error"}
+    return {"status": HOST_INTERRUPTED, "control_reason": reason}
+
+
 def claim_settlement(invocation: Optional[Dict[str, Any]]) -> bool:
     """Claim operation settlement once. A wait end never owns this fact."""
     if invocation is None:
@@ -222,7 +259,7 @@ def logical_calls(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     (the caller stopped waiting, no result recorded), ``unknown`` (only a start),
     ``legacy`` (a pre-identity row) or ``orphan`` (a result whose start row lies
     outside the rows given). A duplicate settlement (pre-guard data) never
-    replaces a real one with a host ``host_error`` row."""
+    replaces a real one with a row the host settled (``HOST_SETTLED_STATUSES``)."""
     calls: List[Dict[str, Any]] = []
     by_id: Dict[str, Dict[str, Any]] = {}
     slot = {CALL_STARTED: "started", CALL_SETTLED: "settled", CALL_WAIT_ENDED: "wait_ended"}
@@ -240,8 +277,8 @@ def logical_calls(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
             calls.append(call)
         key = slot.get(str(row.get("type") or ""), "settled")
         held = call.get(key)
-        if held is None or (key == "settled" and held.get("status") == "host_error"
-                            and row.get("status") != "host_error"):
+        if held is None or (key == "settled" and held.get("status") in HOST_SETTLED_STATUSES
+                            and row.get("status") not in HOST_SETTLED_STATUSES):
             call[key] = row
     for call in calls:
         if "state" not in call:
@@ -279,7 +316,10 @@ def replay_evidence(drive_root: pathlib.Path, task_id: str, want: int = 200, *, 
             if row is not None:
                 observations.append({**base, "fact": fact, "live": False,
                     "receipt": base["receipt"] or row.get("completion_control") is True,
-                    "status": ("error" if row.get("is_error") else "ok") if slot == "settled" else "unknown",
+                    # the live step row's reading; a call a control ended is no failure of the call (#3211)
+                    "status": ("held" if row.get("status") in SAFETY_HELD_STATUSES else row["status"]
+                               if row.get("status") == HOST_INTERRUPTED else "error" if row.get("is_error")
+                               else "ok") if slot == "settled" else "unknown",
                     "hostError": row.get("status") == "host_error",
                     # The row's own recorded host time, as written; a row without one stays without
                     # (never reconstructed), so a reader can order a call by its first observation.

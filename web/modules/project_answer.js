@@ -87,9 +87,10 @@ function refreshFoldsSoon() {
         queued = false;
         // A sleeping row ([data-laid], chat_row_sleep.js) keeps the fold it was measured with at this width: a row that
         // changes wakes, a new width wakes every row, and a feed that is not shown puts none to sleep. Measuring it
-        // would lay it out alone. The rest are measured together, then marked together: one layout serves them all.
+        // would lay it out alone. A room kept away has no size to measure and keeps its folds until it is back. The rest
+        // are measured together, then marked together: one layout serves them all.
         const due = [...document.querySelectorAll('.chat-bubble.project-answer')]
-            .filter((bubble) => !bubble.closest('[data-resizing], [data-laid]'));
+            .filter((bubble) => !bubble.closest('[data-resizing], [data-laid], .chat-instance-panel[hidden]'));
         batch(() => due.forEach(refreshProjectAnswerFold));
     }));
 }
@@ -114,9 +115,7 @@ export function decorateProjectRow(bubble, { role = 'system', projectId = '', pr
     message?.after(actions);
     if (completion) {
         const notice = endingNotice(completionNotice);
-        if (role === 'system' && message && notice && taskName && outcomeTone(notice.phase)) {
-            paintEnding(message, notice, taskName === projectName ? '' : taskName);
-        } else if (limitation && role === 'assistant') {
+        if (!paintProjectEnding(message, { role, completionNotice, taskName, projectName }) && limitation && role === 'assistant') {
             const shown = notice?.cause || limitation;
             const warning = bubble.ownerDocument.createElement('div');
             warning.className = 'msg-provenance project-answer-limitation';
@@ -129,6 +128,16 @@ export function decorateProjectRow(bubble, { role = 'system', projectId = '', pr
         paintTerminalTime(bubble, terminalTimeNote(terminalTime, addedAt));
     }
     return actions;
+}
+
+/** A Project ending's System row with no authored answer reads from the host's typed view when it has one (below):
+ *  then its `.message` is painted with it and the answer is true. The row's bubble and the room's search
+ *  (chat_search_words.js) read the same words. */
+export function paintProjectEnding(message, { role = 'system', completionNotice = null, taskName = '', projectName = '' } = {}) {
+    const notice = endingNotice(completionNotice);
+    if (role !== 'system' || !message || !notice || !taskName || !outcomeTone(notice.phase)) return false;
+    paintEnding(message, notice, taskName === projectName ? '' : taskName);
+    return true;
 }
 
 // The host's typed view of a Project ending. Older rows without cause keep their retained text, never parsed into fields.

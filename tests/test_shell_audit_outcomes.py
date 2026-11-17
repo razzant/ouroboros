@@ -72,8 +72,8 @@ def test_secondary_audit_failure_preserves_real_process_outcome(registry, monkey
     scan_calls = []
 
     def unavailable(_ctx, cmd, *_args, **_kwargs):
-        # A run_script's inner argv names its temporary file, while its outer
-        # audit receives the actual body. Fail precisely that latter audit.
+        # run_script audits its body once: inside the shell on a green exit, in
+        # its own wrapper after any other end. Fail precisely the body's audit.
         if any("AUDIT_PROBE" in str(arg) for arg in cmd):
             scan_calls.append(1)
             raise OSError("secondary observation unavailable")

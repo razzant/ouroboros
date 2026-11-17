@@ -402,7 +402,7 @@ def test_wrapped_inline_read_uses_the_configured_supervisor(environment, monkeyp
     if allowed:
         assert result.status == 'ok' and 'FIXTURE_SECRET_MUST_NOT_REACH_OUTPUT' in result.text
     else:
-        assert (result.status, result.code) == ('blocked', 'SAFETY_VIOLATION')
+        assert (result.status, result.code) == ('blocked', 'SAFETY_RETURNED')
         assert 'FIXTURE_SECRET_MUST_NOT_REACH_OUTPUT' not in result.text
 
 
@@ -467,7 +467,7 @@ def test_child_known_root_read_reaches_the_configured_supervisor(environment, mo
     monkeypatch.setenv('OUROBOROS_SAFETY_MODE', 'full')
     monkeypatch.setattr('ouroboros.safety.check_safety', supervisor)
     result = reg.execute_result('run_command', {'cmd': command, 'cwd': str(work)})
-    assert (result.status, result.code) == ('blocked', 'SAFETY_VIOLATION')
+    assert (result.status, result.code) == ('blocked', 'SAFETY_RETURNED')
     assert decisions == [original]
     assert 'FIXTURE_SECRET_MUST_NOT_REACH_OUTPUT' not in result.text
     assert command == original

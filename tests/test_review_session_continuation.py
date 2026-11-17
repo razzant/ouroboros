@@ -52,7 +52,7 @@ def _engine(monkeypatch, *, resumable=True, stops=1, lose_response=False):
             run_id = accepted.setdefault(idempotency_key, f"run-{len(accepted) + 2}")
             if lose_response and sum("continueFrom" in sent for sent, _key in posts) == 1:
                 raise OSError("Continuation accepted, response lost")
-            return {"runId": run_id}
+            return {"runId": run_id, "storeId": "store-r"}  # the admitting store, as an opted-in receipt names it
         return first_start(self, request, idempotency_key=idempotency_key)
 
     monkeypatch.setattr(FakeGateway, "agent_capabilities", capabilities)
@@ -135,6 +135,8 @@ def test_a_legacy_successor_recorded_by_an_older_host_is_joined_never_recreated(
     assert facts["text"] == "[]" and facts["run_id"] == "run-2"
     replayed = [key for request, key in posts if "continueFrom" in request]
     assert replayed == ([] if legacy_state == "started" else [token])  # the recorded POST, its own key and bytes
+    custody._CUSTODY.clear()  # a joined successor binds only the store its own receipt named
+    assert custody.replay(tmp_path)["run-2"].daemon_store_id == ("" if legacy_state == "started" else "store-r")
 
 
 def test_gateway_continuation_uses_existing_start_protocol(monkeypatch):
@@ -144,7 +146,7 @@ def test_gateway_continuation_uses_existing_start_protocol(monkeypatch):
     try:
         assert gateway.start_run({"continueFrom": "stopped"}, idempotency_key="once")["runId"] == "next"
         assert seen == [("POST", "/v2/runs", {"json_body": {"continueFrom": "stopped"},
-                                               "headers": {"Idempotency-Key": "once"}})]
+                                               "headers": {"Idempotency-Key": "once", "X-Claudexor-Store-Identity": "1"}})]
     finally:
         gateway.close()
 

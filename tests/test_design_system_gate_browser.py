@@ -1,4 +1,4 @@
-"""P11 integration gate: new shell geometry, all pages/tabs, and real touch scrolling.
+"""P11 integration gate: new shell geometry, all pages/tabs, Settings' home and pages, and real touch scrolling.
 
 No xfails: the L3 branch intentionally exposes L1 shell failures until integration.
 Uses the existing static-server/API fixture; never starts the runtime or reads live data.
@@ -15,17 +15,19 @@ import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
 from tests._shared import answer_projects
+from tests.settings_browser_helpers import HOME, walk_settings
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / 'web'
 VIEWPORTS = [
-    (360, 844, False), (390, 844, False), (390, 780, True),
+    (320, 640, False), (360, 844, False), (390, 844, False), (390, 780, True),
     (719, 844, False), (720, 844, False), (721, 844, False),
     (1280, 860, False), (1280, 600, False), (844, 320, False),
 ]
-PROJECTS = [dict(id=f'gate-{i}', name=f'Project {i}: a descriptive project name',
-                 chat_id=100+i, lifecycle='active', visible_revision=0) for i in range(30)]
+# Each row carries the time the list orders by, as the server's always does: gate-0 newest, so the list is this order.
+PROJECTS = [dict(id=f'gate-{i}', name=f'Project {i}: a descriptive project name', chat_id=100+i, lifecycle='active',
+                 visible_revision=0, last_message_at=f'2026-11-01T00:{59 - i:02d}:00+00:00') for i in range(30)]
 TG_STUB = """(() => {
     const listeners = new Map();
     const button = () => ({isVisible:false, show(){this.isVisible=true}, hide(){this.isVisible=false},
@@ -94,7 +96,7 @@ MEASURE = """root => {
         // A page body scrolls sideways only when it CAN scroll (overflow-x auto/scroll); a clipping container
         // (overflow: hidden) with a clipped child, such as a closed Effort strip, is not a page scroll.
         const pageBody = ['auto','scroll'].includes(s.overflowX) &&
-            (e.matches('.page, .settings-scroll, .skills-scroll, .widgets-scroll, .files-list, .dashboard-panel') ||
+            (e.matches('.page, .skills-scroll, .widgets-scroll, .files-list, .dashboard-panel') ||
              ['auto','scroll'].includes(s.overflowY));
         if (pageBody && !local(e) && e.scrollWidth > e.clientWidth + 1)
             overflow.push({node:name(e),extra:e.scrollWidth-e.clientWidth});
@@ -142,7 +144,13 @@ def seed_page(ui, width, height, telegram=False, touch=None):
             'ui_tabs': [dict(skill='gate_skill', tab_id='gate-widget', title='Gate widget', render={
                 'kind':'declarative', 'schema_version':1, 'components':[
                     {'type':'metric','label':'Processed','value':'42'},
-                    {'type':'callout','text':'A widget uses the same contained card on every screen.'}]} )], 'live': {}},
+                    {'type':'callout','text':'A widget uses the same contained card on every screen.'}]} )],
+            'live': {'settings_sections': [dict(skill='gate_skill', section_id='config', key='gate_skill:config',
+                title='Gate skill settings', render={'components': [{'type': 'form', 'id': 'form', 'route': 'settings',
+                    'submit_label': 'Save', 'fields': [
+                        {'name': 'address', 'label': 'A service address with a long descriptive label', 'type': 'text'},
+                        {'name': 'mode', 'label': 'Mode', 'type': 'select', 'default': 'safe',
+                         'options': [{'label': 'Safe', 'value': 'safe'}, {'label': 'Fast', 'value': 'fast'}]}]}]})]}},
         '/api/tasks?queue_only=1': {'tasks': []}, '/api/schedules': {'schedules': []},
         '/api/cost-breakdown': {'total_calls': 4, 'accounting': {
             'settled_usd':25, 'confirmed_usd':25, 'estimated_usd':0, 'reserved_usd':0,
@@ -185,6 +193,14 @@ def nav_pages(page):
 def open_nav(page, name):
     row = page.locator(f'[data-nav-page="{name}"]')
     toggle = page.locator('[data-mobile-nav-toggle]:visible').first
+    # A one-column section page has Back in place of Places. Return through its real header controls.
+    if page.locator('html').get_attribute('data-layout') == 'stack':
+        while not toggle.count():
+            back = page.locator('.page.active .app-page-header .shell-back:visible').first
+            if not back.count():
+                break
+            back.click()
+            rest(page)
     drawer = bool(toggle.count())
     if drawer and toggle.get_attribute('aria-expanded') != 'true':
         toggle.click()
@@ -210,7 +226,7 @@ def save_evidence(tmp_path, name, facts):
     root = Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(tmp_path)))
     root.mkdir(parents=True, exist_ok=True)
     path = root / f'{name}.json'
-    path.write_text(json.dumps(facts, indent=2))
+    path.write_text(json.dumps(facts, indent=2), encoding='utf-8')
     return path
 
 
@@ -242,19 +258,41 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
             open_nav(page, name)
             root = f'#page-{name}'
             if name == 'settings':
-                page.wait_for_selector('#available-subagents-editor .available-subagent-row', state='attached')
+                def measure_settings(view, root=root):
+                    key = f'settings/{view}'
+                    facts[key] = page.evaluate(MEASURE, root)
+                    if any(facts[key].values()):
+                        failures[key] = facts[key]
+                    # A page alone has Back; beside its list the Places control stays with that list.
+                    if width < 720:
+                        control = '[data-mobile-nav-toggle]' if page.locator(HOME).is_visible() else '[data-settings-back]'
+                        if not page.locator(root + ' .app-page-header ' + control).is_visible():
+                            failures[key + '/navigation'] = f'the expected {control} left the header'
+                # The home, every page a module registered (the list of skill forms and the fixture skill's form
+                # among them), and one editor of a page that lists entries.
+                views = walk_settings(page, measure_settings, skill='gate_skill', settle=lambda: rest(page))
+                assert {'skill', 'skill/gate_skill', 'skill-sources'} <= set(views), views
+                facts['settings-views'] = views
+                continue
             if name == 'skills':
                 page.wait_for_selector('.skills-card')
             if name == 'widgets':
                 page.wait_for_selector('.widgets-card')
-            # Settings is mandatory; Dashboard and Skills subviews use the same control.
-            tabs = page.locator(root + ' .app-tab-strip [role="tab"]').all()
+            # Dashboard's vertical rail replaced its strip; every registered view still gets measured.
+            tab_selector = ' [data-dashboard-tab]' if name == 'dashboard' else ' .app-tab-strip [role="tab"]'
+            tabs = page.locator(root + tab_selector).all()
+            if name == 'dashboard':
+                registered = ['logs', 'activity', 'consciousness', 'costs', 'updates', 'storage', 'evolution']
+                assert [tab.get_attribute('data-dashboard-tab') for tab in tabs] == registered
             for index in range(max(1, len(tabs))):
                 tab_name = 'page'
                 if tabs:
+                    if name == 'dashboard' and not tabs[index].is_visible():
+                        page.locator(root + ' [data-dashboard-list-back]').click()
+                        rest(page)
                     tabs[index].click()
-                    tab_name = tabs[index].inner_text().strip()
-                settle(page)
+                    tab_name = tabs[index].get_attribute('data-dashboard-tab') if name == 'dashboard' else tabs[index].inner_text().strip()
+                rest(page)
                 key = f'{name}/{tab_name}'
                 facts[key] = page.evaluate(MEASURE, root)
                 if any(facts[key].values()):
@@ -386,12 +424,11 @@ def test_content_regions_fit_with_touch_controls_and_local_table_scroll(gate_ui)
                 assert cell.evaluate('e => e.scrollWidth > e.clientWidth'), 'the fixture name is longer than its cell'
                 assert cell.evaluate('e => getComputedStyle(e).textOverflow') == 'ellipsis'
             if name == 'settings':
-                page.wait_for_selector('#available-subagents-editor .available-subagent-row', state='attached')
-                for tab in page.locator('[data-settings-tab]').all():
-                    tab.click()
-                    settle(page)
-                    results['settings/' + tab.inner_text().strip()] = page.evaluate(MEASURE, scope)
-                    assert tab.bounding_box()['height'] >= 44
+                walk_settings(page, lambda view: results.__setitem__('settings/' + view, page.evaluate(MEASURE, scope)),
+                              skill='gate_skill', settle=lambda: rest(page))
+                # The overview's rail row exists only in two panes; hidden rows have no touch target.
+                for row in page.locator(f'{HOME} [data-settings-open]:visible').all():
+                    assert row.bounding_box()['height'] >= 44, row.get_attribute('data-settings-open')
             else:
                 settle(page)
                 results[name] = page.evaluate(MEASURE, scope)
@@ -405,5 +442,12 @@ def test_content_regions_fit_with_touch_controls_and_local_table_scroll(gate_ui)
         settle(page)
         broken = page.evaluate(MEASURE, '.dashboard-shell')
         assert any(row['node'].startswith('div#page-costs') for row in broken['overflow']), broken
+
+        # The same sensitivity for Settings: a home row wider than its card must make the home's own probe fail.
+        open_nav(page, 'settings')
+        page.add_style_tag(content='#page-settings .settings-door { min-width: 140%; }')
+        settle(page)
+        broken = page.evaluate(MEASURE, '.settings-shell')
+        assert any('settings-home' in row['node'] for row in broken['overflow']), broken
     finally:
         page.close()

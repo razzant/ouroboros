@@ -57,7 +57,7 @@ def _sleep_policy_allows(task, row, result_root):
                     root_task_id=task.get("root_task_id") or task.get("id"), budget_drive_root=result_root)))
 
 
-def _resume_custody_refusal(result_root, task_id, row, external):
+def _resume_custody_refusal(result_root, task_id, row, external, owner_paused=False):
     """Exact source and off-lock custody observation must both authorize Resume."""
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.budget_pause import EXTERNAL_STOP_CONFIRMED, set_budget_pause
@@ -73,13 +73,13 @@ def _resume_custody_refusal(result_root, task_id, row, external):
         return {"ok": False, "error": "external_custody_unreadable",
                 "detail": str(external.get("error") or ""), "action": "retry_or_cancel"}
     # ``stop_confirmed`` is the only terminal fact; every other run stays under custody.
-    # An owner Pause's started critic is not the member's own writer: it finishes
-    # separately and its result is collected later (owner 2026-10-08, full variant).
-    # The owner's Pause and an authority park leave a started panel's run to its own controller.
-    panel_owned = str(row.get("reason") or "") in {"owner", "authority"}
+    # An owner Pause's started critic is not the member's own writer: it finishes separately, its result collected
+    # later (owner 2026-10-08, full variant), whatever saved row the Pause's closed fence overlays; an authority park
+    # leaves a started panel's run to its controller. A review that cannot apply to the work is never a writer.
+    panel_owned = owner_paused or str(row.get("reason") or "") in {"owner", "authority"}
     unsettled = [run for run in (external.get("runs") or [])
                  if isinstance(run, dict) and str(run.get("state") or "") != EXTERNAL_STOP_CONFIRMED
-                 and not (panel_owned and run.get("review_owned"))]
+                 and not (panel_owned and run.get("review_owned")) and run.get("independent_review") is not True]
     if unsettled and row.get("reason") in {"sleep", "authority"}:
         from ouroboros.sleep_custody import return_allowed
         if return_allowed(task_id, row, external if row.get("reason") == "sleep" else {**external, "runs": unsettled}):
@@ -534,7 +534,7 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
             return {"ok": False, "error": HOLD_REVOCATION_UNWRITTEN, "detail": str(exc)[:200],
                     "grant_id": live_grant.get("grant_id"), "action": "retry_or_cancel"}
         row = {**row, "state": STATE_PAUSED, "grant": revoked}
-    if refusal := _resume_custody_refusal(result_root, task_id, row, external):
+    if refusal := _resume_custody_refusal(result_root, task_id, row, external, bool(owner_fence_id)):
         return refusal
     row = {**row, "external_runs": external,  # an owner Pause's sent work: settled per THIS read
            **({"settlement": "settled"} if row.get("settlement") else {})}
@@ -573,10 +573,9 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         refusal = _root_money_refusal(result_root, task, root_task_id)
         if refusal:
             return refusal
-    # Owner Q9: a descendant cannot be resumed under a root that is itself still paused.
-    if not actor and any(
-            str(item.get("id") or "") == root_task_id and isinstance(item.get("_budget_pause"), dict)
-            for item in q.PENDING):
+    # Owner Q9: a descendant cannot be resumed under a root that is itself still paused (a sleep is a wait).
+    if not actor and any(str(item.get("id") or "") == root_task_id and isinstance(item.get("_budget_pause"), dict)
+                         and item["_budget_pause"].get("reason") != "sleep" for item in q.PENDING):
         return {"ok": False, "error": "root_still_paused", "root_task_id": root_task_id,
                 "action": "resume_root_first"}
     # A later Resume raises the generation; older grants cannot become live again.

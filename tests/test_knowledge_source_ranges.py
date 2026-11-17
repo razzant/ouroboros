@@ -82,20 +82,30 @@ def test_a_bound_that_asks_for_nothing_reads_instead_of_refusing(tmp_path):
 
 
 def test_blank_revision_creates_only_a_missing_note(tmp_path):
-    from ouroboros.tools.knowledge import _knowledge_write
+    """The words and the code agree: omit expected_revision for a bare append; an empty one only creates."""
+    from ouroboros.tools.knowledge import _knowledge_write, get_tools
 
+    schema = next(entry for entry in get_tools() if entry.name == "knowledge_write").schema
+    words = schema["parameters"]["properties"]["expected_revision"]["description"]
+    assert "Omit it for a bare append or to create a note; pass empty only to create a missing note" in words
+    assert "creating a note and a bare append need none" in schema["description"]
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
-    assert "saved" in _knowledge_write(ctx, "new", "First body", expected_revision="")
+    assert "saved" in _knowledge_write(ctx, "new", "First body", mode="overwrite", expected_revision="")
     path = tmp_path / "memory/knowledge/new.md"
     original = path.read_bytes()
     for mode in ("overwrite", "append"):
         assert "revision_conflict" in _knowledge_write(ctx, "new", "Unsafe change", mode=mode, expected_revision="")
         assert path.read_bytes() == original
-    assert "revision_required" in _knowledge_write(ctx, "new", "Unsafe change")
+    assert "revision_required" in _knowledge_write(ctx, "new", "Unsafe change", mode="overwrite")
     revision = hashlib.sha256(original).hexdigest()
-    assert "saved" in _knowledge_write(ctx, "new", "Fresh body", expected_revision=revision)
+    assert "saved" in _knowledge_write(ctx, "new", "Fresh body", mode="overwrite", expected_revision=revision)
     assert "Fresh body" in path.read_text()
-    assert "revision_conflict" in _knowledge_write(ctx, "new", "Stale body", expected_revision=revision)
+    assert "revision_conflict" in _knowledge_write(ctx, "new", "Stale body", mode="overwrite", expected_revision=revision)
+    fresh = path.read_bytes()
+    assert "revision_conflict" in _knowledge_write(ctx, "new", "A bare append.", mode="append", expected_revision="")
+    assert path.read_bytes() == fresh  # an empty expectation on an existing note writes nothing
+    assert "saved" in _knowledge_write(ctx, "new", "A bare append.", mode="append")  # omitted: a bare append
+    assert path.read_bytes() == fresh + b"\nA bare append."
 
 
 def test_boolean_range_bounds_are_not_integer_offsets(tmp_path):

@@ -83,6 +83,8 @@ def test_ended_wait_reask_refuses_same_identity_and_new_key_can_wait(contact_run
                          timeout=10, what="new request parked")
                 assert load_task_result(r.root, ctx.task_id)["owner_wait"]["quiz_id"] == new_id
                 history = json.loads(_assemble_history_response(r.root, 1, 20, 0))
+                # The shipped reader shows both questions open: each head is the owner's amber dot (Main's pill counts
+                # both), and only the wait's own line tells the waiting one from the ended one.
                 run = subprocess.run([shutil.which("node"), "web/tests/presence_contact_consumer.mjs"],
                     input=json.dumps({"reask": {"first": first_frame, "ended": end_frame,
                         "fresh": next(f for f in r.frames if f.get("quiz_id") == new_id), "history": history}}),

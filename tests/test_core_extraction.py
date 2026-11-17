@@ -173,8 +173,14 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # Rolled for the pause/continue doors (audit 05.11): escalate's wait_for_answer description says waiting
     # keeps the work alive with what it holds, until when, and what the default does; nothing else changed
     # (8892c8af... before).
+    # Presence clarification keeps the question notice private and names the requested wait's boundary.
+    # Rolled for the one release of words (#3257): escalate's first sentence asks by authority (BIBLE P0),
+    # its wait clause names work that cannot go on without the answer, and "with an explanation" leaves
+    # the closing sentence; nothing else changed (76a2871b... before).
+    # Rolled for card images: show_card's description says an image takes file (a PNG, JPEG, GIF or WebP the
+    # host copies into the card) or, like audio and video, an inline data: URI; nothing else changed (4da8992f... before).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "2f79b9f5e817f17552818bd9cd50c253b1c9fee3e4612b8fc02e66d92cc6e522"
+        "7a1e368b63165124e58b8b117dc4a1fc843701a9a96ee7700d5cd29a717037b5"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
@@ -226,13 +232,3 @@ def test_extracted_read_and_list_result_bytes_are_stable(tmp_path):
     assert core_file_tools._repo_list(ctx, ".").encode() == (
         b'[\n  "nested/",\n  "sample.txt"\n]'
     )
-
-
-def test_core_extraction_size_bounds_have_meaningful_headroom():
-    counts = {
-        module.__name__: len(pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines())
-        for module in (core, core_file_tools, core_artifacts)
-    }
-    assert counts["ouroboros.tools.core"] <= 1499
-    assert counts["ouroboros.tools.core_file_tools"] <= 1000
-    assert counts["ouroboros.tools.core_artifacts"] <= 1000

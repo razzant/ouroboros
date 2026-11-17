@@ -766,28 +766,9 @@ def _status_and_message_from_exception(exc: BaseException) -> Tuple[Optional[int
 
 
 def _context_overflow_evidence(error: Any) -> bool:
-    try:
-        from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES
-    except Exception:
-        return False
-    values = []
-    if isinstance(error, BaseException):
-        values.extend((getattr(error, "code", None), getattr(error, "type", None)))
-        payload = getattr(error, "body", None)
-        response = getattr(error, "response", None)
-        if payload is None and response is not None and callable(getattr(response, "json", None)):
-            try:
-                payload = response.json()
-            except Exception:
-                payload = None
-    else:
-        payload = error
-    if isinstance(payload, Mapping):
-        values.extend(payload.get(key) for key in ("code", "type", "kind"))
-        nested = payload.get("error")
-        if isinstance(nested, Mapping):
-            values.extend(nested.get(key) for key in ("code", "type", "kind"))
-    return any(str(value or "").strip().lower() in CONTEXT_OVERFLOW_CODES for value in values)
+    from ouroboros.llm_attempt import is_size_refusal  # the shared recognition; that module imports this one
+
+    return isinstance(error, (BaseException, Mapping)) and is_size_refusal(error)
 
 
 def _field_is_present(payload: Mapping[str, Any], field: str) -> bool:

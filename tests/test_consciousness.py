@@ -172,13 +172,16 @@ def test_status_details_and_launch_use_only_stored_places(clock, monkeypatch):
         pytest.fail("status and launch must not discover connectors or reread the allowance")
 
     for target in ("ouroboros.skill_loader.discover_skills", "ouroboros.place_projection.place_declarations",
-                   "ouroboros.place_arrivals.account_candidates", "ouroboros.place_projection.migration_problems",
-                   "ouroboros.consciousness_allowance.allowance_window", "ouroboros.place_projection.place_activity"):
+                   "ouroboros.place_projection.migration_problems", "ouroboros.consciousness_allowance.allowance_window"):
         monkeypatch.setattr(target, forbidden)
-    # One index pass per place: open turns and the newest arrival come from the room index.
-    monkeypatch.setattr(places, "place_room_index", lambda root, place_id: [
-        {"room_chat_id": 123, "unanswered_count": 1, "last_at": "2027-01-15T11:00:00Z"},
-        {"room_chat_id": 124, "unanswered_count": 2, "last_at": "2027-01-15T12:00:00Z"}])
+
+    # One brief read of the stores for the places: open turns and the newest arrival come from the room index.
+    def brief_facts(root, rows, full=True):
+        assert full is False, "status and launch must not read activity"
+        return {place.place_id: {"rooms": [
+            {"room_chat_id": 123, "unanswered_count": 1, "last_at": "2027-01-15T11:00:00Z"},
+            {"room_chat_id": 124, "unanswered_count": 2, "last_at": "2027-01-15T12:00:00Z"}]} for place in rows}
+    monkeypatch.setattr("ouroboros.place_arrivals.place_facts", brief_facts)
     original = view.place_views
 
     def project(*args, **kwargs):
@@ -320,49 +323,46 @@ def test_an_accepted_wake_advances_the_observation_boundary_and_a_refused_one_do
 def test_a_refused_wake_consumes_no_transition_and_the_admitted_one_persists_observed_identities(clock):
     """The accepted boundary carries the task-result transition state beside the chat position:
     a child that settles with no chat row is reported by the next ADMITTED wake, not lost to a
-    refused one. The complete inventory lives in the exact wake source."""
+    refused one. The complete inventory lives in the accepted transition chain."""
     from ouroboros.consciousness import OBSERVATION_STATE_KEY
+    from ouroboros.consciousness_transitions import read_chain
 
     (clock.root / "task_results").mkdir()
     row = {"task_id": "kid", "status": "running", "ts": _iso(T0 - 100), "updated_at": _iso(T0 - 100),
            "_schema_version": 1, "metadata": {}, "description": "child work"}
     seed_result(clock.root, "kid", row)
     assert clock.clock.tick(T0 + FLOOR + 1) == "launched"
-    accepted = clock.launches[-1]["task"]["metadata"]["wake_observation"]["accepted_boundary"]["transitions"]
-    from ouroboros.artifacts import read_actor_source_bytes
-    source = accepted['source_ref']
-    header = json.loads(read_actor_source_bytes(clock.root, source['task_id'], source).splitlines()[0])
-    inventory = header['boundary']['transitions']
+    accepted = clock.launches[-1]["task"]["metadata"]["wake_observation"]["accepted_boundary"]["transition_chain"]
+    inventory = read_chain(clock.root, accepted).state
     assert inventory["inventory"] == {"kid": []} and inventory["scan_at"] == _iso(T0 + FLOOR + 1)
     seed_result(clock.root, "kid", {**row, "status": "failed", "updated_at": _iso(T0 + FLOOR + 50)})  # the orphan sweep
     clock.finish("wake0001", True)
-    assert clock.store[OBSERVATION_STATE_KEY]["transitions"] == accepted  # the terminal carried the accepted identities
+    assert clock.store[OBSERVATION_STATE_KEY]["transition_chain"] == accepted  # the terminal carried the accepted identities
     clock.receipt.update({"admitted": False, "task_id": "", "reason": "budget_exhausted"})
     clock.clock._next_wake_at = T0 + 2 * FLOOR
     assert clock.clock.tick(T0 + 2 * FLOOR) == "rejected:budget_exhausted"
-    assert clock.store[OBSERVATION_STATE_KEY]["transitions"] == accepted
+    assert clock.store[OBSERVATION_STATE_KEY]["transition_chain"] == accepted
     clock.receipt.update({"admitted": True, "task_id": "wake0002", "reason": ""})
     clock.clock._next_wake_at = T0 + 3 * FLOOR
     assert clock.clock.tick(T0 + 3 * FLOOR) == "launched"
     assert "- task kid Failed, completion time not recorded" in clock.launches[-1]["text"]
     clock.finish("wake0002", True)
-    source = clock.store[OBSERVATION_STATE_KEY]["transitions"]['source_ref']
-    header = json.loads(read_actor_source_bytes(clock.root, source['task_id'], source).splitlines()[0])
     # The carried wake's own terminal row is a transition like any task's.
-    assert set(header['boundary']['transitions']["inventory"]) == {"kid", "wake0001"}
+    chain = read_chain(clock.root, clock.store[OBSERVATION_STATE_KEY]["transition_chain"])
+    assert set(chain.state["inventory"]) == {"kid", "wake0001"}
 
 
 @pytest.mark.parametrize('failure', ['write', 'corrupt_previous', 'missing_previous'])
 def test_inventory_source_failure_never_advances_accepted_boundary(clock, monkeypatch, failure):
     from ouroboros import artifacts, chat_chain
     from ouroboros.consciousness import OBSERVATION_STATE_KEY
+    from ouroboros.consciousness_transitions import CHAIN_REL
 
     _chat_row(root=clock.root, ts=_iso(T0 + 1), direction='in', chat_id=1, source='web', text='first')
     assert clock.clock.tick(T0 + FLOOR + 1) == 'launched'
     clock.finish('wake0001', True)
     accepted = clock.store[OBSERVATION_STATE_KEY]
-    source = accepted['transitions']['source_ref']
-    path = artifacts.task_artifact_dir_path(clock.root, source['task_id']) / source['path']
+    path = clock.root / CHAIN_REL / f"{accepted['transition_chain']['link']}.json"
     original = path.read_bytes()
     _chat_row(root=clock.root, ts=_iso(T0 - 100), direction='in', chat_id=1, source='web', text='late old row')
     clock.receipt['task_id'] = 'wake0002'
@@ -394,11 +394,12 @@ def test_inventory_source_failure_never_advances_accepted_boundary(clock, monkey
 
 
 @pytest.mark.parametrize('version', [1, 2])
-def test_inline_inventory_migrates_to_the_source_bound_transitions(clock, version):
-    """A v1 inline inventory migrates to the v2 source-bound record (a late-review wake of a
-    closed task left with the acceptance machine; the migration stays)."""
+def test_inline_inventory_migrates_to_a_base_of_the_transition_chain(clock, version):
+    """An inline inventory (v1, a late-review wake of a closed task left with the acceptance
+    machine; or v2) migrates to a base of the transition chain the boundary names; the migration stays."""
     from ouroboros import consciousness_wake as wake
     from ouroboros.consciousness import OBSERVATION_STATE_KEY
+    from ouroboros.consciousness_transitions import read_chain
     from tests.test_consciousness_wake import _write
 
     _write(clock.root, 'old', status='completed', ts=_iso(T0 - 86400))
@@ -409,14 +410,16 @@ def test_inline_inventory_migrates_to_the_source_bound_transitions(clock, versio
     assert clock.clock.tick(T0 + FLOOR + 1) == 'launched'
     assert ('task old Done' in clock.launches[-1]['text']) is (version == 1)
     clock.finish('wake0001', True)
-    accepted = clock.store[OBSERVATION_STATE_KEY]['transitions']
-    assert set(accepted) == {'version', 'source_ref'} and accepted['version'] == 2
+    accepted = clock.store[OBSERVATION_STATE_KEY]
+    chain = read_chain(clock.root, accepted['transition_chain'])
+    assert 'transitions' not in accepted and accepted['transition_chain']['version'] == 3
+    assert len(chain.names) == 1 and set(chain.state['inventory']) == {'old'}  # one base, the whole state
 
 
 @pytest.mark.parametrize(("restart", "failure"), [(False, 'readback'), (True, 'write'), (True, 'bootstrap_write')])
 def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, failure, restart):
     from ouroboros import artifacts, chat_chain
-    from ouroboros.consciousness import OBSERVATION_STATE_KEY
+    from ouroboros.consciousness import OBSERVATION_BOOTSTRAP_STATE_KEY, OBSERVATION_STATE_KEY
     from tests.test_consciousness_wake import _write
 
     _chat_row(root=clock.root, ts=_iso(T0 - 1), direction='in', chat_id=1, source='web', text='before bootstrap')
@@ -427,7 +430,6 @@ def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, fa
             fault.setattr(artifacts, 'read_actor_source_bytes', lambda *a, **kw: b'bad readback')
         if failure == 'bootstrap_write':
             from supervisor import state
-            from ouroboros.consciousness import OBSERVATION_BOOTSTRAP_STATE_KEY
 
             update = state.update_state
 
@@ -447,6 +449,7 @@ def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, fa
     monkeypatch.setattr(clock_module.time, 'time', lambda: finish_at)
     clock.finish('wake0001', not restart)
     assert not clock.store.get(OBSERVATION_STATE_KEY)  # the failed source rode no accepted boundary to the clock
+    assert clock.store[OBSERVATION_BOOTSTRAP_STATE_KEY] == T0  # nothing accepted: the bootstrap stays
     alarm = BackgroundConsciousness(clock.root, clock.root / 'repo', lambda: 7, now=finish_at + 1) if restart else clock.clock
     clock.receipt['task_id'] = 'wake0002'
     assert alarm.tick(alarm.next_wake_at) == 'launched'
@@ -455,6 +458,9 @@ def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, fa
     assert 'before bootstrap' not in _observed(clock)
     clock.finish('wake0002', True, alarm=alarm)
     assert clock.store[OBSERVATION_STATE_KEY]
+    # An accepted boundary moves the bootstrap to its capture: a body without the chain reader starts there.
+    captured = clock_module.parse_deadline_ts(clock.store[OBSERVATION_STATE_KEY]['captured_at']).timestamp()
+    assert clock.store[OBSERVATION_BOOTSTRAP_STATE_KEY] == captured == alarm._observation_bootstrap_since > T0
     clock.receipt['task_id'] = 'wake0003'
     assert alarm.tick(alarm.next_wake_at + DEFAULT) == 'launched'
     assert 'during first wake' not in _observed(clock)
@@ -462,8 +468,8 @@ def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, fa
 
 
 def test_full_inventory_moves_out_of_hot_state_without_forgetting_closed_tasks(clock):
-    from ouroboros import artifacts
     from ouroboros.consciousness import OBSERVATION_STATE_KEY
+    from ouroboros.consciousness_transitions import read_chain
     from ouroboros.task_results import write_task_result
 
     for index in range(160):
@@ -472,9 +478,7 @@ def test_full_inventory_moves_out_of_hot_state_without_forgetting_closed_tasks(c
     clock.finish('wake0001', True)
     accepted = clock.store[OBSERVATION_STATE_KEY]
     assert len(json.dumps(accepted)) < 1800
-    source = accepted['transitions']['source_ref']
-    header = json.loads(artifacts.read_actor_source_bytes(clock.root, source['task_id'], source).splitlines()[0])
-    assert len(header['boundary']['transitions']['inventory']) == 160
+    assert len(read_chain(clock.root, accepted['transition_chain']).state['inventory']) == 160
     write_task_result(clock.root, 'new-old', 'completed', ts=_iso(T0 - 86400))
     clock.receipt['task_id'] = 'wake0002'
     clock.clock._next_wake_at = T0 + 2 * FLOOR
@@ -598,17 +602,18 @@ def test_a_skipped_wake_records_the_allowance_window_it_met(clock, monkeypatch):
 
 
 def _spent_window(resets_at, settled=20.4):
-    """The ledger as ``allowance_window`` reads it, against whatever daily limit the setting holds now."""
+    """The ledger as ``allowance_window`` reads it, against whatever daily limit the setting holds now. ``reads``
+    are the wake admission's exact reads (the tick's), ``shown`` the status view's display reads."""
     from ouroboros.config import get_consciousness_daily_usd
 
-    def window(root, now=None, **_display_read):
+    def window(root, now=None, **display_read):
         limit = float(get_consciousness_daily_usd())
-        window.reads.append(now)
+        (window.shown if display_read.get("forecast") else window.reads).append(now)
         return {**AVAILABLE, "limit_usd": limit, "settled_usd": settled, "accounted_usd": settled,
                 "remaining_usd": max(0.0, limit - settled), "resets_at": resets_at,
                 "status": "exhausted" if settled >= limit else "available"}
 
-    window.reads = []
+    window.reads, window.shown = [], []
     return window
 
 
@@ -646,6 +651,8 @@ def test_a_changed_daily_limit_retries_a_money_skip_after_min(clock, monkeypatch
     line = view.describe_consciousness_state(clock.clock.status_snapshot(), True)["detail"]
     assert line.endswith(f"next check {view._when(clock_module._iso(now + 2 * FLOOR))}."), line
     assert clock.clock.tick(now + 2 * FLOOR - 1) == "not_due" and len(window.reads) == 2
+    # The status view read its own display windows, a changed limit included; a tick never read for it.
+    assert len(window.shown) >= 2
     assert clock.clock.tick(now + 2 * FLOOR) == "launched"
     assert clock.launches[-1]["metadata"]["root_cost_ceiling_usd"] == pytest.approx(29.6)
 
@@ -803,6 +810,25 @@ def test_launch_cap_is_the_remaining_allowance_when_no_per_task_cap(clock, monke
     monkeypatch.setenv("OUROBOROS_PER_TASK_COST_USD", "0")
     assert clock.clock.tick(T0 + FLOOR + 1) == "launched"
     assert clock.launches[0]["metadata"]["root_cost_ceiling_usd"] == 17.5
+    # A disabled per-task cap leaves the allowance alone to set it.
+    assert clock.launches[0]["metadata"]["root_cost_ceiling_source"] == "allowance"
+
+
+@pytest.mark.parametrize("per_task,ceiling,source", [("50", 17.5, "allowance"), ("10", 10.0, "per_task_cap"),
+                                                     ("17.5", 17.5, "both")])
+def test_launch_stamps_which_limit_set_the_ceiling(clock, monkeypatch, per_task, ceiling, source):
+    """Observed at launch, where min(per-task cap, allowance left) is taken (17.5 left of the day here): the views
+    that explain a pause read it; no stop, fence or Resume does."""
+    monkeypatch.setenv("OUROBOROS_PER_TASK_COST_USD", per_task)
+    assert clock.clock.tick(T0 + FLOOR + 1) == "launched"
+    metadata = clock.launches[0]["metadata"]
+    assert (metadata["root_cost_ceiling_usd"], metadata["root_cost_ceiling_source"]) == (ceiling, source)
+    started = [row for row in _events(clock.root) if row["type"] == "consciousness_wake_started"]
+    assert (started[0]["root_cost_ceiling_usd"], started[0]["root_cost_ceiling_source"]) == (ceiling, source)
+    # The durable row keeps it as the queue's park and a restart's restore copy metadata (queue_snapshot).
+    clock.finish("wake0001", True)
+    from tests._store_shared import read_result
+    assert read_result(clock.root, "wake0001")["metadata"]["root_cost_ceiling_source"] == source
 
 
 def test_a_thin_allowance_still_wakes_and_only_known_exhaustion_skips(clock, monkeypatch):
@@ -956,7 +982,7 @@ def test_start_and_stop_flip_the_flag_and_stop_arms_a_graceful_stop_of_a_live_wa
     import threading
 
     assert clock.clock.start() == "Background consciousness is already enabled."
-    assert clock.clock.stop() == "Background consciousness disabled."
+    assert clock.clock.stop() == "Consciousness off: no own wakes."  # no place, nothing live: nothing else to say
     assert clock.clock.enabled is False and clock.clock.tick(T0 + FLOOR + 1) == "disabled"
     assert clock.clock.stop() == "Background consciousness is already disabled."
     assert clock.clock.start().startswith("Background consciousness enabled; next wake-up at ")
@@ -973,8 +999,181 @@ def test_start_and_stop_flip_the_flag_and_stop_arms_a_graceful_stop_of_a_live_wa
     monkeypatch.setattr("supervisor.worker_chat_lane.stop_direct_chat_turn",
                         lambda *a, **k: pytest.fail("a carried wake has no in-process actor to stop"))
     message = clock.clock.stop()
-    assert message == "Background consciousness disabled; wake-up wake0001 ends at its next step."
+    assert message == "Consciousness off: no own wakes. Stopping now: its wake-up."
     assert done.wait(5) and stopped == ["wake0001"]
+
+
+@pytest.mark.parametrize("stored,said", [
+    ((("active", "active"), ("silent", "silent"), ("paused", "paused")),
+     "Consciousness off: no own wakes, and 2 places only hear until Start."),
+    ((("silent", "silent"),), "Consciousness off: no own wakes, and 1 place only hears until Start."),
+    ((("paused", "paused"),), "Consciousness off: no own wakes."),
+    (None, "Consciousness off: no own wakes, and its places only hear until Start."),
+])
+def test_off_says_how_many_places_only_hear_until_start(clock, monkeypatch, stored, said):
+    """Owner 06.11: he pressed Off to stop one place's replies, and nothing said that every place that is not Paused
+    then only hears until Start. The Main row (and the Telegram /bg reply) says it; an unreadable place store changes
+    only the words, never the switch."""
+    from ouroboros import places
+    if stored is None:
+        monkeypatch.setattr(places, "load_places", lambda _root: (_ for _ in ()).throw(OSError("places unreadable")))
+    for place_id, state in stored or ():
+        places.connect_place(clock.root, place_id=place_id, connector="bridge", provider="chat",
+                             conversation_id=place_id, label=place_id, state=state)
+    assert clock.clock.stop() == said
+    assert clock.clock.enabled is False, "an unreadable place store never holds the switch"
+    assert clock.clock.stop() == "Background consciousness is already disabled."
+
+
+# --- who stopped it (owner 11.11, 5A): the owner's and Panic's stops are the owner's to lift -----------------------
+
+
+@pytest.fixture
+def held(monkeypatch, tmp_path):
+    """A clock over the REAL state store (locked writes, recovery, unavailability), consciousness on, nothing live."""
+    from supervisor import queue, state, workers
+
+    prior = state.DRIVE_ROOT
+    state.init(tmp_path)
+    state.save_state({"owner_chat_id": 7, "bg_consciousness_enabled": True})
+    for module in (workers, queue):
+        monkeypatch.setattr(module, "RUNNING", {})
+        monkeypatch.setattr(module, "PENDING", [])
+    get_direct_activity_registry().clear()
+
+    def saved():
+        projection = state.read_state(tmp_path).projection()
+        return (state.control_value(projection, "bg_consciousness_enabled"),
+                state.control_value(projection, clock_module.STOP_SOURCE_KEY))
+
+    yield SimpleNamespace(clock=BackgroundConsciousness(tmp_path, tmp_path, lambda: 7, now=T0), root=tmp_path,
+                          saved=saved, state=state)
+    state.init(prior)
+
+
+@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])  # cyber_pro: no mode makes the owner's stop the mind's
+def test_the_owners_stop_holds_against_the_minds_start_until_the_owners_own_start(held, monkeypatch, mode):
+    from ouroboros.consciousness import AGENT_STOP, OWNER_STOP, held_stop_text
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+    held.clock.stop(source=OWNER_STOP)
+    assert held.saved() == ((True, False), (True, "owner"))
+    assert held.clock.start(source=AGENT_STOP) == held_stop_text("owner") and held.clock.enabled is False
+    restarted = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)  # a restart reads the saved stop
+    assert restarted.start(source=AGENT_STOP).startswith("Background consciousness stayed off: the owner turned it off")
+    assert held.saved() == ((True, False), (True, "owner")) and restarted.enabled is False
+    assert restarted.start().startswith("Background consciousness enabled; next wake-up at ")  # /bg start, any door
+    assert held.saved() == ((True, True), (True, None)) and restarted.enabled is True
+
+
+def test_the_minds_own_stop_stays_its_own_and_never_relabels_another(held):
+    from ouroboros.consciousness import AGENT_STOP, OWNER_STOP, held_stop_text
+
+    held.clock.stop(source=AGENT_STOP)
+    assert held.saved() == ((True, False), (True, "agent_tool"))
+    assert held.clock.start(source=AGENT_STOP).startswith("Background consciousness enabled")
+    assert held.saved() == ((True, True), (True, None))
+    held.clock.stop(source=OWNER_STOP)
+    held.clock.stop(source=AGENT_STOP)  # a later stop of its own never makes the owner's stop the mind's
+    assert held.saved() == ((True, False), (True, "owner"))
+    assert held.clock.start(source=AGENT_STOP) == held_stop_text("owner")
+
+
+def test_panic_and_an_unrecorded_stop_need_the_owners_start(held):
+    from ouroboros import server_control
+    from ouroboros.consciousness import AGENT_STOP, held_stop_text
+
+    held.state.update_state(server_control._panic_controls, confirm=server_control.PANIC_CONTROL_KEYS)
+    clock = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)
+    clock.stop(source=AGENT_STOP)
+    assert held.saved() == ((True, False), (True, "panic"))
+    assert clock.start(source=AGENT_STOP) == held_stop_text("panic") and "Panic turned it off" in held_stop_text("panic")
+    # Migration: off with no recorded source (an earlier body's stop) is unknown until the owner starts it once.
+    held.state.update_state(lambda st: st.pop(clock_module.STOP_SOURCE_KEY))
+    assert clock.start(source=AGENT_STOP) == held_stop_text("")
+    assert "who turned it off is not recorded" in held_stop_text("") and clock.enabled is False
+    assert clock.start().startswith("Background consciousness enabled") and held.saved()[1] == (True, None)
+
+
+def test_unknown_or_unwritable_state_refuses_the_mind_and_the_owners_stop_still_holds_here(held, monkeypatch):
+    from ouroboros.consciousness import AGENT_STOP, OWNER_STOP, held_stop_text
+    from supervisor.state import StateUnavailable, mark_unconfirmed
+
+    def recovered(st):  # a backup recovery: the mind's own earlier stop is no longer proven
+        st.update(bg_consciousness_enabled=False, bg_consciousness_stop_source="agent_tool")
+        mark_unconfirmed(st, "bg_consciousness_enabled")
+        mark_unconfirmed(st, clock_module.STOP_SOURCE_KEY)
+
+    held.state.update_state(recovered)
+    clock = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)
+    assert clock.start(source=AGENT_STOP) == held_stop_text("") and clock.enabled is False
+    assert clock.start().startswith("Background consciousness enabled")  # the owner's start confirms both again
+    real = held.state.update_state
+
+    def unwritable(*_args, **_kwargs):
+        raise StateUnavailable("lock_timeout", "update")
+
+    monkeypatch.setattr(held.state, "update_state", unwritable)
+    said = clock.stop(source=OWNER_STOP)
+    assert said.startswith("Consciousness off") and clock.enabled is False
+    assert " Not saved (runtime state unavailable, lock_timeout): the stop holds in this process only." in said
+    assert clock.start(source=AGENT_STOP) == held_stop_text("owner")
+    stayed = "Background consciousness stayed off: runtime state is unavailable (lock_timeout); nothing was started."
+    assert clock.start() == stayed and clock.enabled is False, "a failed enable never turns the clock on first"
+    monkeypatch.setattr(held.state, "update_state", real)
+    assert held.saved()[0] == (True, True), "the stale saved choice: only this process holds the owner's stop"
+    assert clock.start(source=AGENT_STOP) == held_stop_text("owner") and clock.enabled is False
+    assert held.saved()[0] == (True, True), "a refused start writes nothing"
+    clock.stop(source=AGENT_STOP)  # the mind's next stop saves the stop this process holds as the owner's
+    assert held.saved() == ((True, False), (True, "owner"))
+    assert clock.start(source=AGENT_STOP) == held_stop_text("owner")
+
+
+def test_a_backup_only_failure_says_what_was_saved_and_the_next_tick_agrees(held, monkeypatch):
+    """The primary copy holds the change and only its backup failed (``primary_written``): the reply says it was
+    saved, never "nothing was started" or "this process only", and the clock, then and on its next tick, is what the
+    saved state says; a restart reads the same."""
+    from ouroboros.consciousness import AGENT_STOP, OWNER_STOP
+
+    real = held.state.atomic_write_text
+
+    def no_backup(path, content):
+        if path == held.state.STATE_LAST_GOOD_PATH:
+            raise OSError("backup unwritable")
+        return real(path, content)
+
+    note = " Saved, but the state's backup copy was not written (backup_write_failed)."
+    held.clock.stop(source=AGENT_STOP)
+    clock = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)  # a fresh process over the mind's own stop
+    monkeypatch.setattr(held.state, "atomic_write_text", no_backup)
+    said = clock.start(source=AGENT_STOP)
+    assert said.startswith("Background consciousness enabled; next wake-up at ") and said.endswith(note), said
+    assert held.saved() == ((True, True), (True, None)) and clock.enabled is True
+    clock.tick(now=T0)
+    assert clock.enabled is True, "the next tick reads the enable the reply named"
+    said = clock.stop(source=OWNER_STOP)
+    assert note in said and "this process only" not in said, said
+    assert held.saved() == ((True, False), (True, "owner"))
+    clock.tick(now=T0)
+    restarted = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)
+    assert clock.enabled is False and restarted.enabled is False, "the stop the reply named is the saved one"
+
+
+def test_a_queued_tool_start_meets_the_stop_the_owner_placed_after_it(held):
+    """The tool only queues; the clock decides when the supervisor runs the event, against the stop standing then."""
+    from ouroboros.consciousness import OWNER_STOP, held_stop_text
+    from ouroboros.tools import control
+    from supervisor import events_runtime_controls
+
+    tool = SimpleNamespace(task_id="t1", pending_events=[], drive_root=held.root, task_metadata={})
+    assert control._toggle_consciousness(tool, "start") == "OK: consciousness 'start' requested."
+    held.clock.stop(source=OWNER_STOP)  # /bg stop from the phone lands before the event is drained
+    sent: list = []
+    ctx = SimpleNamespace(consciousness=held.clock, load_state=held.state.load_state,
+                          send_with_budget=lambda chat, text, **kw: sent.append((chat, text, kw)))
+    events_runtime_controls._handle_toggle_consciousness(tool.pending_events[-1], ctx)
+    assert sent == [(7, f"🧠 {held_stop_text('owner')}", {"role": "system", "system_type": "consciousness_notice"})]
+    assert held.clock.enabled is False and held.saved() == ((True, False), (True, "owner"))
 
 
 def test_status_snapshot_carries_the_alarm_facts(clock):
@@ -984,17 +1183,46 @@ def test_status_snapshot_carries_the_alarm_facts(clock):
         "last_wake_outcome", "last_error", "spent_24h_usd", "daily_usd", "allowance_resets_at",
         "tasks_running", "max_tasks", "live_wake_task_id", "unknown_unmetered", "integrity_degraded",
         "spend_by_cause", "counted_roots", "places_brief", "appointment_at", "live_wake_held",
+        "live_wake_hold", "allowance_status", "allowance_open_rows", "allowance_room_after", "model_route",
     }
     assert snapshot["enabled"] is True and snapshot["level"] == "act"
     assert snapshot["unknown_unmetered"] == 0 and snapshot["integrity_degraded"] is False
     assert snapshot["next_wake_at"].startswith("2027-") and snapshot["last_wake_at"] == ""
     assert snapshot["spent_24h_usd"] == 2.5 and snapshot["daily_usd"] == 20.0
     assert snapshot["tasks_running"] == 1 and snapshot["max_tasks"] == 2 and snapshot["live_wake_task_id"] == ""
+    # The current window's own verdict; no held wake, so no hold; an absent count stays absent, never 0.
+    assert snapshot["allowance_status"] == "available" and snapshot["live_wake_hold"] is None
+    assert snapshot["allowance_open_rows"] is None and snapshot["allowance_room_after"] == ""
+
+
+def test_status_snapshot_names_the_model_its_next_wake_thinks_with(clock, monkeypatch):
+    """``model_route``: the route the next wake takes, with its local flag; ``layer`` ``consciousness`` when its own
+    slot decides it (``route_choice.model_role_slot_override``), else ``main``; a route that cannot be read is null,
+    never a guess."""
+    from ouroboros import route_choice
+
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai/gpt-6-astra")
+    monkeypatch.setenv("USE_LOCAL_MAIN", "false")
+    monkeypatch.setenv("OUROBOROS_MODEL_CONSCIOUSNESS", "anthropic/claude-opus-5-5")
+    monkeypatch.setenv("USE_LOCAL_CONSCIOUSNESS", "")
+    route = lambda: clock.clock.status_snapshot()["model_route"]  # noqa: E731
+    assert route() == {"value": "anthropic/claude-opus-5-5", "layer": "consciousness", "local": False}
+    monkeypatch.setenv("OUROBOROS_MODEL_CONSCIOUSNESS", "")
+    assert route() == {"value": "openai/gpt-6-astra", "layer": "main", "local": False}
+    # An empty slot's own box, checked under a cloud Main, decides the route: Main's model, run locally.
+    monkeypatch.setenv("USE_LOCAL_CONSCIOUSNESS", "true")
+    assert route() == {"value": "openai/gpt-6-astra", "layer": "consciousness", "local": True}
+    monkeypatch.setenv("USE_LOCAL_MAIN", "true")  # equal flags: Main's own route, local
+    assert route() == {"value": "openai/gpt-6-astra", "layer": "main", "local": True}
+    monkeypatch.setenv("USE_LOCAL_CONSCIOUSNESS", "false")  # an unchecked box follows a local Main (owner, #3272)
+    assert route() == {"value": "openai/gpt-6-astra", "layer": "main", "local": True}
+    monkeypatch.setattr(route_choice, "following_route", lambda *_a, **_k: (_ for _ in ()).throw(OSError("unreadable")))
+    assert route() is None
 
 
 def test_the_status_view_may_ride_a_snapshot_and_a_wake_admission_never_does(clock, monkeypatch):
-    """The status view shows money, so it may lag behind a contended ledger lock; the
-    wake ADMISSION spends it, so it reads exactly. One reader, two callers."""
+    """The status view shows money, so it may lag behind a contended ledger lock, and asks for the display's
+    forecast; the wake ADMISSION spends it, so it reads exactly and computes none. One reader, two callers."""
     reads: list = []
 
     def window(root, now=None, **display_read):
@@ -1002,11 +1230,103 @@ def test_the_status_view_may_ride_a_snapshot_and_a_wake_admission_never_does(clo
         return dict(AVAILABLE)
 
     monkeypatch.setattr(clock_module, "allowance_window", window)
-    clock.clock._allowance = (0.0, {})  # nothing cached: the view must read
+    clock.clock._allowance = (0.0, {}, False)  # nothing cached: the view must read
     clock.clock.status_snapshot()
-    assert reads == [{"allow_stale": True}]
+    assert reads == [{"allow_stale": True, "forecast": True}]
     clock.clock._allowance_view(T0, fresh=True)
     assert reads[-1] == {"allow_stale": False}
+
+
+def test_a_cached_view_is_reused_only_while_it_is_still_this_window(clock, monkeypatch):
+    """Inside the TTL a display read reuses its own cached window, but not a wake's forecast-less one, not under a
+    changed limit and not after the first counted row left (the forecast would be stale)."""
+    from ouroboros.config import get_consciousness_daily_usd
+
+    reads: list = []
+    exhausted = dict(AVAILABLE, status="exhausted", settled_usd=20.0, remaining_usd=0.0, room_after=_iso(T0 + 600))
+
+    def window(root, now=None, **display_read):  # as allowance_window: the limit it read, its rows' next exit
+        reads.append(dict(display_read))
+        first_exit = T0 + 300 if now < T0 + 300 else T0 + 900
+        return dict(exhausted, limit_usd=float(get_consciousness_daily_usd()), window_changes_at=first_exit)
+
+    monkeypatch.setattr(clock_module, "allowance_window", window)
+    view = clock.clock._allowance_view
+    clock.clock._allowance = (0.0, {}, False)
+    view(T0)
+    view(T0 + 10)
+    assert len(reads) == 1, "a display read reuses its own window"
+    view(T0 + 20, fresh=True)  # a wake's admission read replaces the cache without a forecast
+    view(T0 + 25)
+    assert reads[-1] == {"allow_stale": True, "forecast": True} and len(reads) == 3, "never served the admission's"
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "40")
+    view(T0 + 30)
+    assert len(reads) == 4, "a changed limit is another window"
+    view(T0 + 301)
+    assert len(reads) == 5, "once a counted row left, the cached forecast is stale"
+    view(T0 + 302)
+    assert len(reads) == 5
+
+
+def _held_wake(clock, monkeypatch, *, metadata=None, pause=None, members=()):
+    """My own wake parked in the pool as the queue parks it, its durable pause row beside it."""
+    from ouroboros.consciousness_wake import wake_task_metadata
+    from ouroboros.task_results import write_task_result
+    from supervisor import queue
+
+    metadata = metadata if metadata is not None else wake_task_metadata(
+        "act", "heartbeat", root_cost_ceiling_usd=2.99, root_cost_ceiling_source="allowance")
+    pause = pause if pause is not None else {
+        "pause_id": "p1", "state": "paused", "reason": "budget", "rail": "graceful_ceiling", "scope": "root",
+        "task_attempt": 1, "cost_ceiling": {"state": "active", "ceiling_usd": 2.99, "root_cap_usd": 50.0,
+                                            "planning_margin_usd": None, "basis": "producer_allowance"}}
+    write_task_result(clock.root, "wake-held", "scheduled", metadata=metadata, budget_pause=pause)
+    rows = [{"id": "wake-held", "metadata": metadata, "root_task_id": "wake-held",
+             "_budget_pause": {"rail": pause.get("rail"), "reason": pause.get("reason"), "root_task_id": "wake-held"}}]
+    for member_id, member_pause in members:
+        write_task_result(clock.root, member_id, "scheduled", root_task_id="wake-held", parent_task_id="wake-held",
+                          budget_pause=member_pause)
+        rows.append({"id": member_id, "root_task_id": "wake-held", "metadata": {},
+                     "_budget_pause": {"rail": member_pause["rail"], "reason": "budget", "root_task_id": "wake-held"}})
+    queue.PENDING[:] = rows
+    clock.clock._own_wake = {"task_id": "wake-held", "wake_cause": "own_clock", "initiator": "consciousness",
+                             "finished": False}
+
+
+def test_a_wake_held_at_the_allowance_it_started_with_is_said_so(clock, monkeypatch):
+    from ouroboros.consciousness_view import describe_consciousness_state
+
+    _held_wake(clock, monkeypatch)
+    snapshot = clock.clock.status_snapshot()
+    assert snapshot["live_wake_held"] is True and snapshot["live_wake_task_id"] == "wake-held"
+    assert snapshot["live_wake_hold"] == {"cause": "allowance", "ceiling_usd": 2.99}
+    assert snapshot["allowance_status"] == "available", "the current window is its own, separate fact"
+    described = describe_consciousness_state(snapshot, True)
+    assert described["status"] == "wake_paused"
+    # The fact is the headline; what follows from it is said beneath it.
+    assert described["detail"] == "Wake-up wake-held stopped at the allowance it had left when it started ($2.99)."
+    assert described["detail_note"] == ("Resume keeps that limit, so it pauses again while its known spend is at it, "
+                                        "and a higher allowance does not raise it. Stop now on its card ends it and "
+                                        "frees the clock for its next check.")
+
+
+def test_a_wake_held_at_a_per_task_cap_raised_before_its_resume_is_not_the_allowance(clock, monkeypatch):
+    """The cap bound it at launch; the owner raised the cap and pressed Resume, and it paused again at the same
+    number: the saved cap is now above its ceiling, as an allowance hold's would be (the old inference's trap)."""
+    from ouroboros.consciousness_view import describe_consciousness_state
+    from ouroboros.consciousness_wake import wake_task_metadata
+
+    pause = {"pause_id": "p2", "state": "paused", "reason": "budget", "rail": "graceful_ceiling", "scope": "root",
+             "task_attempt": 1, "cost_ceiling": {"state": "active", "ceiling_usd": 10.0, "root_cap_usd": 80.0,
+                                                 "planning_margin_usd": None, "basis": "producer_allowance"}}
+    _held_wake(clock, monkeypatch, pause=pause, metadata=wake_task_metadata(
+        "act", "heartbeat", root_cost_ceiling_usd=10.0, root_cost_ceiling_source="per_task_cap"))
+    snapshot = clock.clock.status_snapshot()
+    assert snapshot["live_wake_hold"]["cause"] == "per_task_cap"
+    described = describe_consciousness_state(snapshot, True)
+    assert described["detail"] == ("Wake-up wake-held is paused at the per-task cost cap it started with; its card "
+                                   "shows why. The next wake-up follows it."), "never the allowance's words"
+    assert "detail_note" not in described
 
 
 @pytest.mark.parametrize("next_attempt", [T0 - 100, T0 + 6000])
@@ -1077,10 +1397,25 @@ def test_off_names_the_roots_it_leaves_running_on_my_humans_cited_words(clock, m
     assert carriers.cited_owner_schedules(None) == [("sched-1", "Проверь экономику")]
     stopped = []
     monkeypatch.setattr(carriers, "stop_pooled_wake", stopped.append)
-    assert clock.clock.stop() == ("Background consciousness disabled; autonomous work ends at its next step."
+    assert clock.clock.stop() == ("Consciousness off: no own wakes. Stopping now: «own-root»."
                                   "\nKept running on your words (task cited-root): «Проверь экономику»"
                                   "\nKept running on your words (task cited-running): «Проверь экономику»"
                                   "\nKept firing on your words (schedule sched-1): «Проверь экономику»")
     assert set(stopped) <= {"own-root"}, "only the autonomous root is stopped; the cited ones keep running"
     monkeypatch.setattr(q, "PENDING", []); monkeypatch.setattr(q, "RUNNING", {}); schedules.clear()
     assert clock.clock.stop() == "Background consciousness is already disabled."
+
+
+def test_a_wake_whose_child_paused_first_at_the_inherited_ceiling_is_held_by_its_allowance(clock, monkeypatch):
+    """Child first: the member holding the wake's number paused at it and latched the tree, so the wake's own next
+    send was refused at the root; the member's row proves the cause, read only for that refusal."""
+    refused = {"pause_id": "p3", "state": "paused", "reason": "budget", "rail": "dispatch_refused", "scope": "root",
+               "task_attempt": 1}
+    child = {"pause_id": "c1", "state": "paused", "reason": "budget", "rail": "graceful_ceiling", "scope": "root",
+             "task_attempt": 1, "cost_ceiling": {"state": "active", "ceiling_usd": 2.99, "root_cap_usd": 50.0,
+                                                 "planning_margin_usd": None, "basis": "root_resolved_ceiling"}}
+    _held_wake(clock, monkeypatch, pause=refused, members=[("wake-child", child)])
+    assert clock.clock.status_snapshot()["live_wake_hold"] == {"cause": "allowance", "ceiling_usd": 2.99}
+    # Without that member the same refusal is the per-task fence, never the allowance.
+    _held_wake(clock, monkeypatch, pause=refused)
+    assert clock.clock.status_snapshot()["live_wake_hold"]["cause"] == "per_task_fence"

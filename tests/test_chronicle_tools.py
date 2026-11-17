@@ -20,7 +20,7 @@ import re
 
 import pytest
 
-from ouroboros import chat_chain, dialogue_store
+from ouroboros import chat_chain, dialogue_store, memory_view as mv
 from ouroboros.chronicle_store import ChronicleStore
 from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tools.chronicle import (
@@ -34,6 +34,8 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 LIMIT = tool_result_limit("memory_read")
 LEGACY = {"kind": "legacy_helper", "writer": "old_consolidator", "attribution": "retelling by Light, not lived"}
 LIGHT = {"kind": "helper", "route": "configured-light"}
+MEASURE = ("My story's drawn size is not re-measured by a write: memory_read(story=true) measures it whole, each "
+           "record's tokens and the pages no part or account holds yet.")
 
 
 def ctx_for(root: pathlib.Path, task_id: str = "root0001", **fields) -> ToolContext:
@@ -163,6 +165,9 @@ def test_task_page_takes_task_rows_and_bound_owner_words_and_leaves_an_interleav
     # The interleaved task's page passes: its rows were never sealed by the first page.
     second = write(ctx, kind="page", text="I drafted the release note.", covers={"task_ids": ["taskB001"]})
     assert second["ok"] and second["rows"] == 2  # promote annotation binds the owner's words
+    # A page's receipt names what it wrote and where my story's whole drawn size is measured; it re-reads no story.
+    assert second["effect"] == ("this page: 27 characters. " + MEASURE + " This task's view is not refreshed; the "
+                                "next start re-measures its Max room.")
     sealed = ChronicleStore(tmp_path).sealed_row_refs("1")
     assert sha(unbound) not in sealed and sha(ask_a) in sealed and sha(ask_b) in sealed
     # A range over rows the task pages hold is refused with their ids, never their text.
@@ -359,8 +364,8 @@ def test_part_correction_and_decision_go_through_the_store_rules(tmp_path):
                  expected_sequence=head)
     assert part["ok"] and part["room_id"] == "5"
     # The receipt measures what the fold did and names what it did not: this view and the Max room stay as they were.
-    assert part["effect"] == ("folded 1 record: 11 -> 30 characters. Originals remain readable by address. "
-                              "This task's view is not refreshed; the next start re-measures its Max room "
+    assert part["effect"] == ("folded 1 record: 11 -> 30 characters. " + MEASURE + " Originals remain readable by "
+                              "address. This task's view is not refreshed; the next start re-measures its Max room "
                               "and rewrites the cached story from the first changed retelling.")
     refused = json.loads(_chronicle_write(ctx, kind="part", text="again", member_ids=["legacy-b00-r5"],
                                           expected_sequence=part["room_head"]))
@@ -369,7 +374,7 @@ def test_part_correction_and_decision_go_through_the_store_rules(tmp_path):
     assert account["effect"].startswith("wrote an account over 1 record: 30 -> 13 characters.")
     assert "It tells nothing in their place until a selection shows it." in account["effect"]
     shown = write(ctx, kind="selection", target_id=account["node_id"], replaces=[part["node_id"]], reason="the account says it")
-    assert shown["effect"].startswith("the account now tells 1 record: 30 -> 13 characters.")
+    assert shown["effect"].startswith("the account now tells 1 record: 30 -> 13 characters. " + MEASURE)
     hidden = write(ctx, kind="selection", target_id=account["node_id"], replaces=[], shown=False, reason="back")
     assert hidden["effect"].startswith("withdrawal saved: other selections and folds still determine what appears.")
     first = write(ctx, kind="correction", target_id="legacy-b01-r5", text="It was 26.09, not 25.09.")
@@ -399,7 +404,7 @@ def test_room_read_is_text_with_the_head_line_and_one_header_per_record(tmp_path
     lines = text.split("\n")
     assert lines[0] == f"room 1; head {page['sequence']}"
     assert lines[1].startswith(f"complete: no records after seq {mark['sequence']}")
-    assert lines[2].startswith(f"[page {page['node_id']}; room 1; mind (root root0001); final; covers ")
+    assert lines[2].startswith(f"[page {page['node_id']}; room 1; mind (root, task root0001); final; covers ")
     assert lines[2].endswith(f"seq {page['sequence']}]") and lines[3:5] == ["PAGE TEXT", "second line"]
     assert lines[5].startswith(f"[mark {mark['mark_id']}; room 1;") and lines[6:] == ["MARK TEXT", "quote: PAGE TEXT"]
     with pytest.raises(ValueError):
@@ -434,6 +439,67 @@ def test_rows_read_attributes_each_row_by_its_source_fields_as_text(tmp_path):
     assert len(bounded.split("\n")) == 4
     missing = _memory_read(ctx_for(tmp_path), rows=True, **{"from": "row:1@" + ts(9) + "#" + "a" * 12})
     assert "TOOL_ARG_ERROR" in missing and "row_missing" in missing
+
+
+def test_one_row_the_selected_room_does_not_hold_is_said_not_returned_and_never_lost(tmp_path, monkeypatch):
+    """A ``row:`` address names the chat it was written in; the room that shows it is its membership's, and a work
+    moved from Main into a Project keeps its ``row:1@…`` addresses there. One row asked by itself (from = to, no task
+    or period) that the selected room's selection does not hold says only that this reading did not return it -- no
+    loss, no other room named -- while its continuation line keeps the contract. A row it does return, one larger
+    than a page, a range (``from`` alone stays positional), a filtered read, a typed address refusal and a known
+    gap keep their own words: the first reading shows the source, the gap stays its own fact beside the miss."""
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    project = create_project(tmp_path, "alpha", name="Alpha")
+    alpha = str(project["chat_id"])
+    origin = {"chat_id": 1, "direction": "in", "ts": ts(1), "text": "start the moved work", "client_message_id": "o1"}
+    rows = chat(tmp_path, [
+        {"chat_id": 1, "direction": "in", "ts": ts(0), "text": "main question"},
+        origin,  # its binding's origin: Alpha shows it too
+        {"chat_id": 1, "direction": "out", "ts": ts(2), "task_id": "mover", "text": "moved reply, written in Main"},
+        {"chat_id": int(alpha), "direction": "in", "ts": ts(3), "text": "alpha words"},
+        {"chat_id": 1, "direction": "out", "ts": ts(4), "task_id": "root0001", "text": "main reply"},
+        {"chat_id": int(alpha), "direction": "out", "ts": ts(5), "task_id": "ta", "text": "G" * (LIMIT + 50)},
+    ])
+    ref = build_owner_message_ref(chat_id=1, client_message_id="o1", ts=ts(1), text=origin["text"])
+    bind_task_to_project(tmp_path, "mover", project["id"], origin={"ref": ref, "text": origin["text"]})  # moved
+    ctx = ctx_for(tmp_path)
+    miss = "did not return that row"  # the plain fact, true of every missing row, an A2A row no room shows included
+
+    def one(room, row, **extra):
+        return _memory_read(ctx, room_id=room, rows=True, **{"from": addr(row), "to": addr(row)}, **extra)
+
+    moved_in_main, moved_here = one("1", rows[2]), one(alpha, rows[2])
+    assert moved_in_main.split("\n") == [  # the room in its address does not hold it any more: said so, nothing else
+        f"room 1; rows; from {addr(rows[2])}; to {addr(rows[2])}; this reading of room 1 {miss}",
+        "complete: no further rows (stored order)"]
+    assert moved_here.split("\n")[2].endswith(f"{addr(rows[2])}] moved reply, written in Main")
+    assert miss not in moved_here and all(miss not in one(room, row) for room, row in (
+        ("1", rows[0]), ("1", rows[1]), (alpha, rows[1]), ("1", rows[4]), (alpha, rows[3])))
+    assert miss in one(alpha, rows[0]) and miss in one(alpha, rows[4]) and miss in one("1", rows[3])
+    giant = one(alpha, rows[5])  # found, larger than a page: its words by character window, never a miss
+    assert miss not in giant and re.match(rf"next: from={re.escape(addr(rows[5]))} start=\d+ ", second_line(giant))
+    ranged = _memory_read(ctx, room_id=alpha, rows=True, **{"from": addr(rows[0])})  # Main's row bounds a range here
+    assert miss not in ranged and "alpha words" in ranged and "moved reply" in ranged and "main reply" not in ranged
+    assert "main question" not in ranged  # positional: the rows of Alpha from there on, not Main's row itself
+    filtered = one("1", rows[2], task_id="mover")
+    assert miss not in filtered and second_line(filtered).startswith("complete: no further rows")
+    absent = "row:1@" + ts(9) + "#" + "a" * 12
+    refused = _memory_read(ctx, room_id="1", rows=True, **{"from": absent, "to": absent})
+    assert "TOOL_ARG_ERROR" in refused and "row_missing" in refused and miss not in refused
+    real = chat_chain.source_row_id
+    with monkeypatch.context() as collided:  # a twelve-hex prefix two rows share stays the typed refusal
+        chat(tmp_path, [{"chat_id": 1, "direction": "in", "ts": ts(7), "text": side} for side in ("left", "right")])
+        collided.setattr(chat_chain, "source_row_id", lambda row: "abcdef012345" + real(row)[12:])
+        shared = "row:1@" + ts(7) + "#abcdef012345"
+        ambiguous = _memory_read(ctx, room_id="1", rows=True, **{"from": shared, "to": shared})
+        assert "TOOL_ARG_ERROR" in ambiguous and "row_ambiguous" in ambiguous and miss not in ambiguous
+    from ouroboros import room_appearances
+    monkeypatch.setattr(room_appearances, "read_gaps", lambda *_a, **_kw: {room_appearances.APPEARANCES_DERIVING})
+    gap = room_appearances.GAP_DETAILS[room_appearances.APPEARANCES_DERIVING]
+    assert one(alpha, rows[0]).split("\n")[0].endswith(f"; incomplete: {gap}; this reading of room {alpha} {miss}")
+    assert f"; incomplete: {gap}" in one(alpha, rows[2]) and miss not in one(alpha, rows[2])
 
 
 def test_an_install_without_any_lineage_row_attributes_old_outgoing_rows_by_task_results_only(tmp_path):
@@ -471,11 +537,13 @@ def test_node_read_shows_stamp_original_and_corrections_with_the_acting_revision
     text = _memory_read(ctx, node_id=page["node_id"])
     lines = text.split("\n")
     assert lines[0].startswith(f"[page {page['node_id']}; room 1;")
-    assert f"revision {fix['node_id']} (corrected by mind (root root0001))" in lines[0]
-    assert "stamp: taskA001=not_recorded;" in lines[0] and lines[1].endswith("complete")
-    assert "stamp taskA001: status=not_recorded" in text
-    assert "text:\nORIGINAL" in text and f"correction {fix['node_id']} by mind (root root0001)" in text
-    assert text.rstrip().endswith("CORRECTED")
+    assert f"revision {fix['node_id']} (corrected by mind (root, task root0001))" in lines[0]
+    # The header counts the stamp and names no task; the words come first, the correction under them, then the
+    # host's line for each covered task.
+    assert "host stamp: 1 task — not_recorded 1;" in lines[0] and "taskA001" not in lines[0]
+    assert lines[1].endswith("complete")
+    assert (text.index("text:\nORIGINAL") < text.index(f"correction {fix['node_id']} by mind (root, task root0001)")
+            < text.index("CORRECTED") < text.index("stamp taskA001: status=not_recorded"))
     assert "TOOL_ARG_ERROR" in _memory_read(ctx, node_id="no-such-node")
     assert "TOOL_ARG_ERROR" in _memory_read(ctx, node_id=page["node_id"], rows=True)
 
@@ -738,7 +806,11 @@ def test_mark_view_and_release_including_an_imported_nomination(tmp_path):
     assert view["ok"] and view["operation"] == "mark_view" and view["mark_id"] == mark["mark_id"]
     listed = _memory_read(ctx)
     assert "visibility meaning" in listed and "quote: verbatim words" not in listed
-    assert "legacy-nomination-0123456789abcdef" in listed  # a global mark is in every room
+    # A global mark acts everywhere and every view holds it: a room's read lists the marks placed in it and counts
+    # the global ones in its first line; the global mark is listed in the room it was placed in.
+    assert "legacy-nomination-0123456789abcdef" not in listed
+    assert "global marks in force: 1 (" in listed.split("\n", 1)[0]
+    assert "legacy-nomination-0123456789abcdef" in _memory_read(ctx, room_id="legacy")
     released = json.loads(_memory_mark(ctx, release_ids=["legacy-nomination-0123456789abcdef"],
                                        reason="published the note myself"))
     assert released["ok"] and released["operation"] == "mark_release"
@@ -960,3 +1032,140 @@ def test_a_conversation_page_seals_every_room_of_its_conversation_each_in_its_ow
     assert single["ok"] and single["rows"] == 1 and "rooms" not in store.get(single["node_id"])["covers"]
     assert "Rooms this page covers" not in _memory_read(ctx, node_id=single["node_id"])  # one room: as before
     assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, i1)] == [sha(rows[4])]
+    assert write(ctx, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw the conversation page")["ok"]
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, i1)] == [sha(rows[0]), sha(rows[4])]
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, i2)] == [sha(rows[1])]
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, i3)] == [sha(rows[2])]
+    assert store.sealed_row_refs(other) == {sha(rows[3])}
+
+
+@pytest.mark.parametrize("origin", ["mind", "accepted", "candidate"])
+def test_withdrawing_a_page_restores_exact_open_words_and_discloses_the_account_source(tmp_path, origin):
+    from ouroboros import memory_inventory as mi
+
+    ctx, store = ctx_for(tmp_path), ChronicleStore(tmp_path)
+    rows = chat(tmp_path, [
+        {"chat_id": 1, "direction": "in", "ts": ts(1), "text": "Keep the owner's exact condition: no public release."},
+        {"chat_id": 1, "direction": "out", "ts": ts(2), "text": "I will prepare a local candidate.",
+         "task_id": "root0001", "delegation_role": "root"},
+        {"chat_id": 1, "direction": "in", "ts": ts(3), "text": "The separate conversation stays covered."},
+        {"chat_id": 1, "direction": "in", "ts": ts(4), "text": "This later question is still open."},
+    ])
+    original_rows = _memory_read(ctx, room_id="1", rows=True)
+    text_hashes = {addr(row): hashlib.sha256(row["text"].encode("utf-8")).hexdigest() for row in rows}
+    original_refs = [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, "1")]
+    telling = "The first arc was ready for publication."
+    if origin == "mind":
+        target = write(ctx, kind="page", text=telling, covers={"from": addr(rows[0]), "to": addr(rows[1])})["node_id"]
+    else:
+        draft = store.publish_page(room_id="1", text=telling, author=LIGHT,
+                                   covers={"rows": [sha(row) for row in rows[:2]], "stream_span": [0, 1]},
+                                   metadata={"candidate": True} if origin == "candidate" else {})
+        assert draft.ok
+        target = draft.record["id"]
+        assert write(ctx, kind="decision", target_id=target, accepted=True, reason="I adopt this draft")["ok"]
+    other = write(ctx, kind="page", text="A separate sealed matter.", covers={"from": addr(rows[2]), "to": addr(rows[2])})
+    account = write(ctx, kind="account", text="My unchanged account based on that arc.", sources=[target])
+    selected = write(ctx, kind="selection", target_id=account["node_id"], replaces=[target], reason="My common account")
+    assert other["ok"] and account["ok"] and selected["ok"]
+    account_bytes = store.get(account["node_id"])
+    spec = mv.ViewSpec("integrator", room_id="1")
+    task = {"id": "next-focus", "chat_id": 1}
+    before = mv.capture_memory_view(tmp_path, task, spec)
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, "1")] == [sha(rows[3])]
+    assert rows[0]["text"] not in mv.render_room(before)
+    assert "my later rejection of its source" not in mv.render_story(before)
+    journal = store.log_path.read_bytes()
+
+    reason = "Source withdrawn: this account missed the owner's no-release condition."
+    result = write(ctx, kind="decision", target_id=target, accepted=False, reason=reason)
+    assert result["ok"] and result["kind"] == "decision"
+    assert store.log_path.read_bytes().startswith(journal) and store.get(account["node_id"]) == account_bytes
+    after = mv.capture_memory_view(tmp_path, task, spec)
+    room, story = mv.render_room(after), mv.render_story(after)
+    assert all(row["text"] in room for row in (rows[0], rows[1], rows[3])), room
+    assert telling not in story
+    assert f"my later rejection of its source {target}" in story and reason in story
+    assert account_bytes["text"] in story
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, "1")] == [
+        ref for ref in original_refs if ref != sha(rows[2])]
+    assert _memory_read(ctx, room_id="1", rows=True) == original_rows  # Same addresses and exact text hashes.
+    for address, digest in text_hashes.items():
+        restored, _resolution = chat_chain.resolve_row(tmp_path, address)
+        assert hashlib.sha256(restored["text"].encode("utf-8")).hexdigest() == digest
+    source_read = _memory_read(ctx, node_id=target)
+    assert telling in source_read and "accepted=False" in source_read and reason in source_read
+    account_read = _memory_read(ctx, node_id=account["node_id"])
+    assert "rejected" in account_read and target in account_read
+    store.index_path.unlink()
+    rebuilt = mv.capture_memory_view(tmp_path, task, spec)
+    assert mv.render_room(rebuilt) == room and mv.render_story(rebuilt) == story
+    assert _memory_read(ctx, room_id="1", rows=True) == original_rows
+    assert write(ctx, kind="decision", target_id=target, accepted=False, reason=reason)["reason"] == "invalid"
+
+
+def test_tools_withdraw_the_part_before_its_page_and_keep_both_readable(tmp_path):
+    ctx, store = ctx_for(tmp_path), ChronicleStore(tmp_path)
+    row = chat(tmp_path, [{"chat_id": 1, "direction": "in", "ts": ts(1), "text": "Keep this source."}])[0]
+    page = write(ctx, kind="page", text="My page.", covers={"to": addr(row)})
+    part = write(ctx, kind="part", text="My part.", member_ids=[page["node_id"]], expected_sequence=store.room_head("1"))
+    assert page["ok"] and part["ok"]
+    account = write(ctx, kind="account", text="My unchanged account of the part.", sources=[part["node_id"]])
+    assert write(ctx, kind="selection", target_id=account["node_id"], replaces=[part["node_id"]], reason="My telling")["ok"]
+    spec, task = mv.ViewSpec("integrator", room_id="1"), {"id": "next", "chat_id": 1}
+    assert "My page." not in mv.render_story(mv.capture_memory_view(tmp_path, task, spec))
+    before = store.log_path.read_bytes()
+    refused = write(ctx, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw the page")
+    assert refused["reason"] == "already_folded" and refused["conflict_ids"] == [part["node_id"]]
+    assert store.log_path.read_bytes() == before
+    assert write(ctx, kind="decision", target_id=part["node_id"], accepted=False, reason="Withdraw the part first")["ok"]
+    assert store.folded_members(part["node_id"]) == [] and store.sealed_row_refs("1") == {sha(row)}
+    story = mv.render_story(mv.capture_memory_view(tmp_path, task, spec))
+    assert "My page." in story and f"my later rejection of its source {part['node_id']}" in story
+    assert write(ctx, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw the page now")["ok"]
+    assert store.sealed_row_refs("1") == set() and store.pages_of_room("1") == []
+    assert "My page." in _memory_read(ctx, node_id=page["node_id"])
+    assert "My part." in _memory_read(ctx, node_id=part["node_id"])
+
+
+@pytest.mark.parametrize("role", ["child", "nanny"])
+def test_delegated_tools_cannot_withdraw_an_integrators_page(tmp_path, role):
+    root = ctx_for(tmp_path)
+    row = chat(tmp_path, [{"chat_id": 1, "direction": "in", "ts": ts(1), "text": "Keep my words."}])[0]
+    page = write(root, kind="page", text="My own page.", covers={"to": addr(row)})
+    meta = {"delegation_role": "subagent", "parent_task_id": "root0001", "root_task_id": "root0001"}
+    if role == "nanny":
+        meta["configured_subagent"] = {"route": {"kind": "agent_session"}}
+    delegated = ctx_for(tmp_path, task_id="kid00001", task_metadata=meta)
+    store = ChronicleStore(tmp_path)
+    before = store.log_path.read_bytes()
+    refused = write(delegated, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw")
+    assert refused["reason"] == "not_integrator" and store.log_path.read_bytes() == before
+    assert write(root, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw")["ok"]
+
+
+def test_writer_receipts_read_no_whole_story_and_survive_a_migrating_store(tmp_path, monkeypatch):
+    # A writer's receipt is an observation after the write: it re-reads no whole story (that is
+    # memory_read(story=true)'s), so a store the importer still holds cannot turn a saved choice into a failure.
+    from ouroboros import memory_inventory
+    from ouroboros.store import StoreMigrating
+
+    store, ctx = ChronicleStore(tmp_path), ctx_for(tmp_path)
+    assert store.publish([{"id": "legacy-b00-r5", "kind": "legacy", "room_id": "5", "text": "retelling 0",
+                           "author": LEGACY, "metadata": {"legacy_type": "era", "legacy_block": 0}}]).ok
+    captures = []
+    real = mv.capture_story
+    monkeypatch.setattr(mv, "capture_story", lambda *a, **k: (captures.append(1), real(*a, **k))[1])
+    part = write(ctx, kind="part", text="I lived like this.", member_ids=["legacy-b00-r5"],
+                 expected_sequence=store.room_head("5"))
+    assert part["ok"]
+    account = write(ctx, kind="account", text="Across rooms.", sources=[part["node_id"]], room_id="5")
+
+    def migrating(*_a, **_k):
+        raise StoreMigrating("the dialogue importer runs")
+
+    monkeypatch.setattr(memory_inventory, "legacy_units", migrating)
+    shown = write(ctx, kind="selection", target_id=account["node_id"], replaces=[part["node_id"]], reason="tells it")
+    assert shown["ok"] and shown["shown"] is True
+    assert captures == []  # no writer captured the whole story around its write
+    assert all("memory_read(story=true)" in result["effect"] for result in (part, shown))

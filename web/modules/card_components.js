@@ -167,8 +167,17 @@ export function mountCardComponents(mount, card, { presses = createCardPresses({
             }
         }
     };
+    const rememberFormValues = () => {
+        mount.querySelectorAll('[data-widget-form]').forEach((form) => {
+            const key = form.dataset.widgetForm || '';
+            const spec = index.byKey.get(key)?.component;
+            if (!spec) return;
+            formValues[key] = collectSafeFieldValues(form, spec.fields || [], { includePasswords: false });
+        });
+    };
     const render = () => {
         if (disposed) return;
+        rememberFormValues();
         const view = { state: { result: current.data || {} }, status: {}, componentState, formValues, pendingActions, visibleKeys: new Set() };
         const desired = document.createElement('template');
         desired.innerHTML = drawnTree(current.components, presses)
@@ -214,6 +223,7 @@ export function mountCardComponents(mount, card, { presses = createCardPresses({
     return {
         update(next) {
             if (disposed) return;
+            rememberFormValues();
             current = next;
             index = indexComponentTree(next.components);
             adoptSubmissions();

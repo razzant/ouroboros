@@ -104,7 +104,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # unlike the worker lanes. (Renamed from the singular MODEL_FALLBACK.)
     "OUROBOROS_MODEL_FALLBACKS": OPENROUTER_DEFAULTS["fallback"],
     "OUROBOROS_SERVED_MODEL_REDOS": 2,  # redos of a round another model answered (`llm_substitution.py`)
-    "OUROBOROS_MAX_WORKERS": 10, "OUROBOROS_PRESENCE_MAX_ACTIVE": 2,
+    "OUROBOROS_MAX_WORKERS": "", "OUROBOROS_PRESENCE_MAX_ACTIVE": 2,  # "": no cap, memory admits (settings_scales)
     "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 6,
     "OUROBOROS_MAX_SUBAGENT_DEPTH": 3,
     # Mutative ("acting") subagents master toggle. Empty = follow runtime mode
@@ -134,13 +134,11 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # (finish_reason=null, 429/5xx/overloaded); floored at the caller's base
     # retry budget. Permanent classes fail fast regardless.
     "OUROBOROS_TRANSIENT_RETRY_MAX": 6,
-    # #4 self-DoS guard: max concurrent provider calls per (model, use_local) route; excess
-    # worker threads wait (deadline-bounded) instead of storming one model's rate limit. <=0
-    # disables. Default-on (see ouroboros/model_concurrency.py).
-    "OUROBOROS_MODEL_MAX_CONCURRENCY": 3,
-    # Hard ceiling (seconds) a provider call waits for a concurrency slot when the task has
-    # NO deadline; past it the call is refused before dispatch ($0), never sent without a slot. SSOT here.
-    "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC": 180,
+    # The owner's limit on physical calls in flight per model route (``model_concurrency``): excess sends wait in
+    # line (no clock of their own: a slot, the caller's deadline, Stop or Pause ends the wait). "": not chosen, so an
+    # API route has no limit of the host's and a local model keeps three (``settings_scales.MODEL_CAP_KEY``); a
+    # whole number limits both; <=0 limits neither.
+    "OUROBOROS_MODEL_MAX_CONCURRENCY": "",
     # The owner's interface language for this install: a BCP-47 tag ("ru", "pt-BR", "art-x-<slug>"
     # for an invented language); "" = not chosen, the English source renders. Written by
     # POST /api/ui/i18n/language, read live by the SPA and the Telegram skill, by the mind at its
@@ -196,7 +194,8 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE": "",
     "OUROBOROS_WEBSEARCH_MODEL": "",
     # web_search backend pin: auto (default OpenAI-first cascade) | ddgs (pure
-    # retrieval, no second LLM — for fixed-model runs) | openai | openrouter | anthropic.
+    # retrieval, no second LLM — for fixed-model runs) | openai | openrouter | anthropic
+    # | deepseek (DeepSeek's Search API; explicit only, never in auto).
     "OUROBOROS_WEBSEARCH_BACKEND": "auto",
     # Main-loop OpenRouter server web-search tool. Off by default: provider-
     # specific capability, not a core provider-independence requirement.
@@ -224,8 +223,6 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_SUBAGENT_PRESET_RECEIPT": "",
     "OUROBOROS_ONBOARDING_COMPLETED_AT": "",
     "OUROBOROS_ONBOARDING_ATTEMPT_ID": "",
-    # Pre-commit review enforcement: advisory | blocking
-    "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
     # Auto-grant reviewed-skill requests by default; grants stay bound to the
     # reviewed content hash and editing a skill still invalidates them.
     "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true",
@@ -311,7 +308,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "LOCAL_MODEL_FILENAME": "",
     "LOCAL_MODEL_PORT": 8766,
     "LOCAL_MODEL_N_GPU_LAYERS": 0,
-    "LOCAL_MODEL_CONTEXT_LENGTH": 16384,
+    "LOCAL_MODEL_CONTEXT_LENGTH": 65536,
     "LOCAL_MODEL_CHAT_FORMAT": "",
     "USE_LOCAL_MAIN": False,
     "USE_LOCAL_HEAVY": False,
@@ -327,13 +324,11 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # Delegated subagents. NARROW key, read ONLY by the subagent scheduler; deliberately absent from
     # provider_models.MODEL_SETTING_KEYS (see ARCHITECTURE "Delegated subagents"). Empty = delegation off AND
     # undecided (Settings' Subagents section offers the connected-subscription default); the literal `off` =
-    # delegation off because the owner said so. Wait keys bound the nanny's QUIET wait only.
+    # delegation off because the owner said so.
     "OUROBOROS_SUBAGENT_HARNESS": "",
     # Optional Delegation account pin (D-U5): a credential-profile id sent as `credentialProfileId`; empty = engine
     # rotation pool (D28; presets never author it). Read ONLY by get_subagent_harness -> DelegationRoute.profile_id.
     "OUROBOROS_SUBAGENT_PROFILE": "",
-    "OUROBOROS_DELEGATE_WAIT_SEC": 120,
-    "OUROBOROS_DELEGATE_WAIT_MAX_SEC": 1800,
 }
 
 
@@ -347,6 +342,9 @@ RETIRED_SETTING_KEYS: tuple[str, ...] = (
     "OUROBOROS_SUBAGENT_CAPABILITY_DEPTH_LIMIT",
     # The acceptance improvement-pass and plan-swarm knobs are retired (the cap bounds result/commit/skill waves).
     "OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES",
+    # Blocking left the product: consumed before the purge (config.normalize_settings_raw), so the generic notice never
+    # names it; an install that had Blocking hears it once in its own words (upgrade_notices.review_enforcement_notice).
+    "OUROBOROS_REVIEW_ENFORCEMENT",
     "OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC",
     "OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC",
     "OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC",
@@ -410,6 +408,9 @@ RETIRED_SETTING_KEYS: tuple[str, ...] = (
     # only by a spent deadline (less the finalization reserve), budget or Stop.
     "OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC",
     "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC",  # owner 3A; 30 Oct: await waits its ask, silence its window
+    # pool-capacity WP5: delegate_wait is a sleep on runs (the body observes them); no window holds a slot.
+    "OUROBOROS_DELEGATE_WAIT_SEC", "OUROBOROS_DELEGATE_WAIT_MAX_SEC",
+    "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC",  # owner 13 Nov: a send waits in the install's own queue with no clock of its own
 )
 
 
@@ -538,6 +539,11 @@ SETTINGS_KEYS_NOT_EXPORTED_TO_ENV = frozenset({
     "MCP_SERVERS",
     # The same for the API connection rows, whose keys would otherwise ride every child's environment.
     "OUROBOROS_CONNECTIONS",
+    # The subagent catalog: its readers take the document or the task's snapshot (``settings_integrity.
+    # runtime_catalog_settings``), and a copy of its rows' free text outgrows one environment entry (Linux execve: 32
+    # pages; Windows documents 32,767 characters per variable). An operator's own variable stays input for a document
+    # that sets none; ``note_proposal_projection`` retires the mirror an earlier projection left.
+    "OUROBOROS_SUBAGENTS",
     # ENV IS THE AUTHORITY for the bind host, not settings. `ouroboros server --host 0.0.0.0` puts the choice in
     # the environment, and both consumers (server.main, server_control.restart_current_process) deliberately read
     # env BEFORE settings. Exporting this key stamped the settings value — usually the shipped 127.0.0.1 default,
@@ -554,7 +560,7 @@ SETTINGS_KEYS_NOT_EXPORTED_TO_ENV = frozenset({
 # ABSENT key leaves the choice to the environment (a deployment's OUROBOROS_UI_DIR=none). A merged write
 # carries every key the read produced, so it must not author an absent key with the value the environment
 # or the default gave it: one unrelated Settings save would otherwise freeze the operator's choice on disk.
-SAVED_CHOICE_SETTINGS = frozenset({"OUROBOROS_UI_DIR"})
+SAVED_CHOICE_SETTINGS = frozenset({"OUROBOROS_UI_DIR", "OUROBOROS_MAX_WORKERS", "OUROBOROS_MODEL_MAX_CONCURRENCY"})
 
 
 def unauthored_saved_choices(prepared, stored, authored=()) -> frozenset:

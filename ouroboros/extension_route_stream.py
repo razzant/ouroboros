@@ -29,6 +29,7 @@ import threading
 from starlette.responses import JSONResponse, Response
 
 from ouroboros.utils import sanitize_tool_result_for_log
+from ouroboros.deployment_extensions import discloses_failure, failure_words, WITHHELD
 from ouroboros.config import (
     EXTENSION_STREAM_CHUNK_BYTES, EXTENSION_STREAM_METADATA_BYTES,
     EXTENSION_CHILD_CLEANUP_GRACE_SEC,
@@ -73,8 +74,9 @@ def _read_frame(stream):
 class ChildResponseChannel:
     """Child ASGI send/receive: reserve stdout before loading plugin code."""
 
-    def __init__(self):
+    def __init__(self, skill_name=""):
         import sys
+        self.skill_name = skill_name
         sys.stdout.flush()
         self.output = os.fdopen(os.dup(sys.stdout.fileno()), "wb", buffering=0)
         os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
@@ -127,7 +129,7 @@ class ChildResponseChannel:
             raise ValueError(f"unsupported extension response message {kind!r}")
 
     def error(self, exc):
-        message = sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}")
+        message = sanitize_tool_result_for_log(failure_words(self.skill_name, exc))
         _write_frame(self.output, b"C" if self.body_complete else b"E", message.encode("utf-8"))
 
     def finish(self, ws_relay_failures=None):
@@ -136,6 +138,31 @@ class ChildResponseChannel:
         self.output.close()
         # The control thread is daemon-owned and ends with this per-call child.
         # Closing stdin here could block on its pending read's file-object lock.
+
+
+class PolicyResponse(Response):
+    """Keep a trusted in-process response intact, including its stream/background work, but not error words that
+    may quote a fixed setting. Before headers a failure is JSON; after them it aborts with a value-free error."""
+
+    def __init__(self, response, skill_name):
+        self.response, self.skill_name = response, skill_name
+        self.status_code, self.raw_headers = response.status_code, response.raw_headers
+
+    async def __call__(self, scope, receive, send):
+        started = False
+        async def forward(message):
+            nonlocal started
+            await send(message)
+            started = started or message["type"] == "http.response.start"
+        try:
+            await self.response(scope, receive, forward)
+        except Exception as exc:
+            if discloses_failure(self.skill_name):
+                raise
+            words = failure_words(self.skill_name, exc)
+            if started:
+                raise RuntimeError(words) from None
+            await JSONResponse({"error": words}, status_code=502)(scope, receive, send)
 
 
 class RouteStreamResponse(Response):
@@ -184,7 +211,7 @@ class RouteStreamResponse(Response):
             try:
                 future.result()
             except Exception as exc:
-                log.warning("extension response work failed while cancellation settled: %s", exc)
+                log.warning("extension response work failed while cancellation settled: %s", failure_words(self.spec.get("skill"), exc))
             raise asyncio.CancelledError
         return future.result()
 
@@ -260,6 +287,7 @@ class RouteStreamResponse(Response):
                 self._finishing_send = False
             elif kind in {b"E", b"C"}:
                 detail = payload.decode("utf-8", errors="replace")
+                detail = failure_words(self.spec.get("skill"), ExtensionProcessError(detail), typed=False)
                 if self.body_complete:
                     log.warning("extension response cleanup failed after delivery: %s", detail)
                     if kind == b"E":
@@ -276,7 +304,7 @@ class RouteStreamResponse(Response):
 
     async def __call__(self, scope, receive, send):
         from ouroboros.extension_process_runner import (
-            _drain, _STDERR_CAP, _publish_child_facts, _format_child_returncode,
+            _drain, _STDERR_CAP, _publish_child_facts, _format_child_returncode, ExtensionProcessError,
         )
 
         self.loop, self.task = asyncio.get_running_loop(), asyncio.current_task()
@@ -366,7 +394,8 @@ class RouteStreamResponse(Response):
                                              ws_relay_failures=self.ws_relay_failures,
                                              skill_name=str(self.spec.get("skill") or ""))
                     if proc.returncode not in (None, 0) and not killed_by_host:
-                        detail = sanitize_tool_result_for_log(stderr.decode("utf-8", errors="replace").strip())[-2000:]
+                        detail = (sanitize_tool_result_for_log(stderr.decode("utf-8", errors="replace").strip())[-2000:]
+                                  if discloses_failure(self.spec.get("skill")) else WITHHELD)
                         log.warning("extension route child exited abnormally: %s; %s",
                                     _format_child_returncode(proc.returncode), detail)
                     if overflow["stderr"]:
@@ -377,9 +406,11 @@ class RouteStreamResponse(Response):
             if self.client_disconnected:
                 return
             if self.body_complete:
-                log.warning("extension response cleanup failed after delivery: %s", exc)
+                log.warning("extension response cleanup failed after delivery: %s", failure_words(self.spec.get("skill"), exc))
             elif self.started:
-                raise
+                if discloses_failure(self.spec.get("skill")):
+                    raise
+                raise ExtensionProcessError(failure_words(self.spec.get("skill"), exc)) from None
             else:
                 self.status_code = 502
-                await JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=502)(scope, receive, send)
+                await JSONResponse({"error": failure_words(self.spec.get("skill"), exc)}, status_code=502)(scope, receive, send)

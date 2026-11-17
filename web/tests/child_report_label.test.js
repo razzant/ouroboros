@@ -55,10 +55,10 @@ test('a helper the host could not start leads its line with the cause; the notic
     const notice = '⚠️ SUBAGENT_UNAVAILABLE: this subagent could not start: its route cannot run: daemon_unreachable. '
         + 'The task was NOT run and spent nothing; the host did not substitute another model, route or substrate.';
     for (const [code, cause] of [
-        ['subagent_executor_unavailable', 'This helper could not start because its route was unavailable; it spent nothing'],
+        ['subagent_executor_unavailable', 'This subagent could not start because its route was unavailable; it spent nothing'],
         ['delegate_tools_invisible',
-            'This helper could not start because the tools that run its session are hidden from it; it spent nothing'],
-        ['delegate_visibility_unverified', 'This helper could not start because its tools could not be checked; it spent nothing'],
+            'This subagent could not start because the tools that run its session are hidden from it; it spent nothing'],
+        ['delegate_visibility_unverified', 'This subagent could not start because its tools could not be checked; it spent nothing'],
     ]) {
         const refused = summarizeChatLiveEvent(child({ subagent_event: 'failed', status: 'failed', result: notice,
             reason_code: code, executor_route: 'claude' }));

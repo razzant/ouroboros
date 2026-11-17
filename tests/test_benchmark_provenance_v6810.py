@@ -62,6 +62,23 @@ def test_a_settings_mapping_with_no_slots_fails_OPEN_and_discloses_it(monkeypatc
 # enforces — a new runtime code with no row here fails the suite, which is the only thing
 # that stops the vocabulary from being hand-copied beside the check again.
 _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
+    "task_model_invalid": (False, "gateway/task_model.py: malformed model act refused before admission; no execution is truncated"),
+    "presence_model_unsupported": (False, "owner_model.py: this control is unavailable for a Presence turn; the turn continues"),
+    "not_a_root_task": (False, "owner_model.py: a delegated actor cannot move a root primary; no execution ends"),
+    "model_control_unavailable": (False, "owner_model.py: no durable record for a primary act; execution is unchanged"),
+    "cancel_pending": (False, "owner_model.py: a pending cancellation excludes this model act; the cancellation owns any terminal"),
+    "model_action_state": (False, "owner_model.py: Return, Wait and Keep require a running fallback; refusing the act ends no work"),
+    "model_recents_pending": (False, "owner_model.py: the primary was saved but its suggestion write needs retry; no work is truncated"),
+    "model_queue_publish_failed": (False, "owner_model.py: primary saved, queue publication unconfirmed; not a task terminal"),
+    "model_wake_failed": (False, "owner_model.py: primary saved, wake unconfirmed; the same request can repair delivery"),
+    # Logs reads refuse selectors, sources or byte ranges; no task is stopped.
+    "invalid_view": (False, "gateway/logs.py unknown view (400); not a task terminal"),
+    "invalid_log_source": (False, "gateway/logs.py scope/projection refusal (400); not execution truncation"),
+    "log_source_unavailable": (False, "gateway/logs.py unreadable or unadmitted source (404/503); not a task terminal"),
+    "invalid_raw_request": (False, "gateway/logs.py invalid source selector/page bounds (400); not a task terminal"),
+    "log_source_changed": (False, "gateway/logs.py exact stored-row identity conflict (409); not execution truncation"),
+    "raw_range_invalid": (False, "gateway/logs.py out-of-range or split UTF-8 offset (416); not a task terminal"),
+    "unknown_log": (False, "gateway/logs.py unsupported Raw stream (404); not a task terminal"),
     "request_invalid": (False, "gateway/skill_publish.py: unreadable publish-preflight body; HTTP 400 before any action, not a task terminal"),
     "secret_request_form_only": (False, "protected secret-form policy refuses an ordinary quiz answer; no execution or source is truncated"),
     "project_routing_fence_lookup_failed": (False, "gateway/tasks.py: Project authority unreadable before admission; HTTP 409, no running attempt truncated"),
@@ -157,11 +174,17 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
         False,
         "tools/search.py recoverable ambiguous paid-call result returned to the LLM; the root task remains live",
     ),
+    "query_limit": (
+        False,
+        "gateways/search_api.py a web_search query DeepSeek's documented contract refuses, returned to the LLM before "
+        "any reservation; the root task remains live",
+    ),
     # tell_task: both are one-call tool results for the model's next turn, never the root task's terminal reason.
     "argument_invalid": (
         False,
         "tools/control_relay.py tell_task argument refusal (TOOL_ARG_ERROR, published as completed_no_effect before "
-        "any write) returned to the LLM; the root task remains live",
+        "any write), and gateways/search_api.py a web_search query UTF-8 cannot carry (before any reservation), "
+        "returned to the LLM; the root task remains live",
     ),
     "arrival_effect_unknown": (
         False,
@@ -369,6 +392,20 @@ def _runtime_reason_code_literals() -> dict[str, str]:
         # Conditional/fallback reason values remain producers; their spelling
         # need not be adjacent to the keyword on one source line.
         tree = parse(source)
+        if path.name == "owner_model.py":
+            # The endpoint forwards this typed exception's code, including the
+            # eligibility function's returned refusal; those are wire reasons too.
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id == "ModelActRefused" and node.args):
+                    for code in values(node.args[0]):
+                        found.setdefault(code, f"{path.relative_to(root.parent)}:{node.lineno}")
+            eligibility = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "eligibility")
+            for node in ast.walk(eligibility):
+                if isinstance(node, ast.Return):
+                    for code in values(node.value):
+                        if code:
+                            found.setdefault(code, f"{path.relative_to(root.parent)}:{node.lineno}")
         forwarded = _forwarded_reason_arguments(tree)
         constants = {target.id: node.value for node in tree.body if isinstance(node, ast.Assign)
                      for target in node.targets if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant)}

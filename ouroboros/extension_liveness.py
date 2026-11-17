@@ -1,7 +1,8 @@
 """The liveness authority for one extension: what it should be, and what it is.
 
 Every gate an extension passes before it may run — manifest type, load error,
-enabled flag, skill conflict, executable review freshness, owner grants,
+a deployment's trust in its code (``deployment_extensions.trust_gap``), enabled
+flag, skill conflict, executable review freshness, owner grants,
 isolated-dependency readiness — is answered once here, as a projection over the
 discovered skill and the live registries. Callers decide what to do about it;
 this module never loads or unloads anything.
@@ -38,9 +39,12 @@ def _extension_runtime_state(
 ) -> Dict[str, Any]:
     """Return the liveness authority for one extension."""
     from ouroboros.config import get_runtime_mode
+    from ouroboros.deployment_extensions import TRUST_SENTENCES, UNTRUSTED_REASON, trust_gap
 
     hash_now = current_hash or skill.content_hash
     skill_dir_now = str(skill.skill_dir.resolve())
+    untrusted = (trust_gap(skill.name, skill_dir_now, hash_now)
+                 if skill.manifest.is_extension() and not skill.load_error else "")
     review_stale = skill.review.is_stale_for(hash_now)
     with _lock:
         live_bundle = _extensions.get(skill.name)
@@ -76,6 +80,9 @@ def _extension_runtime_state(
     elif skill.load_error:
         desired_live = False
         reason = "load_error"
+    elif untrusted:  # an execution domain's service runs only the code of its trusted packages
+        desired_live = False
+        reason = UNTRUSTED_REASON
     elif not skill.enabled:
         desired_live = False
         reason = "disabled"
@@ -103,7 +110,8 @@ def _extension_runtime_state(
         "executable_review": review_gate["executable_review"],
         "grant_status": grant_status,
         "conflict": conflict,
-        "load_error": skill.load_error or (load_failure.error if matched_failure and load_failure else None),
+        "load_error": skill.load_error or (TRUST_SENTENCES[untrusted] if untrusted else None)
+        or (load_failure.error if matched_failure and load_failure else None),
         "desired_live": desired_live,
         "live_loaded": live_loaded,
         "loaded_present": loaded_present,
@@ -298,10 +306,12 @@ def _published_skill_readiness(skill, drive_root, peers):
     """Refresh small authority controls against a captured identity, without rehashing payload bytes."""
     from dataclasses import replace
 
+    from ouroboros.deployment_extensions import effective_enabled
     from ouroboros.skill_loader import load_enabled, load_review_state
 
-    current = replace(skill, enabled=load_enabled(drive_root, skill.name), review=load_review_state(
-        drive_root, skill.name, skill_type="extension", skill_dir=skill.skill_dir))
+    current = replace(skill, enabled=effective_enabled(skill.name, load_enabled(drive_root, skill.name), skill.skill_dir,
+                                                       skill.content_hash),
+                      review=load_review_state(drive_root, skill.name, skill_type="extension", skill_dir=skill.skill_dir))
     return _apply_durable_extension_health(_apply_deps_block(_extension_runtime_state(
         current, drive_root=drive_root, skills=peers), drive_root, current), drive_root, current)
 

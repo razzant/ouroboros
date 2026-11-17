@@ -137,6 +137,36 @@ def _provider_catalog_state_returns():
         record.write_bytes(recorded)
 
 
+_CLOCK_CHECKED: set = set()  # module names whose bound clock a test has already been started on
+
+
+def _give_late_imports_the_real_clock() -> None:
+    """Give every product module imported since the last check the clock ``deadline_utils`` defines.
+
+    Sixteen modules bind that clock by name (``from ouroboros.deadline_utils import utc_now``) and keep whatever
+    stood there at their first import; some twenty tests replace it on ``deadline_utils``. A module first imported
+    inside one of them kept the test's clock for the rest of the process: ``capability_evidence`` then read every
+    stored refusal and density witness as expired in every later test of the worker (the cache life table found
+    it). A name a product module itself defines (``ouroboros.utils.utc_now``) is left alone."""
+    real = getattr(sys.modules.get("ouroboros.deadline_utils"), "utc_now", None)
+    if getattr(real, "__module__", "") != "ouroboros.deadline_utils":
+        return  # not imported yet, or a replacement still stands: nothing to hand out
+    for name in set(sys.modules) - _CLOCK_CHECKED:
+        _CLOCK_CHECKED.add(name)
+        module = sys.modules.get(name)
+        bound = getattr(module, "utc_now", None) if name.startswith(("ouroboros.", "supervisor.")) else None
+        if bound is not None and bound is not real and not str(getattr(bound, "__module__", "")).startswith(
+                ("ouroboros", "supervisor")):
+            module.utc_now = real
+
+
+@pytest.fixture(autouse=True)
+def _late_imports_keep_the_real_clock():
+    """Before each test (the last one's patches are undone by then): ``_give_late_imports_the_real_clock``."""
+    _give_late_imports_the_real_clock()
+    yield
+
+
 @pytest.fixture
 def provider_catalog_offline(monkeypatch):
     """Keep the window probe local: no live catalog fetch for this test.
@@ -580,7 +610,7 @@ def _pin_lane_groups(items, config) -> None:
     groups, files = {}, {}
     for item in items:
         resource = serial_resource(item)
-        group = f"serial:{resource}" if resource else item.nodeid.rsplit("::", 1)[0]
+        group = f"serial:{resource}" if resource else item.parent.nodeid
         item.stash[_LANE_GROUP] = group
         groups[item.nodeid] = group
         files.setdefault(group, set()).add(item.nodeid.split("::", 1)[0])
@@ -611,6 +641,7 @@ def pytest_configure(config):
                                        "the tests that run alone in the one-process pass after the xdist pass")
     config.addinivalue_line("markers", "starter_skills: the test runs the real starter-skill installer "
                                        "(conftest `_starter_skills_stay_off`); its skill sources are local fixtures")
+    config.addinivalue_line("markers", "program_observations: explicitly exercise and join vendor-program observation work")
     evidence = os.environ.get("OUROBOROS_TEST_EVIDENCE_ROOT")
     if evidence and _PYTEST_ROOT is not None and not getattr(config.option, "ci_evidence_dir", None):
         config.option.ci_evidence_dir = str(pathlib.Path(evidence) / ("pytest-" + _PYTEST_ROOT.name))
@@ -856,18 +887,22 @@ def _launcher_no_real_network(request):
 @pytest.fixture(autouse=True)
 def _isolate_restart_generation(monkeypatch):
     """Panic and parent observation belong to one process generation, not later tests;
-    so do a returning stop's named queue and the launch/schedule process memory."""
-    from ouroboros import delegate_recovery, launcher_bootstrap, server_control
-    from supervisor import queue, schedule_occurrence, worker_assignment, worker_pool_lifecycle
+    so do a returning stop's named queue, the launch/schedule process memory and a launcher's Quit."""
+    from ouroboros import delegate_recovery, launcher_bootstrap, launcher_server_reaper, server_control
+    from supervisor import dispatch_choice, pool_admission, queue, schedule_occurrence, worker_assignment
 
     monkeypatch.setattr(server_control, "_restart_successors", [])
     monkeypatch.setattr(server_control, "_restart_stop_requested", False)
     monkeypatch.setattr(launcher_bootstrap, "source_handoff", launcher_bootstrap._SourceHandoff())
+    if (launcher := sys.modules.get("launcher")) is not None:
+        monkeypatch.setattr(launcher, "_quit", launcher_server_reaper.QuitEngineStop())
     monkeypatch.setattr(delegate_recovery, "_restart_parent", None)
     monkeypatch.setattr(queue, "RETURNS_NAMED", {})
     monkeypatch.setattr(schedule_occurrence, "_DEFERRED", {})
     monkeypatch.setattr(worker_assignment, "_COMMITTED_UNSENT", {})
-    monkeypatch.setattr(worker_pool_lifecycle, "_DEMAND_FORECAST", worker_pool_lifecycle._initial_forecast())
+    monkeypatch.setattr(dispatch_choice, "_ADMITTED", {})
+    monkeypatch.setattr(pool_admission, "_READY", {"seq": 0, "generation": None, "rss_bytes": None})
+    monkeypatch.setattr(pool_admission, "_FACTS", {})  # the last reading and the last fresh size: this test's own
 
 
 @pytest.fixture(autouse=True)
@@ -889,17 +924,30 @@ def _reset_custody_memo_between_tests():
 
 
 @pytest.fixture(autouse=True)
-def _unlatch_supervisor_event_bus_between_tests():
+def _unlatch_supervisor_event_bus_between_tests(monkeypatch):
     """A TestClient lifespan runs the server shutdown, whose ``workers.shutdown_event_q()``
     latches ``_EVENT_Q_SHUTDOWN`` for the rest of the xdist worker; the next test in that
     worker that publishes on the bus (``kill_workers_for_update``, a promote, a wake) then
     raises "supervisor event bus is shutting down" against a fixture it never saw. Several
     modules already unlatch it locally (test_promote_event_transport, test_inflight_indicator_seams);
-    this does it once for every test. A test that wants the latch sets it itself (monkeypatch)."""
+    this does it once for every test. A test that wants the latch sets it itself (monkeypatch).
+
+    The bus itself is created on its first use (a restart or a Stop publishing ``task_done``), so a
+    test whose production path published left a real bus attached, and a later test then met a
+    consumer it never set up (#2804). A real manager attached during the test is closed through its
+    owner, ``shutdown_event_q()``, before ``monkeypatch`` (requested for that order) hands back the
+    values a test replaced. A bus already attached when the test began is left alone, and a closed
+    one is never restored."""
+    from multiprocessing.managers import BaseManager
+
     from supervisor import workers
 
     workers._EVENT_Q_SHUTDOWN = False
+    found = workers._EVENT_Q_MANAGER
     yield
+    attached = workers._EVENT_Q_MANAGER
+    if attached is not found and isinstance(attached, BaseManager):
+        workers.shutdown_event_q()
 
 
 @pytest.fixture(autouse=True)
@@ -967,6 +1015,20 @@ def _act_as_the_installs_a_browser_or_e2e_test_launched(request, monkeypatch, tm
 
     monkeypatch.setattr(install_identity, "_ownership", as_its_launcher)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _keep_the_pytest_interpreter_tuning():
+    """``server.main()`` run in this process sets the server's interpreter switch interval and garbage-collector
+    threshold (``server_entrypoint``); the pytest process keeps its own for the next test."""
+    import gc
+    import sys
+
+    interval, thresholds = sys.getswitchinterval(), gc.get_threshold()
+    set_interval, set_threshold = sys.setswitchinterval, gc.set_threshold  # a test may patch either; restore through these
+    yield
+    set_interval(interval)
+    set_threshold(*thresholds)
 
 
 @pytest.fixture(autouse=True)
@@ -1277,6 +1339,21 @@ def _hide_bundled_skills(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _program_observations_stay_off(request, monkeypatch, _os_environ_isolation):
+    """Fake engine acquisitions do not implicitly start process-wide observation work."""
+    from ouroboros import harness_program_facts
+
+    if not request.node.get_closest_marker("program_observations"):
+        monkeypatch.setattr(harness_program_facts, "_request", lambda *_: None)
+    yield
+    if request.node.get_closest_marker("program_observations"):
+        for thread in threading.enumerate():
+            if thread.name == "vendor-program-observation":
+                thread.join(timeout=5)
+                assert not thread.is_alive(), "the observation's test must finish its owned work"
+
+
+@pytest.fixture(autouse=True)
 def _starter_skills_stay_off(request, monkeypatch):
     """No ordinary test starts the starter-skill installer; a test of the installer opts in.
 
@@ -1376,6 +1453,48 @@ def _isolate_workspace_executor_globals():
                 svc._panic_requested = saved_svc_panic
                 svc._SERVICES.clear()
                 svc._SERVICES.update(saved_svc_services)
+
+
+@pytest.fixture
+def pinned_path_node(monkeypatch, tmp_path):
+    """Opt-in, for a test that runs a real node skill: Ouroboros's own Node consumers wait for the pin's Node (owner,
+    14 Nov 2026), which no default-lane run prepares. The PATH Node becomes the exact bundle of an isolated pin that
+    names its measured version, so the strict path runs a real Node; this proves the skill, never the shipped pin's
+    security qualification. Skips without a runnable PATH Node. Yields that Node's version."""
+    from types import SimpleNamespace
+
+    from ouroboros import claudexor_runtime, node_runtime, platform_layer
+
+    found = shutil.which("node")
+    version = node_runtime.probe_node_version(found) if found else ""
+    if not version:
+        pytest.skip("no runnable node on PATH")
+    base = tmp_path / "pinned-path-node"
+    staged = platform_layer.embedded_node_candidates(base)[0]
+    staged.parent.mkdir(parents=True)
+    try:
+        staged.symlink_to(os.path.realpath(found))
+    except OSError:  # Windows without symlink rights
+        shutil.copy2(found, staged)
+
+    class _IsolatedPin:  # nothing prepared, no archive: only the exact bundle serves
+        pin, pin_error = SimpleNamespace(node_version=version), ""
+
+        def reviewed_node(self, **_kwargs):
+            raise claudexor_runtime.ClaudexorRuntimeError("runtime_node_unavailable", "fixture: nothing prepared")
+
+        @staticmethod
+        def planned_node(_pin):
+            return ""
+
+    bases = platform_layer.bundled_resource_bases
+    monkeypatch.setattr(platform_layer, "bundled_resource_bases", lambda: [base, *bases()])
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", _IsolatedPin)
+    try:
+        yield version
+    finally:
+        for key in [key for key in node_runtime._NODE_HEALTH_MEMO if key[0].startswith(str(base))]:
+            node_runtime._NODE_HEALTH_MEMO.pop(key, None)
 
 
 @pytest.fixture(autouse=True)

@@ -99,7 +99,8 @@ QUESTION_GEOMETRY = """() => {
     const bubble = document.querySelector('#chat-messages .chat-bubble.project-question');
     const card = bubble.querySelector('.chat-quiz-card');
     const head = card.querySelector('.chat-quiz-head');
-    const frame = card.querySelector('.chat-quiz-comment-box');
+    const wrapper = card.querySelector('.chat-quiz-comment-box');
+    const frame = wrapper.querySelector('.chat-quiz-comment');
     // The bubble's last line is its time alone (owner, refined A 21.10): no host sentence beside it.
     const foot = bubble.querySelector(':scope > .msg-time');
     const capsule = bubble.querySelector('.chat-bubble-voice > .chat-quiz-project');
@@ -108,8 +109,8 @@ QUESTION_GEOMETRY = """() => {
         head: box(head), centres: [...head.querySelectorAll('.chat-quiz-chip, .chat-quiz-status, .chat-quiz-close')].map(el => box(el).cy),
         headOrder: [...head.children].map(el => el.className),
         toQuestion: box(card.querySelector('.chat-quiz-question')).y - box(bubble).y,
-        frame: box(frame), send: box(frame.querySelector('.chat-quiz-send')),
-        field: frame.querySelector('.chat-quiz-comment').getAttribute('aria-label'),
+        frame: box(frame), wrapper: box(wrapper), send: box(wrapper.querySelector('.chat-quiz-send')),
+        field: frame.getAttribute('aria-label'),
         parts: [...bubble.children].filter(el => !el.hidden).map(el => el.classList[0]), footText: foot.textContent.trim(),
         bubbleText: bubble.textContent.replace(/\\s+/g, ' '), factsAnywhere: !!bubble.querySelector('.chat-quiz-host-facts'),
         question: card.querySelector('.chat-quiz-question').textContent.replace(/\\s+/g, ' ').trim(),
@@ -128,7 +129,7 @@ BOXES = """() => {
 
 GROWTH = """async () => {
     const field = document.querySelector('#chat-messages .project-question-card .chat-quiz-comment');
-    const frame = field.closest('.chat-quiz-comment-box'), send = frame.querySelector('.chat-quiz-send');
+    const frame = field, wrapper = field.closest('.chat-quiz-comment-box'), send = wrapper.querySelector('.chat-quiz-send');
     const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const steps = [];
     field.focus();
@@ -136,10 +137,10 @@ GROWTH = """async () => {
         field.value = Array.from({length: lines}, (_, i) => `answer line ${i + 1}`).join('\\n');
         field.dispatchEvent(new Event('input', {bubbles: true}));
         await settle();
-        const f = frame.getBoundingClientRect(), s = send.getBoundingClientRect();
+        const f = frame.getBoundingClientRect(), s = send.getBoundingClientRect(), w = wrapper.getBoundingClientRect();
         steps.push({lines, height: Math.round(field.getBoundingClientRect().height), mode: field.dataset.sizing,
             scrolls: field.scrollHeight > field.clientHeight + 1,
-            inside: s.left >= f.left && s.right <= f.right && s.top >= f.top && s.bottom <= f.bottom});
+            below: s.top >= f.bottom - 0.5, aligned: s.right <= w.right + 0.5});
     }
     return {steps, ring: getComputedStyle(frame).boxShadow};
 }"""
@@ -147,7 +148,7 @@ GROWTH = """async () => {
 
 # The anatomy holds in both themes: the dark voices change colours and the materials inside the answer, never a size.
 @pytest.mark.parametrize('theme', ['light', 'dark'])
-@pytest.mark.parametrize('width,height', [(956, 801), (390, 844)])
+@pytest.mark.parametrize('width,height', [(1100, 750), (956, 801), (390, 844)])
 def test_question_card_voice_line_one_row_head_answer_frame_and_foot(engine_ui, width, height, theme):
     engine = engine_ui['engine']
     page = _open(engine_ui, width, height, theme)
@@ -163,9 +164,11 @@ def test_question_card_voice_line_one_row_head_answer_frame_and_foot(engine_ui, 
         assert facts['headOrder'] == ['chat-quiz-chip', 'chat-quiz-status', 'chat-quiz-head-end'], facts
         assert round(facts['head']['h']) == 28 and max(facts['centres']) - min(facts['centres']) <= 1, facts
         assert facts['toQuestion'] <= 92, 'two lines, not four, before the question'
-        # Answer: one frame holding its words and Send at its trailing bottom edge.
+        # Answer: the visible field owns its frame; Send is a separate trailing action row below it.
         assert facts['field'] == 'Your answer' and not facts['clear'], facts
-        assert facts['frame']['right'] - facts['send']['right'] <= 6 and facts['frame']['bottom'] - facts['send']['bottom'] <= 6, facts
+        assert facts['frame']['right'] <= facts['wrapper']['right'] + 0.5
+        assert facts['send']['y'] >= facts['frame']['bottom'] - 0.5
+        assert facts['send']['right'] <= facts['wrapper']['right'] + 0.5, facts
         # Foot (owner, refined A 21.10): the time alone ends the bubble; the host's sentence is gone from the bubble,
         # and everything the card says (question, the owner's answer frame, the signature line) stays as it was.
         assert facts['parts'] == ['chat-bubble-voice', 'chat-quiz-card', 'msg-time'], facts
@@ -183,11 +186,11 @@ def test_question_card_voice_line_one_row_head_answer_frame_and_foot(engine_ui, 
         growth = page.evaluate(GROWTH)
         print(json.dumps({'question_a_growth': growth, 'engine': engine}))
         heights = {step['lines']: step['height'] for step in growth['steps']}
-        assert heights[0] == heights[1] == heights[2], growth  # two lines at rest
+        assert heights[0] == heights[1] <= heights[2], growth  # the visible field owns its padding; engines may fit two lines at rest
         assert heights[2] < heights[4] < heights[12], growth   # grows with its words
         assert heights[12] == 140 and growth['steps'][4]['scrolls'], growth  # to one cap, then scrolls
         assert growth['steps'][-1]['height'] == heights[1], 'and shrinks again'
-        assert all(step['inside'] for step in growth['steps']), growth
+        assert all(step['below'] and step['aligned'] for step in growth['steps']), growth
         assert growth['ring'] not in ('', 'none'), 'the frame wears the field focus idiom'
         setup_browser.capture(page, f'question-a-{engine}-{width}-{theme}')
         # The Project's own card, opened by its reference as tests/test_ui_result_browser.py presses it: the capsule
@@ -313,7 +316,7 @@ BAR = """name => {
     const box = el => { const r = el.getBoundingClientRect(); return {x: r.x, y: r.y, h: r.height, bottom: r.bottom, cy: r.y + r.height / 2}; };
     const page = document.querySelector('#page-' + name), header = page.querySelector('.app-page-header');
     const lead = header.querySelector('.app-page-lead');
-    const items = [...header.querySelectorAll('.app-page-lead [role=tab], .app-page-lead .files-crumb, .app-page-toolbar button')]
+    const items = [...header.querySelectorAll('.app-page-lead [role=tab], .app-page-lead .files-crumb, .app-page-lead-title, .app-page-toolbar button')]
         .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
     const hb = box(header);
     const hit = document.elementFromPoint(hb.x + header.clientWidth / 2, hb.bottom + 8);
@@ -335,7 +338,7 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
     page = _open(engine_ui, 956, 801)
     try:
         bars = {}
-        for name in ('dashboard', 'settings', 'skills', 'files'):
+        for name in ('skills', 'files'):
             _goto(page, name)
             bars[name] = page.evaluate(BAR, name)
             bar = bars[name]
@@ -346,21 +349,19 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
             # The strip lends its shadows room below the bar but never takes a press meant for the page.
             assert bar['hitsPage'], (name, bar)
             setup_browser.capture(page, f'bar-a-{name}-{engine}-956')
-        # Eight Settings tabs scroll inside the bar; End reveals About without moving the page.
+        # Settings keeps its search and the open page's title in the band's lead.
         _goto(page, 'settings')
-        strip = page.locator('#page-settings .app-page-lead .app-tab-strip')
-        assert strip.evaluate('el => el.scrollWidth > el.clientWidth')
-        page.locator('#page-settings [data-settings-tab]').first.focus()
-        page.keyboard.press('End')
-        about = page.locator('#page-settings [data-settings-tab="about"]')
-        assert about.evaluate("""el => { const s = el.closest('.app-tab-strip').getBoundingClientRect(), r = el.getBoundingClientRect();
-            return r.left >= s.left - 1 && r.right <= s.right + 1; }""")
-        assert page.evaluate("document.querySelector('#page-settings').dataset.activeSettingsTab") == 'about'
+        settings_bar = page.evaluate(BAR, 'settings')
+        assert settings_bar['lead'] and 'data-lead' in settings_bar['attrs'] and 'data-empty' not in settings_bar['attrs']
+        assert settings_bar['height'] == 50, settings_bar
         # The macOS window: the bar is the band, its controls centred on it; an empty header (Widgets) is only the
         # window's handle over the page, and the page's first card sits one inset (not two) under the band.
         _band(page)
-        settings_band = page.evaluate(BAR, 'settings')
-        assert settings_band['height'] == 52 and abs(settings_band['centres'][0] - 26) <= 1, settings_band
+        page.set_viewport_size({'width': 1280, 'height': 801})
+        _goto(page, 'dashboard')
+        page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
+        dashboard_band = page.evaluate(BAR, 'dashboard')
+        assert dashboard_band['height'] == 52 and abs(dashboard_band['centres'][0] - 26) <= 1, dashboard_band
         _goto(page, 'widgets')
         page.locator('.widgets-card').first.wait_for()
         widgets = page.evaluate("""() => ({bar: document.querySelector('#page-widgets .app-page-header').getBoundingClientRect().height,
@@ -370,20 +371,31 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         assert widgets['empty'] and widgets['bar'] == 52 and widgets['margin'] == '0px', widgets
         assert abs(widgets['card'] - (52 + 16)) <= 1, widgets
         setup_browser.capture(page, f'bar-a-widgets-band-{engine}-956')
-        # A phone: the same nodes go back under the row, focus and identity kept; the desk takes them back.
+        # The Dashboard's vertical list keeps its nodes and focus through a resize. On a phone a row opens a
+        # page level; its header's Back returns to that same row. On a desk the list stands beside the page.
         _goto(page, 'dashboard')
-        page.evaluate("window.__strip = document.querySelector('#page-dashboard .app-tab-strip')")
+        page.evaluate("window.__strip = document.querySelector('#page-dashboard [role=tablist]')")
+        assert page.locator('#page-dashboard [role=tablist]').get_attribute('aria-orientation') == 'vertical'
+        assert page.locator('#page-dashboard [data-dashboard-tab]').count() == 7
         page.locator('#page-dashboard [data-dashboard-tab="costs"]').focus()
         page.set_viewport_size({'width': 390, 'height': 844})
         page.wait_for_function("document.documentElement.dataset.layout === 'stack'")
         phone = page.evaluate(BAR, 'dashboard')
-        assert phone['under'] and not phone['lead'] and 'data-lead' not in phone['attrs'] and phone['height'] <= 56, phone
-        assert page.evaluate("""() => document.querySelector('#page-dashboard .app-page-tabs .app-tab-strip') === window.__strip
+        assert not phone['under'] and phone['height'] <= 56, phone
+        assert page.evaluate("""() => document.querySelector('#page-dashboard .dashboard-rail [role=tablist]') === window.__strip
             && document.activeElement?.dataset.dashboardTab === 'costs'""")
+        page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
+        page.locator('#page-costs').wait_for(state='visible')
+        assert page.locator('#page-dashboard .app-page-header [data-dashboard-lead-name]').inner_text() == 'Costs'
+        assert page.evaluate(BAR, 'dashboard')['height'] <= 56
+        page.locator('#page-dashboard .app-page-header [data-dashboard-list-back]').click()
+        assert page.evaluate("document.activeElement?.dataset.dashboardTab === 'costs'")
         setup_browser.capture(page, f'bar-a-dashboard-{engine}-390')
-        page.set_viewport_size({'width': 956, 'height': 801})
+        page.set_viewport_size({'width': 1280, 'height': 801})
         page.wait_for_function("document.documentElement.dataset.layout === 'docked'")
-        assert page.evaluate("document.querySelector('#page-dashboard .app-page-lead .app-tab-strip') === window.__strip")
+        assert page.evaluate("document.querySelector('#page-dashboard .dashboard-rail [role=tablist]') === window.__strip")
+        assert page.locator('#page-costs').is_visible()
+        assert page.locator('#page-dashboard [role=tablist]').is_visible()
     finally:
         page.close()
 
@@ -480,13 +492,13 @@ def test_the_widgets_board_scrolls_with_crisp_edges_under_its_plain_band(engine_
         # A dragged card: the band lets the pointer through to the board's top edge, where the engine scrolls a drag
         # upward, and is the window's handle again once the card is dropped.
         through = """dragging => { const card = document.querySelector('#widgets-list .widgets-card');
-            card.classList.toggle('dragging', dragging); const l = document.querySelector('#page-widgets .widgets-scroll');
+            card.toggleAttribute('data-widget-lifted', dragging); const l = document.querySelector('#page-widgets .widgets-scroll');
             return Boolean(document.elementFromPoint(l.getBoundingClientRect().left + 40, 10)?.closest('.widgets-scroll')); }"""
         assert page.evaluate(through, True), 'a drag reaches the board under the band'
         assert not page.evaluate(through, False), 'at rest the band is the handle'
         # Another page's scroll body keeps the shared fade.
         _goto(page, 'settings')
-        settings = page.locator('#page-settings .settings-scroll').element_handle()
+        settings = page.locator('#page-settings [data-settings-home]').element_handle()  # the home is the scroll body
         page.wait_for_function("el => el.scrollHeight - el.clientHeight > 200", arg=settings)
         settings.evaluate("el => { el.scrollTop = 200; }")
         page.wait_for_function("el => el.hasAttribute('data-scroll-above')", arg=settings)
@@ -587,30 +599,32 @@ def test_files_location_keeps_every_folder_reachable_in_the_bar(engine_ui, width
 
 @pytest.mark.parametrize('theme', ['light', 'dark'])
 def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme):
-    """A docked 720px window can leave only 160px for Files; use its real resize handle."""
+    """A docked 720px window keeps Files' 320px floor; use its real resize handle."""
     page = _open(engine_ui, 720, 801)
     engine = engine_ui['engine']
     try:
-        page.evaluate("""theme => { document.documentElement.dataset.theme = theme;
-            document.documentElement.style.setProperty('--sidebar-width', '180px'); }""", theme)
+        page.evaluate("theme => { document.documentElement.dataset.theme = theme; }", theme)
         _goto(page, 'files')
         _location(page, DEEP)
         page.evaluate("""() => { window.__filesNodes = ['files-breadcrumb', 'files-new-file', 'files-new-dir']
             .map(id => document.getElementById(id)); document.getElementById('files-new-file').focus(); }""")
         handle = page.locator('#primary-sidebar > .resize-handle').bounding_box()
         start_x = handle['x'] + handle['width'] / 2
+        # Owner 14.11; DESIGN "Resizing": drag from the shown box, within the sidebar and room's bounds
+        # (8f5ea4856). Probe just above the room's floor during the drag, then overshoot the sidebar's cap.
+        start_width = page.locator('#primary-sidebar').bounding_box()['width']
         page.mouse.move(start_x, handle['y'] + handle['height'] / 2)
         page.mouse.down()
         # Check during the drag as well as after release, without a window resize event.
-        page.mouse.move(start_x + 545 - 180, handle['y'] + handle['height'] / 2, steps=12)
-        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 175")
+        page.mouse.move(start_x + 385 - start_width, handle['y'] + handle['height'] / 2, steps=12)
+        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 335")
         page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
         setup_browser.capture(page, f'files-sidebar-drag-{engine}-{theme}')
         assert page.locator('#files-breadcrumb').evaluate("el => el.closest('.files-browser-header') !== null")
         assert page.evaluate("document.activeElement === window.__filesNodes[1]")
-        page.mouse.move(start_x + 560 - 180, handle['y'] + handle['height'] / 2)
+        page.mouse.move(start_x + 560 - start_width, handle['y'] + handle['height'] / 2)
         page.mouse.up()
-        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 160")
+        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 320")
         # Reveal Paste through the real file menu, making the action group wider than the available column.
         page.locator('#files-list .files-entry').filter(has_text='notes.md').click(button='right')
         page.locator('#files-context-menu [data-action="copy"]').click()
@@ -624,7 +638,7 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
                 return r.width > 0 && r.left >= content.left && r.right <= content.right + 1 && (hit === el || el.contains(hit)); }""")
             control.click(trial=True)
             measured.append({'name': control.inner_text(), 'box': control.bounding_box()})
-        print(json.dumps({'files_narrow_controls': measured, 'engine': engine, 'theme': theme, 'content_width': 160}))
+        print(json.dumps({'files_narrow_controls': measured, 'engine': engine, 'theme': theme, 'content_width': 320}))
         assert page.evaluate('document.scrollingElement.scrollWidth <= innerWidth')
         assert page.locator('#page-files .app-page-header').get_by_role('heading', name='Files', exact=True).count() == 1
         page.locator('#files-new-file').scroll_into_view_if_needed()

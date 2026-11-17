@@ -93,14 +93,14 @@ def test_stop_detached_wake_records_existing_graceful_cancel_intent(tmp_path, mo
 
 def test_assignment_refuses_another_actor_until_inline_registration_ends(tmp_path, monkeypatch):
     from supervisor.active_activity import get_direct_activity_registry
-    from supervisor.worker_assignment import _choose_candidate
+    from supervisor.dispatch_choice import choose
 
     q, _state, workers = _install_queue(tmp_path, monkeypatch)
     workers.PENDING.append({"id": "head", "type": "task", "depth": 0, "admitted_dispatch": "none"})
     registry = get_direct_activity_registry()
     registry.register("head", 7)
     try:
-        assert _choose_candidate(q, 5.0, set(), set(), {}, set()) == (None, False)
+        assert choose(q, 5.0) == []
     finally:
         registry.unregister("head")
-    assert _choose_candidate(q, 5.0, set(), set(), {}, set()) == (0, False)
+    assert [row["id"] for row in choose(q, 5.0)] == ["head"]

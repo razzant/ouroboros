@@ -229,7 +229,7 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
     root = pathlib.Path(task.get("budget_drive_root") or DATA_DIR)
     snapshot = _load_queue_snapshot(root)
     fact = {**queue_snapshot_observation(snapshot), "source_root": str(root),
-            "max_workers": int(get_max_workers()),
+            "max_workers": get_max_workers(),  # the owner's cap on acting tasks as configured here; None: no number
             "max_active_subagents_per_root": int(get_max_active_subagents_per_root())}
     if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
         return {**fact, "note": "Queue observation unavailable; current capacity is unknown."}
@@ -272,16 +272,17 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         pending_stop_status = "unknown"
     fact["pending_paused_or_held_count"] = pending_stops if pending_stop_status == "observed" else None
     fact["pending_paused_or_held_status"] = pending_stop_status
+    # A cold sleeper is a queued row that keeps no process: its saved pause says it sleeps.
+    fact["pending_sleeping_count"] = (sum(((row.get("task") or {}).get("_budget_pause") or {}).get("reason") == "sleep"
+                                          for row in pending_rows) if pending_stop_status == "observed" else None)
     observed = pool_observation_status(snapshot)
     fact["pool_observation_status"] = observed
-    for key in ("max_workers", "worker_total", "active_worker_count", "busy_worker_count", "booting_count",
-                "reaping_count", "retiring_count", "lane_carrier_total"):
-        # worker_total: project slots that exist (the pool grows on demand below the ceiling); the
-        # conversation lane's carriers are apart. A snapshot's max_workers is its writer's ceiling.
+    for key in ("max_workers", "worker_total", "busy_worker_count", "acting_worker_count", "parked_worker_count",
+                "booting_count", "reaping_count", "retiring_count", "lane_carrier_total", "memory_admission"):
+        # worker_total: project processes that exist (the pool grows on demand while memory admits); the
+        # conversation lane's carriers are apart. A snapshot's max_workers is its writer's cap (null: none).
         fact["recorded_max_workers" if key == "max_workers" else key] = (
             snapshot.get(key) if observed == "observed" else None)
-    demand = snapshot.get("project_demand")  # the last assignment pass's growth forecast, as it published it
-    fact["project_demand"] = dict(demand) if isinstance(demand, dict) else {"status": "not_recorded"}
     assignable = snapshot.get("assignable_idle_workers")
     if observed != "observed":
         fact["free_worker_slots"] = None
@@ -289,7 +290,7 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
     elif assignable is not None:
         fact["free_worker_slots"] = max(0, int(assignable))
         fact["free_worker_slots_basis"] = "recorded_assignable_idle_workers"
-    elif "assignable_idle_workers" not in snapshot and fact["running_count"] is not None:
+    elif "assignable_idle_workers" not in snapshot and fact["running_count"] is not None and fact["max_workers"]:
         # Only a snapshot from before the pool was published: a recorded null is unknown, never spare.
         fact["free_worker_slots"] = max(0, fact["max_workers"] - fact["running_count"]
                                           - int(fact["reaping_count"] or 0))
@@ -301,12 +302,14 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         "Last recorded queue counts at ts; freshness and age were measured when this context "
         "was built and do not refresh during the task. Stale or unknown observations do not "
         "establish current load. Legacy free-slot estimates are not measured capacity. "
-        "pending_count counts rows, not runnable demand: project_demand.admissible_pending is what the "
-        "scheduler's last pass could dispatch (capped by the ceiling), paused or held rows say so explicitly, and "
-        "other rows record no wait cause here. free_worker_slots is assignable idle existing capacity, not headroom; "
-        "the configured ceiling applies on the next task/restart. booting and reaping overlap for fresh slots. "
-        "active_worker_count is dispatch-enabled capacity, not work. "
-        "Scheduling owns admission; these observations reserve no slots."
+        "pending_count counts rows, not runnable demand: paused or held rows and cold sleepers (no process) say so "
+        "explicitly, and other rows record no wait cause here. acting_worker_count holds a task and acts; parked_worker_count waits on its own process "
+        "(a warm sleep, an owner wait or an in-slot wait) and is not counted against the owner's cap, which counts "
+        "acting tasks only (recorded_max_workers; null: no number, the machine's memory is the limit). "
+        "free_worker_slots is assignable idle existing capacity, not headroom; booting and reaping overlap for "
+        "fresh slots. memory_admission is the supervisor's last reading of the machine (dated read_at): available, "
+        "reserve, the typical worker size, the processes still starting, how many new processes it admitted and why "
+        "a start waits. Scheduling owns admission; these observations reserve no slots."
     )
     return fact
 
@@ -486,7 +489,9 @@ _ROUTES_SHOWN = 4  # failing routes rendered in the line; the row keeps every ro
 _CAUSE_CHARS = 80  # of a top cause's message in the line; the row keeps the engine's whole first line
 _STORE_FILES = ("state/current.sqlite", "state/dialog.sqlite", "state/usage.sqlite")
 _JOURNAL_MODES: Dict[str, str] = {}  # per process: each store file's header, read once
-VITALS_READER = "query_data(kind='supervisor_log', op='jsonl')"  # the minimal working call: the kind requires op='jsonl'
+# The minimal working call: the kind requires op='jsonl', and these rows are the installation's journal,
+# which a forked drive does not keep (plane='canonical' reads it from any focus).
+VITALS_READER = "query_data(kind='supervisor_log', op='jsonl', plane='canonical')"
 VITALS_NOTE = f"No verdict here, the weighing is mine; clocks UTC; rows: {VITALS_READER}"
 WAL_GATE = ("WAL needs a SQLite with the WAL-reset fix (3.51.3+, or 3.50.7+ / 3.44.6+ within those series),"
             " enforced kernel locks and a local filesystem; an Update keeps this interpreter")
@@ -743,7 +748,7 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
     journal's reader. ``observed_at`` is the fact's own instant (the clocks' day); it is written only
     when it differs from ``captured_at``, the Runtime JSON's ``context_captured_at`` beside it (a stale
     snapshot), so the same instant is not printed twice. Every absent source omits its key, except
-    ``engine_pool``, which stays and names each source it could not read. Never
+    ``engine_pool`` and ``vendor_programs``, which name unobserved sources. Never
     raises."""
     import os
 
@@ -774,6 +779,8 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
         except Exception:
             log.debug("engine pool fact unavailable", exc_info=True)
             fact["engine_pool"] = "engine: not observed"
+        from ouroboros.harness_program_facts import vendor_programs_line
+        fact["vendor_programs"] = vendor_programs_line(root)
         if tail.get("inline"):
             # Owner decision 2A: the turns the body ran on a thread of the server instead of a carrier, newest
             # last — the degraded executor's reason (a refused spawn, a marker window) or a live call.
@@ -830,10 +837,14 @@ def admission_observation(data_root: Any, *, observed_at: str) -> str:
 
 
 def body_facts(data_root: Any, *, observed_at: str) -> Dict[str, Any]:
-    """The Runtime section's ``storage`` and ``vitals`` keys, each present only with its fact: one call
-    site, ``context.build_runtime_section``."""
+    """The Runtime section's ``storage``, ``vitals`` and ``kept_services`` keys, each present only with its fact: one
+    call site, ``context.build_runtime_section``. ``kept_services`` is what custody says runs now, never a task's
+    ``services_kept`` history (``launch_custody.kept_services_fact``)."""
+    from ouroboros.launch_custody import kept_services_fact
+
     facts = {"storage": storage_fact(data_root, observed_at=observed_at),
-             "vitals": vitals_fact(data_root, observed_at=observed_at, captured_at=observed_at)}
+             "vitals": vitals_fact(data_root, observed_at=observed_at, captured_at=observed_at),
+             "kept_services": kept_services_fact(data_root)}
     return {key: value for key, value in facts.items() if value is not None}
 
 
@@ -842,7 +853,7 @@ def vitals_line(fact: Optional[Dict[str, Any]]) -> str:
     if not isinstance(fact, dict):
         return ""
     parts = [f"body as of {fact['observed_at']}" if fact.get("observed_at") else "body"]
-    for key in ("owner_turns", "owner_turns_note", _STALLS_KEY, "busy_minute", "engine_pool", "conversation_carriers",
+    for key in ("owner_turns", "owner_turns_note", _STALLS_KEY, "busy_minute", "engine_pool", "vendor_programs", "conversation_carriers",
                 "inline_executors", "route_health", "runtime", "wal_gate", "last_update", "boot"):
         value = fact.get(key)
         if isinstance(value, list) and value:
@@ -856,7 +867,7 @@ def _delegation_capability_fact() -> Optional[Dict[str, Any]]:
     """Historical identities and readers; execution bodies are chosen reads."""
     try:
         from ouroboros.reviewer_slot_config import reviewer_slot_last_executions, LAST_EXECUTION_FILENAME
-        from ouroboros.subagent_history import recorded_handle, LAST_DELEGATION_FILENAME
+        from ouroboros.subagent_history import first_call_facts, recorded_handle, LAST_DELEGATION_FILENAME
         from ouroboros.subagents import subagent_last_delegation
 
         slots = reviewer_slot_last_executions()
@@ -865,11 +876,13 @@ def _delegation_capability_fact() -> Optional[Dict[str, Any]]:
             return None
         records = last.get("latest_by_subagent")
         records = list(records.values()) if isinstance(records, dict) and records else ([last] if last else [])
+        prices = first_call_facts()
         return {"note": "Historical observations, not live health; read the records for details.",
                 "reviewer_slots_last": [{"slot": str(slot), "outcome": row.get("status", "unknown"),
                     "observed": row.get("ts")} for slot, row in sorted(slots.items()) if isinstance(row, dict)],
                 "subagents_last_executions": [{"selected_subagent_id": recorded_handle(row),
                     "outcome": row.get("outcome", "unknown"), "observed": row.get("observed_at") or row.get("ts"),
+                    **prices.get(str(row.get("selected_subagent_id") or ""), {}),
                     **{key: row[key] for key in ("task_id", "run_id", "attempt_id") if row.get(key)}}
                     for row in records if isinstance(row, dict)],
                 "readers": [{"tool": "read_file", "arguments": {"root": "runtime_data", "path": "state/" + name}}

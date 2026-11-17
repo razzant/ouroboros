@@ -118,6 +118,9 @@ class PreparedConnection:
                                                      'error_class': type(error).__name__}))
 
     async def run(self, consume):
+        # The adopted consumer polls before this connection declares its rates. Capture stays in the hub from
+        # here until that Ready alone releases it; preparing ahead never withholds audio from the serving one.
+        self.host.hub.pause_input()
         await asyncio.shield(self.ready)
         self.activate.set_result(consume)
         try:

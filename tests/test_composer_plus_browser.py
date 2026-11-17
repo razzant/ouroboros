@@ -1,7 +1,7 @@
 """The composer's "+" and its empty mount points in real engines (docs/DESIGN.md "Composer owner controls").
 
 On a real server in Chromium and WebKit, light and dark, at 1280 and 360 px: "+" stands where the paperclip
-stood, a 36 px target that keeps the text row's height; a pointer opens its menu above it without taking the
+stood, a 36 px target (44 px under a coarse pointer) that keeps the text row's height; a pointer opens its menu above it without taking the
 field's focus, and Attach file opens the file chooser and stages the chosen file; by keyboard, Enter opens the
 menu onto Attach file, Esc closes it and returns focus to "+", Tab leaves it; a drop on the room and an image
 pasted into the field still stage files, and the menu fits a 320 px phone. The voice and chips slots take no
@@ -32,6 +32,7 @@ FACTS = """() => {
     const active = document.activeElement;
     const input = page.querySelector('#chat-input'), words = getComputedStyle(input);
     return {
+        coarse: matchMedia('(pointer: coarse)').matches,
         plus: box(plus), row: box(plus.closest('.chat-text-row')), input: box(page.querySelector('#chat-input')),
         send: box(page.querySelector('.chat-send-group')), menu: box(menu),
         lastLine: box(input).bottom - parseFloat(words.paddingBottom) - parseFloat(words.lineHeight) / 2,
@@ -75,8 +76,9 @@ def _facts(page) -> dict:
 
 def _assert_plus_in_place(facts: dict, where: str) -> None:
     plus, row, field = facts["plus"], facts["row"], facts["input"]
-    assert abs(plus["width"] - 36) <= 0.5 and abs(plus["height"] - 36) <= 0.5, (where, plus)
-    # The finger-sized target keeps the paperclip's place: the row is no taller than its field needs.
+    # DESIGN.md "Touch and containment": a coarse pointer raises the reach to 44 px, keeping the row's footprint.
+    reach = 44 if facts["coarse"] else 36
+    assert abs(plus["width"] - reach) <= 0.5 and abs(plus["height"] - reach) <= 0.5, (where, plus)
     assert row["height"] <= field["height"] + 18.5, (where, row, field)
     # The field can wrap even its placeholder on a phone. The controls ride on its last line.
     assert abs((plus["top"] + plus["bottom"]) / 2 - facts["lastLine"]) <= 1, (where, facts)
@@ -201,7 +203,9 @@ ROW = """() => {
         rowHeight: rect(row).height, rowRight: rect(row).right, compact: row.dataset.ownerCompact || '',
         hosts: [...row.children].filter((node) => node !== slot && rect(node).width > 0)
             .map((node) => [node.className, Math.round(rect(node).width * 2) / 2]),
-        lines: new Set([...row.children].filter((node) => rect(node).width > 0).map((node) => Math.round(rect(node).top))).size,
+        // Latest is absolute, above the phone's line; it does not add a line of capsules or chips.
+        lines: new Set([...row.children].filter((node) => rect(node).width > 0 && !node.matches('.chat-scroll-bottom-btn'))
+            .map((node) => Math.round(rect(node).top))).size,
         slot: { display: style.display, overflow: style.overflowX, left: rect(slot).left, right: rect(slot).right,
             clips: slot.scrollWidth > slot.clientWidth + 1 },
         chipsWhole: [...slot.children].every((chip) => chip.scrollWidth <= chip.clientWidth + 1),

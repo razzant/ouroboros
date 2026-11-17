@@ -81,6 +81,9 @@ def test_the_compose_carrier_is_the_one_executable_recipe():
         assert service["profiles"] == [name], "one profile per volume set"
         assert service["restart"] == "on-failure" and service["init"] is True
         assert service["ports"] == ["127.0.0.1:8765:8765"]
+    for guide in ("Dockerfile", "docs/DEPLOYMENT.md"):  # their plain `docker run` publishes on loopback too
+        published = re.findall(r"docker run [^\n]*?-p (\S+)", (REPO / guide).read_text(encoding="utf-8"))
+        assert published and all(port.startswith("127.0.0.1:") for port in published), guide
     image = services["image"]
     assert image["environment"]["OUROBOROS_LAUNCH_INTENT"] == "automatic"
     assert image["environment"]["OUROBOROS_DATA_DIR"] == "/data"

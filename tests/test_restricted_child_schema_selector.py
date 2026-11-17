@@ -137,8 +137,8 @@ def test_the_acting_work_order_forbids_tool_grants_not_the_selector_its_registry
     order = {"mode": "acting_subagent", "surface": "external_workspace", "write_root": str(tmp_path / "workspace")}
     surface = _compose_subagent_text("obj", role="builder", expected_output="out", constraints="", context="",
                                      task_constraint=order).split("[WRITE SURFACE]", 1)[1]
-    forbidden = surface.split("Do NOT ", 1)[1].split(". ", 1)[0]  # the one sentence of prohibitions
-    assert "grant yourself tools" in forbidden and "enable" not in forbidden, forbidden
+    steps = next(s for s in surface.split(". ") if "the parent's steps" in s)  # the sentence naming the parent's steps
+    assert "granting yourself tools" in steps and "enable" not in steps, steps
     registry = _child(tmp_path, monkeypatch, "acting_subagent", "max")
     registry._ctx.task_constraint = normalize_task_constraint(order)
     resident = initial_tool_schemas(registry, context_mode="max")
@@ -193,25 +193,6 @@ def test_a_selector_the_actor_cannot_call_is_never_recommended(tmp_path, monkeyp
         "blocked" if "enable_tools" in disabled else "ok")
     miss = registry.execute("definitely_not_a_tool", {})
     assert ("list_available_tools" in miss) is ("list_available_tools" not in disabled)
-
-
-def test_a_low_or_max_diagnostic_keeps_its_role_and_is_not_told_to_call_the_selector(tmp_path, monkeypatch):
-    from ouroboros import provider_models
-    from ouroboros.tool_capabilities import TASK_DIAGNOSTIC_TOOL_NAMES
-
-    monkeypatch.setattr("ouroboros.work_diagnostics.context_ref", lambda ctx: {"task_id": "observed"})
-    registry = _child(tmp_path, monkeypatch, "local_readonly_subagent", "max")
-    resident = initial_tool_schemas(registry, context_mode="max")
-    assert set(_names(resident)) <= TASK_DIAGNOSTIC_TOOL_NAMES and "enable_tools" not in _names(resident)
-    assert "compact_context" in _names(resident)  # its own fold, without the selector
-    assert registry.execute_result("compact_context", {"inspect": True}).status != "blocked"
-    monkeypatch.setitem(provider_models.PROVIDER_TOOL_SCHEMA_LIMITS, "openai", len(resident) - 2)
-    loop._setup_dynamic_tools(registry, resident, [], context_mode="max")
-    fitted = _round(registry, resident)
-    assert loop_model_call._fit_route_tool_ceiling(fitted)
-    notice = fitted.messages[-1]["content"]
-    assert "enable_tools" not in notice and "list_available_tools marks them not loaded." in notice
-    assert registry.execute_result("enable_tools", {"tools": "read_file"}).status == "blocked"
 
 
 @pytest.mark.parametrize("profile", PROFILES)

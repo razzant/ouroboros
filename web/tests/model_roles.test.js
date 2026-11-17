@@ -72,7 +72,7 @@ test('Models distinguishes an unread Accounts facet from a confirmed empty accou
     assert.match(noAccounts[0].options[0].label, /connect one in Accounts/i);
     const empty = modelSourceGroups({ catalogKnown: true, accountsKnown: true, hasConfiguredAccounts: true });
     assert.match(empty[0].options[0].label, /No model sources listed/);
-    assert.match(empty[0].options[0].label, /refresh Model Catalog/i);
+    assert.match(empty[0].options[0].label, /press Read again in Models/);
     assert.doesNotMatch(empty[0].options[0].label, /connect one in Accounts/i);
     const saved = modelSourceGroups({ current: 'subscription:owner-source' });
     assert.equal(saved[0].options[0].value, 'subscription:owner-source');
@@ -132,6 +132,33 @@ test('context note uses the server projection, never catalogue arithmetic', () =
         'Window 1.1M tokens (set in Settings) · 984k usable for input');
     assert.match(modelContextNote({ context_window: 272000, max_context_window: 872000 }), /not known/);
     assert.match(modelContextNote(null), /not known/);
+});
+
+test('a window a refusal set says how its number was known, and claims no basis the projection does not name', () => {
+    // A size refusal's input limit in window_projection's shape; the numbers are made up, no provider was asked.
+    const window = { tokens: 883899, kind: 'input', source: 'refusal', observed_at: '2026-11-15T12:00:00+00:00',
+        reserve: 65536, usable: 883899, admitted: 883899, contradiction: null, retired_ack: {} };
+    const note = (basis) => modelContextNote({ window: { ...window, basis } });
+    const said = (words) => `Window 884k tokens (${words}) · 884k usable for input`;
+    assert.equal(note('provider_stated'), said('stated by the provider in a refusal'));
+    // A local instance counted the request Ouroboros refused before sending: no server stated or withheld a number.
+    assert.equal(note('exact_local_count'), said('derived from an exact local count before sending'));
+    // Derived by Ouroboros from a numberless refusal: an anchored estimate or a confirmed declared total.
+    assert.equal(note('anchored_estimate'), said('derived from a refusal that stated no number'));
+    assert.equal(note('unrecorded'), said('from an earlier refusal, basis not recorded'));
+    // A server from before bases were kept sends none; an empty, unknown or inherited name is never guessed at.
+    assert.equal(modelContextNote({ window }), said('from a refusal, basis unknown'));
+    for (const basis of ['', null, 'sent_estimate', 'toString', '__proto__']) assert.equal(note(basis), said('from a refusal, basis unknown'));
+    for (const basis of ['provider_stated', 'exact_local_count', 'anchored_estimate', 'unrecorded', undefined]) {
+        assert.doesNotMatch(note(basis), /2026|65,536|reserve|\(refusal\)|_/);  // stamps and codes stay in the record
+    }
+    // A basis is a refusal's alone: every other source keeps its words, whatever a projection carries beside it.
+    for (const [source, words] of [['provider_metadata', 'from the server'], ['user_setting', 'set in Settings'],
+        ['owner_ack', 'your confirmation'], ['local_health', 'the local serving window'], ['accepted', 'accepted']]) {
+        for (const basis of [undefined, '', 'provider_stated']) {
+            assert.equal(modelContextNote({ window: { ...window, source, basis } }), said(words), `${source} ${basis}`);
+        }
+    }
 });
 
 test('the same role sheets are loaded by both actual UI hosts', () => {
@@ -200,6 +227,56 @@ test('Settings says under Main, before Save, what a new Main does to running wor
     assert.match(main, /data-model-role-model aria-label="Main Model" aria-describedby="roles-main-note"/);
     assert.equal(html.split('data-main-follow-note').length, 2, 'one note, under Main and not under Fallback');
     assert.ok(!rendered(false).includes('data-main-follow-note'), 'the wizard and the wait card never show it');
-    const settings = readFileSync(new URL('../modules/settings.js', import.meta.url), 'utf8');
-    assert.match(settings, /createModelRolesEditor\(\{ hostId: 'settings-model-roles', mainNote: true,/);
+});
+
+test('a kept fallback preserves its unfinished field while source choices follow a new settings read', async (t) => {
+    const { Stub, world, settle } = await import('./helpers/settings_dom.js');
+    const { env } = world(t);
+    const host = new Stub(); host.id = 'roles'; env.document.body.append(host);
+    const editor = createModelRolesEditor({ hostId: 'roles', doc: env.document,
+        only: { slot: 'fallback', index: 2 }, store: { snapshot: {}, accountsKnown: true } });
+    const settings = { OUROBOROS_MODEL: 'owner/main', OPENROUTER_API_KEY: 'key',
+        OUROBOROS_MODEL_FALLBACKS: 'owner/first, owner/second, owner/third',
+        OUROBOROS_MODEL_CONTEXT_WINDOWS: { fallback: [0, 0, 0] } };
+    try {
+        editor.load(settings, contract);
+        const field = host.querySelector('[data-model-role-context]');
+        const details = host.querySelector('.model-role-details'); details.open = true;
+        field.value = ''; field.validity = { badInput: true };  // the native number field holding "1e"
+        await field.fire('input', { target: field });
+        const choices = () => host.querySelector('[data-model-role-source]').querySelectorAll('option').map(node => node.getAttribute('value'));
+        assert.ok(!choices().includes('api:openai'));
+        editor.load({ ...settings, OPENAI_API_KEY: 'new key', OUROBOROS_MODEL: 'owner/new-main' }, contract, { keep: true });
+        assert.equal(host.querySelector('[data-model-role-context]'), field, 'the browser keeps the unfinished field itself');
+        assert.equal(host.querySelector('.model-role-details'), details);
+        assert.equal(details.open, true);
+        assert.equal(field.validity.badInput, true);
+        assert.equal(editor.entry().value, 'owner/third');
+        assert.match(editor.entry().errors[0], /context window must be a positive whole number/);
+        assert.ok(choices().includes('api:openai'), 'the newly added account still reaches the kept form');
+        assert.equal(editor.collect().OUROBOROS_MODEL, 'owner/new-main');
+        // Discarding the draft still takes the stored field anew, including a new numeric value.
+        editor.load({ ...settings, OUROBOROS_MODEL_CONTEXT_WINDOWS: { fallback: [0, 0, 32768] } }, contract);
+        assert.notEqual(host.querySelector('[data-model-role-context]'), field);
+        assert.equal(editor.entry().context, 32768);
+        assert.deepEqual(editor.entry().errors, []);
+        await settle();
+    } finally { editor.destroy(); }
+});
+
+
+test('a clean fallback refresh takes a new saved context window', async (t) => {
+    const { Stub, world, settle } = await import('./helpers/settings_dom.js');
+    const { env } = world(t);
+    const host = new Stub(); host.id = 'roles'; env.document.body.append(host);
+    const editor = createModelRolesEditor({ hostId: 'roles', doc: env.document,
+        only: { slot: 'fallback', index: 0 }, store: { snapshot: {}, accountsKnown: true } });
+    const settings = { OUROBOROS_MODEL_FALLBACKS: 'owner/first', OPENROUTER_API_KEY: 'key' };
+    try {
+        editor.load(settings, contract);
+        editor.load({ ...settings, OUROBOROS_MODEL_CONTEXT_WINDOWS: { fallback: [32768] } }, contract);
+        assert.equal(editor.entry().context, 32768);
+        assert.deepEqual(editor.entry().errors, []);
+        await settle();
+    } finally { editor.destroy(); }
 });

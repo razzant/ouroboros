@@ -125,7 +125,8 @@ def test_cold_collection_reads_a_delegated_seat_attach_only_and_names_a_dead_api
     assert rows["s2"]["status"] == "pending" and rows["s2"]["unresolved"] is True and "never re-sent" in rows["s2"]["error"]
     assert rows["s2"]["failure_code"] == "review_custody_lost" and rows["s3"]["status"] == "answered"
     assert barrier.calls == [["s1", "s2", "s3"]], "one physical dispatch, ever"
-    assert pr._decision(cold, _record(harness))["holding"] == ["s1:o1"], "the late objection holds like any other"
+    assert [(o["seat_id"], o["id"]) for o in pr._decision(cold, _record(harness))["open_objections"]] == [("s1", "o1")], \
+        "the late objection stands like any other"
     assert "s2 (m/b): pending — outcome unknown" in text and "a new ask to it may pay twice" in text
     # Reading again changes nothing: the unknown seat is never cleaned and never re-sent.
     _call(cold)
@@ -145,7 +146,7 @@ def test_a_seat_a_live_controller_still_owns_is_deferred_not_read_as_dead(harnes
     cold = harness.make_ctx(force_plan=True)
     cold.task_attempt = 2
     _call(cold)
-    decision = oh.plan_gate_decision(cold, {}, enforcement="blocking")  # the gate pre-collects the same way
+    decision = oh.plan_gate_decision(cold, {})  # the gate pre-collects the same way
     rows = _rows(harness)
     assert rows["s1"]["status"] == "pending" and not rows["s1"].get("unresolved") and rows["s2"]["status"] == "answered"
     assert decision["status"] == "awaiting" and decision["allow"] is True and decision["unknown_outcome"] == []
@@ -155,7 +156,7 @@ def test_a_seat_a_live_controller_still_owns_is_deferred_not_read_as_dead(harnes
     _call(cold)
     row = _rows(harness)["s1"]
     assert row["status"] == "pending" and row["unresolved"] is True and barrier.calls == [["s1", "s2"]]
-    assert oh.plan_gate_decision(cold, {}, enforcement="blocking")["unknown_outcome"] == ["a1"]
+    assert oh.plan_gate_decision(cold, {})["unknown_outcome"] == ["a1"]
 
 
 # ---------------------------------------------------------------- D7 (option A): a v2 wave still owed at upgrade reaches the author as history
@@ -202,7 +203,7 @@ def test_a_v2_wave_still_owed_at_upgrade_reaches_the_author_as_history_without_w
     ctx = harness.make_ctx()
     _write(ctx)  # revision 1 on the organ; the earlier wave is still owed
     text, _result = _call(ctx)
-    owed = oh.plan_gate_decision(ctx, {}, enforcement="blocking")
+    owed = oh.plan_gate_decision(ctx, {})
     assert "Legacy contributions" not in text and "legacy wave ffffffffffff: owed: old_a; unknown: old_b" in text
     assert owed["pending_asks"] == ["legacy wave " + "f" * 12] and owed["status"] == "awaiting" and owed["allow"] is True
     finished["text"] = "[]\nNO_FINDINGS: the earlier plan read fine."
@@ -211,7 +212,7 @@ def test_a_v2_wave_still_owed_at_upgrade_reaches_the_author_as_history_without_w
     assert "### old_a (cursor=grok) — answered the earlier plan review; read back from its retained source" in text
     assert "NO_FINDINGS: the earlier plan read fine." in text and "legacy wave ffffffffffff: unknown: old_b" in text
     assert result.meta["plan_open_objections"] == 0
-    decision = oh.plan_gate_decision(ctx, {}, enforcement="blocking")
+    decision = oh.plan_gate_decision(ctx, {})
     assert decision["pending_asks"] == [] and decision["open_objections"] == [] and decision["status"] == "clear"
     assert json.dumps(read_result(harness.drive, "task-1")["plan_review_state"], sort_keys=True) == before, "the v2 state is never written"
     assert sub.calls == [], "nothing was sent"
@@ -273,7 +274,7 @@ def test_a_refusal_raised_before_the_paid_stamp_is_never_a_reached_reviewer_on_t
                                                            "affected_paths": [], "body": False, "content_sha256": "0" * 64}],
               "asks": [{"ask_id": "a1", "ts": "t", "revision": 1, "message": "", "participants": [seat]}]}
     assert plan_record.asks_dispatched(record) == 0 and plan_record.unroutable_asks(record) == 1
-    gate = plan_record.gate_projection(record, enforcement="blocking", cyber_pro=False, hurry=False)
+    gate = plan_record.gate_projection(record, cyber_pro=False)
     assert gate["status"] == "clear" and gate["allow"] is True
     # The other direction: a seat that WAS dispatched and merely pending keeps the ask reached.
     reached = {**record, "asks": [{**record["asks"][0], "participants": [{**seat, "status": "pending", "dispatched": True}]}]}
@@ -336,7 +337,7 @@ def test_collection_reads_the_send_time_identity_whatever_changed_since(harness,
         assert "Identical content" in text and result.meta["plan_effect"] == "write" and barrier.calls == [["s1", "s2", "s3"]]
         text, _result = _call(cold)
     elif entry == "gate":
-        decision = oh.plan_gate_decision(cold, {}, enforcement="blocking")
+        decision = oh.plan_gate_decision(cold, {})
         assert decision["status"] == "clear" and decision["pending_asks"] == [] and decision["unknown_outcome"] == []
     else:
         text, _result = _call(cold)
@@ -377,7 +378,7 @@ def test_a_missing_original_assignment_keeps_that_seat_unknown_and_the_other_ans
         call_manifest_path(harness.drive, "task-2", barrier.sent[seat][2] + "_prompt").unlink()
     cold = harness.make_ctx(task_id="task-2", force_plan=True)
     cold.task_attempt = 2
-    decision = oh.plan_gate_decision(cold, {}, enforcement="blocking")
+    decision = oh.plan_gate_decision(cold, {})
     rows = _rows(harness, "task-2")
     assert all(row["status"] == "pending" and row["unresolved"] is True for row in rows.values())
     assert {seat: row["operation_id"] for seat, row in rows.items()} == {seat: barrier.sent[seat][2] for seat in rows}

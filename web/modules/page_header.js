@@ -1,5 +1,5 @@
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { bindScrollFade } from './scroll_fade.js';
+import { revealPastFade, bindScrollFade } from './scroll_fade.js';
 import { SHELL_ICONS } from './page_icons.js';
 import { pageLabel } from './pages.js';
 import { statusMarkHtml } from './status_mark.js';
@@ -9,6 +9,7 @@ function classAttr(parts) {
     return parts.filter(Boolean).join(' ');
 }
 
+// The control is Ouroboros's own picture: press him, and his places open, with his card on top.
 // The shell's ☰: one of the shell's icon controls (style.css .shell-icon-control), shown in the stack layout. A
 // page's header carries it in its leading slot, where the drawer's × then sits; a room (Main, a Project) carries it
 // as the composer row's first control instead, under the thumb (owner 19.10, 1A), as tall as the capsules beside it
@@ -17,7 +18,7 @@ function classAttr(parts) {
 export function renderMobileNavToggle({ inComposer = false } = {}) {
     const classes = inComposer ? 'shell-icon-control mobile-nav-toggle composer-menu ui-hit-area' : 'shell-icon-control mobile-nav-toggle';
     return `
-        <button class="${classes}" type="button" data-mobile-nav-toggle aria-label="Open navigation" aria-controls="primary-sidebar" aria-expanded="false">${SHELL_ICONS.menu}${statusMarkHtml()}</button>
+        <button class="${classes}" type="button" data-mobile-nav-toggle aria-label="Open navigation" aria-controls="primary-sidebar" aria-expanded="false"><span class="places-face" aria-hidden="true"></span>${statusMarkHtml()}</button>
     `;
 }
 
@@ -45,6 +46,7 @@ export function renderPageHeader({
     toolbarClass = '',
     showMobileNav = true,
     named = true,
+    leadHtml = '',  // the page's own navigation written straight into the lead (Settings): the bar is never empty
 } = {}) {
     const variantClass = variant ? `app-page-header-${escapeHtml(variant)}` : '';
     const words = title ?? pageLabel(page);
@@ -62,7 +64,8 @@ export function renderPageHeader({
         : '';
     const facts = [
         named ? ' data-sidebar-names' : '',
-        named && !toolbar && !trailing && !tabs ? ' data-empty' : '',
+        named && !toolbar && !trailing && !tabs && !leadHtml ? ' data-empty' : '',
+        leadHtml ? ' data-lead' : '',
     ].join('');
     const id = titleId ? ` id="${escapeHtml(titleId)}"` : '';
     return `
@@ -71,13 +74,50 @@ export function renderPageHeader({
             <div class="app-page-title-block">
                 <div class="app-page-title-row">
                     <h2 class="app-page-title"${id}>${escapeHtml(words)}</h2>
-                </div>${named ? '<div class="app-page-lead"></div>' : ''}
+                </div>${named || leadHtml ? `<div class="app-page-back" data-page-back></div><div class="app-page-lead">${leadHtml}</div>` : ''}
             </div>
             ${toolbar}
             ${trailing}
         </div>
         ${tabs}
     `;
+}
+
+/**
+ * Back (docs/DESIGN.md "Page header", the Back control): one recipe for the whole app. A header control like ☰ and ×
+ * (style.css .shell-icon-control: a neutral capsule at the chrome height, the touch minimum in the stack layout)
+ * holding the chevron-left glyph at 20 px, named for where it leads in its tooltip and accessible name. `attrs` are
+ * the caller's hooks (a data attribute its handler finds it by).
+ */
+export function renderBackControl({ to = '', attrs = '' } = {}) {
+    const name = to ? `Back to ${to}` : 'Back';
+    return `<button type="button" class="shell-icon-control shell-back" ${attrs} aria-label="${escapeHtml(name)}" title="${escapeHtml(name)}">${SHELL_ICONS.back}</button>`;
+}
+
+/**
+ * The header's Back slot (renderPageHeader writes it before the lead): `control` stands there, so it never scrolls
+ * away with a lead that is a scroller (Dashboard's tabs, Files' location). On a desk the slot stands before the lead;
+ * in the stack layout it is the header's one leading control where ☰ stood (style.css, `.app-page-header[data-back]`),
+ * so a page that leads back (Skills opened from Settings) has one leading control in one row, its tabs under it as
+ * they were. Returns the disposer, which takes the control away.
+ */
+export function placePageBack(header, control) {
+    const slot = header?.querySelector?.('[data-page-back]');
+    if (!slot || !control) return () => {};
+    slot.replaceChildren(control);
+    header.setAttribute('data-back', '');
+    return () => {
+        slot.replaceChildren();
+        header.removeAttribute('data-back');
+    };
+}
+
+/** Point an existing Back control somewhere else: its tooltip and accessible name follow. */
+export function setBackControlTarget(button, to = '') {
+    if (!button) return;
+    const name = to ? `Back to ${to}` : 'Back';
+    button.setAttribute('aria-label', name);
+    button.title = name;
 }
 
 /**
@@ -101,8 +141,10 @@ export function bindPageHeader(header, { lead = null, actions = null } = {}) {
             node.before(home);
             return { node, bar, how, home };
         });
-    if (!moves.length) return () => {};
-    const toolbar = header.querySelector('.app-page-toolbar');
+    const toolbar = header?.querySelector('.app-page-toolbar');
+    // A bar whose actions are already in it (Circles) still lays out as the desk band of every named page; only a
+    // header with no bar and nothing to move has nothing to do here.
+    if (!moves.length && !toolbar) return () => {};
     let docked = null;
     const place = (layout) => {
         // Navigation competes with both moved actions (Files) and actions already in the bar (Skills).
@@ -175,35 +217,27 @@ export function bindHeaderControlPlacement({ headerActions, budgetPill = null, s
     return () => { offLayout(); observer?.disconnect(); };
 }
 
-// SSOT for a segmented single-select control (the settings effort/mode toggles):
-// one generator owns the markup so every group renders identically — the sibling
-// of renderTabStrip/.app-tab, but for in-card segmented choices (.ui-segment).
-// Buttons keep the data-effort-* hooks the controls layer binds on, plus the
-// legacy .settings-effort-* classes that carry the settings layout and accents.
-// The columns come from the choices actually rendered: the generator writes their
-// number once as `--segment-count`, a fact of this rendering rather than a
-// per-control setting, and settings.css derives equal columns from it. `modifier`
-// is a bare boolean data-attribute (e.g. 'data-enforcement-group') for a per-group
-// override such as accent colors.
-export function renderSegmentedField({
-    target,
-    options = [],
-    modifier = '',
-    title = '',
-} = {}) {
+// SSOT for a segmented single-select control, the strip (the settings effort/mode
+// toggles): one generator owns the markup so every group renders identically — the
+// sibling of renderTabStrip/.app-tab, but for in-card choices. The markup is all it
+// writes: ui.css lays out the track (.ui-segment-group) and its options
+// (.ui-segment), each as wide as its word, so nothing is counted, measured or
+// written inline, and no hover title carries a sentence the owner needs. Buttons
+// keep the data-effort-* hooks the controls layer binds on. `modifier` is a bare
+// boolean data-attribute (e.g. 'data-place-state') scripts find the group by.
+export function renderSegmentedField({ target, options = [], modifier = '' } = {}) {
     const tgt = String(target || '').trim();
     if (!tgt) {
         throw new Error('renderSegmentedField requires target');
     }
     const buttons = options.map((opt) => {
         const value = String(opt.value ?? '');
-        return `<button type="button" class="ui-segment settings-effort-btn" data-effort-value="${escapeHtml(value)}">${escapeHtml(opt.label ?? value)}</button>`;
+        return `<button type="button" class="ui-segment" data-effort-value="${escapeHtml(value)}">${escapeHtml(opt.label ?? value)}</button>`;
     }).join('');
     const mod = String(modifier || '').trim();
     const modAttr = mod ? ` ${mod}` : '';
-    const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
     return `
-        <div class="ui-segment-group settings-effort-group" data-effort-group${modAttr} data-effort-target="${escapeHtml(tgt)}" style="--segment-count: ${options.length}"${titleAttr}>
+        <div class="ui-segment-group" data-effort-group${modAttr} data-effort-target="${escapeHtml(tgt)}">
             ${buttons}
         </div>
     `;
@@ -270,10 +304,26 @@ export function bindTabStrip(strip, { dataAttr, activeClass = 'active', onChange
         && !tab.matches('[hidden], [inert]');
     const enabled = (tab) => selectable(tab) && !tab.closest('[hidden], [inert]');
     let selected = null;
+    // A vertical list (the Dashboard's) scrolls in its own box, the list or the rail around it: a chosen row out of
+    // that box's view comes in just past its edge fade (as Settings' rail), and nothing beyond the
+    // box moves (never the page). A row already clear of the fade never moves.
+    function revealInScroller(tab) {
+        const view = strip.ownerDocument.defaultView;
+        const doc = strip.ownerDocument;
+        let box = strip;
+        while (box && box !== doc.body && box !== doc.documentElement) {
+            const overflow = view.getComputedStyle(box).overflowY;
+            if ((overflow === 'auto' || overflow === 'scroll') && box.scrollHeight > box.clientHeight) break;
+            box = box.parentElement;
+        }
+        if (!box || box === doc.body || box === doc.documentElement) return;
+        revealPastFade(box, tab);
+    }
     function revealSelected() {
         if (disposed || !strip.clientWidth) return;
         const tab = tabs().find((item) => item.getAttribute(dataAttr) === selected);
         if (!tab) return;
+        if (strip.getAttribute('aria-orientation') === 'vertical') { revealInScroller(tab); return; }
         const bounds = strip.getBoundingClientRect();
         const rect = tab.getBoundingClientRect();
         const style = strip.ownerDocument.defaultView.getComputedStyle(strip);

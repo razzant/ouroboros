@@ -1,4 +1,4 @@
-"""Private Darwin ABI: a process's kernel birth record, read without a subprocess.
+"""Private Darwin ABI: a process's kernel birth record and a folder's kept spelling, read without a subprocess.
 
 ``sysctl({CTL_KERN, KERN_PROC, KERN_PROC_PID, pid})`` fills one LP64
 ``struct kinfo_proc`` (648 bytes on arm64 and x86_64). ``kp_proc.p_starttime``
@@ -65,6 +65,33 @@ def kernel_birth(pid: int) -> tuple[int, int, bool] | None:
     if echoed_pid != pid or sec <= 0 or not 0 <= usec < 1_000_000:
         return None
     return sec, usec, raw[36] == _SZOMB
+
+
+def kept_spelling(path: str) -> str | None:
+    """The spelling macOS keeps for the existing folder ``path``, or None.
+
+    ``fcntl(F_GETPATH)`` on a read-only directory descriptor, closed before return, names every
+    component as the volume stores it: its case and Unicode form, through symlinks and firmlinks
+    (``/System/Volumes/Data/Users/a`` reads ``/Users/a``). None means absent, not a folder, unreadable
+    (a folder that may be searched but not read), not macOS or any other error: never a guessed spelling.
+    """
+    if not IS_DARWIN:
+        return None
+    import fcntl  # Darwin's own; imported here, as the platform guard requires outside platform_layer
+    import os
+
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK)
+    except (OSError, ValueError):
+        return None
+    try:
+        raw = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024))  # MAXPATHLEN
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    kept = os.fsdecode(raw.split(b"\0", 1)[0])
+    return kept if kept.startswith("/") else None
 
 
 def wait_child_status(pid: int, *, nohang: bool) -> tuple[int, int]:

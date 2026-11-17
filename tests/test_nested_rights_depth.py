@@ -582,7 +582,8 @@ def test_fresh_depth_default_increases_without_widening_active_cap(monkeypatch):
     monkeypatch.delenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", raising=False)
     assert get_max_subagent_depth() == 3
     assert get_max_active_subagents_per_root() == 6
-    assert get_max_workers() == 10
+    monkeypatch.delenv("OUROBOROS_MAX_WORKERS", raising=False)
+    assert get_max_workers() is None  # no number: the machine's memory is the limit
 
 
 def _schedule_event(task_id, parent_id, *, depth=1, drive_root=None):

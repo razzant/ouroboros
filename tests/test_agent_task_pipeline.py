@@ -385,14 +385,15 @@ def test_emit_task_results_surfaces_receipt_absent_flag_in_event_stream(tmp_path
     drive_logs = tmp_path / "logs"
     drive_logs.mkdir(parents=True)
 
-    # reviewable effects (commit_reviewed) + empty receipt store -> receipt_absent
+    # a written result nothing examined after it (no check, no result review) -> receipt_absent
+    written = {"tool": "write_file", "status": "ok", "args": {"path": "report.md"}}
     pipeline.emit_task_results(
         env=env, memory=object(), llm=object(),
         pending_events=pending_events,
         task={"id": "flagme", "type": "task", "chat_id": 1, "text": "do it"},
         text="All done",
         usage={"rounds": 2, "cost": 0.2},
-        llm_trace={"tool_calls": [{"tool": "commit_reviewed", "status": "ok"}], "reasoning_notes": []},
+        llm_trace={"tool_calls": [written], "reasoning_notes": []},
         start_time=0.0,
         drive_logs=drive_logs,
         ctx=SimpleNamespace(pending_restart_reason=""),

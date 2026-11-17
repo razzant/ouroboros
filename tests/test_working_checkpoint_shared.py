@@ -119,6 +119,7 @@ def test_restore_at_every_boundary_yields_the_same_continuation_state(tmp_path, 
         {k: v for k, v in limit_ctx.accumulated_usage.items() if k not in wc._TRANSIENT_USAGE},
         limit_ctx.round_idx, limit_ctx.tool_schemas, set(limit_ctx.owner_msg_seen)), ensure_ascii=False))
     if boundary == wc.RESUMED:
+        expected["context_start"] = ["unknown", ""]  # this legacy continuation carried no original-start fact
         wc.save_resumed(limit_ctx.tools, {"round_idx": 4, "tool_schemas": limit_ctx.tool_schemas,
                                           "resume_point": {"budget_tail": "tool"}, "context_model_role": ""},
                         limit_ctx.messages, limit_ctx.llm_trace, limit_ctx.accumulated_usage, limit_ctx.owner_msg_seen)
@@ -179,6 +180,31 @@ def test_private_opaque_and_foreign_elements_stay_inline(tmp_path):
     assert wc.read_working(tmp_path, "pause-task", 1)[1]["messages"][-1] == {"role": "user", "content": "again"}
 
 
+def test_the_checkpoint_and_the_request_records_share_each_parts_redaction_fact(tmp_path):
+    """A part the round's request records already worked out is not scanned again by the checkpoint (and the other
+    way round): one fact per bytes per task (``observability.task_parts``). What the checkpoint skips is exactly
+    what the request scanned; a secret-bearing message stays inline whichever met it first."""
+    from ouroboros.context_timing import measured_sections, section_spans
+
+    def scanned(work) -> int:
+        with measured_sections():
+            work()
+            return section_spans()["work"].get("secret_scan", 0)
+
+    ctx, limit_ctx = _state_fixture(tmp_path, rounds=4)
+    limit_ctx.messages.append({"role": "tool", "tool_call_id": "call_s", "content": f"api_key={SECRET}"})
+    request = {"messages": limit_ctx.messages, "send_messages": limit_ctx.messages, "tools": limit_ctx.tool_schemas}
+    obs._TASK_PARTS.clear()
+    by_request = scanned(lambda: obs.persist_call(tmp_path, task_id="pause-task", call_id="llm_1_request",
+                                                  call_type="llm_request", payload=request))
+    after_request = scanned(lambda: wc.save_round(limit_ctx, "post_batch"))
+    obs._TASK_PARTS.clear()
+    alone = scanned(lambda: wc.save_round(limit_ctx, "post_batch"))
+    assert by_request > 0 and alone - after_request == by_request
+    inline = [row for row in json.loads(_file(tmp_path).read_bytes())["state"]["messages"] if "$shared" not in row]
+    assert [row.get("tool_call_id") for row in inline] == ["call_s"]
+
+
 def test_the_manifest_union_survives_a_resume_in_a_new_process_and_a_dropped_element_stays_listed(tmp_path):
     ctx, limit_ctx = _state_fixture(tmp_path, rounds=4)
     assert wc.save_round(limit_ctx, "post_batch") is True
@@ -200,26 +226,36 @@ def test_the_manifest_union_survives_a_resume_in_a_new_process_and_a_dropped_ele
     assert {sha for _kind, sha, _size in packs.manifest_blob_refs(tmp_path, "pause-task")} == listed, "the packer's walk sees every part"
 
 
-def test_a_manifest_write_that_failed_is_written_by_the_same_contexts_next_save(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["part", "manifest"])
+def test_a_manifest_write_that_failed_is_written_by_the_same_contexts_next_save(tmp_path, monkeypatch, failure):
     """A part counts as listed only once a manifest naming it landed: the save that retries after a failed
     manifest write (``save_or_log``'s next boundary, ``_hold_until``'s next try) lists it before its file names it."""
     _ctx, limit_ctx = _state_fixture(tmp_path, rounds=4)
     real, calls = obs.write_call_manifest, []
+    publish = obs.replace_atomic
+    part_attempts = []
+
+    def part_fails_once(source, target):
+        part_attempts.append(target)
+        if failure == "part" and len(part_attempts) == 2:
+            raise OSError("the disk refused a part")
+        return publish(source, target)
 
     def fails_once(*args, **kwargs):
         calls.append(kwargs.get("call_id"))
-        if len(calls) == 1:
+        if failure == "manifest" and len(calls) == 1:
             raise OSError("the disk refused the manifest")
         return real(*args, **kwargs)
 
     monkeypatch.setattr(obs, "write_call_manifest", fails_once)
+    monkeypatch.setattr(obs, "replace_atomic", part_fails_once)
     with pytest.raises(OSError):
         wc.save_round(limit_ctx, "post_batch")
     assert not _file(tmp_path).exists() and _manifest(tmp_path) == {}, "no file names a part no manifest lists"
     assert wc.save_round(limit_ctx, "post_batch") is True
     named = set(token_digests(_file(tmp_path).read_bytes()))
     listed = {p["sha256"] for p in _manifest(tmp_path)["shared_parts"]}
-    assert calls == ["working-a1", "working-a1"] and named and named <= listed
+    assert calls == (["working-a1"] * (2 if failure == "manifest" else 1)) and named and named <= listed
     assert {sha for _kind, sha, _size in packs.manifest_blob_refs(tmp_path, "pause-task")} == listed, "the packer's walk sees every part"
 
 

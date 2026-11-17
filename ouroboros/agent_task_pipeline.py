@@ -535,9 +535,12 @@ def _attach_host_mutation_projection(
     )
     # Only the owning root task refreshes its terminal candidate snapshot at
     # outcome derivation; a subagent never rewrites the root's evidence.
-    snapshot_failed = False
+    snapshot_failed, body_observed = False, True
     if task_id and task_id == root_task_id:
         try:
+            # Only the body's own baseline can leave an uncommitted candidate remainder; an admitted folder's work
+            # is its delivery, so its failed capture claims none.
+            body_observed = attribution_task_id(evidence_root, (task_id,), surface_type="system_repo") == task_id
             if attribution_task_id(evidence_root, (task_id,)) == task_id:
                 from ouroboros.body_candidate import find  # the root's own copy reads as the commit consumer reads it
                 copy = find(task_id) or {}
@@ -549,7 +552,7 @@ def _attach_host_mutation_projection(
     for candidate in task_ids:
         projection = load_mutation_evidence_projection(evidence_root, candidate)
         if projection:
-            if snapshot_failed:
+            if snapshot_failed and body_observed:
                 projection["uncommitted_remainder"] = {"state": "unknown", "count": None, "surfaces": []}
             llm_trace["mutation_attribution"] = projection
             return
@@ -1227,6 +1230,9 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             "unknown_unmetered": None,
         })
         existing = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
+        from ouroboros.owner_model import preserve_carrier
+
+        task = preserve_carrier(existing, task)
         if loop_outcome is None:
             loop_outcome = _derive_host_bound_loop_outcome(env, task, text, usage, llm_trace)
             # Apply FR3 before normalization so the persisted axes and ledger agree.
@@ -1334,7 +1340,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             review_status=dict(outcome_axes.get("review") or {}),
             task_contract=task_contract,
             _is_direct_chat=bool(task.get("_is_direct_chat")),
-            loop_outcome=loop_outcome,
+            loop_outcome={k: v for k, v in loop_outcome.items() if k != "trace_refs"},  # the refs are stored once: the top-level ``trace_refs`` below
             project_id=str(task.get("project_id") or ""),
             parent_task_id=task.get("parent_task_id"),
             root_task_id=task.get("root_task_id"),
@@ -1407,7 +1413,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
 def build_review_context(env: Any) -> str:
     """Build a compact review continuity section for the main reasoning context."""
     try:
-        from ouroboros.context_sections import continuity_status_lines
+        from ouroboros.context_sections import continuity_status_lines, earlier_obligation_lines
         from ouroboros.review_state import (
             _LEGACY_CURRENT_REPO_KEY,
             format_status_section,
@@ -1427,18 +1433,11 @@ def build_review_context(env: Any) -> str:
         continuations, corrupt = list_review_continuations(env.drive_root)
         repo_dir = pathlib.Path(env.repo_dir)
         repo_key = make_repo_key(repo_dir)
-        open_obs = state.get_open_obligations(repo_key=repo_key)
-        open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
-        if (
-            not state.latest_attempt()
-            and not continuations
-            and not corrupt
-            and not open_obs
-            and not open_debts
-        ):
+        earlier = earlier_obligation_lines(state, repo_key, limit=120)
+        if not state.latest_attempt() and not continuations and not corrupt and not earlier:
             return ""
 
-        # Owed work and the checkout's stale marker only: the retired advisory
+        # Unfinished work and the checkout's stale marker only: the retired advisory
         # gate projected no readiness here (decision 3A), and the commit gate is
         # the panel, tests, custody and binding, none of which this section decides.
         lines: List[str] = ["## Review Continuity", f"- repo_key={repo_key}"]
@@ -1452,35 +1451,7 @@ def build_review_context(env: Any) -> str:
             lines.append(f"  invalidated_by={state.stale_marker_attribution_note(marker=marker)}")
             if look_unreadable:
                 lines.append(f"  preflight_unreadable={_truncate_with_notice(look_unreadable, 220)} (marker unverified)")
-
-        if open_debts:
-            lines.append("- retry_anchor=commit_readiness_debt")
-            lines.append(f"- commit_readiness_debt={len(open_debts)}")
-            lines.append("\n### Commit-readiness debt")
-            for debt in open_debts:
-                summary = _truncate_with_notice(getattr(debt, "summary", ""), 180).replace("\n", " ")
-                lines.append(
-                    f"- [{getattr(debt, 'debt_id', '')}] status={getattr(debt, 'status', '')} "
-                    f"category={getattr(debt, 'category', '')} source={getattr(debt, 'source', '')}"
-                )
-                lines.append(f"  summary={summary}")
-                if getattr(debt, "source_obligation_ids", None):
-                    lines.append(f"  obligation_ids={', '.join(list(debt.source_obligation_ids or []))}")
-                for evidence in list(getattr(debt, "evidence", []) or []):
-                    lines.append(f"  evidence={_truncate_with_notice(evidence, 180).replace(chr(10), ' ')}")
-        else:
-            lines.append("- commit_readiness_debt=0")
-
-        if open_obs:
-            lines.append(f"- open_obligations={len(open_obs)}")
-            for ob in open_obs:
-                reason = _truncate_with_notice(getattr(ob, "reason", ""), 120).replace("\n", " ")
-                lines.append(
-                    f"  [{getattr(ob, 'obligation_id', '')}] "
-                    f"{getattr(ob, 'item', '')}: {reason}"
-                )
-        else:
-            lines.append("- open_obligations=0")
+        lines += earlier
 
         continuation_start = len(lines)
         if retired:
@@ -1545,8 +1516,10 @@ def build_review_context(env: Any) -> str:
                             f"  ⚠️ OMISSION NOTE: {len(item.advisory_findings) - _PER_FINDING_CAP} "
                             f"additional advisory_finding(s) omitted."
                         )
+                if item.review_record_id:
+                    lines.append(f"  review_record_id={item.review_record_id}")
                 if item.obligation_ids:
-                    lines.append(f"  obligation_ids={', '.join(item.obligation_ids)}")
+                    lines.append(f"  obligation_ids={', '.join(item.obligation_ids)} (recorded before obligations retired)")
         if corrupt:
             lines.append("\n### Corrupt review continuations")
             _CORRUPT_CAP = 3

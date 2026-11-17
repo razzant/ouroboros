@@ -23,6 +23,9 @@ from ouroboros.review_execution import ReviewRouteKind, delivery_retrieves
 # author's final stance explicit and hash-bound when a review is advisory.
 AUTHOR_DISPOSITION_VALUES = frozenset({"accepted", "rejected", "partial", "deferred"})
 AUTHOR_ACTION_VALUES = frozenset({"finish", "stop"})
+# Every review informs and none forbids (BIBLE P3); the value Advisory-era records also carry,
+# so fingerprints and reuse keys keep their bytes. Older records keep "blocking" as history.
+RECORDED_REVIEW_AUTHORITY = "advisory"
 
 
 def build_author_disposition(

@@ -8,8 +8,9 @@ announce a transition), the transitions task results record, by identity, announ
 card's closed state: an orphan sweep, a lost ``task_done``, an expired card), and the memory journal records after the
 accepted sequence (``memory_inventory.memory_changes``: one line, its author and an exact read each; what stands open
 is the view's), then every answerable owner card. The wake accepts a chain position, every observed task's transition
-identities (``_transitions_since``) and the last journal sequence, never the alarm's finish time, so a fact written
-during a wake or late under an older stamp reaches the next one; a wake never activates the journal.
+identities (``_transitions_since``; kept as a chain of files, ``consciousness_transitions``) and the last journal
+sequence, never the alarm's finish time, so a fact written during a wake or late under an older stamp reaches the next
+one; a wake never activates the journal.
 ``bind_wake_observation`` stores the whole observation as an exact source under the registered wake; a request that
 cannot fit it gets its composition, window, coverage and that pointer with my human's card answers whole (their other
 words are in my view), else the bare pointer (``overview_text``; first build: ``context_input_selection.rescued_start``;
@@ -26,17 +27,20 @@ import logging
 import pathlib
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.consciousness_authority import (CONSCIOUSNESS_CATEGORY, CONSCIOUSNESS_INITIATOR, WAKE_CAUSE_OWN_CLOCK,
                                                WORK_KIND_CONSCIOUSNESS, disabled_tools_for, is_consciousness_origin,
                                                normalize_level, runtime_mode_cap_for)
+from ouroboros.consciousness_transitions import (CHAT_BOUNDARY_KEYS, TRANSITIONS_VERSION, TransitionChain,
+                                                 accepted_transitions, bind_link)
 from ouroboros.chat_chain import row_address, source_row_id
 from ouroboros.context_health import safe_read
 from ouroboros.deadline_utils import ago_text
-from ouroboros.dialogue_provenance import (dialogue_speaker, is_presence_task, memory_row_header, reaction_note,
-                                           render_memory_row, render_row_text, row_author, wordless_reaction)
+from ouroboros.dialogue_provenance import (dialogue_speaker, is_presence_task, memory_row_header, owner_speech,
+                                           reaction_note, render_memory_row, render_row_text, row_author,
+                                           wordless_reaction)
 
 log = logging.getLogger(__name__)
 
@@ -44,9 +48,8 @@ PROMPT_REL = pathlib.Path("prompts") / "CONSCIOUSNESS.md"
 WAKE_OBSERVATION_KEY = "wake_observation"  # task metadata: the bound observation's source and projection
 WAKE_CONTINUITY_KEY = "wake_continuity"  # task metadata: the notes this wake carries to the next (``previous_wake_text``)
 OBSERVATION_BOUNDARY_VERSION = 1
-TRANSITIONS_VERSION = 2  # complete per-task transition inventory, including closed tasks
-PLACEHOLDERS = ("reason", "last_wake_ago", "events", "level", "level_line", "withheld_tools",
-                "spent_usd", "daily_usd", "running", "max_tasks", "interval", "spend_by_cause", "counted_roots", "places", "previous_wake")
+PLACEHOLDERS = ("reason", "last_wake_ago", "events", "level", "level_line", "withheld_tools", "spent_usd", "daily_usd",
+                "running", "max_tasks", "interval", "spend_by_cause", "counted_roots", "places", "previous_wake", "cache_writes")
 LEVEL_LINES = {
     "observe": "On its own it studies, keeps its memory and tells you; it changes nothing outside.",
     "act": "Also acts on its own: starts work, runs commands, speaks and acts in places. It does not change itself.",
@@ -55,13 +58,20 @@ LEVEL_LINES = {
 _FALLBACK_TEMPLATE = "[Wake-up · {reason}] No request started this turn: it is yours. Previous wake: {previous_wake}. Wake context (last wake {last_wake_ago}): {events}"
 
 
-def wake_task_metadata(level: Any, reason: str, *, root_cost_ceiling_usd: Optional[float] = None) -> Dict[str, Any]:
+CEILING_SOURCES = frozenset({"allowance", "per_task_cap", "both"})
+
+
+def wake_task_metadata(level: Any, reason: str, *, root_cost_ceiling_usd: Optional[float] = None,
+                       root_cost_ceiling_source: str = "") -> Dict[str, Any]:
     """The wake's ``task_metadata``: origin label, ledger category, level and its consequences.
 
     ``root_cost_ceiling_usd`` is the wake tree's GRACEFUL ceiling (the allowance left, at most the per-task cap): the
     root's own by ``task_pacing.resolve_cost_ceiling``, inherited resolved by the members, the ledger fence staying at
     the owner's per-task cap. Only a strictly positive ceiling is stamped: a wake with nothing left is skipped by the
-    alarm, never started under a $0 ceiling."""
+    alarm, never started under a $0 ceiling. ``root_cost_ceiling_source`` (``CEILING_SOURCES``) is stamped beside it:
+    which limit set that number at launch (the allowance left, the per-task cap, or both at once). It is an
+    observation for the views that explain a pause (``consciousness_view.hold_cause``); no stop, fence or Resume
+    reads it, and a record without it says nothing about either limit."""
     normalized = normalize_level(level)
     metadata: Dict[str, Any] = {
         "initiator": CONSCIOUSNESS_INITIATOR, "usage_category": CONSCIOUSNESS_CATEGORY,
@@ -73,6 +83,8 @@ def wake_task_metadata(level: Any, reason: str, *, root_cost_ceiling_usd: Option
     }
     if root_cost_ceiling_usd is not None and float(root_cost_ceiling_usd) > 0:
         metadata["root_cost_ceiling_usd"] = float(root_cost_ceiling_usd)
+        if root_cost_ceiling_source in CEILING_SOURCES:
+            metadata["root_cost_ceiling_source"] = root_cost_ceiling_source
     return metadata
 
 
@@ -373,9 +385,9 @@ def _row_kind(row: Dict[str, Any], accounts: Any = None) -> str:
 
     Human input is classified by what its producer stamped, never by ``direction`` alone: A2A traffic is machine
     traffic, a place row is my human's only from an account its place confirms now (``accounts``, as ``row_author``
-    reads it), an Ouroboros-initiated Presence row is not a human, a late card answer rides its ``quiz_answer`` row,
-    an imported earlier message (``presence_history``) is counted, never listed as new, and a wordless typed
-    reaction is context, never a correspondent's message.
+    reads it) and not forwarding another author's words (``owner_speech``), an Ouroboros-initiated Presence row is
+    not a human, a late card answer rides its ``quiz_answer`` row, an imported earlier message (``presence_history``)
+    is counted, never listed as new, and a wordless typed reaction is context, never a correspondent's message.
     """
     from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 
@@ -397,8 +409,8 @@ def _row_kind(row: Dict[str, Any], accounts: Any = None) -> str:
             return ""
         if wordless_reaction(row):
             return "correspondent_reaction"
-        confirmed = row_author(row, owner_accounts=accounts).get("owner_confirmed")
-        return "owner_message" if confirmed else "correspondent_message"
+        # My human's own words (a forward from their account carries another author's: listed, never counted away)
+        return "owner_message" if owner_speech(row, row_author(row, owner_accounts=accounts)) else "correspondent_message"
     return "owner_message"
 
 
@@ -554,9 +566,9 @@ def _transitions_since(transitions: Dict[str, Dict[str, Dict[str, Any]]], accept
 
     Every observed task keeps its keys, closed tasks too: absence from a complete accepted inventory then proves a new
     result even when its first write copied an old stamp, and a key no task records any more (a pre-fold late-review
-    key) is never fresh again. The existing wake boundary owns this state, with no new store or count cutoff;
-    unchanged tasks keep their accepted keys without their bodies. V1 recorded open tasks only: unknown keys in that
-    incomplete inventory replay once, the caller disclosing coverage.
+    key) is never fresh again. The accepted wake boundary names this state (its transition chain), with no count
+    cutoff; unchanged tasks keep their accepted keys without their bodies. V1 recorded open tasks only: unknown keys in
+    that incomplete inventory replay once, the caller disclosing coverage.
     """
     valid = (isinstance(accepted, dict) and accepted.get("version") in {1, TRANSITIONS_VERSION}
              and isinstance(accepted.get("inventory"), dict))
@@ -622,6 +634,8 @@ class WakeObservation:
     captured_at: str
     # The chat position, transition state and memory sequence a wake that accepts this observation persists.
     boundary: Optional[Dict[str, Any]] = None
+    # The accepted transition chain this observation read; the link its acceptance writes extends it.
+    chain: Optional[TransitionChain] = field(default=None, repr=False, compare=False)
 
     def counts(self) -> Dict[str, int]:
         counts = dict(Counter(kind for kind, _offset, _line in self.events))  # first-seen order
@@ -693,16 +707,18 @@ class WakeObservation:
             lines += ["My human's card answers in this window, whole (every other event stays at the source):", *own]
         return "\n" + "\n".join(lines)
 
-    def source_bytes(self) -> bytes:
+    def source_bytes(self, chain: Optional[Dict[str, Any]] = None) -> bytes:
+        """A header, then one row per event. The header's boundary is the compact one an accepting wake persists: chat
+        position, memory sequence and ``chain`` (the transition link it named; a later wake may remove that file)."""
+        boundary = None if self.boundary is None else {
+            **{key: value for key, value in self.boundary.items() if key != "transitions"},
+            **({"transition_chain": chain} if chain else {})}
         header = {"kind": "wake_observation", "captured_at": self.captured_at, "window": self.window,
                   "gaps": list(self.gaps), "composition": self.counts(), "trigger": self.trigger,
-                  "boundary": self.boundary}
+                  "boundary": boundary}
         rows = [header] + [{"kind": kind, "chat_offset": offset, "line": line} for kind, offset, line in self.events]
         rows += [{"kind": "outstanding_card", "line": line} for line in self.outstanding]
         return ("\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows) + "\n").encode("utf-8")
-
-
-_CHAT_BOUNDARY_KEYS = ("version", "upper", "segment_start", "segment_sha256")
 
 
 def _task_window(root, prior, chat_rows):
@@ -746,29 +762,12 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
 
     root, gaps = pathlib.Path(drive_root), set()
     accepted = boundary if isinstance(boundary, dict) else {}
-    prior = accepted.get("transitions")
-    source_unreadable = False
-    if isinstance(prior, dict) and "source_ref" in prior:
-        from ouroboros.artifacts import read_actor_source_bytes
-
-        try:
-            ref = prior["source_ref"]
-            raw = read_actor_source_bytes(root, ref["task_id"], ref)
-            header = json.loads(raw.splitlines()[0])
-            stored = header["boundary"]
-            inventory = stored["transitions"]
-            if (header.get("kind") != "wake_observation" or header.get("captured_at") != accepted.get("captured_at")
-                    or any(stored.get(key) != accepted.get(key) for key in _CHAT_BOUNDARY_KEYS)
-                    or stored.get("memory") != accepted.get("memory")
-                    or inventory.get("version") != TRANSITIONS_VERSION
-                    or not isinstance(inventory.get("inventory"), dict)
-                    or any(not isinstance(keys, list) or not all(isinstance(key, str) for key in keys)
-                           for keys in inventory["inventory"].values())):
-                raise ValueError("wake source does not match accepted boundary")
-            prior = inventory
-        except Exception as exc:
-            source_unreadable = True
-            gaps.add(f"unreadable_transition_source: {type(exc).__name__}")
+    try:  # the chain the boundary names, its previous-form wake source, or the state it holds inline
+        prior, chain = accepted_transitions(root, accepted)
+        source_unreadable = False
+    except Exception as exc:
+        prior, chain, source_unreadable = accepted.get("transitions"), None, True
+        gaps.add(f"unreadable_transition_source: {type(exc).__name__}")
     try:
         chat_rows, window = _chat_window(root, accepted or None, since, gaps)
     except Exception as exc:
@@ -859,13 +858,13 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
                 cards.append((str(block.get("asked_at") or ""), _card_line(
                     task_id, str(quiz_id), block, now=now, owner_wait=row.get("owner_wait"))))
     trigger = _trigger_line(reason)
-    chat_boundary = window.get("boundary") or {key: accepted[key] for key in _CHAT_BOUNDARY_KEYS if key in accepted}
+    chat_boundary = window.get("boundary") or {key: accepted[key] for key in CHAT_BOUNDARY_KEYS if key in accepted}
     state_to_accept = {**chat_boundary, **({"transitions": state} if isinstance(state, dict) else {}),
                        **({"memory": memory_boundary} if memory_boundary is not None else {})}
     return WakeObservation(trigger=trigger, events=tuple(events),
                            outstanding=tuple(line for _stamp, line in sorted(cards, reverse=True)),
                            window=window, gaps=tuple(sorted(gaps)), captured_at=_iso(now),
-                           boundary=None if source_unreadable else state_to_accept or None)
+                           boundary=None if source_unreadable else state_to_accept or None, chain=chain)
 
 
 def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
@@ -882,7 +881,7 @@ def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
     facts = task.pop("_wake_prepare", None)
     if not isinstance(facts, dict):
         return
-    from ouroboros.consciousness_view import cause_views, place_views, root_views
+    from ouroboros.consciousness_view import cache_writes_text, cause_views, place_views, root_views
 
     root = pathlib.Path(drive_root)
     now = float(facts.get("now") or 0.0)
@@ -900,8 +899,9 @@ def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
         places = place_views(root, window)
     except Exception:
         places = None
-    context = {"spend_by_cause": cause_views(window.get("spend_by_cause"), places),
-               "counted_roots": root_views(list(facts.get("counted_roots") or []), places), "places": places}
+    context = {"spend_by_cause": cause_views(window.get("spend_by_cause"), places), "places": places,
+               "counted_roots": root_views(list(facts.get("counted_roots") or []), places),
+               "cache_writes": cache_writes_text(root, now)}  # read once: ``render`` runs for each form of the wake
     def render(events: str) -> str:
         return render_wake_message(
             facts.get("repo_dir"), drive_root=root, reason=reason, last_wake_at=float(facts.get("last_wake_at") or 0.0),
@@ -923,18 +923,22 @@ def bind_wake_observation(drive_root: Any, task: Dict[str, Any], observation: Wa
 
     Runs after the wake is registered and before its thread starts. The task's text stays the complete observation
     (the original host input); the stored source and its overview forms only let the context fit deliver it by
-    reference when it cannot fit (``loop_model_call``). Only exact source readback permits accepting a compact
-    boundary; a failure leaves the full input and no advance."""
+    reference when it cannot fit (``loop_model_call``). The transition state is written first, as a link of the
+    accepted chain (``consciousness_transitions.bind_link``); only exact readback of both permits accepting a compact
+    boundary that names that link; a failure leaves the full input and no advance."""
     from ouroboros.chat_chain import retain_memory_source
     from ouroboros.artifacts import read_actor_source_bytes
     from types import SimpleNamespace
 
     metadata = task.setdefault("metadata", {})
-    accepted = None
+    accepted, boundary = None, observation.boundary or {}
     facts: Dict[str, Any] = {"captured_at": observation.captured_at, "window": observation.window,
                              "composition": observation.counts(), "gaps": list(observation.gaps)}
     try:
-        data = observation.source_bytes()
+        chain = None
+        if (boundary.get("transitions") or {}).get("version") == TRANSITIONS_VERSION:
+            chain = bind_link(drive_root, observation.chain, boundary["transitions"])
+        data = observation.source_bytes(chain)
         source = retain_memory_source(SimpleNamespace(drive_root=drive_root, task_id=str(task["id"])),
                                       "wake_observation", data, extension="jsonl")
         if read_actor_source_bytes(drive_root, str(task["id"]), source) != data:
@@ -945,12 +949,9 @@ def bind_wake_observation(drive_root: Any, task: Dict[str, Any], observation: Wa
         facts.update(source=source, projection_text=projection)
         if pointer != projection:  # the start's and a real overflow's guarantee: the bare pointer
             facts["pointer_text"] = pointer
-        if observation.boundary is not None and (observation.boundary.get("transitions") or {}).get("version") == TRANSITIONS_VERSION:
-            accepted = {key: observation.boundary[key] for key in _CHAT_BOUNDARY_KEYS if key in observation.boundary}
-            accepted.update(transitions={"version": TRANSITIONS_VERSION, "source_ref": source},
-                            task_id=str(task["id"]), captured_at=observation.captured_at)
-            if "memory" in observation.boundary:
-                accepted["memory"] = observation.boundary["memory"]
+        if chain is not None:
+            accepted = {key: boundary[key] for key in (*CHAT_BOUNDARY_KEYS, "memory") if key in boundary}
+            accepted.update(transition_chain=chain, task_id=str(task["id"]), captured_at=observation.captured_at)
     except Exception as exc:
         facts["source_error"] = f"{type(exc).__name__}: {exc}"
     metadata[WAKE_OBSERVATION_KEY] = facts
@@ -961,7 +962,7 @@ def render_wake_message(repo_dir: Any, *, drive_root: Any, reason: str, last_wak
                         disabled_tools: List[str], spent_usd: Any, daily_usd: Any, running: int,
                         max_tasks: int, interval: int, events: str, spent_is_floor: bool = False,
                         spend_by_cause=None, counted_roots=None, places=None, previous_wake: str = "none",
-                        appointment_at: float = 0.0) -> str:
+                        appointment_at: float = 0.0, cache_writes: str = "unknown") -> str:
     """Fill ``prompts/CONSCIOUSNESS.md`` for one wake; every placeholder is substituted.
 
     "On time" is lateness below ``ago_text``'s one-minute display granularity, not a new scheduling threshold.
@@ -983,7 +984,7 @@ def render_wake_message(repo_dir: Any, *, drive_root: Any, reason: str, last_wak
         "withheld_tools": ", ".join(disabled_tools) if disabled_tools else "none",
         "spent_usd": spent, "daily_usd": f"{float(daily_usd):.2f}",
         "running": str(int(running)), "max_tasks": str(int(max_tasks)), "interval": str(int(interval)),
-        "spend_by_cause": spend_text(spend_by_cause), "counted_roots": roots_text(counted_roots),
+        "spend_by_cause": spend_text(spend_by_cause), "counted_roots": roots_text(counted_roots), "cache_writes": cache_writes,
     }
     # One pass: a fact (a task title inside {events}) that happens to contain "{daily_usd}"
     # is never substituted again.

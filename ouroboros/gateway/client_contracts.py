@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.delegate_custody_usage import CostCustody
 from ouroboros.cost_projection import CostPresentation
+from ouroboros.gateway.work_contracts import ChatModelRoute
 
 try:  # Python 3.11+
     from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
@@ -68,10 +69,11 @@ class SetupModelSlot(TypedDict):
     note: str
     settingsInputId: str
     settingsToggleId: str
+    managed: bool  # a deployment policy fixes it: shown, never edited or written
 
 
 class SetupModeChoice(TypedDict):
-    """A ``reviewModes`` or ``runtimeModes`` row; ``value`` is what the setting stores."""
+    """A ``runtimeModes`` row; ``value`` is what the setting stores."""
 
     value: str
     label: str
@@ -91,7 +93,6 @@ class SetupBudgetField(TypedDict):
     stateKey: str
     settingKey: str
     inputId: str
-    settingsInputId: str
     title: str
     label: str
     note: str
@@ -116,7 +117,6 @@ class SetupContract(TypedDict):
     providerFields: List[SetupProviderField]
     providerProfiles: Dict[str, SetupProviderProfile]
     modelSlots: List[SetupModelSlot]
-    reviewModes: List[SetupModeChoice]
     runtimeModes: List[SetupModeChoice]
     localRoutingModes: List[SetupLocalRoutingMode]
     budgetFields: List[SetupBudgetField]
@@ -140,7 +140,6 @@ class SetupInitialState(TypedDict):
     legacyCompatibleBaseUrl: str  # saved OPENAI_BASE_URL, display only: completion never writes it
     safetyModel: str
     providerProfile: str
-    reviewEnforcement: str
     runtimeMode: str
     skillsRepoPath: str
     localPreset: str
@@ -154,6 +153,7 @@ class SetupInitialState(TypedDict):
     modelContextWindows: Dict[str, Any]
     processingPreference: str
     modelProcessingPreferences: Dict[str, Any]
+    automaticModels: List[str]  # model-slot stateKeys neither the document nor an operator's variable sets
 
 
 class SetupConsciousnessOffer(TypedDict):
@@ -180,6 +180,7 @@ class SetupBootstrap(TypedDict):
     contract: SetupContract
     initialState: SetupInitialState
     consciousnessOffer: SetupConsciousnessOffer  # display; a ticked row sends the ordinary Start after the save
+    deployment: Optional["SettingsDeploymentPolicy"]  # Settings' ``_meta.policy_state.deployment``; null unmanaged
 
 
 class OnboardingBootstrapResponse(TypedDict):
@@ -190,12 +191,107 @@ class OnboardingBootstrapResponse(TypedDict):
     bootstrap: SetupBootstrap
 
 
+class SettingsSaveRequest(TypedDict, total=False):
+    """Open partial settings document; the two control fields are never stored."""
+    if_unchanged: Dict[str, str]
+    unset: List[str]
+
+
+class SettingsChange(TypedDict, total=False):
+    """Sanitized commit facts. A secret has no token; a withheld value has no inverse."""
+    old: Any
+    new: Any
+    old_absent: bool
+    token: str
+    withheld: Literal["secret", "structure"]
+
+
+class SettingsReceipt(TypedDict, total=False):
+    changes: Dict[str, SettingsChange]
+    receipt: Literal["unavailable"]
+
+
+class SettingsTiming(TypedDict):
+    effects: Dict[str, Literal["now", "next_call", "next_wake", "next_task", "restart", "local_model"]]
+    tokens: Dict[str, str]
+
+
+class SettingsRestartState(TypedDict, total=False):
+    restart_required: bool
+    restart_keys: List[str]
+    restart_source_unknown_keys: List[str]
+    unknown_keys: List[str]
+    local_model: Dict[str, Any]
+    summary: str
+    running: Dict[str, Any]
+
+
 class SettingsReadResponse(TypedDict, total=False):
     """``GET /api/settings``: every effective setting key with its value (secrets masked: a
     password-class key reads as the configured placeholder, others as a short prefix plus
     ``...``) and ``_meta``. Sending a masked value back means "unchanged"; ``""`` clears."""
 
-    _meta: SettingsMeta
+    _meta: _contracts.SettingsMeta
+
+
+class SettingsPolicyState(TypedDict):
+    """``_meta.policy_state`` of ``GET /api/settings``: configured versus effective Access and Supervisor
+    (``gateway.settings._build_policy_state``), plus what a managed deployment's policy fixes."""
+
+    access: _contracts.SettingsPolicyAxis
+    supervisor: _contracts.SettingsPolicyAxis
+    running_task_snapshot: bool
+    deployment: NotRequired[SettingsDeploymentPolicy]  # absent outside a managed deployment
+
+
+class SettingsDeploymentChecker(TypedDict):
+    """The organization's Safety Supervisor route; no connection value or secret."""
+
+    model: str
+    account: str
+    fallbacks: List[str]
+    connections: List[str]  # the connections its routes use, by picker id (``kind`` or ``kind@name``)
+    fields: List[str]  # the flat settings its built-in routes read now (a compatible lane's pair included)
+    local: bool  # a route answers from the local model server
+
+
+class SettingsDeploymentRequirement(TypedDict):
+    """One extension the policy requires: its pin and the custom settings it fixes, by name only; Settings and
+    Skills add how the observing process sees it (``deployment_extensions.requirement_state``)."""
+
+    name: str
+    path: str
+    content_hash: str
+    settings: List[str]
+    state: NotRequired[Literal["met", "unmet"]]
+    reason: NotRequired[str]  # running, missing, collision, elsewhere, changed, review, grants, load_error, ...
+    detail: NotRequired[str]  # the owner's sentence, with no fixed value in it
+    observed_hash: NotRequired[str]  # the digest of other bytes found at the path
+    process: NotRequired[Dict[str, Any]]  # role, pid, started (birth token) and observed_at of the observer
+
+
+class SettingsDeploymentExtensions(TypedDict):
+    """The policy's required extensions and what ordinary work does while one is not running ("" when none is);
+    with an execution domain, ``trusted`` lists the only packages ({name, path, content_hash}) whose code the
+    service runs."""
+
+    when_unmet: Literal["hold", "warn", ""]
+    required: List[SettingsDeploymentRequirement]
+    trusted: NotRequired[List[Dict[str, str]]]
+
+
+class SettingsDeploymentPolicy(TypedDict):
+    """What a managed deployment's policy file fixes (``deployment_policy.policy_state``)."""
+
+    source: Literal["deployment_policy"]
+    version: int
+    digest: str  # the first 16 hex digits of the file's SHA-256, as this server generation read it
+    access_max: Optional[str]
+    min_coverage: Optional[str]
+    checker: Optional[SettingsDeploymentChecker]
+    allowed_exits: List[str]  # agent repeat, human release after DANGEROUS, human unchecked release
+    organization_rules: bool
+    extensions: Optional[SettingsDeploymentExtensions]
 
 
 class SettingsWriteRefusal(TypedDict):
@@ -242,7 +338,7 @@ class ContractHttpEntry(TypedDict):
     query: NotRequired[List[str]]
     headers: NotRequired[List[str]]  # request headers the handler reads; a trailing "!" marks a required one
     request: NotRequired[ContractBody]
-    responses: NotRequired[Dict[str, ContractBody]]  # by HTTP status
+    responses: NotRequired[Dict[str, ContractBody]]  # HTTP status, then 4xx/5xx for unlisted errors
     note: NotRequired[str]
 
 
@@ -300,6 +396,51 @@ class OwnerSubagentsModeRequest(TypedDict):
     project_id: NotRequired[str]
 
 
+class OwnerChatModelRequest(TypedDict):
+    """A Project follows Main or chooses a model; without project_id this writes Main itself."""
+
+    kind: Literal["main", "model"]
+    model: NotRequired[str]  # kind ``model`` only: the raw route, its source included
+    use_local: NotRequired[bool]  # kind ``model`` only
+    project_id: NotRequired[str]
+
+
+class ChatModelChoice(TypedDict):
+    """A room follows Main or chooses a route; a reference is never the same model pinned."""
+
+    kind: Literal["main", "model"]
+    model: NotRequired[str]  # kind ``model`` only: the raw route, its source included
+    use_local: NotRequired[bool]  # kind ``model`` only
+
+
+class OwnerChatModelResponse(TypedDict):
+    ok: bool
+    project_id: str
+    model_choice: NotRequired[ChatModelChoice]  # Project response
+    previous_model_choice: NotRequired[ChatModelChoice]
+    main_route: NotRequired[ChatModelRoute]  # Main response
+    previous_main_route: NotRequired[ChatModelRoute]
+    account: NotRequired[Literal["kept", "auto", "none"]]
+    window_reset: NotRequired[bool]
+
+
+class OwnerChatProcessingRequest(TypedDict):
+    """A room's processing tier for new owner work, or Main's own without project_id; ``""`` is Default. Ultrafast is a room's only."""
+
+    processing: Literal["", "standard", "fast", "economy", "ultrafast"]
+    project_id: NotRequired[str]
+
+
+class OwnerChatProcessingResponse(TypedDict):
+    ok: bool
+    project_id: str
+    processing_choice: NotRequired[Literal["", "standard", "fast", "economy", "ultrafast"]]  # Project response
+    previous_processing_choice: NotRequired[Literal["", "standard", "fast", "economy", "ultrafast"]]
+    main_processing: NotRequired[Literal["", "standard", "fast", "economy"]]  # Main response: Main's own tier (a Settings value)
+    previous_main_processing: NotRequired[Literal["", "standard", "fast", "economy"]]
+    processing_default: NotRequired[Literal["", "standard", "fast", "economy"]]  # what Default resolves to
+
+
 class OwnerSafetyModeRequest(TypedDict):
     kind: NotRequired[Literal["your_work", "consciousness"]]
     mode: Literal["full", "light", "off"]
@@ -309,16 +450,17 @@ class OwnerSafetyRulesRequest(TypedDict):
     rules: str
 
 
-class OwnerSafetyRulesResponse(TypedDict):
+class OwnerSafetyRulesResponse(SettingsReceipt):
     ok: bool
     rules: str
 
 
 class OwnerSafetyModelRequest(TypedDict):
     settings: Dict[str, Any]
+    if_unchanged: NotRequired[Dict[str, str]]
 
 
-class OwnerSafetyModelResponse(TypedDict):
+class OwnerSafetyModelResponse(SettingsReceipt):
     ok: bool
 
 
@@ -347,6 +489,7 @@ class RecentWake(_RecentWakeIdentity):
     chat_id: Optional[int]
     cause: Literal["own", "focus"]
     place_label: str
+    place_id: NotRequired[str]  # a focus wake's place, for its sheet
     conversation: str
     started_at: Optional[str]
     first_reply_at: NotRequired[Optional[str]]
@@ -383,12 +526,65 @@ class RecentWakesView(TypedDict):
 
 
 class PlaceConnectRequest(TypedDict):
-    """Connect Silent; ids default to empty. An instance label is prefixed with the service."""
+    """Connect Silent; ids default to empty. An instance label is prefixed with the service. An Add's note,
+    description and circle_id land with a new place only; a connected one answers 409 place_exists."""
 
     connector: str
     account_id: NotRequired[str]
     conversation_id: NotRequired[str]
     label: NotRequired[str]
+    note: NotRequired[str]
+    description: NotRequired[str]
+    circle_id: NotRequired[str]
+
+
+class PlaceCircleChoice(TypedDict):
+    """The circle a place is in and who placed it there; the words and their author are the circle's."""
+
+    circle_id: str
+    placed_by: str
+    placed_at: str
+
+
+class PlaceDescription(TypedDict):
+    """A short purpose line under the place's name: never a rule or permission."""
+
+    text: str
+    author: str
+    at: str
+
+
+class CircleSummary(TypedDict):
+    """One circle's words, authorship and model; an empty model inherits consciousness."""
+
+    circle_id: str
+    name: str
+    text: str
+    text_author: str
+    text_at: str
+    revision: int
+    model: str
+
+
+class CircleCreateRequest(TypedDict):
+    """A new circle last in the order; its words are the owner's."""
+
+    name: str
+    text: NotRequired[str]
+    model: NotRequired[str]
+
+
+class CircleUpdateRequest(TypedDict, total=False):
+    """Change name, words or model; expected_revision compares the circle's revision before writing."""
+
+    name: str
+    text: str
+    model: str
+    expected_revision: int
+
+
+class CircleDeleteRequest(TypedDict, total=False):
+    expected_revision: int
 
 
 class PlaceIcon(TypedDict, total=False):
@@ -404,6 +600,14 @@ class PlaceReadiness(TypedDict):
     tone: str
 
 
+class PlaceModelRoute(TypedDict):
+    """The model a place thinks with now, the scope that chose it, and whether that route is the local runtime."""
+
+    value: str
+    layer: Literal["place", "circle", "consciousness"]
+    local: bool
+
+
 class PlaceSummary(TypedDict):
     """One projection for list, write/conflict responses and the model's place map."""
 
@@ -414,11 +618,13 @@ class PlaceSummary(TypedDict):
     conversation_id: str
     label: str
     state: Literal["active", "silent", "paused"]
+    only_hears: NotRequired[bool]  # derived per read: true while consciousness is off (or Panic) and the place not Paused
     wakes: List[Dict[str, str]]
     notes: List[Dict[str, str]]
     owner_accounts: List[Dict[str, str]]
     working_folder: str
     model: str
+    model_route: PlaceModelRoute
     context_topics: List[str]
     legacy_binding_ids: List[str]
     revision: int
@@ -441,6 +647,9 @@ class PlaceSummary(TypedDict):
     activity_coverage: str
     spent_24h_usd: Optional[float]
     account_candidates: List[Dict[str, Any]]
+    shared_owner_accounts: List[Dict[str, str]]  # confirmed in another place of this bot/app; count here
+    circle: Optional[PlaceCircleChoice]
+    description: Optional[PlaceDescription]
 
 
 class PlaceDisconnectRequest(TypedDict, total=False):
@@ -491,6 +700,8 @@ class PlaceUpdateRequest(TypedDict, total=False):
     model: str
     confirm_owner_account: PlaceOwnerAccountRequest
     revoke_owner_account: str
+    circle_id: str  # "" takes it out of its circle
+    description: str  # "" clears it
     expected_revision: int
 
 
@@ -522,12 +733,12 @@ class ChatUploadDeleteResponse(TypedDict):
 
 
 class ProjectListResponse(TypedDict):
-    """``GET /api/projects``: active and deleting projects, at most 200, most recently active first; ``?all=1``
-    lists every one of them. ``?id=<project_id>`` answers that project while active or deleting, ``?chat_id=<n>``
-    the active project of that room; either answers none otherwise.
+    """``GET /api/projects``: active and deleting projects, at most 200, newest message first (``last_message_at``);
+    ``?all=1`` lists every one of them. ``?id=<project_id>`` answers that project while active or deleting,
+    ``?chat_id=<n>`` the active project of that room; either answers none otherwise.
     Rows are the compact projection ``GET /api/state`` also carries: id, name, pinned, chat_id, working_dir,
-    provenance, last_active_at, lifecycle, optional closed, routing_generation, visible_revision, delete_error and
-    has_thread_activity."""
+    provenance, last_active_at, last_message_at, lifecycle, optional closed, routing_generation, visible_revision,
+    delete_error and has_thread_activity."""
 
     projects: List[ProjectEntry]
 
@@ -760,22 +971,25 @@ class TaskResumeResponse(TypedDict, total=False):
     message: str
 
 
-# Last, not first: ``contracts.py`` imports ServedUiState from this module, so the shared
-# SettingsMeta is bound after this module's own envelopes exist, whichever module loads first.
-from ouroboros.gateway.contracts import ProjectEntry, SettingsMeta  # noqa: E402
+# Resolve shared shapes after either module has finished loading.
+from ouroboros.gateway import contracts as _contracts  # noqa: E402
+from ouroboros.gateway.contracts import ProjectEntry  # noqa: E402
 
 __all__ = [
     "ServedUiState",
     "SetupStep", "SetupProviderField", "SetupProviderProfile", "SetupModelSlot", "SetupModeChoice",
     "SetupLocalRoutingMode", "SetupBudgetField", "SetupSubscriptionField", "SetupContract",
     "SetupLocalPreset", "SetupInitialState", "SetupConsciousnessOffer", "SetupBootstrap", "OnboardingBootstrapResponse",
-    "SettingsReadResponse", "SettingsWriteRefusal",
+    "SettingsSaveRequest", "SettingsChange", "SettingsReceipt", "SettingsTiming", "SettingsRestartState",
+    "SettingsReadResponse", "SettingsPolicyState", "SettingsDeploymentChecker", "SettingsDeploymentRequirement", "SettingsDeploymentExtensions",
+    "SettingsDeploymentPolicy", "SettingsWriteRefusal",
     "AuthLoginRequest", "AuthLoginResponse",
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",
-    "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
+    "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerChatModelRequest", "ChatModelChoice", "ChatModelRoute", "OwnerChatModelResponse", "OwnerChatProcessingRequest", "OwnerChatProcessingResponse", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
     "RecentWake", "RecentWakeCheck", "RecentWakesView",
-    "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceSummary", "PlaceDisconnectRequest",
-    "PlaceOwnerAccountRequest", "PlaceUpdateRequest",
+    "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceModelRoute", "PlaceSummary", "PlaceDisconnectRequest",
+    "PlaceOwnerAccountRequest", "PlaceUpdateRequest", "PlaceCircleChoice", "PlaceDescription",
+    "CircleSummary", "CircleCreateRequest", "CircleUpdateRequest", "CircleDeleteRequest",
     "SettingsSecretRequest", "SettingsSecretResponse", "ChatUploadDeleteRequest", "ChatUploadDeleteResponse",
     "ProjectListResponse", "ProjectCreateResponse", "ProjectUpdateRequest", "ProjectUpdateResponse",
     "ProjectFromTaskRequest", "ProjectTaskBinding", "ProjectFromTaskResponse",

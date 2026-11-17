@@ -222,6 +222,31 @@ def test_ui_smoke_widget_board_masonry_and_owner_widths(direct_server_with_data,
     def same(a: float, b: float) -> bool:
         return abs(a - b) <= 1.5
 
+    def settled(page) -> None:
+        # The masonry's first layout (the one that says `columns`) runs at the list's width before the board's own
+        # height gives its scroller the 6 px WebKit scroll bar (style.css `::-webkit-scrollbar`); the list narrows and
+        # the masonry lays out again a frame later. Read the board once three frames pass with nothing moved.
+        page.evaluate(
+            """() => new Promise((resolve, reject) => {
+                const shape = () => {
+                    const list = document.getElementById('widgets-list').getBoundingClientRect();
+                    return JSON.stringify([list.width, ...[...document.querySelectorAll('#widgets-list [data-widget-key]')]
+                        .map((node) => { const box = node.getBoundingClientRect(); return [box.width, box.x - list.x]; })]);
+                };
+                let last = shape();
+                let quiet = 0;
+                const timer = setTimeout(() => reject(new Error(`the board still moved after 5 s: ${last}`)), 5000);
+                const frame = () => {
+                    const now = shape();
+                    quiet = now === last ? quiet + 1 : 0;
+                    last = now;
+                    if (quiet < 3) requestAnimationFrame(frame);
+                    else { clearTimeout(timer); resolve(); }
+                };
+                requestAnimationFrame(frame);
+            })"""
+        )
+
     try:
         with sync_playwright() as pw:
             browser = getattr(pw, browser_name).launch(headless=True)
@@ -237,6 +262,7 @@ def test_ui_smoke_widget_board_masonry_and_owner_widths(direct_server_with_data,
                 assert toggled == 200
                 open_widgets(page)
                 page.wait_for_function("document.getElementById('widgets-list').dataset.widgetLayout === 'columns'", timeout=5_000)
+                settled(page)
                 mark_frames(page)
                 dom_before = node_order(page)
 

@@ -629,7 +629,7 @@ def test_review_grants_and_enable(slug, review_secret, install_skill, tmp_path):
     # source row's install basis now, so an explicit review is an ordinary one.
     assert review.get("review_profile") in (None, ""), review.get("review_profile")
 
-    # Auto-grant ran inside review_skill (blocking enforcement ⇒ only on
+    # Auto-grant ran inside review_skill (the lane admits only
     # clean/warnings). Grants are request-keyed: a requested key grants with an
     # empty settings value.
     grants = grant_status_for_skill(data, loaded)

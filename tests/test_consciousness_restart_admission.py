@@ -411,7 +411,7 @@ def test_a_stop_reaches_a_started_wake_and_a_refused_one_has_nothing_to_stop(rac
     tick = race.clock.tick(race.start)
     if window == "before_the_row":
         assert _refusal_facts(race, tick=tick) == _refused()
-        assert messages == ["Background consciousness disabled."]  # nothing was live to stop
+        assert messages == ["Consciousness off: no own wakes."]  # nothing was live to stop
         refused_id = seeded[0]["id"]
         assert stopped == [] and refused_id not in _wake_rows(race)  # no row ever: nothing to stop
         return
@@ -419,7 +419,7 @@ def test_a_stop_reaches_a_started_wake_and_a_refused_one_has_nothing_to_stop(rac
     live = race.clock.live_wake()  # the admitted row, before the carrier ran a step
     _carry(race)
     assert _wait_for(lambda: stopped) and stopped == [live] and live == race.ran[0]["id"]
-    assert messages == [f"Background consciousness disabled; wake-up {live} ends at its next step."]
+    assert messages == ["Consciousness off: no own wakes. Stopping now: its wake-up."]  # the wake `live`, by its kind
 
 
 def test_a_panic_barred_wake_never_admits_beside_a_pending_restart(race, monkeypatch):

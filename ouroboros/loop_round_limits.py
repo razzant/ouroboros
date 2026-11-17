@@ -127,8 +127,8 @@ def _drain_incoming_messages(
     returned result's final save, or the published exact pause), so a crash in
     between delivers it again instead of losing it. Non-content controls are
     acknowledged at once. ``place_live_runs`` (the round top alone, never a delivery
-    close, a forced finalization or a live call): my human's rows this run carries
-    are placed into the sessions it holds open (``place_rows_into_runs``), each once.
+    close, a forced finalization or a live call): my human's rows the host's placement at receipt
+    left are placed into the sessions it holds open (``place_rows_into_runs``), each once.
     """
     controls: Dict[str, Any] = {}
 
@@ -213,14 +213,21 @@ def _drain_incoming_messages(
                 acknowledge_transcript_entry(drive_root, task_id, entry, wake_id="owner_pause_wake")
                 continue
             if kind == KIND_HURRY:
-                # HQ1 no-chat contract (§19.7.2 item 6): a typed hurry
-                # control routes structurally — never via
-                # _record_owner_directive, _owner_marked_content, messages, or
-                # owner_message_injected.
-                from ouroboros.owner_hurry import apply_latch
+                # HQ1 no-chat contract (§19.7.2 item 6): a typed hurry control routes structurally — never via
+                # _record_owner_directive, _owner_marked_content or owner_message_injected. Arming the latch gives
+                # the running work one typed row of the owner's act (``HURRY_WORDS``), never a directive.
+                from ouroboros.owner_hurry import HURRY_WORDS, apply_latch
 
-                apply_latch(owner_ctx, entry, event_queue=event_queue)
+                if apply_latch(owner_ctx, entry, event_queue=event_queue):
+                    _loop()._append_or_merge_user_message(messages, HURRY_WORDS, slot=owner_ctx, kind=OWNER_WORDS_KIND)
                 controls["hurry"] = str(entry.get("msg_id") or "hurry")
+                continue
+            from ouroboros.owner_mailbox import KIND_OWNER_MODEL
+            if kind == KIND_OWNER_MODEL:
+                from ouroboros.owner_model import apply_current
+
+                controls["owner_model"] = apply_current(owner_ctx) or controls.get("owner_model", False)
+                acknowledge_transcript_entry(drive_root, task_id, entry, wake_id="owner_model_wake")
                 continue
             dmsg = entry.get("text") or ""
             if kind == KIND_TASK_MESSAGE:
@@ -239,15 +246,19 @@ def _drain_incoming_messages(
                 provenance = str(entry.get("provenance") or "ancestor_task")
                 arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), dict) else {}
                 if provenance == "place_event":
+                    from ouroboros.place_intake import arrival_owner_words
                     from ouroboros.presence_continuation import note_place_delivery
                     note_place_delivery(owner_ctx, entry, controls)  # the event is context; my human's words are theirs
-                    if confirmed := arrival.get("confirmed_words") or arrival.get("owner_words"):  # provenance, as at the opening
-                        from ouroboros.owner_words import PLACE_CONFIRMED, place_reply_target
+                    arrival = {**arrival, "confirmed_words": arrival_owner_words(owner_ctx, drive_root, entry)}  # now
+                    entry = {**entry, "place_arrival": arrival}  # its delivered prefix reads the same fact
+                    if confirmed := arrival["confirmed_words"]:  # provenance, as at the opening
+                        from ouroboros.owner_words import PLACE_CONFIRMED, place_row_facts
                         from ouroboros.presence_runner import presence_chat_id
                         room = presence_chat_id(str((entry.get("sender_origin") or {}).get("conversation_key") or ""))
                         _loop()._record_owner_directive(owner_ctx, source=PLACE_CONFIRMED, carried=True,
                             content=confirmed, msg_id=f"chat {room} / {arrival.get('source_event_id') or ''}",
-                            reply_to=place_reply_target(arrival.get("message")), origin=_arrival(received=entry.get("ts")))
+                            **place_row_facts(arrival.get("conversation_id"), arrival.get("message"),
+                                              _arrival(received=entry.get("ts"))))
                 if provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
                     _loop()._record_owner_directive(
                         owner_ctx, content=dmsg, msg_id=str(entry.get("msg_id") or ""),
@@ -332,7 +343,7 @@ def _drain_incoming_messages(
             _loop()._record_owner_directive(
                 owner_ctx,
                 source="owner_mailbox",
-                content=_owner_content(entry, drive_root, task_id),
+                content=_owner_content(entry, drive_root, task_id), words=dmsg,  # the rendering, its exact text beside
                 msg_id=str(entry.get("msg_id") or ""),
                 # The same message relayed, or read from its room, is one row: its room and client id name it.
                 origin={**_arrival(held, entry.get("ts")), "client_message_id": entry.get("client_message_id")},
@@ -360,11 +371,11 @@ def _drain_incoming_messages(
                     })
                 except Exception:
                     pass
-    if owner_ctx is not None:  # my human's rows reach every live member below this run, by identity, each once
+    if owner_ctx is not None:  # the catch-up of the host's carriage at receipt: every live member below, each row once
         from ouroboros.owner_relay import carry_to_members
         grown = len(getattr(owner_ctx, "_owner_directives", None) or []) > before_rows
         carry_to_members(owner_ctx, delivered=delivered or grown)
-        if place_live_runs:  # and the sessions this run holds open, each row once per run
+        if place_live_runs:  # and the sessions this run holds open, each row once per run (and the host's facts)
             from ouroboros.delegate_interactions import place_rows_into_runs
             for line in place_rows_into_runs(owner_ctx):
                 _loop()._append_or_merge_user_message(messages, line, slot=owner_ctx)
@@ -395,8 +406,10 @@ def _run_round_compaction(
     """The round's transcript maintenance before the send: the mind's pending authored
     view (Main fit owns every automatic decision), then -- on the transcript that will
     actually go out -- the host roster of independent roots as a TAIL row when it changed
-    (owner 6C). The note follows any view so it is never folded into a rewrite, and precedes
-    the acceptance observation and the seal."""
+    (owner 6C), and the mark changes no row or memory_mark result in view states yet
+    (``mark_anchors.append_mark_changes``). These rows follow any view so they are never
+    folded into a rewrite, and precede the acceptance observation and the seal."""
+    from ouroboros.mark_anchors import append_mark_changes
     from ouroboros.peer_roster import maybe_append_roster_note
     from ouroboros.tools.owner_delivery import publish_pending_owner_dialogue
 
@@ -423,6 +436,7 @@ def _run_round_compaction(
     maybe_append_roster_note(ctx.tools._ctx, messages, ctx.drive_root)
     from ouroboros.skill_context_snapshot import maybe_append_skill_snapshots
     maybe_append_skill_snapshots(ctx.tools._ctx, messages, ctx.drive_root)
+    append_mark_changes(ctx.tools._ctx, messages)
     return messages
 
 
@@ -448,7 +462,7 @@ def _retire_superseded_host_state(messages, ctx):
 
 def _run_authored_context_view(messages, ctx, pending, selected_names):
     """Apply one source/schema view together at the existing completed boundary."""
-    from ouroboros.context_budget import ContextReclaimRequest
+    from ouroboros.context_budget import ContextReclaimRequest, authored_view_fields
     from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256
     from ouroboros.tool_policy import request_tool_schema_selection, select_tool_schemas
 
@@ -490,7 +504,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         try:
             if plan is None or not observed_core or plan.core_sha256 != observed_core:
                 raise ValueError("memory snapshot changed; inspect the current view")
-            memory_plan = select_view(plan, mode, addresses, owner_note=bool(proposal.get("working_note", "").strip()))
+            memory_plan = select_view(plan, mode, addresses, owner_note=bool(proposal.get("working_note", "").strip()),
+                                      tool_names=[schema["function"]["name"] for schema in schemas])
         except ValueError as exc:
             tool_ctx._pending_compaction = None
             tool_ctx._context_view_receipt = {"status": "selection_failed", "reason": str(exc)}
@@ -520,7 +535,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             route_fp="actor", round_id=str(ctx.round_idx),
             transcript_sha256=context_reclaim_transcript_sha256(messages),
             measurement_basis="cold_estimate", measurement_density=1.0, reclaim_goal_tokens=0,
-            **{key: proposal[key] for key in ("working_note", "expected_view_revision", "keep_unit_ids", "restore_unit_refs", "schema_names")},
+            **authored_view_fields(proposal),
         )
         candidate, result = compact_tool_history_llm(
             messages, request=request, observed_messages=observed["messages"],
@@ -598,7 +613,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             from ouroboros.tools.compact_context import residue_by_kind
             notice.update(reclaimed_tokens=receipt.get("reclaimed_tokens"), residue=residue_by_kind(candidate),
                           resulting_input_tokens=(receipt.get("fit") or {}).get("estimated_input_tokens"),
-                          basis="host estimates")
+                          basis="host estimates", **({"replaced_notes": receipt["replaced_notes"]}
+                                                     if receipt.get("replaced_notes") else {}))
         exceptions = receipt.get("request_exceptions") or []
         if receipt.get("inherited_selections_unapplied"):
             notice["inherited_selections_unapplied"] = receipt["inherited_selections_unapplied"]
@@ -708,7 +724,7 @@ class _RoundLimitContext:
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({ctx.max_rounds}). Consider decomposing into subtasks via schedule_subagent."
+    finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({ctx.max_rounds})."
     prompt = (
         f"[ROUND_LIMIT] {finish_reason} Produce your best final answer now from the "
         "verified work so far; clearly mark anything unverified or incomplete. An honest "
@@ -890,7 +906,7 @@ def _handle_model_wait_control(
     remains the supervisor's death-then-settlement transaction.
     """
     from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, active_intent, stop_policy
-    from ouroboros.model_wait import ModelWaitInterrupted, current_model_wait
+    from ouroboros.model_wait import OWNER_WORDS_WAITING, ModelWaitInterrupted, current_model_wait
     from ouroboros.transport_custody import outcome_unknown_on_chain
 
     reason = error.control_reason
@@ -899,6 +915,8 @@ def _handle_model_wait_control(
     # catches a hold's interruption raised outside the model call, must not
     # hand the same error back here.
     error.control_rails_seen = True
+    if reason in {"owner_model", OWNER_WORDS_WAITING}:
+        return None  # a refused call's wait or a granted repeat yielded; the next drain applies the primary or the words
     if reason == "owner_launch_authority_unavailable":
         # Only the positively unsent handoff waits, and only on positive lock contention;
         # sent effects never retry. Reuse this task's live stack and control/deadline
@@ -1043,6 +1061,24 @@ def _handle_model_wait_control(
     return result
 
 
+def local_deadline_remaining(tool_ctx: Any, limit_ctx: Any = None) -> Optional[float]:
+    """Seconds left on the task's explicit calendar ``deadline_at`` or API/CLI execution budget, whichever ends first;
+    ``None`` without either. A read deadline is also stamped on ``limit_ctx`` for the round's later rails."""
+    from ouroboros.model_wait import explicit_execution_window_remaining
+
+    meta = getattr(tool_ctx, "task_metadata", {})
+    if not isinstance(meta, dict):
+        return None
+    deadline = parse_deadline_ts(meta.get("deadline_at"))
+    execution_left = explicit_execution_window_remaining(tool_ctx)
+    if deadline is None and execution_left is None:
+        return None
+    if deadline is not None and limit_ctx is not None:
+        limit_ctx.deadline_ts = deadline.timestamp()
+    return min(value for value in ((deadline - _loop().utc_now()).total_seconds() if deadline else None,
+                                   execution_left) if value is not None)
+
+
 def _maybe_deadline_local_finalize(
     ctx: _RoundLimitContext, tools: ToolRegistry
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
@@ -1055,20 +1091,8 @@ def _maybe_deadline_local_finalize(
     one tool-less best answer — independent of the supervisor — so a bound
     NEVER returns emptiness. Never fires without one (no synthesized deadline;
     leaderboard timeouts stay legal); confirmed waits extend only the execution budget."""
-    meta = getattr(tools._ctx, "task_metadata", {})
-    if not isinstance(meta, dict):
-        return None
-    from ouroboros.model_wait import explicit_execution_window_remaining
-
-    deadline = parse_deadline_ts(meta.get("deadline_at"))
-    execution_left = explicit_execution_window_remaining(tools._ctx)
-    if deadline is None and execution_left is None:
-        return None
-    if deadline is not None:
-        ctx.deadline_ts = deadline.timestamp()
-    remaining = min(value for value in ((deadline - _loop().utc_now()).total_seconds() if deadline else None,
-                                        execution_left) if value is not None)
-    if remaining > task_pacing.effective_finalization_reserve_sec(tools._ctx):
+    remaining = local_deadline_remaining(tools._ctx, ctx)
+    if remaining is None or remaining > task_pacing.effective_finalization_reserve_sec(tools._ctx):
         return None
     prompt = (
         f"[DEADLINE] The task's remaining time is ~{max(0.0, remaining)/60:.1f} min "
@@ -1080,12 +1104,32 @@ def _maybe_deadline_local_finalize(
     return _loop()._forced_final_answer(ctx, prompt=prompt, fallback_text=fallback, reason_code="deadline_local")
 
 
+def _keep_final_over_routeless_round(limit_ctx: _RoundLimitContext, tools: ToolRegistry, controls: Dict[str, Any]):
+    """A round that only the routeless note asks for (``place_reply.routeless_note_pending``, a restored note too) buys
+    nothing past a rail. When Wrap up or the supervisor's grace, a time control, the deadline reserve or a money stop
+    now ends the work, the note is withdrawn once and the retained final finishes as it stood, through the ordinary
+    exit, before any forced wrap-up or pause; owner Stop now keeps its own rail. ``None``: no such round, or it holds."""
+    from ouroboros.place_reply import NO_SEND_KEY, _round_affordable, routeless_note_pending
+
+    ctx, stop = tools._ctx, str(controls.get("finalize_now") or "").splitlines()
+    candidate = getattr(ctx, "_delivery_candidate", None)
+    if (not routeless_note_pending(getattr(limit_ctx, "llm_trace", None), candidate, getattr(limit_ctx, "messages", None))
+            or (stop and stop[0].strip() == REASON_OWNER_STOPPED_DIRECT_TURN)
+            or (not stop and _round_affordable(ctx, limit_ctx, ahead=False))):
+        return None
+    candidate.finalization_control = "candidate"  # withdrawn: the note stays spent and is never shown again
+    limit_ctx.llm_trace[NO_SEND_KEY]["withdrawn"] = True
+    return _loop()._finalize_loop_candidate(None, limit_ctx, tools, lambda *_a, **_k: None, resume_candidate=True)
+
+
 def _maybe_early_finalize(
     limit_ctx: _RoundLimitContext, tools: ToolRegistry, controls: Dict[str, Any],
     *, transport_episode: Optional[TransportWaitEpisode] = None,
     cost_ceiling: Optional[task_pacing.CostCeiling] = None,
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """Consume supervisor grace, then local deadline, then the round's cost rail."""
+    if (kept := _keep_final_over_routeless_round(limit_ctx, tools, controls)) is not None:
+        return kept
     if controls.get("finalize_now"):
         # The owner's "Stop now" on a direct turn costs no call, so it is
         # honest whatever the transport is doing — never reported to the owner
@@ -1205,7 +1249,8 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     pass (``refusal_policy``) frees a shown chosen read only after a provider's refusal (an estimate
     never cuts a chosen read)."""
     from ouroboros.context_budget import ContextReclaimRequest
-    from ouroboros.context_compaction import context_reclaim_transcript_sha256, emergency_address_view
+    from ouroboros.context_compaction import context_reclaim_transcript_sha256
+    from ouroboros.context_source_view import emergency_address_view
 
     measurement = disposition.measurement
     tool_ctx = ctx.tools._ctx
@@ -1264,10 +1309,11 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
     before = plan.projection(mode).system_content_json
     capacity = measurement.capacity_total_tokens
     rebound = plan.reproject_for_route(
-        window_tokens=int(capacity or 0), known_window=capacity is not None,
+        window_tokens=int(capacity or 0), known_window=capacity is not None, admitted=True,
         ratio=measurement.measurement_density,
         output_reserve=int(plan.output_reserve_tokens), tool_schemas=ctx.tool_schemas, start_mode=mode,
         current_messages=ctx.messages, measured_input_tokens=measurement.reprojection_input_tokens,
+        reasoning_effort=str(getattr(ctx, "active_effort", "") or ""),  # the shape the round measured
         refused_tokens=(int(saving) if saving or (saving == 0 and slack)  # a slack-only ask states no excess
                         else max(1, int(measurement.capacity_deficit_tokens or 0))),
         **({"slack_tokens": int(slack)} if slack else {}),
@@ -1288,7 +1334,7 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
     _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
         "checkpoint_kind": "context_memory_coarsened", "round": ctx.round_idx,
         "route_fp": measurement.route_fp, "effective_mode": mode,
-        "window_tokens": measurement.capacity_total_tokens,
+        "window_tokens": rebound.window_tokens,
         "input_tokens_estimate": measurement.estimated_input_tokens,
     })
     return True

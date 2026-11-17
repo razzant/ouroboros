@@ -90,9 +90,8 @@ class SkillReviewState:
     def is_stale_for(self, current_hash: str) -> bool:
         return not current_hash or (self.reviewed_content_hash or self.content_hash) != current_hash
 
-    def gate_for(self, current_hash: str, *, enforcement: Optional[str] = None) -> Dict[str, Any]:
-        return {**skill_review_gate(self.status, stale=self.is_stale_for(current_hash),
-                                   enforcement=enforcement, findings=self.findings,
+    def gate_for(self, current_hash: str) -> Dict[str, Any]:
+        return {**skill_review_gate(self.status, stale=self.is_stale_for(current_hash), findings=self.findings,
                                    author_disposition=self.author_disposition, current_hash=current_hash,
                                    acceptance=self.acceptance),
                 "reviewed_content_hash": self.reviewed_content_hash or self.content_hash}
@@ -633,15 +632,18 @@ def save_review_state(
     )
 
 
-def requested_core_setting_keys(env_keys: List[str]) -> List[str]:
-    """Return manifest-requested setting keys that require explicit owner grants."""
+def requested_core_setting_keys(env_keys: List[str], settings: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Return manifest-requested setting keys that require explicit owner grants.
+
+    A reader exposing values passes the ``settings`` it read them from: the same mapping names its custom
+    secrets, so a key saved between two reads can never be exposed unclassified. Otherwise this reads them."""
     if not env_keys:
         return []  # nothing requested, nothing to classify: no settings read
     forbidden_upper = {key.upper() for key in FORBIDDEN_SKILL_SETTINGS}
     requestable_when_absent = {"TELEGRAM_BOT_TOKEN"}
     try:
         from ouroboros.config import SETTINGS_DEFAULTS, load_settings
-        settings = load_settings()
+        settings = load_settings() if settings is None else settings
         custom_secret_upper = {
             str(key).upper() for key in settings
             if str(key).upper() not in SETTINGS_DEFAULTS and str(key).upper().replace("_", "").isalnum()
@@ -783,6 +785,7 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
             "unsupported_for_skill_type": False,
             "content_hash": "",
             "updated_at": "",
+            "earlier_grant": None,
         }
     requested = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
     requested_permissions = requested_skill_permissions(
@@ -802,6 +805,17 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
     )
     granted = [key for key in requested if key in persisted_grants]
     granted_permissions = [perm for perm in requested_permissions if perm in persisted_permissions]
+    # A grant saved for other bytes belongs to an earlier version of the skill's files. Readiness, the
+    # execution refusal and the card name that fact instead of reporting the keys as absent; the
+    # binding to bytes itself is unchanged.
+    earlier_grant = None
+    if grants.get("content_hash") and not grant_hash_ok:
+        earlier_keys = [key for key in requested if key in set(grants.get("granted_keys") or [])]
+        earlier_permissions = [
+            perm for perm in requested_permissions if perm in set(grants.get("granted_permissions") or [])
+        ]
+        if earlier_keys or earlier_permissions:
+            earlier_grant = {"keys": earlier_keys, "permissions": earlier_permissions}
     missing = [key for key in requested if key not in set(granted)]
     missing_permissions = [perm for perm in requested_permissions if perm not in set(granted_permissions)]
     review_ready = skill.review.gate_for(skill.content_hash)["executable_review"]
@@ -821,6 +835,7 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
         "unsupported_for_skill_type": unsupported,
         "content_hash": grants.get("content_hash", ""),
         "updated_at": grants.get("updated_at", ""),
+        "earlier_grant": earlier_grant,
     }
 
 
@@ -854,7 +869,7 @@ def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> AutoG
         return outcome
     gate = skill.review.gate_for(skill.content_hash)
     # A pending status grants only through an acceptance basis for these bytes
-    # (trusted source, owner skip/edit, Advisory author finish), never Cyber alone.
+    # (trusted source, owner skip/edit, author finish), never Cyber alone.
     if (not gate["executable_review"] or (gate["status"] == _REVIEW_STATUS_PENDING
         and gate["blocking_reason"] not in ACCEPTANCE_REASONS)):
         return outcome
@@ -929,7 +944,9 @@ def load_skill(
     except SkillPayloadUnreadable as exc:
         content_hash = ""
         load_error = f"payload unreadable: {exc}"
-    enabled = load_enabled(drive_root, name)
+    from ouroboros.deployment_extensions import effective_enabled  # a deployment's required package reads as on
+
+    enabled = effective_enabled(name, load_enabled(drive_root, name), skill_dir, content_hash)
     is_module_widget = (
         manifest.is_extension()
         and isinstance(manifest.ui_tab, dict)

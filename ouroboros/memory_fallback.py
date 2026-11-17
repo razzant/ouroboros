@@ -44,7 +44,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.chronicle_import import row_lineage
-from ouroboros.chronicle_store import ChronicleStore, PublishResult, draft_signer, source_time_span
+from ouroboros.chronicle_store import ChronicleStore, PublishResult, source_time_span
 from ouroboros.consolidator import LIGHT_ANSWER_CEILING_TOKENS
 from ouroboros.dialogue_provenance import (memory_row_header, recorded_finality, render_memory_row, render_row_text,
                                            row_class)
@@ -430,7 +430,9 @@ def _stamp_line(entry: Mapping[str, Any], lane_rows: int) -> str:
     for label, key in (("outcome", "outcome"), ("phase", "outcome_phase"), ("review", "review_verdict"),
                        ("reason", "reason_code"), ("objective", "objective_status")):
         if entry.get(key):
-            facts.append(f"{label} {entry[key]}")
+            facts.append(f"{label} {entry[key]}" + (f" by {entry['objective_source']}" + (
+                f" ({entry['objective_reason']})" if entry.get("objective_reason") else "")
+                if key == "objective_status" and entry.get("objective_source") else ""))
     finality = recorded_finality(entry.get("outcome_final"), entry.get("outcome_authority"),
                                  host_facts=entry.get("source") == "host_task_facts")
     if finality:
@@ -648,11 +650,11 @@ def _part_input(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, b
         span = period.span or {}
         dated = (f"{span.get('start') or '?'} → {span.get('end') or '?'}{period.note()}"
                  + ("; incomplete" if span.get("incomplete") else "")) if span else "unknown"
-        author = member.get("author") or {}
-        signer = f" ({draft_signer(author)})" if author.get("kind") == "helper" else ""
-        blocks.append(f"### {member['kind']} {member['id']} — by {memory_inventory._author_words(author)}{signer}"
+        author, moved = member.get("author") or {}, memory_inventory.transfer_words(member)
+        blocks.append(f"### {member['kind']} {member['id']} — by {memory_inventory.record_byline(member)}"
                       + f" — status {member.get('status') or 'not recorded'} — period {dated}"
-                      + (" — prior helper account, retain its attributed meaning" if member["kind"] == "legacy" else "")
+                      + (f" — {moved}: keep its stated author and meaning" if moved else
+                         " — prior helper account, retain its attributed meaning" if author.get("kind") == "legacy_helper" else "")
                       + "\n" + _indented(member.get("current_text"))
                       + "".join(f"\nquote ({q.get('speaker')}, {q.get('address')}): {q.get('text')}"
                                 for q in member.get("quotes") or ()))

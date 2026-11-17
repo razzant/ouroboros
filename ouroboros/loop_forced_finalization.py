@@ -80,7 +80,7 @@ def _direct_child_results(ctx: _RoundLimitContext) -> list[Dict[str, Any]]:
 
 # Child states that need no further author disposition before this task finishes.
 HANDLED_CHILD_DISPOSITIONS = frozenset({
-    "integrated", "irrelevant", "deferred", "discarded", "cancelled", "host_attention",
+    "integrated", "irrelevant", "deferred", "discarded", "cancelled",
 })
 
 
@@ -93,9 +93,13 @@ def _project_child_result_dispositions(
     try:
         from ouroboros.tools.join_ledger import _child_result_sha256
 
-        current = []
+        from ouroboros.task_status import FINAL_STATUSES
+
+        current, undecided = [], []
         for child in _loop()._direct_child_results(ctx):
             disposition = _loop()._child_disposition_state(child)
+            if not disposition and str(child.get("status") or "").strip().lower() in FINAL_STATUSES:
+                undecided.append(str(child.get("task_id") or child.get("id") or ""))  # finished, no decision: a detail
             if disposition not in {"integrated", "irrelevant", "deferred"}:
                 continue
             current.append({
@@ -106,6 +110,7 @@ def _project_child_result_dispositions(
         llm_trace["child_result_dispositions"] = {
             "current": current,
             "deferred_count": sum(row["disposition"] == "deferred" for row in current),
+            "undecided": undecided[:20],
         }
     except Exception:
         llm_trace["child_result_dispositions"] = {"current": [], "deferred_count": 0}
@@ -386,38 +391,6 @@ def _undecided_children_listing(undecided: list[Dict[str, Any]]) -> str:
     )
 
 
-def _maybe_enforce_child_absorption_gate(
-    tools: ToolRegistry,
-    limit_ctx: _RoundLimitContext,
-    content: Any,
-    messages: List[Dict[str, Any]],
-    emit_progress: Callable[[str], None],
-    llm_trace: Dict[str, Any],
-) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]] | str]:
-    undecided = _undispositioned_children(limit_ctx)
-    if not undecided:
-        return None
-    reminder = ("[CHILD_ABSORPTION_REQUIRED]\nCurrent children without an exact disposition: "
-                + _undecided_children_listing(undecided) + ". Inspect/wait for results and record "
-                "tree_note(kind='decision', payload={'type':'child_result_disposition', 'children': "
-                "[{'child_task_id': ..., 'disposition': 'integrated|irrelevant|deferred', 'child_result_sha256': ...}]}). "
-                "You may discard or cancel with their existing tools, defer honestly, or explicitly "
-                "finish_task(action='stop', rationale=..., answer=...) with unfinished work. No reminder count ends the task.")
-    if not messages or messages[-1].get("content") != reminder:
-        _loop()._append_or_merge_user_message(messages, reminder)
-    emit_progress("Child results still require an author disposition or an explicit unfinished stop.")
-    return "continue"
-
-
-def _plan_gate_identity(decision: Dict[str, Any]) -> str:
-    """Typed identity of the planning gate as the mind was last TOLD it: the decision's
-    own typed fields (status, the holding objections, the pending asks, the hurry
-    attribution) — never the rendered English (astra F3)."""
-    return "|".join(str(decision.get(key) or "") for key in (
-        "status", "allow", "enforcement", "owner_hurry_local_advisory", "unreadable",
-    )) + "|" + ",".join(str(x) for x in decision.get("holding") or []) + "|" + ",".join(str(x) for x in decision.get("pending_asks") or [])
-
-
 def _enforce_plan_gate(
     content: str,
     messages: List[Dict[str, Any]],
@@ -425,19 +398,13 @@ def _enforce_plan_gate(
     llm_trace: Dict[str, Any],
     emit_progress: Callable[[str], None],
 ) -> bool:
-    """Hold normal finalization while blocking plan work is open, and hand the mind
-    ONE fact when a hold it was told about was released behind its back (owner Q4=A).
+    """Hold normal finalization while the plan record cannot be read (the one hold left).
 
-    The marker advances ONLY on the two paths that actually append a message to
-    ``messages`` — the hold reminder and the release note — so it records what
-    entered the MIND's context, not what this gate observed. Every other gate
-    transition already reaches the mind by its own route and must not buy a round:
-    each settled answer arrives as typed review history at the next tool boundary or round,
-    or before delivery (``loop_delivery._unread_review_updates``), a rail
-    release rides the forced prompt's typed facts, and objections and withdrawals
-    are the mind's own ``plan_task`` results. The one residual is the owner's hurry, which the HQ1
-    no-chat contract forbids putting into ``messages``
-    (``loop_round_limits.py``) — that is the only release this fires on."""
+    Every other gate transition reaches the mind by its own route and buys no round: each
+    settled answer arrives as typed review history at the next tool boundary or round, or
+    before delivery (``loop_delivery._unread_review_updates``), a rail release rides the
+    forced prompt's typed facts, and objections and withdrawals are the mind's own
+    ``plan_task`` results."""
 
     decision = _loop()._plan_gate_decision(tools._ctx, llm_trace)
     if decision.get("required"):
@@ -445,39 +412,13 @@ def _enforce_plan_gate(
     else:  # the projection the outcome reads is THIS answer's gate: an earlier hold's never outlives it
         for stale in ("plan_gate", "force_plan_decision"):
             llm_trace.pop(stale, None)
-    identity = _plan_gate_identity(decision) if decision.get("required") else ""
-    told = str(getattr(tools._ctx, "_plan_gate_told_identity", "") or "")
     if decision.get("allow"):
-        # The one release the mind cannot see otherwise: the owner's hurry let it past
-        # objections that still hold (``holding``); a gate the mind cleared itself — a
-        # withdrawal, nothing pending — buys no round.
-        if not (
-            told and identity and identity != told
-            and decision.get("holding")
-            and decision.get("owner_hurry_local_advisory")
-            and not getattr(tools._ctx, "_plan_gate_release_told", False)
-        ):
-            return False
-        tools._ctx._plan_gate_told_identity = identity
-        tools._ctx._plan_gate_release_told = True
-        if content.strip():
-            messages.append({"role": "assistant", "content": content})
-        _loop()._append_or_merge_user_message(
-            messages,
-            "[PLAN_REVIEW_RELEASED]\n"
-            "The plan-review hold reported to you earlier is released by the owner's hurry "
-            "request, and the review is still open.\n" + _FACTS_LEAD + "\n"
-            + _plan_gate_facts(decision),
-        )
-        llm_trace["reasoning_notes"].append("Released plan-review gate reported before final response.")
-        emit_progress("Plan-review gate released before final response.")
-        return True
+        return False
     if content.strip():
         messages.append({"role": "assistant", "content": content})
     reminder = _loop()._plan_gate_reminder(decision)
     _loop()._append_or_merge_user_message(messages, reminder)
     llm_trace["reasoning_notes"].append(reminder)
-    tools._ctx._plan_gate_told_identity = identity
     emit_progress("Plan-review action required before final response.")
     return True
 
@@ -502,25 +443,17 @@ def _plan_gate_facts(decision: Dict[str, Any]) -> str:
     BIBLE P5/P6 — the host does not put a template in the mind's mouth).
 
     Only fields that do NOT depend on ``hard_rail`` are emitted, so the same line is
-    true on the normal rail and on every forced rail. ``owner_hurry_local_advisory``/
-    ``configured_enforcement`` carry the accurate hurry-vs-advisory attribution that
-    the recorded notice does not distinguish."""
+    true on the normal rail and on every forced rail."""
     if not decision.get("required"):
         return ""
     objections, pending = decision.get("open_objections") or [], decision.get("pending_asks") or []
     status = str(decision.get("status") or "")
-    if not objections and not pending and status not in {"unreadable", "held"}:
+    if not objections and not pending and status != "unreadable":
         return ""
     parts = ["plan_review_open=true", f"plan_gate_status={status}",
-             f"plan_open_objections={len(objections)}", f"plan_holding={len(decision.get('holding') or [])}",
-             f"plan_pending_asks={len(pending)}"]
-    if decision.get("enforcement"):
-        parts.append(f"plan_review_enforcement={decision['enforcement']}")
+             f"plan_open_objections={len(objections)}", f"plan_pending_asks={len(pending)}"]
     if decision.get("decision_authority"):
         parts.append(f"decision_authority={decision['decision_authority']}")
-    if decision.get("owner_hurry_local_advisory"):
-        parts.append("owner_hurry_local_advisory=true")
-        parts.append(f"configured_enforcement={decision.get('configured_enforcement') or 'blocking'}")
     if decision.get("unreadable"):
         parts.append("plan_record_unreadable=true")
     return " ".join(parts)
@@ -565,10 +498,59 @@ def _forced_state_facts(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> s
         return ""
 
 
+def _plan_for_acting_route(plan: Any, ctx: _RoundLimitContext) -> bool:
+    """Whether Main's plan names the forced call's acting role, model and locality.
+    A local route's plan names provider ``local``, as ``gateway.settings._active_main_route`` resolves it."""
+    from ouroboros.model_slots import acting_model_role
+    from ouroboros.provider_models import provider_for_model
+
+    model = str(getattr(ctx, "active_model", "") or "")
+    local = bool(getattr(ctx, "active_use_local", False)) or provider_for_model(model) == "local"
+    owner = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    role = acting_model_role(owner, model_role=getattr(ctx, "model_role", ""))
+    return (plan is not None and str(getattr(plan, "model", "") or "") == model
+            and (str(getattr(plan, "provider", "") or "") == "local") == local
+            and (not role or getattr(plan, "model_role", "") == role))
+
+
+def _bind_forced_route(ctx: _RoundLimitContext) -> bool:
+    """Fit the acting route before a forced candidate is priced or sent. A cold restore may have fitted a pending
+    route for the next ordinary round, with another model, role, locality or effort; forced preparation does not
+    consume that choice. On rebind failure, another route's plan stays unmeasured; a matching route still measures
+    the acting effort (``_forced_physical_context``). True when fitted here; ordinary work that follows a priced
+    candidate never sent refits its own round's route from the loop's plan (``loop_routes.bind_round_route``)."""
+    from ouroboros.context_fit import effort_lengthens_request
+
+    tools = getattr(ctx, "tools", None)
+    tools_ctx = getattr(tools, "_ctx", None)
+    plan = getattr(tools_ctx, "context_fit_plan", None)
+    if plan is None or (_plan_for_acting_route(plan, ctx) and not effort_lengthens_request(
+            getattr(plan, "provider", ""), getattr(plan, "start_reasoning_effort", ""), ctx.active_effort)):
+        return False
+    try:
+        from ouroboros.model_slots import acting_model_role, task_model_binding
+        from ouroboros.owner_wait import _conversation_account
+
+        waiter = getattr(tools_ctx, "model_wait_context", None)
+        role, account = task_model_binding({"model_role": acting_model_role(tools_ctx, model_role=getattr(ctx, "model_role", "")),
+            "task_metadata": getattr(tools_ctx, "task_metadata", {})},
+            context_fit_plan=plan, overrides=getattr(waiter, "overrides", None))
+        _loop()._rebind_context_fit_plan(
+            plan, tools, ctx.messages, model=ctx.active_model, use_local=ctx.active_use_local,
+            tool_schemas=list(getattr(ctx, "tool_schemas", None) or []), model_role=role, credential_profile_id=account,
+            model_route=_conversation_account(tools_ctx, ctx.messages, role, account), route_is_preference=True,
+            start_mode=getattr(tools_ctx, "active_context_mode", None), reasoning_effort=ctx.active_effort)
+    except Exception:
+        log.debug("Forced rail kept the restored plan of another route", exc_info=True)
+        return False
+    return True
+
+
 @finalization_child_scope()
 def _prepare_forced_prompt(
     ctx: _RoundLimitContext, prompt: str, llm_trace: Dict[str, Any],
 ) -> str:
+    _bind_forced_route(ctx)
     _loop()._drain_forced_owner_directives(ctx, llm_trace)
     _loop()._finalize_forced_services(ctx, llm_trace)
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
@@ -798,19 +780,19 @@ def _close_forced_intake(ctx: _RoundLimitContext) -> None:
     """A committed forced rail is its loop's last read of place mail: close that intake before the rail's first
     drain, under the admission lock, as the ordinary final close does (``loop_delivery``). What landed before reaches
     the rail's one call; an arrival after is refused and takes the Host's ordinary route. The durable fact moves with
-    it (``follow_loop_admission``); the local flag only in a Presence context, whose place door reads it (a direct
-    turn's flag is its owner's route and Stop door, and a forced call may run long). Idempotent; nothing reopens it.
-    A budget lookahead that only prices a wrap-up never calls this: healthy work keeps reading."""
+    it (``follow_loop_admission``, an owner turn's too); the local flag only in a Presence context, whose place door
+    reads it (a direct turn's flag is its owner's route and Stop door, and a forced call may run long). Idempotent;
+    nothing reopens it. A budget lookahead that only prices a wrap-up never calls this: healthy work keeps reading."""
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     lock = getattr(tools_ctx, "owner_message_admission_lock", None)
     agent = getattr(tools_ctx, "owner_message_admission_agent", None)
     metadata = getattr(tools_ctx, "task_metadata", None)
-    if lock is None or agent is None or not isinstance(metadata, dict) or not isinstance(metadata.get("presence"), dict):
+    if lock is None or agent is None or not isinstance(metadata, dict):
         return
     from ouroboros.conversation_lease import follow_loop_admission
 
     with lock:
-        agent._accepting_owner_messages = False
+        agent._accepting_owner_messages &= not isinstance(metadata.get("presence"), dict)  # a place door's flag only
         follow_loop_admission(tools_ctx, False)
 
 
@@ -865,18 +847,18 @@ def _forced_physical_context(ctx: _RoundLimitContext, messages: List[Dict[str, A
     The transport finalizer sizes a rendered Nano's reply from the bound context, so the
     priced lookahead and the send it admits are measured ONCE and share the allowance
     (their clock-free identity still matches). None without a Main plan for the acting
-    model: the send then goes out under the caller's ceiling, as before. A local task's
+    route (``_plan_for_acting_route``): the send then goes out under the caller's ceiling, as before. A local task's
     lookahead builds a remote candidate (disclosed): the equality promise is remote-only.
     """
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     plan = getattr(tools_ctx, "context_fit_plan", None)
-    if plan is None or str(ctx.active_model or "") != str(getattr(plan, "model", "") or ""):
-        return None
+    from ouroboros.transcript_prefix import forget_attempt_prefix, rewrite_epoch, with_attempt_prefix
+    if not _plan_for_acting_route(plan, ctx):
+        return forget_attempt_prefix(ctx)
     from ouroboros.context_anchor import main_input_anchor
     from ouroboros.context_fit import measure_main_fit
     from ouroboros.loop_model_call import _main_context_profile, _physical_context_for_fit, _remember_main_fit
     from ouroboros.observability import new_execution_id
-    from ouroboros.transcript_prefix import rewrite_epoch
 
     mode = str(getattr(tools_ctx, "active_context_mode", "") or "")
     mode = mode if mode in {"max", "low", "nano"} else "max"
@@ -887,7 +869,7 @@ def _forced_physical_context(ctx: _RoundLimitContext, messages: List[Dict[str, A
         rendered_mode=mode, round_id=round_id, reasoning_effort=ctx.active_effort,
         anchor=anchor, accepted_input_tokens=accepted)
     _remember_main_fit(ctx, disposition)
-    return _physical_context_for_fit(disposition)
+    return with_attempt_prefix(_physical_context_for_fit(disposition), ctx.accumulated_usage, ctx, messages)
 
 
 @receiver_abandonable()
@@ -895,7 +877,7 @@ def _call_forced_model_once(
     ctx: _RoundLimitContext, *, initial_messages: Any = None, admitted_request: Any = None,
     admission: Optional[Dict[str, Any]] = None,
 ) -> str:
-    from ouroboros.model_slots import task_model_binding
+    from ouroboros.model_slots import acting_model_role, task_model_binding, task_processing_preference
     from ouroboros.model_wait import current_model_wait
     from ouroboros.subagent_bootstrap import is_configured_api_child
 
@@ -911,7 +893,7 @@ def _call_forced_model_once(
     if physical is None:
         physical = _forced_physical_context(ctx, initial_messages if initial_messages is not None else ctx.messages)
     waiter = current_model_wait()
-    role, account = task_model_binding({"model_role": getattr(ctx, "model_role", ""),
+    role, account = task_model_binding({"model_role": acting_model_role(owner_ctx, model_role=getattr(ctx, "model_role", "")),
         "task_metadata": getattr(owner_ctx, "task_metadata", {})},
         context_fit_plan=getattr(owner_ctx, "context_fit_plan", None),
         overrides=waiter.overrides if waiter else None)
@@ -973,6 +955,9 @@ def _call_forced_model_once(
             candidate_predicate=candidate_predicate if admitted_request is not None else None,
             model_role=role,
             model_account_override=account,
+            # The work's own tier, as its rounds and the priced wrap-up copy ask it (task_pacing).
+            processing_preference=task_processing_preference(
+                {"task_metadata": getattr(owner_ctx, "task_metadata", {})}, model_role=role),
             # A forced final belongs to the loop invocation that is finishing, so it
             # continues that same active turn instead of opening a new one.
             model_turn_state=getattr(owner_ctx, "model_turn_state", None),

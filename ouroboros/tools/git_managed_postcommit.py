@@ -112,6 +112,7 @@ def _finish_managed_commit(ctx, tx, commit_sha, message, started_at, warning, fi
                                       block_details=detail, duration_sec=time.time() - started_at)
         return detail
     _git().record_bound_commit_success(ctx, message, started_at, *fingerprints, commit_sha)
+    _git().note_override_landing(ctx, commit_sha)
     ctx._coupling_review_history = {}  # the subject's coupling rounds end with its commit
     return _git()._publish_post_commit_test_fact(
         ctx, _git()._format_commit_result(ctx, message, "", warning[0]) + "\n\n" + detail, warning[0])

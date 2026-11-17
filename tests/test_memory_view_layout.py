@@ -4,8 +4,8 @@ A built request holds common governance (A', marked), the optional handbook (D, 
 identity with my story (B, marked), then knowledge, my rooms and the runtime
 facts (C, unmarked). B depends only on the chronicle, identity, WORLD, the deep review and the
 catalog: the same bytes for Main, a Project's root and a wake. Knowledge edits change only C;
-a new page changes B and never A' or D. Anthropic keeps the message seal and gives schemas
-only a free slot. Codex and direct OpenAI keep all stable items and C as one notice (their cache is
+a new page changes B and never A' or D. Anthropic keeps the message seal and gives a spare
+slot to C before schemas. Codex and direct OpenAI keep all stable items and C as one notice (their cache is
 read only inside the leading system group, by prefix: measured 2026-10-03); the view fact of
 the first send reaches the cap info, the task context, one event and the trace.
 Fixture: ``tests._memory_inventory_shared`` (three rooms besides Main, legacy memory).
@@ -36,17 +36,18 @@ def test_note_labels_and_aggregate_keep_readers_and_do_not_change_other_rooms():
     level = mf.level_with(snap, mv.FULL_VIEW, ['F8:' + note['id'] for note in snap.room['notes']])
     rendered = mv.render_room(snap, level)
     first = snap.room['notes'][0]
-    assert (f"note {first['id']} by root on 2026-09-02: Label 0.; memory_read(node_id='{first['id']}')") in rendered
+    assert (f"note {first['id']} by root on 2026-09-02: Label 0. (record opening, no lead); memory_read(node_id='{first['id']}')") in rendered
     long_line = mv._note_pointer(snap.room['notes'][1])
     label = long_line.split(': ', 1)[1].split('; memory_read')[0]
-    assert len(label) <= 160 and label.endswith('…') and '\n' not in long_line
+    assert label.startswith(snap.room['notes'][1]['text'].split('\n')[0]) and '\n' not in long_line
+    assert 'Second sentence' not in label
     aggregate = mf.level_with(snap, level, ['F8a:1'])
     text = mv.render_room(snap, aggregate)
     assert '6 notes not yet sealed, 2026-09-02 → 2026-09-03, by child, root; ids:' in text
     assert all(note['id'] in text for note in snap.room['notes'])
     assert '(memory_read(node_id=…))' in text
-    from ouroboros import memory_view_conversations as conversations
-    assert conversations.render(snap.conversations, {}) in text  # this room's note forms leave the other groups be
+    from tests import _memory_view_synthetic as syn
+    assert syn.conversations_text(snap.conversations, {}) in text  # this room's note forms leave the other groups be
     assert mv.render_story(snap, aggregate) == mv.render_story(snap)
 
 
@@ -90,7 +91,7 @@ def test_the_request_keeps_my_story_before_the_changing_tail_and_the_book_separa
     a, d, b, c = (block["text"] for block in content)
     assert d.startswith("## DEVELOPMENT.md\n") and "## DEVELOPMENT.md\n" not in a
     assert "## My story" in b and "## My story" not in a + d + c
-    for heading in ("## Shared understanding", "## Knowledge base", "## This room (Main)", "## Other conversations"):
+    for heading in ("## Shared understanding", "## Knowledge base", "## This room (Main [chat_id=1])", "## Other conversations"):
         assert heading in c and heading not in a + b, heading
     for gone in ("## Dialogue History", "## Recent chat", "## Project owner origins", "## Legacy Dialogue Summary"):
         assert gone not in a + b + c, gone
@@ -107,13 +108,29 @@ def test_b_is_byte_identical_for_main_another_room_and_a_wake(tmp_path):
     assert len({view[0] for view in views.values()}) == 1  # A': common governance
     assert len({view[2] for view in views.values()}) == 4  # C: each one's own rooms
     main_c, wake_c = views["main"][2], views["wake"][2]
-    assert section(wake_c, "## This room (Main)") == section(main_c, "## This room (Main)")
-    assert "## This room (Main)" not in views["alpha"][2]
+    assert section(wake_c, "## This room (Main [chat_id=1])") == section(main_c, "## This room (Main [chat_id=1])")
+    assert "## This room (Main [chat_id=1])" not in views["alpha"][2]
     assert section(wake_c, "## Other conversations") == section(main_c, "## Other conversations")
     for words in ("alpha again", "beta again"):
-        assert words in section(wake_c, "## Other conversations") and words not in section(main_c, "## This room (Main)")
+        assert words in section(wake_c, "## Other conversations") and words not in section(main_c, "## This room (Main [chat_id=1])")
     assert "memory_read(room_id=" in section(wake_c, "## Other conversations")
-    assert section(main_c, "## This room (Main)") in main_c.split("## Other conversations", 1)[0]  # the room first
+    assert section(main_c, "## This room (Main [chat_id=1])") in main_c.split("## Other conversations", 1)[0]  # the room first
+
+
+def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch):
+    """A' and B are bytes of their sources alone (DEVELOPMENT "Cache-friendliness invariant"): another task, another
+    owner message and ``time.time`` three days on, at one state of memory, change only C. A paid route writes its
+    whole start again whenever these bytes move, so a capture fact in them is paid by every task that follows.
+    A stamp taken through ``datetime.now`` is not moved here (WORLD's dated measured block is such a line)."""
+    import time
+
+    env, memory, _rooms = world(tmp_path)
+    first = blocks(env, memory, MAIN)
+    later = time.time() + 3 * 86_400
+    monkeypatch.setattr(time, "time", lambda: later)
+    second = blocks(env, memory, {"id": "another-task", "chat_id": 1, "text": "a different owner message, much later"})
+    assert second[0] == first[0] and second[1] == first[1]
+    assert second[2] != first[2]  # the changing context is the capture's own
 
 
 def test_full_roles_share_the_first_block_and_only_eligible_tasks_get_the_handbook(tmp_path):
@@ -275,12 +292,110 @@ def test_anthropic_preserves_the_message_seal_and_gives_schemas_only_a_free_slot
     kept = LLMClient._payload_cache_breakpoints(payload)
     assert len(kept) == len(_deep_markers(payload)) == 4
     has_book = book and mode == "max"
-    assert ("cache_control" in payload["tools"][-1]) == (not has_book)
+    assert "cache_control" not in payload["tools"][-1]
+    system = payload.get("system", payload["messages"][0].get("content"))
+    assert ("cache_control" in system[-1]) == (not has_book)
+    assert "cache_control" in system[0], "common governance keeps its own breakpoint in every arm"
+    sent, built = ([block["text"] for block in blocks] for blocks in (system, canonical[0]["content"]))
+    assert "".join(sent) == "".join(built) and len(sent) == len(built) + (not has_book)  # B as head and story, or whole
     # The newest tool result, or the task message itself: the seal changed neither row.
     assert kept[-1]["text"] == ("result 5" if long else messages[1]["content"])
     assert any(block.get("text", "").startswith("## DEVELOPMENT.md\n") for block in kept) == has_book
     assert all(block["cache_control"] == {"type": "ephemeral", "ttl": "1h"} for block in kept)
     assert messages == canonical and tools == _tools()
+
+
+_STORY_PAGE = ("Story. " * 34_000).strip()  # 238,000 characters: a window of 160,000 tokens cannot hold it whole
+
+
+def _story_start(tmp_path, monkeypatch, window, mode="low", **task):
+    """``(sealed messages, cap)`` of a first request in ``mode`` on a route of ``window`` tokens, with ``_STORY_PAGE``
+    as one page of my story."""
+    from types import SimpleNamespace
+
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.context_fit import seal_task_transcript
+    from tests.test_common_story import _page
+
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", mode)
+    env, memory, _rooms = world(tmp_path)
+    ChronicleStore(memory.drive_root).ensure_activated()
+    _page(memory.drive_root, "1", 10, 11, text=_STORY_PAGE)
+    evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=window)
+    messages, cap = _messages(env, memory, {**MAIN, **task},
+                              route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
+    seal_task_transcript(messages)
+    return messages, cap
+
+
+def _anthropic_system(monkeypatch, provider, messages):
+    """The system blocks the lane itself puts on the wire, with the whole payload."""
+    from ouroboros.llm import LLMClient
+    from tests.test_review_prompt_caching import _openrouter_target, _send_direct_anthropic, _tools
+
+    client = LLMClient(api_key="unused")
+    if provider == "anthropic":
+        payload, usage = _send_direct_anthropic(monkeypatch, messages, _tools())
+        assert usage.get("prompt_cache_breakpoints_reduced") is None
+    else:
+        target = _openrouter_target("anthropic/claude-fable-5")
+        payload = client._build_remote_kwargs(target, messages, "high", 512, "auto", None, _tools(), skip_capability_fetch=True)
+        client._normalize_payload_cache_ttl(target, payload)
+        assert client._cache_breakpoint_tls.pending is None
+    return payload.get("system", payload["messages"][0].get("content")), payload
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openrouter"])
+@pytest.mark.parametrize("window,whole", [(1_000_000, True), (160_000, False)])
+def test_resident_memory_keeps_its_breakpoint_where_another_work_agrees_with_it(tmp_path, monkeypatch, provider, window, whole):
+    """A new work's first request reads another work's start as far as a breakpoint both ended on the same bytes
+    (#3231). B's head (identity, the catalogue, the maps) holds nothing of my story, so works whose stories were cut
+    differently still agree on it; the story after it is one text only while no work had it narrowed for its window.
+    So B goes as its head and its story, and its one breakpoint ends the story while that is whole and the head once
+    it was narrowed: another work usually repeats the head and seldom a narrowed story. Nothing is added: four
+    breakpoints, A' and C keep theirs, the texts are B's."""
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_messages import SHARED_HEAD_KEY
+    from tests.test_review_prompt_caching import _deep_markers
+
+    messages, cap = _story_start(tmp_path, monkeypatch, window, workspace_root=str(foreign_tree(tmp_path / "project")))
+    canonical = copy.deepcopy(messages)
+    a, b, c = messages[0]["content"]
+    declared = b[SHARED_HEAD_KEY]
+    head, story = b["text"][:declared["chars"]], b["text"][declared["chars"]:]
+    assert declared["story_whole"] is whole and (_STORY_PAGE in story) is whole  # whole: the page's every word is in it
+    assert head.endswith("\n\n") and story.startswith("## My story\n") and "## My story" not in head
+    system, payload = _anthropic_system(monkeypatch, provider, messages)
+    assert [block["text"] for block in system] == [a["text"], head, story, c["text"]]
+    assert ["cache_control" in block for block in system] == [True, not whole, whole, True]
+    assert len(LLMClient._payload_cache_breakpoints(payload)) == len(_deep_markers(payload)) == 4
+    leaked = SHARED_HEAD_KEY in json.dumps(payload)  # a bare bool: a failure must not draw the whole payload
+    assert not leaked, "the declaration is the host's own"
+    assert messages == canonical
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openrouter"])
+@pytest.mark.parametrize("case", ["handbook", "unsealed", "child"])
+def test_resident_memory_stays_one_block_where_the_allocator_does_not_act(tmp_path, monkeypatch, provider, case):
+    """The other direction: the full handbook's own block leaves no spare breakpoint, an unsealed prompt buys no
+    write, and a declared child's B holds no story to cut. Each is sent block for block as it was built."""
+    from ouroboros.llm_messages import SHARED_HEAD_KEY
+
+    child = {"delegation_role": "subagent", "parent_task_id": "bound", "root_task_id": "bound",
+             "task_contract": {"input_sources": "declared"}, "configured_subagent": {"route": {"kind": "api_model"}}}
+    window, mode, task = {"handbook": (1_000_000, "max", {}), "child": (160_000, "low", child),
+                          "unsealed": (160_000, "low", {"workspace_root": str(foreign_tree(tmp_path / "project"))})}[case]
+    messages, _cap = _story_start(tmp_path, monkeypatch, window, mode, **task)
+    if case == "unsealed":
+        for message in messages:
+            message.pop("cache_control", None)
+    content = messages[0]["content"]
+    assert sum(SHARED_HEAD_KEY in block for block in content) == (case != "child")
+    assert any(block["text"].startswith("## DEVELOPMENT.md\n") for block in content) == (case == "handbook")
+    system, payload = _anthropic_system(monkeypatch, provider, messages)
+    assert [block["text"] for block in system] == [block["text"] for block in content]
+    marks, leaked = ["cache_control" in block for block in system], SHARED_HEAD_KEY in json.dumps(payload)
+    assert marks == [True] * (len(content) - 1) + [case == "child"] and not leaked
 
 
 def test_the_view_fact_reaches_the_cap_info_the_task_context_and_one_event(tmp_path):
@@ -397,10 +512,10 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
     """The real path: the schemas come from the task's registry under the owner's mode, as the agent
     passes them (``initial_tool_schemas``), and the plan's Nano projection is the request. A read-only
     child carries enable_tools in every mode (#1860), so a Nano the window chose for the owner's Max
-    sends it too, as the owner's Nano and a root always do: their floor says memory_read is reachable
-    through it. A child whose contract disables enable_tools sends list_available_tools and its own
-    fold (compact_context, in every restricted profile and mode since #2846) alone: its floor names
-    list_available_tools and the parent, never enable_tools or chronicle_write."""
+    sends it too, as the owner's Nano and a root always do: their floor says enable_tools loads
+    memory_read if permitted. A child whose contract disables enable_tools sends list_available_tools
+    and its own fold (compact_context, in every restricted profile and mode since #2846) alone: its
+    floor names list_available_tools, never enable_tools, chronicle_write or a parent's reading."""
     from types import SimpleNamespace
 
     from ouroboros import context
@@ -435,7 +550,7 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
         non_memory_tokens=10_000_000, lowered_from=None if owner == "nano" else owner,  # no room: its last view
         tool_names=select_tool_schemas(schemas, context_mode="nano").chosen)
     window = (10_000_000 - roomy.projection("nano").memory_facts["floor"]["physical_allowance_tokens"]
-              + view_tokens(shortest[0]) + view_tokens(shortest[1]) + 50)
+              + view_tokens(shortest.story) + view_tokens(shortest.room) + 50)
     start = plan(window)
     from ouroboros.context_budget import context_mode_limits
     from ouroboros.context_fit import tool_schema_tokens
@@ -451,14 +566,170 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
     floor = section(built.messages_for("nano")[0]["content"][-1]["text"], "### Physical floor")
     sent = select_tool_schemas(schemas, context_mode="nano").chosen
     assert "memory_read" not in sent and ("enable_tools" in floor) == ("enable_tools" in sent), (sent, floor)
-    # Sealing is offered only to a request that can call chronicle_write (sent, or loaded by enable_tools).
-    assert ("chronicle_write kind=page" in floor) == bool({"chronicle_write", "enable_tools"} & set(sent)), floor
+    # This receipt explains the reader path; it does not invite a sealing act.
+    assert "chronicle_write kind=page" not in floor
     if actor == "child_without_selector":
         assert sent == ("compact_context", "list_available_tools")
-        assert floor.rstrip().endswith("list_available_tools shows what this task can call, and my parent task can "
-                                       "read any address I name to it)")
+        assert floor.rstrip().endswith("(memory_read was not among my tools when this view was rendered; "
+                                       "list_available_tools shows what this task can call)")
     else:
-        assert "enable_tools" in sent and floor.rstrip().endswith("(memory_read is reachable through enable_tools)")
+        assert "enable_tools" in sent and floor.rstrip().endswith("(enable_tools loads memory_read if permitted)")
+
+
+@pytest.mark.parametrize("actor", ["root", "child", "child_without_selector", "root_without_reader",
+                                   "child_without_reader", "root_loading_it_first", "child_loading_it_first"])
+def test_an_owners_nano_that_cuts_nothing_names_its_reader_path_and_a_selection_keeps_it(tmp_path, monkeypatch, actor):
+    """The owner's choice for Nano: memory_read stays on demand, with a cue. The owner's Nano in a roomy window cuts
+    nothing, and the request's own schemas (``initial_tool_schemas`` under the actor's constraint) still name the
+    reader's path under ``### Memory check`` -- a quiet Nano had no note at all. The owner's Max of the same work
+    says nothing in Max or Low: the path is a Nano note, and those requests send memory_read wherever it is permitted.
+    Then the mind selects a shorter form (compact_context with view_address) and the loop's boundary applies it
+    (``_run_round_compaction``): the request that follows names the same path, where before the selection's note had
+    lost it. Nano's schemas stay its own. The cue is a condition, not a grant: through the loop's own binding,
+    enable_tools loads the reader for a root and a read-only child alike, and where the task's contract disables
+    memory_read (``root_without_reader``, ``child_without_reader``) refuses it as hidden by policy, as the same
+    contract refuses a direct read. A reader loaded before the selection (``*_loading_it_first``) is among the
+    schemas the request after it sends, so that note, read from them rather than the start's, carries no cue."""
+    from types import SimpleNamespace
+
+    from ouroboros import context, loop
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.loop_round_limits import _CompactionRoundContext, _run_round_compaction
+    from ouroboros.memory_floor import view_inventory
+    from ouroboros.tool_policy import initial_tool_schemas, select_tool_schemas
+    from ouroboros.tools.compact_context import record_context_view
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "nano")
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+    env, memory, _rooms = world(tmp_path)
+    root, permitted = actor.startswith("root"), not actor.endswith("_without_reader")
+    first = actor.endswith("_loading_it_first")
+    task = {"type": "task", "text": "hi", **(MAIN if root else {
+        "id": "kid", "chat_id": 1, "delegation_role": "subagent", "parent_task_id": "bound", "root_task_id": "bound",
+        "configured_subagent": {"id": "h", "route": {"kind": "api_model"}}})}
+    (tmp_path / "registry").mkdir()
+    registry = ToolRegistry(repo_dir=tmp_path / "registry", drive_root=tmp_path / "registry")
+    if not root:
+        registry._ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent")
+    if actor == "child_without_selector" or not permitted:
+        registry._ctx.task_contract = {"disabled_tools": ["enable_tools" if permitted else "memory_read"]}
+    assert registry._is_local_readonly_subagent() is not root  # each actor is the role its name says
+    schemas = initial_tool_schemas(registry, context_mode="nano")
+    sent = list(select_tool_schemas(schemas, context_mode="nano").schemas)
+    names = [schema["function"]["name"] for schema in sent]
+    catalog = [schema["function"]["name"] for schema in registry.schemas()]
+    assert "memory_read" not in names and ("memory_read" in catalog) is permitted
+    assert ("enable_tools" in names) is (actor != "child_without_selector")  # every other actor takes the seam below
+    path = ("(enable_tools loads memory_read if permitted)" if "enable_tools" in names else
+            "(memory_read was not among my tools when this view was rendered; list_available_tools shows what this "
+            "task can call)")
+    evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=10_000_000)
+    core = context._capture_context_core(env, memory, task, None, None)
+
+    def start(owner, tools):
+        return context._build_context_fit_plan(env, core, task, preferred_mode=owner, tool_schemas=tools,
+            route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
+
+    plan = start("nano", schemas)
+
+    def floor(messages):  # the note closing the room block, to the next blank line
+        text = "\n\n".join(block["text"] for block in messages[0]["content"])
+        start = max(text.find("### Memory check"), text.find("### Physical floor"))
+        end = text.find("\n\n", start)
+        return "" if start < 0 else text[start:] if end < 0 else text[start:end]
+
+    assert plan.initial_mode == "nano" and not plan.projection("nano").memory_facts["floor"]["mode_switch"]
+    assert floor(plan.messages_for("nano")) == f"### Memory check\nAddresses this view shows read with memory_read.\n{path}"
+    maxed = start("max", initial_tool_schemas(registry, context_mode="max"))
+    assert maxed.initial_mode == "max" and floor(maxed.messages_for("max")) == floor(maxed.messages_for("low")) == ""
+    ctx = registry._ctx
+    ctx.context_fit_plan, ctx.active_context_mode = plan, "nano"
+    messages = plan.messages_for("nano")
+    if first:  # the mind loads the permitted reader, then selects in a round that sent it
+        loop._setup_dynamic_tools(registry, sent, [], context_mode="nano")
+        assert "Call schemas loaded" in registry.execute_result("enable_tools", {"tools": "memory_read"}).text
+    record_context_view(ctx, messages, sent)
+    eligible = [row["view_address"] for row in view_inventory(plan, "nano")
+                if row["kind"] == "memory" and row["eligible"] and not row["selected"]]
+    address = next(found for step in ("F2", "F5", "F4", "F3", "F6g", "F6w") for found in eligible
+                   if found.split(":", 1)[0] == step)  # a real cut, never an owner row (it needs an authored note)
+    assert registry.execute("compact_context", {"view_address": [address]}).startswith("Working view requested")
+    after = _run_round_compaction(json.loads(json.dumps(messages)), _CompactionRoundContext(
+        registry, tmp_path / "registry", tmp_path / "registry" / "logs", str(task.get("id")), 2, None,
+        lambda *_a, **_kw: None, sent, lambda _candidate, _selected: {"accepted": True}))
+    assert ctx._context_view_receipt["status"] == "applied", ctx._context_view_receipt
+    note = floor(after)
+    assert note.startswith("### Physical floor\nNano cuts for "), (address, note)
+    assert note.endswith("\n" + path) is not first, (address, note)
+    if first:  # the request after the selection sends memory_read: no path is left to name
+        assert path not in note and "was not among my tools" not in note, note
+    assert [schema["function"]["name"] for schema in sent] == names + ["memory_read"] * first  # else still on demand
+    if "enable_tools" in names and not first:  # the cue's condition both ways, through the loop's binding
+        loop._setup_dynamic_tools(registry, sent, [], context_mode="nano")
+        loaded = registry.execute_result("enable_tools", {"tools": "memory_read"})
+        assert ("memory_read" in [schema["function"]["name"] for schema in sent]) is permitted, loaded.text
+        assert ("Call schemas loaded" in loaded.text) is permitted and (loaded.status == "blocked") is not permitted
+        if not permitted:  # hidden by policy; a direct read with valid arguments is refused by it too, never read
+            assert "memory_read — disabled by this task's contract (disabled_tools)" in loaded.text
+            direct = registry.execute_result("memory_read", {"room_id": "1", "rows": True})
+            assert (direct.status, direct.code) == ("blocked", "RESOURCE_CONSTRAINT_BLOCKED"), direct.text
+            assert "task_contract.disabled_tools withholds 'memory_read'" in direct.text
+
+
+def test_a_schema_only_change_leaves_the_nano_cue_true_of_the_view_it_was_rendered_with(tmp_path, monkeypatch):
+    """A schema-only change redraws no view (compact_context with schema_names and no view_address). A read-only Nano
+    child whose contract disables enable_tools loads memory_read that way: the request after it sends the reader,
+    while its system block keeps the note its view was rendered with. That note states the absence as a fact of the
+    tools of that rendering, which the start's schemas bear out, never of the request carrying it or of reach."""
+    from types import SimpleNamespace
+
+    from ouroboros import context, loop
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.loop_round_limits import _CompactionRoundContext, _run_round_compaction
+    from ouroboros.tool_policy import initial_tool_schemas, select_tool_schemas
+    from ouroboros.tools.compact_context import record_context_view
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "nano")
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+    env, memory, _rooms = world(tmp_path)
+    task = {"type": "task", "text": "hi", "id": "kid", "chat_id": 1, "delegation_role": "subagent",
+            "parent_task_id": "bound", "root_task_id": "bound",
+            "configured_subagent": {"id": "h", "route": {"kind": "api_model"}}}
+    (tmp_path / "registry").mkdir()
+    registry = ToolRegistry(repo_dir=tmp_path / "registry", drive_root=tmp_path / "registry")
+    registry._ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent")
+    registry._ctx.task_contract = {"disabled_tools": ["enable_tools"]}
+    schemas = initial_tool_schemas(registry, context_mode="nano")
+    sent = list(select_tool_schemas(schemas, context_mode="nano").schemas)
+    names = [schema["function"]["name"] for schema in sent]
+    assert names == ["compact_context", "list_available_tools"]
+    evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=10_000_000)
+    plan = context._build_context_fit_plan(env, context._capture_context_core(env, memory, task, None, None), task,
+        preferred_mode="nano", tool_schemas=schemas,
+        route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
+    ctx = registry._ctx
+    ctx.context_fit_plan, ctx.active_context_mode = plan, "nano"
+    messages = plan.messages_for("nano")
+    cue = ("### Memory check\nAddresses this view shows read with memory_read.\n(memory_read was not among my tools "
+           "when this view was rendered; list_available_tools shows what this task can call)")
+
+    def system(rows):
+        return "\n\n".join(block["text"] for block in rows[0]["content"])
+
+    assert cue in system(messages)
+    record_context_view(ctx, messages, sent)
+    assert registry.execute("compact_context", {"working_note": "Loading the reader for one address.",
+                                                "schema_names": [*names, "memory_read"]}).startswith("Working view")
+    after = _run_round_compaction(json.loads(json.dumps(messages)), _CompactionRoundContext(
+        registry, tmp_path / "registry", tmp_path / "registry" / "logs", "kid", 2, None,
+        lambda *_a, **_kw: None, sent, lambda _candidate, _selected: {"accepted": True}))
+    assert ctx._context_view_receipt["status"] == "applied", ctx._context_view_receipt
+    assert sorted(schema["function"]["name"] for schema in sent) == sorted([*names, "memory_read"])  # sent next
+    assert system(after) == system(messages)  # no view redrawn: the note its view was rendered with
+    rendered = select_tool_schemas(json.loads(plan.start_tool_schemas_json), context_mode="nano").chosen
+    assert "memory_read" not in rendered and "not among this request's tools" not in system(after)
 
 
 def test_the_task_trace_keeps_the_view_fact_of_its_request(tmp_path, monkeypatch):
@@ -730,7 +1001,10 @@ def test_a_measured_build_times_each_section_on_its_receipt(tmp_path, monkeypatc
     assert discoveries == [memory.drive_root, memory.drive_root]
     plain = receipt()
     assert {"memory_view", "knowledge", "health", "runtime", "registry", "installed_skills",
-            "drive_state", "review_records", "review_context", "fit", "total"} == set(timed["sections_ms"])
+            "drive_state", "review_records", "review_context", "fit", "total"} == {
+        name for name in timed["sections_ms"] if "." not in name}  # dotted names are spans inside these
+    assert {"memory_view.chronicle", "memory_view.tail", "memory_view.conversations", "memory_view.story", "fit.frame_max",
+            "fit.projections"} <= set(timed["sections_ms"])
     assert set(timed["sections_cpu_ms"]) == set(timed["sections_ms"])
     assert timed["sections_ms"]["total"] >= max(timed["sections_ms"].values())  # the build's own time
     assert all(isinstance(ms, int) and ms >= 0 for ms in [*timed["sections_ms"].values(), *timed["sections_cpu_ms"].values()])

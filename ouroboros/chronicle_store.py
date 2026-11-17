@@ -19,10 +19,10 @@ a page whose set intersects an already sealed set is refused
 folds adjacent effective records of one lower level of its room (pages, legacy
 sections or parts), each at most once (``folded``). A helper's page or part (the
 Light writer's, or a delegated child's or nanny's signed with its focus) is
-a draft that acts at once; the mind's ``decision`` accepts or rejects it, and a
-rejected draft stops acting, so its rows are open and its members unfolded
-again; a draft already folded into a part is not rejected while that part acts
-(``already_folded``). Only the mind corrects, and a correction stands under the
+a draft that acts at once; the mind's ``decision`` accepts or rejects it. The same
+``accepted=false`` withdraws its own or an accepted page or part: status ``rejected``
+opens its rows and unfolds its members. A record folded into a part cannot be
+withdrawn while that part acts (``already_folded``). Only the mind corrects, and a correction stands under the
 original wherever the record is shown, signed and dated (``_interpret``); it never
 replaces the record's words.
 
@@ -58,6 +58,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Opt
 
 from ouroboros import store, store_timing
 from ouroboros.chronicle_quotes import QuoteResolver, quote_refusal
+from ouroboros.context_timing import counted, timed
 from ouroboros.platform_layer import (acquire_exclusive_file_lock, kernel_file_locks_enforced,
                                       release_exclusive_file_lock)
 from ouroboros.utils import append_jsonl, assert_test_data_path, utc_now_iso
@@ -65,7 +66,7 @@ from ouroboros.utils import append_jsonl, assert_test_data_path, utc_now_iso
 SCHEMA_VERSION = 3
 KINDS = frozenset({"page", "part", "note", "correction", "decision", "mark", "mark_view", "mark_release",
                    "legacy", "gap", "activation", "account", "selection"})
-AUTHOR_KINDS = frozenset({"mind", "helper", "host", "legacy_helper"})
+AUTHOR_KINDS = frozenset({"mind", "helper", "host", "legacy_helper", "source_author"})
 STORY_KINDS = ("page", "part", "note", "legacy", "gap", "account")
 # An account or its selection changes the common view, not what one room's story says: neither moves a room head.
 HEAD_KINDS = ("page", "part", "note", "correction", "decision", "legacy", "gap")
@@ -168,9 +169,11 @@ def is_late_review_mark(mark: Any) -> bool:
     return isinstance(author, Mapping) and author.get("kind") == "host" and author.get("operation") == LATE_REVIEW_OPERATION
 
 
-def _author_problem(author: Any) -> str:
+def _author_problem(author: Any, kind: Any = None) -> str:
     if not isinstance(author, dict) or author.get("kind") not in AUTHOR_KINDS:
         return "author.kind is one of " + ", ".join(sorted(AUTHOR_KINDS))
+    if author["kind"] == "source_author" and kind != "legacy":
+        return "a source_author signs only legacy records: the words of a transfer (chronicle_import)"
     if author["kind"] == "mind":
         focus = author.get("focus")
         if not isinstance(focus, dict) or not _nonblank(focus.get("role")) or not _nonblank(author.get("task_id")):
@@ -337,10 +340,16 @@ def _tail_rows(db, terminal_only: bool) -> List[List[Any]]:
         after = last
 
 
+def _body(stored: Any) -> Dict[str, Any]:
+    """A record as a reader takes it: the index gives its stored text, a capture's snapshot its one parsed record."""
+    return json.loads(stored) if isinstance(stored, str) else stored
+
+
 class _Snapshot:
     """``_IndexLookups`` answered from one state of the index (``_SNAPSHOT_SQL``, parsed after its read
     transaction closed, and the stored tail facts its view reads, ``_tail_rows``): the same filters and order
-    and no statement. Each record handed out is parsed anew from its stored text, as the index returns it;
+    and no statement. A record's stored text is parsed once for this snapshot (``body``), every reader of it takes
+    a copy of its top level, and none of them changes what is nested inside (tests/test_chronicle_read_path.py);
     ``memo`` holds facts one capture derives once. A proposal's capture extends its ``tables``."""
     proposed = False  # a proposal's capture: it reads an unsaved record as published (``stored_state``)
 
@@ -364,21 +373,30 @@ class _Snapshot:
         self.values = dict(state)
         self.tail_rows = sorted(tail[0]) if tail else []  # [pos, seq, row_sha256, legacy, meta, terminal] by position
         self.memo: Dict[str, Any] = {"tail_scope": tail_scope, **dict(memo)}
+        self.bodies: Dict[int, Dict[str, Any]] = {}  # each record's stored text, parsed once (``body``)
+
+    def body(self, row):
+        """The record of this index row, parsed once for this snapshot."""
+        parsed = self.bodies.get(row[0])
+        if parsed is None:
+            counted("records_parsed", key=row[0])
+            parsed = self.bodies[row[0]] = json.loads(row[5])
+        return parsed
 
     def get(self, record_id):
         row = self.by_id.get(str(record_id))
-        return {**json.loads(row[5]), "sequence": row[0]} if row else None
+        return {**self.body(row), "sequence": row[0]} if row else None
 
     def targeting(self, record_id, kinds):
-        return [(row[0], json.loads(row[5])) for row in self.by_target.get(str(record_id), ()) if row[2] in kinds]
+        return [(row[0], dict(self.body(row))) for row in self.by_target.get(str(record_id), ()) if row[2] in kinds]
 
     def part_of(self, record_id):
         return self.folded.get(str(record_id))
 
     def rows(self, room=None, kinds=(), after=0, limit=-1, author_kind=None, unfolded=False):
         rows = self.records if room is None else self.by_room.get(str(room), ())
-        return [(row[0], row[5]) for row in rows if row[0] > int(after) and (not kinds or row[2] in kinds) and not (
-            unfolded and row[1] in self.folded) and (author_kind is None or _mapping(json.loads(row[5]).get("author")).get(
+        return [(row[0], self.body(row)) for row in rows if row[0] > int(after) and (not kinds or row[2] in kinds) and not (
+            unfolded and row[1] in self.folded) and (author_kind is None or _mapping(self.body(row).get("author")).get(
                 "kind") == author_kind)][:None if limit < 0 else limit]
 
     def sealed(self, room):
@@ -408,7 +426,7 @@ class _Snapshot:
 
     def members_of(self, record_id):
         row = self.by_id.get(str(record_id))
-        covers = json.loads(row[5]).get("covers") if row and row[2] == "part" else None
+        covers = self.body(row).get("covers") if row and row[2] == "part" else None
         return [str(member) for member in covers.get("member_ids") or ()] if isinstance(covers, dict) else []
 
 
@@ -439,11 +457,7 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
         yield None if snapshot is None else snapshot.memo
         return
     if snapshot is None:
-        terminal_only = _TAIL_SCOPES[tail]
-        with store._index() as db:
-            texts = [db.execute(sql).fetchone()[0] for sql in _SNAPSHOT_SQL]
-            held = () if terminal_only is None else (_tail_rows(db, terminal_only),)
-        snapshot = _Snapshot([*(json.loads(text or "[]") for text in texts), *held], tail)
+        snapshot = timed("memory_view.chronicle", _read_snapshot, store, tail)
     if proposed is not None:  # read as published after every record: [sequence, id, kind, room, target, body]
         rows, kept = snapshot.tables[0], {key: snapshot.memo[key] for key in _SELECTION_FREE if key in snapshot.memo}
         snapshot = _Snapshot([[*rows, [max((row[0] for row in rows), default=0) + 1, proposed["id"], proposed["kind"],
@@ -455,6 +469,15 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
         yield snapshot.memo
     finally:
         _CAPTURE.reset(token)
+
+
+def _read_snapshot(store: "ChronicleStore", tail: str) -> _Snapshot:
+    """One state of the index in one read transaction, then parsed outside it (``capture``)."""
+    terminal_only = _TAIL_SCOPES[tail]
+    with store._index() as db:
+        texts = [db.execute(sql).fetchone()[0] for sql in _SNAPSHOT_SQL]
+        held = () if terminal_only is None else (_tail_rows(db, terminal_only),)
+    return _Snapshot([*(json.loads(text or "[]") for text in texts), *held], tail)
 
 
 def capture_memo(data_root: Any, key: str, compute: Callable[[], Any]) -> Any:
@@ -656,7 +679,7 @@ class ChronicleStore:
                 db.executemany("INSERT INTO folded VALUES (?,?)",
                                [(str(member), record_id) for member in record["covers"]["member_ids"]])
             elif kind == "decision" and not record.get("accepted"):
-                # A rejected draft stops acting: its rows are open and its members unfolded again.
+                # Rejection or withdrawal stops the target acting; its words stay in records.
                 db.execute("DELETE FROM page_rows WHERE page_id=?", (record["target_id"],))
                 db.execute("DELETE FROM folded WHERE part_id=?", (record["target_id"],))
             elif kind == "selection":  # an account's latest selection is its only acting claim on what it tells
@@ -732,10 +755,11 @@ class ChronicleStore:
             return self._commit(db, [record], quotes_verified=True,
                                 pre=lambda: self._head_refusal(db, room, expected_sequence))
 
-    def write_note(self, *, room_id: Any, task_id: str, text: str, author: Dict[str, Any]) -> PublishResult:
+    def write_note(self, *, room_id: Any, task_id: str, text: str, author: Dict[str, Any],
+                   metadata: Optional[Dict[str, Any]] = None) -> PublishResult:
         """The mind's separate record for its future self; a page later covers it by ``note:<id>``."""
         return self.publish([{"kind": "note", "room_id": str(room_id), "task_id": task_id, "text": text,
-                              "author": author}])
+                              "author": author, **({"metadata": metadata} if metadata else {})}])
 
     def publish_account(self, *, room_id: Any, text: str, sources: Iterable[Any], author: Dict[str, Any],
                         metadata: Optional[Dict[str, Any]] = None, record_id: Optional[str] = None,
@@ -796,7 +820,7 @@ class ChronicleStore:
                 refusal = self._head_refusal(db, room, expected_sequence)
                 if refusal is not None or target["kind"] not in _CORRECTABLE:
                     return refusal
-                current = self._current_revision(db, target["id"])
+                current = self._revisions(db, target["id"])[-1]
                 if expected_revision is None and current != target["id"]:
                     return _refuse("revision_required", "the target already has a correction: pass "
                                    "expected_revision", current_revision=current)
@@ -808,7 +832,7 @@ class ChronicleStore:
                                       "text": text, "author": author}], pre=pre)
 
     def decide(self, draft_id: str, accepted: bool, author: Dict[str, Any], reason: str) -> PublishResult:
-        """The mind accepts or rejects a helper's draft page or part, once, with a reason."""
+        """Accept a helper draft, or withdraw a draft, own or accepted page/part, with a reason."""
         with self._publishing() as db:
             target = self._get(db, draft_id)
             if target is None:
@@ -822,7 +846,7 @@ class ChronicleStore:
         record = {"kind": "mark", "room_id": str(room_id), "target_ref": target_ref, "text": text,
                   "author": author, "scope": scope, "quote": quote, "visibility": "full"}
         if anchor is not None:
-            record["anchor"] = anchor  # an action the mark meets me at (``mark_anchors``)
+            record["anchor"] = anchor  # the action whose first result in a task carries the mark's words (``mark_anchors.anchored_note``)
         if record_id:
             record["id"] = str(record_id)
         return self.publish([record])
@@ -856,6 +880,8 @@ class ChronicleStore:
             record["room_id"] = str(record.get("room_id", ""))
             old = db.execute("SELECT body FROM records WHERE id=?", (record["id"],)).fetchone()
             old_record = json.loads(old[0]) if old else identities.get(record["id"])
+            if old_record is None and "ts" in record and _mapping(record.get("metadata")).get("transfer") is not None:
+                return _refuse("invalid", "the store dates a transfer's publication; its source's date is legacy_written_at")
             record.setdefault("ts", old_record["ts"] if old_record else utc_now_iso())
             if old_record is not None and old_record != record:
                 return _refuse("invalid", "identity collision: this id already holds a different record",
@@ -912,9 +938,11 @@ class ChronicleStore:
         kind = record.get("kind")
         if kind not in KINDS:
             return _refuse("invalid", f"unknown record kind {kind!r}")
-        problem = _author_problem(record.get("author"))
+        problem = _author_problem(record.get("author"), kind)
         if problem:
             return _refuse("invalid", problem)
+        if kind != "legacy" and _mapping(record.get("metadata")).get("transfer") is not None:
+            return _refuse("invalid", "metadata.transfer is only valid on legacy records")
         if kind in _TEXT_KINDS and not _nonblank(record.get("text")):
             return _refuse("invalid", f"a {kind} needs text")
         if kind in ("page", "part") and record["author"]["kind"] not in ("mind", "helper"):
@@ -979,6 +1007,10 @@ class ChronicleStore:
             return _refuse("invalid", "members are adjacent in their room's order of unfolded records")
         return None
 
+    def _rule_legacy(self, db, record):
+        from ouroboros.chronicle_import import transfer_problem  # the legacy format's owner (lazy: it imports this)
+        return _refuse("invalid", problem) if (problem := transfer_problem(record)) else None
+
     def _rule_note(self, db, record):
         if record["author"]["kind"] != "mind" or not _nonblank(record.get("task_id")):
             return _refuse("invalid", "a note is the mind's, with its task_id")
@@ -995,6 +1027,8 @@ class ChronicleStore:
         return None
 
     def _rule_decision(self, db, record):
+        if _mapping(record["author"].get("focus")).get("role") in DELEGATED_FOCUS_ROLES:
+            return _refuse("not_integrator", "only the integrating mind decides or withdraws a page or part")
         if record["author"]["kind"] != "mind" or not _nonblank(record.get("reason")):
             return _refuse("invalid", "a decision is the mind's, with a reason")
         if not isinstance(record.get("accepted"), bool):
@@ -1002,19 +1036,20 @@ class ChronicleStore:
         target = self._get(db, record.get("target_id", ""))
         if target is None:
             return _refuse("target_missing", conflict_ids=(str(record.get("target_id", "")),))
-        if (target["kind"] not in ("page", "part") or target.get("author", {}).get("kind") != "helper"
+        if (target["kind"] not in ("page", "part") or target.get("author", {}).get("kind") not in ("mind", "helper")
                 or target["room_id"] != record["room_id"]):
-            return _refuse("invalid", "only a helper's draft page or part takes a decision")
-        prior = db.execute("SELECT id FROM records WHERE target=? AND kind='decision'", (target["id"],)).fetchone()
-        if prior:
-            return _refuse("invalid", "the draft is already decided", conflict_ids=(prior[0],))
+            return _refuse("invalid", "a decision targets a mind's or helper's page or part of its room")
+        status = self._status(db, target)
+        if status == "rejected" or record["accepted"] and status not in ("draft", "candidate"):
+            prior = _lookups(db).targeting(target["id"], ("decision",))
+            return _refuse("invalid", "only an undecided draft can be accepted; a withdrawn record stays withdrawn",
+                           conflict_ids=(prior[-1][1]["id"],) if prior else ())
         if record["accepted"] and target.get("metadata", {}).get("candidate"):
             return self._rule_page(db, target)  # adoption must still have exclusive coverage
         holder = db.execute("SELECT part_id FROM folded WHERE member_id=?", (target["id"],)).fetchone()
         if holder and not record["accepted"]:
-            # A rejected draft stops acting, so it cannot stay a member of an acting part.
-            return _refuse("already_folded", "the draft is folded into a part: reject that part first when it "
-                           "is a helper's draft, or correct this draft beside its original", conflict_ids=(holder[0],))
+            return _refuse("already_folded", "the record is folded into a part: withdraw that part first",
+                           conflict_ids=(holder[0],))
         return None
 
     def _source_version(self, db, given) -> Tuple[Optional[Dict[str, Any]], Optional[PublishResult]]:
@@ -1128,10 +1163,6 @@ class ChronicleStore:
             % ",".join("?" * len(HEAD_KINDS)), (room, expected, *HEAD_KINDS)))
         return _refuse("revision_conflict", "the room changed since that head", current_head=head, conflict_ids=newer)
 
-    def _current_revision(self, db, record_id) -> str:
-        fixes = _lookups(db).targeting(record_id, ("correction",))
-        return fixes[-1][1]["id"] if fixes else record_id
-
     def _revisions(self, db, record_id) -> List[str]:
         """The record's own id, then each correction's, in publication order: every revision it ever had."""
         return [str(record_id)] + [fix["id"] for _seq, fix in _lookups(db).targeting(record_id, ("correction",))]
@@ -1150,12 +1181,12 @@ class ChronicleStore:
     def _status(self, db, record) -> Optional[str]:
         if record.get("kind") not in ("page", "part"):
             return None
+        decisions = _lookups(db).targeting(record["id"], ("decision",))
+        if decisions:
+            return "accepted" if decisions[-1][1].get("accepted") else "rejected"
         if record.get("author", {}).get("kind") != "helper":
             return "final"
-        decisions = _lookups(db).targeting(record["id"], ("decision",))
-        if not decisions:
-            return "candidate" if record.get("metadata", {}).get("candidate") else "draft"
-        return "accepted" if decisions[-1][1].get("accepted") else "rejected"
+        return "candidate" if record.get("metadata", {}).get("candidate") else "draft"
 
     def _order_key(self, db, record, cache) -> Tuple[Any, ...]:
         """Legacy sections by block, pages by ``stream_span[0]``, a part by its first member."""
@@ -1385,7 +1416,7 @@ class ChronicleStore:
                 limit: Optional[int] = None, author_kind: Optional[str] = None, unfolded: bool = False) -> List[Dict[str, Any]]:
         """Stored records in order, filtered by the index (room, ``kinds``, author kind, unfolded); ``limit`` bounds the statement."""
         with self._reading() as look:
-            return [{**json.loads(body), "sequence": seq} for seq, body in look.rows(
+            return [{**_body(body), "sequence": seq} for seq, body in look.rows(
                 room_id, tuple(kinds or ()), after_seq, -1 if limit is None else int(limit), author_kind, unfolded)]
 
     def interpret(self, records: Iterable[Mapping[str, Any]], *, revision: Optional[str] = None,
@@ -1400,7 +1431,7 @@ class ChronicleStore:
                     sources: bool = True) -> List[Dict[str, Any]]:
         """``records`` interpreted in the same one read: a listing costs one index open, never one per record."""
         with self._reading() as look:
-            return [self._interpret(look, {**json.loads(body), "sequence": seq}, sources=sources) for seq, body in look.rows(
+            return [self._interpret(look, {**_body(body), "sequence": seq}, sources=sources) for seq, body in look.rows(
                 room_id, tuple(kinds), after_seq, -1 if limit is None else int(limit), author_kind, unfolded)]
 
     def targeting(self, record_id: Any, kinds: Iterable[str], *, after_seq: int = 0,
@@ -1445,7 +1476,7 @@ class ChronicleStore:
     def pages_of_room(self, room_id: Any) -> List[Dict[str, Any]]:
         """Effective pages and parts of a room, interpreted, in story order."""
         with self._reading() as look:
-            rows = [{**json.loads(body), "sequence": seq} for seq, body in look.rows(room_id, ("page", "part"))]
+            rows = [{**_body(body), "sequence": seq} for seq, body in look.rows(room_id, ("page", "part"))]
             cache: Dict[str, Tuple[Any, ...]] = {}
             effective = [r for r in (self._interpret(look, row) for row in rows) if r.get("status") not in ("rejected", "candidate")]
             return sorted(effective, key=lambda r: self._order_key(look, r, cache))
@@ -1455,11 +1486,12 @@ class ChronicleStore:
         return self.interpreted(kinds=("account",))
 
     def folded_members(self, part_id: Any) -> List[str]:
-        """Every record under a part through nested parts: its own members first, then theirs (no member read whole)."""
+        """Every record an acting part folds, through nested parts; withdrawn parts fold nothing (no body read whole)."""
         with self._reading() as look:
             out, todo = [], [str(part_id)]
             while todo:
-                members = look.members_of(todo.pop(0))
+                parent = todo.pop(0)
+                members = [member for member in look.members_of(parent) if look.part_of(member) == parent]
                 out += members
                 todo += members
             return out
@@ -1484,7 +1516,8 @@ class ChronicleStore:
             return look.sealed(room_id)
 
     def legacy_pointer_rows(self) -> List[Dict[str, Any]]:
-        """One compact row per legacy section or gap: room, label, period and how to open it."""
+        """One compact row per legacy section or gap: room, label, period and how to open it; the activation
+        import's by block, then room, then sequence; a transfer's (``chronicle_import``) after them all, by sequence."""
         pointers = []
         for row in self.interpreted(kinds=("legacy", "gap")):
             meta = row.get("metadata") or {}
@@ -1492,15 +1525,38 @@ class ChronicleStore:
                              "label": meta.get("label"), "legacy_type": meta.get("legacy_type"),
                              "legacy_block": meta.get("legacy_block"), "range_text": meta.get("legacy_range_text"),
                              "messages": meta.get("room_message_count"),  # the old writer's own count for the room
-                             "covers": row.get("covers"), "revision": row["revision"],
+                             "covers": row.get("covers"), "revision": row["revision"], "transfer": meta.get("transfer"),
                              "folded_into": row["folded_into"], "sequence": row["sequence"]})
         return sorted(pointers, key=lambda p: (p["legacy_block"] if type(p["legacy_block"]) is int else _NO_BLOCK,
-                                               p["room_id"], p["sequence"]))
+                                               bool(p["transfer"]), "" if p["transfer"] else p["room_id"], p["sequence"]))
 
     def active_marks(self, room_id: Any = None, include_global: bool = True) -> List[Dict[str, Any]]:
         """A room's acting marks (and the global ones); ``room_id=None`` is every room's."""
         with self._reading() as look:
             return [json.loads(body) for body in look.marks(room_id, include_global)]
+
+    def newest_sequence(self) -> int:
+        """The newest record's sequence the reads reflect: a pinned capture's own, else the index's."""
+        snapshot = self._pinned()
+        if snapshot is not None:
+            return snapshot.records[-1][0] if snapshot.records else 0
+        with self._index() as db:
+            return db.execute("SELECT COALESCE(MAX(sequence),0) FROM records").fetchone()[0]
+
+    def mark_changes(self, after: int) -> Tuple[List[Dict[str, Any]], int]:
+        """``(changes, newest)`` from one read of the index: the marks, view changes and releases after sequence
+        ``after``, oldest first, each with ``mark``, the marked record as it stood then (its visibility as of that
+        change), and the newest sequence, where the next read starts (``mark_anchors.append_mark_changes``)."""
+        with self._index() as db:
+            look = _IndexLookups(db)
+            newest = db.execute("SELECT COALESCE(MAX(sequence),0) FROM records").fetchone()[0]
+            changes = []
+            for seq, body in look.rows(None, ("mark", "mark_view", "mark_release"), after):
+                change = {**json.loads(body), "sequence": seq}
+                mark = change if change["kind"] == "mark" else look.get(change.get("target_id")) or {}
+                views = [view for at, view in look.targeting(mark.get("id", ""), ("mark_view",)) if at <= seq]
+                changes.append({**change, "mark": {**mark, **({"visibility": views[-1]["visibility"]} if views else {})}})
+            return changes, newest
 
     def observation_snapshot(self, boundary: Optional[Dict[str, Any]] = None, *, limit: Optional[int] = None):
         """New immutable records (the first ``limit`` of them) plus the newest position, under one read lock.

@@ -16,6 +16,7 @@ import json
 import types
 import pytest
 from ouroboros import cancel_intents as ci
+from ouroboros.terminal_time import terminal_time_fact
 from ouroboros.task_results import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -306,11 +307,17 @@ def test_graceful_single_retry_targets_leaf_and_stop_now_hardens_same_intent(
     assert ci.stop_policy(ci.active_intent(qenv.drive, new_id)) == ci.STOP_POLICY_IMMEDIATE
     assert ci.active_intent(qenv.drive, old_id) is None
 
-def test_lifecycle_fault_never_frees_a_reaping_slot(tmp_path):
+def test_lifecycle_fault_never_frees_a_reaping_slot(tmp_path, monkeypatch):
     """A ``reaping`` slot is owned by the reaper/custody: releasing it here would
     hand a mid-kill process back to assignment."""
     from ouroboros.utils import append_jsonl
     from supervisor.events import _handle_task_done
+    from supervisor import task_reaper
+
+    # This unit case owns the deferred handoff; starting the persistent server
+    # reaper here would leave a daemon operating on already-torn-down fixtures.
+    recovery = []
+    monkeypatch.setattr(task_reaper, "enqueue_terminal_file_recovery", lambda *args: recovery.append(args))
 
     running = {"t12": {"task": {"id": "t12"}}}
     slot = types.SimpleNamespace(busy_task_id="t12", reaping=True)
@@ -324,6 +331,8 @@ def test_lifecycle_fault_never_frees_a_reaping_slot(tmp_path):
     _handle_task_done({"task_id": "t12", "status": "running", "worker_id": 0}, ctx)
 
     assert slot.busy_task_id == "t12" and slot.reaping is True
+    if recovery:
+        assert recovery[0][0] is ctx and recovery[0][1]["task_id"] == "t12"
 
 def test_concurrent_custody_on_a_pending_task_settles_exactly_once(qenv):
     """A-F11 probe shape: the second custody must give the capture back."""
@@ -383,7 +392,9 @@ def test_custody_takes_over_a_slot_stranded_by_an_abandoned_claim(qenv):
     finally:
         proc.terminate()
     assert outcome == qenv.tl.CANCEL_CANCELLED
-    assert load_task_result(qenv.drive, task_id)["status"] == STATUS_CANCELLED
+    stored = load_task_result(qenv.drive, task_id)
+    assert stored["status"] == STATUS_CANCELLED
+    assert terminal_time_fact(stored)["source"] == "supervisor_cancel"  # it killed the work it held and saw the end
     assert ci.active_intent(qenv.drive, task_id) is None
 
 def test_settled_branch_recovers_a_slot_stranded_by_a_dead_custody(qenv):
@@ -397,7 +408,7 @@ def test_settled_branch_recovers_a_slot_stranded_by_a_dead_custody(qenv):
     import supervisor.workers as workers_mod
     qenv_respawn = workers_mod.respawn_worker
     assert qenv_respawn is not None
-    workers_mod.respawn_worker = lambda wid: respawned.append(wid)
+    workers_mod.respawn_worker = lambda wid, *, expected_worker: respawned.append(wid) if expected_worker is qenv.workers.WORKERS[wid] else None
     try:
         write_task_result(qenv.drive, task_id, STATUS_COMPLETED, result="finished")
         ci.request_cancel(qenv.drive, task_id)  # settled: no intent minted
@@ -481,7 +492,9 @@ def test_two_concurrent_custodies_on_a_pending_task_settle_exactly_once(qenv, mo
 
     assert outcomes.count(qenv.tl.CANCEL_CANCELLED) == 1, outcomes
     assert done_events == ["race-2t"], "exactly ONE task_done"
-    assert load_task_result(qenv.drive, "race-2t")["status"] == STATUS_CANCELLED
+    stored = load_task_result(qenv.drive, "race-2t")
+    assert stored["status"] == STATUS_CANCELLED
+    assert terminal_time_fact(stored)["source"] == "supervisor_cancel"  # it cancelled the work it held
     assert ci.active_intent(qenv.drive, "race-2t") is None
     assert qenv.q.PENDING == [], "the loser must not re-insert the captured row"
 

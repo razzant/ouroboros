@@ -530,6 +530,7 @@
         "chat_id": 1,
         "conversation": "mail:account:inbox:0",
         "place_label": "mail",
+        "place_id": "mail",
         "started_at": "2026-10-23T07:44:23.208947+00:00",
         "first_reply_at": null,
         "ended_at": "2026-10-23T07:49:41.071005+00:00",
@@ -573,6 +574,7 @@
         "chat_id": 1,
         "conversation": "mail:account:inbox:0",
         "place_label": "mail",
+        "place_id": "mail",
         "started_at": "2026-10-23T07:44:23.208947+00:00",
         "first_reply_at": null,
         "ended_at": "2026-10-23T07:49:41.071005+00:00",
@@ -850,8 +852,8 @@
             "archives_bounded": false,
             "matched": 1,
             "gaps": [],
-            "live_size": 633,
-            "live_window": 633,
+            "live_size": 588,
+            "live_window": 588,
             "shown": 1,
             "unit": "calls",
             "quota_met": false
@@ -859,6 +861,7 @@
         },
         "_is_direct_chat": true,
         "initiator": "consciousness",
+        "terminal_origin": "model_final",
         "rounds": 9,
         "continuation_offer": {
           "eligible": false,
@@ -991,8 +994,8 @@
             "archives_bounded": false,
             "matched": 1,
             "gaps": [],
-            "live_size": 633,
-            "live_window": 633,
+            "live_size": 588,
+            "live_window": 588,
             "shown": 1,
             "unit": "calls",
             "quota_met": false
@@ -1002,6 +1005,7 @@
         "_is_direct_chat": true,
         "initiator": "consciousness",
         "wake_summary": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не требуется.",
+        "terminal_origin": "model_final",
         "rounds": 9,
         "continuation_offer": {
           "eligible": false,
@@ -1134,8 +1138,8 @@
             "archives_bounded": false,
             "matched": 1,
             "gaps": [],
-            "live_size": 633,
-            "live_window": 633,
+            "live_size": 588,
+            "live_window": 588,
             "shown": 1,
             "unit": "calls",
             "quota_met": false
@@ -1143,6 +1147,7 @@
         },
         "_is_direct_chat": true,
         "initiator": "consciousness",
+        "terminal_origin": "model_final",
         "rounds": 9,
         "continuation_offer": {
           "eligible": false,
@@ -1348,8 +1353,8 @@
             "archives_bounded": false,
             "matched": 0,
             "gaps": [],
-            "live_size": 633,
-            "live_window": 633,
+            "live_size": 588,
+            "live_window": 588,
             "shown": 0,
             "unit": "calls",
             "quota_met": false
@@ -1367,6 +1372,7 @@
           "status": "available",
           "open_run_ids": [],
           "unrecorded_run_ids": [],
+          "closed_unrecorded_run_ids": [],
           "pending_invocation_ids": []
         },
         "cost_presentation": {
@@ -1522,8 +1528,8 @@
               "archives_bounded": false,
               "matched": 1,
               "gaps": [],
-              "live_size": 211,
-              "live_window": 211,
+              "live_size": 196,
+              "live_window": 196,
               "shown": 1,
               "unit": "calls",
               "quota_met": false
@@ -1531,6 +1537,7 @@
           },
           "_is_direct_chat": true,
           "initiator": "consciousness",
+          "terminal_origin": "model_final",
           "rounds": 9,
           "continuation_offer": {
             "eligible": false,
@@ -1734,8 +1741,8 @@
               "archives_bounded": false,
               "matched": 1,
               "gaps": [],
-              "live_size": 211,
-              "live_window": 211,
+              "live_size": 196,
+              "live_window": 196,
               "shown": 1,
               "unit": "calls",
               "quota_met": false
@@ -1743,6 +1750,7 @@
           },
           "_is_direct_chat": true,
           "initiator": "consciousness",
+          "terminal_origin": "model_final",
           "rounds": 9,
           "continuation_offer": {
             "eligible": false,

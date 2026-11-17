@@ -29,7 +29,7 @@ from mcp.server.stdio import stdio_server
 
 LOG = sys.argv[1]
 server = Server("task-session-fixture")
-state = {"count": 0, "pinger": None}
+state = {"count": 0, "pinger": None, "pages": ["about:blank"], "selected": 0}
 OBJECT = {"type": "object", "properties": {}}
 
 
@@ -80,6 +80,9 @@ async def tools():
             types.Tool(name="gate", description="answers once a file named release exists", inputSchema=OBJECT),
             types.Tool(name="fail", description="answers isError", inputSchema=OBJECT),
             types.Tool(name="garble", description="writes bytes no UTF-8 reader accepts", inputSchema=OBJECT),
+            types.Tool(name="browser_navigate", description="sets the selected page's URL", inputSchema=OBJECT),
+            types.Tool(name="browser_tabs", description="opens or selects a page", inputSchema=OBJECT),
+            types.Tool(name="browser_snapshot", description="reads the selected page", inputSchema=OBJECT),
             types.Tool(name="guard", description="asks the host guard",
                        inputSchema={"type": "object", "properties": {"questions": {"type": "array"}}})]
 
@@ -112,6 +115,18 @@ async def call(name, arguments):
     if name == "bump":
         state["count"] += 1
         return [types.TextContent(type="text", text=json.dumps({"pid": os.getpid(), "count": state["count"]}))]
+    if name == "browser_navigate":
+        state["pages"][state["selected"]] = arguments["url"]
+    elif name == "browser_tabs":
+        if arguments["action"] == "new":
+            state["pages"].append("about:blank")
+            state["selected"] = len(state["pages"]) - 1
+        elif arguments["action"] == "select":
+            state["selected"] = arguments["index"]
+    if name in {"browser_navigate", "browser_tabs", "browser_snapshot"}:
+        return [types.TextContent(type="text", text=json.dumps({
+            "pid": os.getpid(), "selected": state["selected"],
+            "url": state["pages"][state["selected"]], "pages": state["pages"]}))]
     if name == "hang":
         await anyio.sleep(3600)
     if name == "die":
@@ -414,7 +429,7 @@ def test_flags_parse_validate_and_keep_the_catalog_identity():
 
 
 def test_agent_turn_finally_closes_the_session_its_loop_left_open(tmp_path, monkeypatch):
-    """The second cleanup owner: the real turn's ``finally`` ends a session no loop cleanup closed."""
+    """Separate executor calls keep the selected page in a real turn; its ``finally`` closes the session."""
     from ouroboros import agent as agent_module
     from ouroboros import agent_task_pipeline, config, safety
     from ouroboros.model_wait import task_model_wait_scope
@@ -433,9 +448,17 @@ def test_agent_turn_finally_closes_the_session_its_loop_left_open(tmp_path, monk
     monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *_a, **_kw: pytest.fail("no model round in this turn"))
     seen = {}
 
-    def loop_without_its_own_cleanup(**kw):  # one real tool call, then a return the loop's finally never saw
-        seen["result"] = kw["tools"].execute_result("mcp_fx__bump", {"n": 1})
-        seen["session"] = session_of(kw["tools"])
+    def loop_without_its_own_cleanup(**kw):  # a return the loop's own finally never saw
+        tools = kw["tools"]
+        seen["result"] = call(tools, "bump")
+        seen["pages"] = [call(tools, name, args) for name, args in (
+            ("browser_navigate", {"url": "https://example.test/first"}),
+            ("browser_tabs", {"action": "new"}),
+            ("browser_navigate", {"url": "https://example.test/second"}),
+            ("browser_tabs", {"action": "select", "index": 0}),
+            ("browser_snapshot", {}),
+        )]
+        seen["session"] = session_of(tools)
         return "done", {}, {"reasoning_notes": [], "tool_calls": []}
     monkeypatch.setattr(agent_module, "run_llm_loop", loop_without_its_own_cleanup)
     repo, drive = tmp_path / "repo", tmp_path / "drive"
@@ -446,5 +469,13 @@ def test_agent_turn_finally_closes_the_session_its_loop_left_open(tmp_path, monk
     with task_model_wait_scope(task=task, drive_root=drive, event_queue=None, worker_slot_held=False):
         agent._handle_task_scoped(dict(task))
     pid = body(seen["result"])["pid"]
+    assert all(result.status == "ok" for result in seen["pages"]), seen["pages"]
+    pages = [body(result) for result in seen["pages"]]
+    assert {page["pid"] for page in pages} == {pid}
+    assert [page["selected"] for page in pages] == [0, 1, 1, 0, 0]
+    assert pages[-1] == {"pid": pid, "selected": 0, "url": "https://example.test/first",
+                         "pages": ["https://example.test/first", "https://example.test/second"]}
     assert seen["session"].closure == "closed" and not alive(pid)
     assert len(rows(log, "start")) == 2  # discovery, then the turn's one session
+    assert [row["tool"] for row in rows(log, "call")] == [
+        "bump", "browser_navigate", "browser_tabs", "browser_navigate", "browser_tabs", "browser_snapshot"]

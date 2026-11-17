@@ -463,46 +463,6 @@ def test_load_runtime_state_rejects_invalid_port_before_http(monkeypatch):
         assert asyncio.run(state._load_runtime_state(Api(port))) == {}
 
 
-def test_recent_thoughts_discloses_long_entry_and_reconstructible_source(tmp_path):
-    from ouroboros import dialogue_store as ds
-
-    plugin = _load_plugin()
-    data = tmp_path / "data"
-    timestamp = "2026-07-30T10:11:12Z"
-    task_id = "task-abcdef123456"
-    ds.append(data, "progress", {"ts": timestamp, "task_id": task_id, "text": "x" * 300})
-
-    class Api:
-        @staticmethod
-        def get_runtime_info():
-            return {"data_dir": str(data)}
-
-    text = plugin._load_recent_thoughts(Api())
-
-    assert "OMISSION NOTE: truncated at 100 chars; original length 300" in text
-    assert f"Full ref: data/state/dialog.sqlite (progress) @ {timestamp} task {task_id}" in text
-    assert text.endswith("Showing up to 4 recent entries. Full source: data/state/dialog.sqlite (progress)")
-
-
-def test_recent_thoughts_preserves_short_entry_and_discloses_list_projection(tmp_path):
-    from ouroboros import dialogue_store as ds
-
-    plugin = _load_plugin()
-    data = tmp_path / "data"
-    note = "plain short entry byte intact"
-    ds.append(data, "progress", {"text": note})
-
-    class Api:
-        @staticmethod
-        def get_runtime_info():
-            return {"data_dir": str(data)}
-
-    assert plugin._load_recent_thoughts(Api()) == (
-        f"• {note}\n\n"
-        "Showing up to 4 recent entries. Full source: data/state/dialog.sqlite (progress)"
-    )
-
-
 def test_subagent_progress_edits_one_bubble_not_a_flood(tmp_path, monkeypatch):
     # Complaint #1: a stream of progress notes for ONE subagent must edit a
     # single bubble in place (the note changes each time), never post new ones.

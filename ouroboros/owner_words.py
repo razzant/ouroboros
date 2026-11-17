@@ -13,10 +13,11 @@ tree-origin channel (``origin_metadata``) into every descendant's ``task.metadat
 marker (``initiator=consciousness``) or ``not_recorded``: no vocabulary of reasons of its own.
 
 ``work_words`` is the set a handoff renders (a helper's birth, a reviewer's ask, a direct
-start): the tree's rows first, then the rows the run holds as context, the bound Project
-room's rows read once at that render, the Project's retained origin rows and the rows that
-marks in force target. One message is one row whichever carrier holds it — its room and
-client id; a row with no id at all by its words and its time — and the first carrier keeps
+start) and the mind reads itself (``memory_read(owner_words=true)``): the tree's rows first,
+then the rows the run holds as context, the bound Project room's rows read once at that
+render, the Project's retained origin rows and the rows that marks in force target. One
+message is one row whichever carrier holds it — its room and client id; a row with no id
+at all by its words and its time — and the first carrier keeps
 the row. Every row carries the time the room accepted it, or ``received``, when the host
 got it, or none: never an invented date. An answer travels with the card it answers, under
 the asking task's name. A room or a mark store that cannot be read is one gap line beside
@@ -57,6 +58,17 @@ OWNER_SOURCES = frozenset({"initial_user", "owner_mailbox", "owner_quiz_answer",
 # only (outside ``OWNER_SOURCES``): whom they are for, and whether they ask me for work, is my reading; an order exists
 # only where I cite them and the host verifies the bytes.
 PLACE_CONFIRMED = "place_confirmed"
+# A schedule's text, beside my human's words and never theirs: each field of it (its objective, its context) under the
+# supplier the host recorded for that field and when (``objective_author``/``context_author``, written only by the
+# schedule writers in ``supervisor/schedule_lifecycle.py``). Text that came through the Schedules API
+# (``POST /api/schedules``: the owner's CLI, or any program holding that access) is the work's assignment and its
+# conditions, not my human's personal word, and gives no permission only they can give. Corpus items carry it by value
+# (outside ``OWNER_SOURCES``) and ``SCHEDULE_FIELD`` hands the run's items to every helper it schedules.
+SCHEDULE_TEXT = "schedule_text"
+SCHEDULE_FIELD = "governing_schedule_text"
+# A schedule item's typed ids, each a string when present (``scheduled_text_items``).
+SCHEDULE_ITEM_IDS = ("schedule_id", "field", "supplier", "supplier_task_id", "supplied_at")
+_TEXT_AUTHOR_KEYS = (("objective", "objective_author"), ("context", "context_author"))
 CITED = "cited"
 FIELD, ABSENT_FIELD = "governing_owner_words", "governing_owner_words_absent"
 # A session task's record alone: the rows ``_live_words`` read at its scheduling (the bound room's rows, the
@@ -210,6 +222,13 @@ def objective_author_line(origin: Mapping[str, Any] | None) -> str:
         return f"drafted by task {author.get('task_id')}, not spoken by my human"
     if kind == "continuation":
         return f"the host's Continue work order for task {author.get('predecessor_task_id')}"
+    if kind == "schedule_api":
+        when = f" at {author['at']}" if author.get("at") else ""
+        return (f"supplied through the Schedules API{when} (the owner's CLI, or any program with that access): "
+                "the assignment and its conditions, not my human's words")
+    if kind == "ui_control":
+        return (f"the host's prompt for my human's press of {author.get('control') or 'a control'}: "
+                "the press is theirs, these words are not")
     if kind:
         return f"its author is recorded by the host as kind={kind}"
     if origin.get("initiator") == "consciousness":
@@ -230,6 +249,70 @@ def objective_author_text(ctx: Any) -> str:
     from ouroboros.dialogue_provenance import run_origin
 
     return objective_author_line(run_origin({"type": getattr(ctx, "current_task_type", None), "metadata": dict(_ctx_metadata(ctx))}))
+
+
+def scheduled_text_items(metadata: Any, contract: Any) -> List[Dict[str, Any]]:
+    """A schedule's run's own corpus items for its schedule's text (``SCHEDULE_TEXT``): each field its contract holds
+    (the objective and the context, as the contract keeps them) with the schedule, the field and the supplier the
+    host recorded for it (``supplier``: the author's kind; ``supplier_task_id``; ``supplied_at``), each absent when
+    the host recorded none: an unknown supplier is never my human. A run no schedule admitted has none."""
+    metadata, contract = _mapping(metadata), _mapping(contract)
+    schedule_id = str(metadata.get("schedule_id") or "")
+    items: List[Dict[str, Any]] = []
+    for field, key in _TEXT_AUTHOR_KEYS if schedule_id else ():
+        text, author = contract.get(field), _mapping(metadata.get(key))
+        if isinstance(text, str) and text.strip():
+            items.append({"source": SCHEDULE_TEXT, "content": text, "schedule_id": schedule_id, "field": field,
+                          **{name: str(author[value]) for name, value in (("supplier", "kind"), ("supplier_task_id", "task_id"),
+                                                                           ("supplied_at", "at")) if author.get(value)}})
+    return items
+
+
+def schedule_items(ctx: Any) -> List[Dict[str, Any]]:
+    """The schedule text this run holds: its own schedule's and its tree's (``_initialize_owner_directives`` records
+    both into the corpus), as items."""
+    return [{key: row[key] for key in ("source", "content", *SCHEDULE_ITEM_IDS) if row.get(key)}
+            for row in getattr(ctx, "_owner_directives", None) or []
+            if isinstance(row, dict) and row.get("source") == SCHEDULE_TEXT and str(row.get("content") or "").strip()]
+
+
+def task_schedule_items(task: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """The schedule text a helper was scheduled with (``SCHEDULE_FIELD``), at the top level or under ``metadata``."""
+    source = _mapping(task)
+    raw = source[SCHEDULE_FIELD] if SCHEDULE_FIELD in source else _mapping(source.get("metadata")).get(SCHEDULE_FIELD)
+    return [dict(item) for item in (raw if isinstance(raw, list) else [])
+            if isinstance(item, Mapping) and item.get("source") == SCHEDULE_TEXT and str(item.get("content") or "").strip()]
+
+
+def _schedule_rows(items: Any, task_id: str = "") -> List[Dict[str, Any]]:
+    """Items as rows of a section: the words, the supplier's label (``author``) and when, under ``schedule <id> <field>``."""
+    rows = []
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, Mapping) and item.get("source") == SCHEDULE_TEXT:
+            kind = str(item.get("supplier") or "")
+            label = {"schedule_api": "the Schedules API",
+                     "task": f"task {item.get('supplier_task_id') or '(id not recorded)'}"}.get(kind, kind and f"kind={kind}")
+            rows.append(_row(item.get("content"), source=SCHEDULE_TEXT, carrier="schedule", task_id=task_id,
+                             ts=item.get("supplied_at"), ref=f"schedule {item.get('schedule_id')} {item.get('field')}",
+                             author=label or "a supplier the host did not record"))
+    return _deduped(rows)
+
+
+_SCHEDULE_HEADING = "The schedule's text for this work (verbatim, with the supplier the host recorded)"
+_SCHEDULE_FRAME = ("It is the work's assignment and its conditions, not my human's words: text supplied through the Schedules "
+                   "API (the owner's CLI, or any program with that access) gives no permission only my human can give.")
+
+
+def render_schedule_text(items: Any, *, audience: str, indent: str = "") -> str:
+    """The schedule text section for the audiences of ``render_owner_words``; ``""`` when there is none."""
+    if audience not in _HEADINGS:
+        raise ValueError(f"unknown owner-words audience {audience!r}; expected one of {sorted(_HEADINGS)}")
+    rows = _schedule_rows(items)
+    if not rows:
+        return ""
+    heading = (_SCHEDULE_HEADING.upper() if audience == "session"
+               else f"{'###' if audience == 'root' else '##'} {_SCHEDULE_HEADING}")
+    return f"{heading}\n{_SCHEDULE_FRAME}\n" + "\n\n".join(words_block(row, indent) for row in rows)
 
 
 def _item_time(item: Mapping[str, Any]) -> str:
@@ -270,26 +353,40 @@ def _held_twin(item: Mapping[str, Any], held: Mapping[str, Any]) -> Mapping[str,
     return {}
 
 
-def _dated_directives(ctx: Any):
-    """``(item, time, reference, door-stamped)`` for each owner-sourced item of the run's corpus: the door's stamp
-    for its first message, and for its origin row recorded without an identity of its own, under the reference
-    the held origin row keeps when the run holds one (``_held_origin``: a legacy door without a client id keeps
-    its carrier's address); else the item's own room, client id and time (empty here: ``_words_rows`` reads them);
-    an item without a room reads under the chat row this focus holds for it (``_held_twin``), so one message is
-    one row whichever carrier names it, and an answer recorded without its card takes the card its twin answers,
-    so the card renders beside the answer."""
+def _opening(item: Mapping[str, Any], origin_ref: Mapping[str, Any]) -> bool:
+    """The run's first message as the owner door stamped it (``origin_message_ref``): its ``initial_user`` row, or
+    its origin row recorded without an identity of its own."""
+    source = item.get("source")
+    return bool(origin_ref) and (source == "initial_user" or (source == "origin_message" and not row_ref(item)))
+
+
+def _door_ref(ctx: Any) -> str:
+    """The run's first message under the door's stamp (``origin_message_ref``): the reference the held origin row
+    keeps when the run holds one (``_held_origin``: a legacy door without a client id keeps its carrier's address),
+    else its room and client id. The copy a helper inherits carries the same reference."""
     from ouroboros.owner_relay import owner_row_address
 
     origin_ref = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
     held = _mapping(getattr(ctx, "_held_owner_messages", None))
     known = _held_origin(origin_ref, held or _ctx_metadata(ctx).get("held_owner_messages"))
-    reference = _carrier_ref(known, canonical=owner_row_address(known)) if known else _chat_ref(origin_ref)
+    return _carrier_ref(known, canonical=owner_row_address(known)) if known else _chat_ref(origin_ref)
+
+
+def _dated_directives(ctx: Any):
+    """``(item, time, reference, door-stamped)`` for each owner-sourced item of the run's corpus: the door's stamp
+    for its first message, and for its origin row recorded without an identity of its own, under the door's
+    reference (``_door_ref``); else the item's own room, client id and time (empty here: ``_words_rows`` reads them);
+    an item without a room reads under the chat row this focus holds for it (``_held_twin``), so one message is
+    one row whichever carrier names it, and an answer recorded without its card takes the card its twin answers,
+    so the card renders beside the answer."""
+    origin_ref = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
+    held = _mapping(getattr(ctx, "_held_owner_messages", None))
+    reference = _door_ref(ctx)
     for item in getattr(ctx, "_owner_directives", None) or []:
         if not isinstance(item, dict) or item.get("source") not in OWNER_SOURCES:
             continue
-        door = item["source"] == "initial_user" and bool(origin_ref)
-        if door or (item["source"] == "origin_message" and origin_ref and not row_ref(item)):
-            yield item, str(origin_ref.get("ts") or ""), reference, door
+        if _opening(item, origin_ref):
+            yield item, str(origin_ref.get("ts") or ""), reference, item["source"] == "initial_user"
             continue
         twin = {} if item.get("chat_id") and item.get("client_message_id") else _held_twin(item, held)
         if twin and not _mapping(item.get("reply_to")).get("address") and (
@@ -332,6 +429,7 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
     names, the door's own record of it, first, standing for the run's own door row with that row's reply target and
     message id. Without one, a suppressed (never-logged) origin's words live only in the run's first row and ride
     only under the door's stamp (``initial_user``): an unstamped first turn (``initial_text``) is never owner words.
+    The schedule text the run holds (``schedule_items``) rides after them under its own label, never as theirs.
     """
     from ouroboros.review_evidence_sections import _owner_content_projection
 
@@ -350,18 +448,44 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
     else:
         rows = [*([door] if door is not None and not source_text else []), *rest]
     rows = [{**row, "content": _owner_content_projection(row.get("content"))} for row in rows]
-    return [row for row in rows if row["content"].strip()]
+    return [row for row in rows if row["content"].strip()] + schedule_items(ctx)
 
 
 def place_confirmed_words(confirmed: bool, text: Any, message: Any) -> str:
     """A place event's words as provenance when its author is an account the place confirms as my human's (and the
     connector does not report it unauthenticated), the same at a turn's opening and mid-turn. A forwarded message
     carries another author's words: context. Never a verdict about whom the words are for."""
+    from ouroboros.places import forwarded_message
+
     words = str(text or "")
-    return words if confirmed is True and words.strip() and not _mapping(message).get("forward_origin") else ""
+    return words if confirmed is True and words.strip() and not forwarded_message(message) else ""
 
 
-def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None, str]:
+def place_row_facts(conversation_id: Any, message: Any, origin: Mapping[str, Any] | None = None, *,
+                    source: str = "") -> Dict[str, Any]:
+    """A confirmed place event's corpus-row facts beside its words: the message it replies to (by address; with
+    ``source``, the exact reader of the event record that carried its words) and its provider identity
+    (``own_sends.message_identity``), so a later reader tells my own post through my human's account once that
+    post's receipt is known; ``origin``: the row's other typed ids."""
+    from ouroboros.own_sends import message_identity
+
+    found = message_identity(conversation_id, message)
+    identity = {"conversation_id": found[0], "message_id": found[1]} if found else {}
+    return {"reply_to": place_reply_target(message, source), "origin": {**(origin or {}), **identity}}
+
+
+def _my_post(ctx: Any, item: Mapping[str, Any]) -> bool:
+    """A confirmed place row whose provider identity my send receipts now name: my own echo, never my human's."""
+    identity = (str(item.get("conversation_id") or ""), str(item.get("message_id") or ""))
+    if not all(identity) or not getattr(ctx, "drive_root", None):
+        return False
+    from ouroboros.own_sends import sent_identities
+    from ouroboros.tool_access import canonical_data_root
+
+    return identity in sent_identities(canonical_data_root(ctx))
+
+
+def cited_owner_basis(ctx: Any, owner_words: Any, *, call_speech: bool = False) -> Tuple[Dict[str, Any] | None, str]:
     """``(basis, error)`` for words a run cites as my human's order for the work it starts.
 
     The host verifies provenance and nothing else: the exact bytes (``chronicle_quotes.quote_in``, emphasis
@@ -370,8 +494,12 @@ def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None
     not unauthenticated, not forwarded). Absent words: ``(None, "")``, the work is my own. Words found: the row
     the new root carries (``basis: cited``) holds the whole verified message as ``content`` (never a host cut of my
     human's words) with the cited span as ``cited``, labelled by its real source: the owner door it came through,
-    or ``place_owner`` for a confirmed account's place words. Words not found: a typed refusal, nothing started.
-    Whether the words ask for this work is the citing mind's reading, visible on the card."""
+    or ``place_owner`` for a confirmed account's place words, read again at the cite: a row my send receipt now names
+    is my own echo (``_my_post``). Words not found: a typed refusal, nothing started.
+    Whether the words ask for this work is the citing mind's reading, visible on the card.
+    The owner's decision of 11 November 2026 admits their own call speech only for a model choice:
+    its caller opts in with ``call_speech`` and carries the returned ``live_call`` span only on the lead,
+    never as the new work's owner corpus (the caption rules of 7 November otherwise stand)."""
     from ouroboros.chronicle_quotes import quote_in
 
     wanted = str(owner_words or "").strip()
@@ -382,18 +510,27 @@ def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None
             return {"source": row["source"], "content": row["text"], "cited": wanted, "basis": CITED, "carried": True,
                     **({"msg_id": row["ref"]} if row.get("ref") else {})}, ""
     for item in getattr(ctx, "_owner_directives", None) or []:  # confirmed place events, with what they replied to
-        if isinstance(item, dict) and item.get("source") == PLACE_CONFIRMED and quote_in(wanted, str(item.get("content") or "")):
+        if (isinstance(item, dict) and item.get("source") == PLACE_CONFIRMED
+                and quote_in(wanted, str(item.get("content") or "")) and not _my_post(ctx, item)):
             return {"source": "place_owner", "content": str(item.get("content") or ""), "cited": wanted, "basis": CITED,
                     "carried": True, **{key: item[key] for key in ("msg_id", "reply_to") if item.get(key)}}, ""
+    # Only the own-call owner-caption branch records live_call directives; heard speech and
+    # Presence calls do not. A model choice may cite it without granting authority to the work.
+    for item in (getattr(ctx, "_owner_directives", None) or []) if call_speech else ():
+        if (isinstance(item, dict) and item.get("source") == "live_call"
+                and quote_in(wanted, str(item.get("content") or ""))):
+            return {"source": "live_call", "cited": wanted,
+                    **({"msg_id": item["msg_id"]} if item.get("msg_id") else {})}, ""
     return None, ("owner_words were not found verbatim in any message of your human that reached this run (their "
                   "confirmed account, not forwarded): nothing was started. Copy their exact words, or omit owner_words "
                   "to start the work as your own.")
 
 
-def place_reply_target(message: Any) -> Dict[str, str] | None:
-    """The platform message a place event replies to, by address (a connector gives no words for it), else None."""
-    replied = str(_mapping(message).get("reply_to_message_id") or "")
-    return {"address": f"platform message {replied} in this room", "author": "", "text": ""} if replied else None
+def place_reply_target(message: Any, source: str = "") -> Dict[str, str] | None:
+    """The replied message's provider address and any words the connector carried, as context under its author."""
+    from ouroboros.presence_message_facts import reply_target
+
+    return reply_target(message, source=source)
 
 
 def owner_words_contain(ctx: Any, text: Any) -> bool:
@@ -507,6 +644,11 @@ def answered_card_reply(block: Any, task_id: Any) -> Dict[str, str]:
         lines.append(f"(host record: my human pressed option {block['answered_index'] + 1})")
     return {"address": f"quiz {block.get('quiz_id')} of task {task_id}", "author": f"Ouroboros, task {task_id}",
             "text": "\n".join(lines)}
+
+
+def is_answered_card(reply: Any) -> bool:
+    """Whether a corpus row's ``reply_to`` is a card my human answered (``answered_card_reply``), not a chat message."""
+    return str(_mapping(reply).get("address") or "").startswith("quiz ")
 
 
 def reply_target(drive_root: Any, reference: Any) -> Dict[str, str]:
@@ -688,9 +830,12 @@ def governing_words_for_schedule(ctx: Any, *, session: bool = False) -> Dict[str
     ``session`` (the helper compiles an external work order): the rows ``_live_words`` reads at this handoff (the
     bound room's rows, the Project's origin rows and the marked rows) ride beside them under ``ROOM_FIELD``, by
     value (an empty list when none), so that work order stays a function of the helper's record; a store that
-    cannot be read gives the rows that could be, and its gap is logged."""
+    cannot be read gives the rows that could be, and its gap is logged. The schedule text the run holds rides beside
+    them under ``SCHEDULE_FIELD``, by value: the helper's assignment never drops its tree's conditions."""
     rows = _tree_words(ctx)[0]
     facts: Dict[str, Any] = {FIELD: rows} if rows else {ABSENT_FIELD: _absent(ctx)}
+    if schedule := schedule_items(ctx):
+        facts[SCHEDULE_FIELD] = schedule
     if session:
         root, metadata, task_id = _data_root(ctx), _ctx_metadata(ctx), str(getattr(ctx, "task_id", "") or "")
         facts[ROOM_FIELD] = [] if root is None else _live_words(root, _room_of(
@@ -719,33 +864,70 @@ def work_words(ctx: Any) -> Tuple[List[Dict[str, Any]], str, List[str]]:
     return rows, "" if rows else _absent(ctx), gaps
 
 
+def source_refs(item: Mapping[str, Any]) -> set:
+    """Every reference a row names its message by: its typed identity (``row_ref``) and the one a carrier printed
+    into its ``msg_id`` (``_chat_ref``'s ``chat N / client``), so one message under two formats is one source. A row
+    that names no message has none: an empty reference never makes two rows one, and coincident words never do."""
+    return {row_ref(item), str(item.get("msg_id") or "")} - {""}
+
+
 def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
-    """The rows addressed to this run's work beside its corpus, shaped as the corpus rows the Safety check reads
-    (``source``, ``content``, ``msg_id`` = the row's reference, ``reply_to`` = the card or message it answers): the
-    field it inherited, a reply target folded into its row and a row the corpus already holds skipped; then the
-    rows it holds that reached this work. Never a room, context or marked row: a permission my human gave another
-    work is not this one's. Reads the context's attributes as they stand and writes nothing."""
+    """The rows the Safety check reads for this run's work, shaped as its corpus rows (``source``, ``content``,
+    ``msg_id`` = the row's reference, ``reply_to`` = the card or message it answers, ``ts`` = its time where one was
+    recorded): the corpus, the field it inherited (a reply target folded into its row), then the rows it holds that
+    reached this work; one row per source (``source_refs``), the first kept with the card and time a later copy
+    adds, and the opening message dated by its door (``_opening``). Never a room, context or marked row: a
+    permission my human gave another work is not this one's. Reads the context's attributes and writes nothing."""
     from ouroboros.owner_relay import owner_text
 
-    corpus = {row_ref(item) for item in getattr(ctx, "_owner_directives", None) or [] if isinstance(item, Mapping)}
     rows: List[Dict[str, Any]] = []
+    kept: Dict[str, Dict[str, Any]] = {}  # reference -> the listed row of that source
+    origin = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
+
+    def add(row: Mapping[str, Any]) -> Dict[str, Any]:  # the listed copy of this source, gaps filled by a later one
+        refs = source_refs(row)
+        listed = next((kept[ref] for ref in refs if ref in kept), None)
+        if listed is None:
+            rows.append(listed := dict(row))
+            kept.update(dict.fromkeys(refs, listed))
+        listed.update({key: row[key] for key in ("reply_to", "ts") if row.get(key) and not listed.get(key)})
+        return listed
+    for item in getattr(ctx, "_owner_directives", None) or []:
+        if isinstance(item, Mapping):
+            listed = add(item)
+            if _opening(item, origin) and origin.get("ts") and not listed.get("ts"):
+                listed["ts"] = str(origin["ts"])
     last: Dict[str, Any] | None = None  # the field row a following reply target belongs to
     for row in task_governing_words(_ctx_metadata(ctx))[0]:
         if row["source"] == REPLY_TARGET:
-            if last is not None:
+            if last is not None and not last.get("reply_to"):
                 last["reply_to"] = {"address": row["ref"], "author": row.get("author") or "", "text": row["text"]}
             last = None
             continue
-        last = None if row["ref"] in corpus - {""} else {"source": row["source"], "content": row["text"], "msg_id": row["ref"]}
-        rows += [last] if last is not None else []
+        last = add({"source": row["source"], "content": row["text"], "msg_id": row["ref"],
+                    **({"ts": row["ts"]} if row["ts"] else {})})
     root = _data_root(ctx)
     for key, row in _mapping(getattr(ctx, "_held_owner_messages", None)).items():
         if isinstance(row, Mapping) and isinstance(row.get("carried"), dict) and not row["carried"].get("went_to"):
             replied = answered_card_reply(*answered_card_source(row)) or reply_target(
                 row.get("_owner_source_root") or root, row.get("reply_to"))
-            rows.append({"source": "owner_mailbox", "content": owner_text(row), "msg_id": str(key),
-                         **({"reply_to": replied} if replied else {})})
+            add({"source": "owner_mailbox", "content": owner_text(row), "msg_id": str(key),
+                 **({"ts": when} if (when := _item_time(row)) else {}), **({"reply_to": replied} if replied else {})})
     return rows
+
+
+def safety_owner_ids(ctx: Any) -> List[set]:
+    """One identity per row of my human's that ``safety_sources`` lists (``OWNER_SOURCES`` and ``PLACE_CONFIRMED``):
+    the references it names its message by (``source_refs``), the opening message's with the door's (``_door_ref``),
+    which its copy in a helper carries too; a row naming no message, its words and time. Two rows are one message
+    when their identities meet. Reads the context's attributes and writes nothing."""
+    from ouroboros.project_dialogue import _text_sha256
+
+    origin = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
+    door = {_door_ref(ctx)} if origin else set()
+    return [source_refs(row) | (door if _opening(row, origin) else set())
+            or {f"words {_text_sha256(row.get('content'))} {row.get('ts') or ''}"}
+            for row in safety_sources(ctx) if row.get("source") in OWNER_SOURCES | {PLACE_CONFIRMED}]
 
 
 def _inbound_rows(drive_root: Any, client_ids: Mapping[str, str], accounts: Any = None) -> List[Dict[str, Any]]:
@@ -773,15 +955,18 @@ def owner_place_accounts(drive_root: Any) -> Mapping[str, Any]:
 def owner_row(row: Mapping[str, Any] | None, drive_root: Any = None, *, accounts: Any = None) -> bool:
     """The owner-source cut: inbound, non-empty, not a system or skill-repair injection, and a place row only
     from an account its place confirms as my human's now (``places.owner_confirmed_row`` over ``accounts``, the
-    operation's one snapshot, else one read of ``drive_root``'s; unreadable: not)."""
+    operation's one snapshot, else one read of ``drive_root``'s; unreadable: not) whose words are not another
+    author's (``places.forwarded_message``: the account is still theirs, the words are not)."""
     if not (row and row.get("direction") == "in" and str(row.get("text") or "").strip()
             and not (row.get("system_type") or row.get("source") == "skill_repair")):
         return False
     from ouroboros.dialogue_provenance import row_provenance
-    from ouroboros.places import owner_confirmed_row  # D17->D20 is lazy-only
+    from ouroboros.places import forwarded_message, owner_confirmed_row  # D17->D20 is lazy-only
 
     if row_provenance(row) != "place":
         return True
+    if forwarded_message(_mapping(row.get("transport")).get("message")):
+        return False
     return owner_confirmed_row(row, owner_place_accounts(drive_root) if accounts is None else accounts)
 
 
@@ -1013,17 +1198,28 @@ def words_stamp(row: Mapping[str, Any]) -> str:
     if source == REPLY_TARGET:  # context beside the words, under its own author: never my human's words
         stamp = [f"{row.get('author') or 'author not recorded'}: the message my human replied to, "
                  "not my human's words", ref]
+    elif source == SCHEDULE_TEXT:  # the work's assignment under its recorded supplier: never my human's words
+        stamp = [str(row.get("ts") or ""), ref, f"supplied by {row.get('author') or 'a supplier the host did not record'}",
+                 "not my human's words"]
     else:
         stamp = [str(row.get("ts") or ""), "owner", f"{source} of task {task_id}" if task_id else source,
                  carrier if carrier.startswith("went to ") else "", ref]
     return "[" + " · ".join(part for part in stamp if part) + "]"
 
 
-def owner_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
-    """``render_owner_words`` over this run's set at this handoff (``work_words``)."""
+def work_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
+    """``render_owner_words`` over this run's set at this handoff (``work_words``): my human's words alone. Reviewers
+    and the plan council read it with the schedule text appended; ``memory_read(owner_words=true)`` returns it whole."""
     rows, absent, gaps = work_words(ctx)
     root = str(_ctx_metadata(ctx).get("root_task_id") or getattr(ctx, "task_id", "") or "")
     return render_owner_words(rows, absent, audience=audience, root_task_id=root, gaps=gaps)
+
+
+def owner_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
+    """``work_words_text``, then the schedule text the run holds (``render_schedule_text``)."""
+    words = work_words_text(ctx, audience=audience)
+    schedule = render_schedule_text(schedule_items(ctx), audience=audience)
+    return "\n\n".join(part for part in (words, schedule) if part)
 
 
 def reviewer_words_material() -> list:

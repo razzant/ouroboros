@@ -3,6 +3,7 @@
 import datetime as dt
 import json
 import pathlib
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,9 @@ from ouroboros import consciousness_view as view, places, usage_accounting as ua
 from ouroboros.consciousness_wake import PLACEHOLDERS, render_wake_message
 from tests._store_shared import seed_result
 from tests.fixtures_usage_store import _request, _settle
+from tests.test_cost_period import UNLISTED, _call as _period_call, root as _period_root
+
+period_root = _period_root  # the period view's own ledger fixture: a real usage store and a priced catalogue
 
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "wake_document_214a31b6.json"
@@ -35,6 +39,17 @@ def wake(tmp_path, monkeypatch):
     return document
 
 
+@pytest.mark.parametrize("summary", ["Проверка завершена.", "Проверка завершена.\n42 строки в /tmp/result.csv. Следующий шаг за владельцем."])
+def test_consciousness_row_projects_only_the_opening_without_changing_the_record(tmp_path, wake, summary):
+    from ouroboros.task_results import load_task_result
+
+    wake["wake_summary"] = summary
+    seed_result(tmp_path, wake["task_id"], wake)
+    row, = view.recent_wakes(tmp_path, [])
+    assert row["summary"] == "Проверка завершена."
+    assert load_task_result(tmp_path, wake["task_id"])["wake_summary"] == summary
+
+
 def test_places_context_has_every_place_and_room_without_reading_history(monkeypatch, tmp_path):
     configured = [places.connect_place(tmp_path, place_id=pid, connector="bridge", provider="chat",
                                        conversation_id=pid, label=label, state=state)
@@ -42,15 +57,15 @@ def test_places_context_has_every_place_and_room_without_reading_history(monkeyp
                                             ("quiet", "Quiet room", "silent")]]
     places.edit_place(tmp_path, "mail", "add_note", author="owner", text="Watch releases.\nKeep the exact second line.")
     monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
-    monkeypatch.setattr("ouroboros.place_projection.place_activity", lambda _root, place: {
-        "unanswered": {"mail": 3, "quiet": 0, "paused": None}[place.place_id], "last_activity_at": ""})
     calls = []
-    def rooms(root, place_id):
-        calls.append((root, place_id))
-        return {"mail": [{"room_chat_id": -1, "unanswered_count": 2},
-                          {"room_chat_id": -2, "unanswered_count": 1}], "quiet": [],
-                "paused": [{"room_chat_id": -3, "unanswered_count": None}]}[place_id]
-    monkeypatch.setattr(places, "place_room_index", rooms, raising=False)
+    def facts(root, rows, full=True):
+        rows = list(rows)
+        calls.append((root, [place.place_id for place in rows], full))
+        return {place.place_id: {"rooms": {"mail": [{"room_chat_id": -1, "unanswered_count": 2},
+                                                    {"room_chat_id": -2, "unanswered_count": 1}], "quiet": [],
+                                           "paused": [{"room_chat_id": -3, "unanswered_count": None}]}[place.place_id]}
+                for place in rows}
+    monkeypatch.setattr("ouroboros.place_arrivals.place_facts", facts)
     rows = view.place_views(tmp_path)
     assert [row["unanswered"] for row in rows] == [3, None, 0]
     text = view.places_text(tmp_path, rows)
@@ -60,10 +75,50 @@ def test_places_context_has_every_place_and_room_without_reading_history(monkeyp
     assert "Quiet room [quiet]: silent; open turns: 0; no captured room" in text
     assert "Paused room [paused]: paused; open turns: unknown; rooms: 1" in text
     assert "note (owner): Watch releases." in text and "note (owner): Keep the exact second line." in text
-    assert calls == [(tmp_path, place.place_id) for place in configured]
+    listed = [place.place_id for place in places.place_records(tmp_path).places.values()]
+    assert calls == [(tmp_path, listed, False)], "one brief read of the stores for the whole list"
     for place in configured:
         places.edit_place(tmp_path, place.place_id, "disconnect", author="owner")
     assert view.places_text(tmp_path, view.place_views(tmp_path)) == "none"
+
+
+@pytest.mark.parametrize("brief,detail", [
+    ([{"state": "active"}, {"state": "silent"}, {"state": "paused"}], "Off: no own wakes; 2 places only hear."),
+    ([{"state": "silent"}, {"state": "paused"}], "Off: no own wakes; 1 place only hears."),
+    ([{"state": "paused"}], "Off: no own wakes."),
+    (None, "Off: no own wakes."),
+    ("unread", "Off: no own wakes; its places only hear."),  # the place store could not be read: as Stop says
+])
+def test_off_says_no_own_wakes_and_how_many_places_only_hear(brief, detail):
+    """Owner 06.11: Off read «Background consciousness is off.» while 28 places went on reading «active». The host's
+    one detail line (the chip's name, the Shade and the Dashboard headline) counts them from the brief it already has."""
+    snapshot = {} if brief is None else {"places_brief": None if brief == "unread" else brief}
+    described = view.describe_consciousness_state(snapshot, False)
+    assert (described["status"], described["detail"]) == ("disabled", detail)
+    assert "hear" not in view.describe_consciousness_state(snapshot, True)["detail"], "a switch that is on claims nothing"
+
+
+def test_my_map_names_each_circle_once_with_its_whole_words_and_my_placements(monkeypatch, tmp_path):
+    """The own-clock map groups places under their circles (each circle's words whole, once), then the places in no
+    circle; a place I put in a circle says that my human's words there still restrict it, without their consent."""
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
+    monkeypatch.setattr("ouroboros.place_arrivals.place_facts",
+                        lambda _root, rows, full=True: {place.place_id: {"rooms": []} for place in rows})
+    rows = [places.connect_place(tmp_path, connector="bridge", provider="chat", conversation_id=cid, label=label)
+            for cid, label in (("a", "Team chat"), ("b", "Team mail"), ("c", "Family"))]
+    team = places.create_circle(tmp_path, name="Team", text="Shared words, line one.\nLine two.", author="owner")
+    places.edit_place(tmp_path, rows[0].place_id, "set_circle", author="owner", circle_id=team["circle_id"])
+    places.edit_place(tmp_path, rows[1].place_id, "set_circle", author="ouroboros", circle_id=team["circle_id"])
+    text = view.places_text(tmp_path, view.place_views(tmp_path))
+    assert text.count("Shared words, line one.") == 1 and "\n    words (owner): Line two." in text
+    assert f'circle Team [{team["circle_id"]}]\n    words (owner): Shared words, line one.' in text
+    team_mail = next(line for line in text.splitlines() if "Team mail" in line)
+    team_chat = next(line for line in text.splitlines() if "Team chat" in line)
+    assert "you placed it in this circle" in team_mail and "you placed it" not in team_chat
+    # My human's words there still restrict; only consent needs their placement (prompts/SAFETY.md).
+    assert "your human's words there still restrict it, but consent needs their placement" in team_mail
+    assert "context" not in team_mail
+    assert text.index("not in a circle:") < text.index("Family") and text.index("Team chat") < text.index("not in a circle:")
 
 
 def test_unavailable_index_does_not_claim_zero(monkeypatch, tmp_path):
@@ -71,7 +126,9 @@ def test_unavailable_index_does_not_claim_zero(monkeypatch, tmp_path):
     monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
     def unavailable(*_args):
         raise OSError("room index unavailable")
-    monkeypatch.setattr(places, "place_room_index", unavailable)
+    from ouroboros import dialogue_store
+    dialogue_store.ensure(tmp_path)  # a dialogue store whose room read fails, not one that holds no room
+    monkeypatch.setattr("ouroboros.place_arrivals._place_rooms", unavailable)
     assert view.place_views(tmp_path)[0]["unanswered"] is None
     text = view.places_text(tmp_path, view.place_views(tmp_path))
     assert "rooms unknown" in text and "no captured room" not in text  # unknown never reads as zero
@@ -91,6 +148,99 @@ def test_prompt_carries_labels_counts_and_one_allowance(tmp_path):
     assert "root: Study queue (started work)" in text
     assert "places: Inbox [mail]: active; open turns: 0" in text
     assert "allowance known spend (last 24 h): at least 2.50 / 20.00 USD" in text
+    assert "\n- install cache writes: unknown\n" in text  # a caller that read nothing says so, never "none"
+
+
+def test_cache_writes_line_folds_classes_and_never_reads_an_unshared_cost_as_zero():
+    """The row a wake carries: calls, tokens, the writes' share of recorded cost, then every class of what the writes
+    followed, in the Costs page's own order (share of cost first, then tokens). A class is one entry whatever its
+    details were, and no detail (a route's or a block's name) is printed. A call no tariff could share is unsplit: a
+    class that has some says how many beside its dollars, a class with none shared shows no dollars, and a day with
+    none shared says its share is unknown, never $0.00."""
+    def row(name, calls, tokens, usd, unsplit=0, detail=""):
+        return {"class": name, "detail": detail, "calls": calls, "write_tokens": tokens, "write_cost": usd,
+                "unshared_calls": unsplit, "shared_write_tokens": tokens if unsplit < calls else 0}
+
+    costly = [row("entered_model", 20, 30_000_000, 120.0, detail="anthropic/claude-opus-5.5"),
+              row("entered_model", 10, 15_000_000, 62.25, 2, detail="openrouter@named::anthropic/claude-opus-5.5"),
+              row("system_changed", 21, 20_000_000, 108.4, detail="my story and identity"),
+              row("append", 15, 5_000_000, 70.95), row("first_request", 18, 1_400_000, 51.2),
+              row("not_recorded", 10, 400, 0.0, 10)]
+    assert view._cache_writes_line(costly) == (
+        "94 in the last 24 h, 71,400,400 tokens, $412.80 write share of recorded cost, 12 unsplit; by what they followed: "
+        "entered_model 30 $182.25 (2 unsplit), system_changed 21 $108.40, append 15 $70.95, first_request 18 $51.20, "
+        "not_recorded 10")
+    # The order is the share of cost, not the tokens: the class that wrote most tokens with none of its cost shared
+    # comes last, and it is still in the row (nothing is cut to "the largest few").
+    mixed = [row("append", 4, 50_000_000, 0.0, 4), row("system_changed", 3, 9_000_000, 2.0),
+             row("first_request", 2, 1_000_000, 5.0), row("paused", 4, 30_010_000, 0.08, 3)]
+    assert view._cache_writes_line(mixed) == (
+        "13 in the last 24 h, 90,010,000 tokens, $7.08 write share of recorded cost, 7 unsplit; by what they followed: "
+        "first_request 2 $5.00, system_changed 3 $2.00, paused 4 $0.08 (3 unsplit), append 4")
+    # Where no cost is shared the tokens are the whole order (not the names, not the order the rows came in).
+    assert view._cache_writes_line([row("append", 31, 2_000_000, 0.0, 31), row("first_request", 9, 6_200_000, 0.0, 9)]) == (
+        "40 in the last 24 h, 8,200,000 tokens, write share of cost unknown; by what they followed: first_request 9, append 31")
+    nine = ["first_request", "entered_model", "tools_changed", "system_changed", "history_rewritten", "paused",
+            "returned_to_model", "append", "not_recorded"]  # every class the fact can name (transcript_prefix.prefix_class)
+    whole = view._cache_writes_line([row(name, 1, 1_000, float(place)) for place, name in enumerate(nine, 1)])
+    assert [entry.split()[0] for entry in whole.split("followed: ")[1].split(", ")] == nine[::-1]  # all nine, none cut
+    assert view._cache_writes_line([row("append", 1, 999, 0.004)]) == (
+        "1 in the last 24 h, 999 tokens, $0.00 write share of recorded cost; by what they followed: append 1 $0.00")
+    assert view._cache_writes_line([]) == "none recorded in the last 24 h"
+
+
+def test_cache_writes_text_reads_the_period_view_itself_and_says_unknown_when_it_cannot(period_root, monkeypatch):
+    """Through the real ledger and ``cost_period``: its row keys are the ones the line reads. A call whose route has no
+    price list keeps its recorded cost unshared, so a day of such calls says the share is unknown and prints no dollar.
+    A view that raises, or whose rows the line cannot read, is "unknown" and never "none"; the wake that asked goes on."""
+    assert view.cache_writes_text(period_root) == "none recorded in the last 24 h"
+    _period_call(period_root, model=UNLISTED, prompt=30_000, write=30_000, cost=0.25, prefix={"departs": "append"})
+    assert view.cache_writes_text(period_root) == (
+        "1 in the last 24 h, 30,000 tokens, write share of cost unknown; by what they followed: append 1")
+    _period_call(period_root, prompt=200_000, write=200_000, cost=1.60, prefix={"departs": "first"})
+    _period_call(period_root, prompt=100_000, write=100_000, cost=0.80,
+                 prefix={"departs": "system", "index": 1, "of": 3, "block": "my story and identity"})
+    _period_call(period_root, prompt=50_000, write=50_000, cost=0.40,
+                 prefix={"departs": "system", "index": 2, "of": 3, "block": "runtime facts"})
+    _period_call(period_root, prompt=100, read=100, cost=0.1, prefix={"departs": "append"})  # wrote nothing
+    assert view.cache_writes_text(period_root) == (
+        "4 in the last 24 h, 380,000 tokens, $2.80 write share of recorded cost, 1 unsplit; "
+        "by what they followed: first_request 1 $1.60, system_changed 2 $1.20, append 1")
+    # The view asked for is the last 24 hours before the wake's own clock: 25 hours on, these calls are outside it.
+    assert view.cache_writes_text(period_root, now=time.time() + 90_000) == "none recorded in the last 24 h"
+    from ouroboros.gateway import cost_period
+    from ouroboros.usage_ledger import UsageLockUnavailable
+
+    def busy(*_args, **_kwargs):
+        raise UsageLockUnavailable("the ledger is busy")
+
+    for reader in (busy, lambda *_a, **_kw: {"cache_writes": [{"class": "append"}]}):
+        monkeypatch.setattr(cost_period, "cost_period", reader)
+        assert view.cache_writes_text(period_root) == "unknown (could not be read)"
+
+
+def test_a_wake_reads_its_cache_writes_once_and_carries_them_in_every_form(monkeypatch, tmp_path):
+    """``prepare_wake`` asks once, in the carrier, and the row rides the complete observation and both stored forms
+    (``bind_wake_observation`` renders them from the same context)."""
+    from ouroboros import consciousness_wake
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    reads, forms = [], []
+    line = "3 in the last 24 h, 9,000 tokens, write share of cost unknown; by what they followed: append 3"
+    monkeypatch.setattr(view, "cache_writes_text", lambda root, now: reads.append((root, now)) or line)
+    monkeypatch.setattr(view, "place_views", lambda root, window: None)
+    monkeypatch.setattr(consciousness_wake, "observe_wake", lambda root, **kw: SimpleNamespace(full_text=lambda: "EVENTS"))
+    monkeypatch.setattr(consciousness_wake, "previous_wake_text", lambda *a, **kw: "none")
+    monkeypatch.setattr(consciousness_wake, "bind_wake_observation",
+                        lambda root, task, observation, render: forms.extend([render("OVERVIEW"), render("POINTER")]))
+    task = {"id": "w1", "chat_id": 1, "text": "[Wake-up · heartbeat]", "metadata": {}, "_wake_prepare": {
+        "boundary": None, "since": 10.0, "now": 20.0, "reason": "heartbeat", "level": "act", "repo_dir": str(repo),
+        "last_wake_at": 5.0, "last_wake_task_id": "", "disabled_tools": [], "counted_roots": [], "max_tasks": 2,
+        "interval": 600, "window": {"settled_usd": 1.0, "unknown_unmetered": 0, "limit_usd": 5.0, "spend_by_cause": None}}}
+    consciousness_wake.prepare_wake(task, tmp_path)
+    assert reads == [(tmp_path, 20.0)]
+    row = f"\n- install cache writes: {line}\n- counted roots: "
+    assert row in task["text"] and len(forms) == 2 and all(row in form for form in forms)
 
 
 def test_real_terminal_wake_uses_terminal_fact_and_card_phase(tmp_path, wake):
@@ -501,6 +651,7 @@ def test_durable_automatic_release_and_receipts_survive_result_updates(tmp_path,
     assert row["conversation"] == "chat:a:r" and row["chat_id"] == -7
     labelled, = view.recent_wakes(tmp_path, [{"place_id": "mail", "label": "Inbox"}])
     assert labelled["cause"] == "focus" and labelled["place_label"] == "Inbox"
+    assert labelled["place_id"] == "mail", "the Shade's door opens this place's sheet; an own wake carries none"
 
 
 def test_own_clock_text_survives_an_unreadable_room(tmp_path, monkeypatch):
@@ -554,3 +705,136 @@ def test_recent_focus_as_comes_from_stored_metadata(tmp_path, wake, cause, ident
         assert row["as"] == {"label": "At the event", "owner": owner}
     else:
         assert "as" not in row
+
+
+# --- what holds my own held wake --------------------------------------------------------------------
+
+
+def _pause(rail="graceful_ceiling", *, state="paused", reason="budget", scope="root", ceiling=2.99,
+           basis="producer_allowance", cap=50.0):
+    row = {"pause_id": "p", "state": state, "reason": reason, "rail": rail, "scope": scope, "task_attempt": 1}
+    if basis is not None:
+        row["cost_ceiling"] = {"state": "active", "ceiling_usd": ceiling, "root_cap_usd": cap,
+                               "planning_margin_usd": None, "basis": basis}
+    return row
+
+
+def _launched(source="allowance", ceiling=2.99, **extra):
+    from ouroboros.consciousness_wake import wake_task_metadata
+    return {**wake_task_metadata("act", "heartbeat", root_cost_ceiling_usd=ceiling, root_cost_ceiling_source=source),
+            **extra}
+
+
+CHILD_AT_CEILING = _pause(basis="root_resolved_ceiling")
+
+
+@pytest.mark.parametrize("metadata,own,members,cause", [
+    # The launch stamp names the limit that set the ceiling the wake paused at.
+    (_launched("allowance"), _pause(), (), "allowance"),
+    (_launched("both"), _pause(), (), "allowance_and_cap"),
+    (_launched("per_task_cap"), _pause(), (), "per_task_cap"),
+    # A per-task cap of 0 left the allowance alone to set it (stamped "allowance"); a saved null cap changes nothing.
+    (_launched("allowance"), _pause(cap=None), (), "allowance"),
+    # The cap was raised and Resume pressed: the re-resolved cap is above the ceiling, the stamp still says the cap.
+    (_launched("per_task_cap", ceiling=10.0), _pause(ceiling=10.0, cap=80.0), (), "per_task_cap"),
+    # A record from before the stamp proves the launch ceiling only, never which limit.
+    (_launched(""), _pause(), (), "launch_ceiling"),
+    (_launched(""), _pause(basis=None), (), "launch_ceiling"),
+    # Child first: the tree's latch refused the wake while a member paused at the inherited number.
+    (_launched("allowance"), _pause("dispatch_refused", basis=None), (CHILD_AT_CEILING,), "allowance"),
+    # A member at a number of its own (an explicit profile's) proves nothing about the wake's launch ceiling.
+    (_launched("allowance"), _pause("dispatch_refused", basis=None),
+     (_pause(basis="min(global_pct, root_cap_minus_margin, non_root_member, root_resolved_ceiling)"),), "per_task_fence"),
+    (_launched("allowance"), _pause("dispatch_refused", basis=None), (_pause(basis="root_resolved_ceiling", ceiling=1.0),),
+     "per_task_fence"),
+    # The cap was lowered after launch, before the task started: its fence refused first.
+    (_launched("allowance"), _pause("dispatch_refused", basis=None), (), "per_task_fence"),
+    (_launched("allowance"), _pause("dispatch_refused", scope="global", basis=None), (), "total_budget"),
+    (_launched("allowance"), _pause("global_exhausted", scope="global", basis=None), (), "total_budget"),
+    # Pauses that are not money keep their own reason.
+    (_launched("allowance"), _pause("owner_pause", reason="owner", basis=None), (), "owner"),
+    (_launched("allowance"), _pause("model_sleep", reason="sleep", scope="task", basis=None), (CHILD_AT_CEILING,), "sleep"),
+    (_launched("allowance"), _pause("billing_authority_unreadable", reason="authority", basis=None), (), "technical"),
+    # No live pause proves nothing: a Resume granted, a resumed record, no row at all.
+    (_launched("allowance"), _pause(state="resume_granted"), (), ""),
+    (_launched("allowance"), _pause(state="resumed"), (), ""),
+    (_launched("allowance"), {}, (), ""),
+    # A saved ceiling that is not the launch number, or an allowance the owner's Resume lifted, proves nothing.
+    (_launched("allowance"), _pause(ceiling=5.0), (), ""),
+    ({**{k: v for k, v in _launched("allowance").items() if k != "root_cost_ceiling_usd"},
+      "producer_allowance_lifted": {"ceiling_usd": 2.99}}, _pause(), (), ""),
+])
+def test_a_held_wake_is_said_held_by_its_allowance_only_where_its_records_prove_it(metadata, own, members, cause):
+    held = view.hold_cause(metadata, own, members)
+    assert held["cause"] == cause
+    stamped = cause in {"allowance", "allowance_and_cap", "per_task_cap", "launch_ceiling"}
+    assert held["ceiling_usd"] == (metadata["root_cost_ceiling_usd"] if stamped else None)
+
+
+def test_an_exhausted_skip_whose_later_window_read_failed_says_its_amount_unknown_never_zero():
+    """A later read that failed after an exhausted check leaves the 24-hour amount unknown, never $0.00; the skip
+    itself stays what happened (the Consciousness tab, the Shade and /bg say this detail)."""
+    snapshot = {"last_wake_outcome": "skipped:allowance_exhausted", "spent_24h_usd": None, "daily_usd": 390.0,
+                "allowance_status": "allowance_unknown", "next_wake_at": "", "unknown_unmetered": 0}
+    detail = view.describe_consciousness_state(snapshot, True)["detail"]
+    assert detail.startswith("Daily allowance spent at its last check; what it spent in the last 24 h is unknown now; "
+                             "next check "), detail
+    assert "$0.00" not in detail
+    known = view.describe_consciousness_state({**snapshot, "spent_24h_usd": 391.5}, True)["detail"]
+    assert known.startswith("Daily allowance spent ($391.50 of $390.00 in the last 24 h); next check "), known
+
+
+HELD_NOTE = ("Resume keeps that limit, so it pauses again while its known spend is at it, and a higher allowance does "
+             "not raise it. Stop now on its card ends it and frees the clock for its next check.")
+
+
+@pytest.mark.parametrize("cause,ceiling,said", [
+    ("allowance", 2.99, "Wake-up w1 stopped at the allowance it had left when it started ($2.99)."),
+    ("allowance_and_cap", 50.0, "Wake-up w1 stopped at the allowance it had left when it started ($50.00, the per-task "
+     "cap too)."),
+    ("launch_ceiling", 2.99, "Wake-up w1 is paused at the spending limit it started with; its card shows why. "
+     "The next wake-up follows it."),
+    ("per_task_cap", 10.0, "Wake-up w1 is paused at the per-task cost cap it started with; its card shows why. "
+     "The next wake-up follows it."),
+    ("owner", None, "Wake-up w1 is on an explicit pause; its card shows who paused it and how to continue."),
+    ("", None, "Wake-up w1 is paused or waiting in the queue; its card shows why. The next wake-up follows it."),
+])
+def test_the_held_wake_sentence_names_only_a_proven_launch_limit(cause, ceiling, said):
+    snapshot = {"live_wake_task_id": "w1", "live_wake_held": True, "next_wake_at": "2026-10-24T09:30:00+00:00",
+                "live_wake_hold": {"cause": cause, "ceiling_usd": ceiling}}
+    described = view.describe_consciousness_state(snapshot, True)
+    assert described["status"] == "wake_paused" and described["detail"] == said
+    # What follows from an allowance hold is said beneath it; every other hold has no note.
+    assert described.get("detail_note") == (HELD_NOTE if cause in view.ALLOWANCE_HOLDS else None)
+    assert "09:30" not in described["detail"] + described.get("detail_note", ""), "no clock: Costs alone says when"
+    # Off still wins over any hold, and a note the snapshot carried from an earlier hold never outlives it.
+    off = view.describe_consciousness_state({**snapshot, "detail_note": HELD_NOTE}, False)
+    assert off["status"] == "disabled" and "detail_note" not in off
+
+
+def test_an_unreadable_pause_leaves_the_cause_unknown(monkeypatch, tmp_path):
+    def unreadable(_root, _task_id):
+        raise OSError("store busy")
+
+    monkeypatch.setattr("ouroboros.store_hot_facts.controls", unreadable)
+    assert view.held_wake_cause(tmp_path, "wake-x") == {"cause": "", "ceiling_usd": None}
+
+
+@pytest.mark.parametrize("fence,cause", [
+    ({"state": "requested"}, "owner"),
+    ({"state": "paused"}, "owner"),
+    ({"state": "released"}, "allowance"),
+    ({"state": "paused", "selected_members": {"wake-x": {"grant_id": "g"}}}, "allowance"),
+])
+def test_owner_pause_over_a_parked_budget_wake_takes_precedence(tmp_path, monkeypatch, fence, cause):
+    """Pause-all need not rewrite a parked wake's old budget row: its root fence owns the current hold."""
+    metadata = _launched()
+    seed_result(tmp_path, "wake-x", {"task_id": "wake-x", "status": "paused", "metadata": metadata,
+                                    "budget_pause": _pause(), "owner_pause": fence})
+    monkeypatch.setattr("supervisor.consciousness_carriers.live_task_rows",
+                        lambda _ids: {"wake-x": {"metadata": metadata}})
+    held = view.held_wake_cause(tmp_path, "wake-x")
+    assert held == {"cause": cause, "ceiling_usd": 2.99 if cause == "allowance" else None}
+    described = view.describe_consciousness_state({"live_wake_task_id": "wake-x", "live_wake_held": True,
+                                                  "live_wake_hold": held}, True)
+    assert ("Stop now" in described.get("detail_note", "")) is (cause == "allowance")

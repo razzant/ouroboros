@@ -41,8 +41,10 @@ def _isolate_manager(tmp_path, monkeypatch):
     mcp_client.reset_manager_for_tests()
 
 
-def _servers(*, slack_pinned=True, listing=None):
-    listing = listing if listing is not None else {"gitlab": GITLAB, "slack": SLACK}
+def _servers(*, slack_pinned=True, listing=None, extra=()):
+    """The remote gitlab and slack servers, plus ``extra`` entries listing SLACK's one tool."""
+    if listing is None:
+        listing = {"gitlab": GITLAB, "slack": SLACK, **{row["id"]: SLACK for row in extra}}
 
     async def list_tools(cfg, timeout):
         rows = listing[cfg.id]
@@ -55,14 +57,14 @@ def _servers(*, slack_pinned=True, listing=None):
     servers = [{"id": "gitlab", "name": "GitLab", "enabled": True, "transport": "streamable_http",
                 "url": "https://gitlab.example/mcp"},
                {"id": "slack", "name": "Slack", "enabled": True, "transport": "streamable_http",
-                "url": "https://slack.example/mcp", "schemas_at_start": slack_pinned}]
+                "url": "https://slack.example/mcp", "schemas_at_start": slack_pinned}, *extra]
     from ouroboros import config
 
     settings = {"MCP_ENABLED": True, "MCP_SERVERS": servers}
     config.SETTINGS_PATH.write_text(json.dumps(settings), encoding="utf-8")
     mcp_client.reconfigure_from_settings(settings)
-    for server in ("gitlab", "slack"):
-        manager.refresh_server(server)
+    for server in servers:
+        manager.refresh_server(server["id"])
     return manager
 
 
@@ -100,6 +102,25 @@ def test_an_unpinned_server_starts_on_demand_in_every_mode_and_the_map_names_its
     assert "- mcp_slack (Slack): 1 tool," in helper and "loaded from task start; callable as mcp_slack__<name>: history" in helper
     for compact in (nano, helper):
         assert "\n  Server instructions: Use numeric project ids, never names." in compact
+
+
+def test_a_stdio_header_names_the_process_lifetime_its_configuration_gives(registry):
+    """#2914: a per-call stdio server starts a new process for every call, so a page it opened is gone by the next
+    call; with ``task_session`` a task's calls share one process until a timeout, a Settings change or a server exit
+    replaces it. A remote server's lifetime is its own."""
+    _servers(extra=[{"id": "files", "name": "Files", "enabled": True, "transport": "stdio", "command": "node"},
+                    {"id": "browser", "enabled": True, "transport": "stdio", "command": "node", "task_session": True}])
+    full, nano = connection_views(registry, helper=False)
+    helper, _ = connection_views(registry, helper=True)
+    for text, lead in ((full, "\n### "), (nano, "\n- "), (helper, "\n- ")):
+        assert f"{lead}mcp_files (Files): 1 tool, call schemas ≈" in text
+        assert ("on demand; a new process per call, so in-memory state such as open pages does not carry over; "
+                "callable as mcp_files__<name>") in text
+        assert f"{lead}mcp_browser: 1 tool," in text
+        assert ("on demand; calls in a task share one process; a call timeout, a Settings change or a server exit "
+                "starts a new one; callable as mcp_browser__<name>") in text
+        assert "on demand; callable as mcp_gitlab__<name>" in text  # remote: no lifetime words
+    assert full.count("process") == helper.count("process") == 2  # nor on the pinned remote slack
 
 
 @pytest.mark.parametrize("disabled", [(), ("enable_tools",), ("enable_tools", "list_available_tools")])
@@ -167,7 +188,7 @@ def test_main_shows_mcp_schemas_for_the_gateway_and_its_request_tools_keep_their
     created = registry.execute_result("call_mcp_tool", {"name": "mcp_gitlab__create_issue", "arguments": {"title": "T"}})
     assert "issue created" in created.text and sent == checked == [("mcp_gitlab__create_issue", {"title": "T"})]
     refused = registry.execute_result("call_mcp_tool", {"name": "mcp_gitlab__get_merge_request", "arguments": "{}"})
-    assert refused.code == "SAFETY_VIOLATION" and len(sent) == 1
+    assert refused.code == "SAFETY_RETURNED" and len(sent) == 1
     assert registry.execute_result("call_mcp_tool", {"name": "write_file"}).code == "TOOL_ARG_ERROR" and len(sent) == 1
 
 
@@ -197,6 +218,130 @@ def test_a_gateway_envelope_runs_as_its_mcp_call_and_a_typed_error_carries_the_s
     assert '"description": "Issue title"' in failed.text
     done = ToolResult(status="ok", code="OK", text="done")
     assert with_gateway_schema(registry, "mcp_gitlab__create_issue", done) is done
+
+
+_TITLE = {"title": "Привет 🙂 «ё» e\u0301 \u00e9 \\ \" \u200b"}  # decomposed and precomposed e, a zero-width space
+_OMITTED = object()
+# call_mcp_tool's ``arguments`` form -> what reaches the server; None: refused, nothing sent. The no-argument forms
+# callers already use stay calls without arguments, an object (or JSON text of one) passes unchanged, and nothing
+# else is read as a call without arguments or corrected.
+_GATEWAY_ARGUMENTS = {
+    "omitted": (_OMITTED, {}), "null": (None, {}), "empty object": ({}, {}), "empty text": ("", {}),
+    "blank text": (" \n\t ", {}), "null text": (" null ", {}),
+    "object": (_TITLE, _TITLE), "object text": (json.dumps(_TITLE, ensure_ascii=False), _TITLE),
+    "escaped object text": (json.dumps(_TITLE), _TITLE),
+    "text that is not JSON": ('{"title": "T"', None), "array": (["T"], None), "array text": ('["T"]', None),
+    "number": (5, None), "zero": (0, None), "number text": ("5", None), "boolean": (True, None),
+    "false": (False, None), "boolean text": ("true", None),
+    "doubly encoded object": (json.dumps(json.dumps(_TITLE)), None), "doubly encoded null": (json.dumps("null"), None),
+    "nested past the decoder": ("[" * 1_000_000 + "]" * 1_000_000, None),  # past 3.14's C-stack bound, too
+}
+
+
+def _gateway_sends(registry, monkeypatch):
+    """Main's loop binding over the servers, plus what reaches an MCP transport and every Safety check call
+    (``True``: a declared skip, answered before any model), through the real dispatch."""
+    from ouroboros import loop as loop_module
+    from ouroboros import safety
+    from ouroboros.tools.tool_result import ToolResult
+
+    sent, checked = [], []
+
+    async def transport(cfg, name, args, timeout):
+        sent.append((name, args))
+        return ToolResult(status="ok", code="OK", text=f"{name} done")
+
+    def check(name, args, *, declared_policy="", **_kwargs):
+        checked.append((name, declared_policy == safety.POLICY_SKIP))
+        return True, ""
+
+    _servers()._async_call_tool = transport
+    monkeypatch.setattr(safety, "check_safety", check)
+    loop_module._setup_dynamic_tools(registry, initial_tool_schemas(registry), [], gateway=True)
+    return sent, checked
+
+
+def _gateway_envelope(form):
+    value = _GATEWAY_ARGUMENTS[form][0]
+    return {"name": "mcp_gitlab__create_issue", **({} if value is _OMITTED else {"arguments": value})}
+
+
+def _assert_refused_unsent(result):
+    assert (result.code, result.meta.get("operation_outcome")) == ("TOOL_ARG_ERROR", "completed_no_effect")
+    assert "nothing was sent to mcp_gitlab__create_issue" in result.text
+    assert '"description": "Issue title"' in result.text  # the tool's schema, to compose the next call from
+
+
+@pytest.mark.parametrize("form", list(_GATEWAY_ARGUMENTS))
+def test_the_gateway_handler_sends_one_arguments_object_or_nothing(registry, monkeypatch, form):
+    """Called directly, call_mcp_tool sends the no-argument forms as {} and an object exactly as given (Unicode kept);
+    any other arguments are a typed no-effect refusal carrying the tool's schema: the Safety check sees only the
+    gateway's own declared skip, and nothing is sent."""
+    if form == "nested past the decoder":
+        with pytest.raises(RecursionError):  # the witness: the decoder refuses the depth, balanced or not
+            json.loads(_GATEWAY_ARGUMENTS[form][0])
+    sent, checked = _gateway_sends(registry, monkeypatch)
+    result = registry.execute_result("call_mcp_tool", _gateway_envelope(form))
+    passes = _GATEWAY_ARGUMENTS[form][1]
+    if passes is None:
+        assert sent == [] and checked == [("call_mcp_tool", True)]
+        _assert_refused_unsent(result)
+    else:
+        assert result.status == "ok" and "create_issue done" in result.text
+        assert sent == [("create_issue", passes)]
+        assert checked == [("call_mcp_tool", True), ("mcp_gitlab__create_issue", False)]
+
+
+@pytest.mark.parametrize("form", list(_GATEWAY_ARGUMENTS))
+def test_a_gateway_call_in_a_batch_runs_as_its_mcp_call_or_is_refused_beside_a_running_neighbour(
+        registry, monkeypatch, tmp_path, form):
+    """Through the executor a call_mcp_tool envelope runs as the MCP call it names; arguments that pass no object
+    leave the envelope to the gateway's own handler, which refuses it unsent, and the next call of the batch runs."""
+    from ouroboros.loop_tool_execution import execute_tool_batch
+
+    sent, checked = _gateway_sends(registry, monkeypatch)
+    envelopes = (("form", _gateway_envelope(form)), ("neighbour", {"name": "mcp_slack__history"}))
+    calls = [{"id": call_id, "type": "function",
+              "function": {"name": "call_mcp_tool", "arguments": json.dumps(envelope, ensure_ascii=False)}}
+             for call_id, envelope in envelopes]
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    results, control = execute_tool_batch(calls, registry, tmp_path / "logs", "gateway-batch", None, {})
+    assert control is None
+    rows = {row["tool_call_id"]: row for row in results}
+    assert (rows["neighbour"]["fn_name"], rows["neighbour"]["is_error"]) == ("mcp_slack__history", False)
+    passes = _GATEWAY_ARGUMENTS[form][1]
+    if passes is None:
+        assert sent == [("history", {})]
+        assert sorted(checked) == [("call_mcp_tool", True), ("mcp_slack__history", False)]
+        assert (rows["form"]["fn_name"], rows["form"]["is_error"]) == ("call_mcp_tool", True)
+        _assert_refused_unsent(rows["form"]["tool_result"])
+    else:
+        assert (rows["form"]["fn_name"], rows["form"]["is_error"]) == ("mcp_gitlab__create_issue", False)
+        assert sorted(sent, key=lambda row: row[0]) == [("create_issue", passes), ("history", {})]
+        assert sorted(checked) == [("mcp_gitlab__create_issue", False), ("mcp_slack__history", False)]
+
+
+def test_a_call_whose_own_arguments_nest_past_the_decoder_is_refused_beside_a_running_neighbour(
+        registry, monkeypatch, tmp_path):
+    """The rows above nest inside a parsed envelope; here the call's own arguments (a repetition loop cut at the
+    output limit) reach every executor parse: a typed argument error, nothing dispatched, and the batch goes on."""
+    from ouroboros.loop_tool_execution import execute_tool_batch
+
+    deep = '{"name": ' + "[" * 1_000_000  # past Python 3.14's C-stack bound (about 115k), not only 1000 frames
+    with pytest.raises(RecursionError):  # the witness: the decoder refuses the depth, not merely the truncation
+        json.loads(deep)
+    sent, checked = _gateway_sends(registry, monkeypatch)
+    calls = [{"id": "deep", "type": "function", "function": {
+                 "name": "call_mcp_tool", "arguments": deep}},
+             {"id": "neighbour", "type": "function", "function": {
+                 "name": "call_mcp_tool", "arguments": json.dumps({"name": "mcp_slack__history"})}}]
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    results, control = execute_tool_batch(calls, registry, tmp_path / "logs", "deep-batch", None, {})
+    assert control is None and sent == [("history", {})] and checked == [("mcp_slack__history", False)]
+    rows = {row["tool_call_id"]: row for row in results}
+    assert (rows["neighbour"]["fn_name"], rows["neighbour"]["is_error"]) == ("mcp_slack__history", False)
+    assert (rows["deep"]["fn_name"], rows["deep"]["is_error"]) == ("call_mcp_tool", True)
+    assert rows["deep"]["tool_result"].code == "TOOL_ARG_ERROR"
 
 
 def test_enable_tools_loads_a_whole_server_and_says_what_the_next_request_carries(registry):

@@ -20,16 +20,18 @@ import pathlib
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.dialogue_provenance import PRESENCE_BINDING_AUTHORITY_KEY, is_presence_task, presence_caller_binding
+from ouroboros.focus import normalize_focus
 from ouroboros.project_facts import (
+    explicit_project_id_ok,
     placed_project_id,
     project_journal_path,
     project_reflections_path,
     project_workpad_path,
     sanitize_project_id,
-    explicit_project_id_ok,
 )
-from ouroboros.dialogue_provenance import is_presence_task, presence_caller_binding
-from ouroboros.focus import normalize_focus
+from ouroboros.memory_texts import edit_properties
+from ouroboros.project_naming import CONTINUE_TITLE_PREFIX
 from ouroboros.task_carrier import inline_execution
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import completed_local_read
@@ -37,7 +39,6 @@ from ouroboros.utils import (
     append_jsonl,
     jsonl_generation_signature,
     utc_now_iso,
-    write_text_atomic,
 )
 
 log = logging.getLogger(__name__)
@@ -48,10 +49,10 @@ _JOURNAL_KINDS = ("start", "checkpoint", "blocked", "done", "note")
 # file tools refuse the project store).
 _READ_SOURCES = {"journal": project_journal_path, "reflections": project_reflections_path}
 _MAX_TEXT_CHARS = 4000
-_WORKPAD_MAX_BYTES = 256 * 1024
 
 
-def _scope_authority(ctx: ToolContext) -> tuple[str, Dict[str, Any]]:
+def _actor_facts(ctx: ToolContext) -> tuple[Dict[str, Any], Dict[str, Any], bool, str, str]:
+    """``(metadata, task view, is a child, delegation_role, root_task_id)`` as the host admitted this actor."""
     metadata = getattr(ctx, "task_metadata", {})
     metadata = metadata if isinstance(metadata, dict) else {}
     contract = getattr(ctx, "task_contract", {})
@@ -63,7 +64,11 @@ def _scope_authority(ctx: ToolContext) -> tuple[str, Dict[str, Any]]:
     parent_task_id = str(lineage.get("parent_task_id") or metadata.get("parent_task_id") or "").strip()
     delegation_role = str(lineage.get("delegation_role") or metadata.get("delegation_role") or "").strip()
     root_task_id = str(lineage.get("root_task_id") or metadata.get("root_task_id") or "").strip()
-    child = bool(parent_task_id) or delegation_role == "subagent"
+    return metadata, task, bool(parent_task_id) or delegation_role == "subagent", delegation_role, root_task_id
+
+
+def _scope_authority(ctx: ToolContext) -> tuple[str, Dict[str, Any]]:
+    metadata, task, child, delegation_role, root_task_id = _actor_facts(ctx)
     if is_presence_task(task) or presence_caller_binding(ctx) is not None:  # a speaker, or acting for its binding
         return "presence", metadata
     if child:
@@ -75,42 +80,77 @@ def _scope_authority(ctx: ToolContext) -> tuple[str, Dict[str, Any]]:
     return ("root" if root else "scoped"), metadata
 
 
+def _admitted_continuation(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """The Continue record the host's admission stamped on this root, naming its work; ``{}`` for any other root."""
+    continuation = metadata.get("continuation") if isinstance(metadata.get("continuation"), dict) else {}
+    author = metadata.get("objective_author") if isinstance(metadata.get("objective_author"), dict) else {}
+    admitted = (str(continuation.get("work_id") or "").strip() and isinstance(continuation.get("admission"), dict)
+                and author.get("kind") == "continuation"
+                and author.get("predecessor_task_id") == continuation.get("predecessor_task_id"))
+    return continuation if admitted else {}
+
+
+def _focus_root(ctx: ToolContext) -> pathlib.Path:
+    metadata = getattr(ctx, "task_metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return pathlib.Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or getattr(ctx, "drive_root", "")))
+
+
+def _bound_continue_root(ctx: ToolContext) -> bool:
+    """A Continue of a place-bound work, admitted into a Project: it inherits the binding but speaks nowhere and is
+    that Project's own root. Focus-only: its other journal scopes stay those of work acting for a binding."""
+    metadata, task, child, _role, _root = _actor_facts(ctx)
+    return bool(not child and not is_presence_task(task) and isinstance(metadata.get(PRESENCE_BINDING_AUTHORITY_KEY), dict)
+                and _admitted_continuation(metadata) and _bound_project(_focus_root(ctx), str(getattr(ctx, "task_id", "") or "")))
+
+
 def may_publish_focus(ctx: ToolContext) -> bool:
-    """Whether this actor's focus line is its own to publish: an independent root, never a child or a
-    speaker (``_update_focus``'s rule; its one exception, a Project-bound inline speaker, is Presence).
+    """Whether this actor's focus line is its own to publish: an independent root or a bound Continue
+    (``_bound_continue_root``), never a child or a speaker (``_update_focus``'s rule; its one exception, a
+    Project-bound inline speaker, is Presence).
     The round's facts name an absent line only for such an actor in the pool (a live direct turn answers in chat)."""
-    return _scope_authority(ctx)[0] == "root"
+    return _scope_authority(ctx)[0] == "root" or _bound_continue_root(ctx)
 
 
-def _resolve_project_id(ctx: ToolContext, explicit: Any, *, write: bool = False) -> tuple[str, str]:
+def _project_scope(ctx: ToolContext, explicit: Any, *, write: bool = False) -> tuple[str, str, str]:
+    """``(project id, refusal, its code)``: the project this actor may read (``write``: write), or the refusal and
+    the code it is published with (``TOOL_ARG_ERROR`` for a malformed scope, ``ACCESS_BLOCKED`` for a project
+    this actor may not use), so a caller never re-reads the kind from the text."""
+    malformed = "TOOL_ARG_ERROR", "⚠️ TOOL_ARG_ERROR: "
     own_value = placed_project_id(ctx)
     if own_value not in (None, "") and not isinstance(own_value, str):
-        return "", "⚠️ TOOL_ARG_ERROR: current project scope is malformed"
+        return "", malformed[1] + "current project scope is malformed", malformed[0]
     if explicit not in (None, "") and not isinstance(explicit, str):
-        return "", "⚠️ TOOL_ARG_ERROR: project_id is malformed"
+        return "", malformed[1] + "project_id is malformed", malformed[0]
     own_raw = str(own_value or "").strip()
     requested_raw = str(explicit or "").strip()
     own = sanitize_project_id(own_raw) if own_raw else ""
     if requested_raw and not explicit_project_id_ok(requested_raw):
-        return "", "⚠️ TOOL_ARG_ERROR: project_id is malformed"
+        return "", malformed[1] + "project_id is malformed", malformed[0]
     requested = sanitize_project_id(requested_raw) if requested_raw else ""
     authority, _metadata = _scope_authority(ctx)
     if requested_raw and not requested:
-        return "", "⚠️ TOOL_ARG_ERROR: project_id is malformed"
+        return "", malformed[1] + "project_id is malformed", malformed[0]
     if own_raw and not own:
-        return "", "⚠️ TOOL_ARG_ERROR: current project scope is malformed"
+        return "", malformed[1] + "current project scope is malformed", malformed[0]
     # A root reads every project; so does a place turn (owner 06.11, 4=A: it may read project journals and tell
     # the task that leads its thread), read-only. A child reads only its own; writes stay with the current project.
     reads_any = authority == "root" or (authority == "presence" and not write)
     if own and requested and requested != own:
         if write:
-            return "", "⚠️ TOOL_FORBIDDEN: foreign project writes are refused; write only the current project"
+            return "", "⚠️ TOOL_FORBIDDEN: foreign project writes are refused; write only the current project", "ACCESS_BLOCKED"
         if not reads_any:
-            return "", "⚠️ TOOL_FORBIDDEN: this actor may read only its current project"
-        return requested, ""
+            return "", "⚠️ TOOL_FORBIDDEN: this actor may read only its current project", "ACCESS_BLOCKED"
+        return requested, "", ""
     if requested and not own and not reads_any:
-        return "", "⚠️ TOOL_FORBIDDEN: restricted actors may not access a foreign project"
-    return own or requested, ""
+        return "", "⚠️ TOOL_FORBIDDEN: restricted actors may not access a foreign project", "ACCESS_BLOCKED"
+    return own or requested, "", ""
+
+
+def _resolve_project_id(ctx: ToolContext, explicit: Any, *, write: bool = False) -> tuple[str, str]:
+    """``(project id, refusal text)``: ``_project_scope`` without the refusal's code."""
+    pid, refusal, _code = _project_scope(ctx, explicit, write=write)
+    return pid, refusal
 
 
 def _authorized_project_id(ctx: ToolContext, explicit: Any) -> str:
@@ -493,40 +533,59 @@ def _journal_read(
     return f"## Project journal ({pid})\n\n" + "\n".join(lines)
 
 
-@completed_local_read
-def _workpad_read(ctx: ToolContext, project_id: str = "") -> str:
+def _workpad_page(ctx: ToolContext, project_id: Any = "") -> Tuple[str, Optional[bytes], str]:
+    """``(project id, the page's exact bytes or None when it has none, refusal)``: one byte capture of the page,
+    under the read scope (``_resolve_project_id(write=False)``), never translated or stripped."""
     pid, scope_error = _resolve_project_id(ctx, project_id, write=False)
     if scope_error:
-        return scope_error + " (workpad_read)"
+        return "", None, scope_error + " (workpad_read)"
     if not pid:
-        return "⚠️ TOOL_ARG_ERROR (workpad_read): no project scope."
+        return "", None, "⚠️ TOOL_ARG_ERROR (workpad_read): no project scope."
     path = project_workpad_path(pid)
-    if not path.is_file():
-        return f"(workpad for project {pid} is empty)"
     try:
-        return path.read_text(encoding="utf-8")
+        return pid, (path.read_bytes() if path.is_file() else None), ""
     except OSError as exc:
-        return f"⚠️ TOOL_ERROR (workpad_read): {exc}"
+        return pid, None, f"⚠️ TOOL_ERROR (workpad_read): {exc}"
 
 
-def _workpad_write(ctx: ToolContext, content: str, project_id: str = "") -> str:
-    pid, scope_error = _resolve_project_id(ctx, project_id, write=True)
-    if scope_error:
-        return scope_error + " (workpad_write)"
-    if not pid:
-        return "⚠️ TOOL_ARG_ERROR (workpad_write): no project scope."
-    body = str(content or "")
-    if len(body.encode("utf-8", errors="ignore")) > _WORKPAD_MAX_BYTES:
-        return ("⚠️ TOOL_ARG_ERROR (workpad_write): workpad exceeds 256KB — keep it a "
-                "working page; move durable facts to knowledge_write and history to journal_write.")
-    path = project_workpad_path(pid)
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _empty_workpad(pid: str) -> str:
+    return f"(workpad for project {pid} is empty)"
+
+
+@completed_local_read
+def _workpad_read(ctx: ToolContext, project_id: str = "") -> str:
+    pid, raw, refusal = _workpad_page(ctx, project_id)
+    if refusal:
+        return refusal
+    if raw is None:
+        return _empty_workpad(pid) + " workpad_write creates it; there is no revision yet."
     try:
-        # Replace, never truncate in place: a failed write leaves the previous page whole.
-        write_text_atomic(path, body)
-    except OSError as exc:
-        return f"⚠️ TOOL_ERROR (workpad_write): {exc}"
-    return f"OK: workpad[{pid}] written ({len(body)} chars)."
+        page = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return f"⚠️ TOOL_ERROR (workpad_read): the page is not UTF-8 ({exc.reason})"
+    return (f"revision={hashlib.sha256(raw).hexdigest()} (project {pid}'s workpad, {len(page)} chars; the page "
+            "follows exactly)\n\n" + page)
+
+
+def _workpad_write(ctx: ToolContext, content: Optional[str] = None, project_id: str = "", mode: str = "overwrite",
+                   expected_revision: Optional[str] = None, old_str: Optional[str] = None,
+                   new_str: Optional[str] = None, edits: Optional[list] = None, version: Optional[str] = None,
+                   reason: Optional[str] = "") -> str:
+    """Write the project's page through the plain-text editor (``memory_texts``): overwrite, edit or revert, its
+    history row first beside the page."""
+    from ouroboros.memory_texts import workpad_source, write_text
+    from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+
+    pid, scope_error, code = _project_scope(ctx, project_id, write=True)
+    if scope_error or not pid:
+        return _publish_tool_result(ctx, ToolResult(
+            status="blocked" if code == "ACCESS_BLOCKED" else "error", code=code or "TOOL_ARG_ERROR",
+            text=(scope_error or "⚠️ TOOL_ARG_ERROR (workpad_write): no project scope.") + (
+                " (workpad_write)" if scope_error else "")))
+    metadata = getattr(ctx, "task_metadata", {}) or {}
+    return write_text(ctx, workpad_source(pid), content=content, mode=mode, expected_revision=expected_revision,
+                      old_str=old_str, new_str=new_str, edits=edits, version=version, reason=reason,
+                      source_type=str((metadata if isinstance(metadata, dict) else {}).get("delegation_role") or "task"))
 
 
 _FOCUS_SOURCE_REFUSAL_PREFIXES = (
@@ -534,7 +593,7 @@ _FOCUS_SOURCE_REFUSAL_PREFIXES = (
 )
 # A focus points at ONE bounded page of an existing reader; a retained answer is
 # a cognitive artifact, not a mirror of the store. Larger answers are refused
-# with the repair (narrow the page), never clipped.
+# with the repair the reader has (a narrower page; the workpad has none), never clipped.
 _FOCUS_SOURCE_MAX_BYTES = 256 * 1024
 
 
@@ -566,8 +625,9 @@ def _read_focus_source(ctx: ToolContext, source: Dict[str, Any]) -> Tuple[Option
         if reader == "journal_read":
             text = _journal_read(ctx, project_id=str(args.get("project_id") or ""),
                                  offset=int(args.get("offset") or 0), snapshot=str(args.get("snapshot") or ""))
-        elif reader == "workpad_read":
-            text = _workpad_read(ctx, project_id=str(args.get("project_id") or ""))
+        elif reader == "workpad_read":  # the page's own bytes, as captured: not the read's revision line
+            pid, raw, refusal = _workpad_page(ctx, str(args.get("project_id") or ""))
+            text = refusal or (_empty_workpad(pid) if raw is None else raw.decode("utf-8"))
         elif reader == "recent_tasks":
             from ouroboros.tools.recent_tasks import _handle_recent_tasks
             text = _handle_recent_tasks(ctx, offset=int(args.get("offset") or 0), snapshot=str(args.get("snapshot") or ""))
@@ -612,7 +672,9 @@ def _read_focus_source(ctx: ToolContext, source: Dict[str, Any]) -> Tuple[Option
             return "", f"{reader} refused: {code or 'typed error'}"
     if len(body.encode("utf-8")) > _FOCUS_SOURCE_MAX_BYTES:
         return "", (f"{reader} answered {len(body.encode('utf-8'))} bytes, above the {_FOCUS_SOURCE_MAX_BYTES}-byte "
-                    "focus source bound; point the focus at a narrower page (offset/snapshot) or a smaller reader")
+                    "focus source bound; " + ("the workpad has no narrower page: name another reader, or fold the page "
+                                              "with workpad_write first" if reader == "workpad_read" else
+                                              "point the focus at a narrower page (offset/snapshot) or a smaller reader"))
     return body, ""
 
 
@@ -632,6 +694,20 @@ def _retain_focus_source(canonical: pathlib.Path, task_id: str, source: Dict[str
     return {key: ref[key] for key in ("kind", "root", "path", "size", "sha256")}
 
 
+def _offered_work_name(metadata: Dict[str, Any], work_name: Any, turn: bool) -> Tuple[str, str, str]:
+    """``(work id, cleaned name, "")``, ``("", "", why it is ignored)``, or all empty when none was offered. The work
+    is the one this root's own admission recorded, so no caller can name another."""
+    if not str(work_name or "").strip():
+        return "", "", ""
+    continuation = {} if turn else _admitted_continuation(metadata)
+    if not continuation:
+        return "", "", "only a Continue of existing work names it"
+    from ouroboros.project_naming import continued_work_name
+
+    name = continued_work_name(work_name)
+    return (str(continuation["work_id"]), name, "") if name else ("", "", "it is empty after cleanup")
+
+
 def _bound_project(root: Any, task_id: str) -> str:
     """This task's own durable Project binding; an unreadable registry binds nothing here."""
     from ouroboros.projects_registry import project_id_for_task
@@ -643,7 +719,7 @@ def _bound_project(root: Any, task_id: str) -> str:
         return ""
 
 
-def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
+def _update_focus(ctx: ToolContext, text: str, source_ref: Any, work_name: Any = "") -> str:
     """Publish one short authored focus onto this live root's existing records."""
     metadata = getattr(ctx, "task_metadata", {})
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -654,15 +730,13 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
             "_presence_origin": getattr(ctx, "_presence_origin", None)}
     authority, _ = _scope_authority(ctx)
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
-    import pathlib
-
-    canonical = pathlib.Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or getattr(ctx, "drive_root", "")))
+    canonical = _focus_root(ctx)
     # A live inline Presence speaker a move bound to a Project is that Project's work: its focus is
     # dated context there, never authority, a new principal or speech outside (``presence_turn_is_live``).
     inline = bool(authority == "presence" and is_presence_task(task) and task_id
                   and metadata.get("presence_event_identity") and not metadata.get("parent_task_id")
                   and _bound_project(canonical, task_id))
-    if not inline and (authority != "root" or is_presence_task(task)):
+    if not inline and (authority != "root" or is_presence_task(task)) and not _bound_continue_root(ctx):
         return "⚠️ TOOL_FORBIDDEN (update_focus): only an independent project/root task may publish focus"
     if not task_id:
         return "⚠️ TOOL_ARG_ERROR (update_focus): task_id is required"
@@ -734,6 +808,17 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
                 return None
         return fields
 
+    work_id, offered, naming_refused = _offered_work_name(metadata, work_name, direct or inline)
+    named = ""
+
+    def _claim_name(txn: Any, _current: Dict[str, Any], document: Dict[str, Any]) -> Dict[str, Any]:
+        """The focus write ``_project`` just accepted for the live attempt and the name land in one transaction."""
+        nonlocal named, naming_refused
+        from ouroboros.project_naming import adopt_continued_work_name
+
+        named, naming_refused = adopt_continued_work_name(txn, work_id, offered)
+        return {**document, "suggested_name": f"{CONTINUE_TITLE_PREFIX}{named[:80]}"} if named else document
+
     # A direct turn is owned by the live ingress actor rather than the queue.
     # Hold its existing admission lock across the liveness check and the locked
     # result write, then require the same actor projection to accept the stamp.
@@ -750,7 +835,8 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
             current = load_task_result(canonical, task_id)
             if not isinstance(current, dict) or not _live(current):
                 return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current task is no longer live"
-            stored = write_task_result(canonical, task_id, STATUS_RUNNING, focus=focus, _field_projector=_project)
+            stored = write_task_result(canonical, task_id, STATUS_RUNNING, focus=focus, _field_projector=_project,
+                                       _last_word=_claim_name if offered else None)
             if not isinstance(stored, dict) or not _live(stored):
                 return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current task is no longer live"
             if stored.get("focus") != focus:
@@ -773,7 +859,16 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
             # the durable carrier on its next read.
             return ("⚠️ FOCUS_PROJECTION_UNAVAILABLE (update_focus): focus was stored, "
                     "but the live projection notification could not be queued")
-    return f"OK: focus[{task_id}] updated (authored_at={focus['authored_at']})."
+        if named:  # the first record's card and this one's, where either is open; a reload reads the records
+            for target, shown in ((work_id, named), (task_id, str(stored.get("suggested_name") or ""))):
+                try:
+                    event_queue.put_nowait({"type": "task_named", "task_id": target, "suggested_name": shown})
+                except Exception:
+                    log.debug("work name event failed for %s", target, exc_info=True)
+    receipt = f"OK: focus[{task_id}] updated (authored_at={focus['authored_at']})."
+    if named:
+        return f"{receipt} Work name set: {named!r}."
+    return f"{receipt} work_name ignored: {naming_refused}." if naming_refused else receipt
 
 
 def journal_tail_digest(project_id: str, *, limit: int = 40) -> str:
@@ -847,6 +942,9 @@ def get_tools() -> List[ToolEntry]:
                     "type": "object",
                     "properties": {
                         "text": {"type": "string", "description": "Short focus text (<=280 chars)."},
+                        "work_name": {"type": "string", "description": (
+                            "Only when your Continue work order says the work has no name yet: a short name of its "
+                            "subject that stays across Continues, never its status. The answer says if it was taken.")},
                         "source_ref": {
                             "type": "object",
                             "description": "Reference to an existing bounded reader; this carries no content or path.",
@@ -867,7 +965,7 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["text", "source_ref"],
                 },
             },
-            lambda ctx, text, source_ref: _update_focus(ctx, text, source_ref),
+            lambda ctx, text, source_ref, work_name="": _update_focus(ctx, text, source_ref, work_name),
             timeout_sec=15,
         ),
         ToolEntry(
@@ -935,7 +1033,9 @@ def get_tools() -> List[ToolEntry]:
             "workpad_read",
             {
                 "name": "workpad_read",
-                "description": "Read the current project's free-form workpad page.",
+                "description": ("Read the current project's free-form workpad page exactly, after its revision "
+                                "line (expected_revision for workpad_write). Its earlier versions: "
+                                "memory_read(source='workpad')."),
                 "parameters": {"type": "object", "properties": dict(common)},
             },
             lambda ctx, project_id="": _workpad_read(ctx, project_id),
@@ -946,20 +1046,32 @@ def get_tools() -> List[ToolEntry]:
             {
                 "name": "workpad_write",
                 "description": (
-                    "Overwrite the current project's workpad page (<=256KB). A working "
-                    "page for plans/links/state — durable facts belong in knowledge_write, "
-                    "history in journal_write."
+                    "Write the current project's workpad, a working page for plans, links and state (durable facts "
+                    "belong in knowledge_write, history in journal_write). Change parts with mode='edit': "
+                    "edits=[{old_str, new_str}, ...] (or one old_str with content), each old_str exact text found "
+                    "once in the revision I read, all or none; mode='overwrite' (default) replaces the whole page "
+                    "with content; mode='revert' puts back version=<revision>. expected_revision (shown under the "
+                    "resident page and by workpad_read) is required for edit and revert; an overwrite without it "
+                    "still lands, and replacing a version this task did not write answers with a warning. A stale "
+                    "revision writes nothing and returns what changed since. reason is kept in the page's history. "
+                    "The receipt states the page's size (it enters every request of its project whole), what it "
+                    "replaced and the calls that read it (memory_read(source='workpad:<project id>', version=...)) "
+                    "and put it back."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "content": {"type": "string"},
+                        **edit_properties(
+                            "page", "The current revision (under the resident page, workpad_read's, a receipt's "
+                            "or refusal's); empty creates a missing page only."),
                         **common,
                     },
-                    "required": ["content"],
+                    "required": [],
                 },
             },
-            lambda ctx, content, project_id="": _workpad_write(ctx, content, project_id),
+            lambda ctx, content=None, project_id="", mode="overwrite", expected_revision=None, old_str=None,
+            new_str=None, edits=None, version=None, reason="": _workpad_write(
+                ctx, content, project_id, mode, expected_revision, old_str, new_str, edits, version, reason),
             timeout_sec=15,
         ),
     ]

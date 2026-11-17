@@ -69,6 +69,7 @@ from ouroboros.utils import (
     get_git_info,
     read_text,
     safe_relpath,
+    sha256_text,
     utc_now_iso,
 )
 
@@ -95,7 +96,8 @@ def build_user_content(task: Dict[str, Any]) -> Any:
     if isinstance(host_fact, dict) and host_fact.get("kind") == "call_open":
         text = "[Host fact: a live call opened; not the owner's words]\n\n" + str(text or "")
     author = metadata.get("objective_author")
-    if isinstance(author, dict) and author.get("kind") == "task":
+    # Text a task drafted, the Schedules API supplied or the host composed for a press: never my human's words.
+    if isinstance(author, dict) and author.get("kind") in {"task", "schedule_api", "ui_control"}:
         from ouroboros.owner_words import objective_author_line
 
         text = (f"[OBJECTIVE_AUTHOR] The objective below was {objective_author_line({'objective_author': author})}. "
@@ -328,7 +330,7 @@ def _task_authority_projection(env: Any, task: Dict[str, Any]) -> Dict[str, Any]
     from ouroboros.review_history import review_dispute_history
 
     for repo in dict.fromkeys(str(p) for p in (task.get("workspace_root"), getattr(env, "repo_dir", None)) if p):
-        history = review_dispute_history(drive_root=canonical_root, repo_root=repo, task_id=task_id)
+        history = review_dispute_history(drive_root=canonical_root, repo_root=repo, task_id=task_id, attempts_root=env.drive_root)
         if history.get("rounds") or history.get("gaps"):
             projection.setdefault("commit_review_authority", []).append({"repo_root": repo, "dispute_history": history})
     return projection
@@ -640,6 +642,7 @@ from ouroboros.context_sections import (  # noqa: E402,F401 — existing public 
     _build_installed_skills_section, _drive_state_section, runtime_host_section,
     _SHARED_UNDERSTANDING_GAP,
 )
+from ouroboros.context_sections import revision_line  # noqa: E402
 from ouroboros.section_floor import HostSection, capture_sections, labelled_section  # noqa: E402
 
 
@@ -685,16 +688,17 @@ def build_memory_sections(memory: Memory, partition: str = "all", *, include_scr
                         "read_file(root='runtime_data', path='memory/scratchpad.md'))\n\n" + scratchpad_body))
 
     if include_stable:
-        identity_raw = memory.load_identity()
+        identity_raw = memory.load_identity()  # one byte capture: the text shown and its revision
         _warn_if_over_budget("identity", identity_raw)
         reader = _canonical_runtime_reader(ctx, memory.drive_root, "memory/identity.md")
-        sections.append(HostSection("identity", f"## Identity (already loaded from `{memory.identity_path()}`; read current bytes before revising)\n"
-                                   f"Source reader: {reader}\n\n" + identity_raw))
+        sections.append(HostSection("identity", f"## Identity (already loaded from `{memory.identity_path()}`; the "
+                                   "revision under it is update_identity's expected_revision)\n"
+                                   f"Source reader: {reader}\n\n" + identity_raw + revision_line(
+                                       "identity", identity_raw, sha256_text(identity_raw))))
         world_file = memory.load_world_profile()
-        world_raw = world_file.strip()
-        if world_raw:
+        if world_file.strip():
             # The map loads whole; oversize is the mind's to compact (detail to knowledge).
-            _warn_if_over_budget("world", world_raw)
+            _warn_if_over_budget("world", world_file)
             sections.append(_world_section(world_file))
 
     if partition == "all":
@@ -709,16 +713,20 @@ def build_memory_sections(memory: Memory, partition: str = "all", *, include_scr
 
 
 def _world_section(world_file: str) -> HostSection:
-    """WORLD.md whole, with its own heading map as the operative view (line ranges into the file)."""
+    """WORLD.md whole, exactly as stored, with its revision; its own heading map is the operative view (line ranges
+    into the file), which says it is partial."""
     from ouroboros.context_layout import generate_doc_nav_map
 
     reader = "read_file(root='runtime_data', path='memory/WORLD.md', start_line=A, max_lines=N)"
+    revision = sha256_text(world_file)
     full = ("## My World (from `memory/WORLD.md` — already loaded; the measured block refreshes at startup, "
-            "the rest is mine to keep current with update_world; compact, detail in knowledge)\n\n" + world_file.strip())
+            "the rest is mine to keep current with update_world; compact, detail in knowledge)\n\n" + world_file
+            + revision_line("map", world_file, revision))
     headings = generate_doc_nav_map(world_file, title="My World", rel_path="memory/WORLD.md",
                                     instructions=False).split("\n", 2)[2]  # below its own title line
-    return HostSection("world", full, f"## My World (from `memory/WORLD.md`)\n\n{headings}\n\n"
-                                      f"Its line ranges read with {reader}.")
+    return HostSection("world", full, f"## My World (from `memory/WORLD.md`; a partial view: its headings only)\n\n"
+                                      f"{headings}\n\nIts line ranges read with {reader}; the whole map, before an "
+                                      f"edit: memory_read(source='world', version='{revision}').")
 
 
 def build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[str]:
@@ -967,9 +975,10 @@ def _capture_context_core(
     elif not declared:  # shared review history is a declared request's named omission
         try:
             from ouroboros.context_sections import review_status_host_section
-            from ouroboros.review_state import load_state
+            from ouroboros.review_state import load_state, make_repo_key
             advisory_state = load_state(canonical_root)
-            if advisory_state.latest_attempt():
+            if advisory_state.latest_attempt() or advisory_state.earlier_open_obligations(
+                    make_repo_key(pathlib.Path(env.repo_dir))):
                 advisory_section = review_status_host_section(
                     advisory_state,
                     repo_dir=pathlib.Path(env.repo_dir), drive_root=canonical_root,
@@ -1013,6 +1022,7 @@ def _capture_context_core(
             answers_conversation=spoken and route != ROUTELESS,
             unsettled=why if route == UNKNOWN else "",
             routeless=why if spoken and route == ROUTELESS else "",
+            inline=inline,
         )
         if presence_section:
             dynamic_parts.append(presence_section)
@@ -1038,7 +1048,7 @@ def _capture_context_core(
         reference_book_errors=tuple(book_errors),
         compact_reference_docs=is_child,
         dynamic_head_text="\n\n".join(head_parts),
-        memory_view_json=view_json,
+        memory_view_json=view_json, memory_view_sequence=view.chronicle_sequence,
         supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),
         connections=connections,
     )
@@ -1111,6 +1121,7 @@ def build_context_fit_plan(
     tool_schemas: Optional[List[Dict[str, Any]]] = None,
     route_resolver: Optional[Any] = None,
     tool_registry: Any = None,
+    reasoning_effort: str = "",
 ) -> ContextFitPlan:
     """Compatibility wrapper over the cohesive context-fit implementation."""
     core = _capture_context_core(env, memory, task, review_context_builder, ctx, tool_registry)
@@ -1121,6 +1132,7 @@ def build_context_fit_plan(
         preferred_mode=str(preferred_mode or get_context_mode() or "max"),
         route_resolver=route_resolver or _context_fit_route,
         tool_schemas=tool_schemas,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -1134,11 +1146,18 @@ def _record_memory_view(env: Any, memory: Memory, task: Dict[str, Any], ctx: Any
         from ouroboros.memory_floor import trace_facts
 
         ctx.memory_view_facts = trace_facts(facts)
+    from ouroboros.transcript_prefix import _running_code
     from ouroboros.utils import append_jsonl
 
     root = pathlib.Path(task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or memory.drive_root)
-    if not append_jsonl(root / "logs/events.jsonl", {"ts": utc_now_iso(), "type": "context_memory_view",
-                                                     "task_id": str(task.get("id") or ""), **facts, **section_spans()}):
+    from ouroboros.capability_evidence import _age_seconds
+
+    kind, observed = getattr(plan, "window_evidence", ("", ""))  # live, recorded, pool or unknown, and how old
+    age = _age_seconds(observed) if observed else None
+    evidence = {"window_evidence": {"kind": kind, "age_s": round(age) if age is not None and age != float("inf") else None}}
+    if not append_jsonl(root / "logs/events.jsonl", {"ts": utc_now_iso(), "type": "context_memory_view", "code": _running_code(),
+                                                     "task_id": str(task.get("id") or ""), **facts,
+                                                     **(evidence if kind else {}), **section_spans()}):
         log.warning("Context memory view receipt could not be written")
     return facts
 
@@ -1150,12 +1169,13 @@ def build_llm_messages(
     review_context_builder: Optional[Any] = None,
     ctx: Any = None,
     *, tool_schemas: Optional[List[Dict[str, Any]]] = None, route_resolver: Optional[Any] = None,
-    tool_registry: Any = None,
+    tool_registry: Any = None, reasoning_effort: str = "",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """The first request of a task: the plan's projection for its starting mode, and the cap info.
 
     No model is called on this path: my memory is rendered, never prepared by a paid pass;
-    a window too small for it addresses lines and pages instead.
+    a window too small for it addresses lines and pages instead. ``reasoning_effort`` is the first send's,
+    which shapes the request on a direct OpenAI reasoning route (``context_fit._request_shapes``).
     """
     # Keep the legacy public shape while publishing the immutable plan on the
     # existing ToolContext for the ordinary loop.  Commit/scope reviewers do not
@@ -1170,6 +1190,7 @@ def build_llm_messages(
         tool_schemas=tool_schemas,
         route_resolver=route_resolver,
         tool_registry=tool_registry,
+        reasoning_effort=reasoning_effort,
     )
     if ctx is not None:
         ctx.context_fit_plan = plan

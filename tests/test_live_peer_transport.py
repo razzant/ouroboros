@@ -336,6 +336,7 @@ def test_presence_utterance_identity_and_mixed_audio_attribution_survive(tmp_pat
     rows = chat_rows(tmp_path)
     assert len(rows) == 2
     assert rows[0]["client_message_id"] == "meeting:join:heard:one"
+    assert "identity" not in rows[0]["transport"]  # a call task without a focus has no admitted identity to carry
     for direction, name in (("in", "long-heard"), ("out", "long-spoken")):
         assert record_call_utterance(tmp_path, task, direction=direction, text=LONG_WORDS.strip(), utterance_id=name)
         assert chat_rows(tmp_path)[-1]["text"] == LONG_WORDS.strip()

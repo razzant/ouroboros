@@ -3,6 +3,77 @@
 // Words come from the server's codes through tr(); a client never derives a state, mark or control.
 
 /**
+ * The owner's cited words, bounded for publication (CLIENT_CONTRACT §5); text stays authored.
+ * @typedef {Object} CitedModelWords
+ * @property {string} text
+ * @property {boolean} clipped  // the durable citation is longer than this published span
+ */
+/**
+ * A work's primary route and whose choice it is.
+ * @typedef {Object} WorkPrimaryRoute
+ * @property {string} model
+ * @property {boolean} use_local
+ * @property {CitedModelWords=} cited
+ * @property {string} basis  // main | a role it follows | room | owner | owner_words | mind | fallback | place | circle
+ */
+/**
+ * The route a work acts on and its chooser (`lead` on a work and on its activity row). A departure names the
+ * primary it left: `basis` is then `fallback` or `mind`, with when (`since`) and why (`cause`).
+ * @typedef {Object} WorkLead
+ * @property {string} model
+ * @property {boolean} use_local
+ * @property {CitedModelWords=} cited
+ * @property {string} basis
+ * @property {string=} role  // a fallback's chain row (`fallback:<n>`, n from 0): tells apart two rows of one model
+ * @property {WorkPrimaryRoute=} primary  // only when the acting route is not the primary
+ * @property {string=} since  // an ISO instant in UTC
+ * @property {string=} cause  // a short code or phrase: `switch_model`, a failure's code, `configured fallback`
+ * @property {import('./client_contract_types.js').ChatModelRoute=} pending  // the route the next step uses, when it differs
+ */
+/**
+ * Main's own tier ('' = none: Main takes the default) and the default every lead pays (`/api/state`).
+ * @typedef {Object} ProcessingTiers
+ * @property {""|"standard"|"fast"|"economy"} main
+ * @property {""|"standard"|"fast"|"economy"} default
+ */
+/**
+ * One call's processing as its receipt states it: what was asked, sent and seen.
+ * @typedef {Object} ProcessingReceipt
+ * @property {?string} requested
+ * @property {?string} submitted
+ * @property {?string=} submittedNative  // the provider's own word for what was sent
+ * @property {string} observed  // standard | fast | economy | unknown
+ * @property {Array<string>=} observedNative  // the provider's own words (an older Codex: `ultrafast` folded into fast)
+ * @property {?string} reason  // processing_not_submitted | submitted_mode_differs | provider_mode_changed
+ */
+/**
+ * A root's own tier (its room's at admission, or the owner's card act; '' = the default resolution) and the
+ * newest call's receipt this host saw: a choice is never shown as what ran.
+ * @typedef {Object} WorkProcessing
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"} choice
+ * @property {"room"|"owner"=} source
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} resolved  // server resolver, including the acting fallback row
+ * @property {ProcessingReceipt=} last
+ */
+/**
+ * One act on a work's model (POST /api/tasks/{task_id}/model): `set` gives it a model, `follow` returns it to Main;
+ * `return`, `wait` and `keep` leave a fallback; `processing` sets its own tier from its next call ('' = Default).
+ * @typedef {Object} TaskModelRequest
+ * @property {string} request_id  // a retry of the same act carries the same id
+ * @property {"set"|"follow"|"return"|"wait"|"keep"|"processing"} action
+ * @property {string=} model  // `set` only
+ * @property {boolean=} use_local  // `set` only
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} processing  // `processing` only
+ */
+/**
+ * @typedef {Object} TaskModelResponse
+ * @property {true} ok
+ * @property {string} task_id
+ * @property {"next_step"|"at_start"} applied  // a running work switches at its next step, a queued one starts on it
+ * @property {WorkLead=} lead  // every model act
+ * @property {WorkProcessing=} processing  // a tier act
+ */
+/**
  * @typedef {Object} WorkReason
  * @property {string} code  // closed per release; an unknown code renders its text
  * @property {string} text  // the English sentence for this code
@@ -42,16 +113,17 @@
  * @property {Array<string>=} ids
  */
 /**
- * @typedef {Object} WorkTurn
- * @property {string} kind  // question | action
+ * @typedef {Object} WorkTurn  // what waits for the owner (gateway/work_contracts.py WorkTurn)
+ * @property {string} kind  // question | open_question | action
+ * @property {string=} work_id  // in a room's turn: the work that holds it; absent for a question no work holds
  * @property {string} task_id
  * @property {string=} quiz_id
  * @property {string=} wait_id
- * @property {string=} code
+ * @property {string=} code  // open_question: delivery_unknown for an answer whose delivery is unknown
  */
 /**
  * @typedef {Object} WorkControl
- * @property {string} action  // stop | stop_earlier | pause | resume | hurry | wrap_up
+ * @property {string} action  // stop | stop_earlier | pause | resume | hurry | wrap_up | model
  * @property {string} target  // the exact task id the door acts on
  * @property {string=} scope  // single | cascade | work
  */
@@ -98,13 +170,15 @@
  * @property {WorkFocus=} focus
  * @property {Array<Object>=} gaps
  * @property {string=} client_message_id
+ * @property {WorkLead=} lead  // the model it runs on and whose choice that is
+ * @property {WorkProcessing=} processing  // its own tier and the newest call's receipt
  */
 /**
  * @typedef {Object} RoomStatus
  * @property {string} activity  // working | queued | waiting | paused | idle | unknown
  * @property {string} transition
  * @property {string} call
- * @property {Array<Object>} turn
+ * @property {Array<WorkTurn>} turn  // its works' items, and its own questions no work holds
  * @property {boolean} amber
  * @property {string} mark  // moving | still | pause | ring | none
  * @property {boolean} confirmed
@@ -113,7 +187,7 @@
 /**
  * @typedef {Object} WorkSummary
  * @property {Object<string, number>} counts
- * @property {number} turn
+ * @property {number} turn  // each work with a turn, and each standalone question no counted work carries
  * @property {boolean} confirmed
  */
 

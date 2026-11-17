@@ -86,19 +86,19 @@ def _unix_computer_use_state_failures(data_root: Path, state_dir: Path, payload_
         failures.append(f"unix_computer_use state dir must be the runtime canonical isolated state dir: {expected_state_dir}")
     try:
         from ouroboros.skill_loader import load_skill
-        from ouroboros.skill_review_status import skill_review_gate
         from ouroboros.skill_readiness import skill_readiness_for_execution
 
         loaded = load_skill(payload_dir, data_root)
         if loaded is None:
             failures.append(f"unix_computer_use payload is not a valid skill: {payload_dir}")
             return failures
+        # The benchmark reads the verdict itself: a skill with blocker findings is no longer refused by any gate.
         stale = loaded.review.is_stale_for(loaded.content_hash)
-        review_gate = skill_review_gate(loaded.review.status, stale=stale, enforcement="blocking")
-        if not review_gate.get("executable_review"):
+        status = str(loaded.review.status or "")
+        if stale or status not in {"clean", "warnings"}:
             failures.append(
                 "unix_computer_use review must be fresh executable pass/advisory_pass "
-                f"(clean/warnings): {review_gate.get('blocking_reason') or 'review_not_executable'}"
+                f"(clean/warnings): {'review_stale' if stale else status or 'review_not_executable'}"
             )
         else:
             readiness = skill_readiness_for_execution(data_root, loaded, require_enabled=True, require_grants=True)

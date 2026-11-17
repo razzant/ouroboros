@@ -18,10 +18,13 @@ them a second time:
   stays a pointer: readable and correctable, never folded.
 - A **period** (a block of the old memory) is folded when every unit of it is.
 - A **story record's period and place** (``record_period``) are read from its room's own rows:
-  a page's covers, a retold record's rows (without rows, its block's recorded period, labelled),
-  a part's union over its members, an account's union over its sources (several rooms: their
-  rows' span, which is not every event between and seals no row). The aggregate a part
-  records is historical and not shown.
+  a page's covers, a retold record's rows (without rows, its block's recorded period, or a
+  transfer's period its source states; each labelled), a part's union over its members, an
+  account's union over its sources (several rooms: their rows' span, which is not every event
+  between and seals no row). The aggregate a part records is historical and not shown.
+- **Who wrote a record and how a transfer came** are printed in one form by every reader
+  (``record_byline``, ``transfer_words``): a claim the record carries, never a confirmed identity;
+  the words a transfer brought appear only ``quoted``, as data that never starts a line.
 - The **standing facts** every reader prints are counted here once: the story's pages and parts
   (``story_counts``) and one room's open rows by lane, their size and times, its unsealed notes,
   its pages and the last row they cover (``room_facts``).
@@ -45,15 +48,19 @@ Nothing here publishes a record or calls a model.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import pathlib
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Tuple
 
 from ouroboros import chat_chain
 from ouroboros.chronicle_import import legacy_frontier
-from ouroboros.chronicle_store import ChronicleStore, capture, capture_memo, source_time_span
-from ouroboros.dialogue_provenance import (in_reading_order, recorded_person, rooms_read_by_time, row_class,
-                                           row_provenance)
+from ouroboros.chronicle_store import ChronicleStore, capture, capture_memo, draft_signer, source_time_span
+from ouroboros.context_timing import counted, timed_section
+from ouroboros.dialogue_provenance import (in_reading_order, place_message_facts, recorded_person, rooms_read_by_time,
+                                           row_class, row_provenance)
 
 # The key of the memory view's last-capture fact in a task's ``llm_trace``.
 VIEW_TRACE_KEY = "memory_view"
@@ -87,7 +94,8 @@ _TRANSPORT_NESTED = {
     "identity": ("sends_as",),  # the account I send as (``_place_speaker``)
     "delivery": ("state",  # ``dialogue_provenance``, ``reaction_note``, the view's typed fact, ``place_activity``
                  "presence_provenance"),  # an older receipt's place facts (``place_row_facts``)
-    "message": ("reaction",),  # the typed reaction (``reaction_fact``): its words, or a row that is that act alone
+    "message": ("reaction",  # the typed reaction (``reaction_fact``): its words, or a row that is that act alone
+                "message_id", "forward_origin"),  # provider identity and word authorship (``places.owner_author``)
     "origin": ("kind", "task_id"),  # the work that sent my delivered message (``memory_view``'s own-row head)
     "conversation": ("title", "name", "full_name", "username", "topic_id",  # its own name (``RoomLabelResolver``)
                      "chat_type", "channel_type", "is_im", "is_mpim", "is_private", "visibility",  # who reads it
@@ -95,9 +103,9 @@ _TRANSPORT_NESTED = {
 }
 # Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read; 6: and the author
 # fact's; 7: the sending work, the conversation's name and audience, a finish's sentence and its fold, a project
-# closure notice's delivery): a stored prefix of another version is another source, read live until the
-# maintenance job ``memory_tail`` refills it.
-_META_VERSION = 7
+# closure notice's delivery; 8: provider id; 9: forwarded authorship and connector-facts digest): a prefix of another version
+# is another source, read live until the maintenance job ``memory_tail`` refills it.
+_META_VERSION = 9
 
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
 
@@ -135,6 +143,8 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
         from ouroboros.project_dialogue import _entry_source_identities, _text_sha256  # D15->D17 is lazy-only
 
         meta["text_sha256"] = _text_sha256(row.get("text"))
+        if facts := place_message_facts(row):  # same words alone do not make different forwards/files a repeat
+            meta["message_facts_sha256"] = hashlib.sha256(facts.encode("utf-8")).hexdigest()
         meta["source_keys"] = tuple(sorted(_entry_source_identities(row)))
     return meta
 
@@ -262,6 +272,7 @@ def _tail(root: Any, frontier: Mapping[str, Any]) -> Tail:
     return capture_memo(root, "tail", lambda: _read_tail(root, frontier))
 
 
+@timed_section("memory_view.tail")
 def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = False) -> Tail:
     """``_tail``'s read; ``terminal_only`` keeps the rows with a terminal status (the stored ones read alone)."""
     from ouroboros import dialogue_store as ds
@@ -278,11 +289,15 @@ def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = 
             gap = _projected(live[1:] if anchor else live)
             if state.get("complete") and end > state["upper"]:  # one zero-wait attempt; a busy lock leaves it
                 store.extend_tail(state, gap, {**state, "upper": end, "anchor": gap[-1][1:3] if gap else anchor})
-            return Tail([_entry(fact) for fact in stored + gap if not terminal_only or fact[5] is not None],
-                        bool(state.get("complete")))
+            rows = [_entry(fact) for fact in stored + gap if not terminal_only or fact[5] is not None]
+            counted("rows_read", 0 if terminal_only else len(rows))
+            counted("rows_new", 0 if terminal_only else len(gap))
+            return Tail(rows, bool(state.get("complete")))
     lower = chat_chain.position_boundary(root, source["frontier"])
-    return Tail([_entry(fact) for fact in _projected(chat_chain.iter_stream(root, lower=lower, upper=end))
-                 if not terminal_only or fact[5] is not None], False)
+    rows = [_entry(fact) for fact in _projected(chat_chain.iter_stream(root, lower=lower, upper=end))
+            if not terminal_only or fact[5] is not None]
+    counted("rows_read", 0 if terminal_only else len(rows))  # nothing stored: every row is read live, and none is new
+    return Tail(rows, False)
 
 
 _FILL_ROWS = 2_000  # rows per index transaction: bounds one publication-lock hold, so publishers interleave
@@ -418,6 +433,7 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
                 rooms[room] = in_reading_order(kept, timed, lambda entry: entry[1])
             if sealed is not None and refs and len(kept) < len(entries) and row_provenance(entries[-1][1]) == "place":
                 sealed[room] = [entry for entry in entries if entry[0]["row_sha256"] in refs]
+    counted("rows_open", len({entry[0]["row_sha256"] for entries in rooms.values() for entry in entries}))
     return rooms
 
 
@@ -634,18 +650,24 @@ def legacy_progress(units: List[LegacyUnit]) -> Dict[str, Any]:
 
 # --- the period and place of a story record ----------------------------------------------------
 
+_BASIS_WORDS = {"block": "block period", "stated": "stated by its source"}
+
+
 class Period(NamedTuple):
     """A story record's period as read from its room's rows: ``span`` (``source_time_span`` form, None when no
-    row and no block period is known), ``first`` (the stream position its story order starts from; -1 unknown)
-    and ``source``: ``rows`` (the room's own rows), ``block`` (a retold record without rows: its block's recorded
-    period and position) or ``mixed`` (a part over both)."""
+    row and no block or stated period is known), ``first`` (the stream position its story order starts from; -1
+    unknown) and ``source``: ``rows`` (the room's own rows), ``block`` (a retold record without rows: its block's
+    recorded period and position), ``stated`` (a transfer without rows: the period of events its source states, never
+    when it was written) or ``mixed`` (a part or account over several, each named in ``bases``)."""
     span: Optional[Dict[str, Any]]
     first: int
     source: str
+    bases: Tuple[str, ...] = ()
 
     def note(self) -> str:
         """What a reader prints after the period: nothing for the room's own rows, else whose period it is."""
-        return {"block": " (block period)", "mixed": " (partly block period)"}.get(self.source, "") if self.span else ""
+        named = [_BASIS_WORDS[basis] for basis in self.bases or (self.source,) if basis in _BASIS_WORDS]
+        return f" ({'partly ' if self.source == 'mixed' else ''}{', partly '.join(named)})" if self.span and named else ""
 
 
 def record_period(store: ChronicleStore, record: Mapping[str, Any], units: Mapping[str, LegacyUnit], *,
@@ -669,16 +691,21 @@ def record_period(store: ChronicleStore, record: Mapping[str, Any], units: Mappi
         if len(members) != len(ids or ()):
             members.append(Period(None, -1, "rows"))  # a source not in this chronicle: an incomplete period
         spans = [period.span for period in members if period.span]
-        sources = {period.source for period in members if period.span}
+        bases = {basis for period in members if period.span for basis in period.bases or (period.source,)}
         span = source_time_span([span[key] for span in spans for key in ("start", "end") if span.get(key)],
                                 incomplete=any(not period.span or period.span.get("incomplete") for period in members)
                                 ) if spans else None
         firsts = [period.first for period in members if period.first >= 0]
-        return Period(span, min(firsts) if firsts else -1, "mixed" if len(sources) > 1 else next(iter(sources), "rows"))
+        return Period(span, min(firsts) if firsts else -1, "mixed" if len(bases) > 1 else next(iter(bases), "rows"),
+                      tuple(sorted(bases)) if len(bases) > 1 else ())
     if record.get("kind") in ("legacy", "gap"):
         unit = units.get(str(record.get("id")))
         if unit is not None and unit.ts_span:
             return Period(dict(unit.ts_span), unit.first_pos, "rows")
+        meta = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+        if meta.get("transfer"):  # never a block's: the period its source states, if it states one
+            span = meta.get("stated_period") if isinstance(meta.get("stated_period"), Mapping) else {}
+            return Period(dict(span) if span.get("start") or span.get("end") else None, -1, "stated")
         raw = covers.get("raw_range") if isinstance(covers.get("raw_range"), Mapping) else {}
         span, pos = (raw.get("ts_span"), raw.get("pos")) if raw.get("status") == "exact" else (None, None)
         return Period(dict(span) if isinstance(span, Mapping) and (span.get("start") or span.get("end")) else None,
@@ -872,7 +899,7 @@ class ShortageFact:
     mode: str = ""
 
 
-_ROW_STEPS = frozenset({"F2", "F7"})  # my replies, this room's people: the steps that ask the mind
+_ROW_STEPS = frozenset({"F2", "F7"})  # this room's rows a step took: my replies (addresses or work lines) and its people
 _NARRATIVE_STEPS = frozenset({"F4", "F5l", "F5"})  # this room's retold page, story labels and pointers
 
 
@@ -884,7 +911,7 @@ def shortage_from_trace(trace: Any) -> Optional[ShortageFact]:
     narrative by label or pointer (F4, F5l, F5), names those records, and the window alone took
     them (``by_budget == 0``; an owner-selected mode target is no shortage of the window).
     ``other_room``: neither, but the floor folded the words or the line of a room of my other
-    conversations where my human or I spoke (``folded_rooms``, oldest first): the oldest of them.
+    conversations where my human or I spoke, beyond unread host/window facts (``folded_rooms``).
     Fact lines (F1), retold pointers (F3) alone, a foreign shape or no fact: ``None``.
     """
     fact = trace.get(VIEW_TRACE_KEY) if isinstance(trace, Mapping) else None
@@ -930,14 +957,64 @@ def _read_call(record_id: Any) -> str:
     return f"memory_read(node_id='{record_id}')"
 
 
-def _author_words(author: Any) -> str:
+_ATTESTED = {"source": "signed in the source", "importer": "stated by the importer"}
+# A transfer's facts its readers carry beside its author (``chronicle_import``): (entry key, metadata key).
+TRANSFER_FACTS = (("transfer", "transfer"), ("written_at", "legacy_written_at"), ("stated_period", "stated_period"))
+_UNPRINTED = frozenset({"Cc", "Cf", "Zl", "Zp"})  # control, format and line/paragraph separator characters
+
+
+def quoted(value: Any) -> str:
+    """Words a transfer brought (a name, a model, a title) inline as data: one JSON string literal with every line
+    break, control and format character escaped, so in a header it never starts a line, a heading or a role. The
+    stored value stays whole; this is only how a reader prints it."""
+    return "".join(f"\\u{ord(char):04x}" if unicodedata.category(char) in _UNPRINTED else char
+                   for char in json.dumps(str(value), ensure_ascii=False))
+
+
+def author_byline(author: Any, *, carried: bool = False) -> str:
+    """Who wrote a record, as every reader prints it: ``mind (root, task t1)``; a delegated focus's draft
+    ``helper (child, task X)``; a transfer's ``source_author ("<label>"; model "<model>"; signed in the source)``
+    (``stated by the importer``; an unstated field says so) or ``source_author (author unknown; model unknown)``;
+    the signature of an old writer a transfer ``carried``, ``legacy_helper (recorded writer "…"; attribution "…")``:
+    its own fields as data, never this installation's account of an upgrade; any other kind with its distinct
+    writer, operation and attribution."""
     author = author if isinstance(author, Mapping) else {}
     kind = str(author.get("kind") or "unknown author")
-    if kind == "mind":
-        focus = author.get("focus") if isinstance(author.get("focus"), Mapping) else {}
-        return f"mind ({focus.get('role') or 'focus not recorded'}, task {author.get('task_id') or 'not recorded'})"
-    detail = author.get("writer") or author.get("operation") or author.get("attribution") or ""
-    return f"{kind} ({detail})" if detail else kind
+    if kind == "source_author":
+        if author.get("basis") not in _ATTESTED:  # neither the source nor the importer states who or which model
+            return "source_author (author unknown; model unknown)"
+        label = quoted(author["label"]) if author.get("label") else "author not stated"
+        model = quoted(author["model"]) if author.get("model") else "not stated"
+        return f"source_author ({label}; model {model}; {_ATTESTED[author['basis']]})"
+    if carried:
+        recorded = "; ".join(f"{key} {quoted(author[key])}" for key in ("writer", "operation", "attribution") if author.get(key))
+        return f"{kind} (recorded {recorded})" if recorded else f"{kind} (nothing more recorded)"
+    if kind == "mind" or kind == "helper" and isinstance(author.get("focus"), Mapping):
+        return f"{kind} ({draft_signer(author)})"
+    details = "; ".join(dict.fromkeys(str(author[key]) for key in ("writer", "operation", "attribution") if author.get(key)))
+    return f"{kind} ({details})" if details else kind
+
+
+def record_byline(record: Mapping[str, Any]) -> str:
+    """``author_byline`` of a stored record: a transfer's old writer as its carried signature."""
+    meta = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+    return author_byline(record.get("author"), carried=bool(meta.get("transfer")))
+
+
+def transfer_words(record: Mapping[str, Any]) -> str:
+    """How a transfer (``chronicle_import``) came here and when its source says its words were written; ``''``
+    for any other record. ``ts`` is the local publication, never the source's date; who ran it is ``quoted``."""
+    meta = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+    moved = meta.get("transfer") if isinstance(meta.get("transfer"), Mapping) else {}
+    if not moved:
+        return ""
+
+    def named(key: str, missing: str) -> str:
+        return quoted(moved[key]) if moved.get(key) else missing
+
+    return (f"transferred {str(record.get('ts') or '')[:10] or 'date not recorded'} by "
+            f"{named('operator', 'operator not recorded')} with {named('tool', 'tool not recorded')}, "
+            f"task {named('task_id', 'not recorded')}; written {meta.get('legacy_written_at') or 'date not stated'}")
 
 
 def _change_line(record: Mapping[str, Any], released: Optional[Mapping[str, Any]] = None) -> str:
@@ -963,7 +1040,7 @@ def _change_line(record: Mapping[str, Any], released: Optional[Mapping[str, Any]
     if kind == "mark":
         ref = record.get("target_ref") if isinstance(record.get("target_ref"), Mapping) else {}
         target = ref.get("id") if ref.get("kind") == "chronicle" else None
-    return (f"- {kind}{draft} {record.get('id')} {where}, by {_author_words(author)}" + (f": {what}" if what else "")
+    return (f"- {kind}{draft} {record.get('id')} {where}, by {author_byline(author)}" + (f": {what}" if what else "")
             + f"; {_read_call(record.get('id'))}" + (f"; target {_read_call(target)}" if target else ""))
 
 

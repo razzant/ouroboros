@@ -23,7 +23,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Mapping, Optional, Tuple
 
 # Canonical host-row classification; physical requests omit this top-level metadata.
 HOST_CONTEXT_KIND_KEY = "_host_context_kind"
@@ -203,17 +203,20 @@ def request_context_budget(
             "target_deficit_tokens": (max(0, measured + reserve - target_tokens) if target_tokens else None),
             "capacity_deficit_tokens": (max(0, measured + reserve - window_tokens) if window_tokens else None)}
 
-# One overflow vocabulary for every seam that must recognize a CONTEXT-WINDOW
-# overflow (Main provider-code precedence and the local transport). A provider
-# code or message shape added here reaches both seams at once; per-module copies
-# drifted independently before.
+# One vocabulary of refusals a smaller input cures, for every seam that must
+# recognize them (Main provider-code precedence and the local transport): the
+# context window, or one input string's length. A provider code or message shape
+# added here reaches both seams at once; per-module copies drifted independently.
 CONTEXT_OVERFLOW_CODES = frozenset({
     "context_length_exceeded",
     "context_window_exceeded",
     "model_context_window_exceeded",
     "prompt_too_long",
     "input_too_long",
+    "string_above_max_length",
 })
+#: A refusal of one input string's length (OpenAI's 10 MiB text limit, 07.11.2026) teaches no token window.
+INPUT_STRING_LENGTH_CODES = frozenset({"string_above_max_length"})
 CONTEXT_OVERFLOW_MESSAGE_MARKERS = (
     "context_length_exceeded",
     "context length",
@@ -238,11 +241,21 @@ OUTPUT_OR_BODY_SIZE_MARKERS = (
 
 
 def output_or_body_size_message(text: Any) -> bool:
-    """True for output/body limits, excluding the combined input+output window."""
+    """True for output/body limits, excluding the combined input+output window.
+
+    A sentence that names ``max_tokens`` is about the window, not the output limit, when it counts the request's
+    input under the window it names and no reply above it (Anthropic's «input length and max_tokens exceed context
+    limit», vLLM's «'max_tokens' … is too large: R. … maximum context length is W tokens and your request has I input
+    tokens»): shrinking the input makes the unchanged reply fit. A reply above the window it names is an output limit."""
     low = str(text or "").lower().replace("`", "")
     if "input length and max_tokens exceed context limit" in low:
         return False  # shrinking input can make the unchanged output reserve fit
-    return any(marker in low for marker in OUTPUT_OR_BODY_SIZE_MARKERS)
+    if not any(marker in low for marker in OUTPUT_OR_BODY_SIZE_MARKERS):
+        return False
+    from ouroboros.capability_evidence import _parse_ctx_requested
+
+    (stated_input, stated_reply, _), limit = _parse_ctx_requested(low), _parse_ctx_limit_number(low)
+    return not (limit and 0 < stated_input < limit and stated_reply < limit)
 
 
 # Limit phrases share their parser with recovery. Generic lengths require token
@@ -280,6 +293,60 @@ def context_overflow_message(text: Any) -> bool:
         return False
     return any(marker in low for marker in CONTEXT_OVERFLOW_MESSAGE_MARKERS) or _parse_ctx_limit_number(low) > 0
 
+
+SIZE_REFUSAL_STATUSES = frozenset({400, 413, 422})
+_PLAIN_INTEGER = re.compile(r"(?<![\w.,-])\d+(?![\w]|[.,]\d)")
+
+
+def size_refusal(answer: Any, status: Optional[int], typed: Any = (), printed: str = "") -> Optional[Tuple[str, str, str, str]]:
+    """How a refused request's answer (``_usage_response.provider_answer``) says a smaller input cures it:
+    ``(basis, code, speaker, sentence)``, else None.
+
+    The final status sets the family first: only a client refusal (400, 413, 422, or an answer that carries no
+    status) is read for size; any other status is its own family whatever its words say. Inside the family the
+    evidence counts from any layer of the same attempt, earlier upstream attempts included: a typed size code
+    (``typed``, also among the failure's own ``typed`` values); then the frozen list, which is the phrase markers
+    and the unit-guarded parser above, never extended (``frozen``; a failure whose body does not carry the words
+    still speaks through its ``printed`` form, which is never quoted); HTTP 413 alone (``status_413``). The
+    basis says what the answer may teach (``context_window.record_refusal``). A caller that types causes of
+    another kind applies them first.
+    """
+    if status and status not in SIZE_REFUSAL_STATUSES:
+        return None
+    stated = next(((who, text) for who, text, history in answer.said if not history and context_overflow_message(text)), None)
+    for code in typed:
+        if code.lower() in CONTEXT_OVERFLOW_CODES:
+            return "typed", code, *(stated or answer.innermost())
+    for speaker, code, history in answer.codes:
+        if code.lower() in CONTEXT_OVERFLOW_CODES:
+            own = [text for who, text, earlier in answer.said if (who, earlier) == (speaker, history)]
+            # Its sentence that states the size, else its last: a gateway's empty wrapper line is not the cause.
+            return "typed", code, speaker, next((text for text in own if context_overflow_message(text)), own[-1] if own else "")
+    for speaker, text, _history in answer.said:
+        if context_overflow_message(text):
+            return "frozen", "", speaker, text
+    if printed and context_overflow_message(printed):
+        return "frozen", "", "", ""
+    return ("status_413", "", *answer.innermost()) if status == 413 else None
+
+
+def cited_declared_limit(said: Any, reply_allowance: int, *declarations: Any) -> Optional[Tuple[int, Any, str, str]]:
+    """``(N, its declaration, speaker, sentence)`` for a plain decimal integer a sentence of the attempt cites that
+    is above the reply allowance the refused request sent and EQUALS a token limit declared for the route.
+
+    Each of ``declarations`` maps a declared limit to what it declares; they are read in order, a callable one
+    only when a cited integer is still unmatched. Equality compares two statements of one party, so it needs no
+    interval and no acceptance history; an output cap refuses only a reply larger than itself, so the allowance
+    keeps it quiet without reading a word. Recognition only: the number states no unit and teaches no window."""
+    cited = [(int(match.group()), speaker, text) for speaker, text, _history in said
+             for match in _PLAIN_INTEGER.finditer(text) if int(match.group()) > reply_allowance]
+    for declared in declarations if cited else ():
+        declared = declared() if callable(declared) else declared
+        for number, speaker, text in cited:
+            if number in declared:
+                return number, declared[number], speaker, text
+    return None
+
 MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate"]
 ReclaimStatus = Literal[
     "applied", "no_eligible", "checkpoint_failed", "no_measurable_shrink", "binding_mismatch",
@@ -301,6 +368,17 @@ class ContextReclaimRequest:
     keep_unit_ids: Optional[Tuple[str, ...]] = None
     restore_unit_refs: Tuple[Dict[str, Any], ...] = ()
     schema_names: Optional[Tuple[str, ...]] = None
+    # Earlier notes (capsule units) the mind names to fold into its new note; every other note stays.
+    replace_note_ids: Tuple[str, ...] = ()
+
+
+def authored_view_fields(pending: Mapping[str, Any]) -> Dict[str, Any]:
+    """A queued ``compact_context`` request's authored-view fields, as both of its executors pass them
+    (Main's ``loop_round_limits`` and the native review episode). A request queued before
+    ``replace_note_ids`` existed, such as one restored after a pause, names no note to replace."""
+    return {**{key: pending[key] for key in ("working_note", "expected_view_revision", "keep_unit_ids",
+                                             "restore_unit_refs", "schema_names")},
+            "replace_note_ids": tuple(pending.get("replace_note_ids") or ())}
 
 
 @dataclass(frozen=True)
@@ -321,6 +399,8 @@ class ContextReclaimReceipt:
     source_refs: Tuple[Dict[str, Any], ...] = ()
     schema_names: Optional[Tuple[str, ...]] = None
     fit: Optional[Dict[str, Any]] = None
+    # An applied fold's replaced notes: ``{"checkpoint_ref", "notes": [{unit_id, raw_sha256, first_line}]}``.
+    replaced_notes: Optional[Dict[str, Any]] = None
 
 
 class SummarizerContextOverflow(RuntimeError):

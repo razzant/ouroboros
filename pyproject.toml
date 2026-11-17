@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "7.10.0"
+version = "7.11.0"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -54,7 +54,9 @@ dependencies = [
     # dependencies because the packaged hermetic commit gate invokes them.
     "pytest-xdist>=3.5",
     "pytest-timeout>=2.1",
-    "mcp>=1.29,<2.0",
+    # Security floor: CVE-2026-116686 ($ref fetch in tool-result validation) and
+    # CVE-2026-116685 (cross-origin redirects) are fixed in the 1.x line at 1.30.0.
+    "mcp>=1.30,<2.0",
     "PyYAML>=6.0",
     "croniter",
     # Upper-bounded: tree-sitter 0.25.x + language-pack 1.x changed the grammar/
@@ -103,7 +105,7 @@ all = [
 ]
 
 [dependency-groups]
-dev = ["ruff>=0.12"]
+dev = ["ruff>=0.12", "sentry-sdk==2.71.0"]
 
 [tool.uv]
 required-version = "==0.12.1"

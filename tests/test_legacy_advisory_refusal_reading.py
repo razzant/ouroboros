@@ -262,7 +262,8 @@ def test_task_detail_and_history_read_it_the_same_way_and_the_published_main_row
 
 
 def test_a_current_advisory_author_finish_keeps_its_own_reading():
-    """The result review's informed author finish is unchanged: Done, its critic's FAIL kept beside it."""
+    """The result review's informed author finish keeps its reading: the author's acceptance, its critic's FAIL kept
+    beside it, shown as Done with warnings (owner, 8 Nov 2026: an acceptance the reviewers did not approve is flagged)."""
     record = {"status": "completed", "reason_code": "final_message", "outcome_axes": {
         "execution": {"status": "ok"},
         "objective": {"status": "pass", "source": "author_acceptance", "reason": "author_finish"},
@@ -270,4 +271,4 @@ def test_a_current_advisory_author_finish_keeps_its_own_reading():
                    "acceptance_decision": {"status": "finalized_unaccepted", "source": "result_review",
                                            "reason": "author_finish", "enforcement": "advisory"}}}}
     assert normalize_outcome_axes(record)["objective"]["status"] == "pass"
-    assert completion_status_label(record, {}) == "Done"
+    assert completion_status_label(record, {}) == "Done with warnings"

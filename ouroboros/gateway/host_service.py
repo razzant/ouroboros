@@ -25,6 +25,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ouroboros.contracts.chat_id_policy import A2A_CHAT_ID_MAX, A2A_CHAT_ID_MIN, is_a2a_chat_id
+from ouroboros.deployment_extensions import trust_gap
 from ouroboros.event_bus import get_global_event_bus
 from ouroboros.config import WS_RELAY_BURST, WS_RELAY_REFILL_PER_SEC
 from ouroboros.gateway._helpers import run_sync_to_completion
@@ -37,7 +38,6 @@ from ouroboros.presence_delivery import (
 from ouroboros.skill_loader import (
     find_skill,
     grant_status_for_skill,
-    load_enabled,
 )
 from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
 
@@ -308,8 +308,10 @@ class HostServiceContext:
             raise HostServiceAuthError(f"skill {skill_name!r} is not installed")
         if not loaded.review.gate_for(loaded.content_hash)["executable_review"]:
             raise HostServiceAuthError(f"skill {skill_name!r} has no current executable review authority")
-        if not load_enabled(self.data_dir, skill_name):
+        if not loaded.enabled:  # the effective switch (``deployment_extensions``), as the loader reads it
             raise HostServiceAuthError(f"skill {skill_name!r} is disabled")
+        if loaded.manifest.is_extension() and trust_gap(loaded.name, loaded.skill_dir, loaded.content_hash):
+            raise HostServiceAuthError(f"skill {skill_name!r} is not code this deployment's service runs")
         if str(token_payload.get("content_hash") or "") != str(loaded.content_hash or ""):
             raise HostServiceAuthError(f"skill {skill_name!r} token is stale")
 
@@ -596,6 +598,16 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                         **({"chat_attachments": refs} if refs else {})}
         if payload.get("reply_to"):  # no reference adds nothing to a plain inject's kwargs
             metadata["reply_to"] = payload["reply_to"]
+        from supervisor.message_ingress import ui_control_fact
+
+        try:  # a skill's control (an inline button) composed this text: the press is the owner's, not the words
+            control = ui_control_fact(payload.get("ui_control"), pressed_at=utc_now_iso(), owner_text=False)
+        except ValueError as exc:
+            return _json_error(str(exc), 400)
+        if control and client_message_id:  # a correlated operation is its accepted owner row; a press writes none
+            return _json_error("ui_control cannot name a client_message_id: a press is not an owner message", 400)
+        if control:
+            metadata["ui_control"] = control
         bridge = ctx.bridge_getter()
         response_event: asyncio.Event = asyncio.Event()
         response_holder: dict[str, str] = {}

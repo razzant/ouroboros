@@ -37,6 +37,8 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/skills/{skill}/review-history/{job_id}` | the skill's ledger record, else a legacy `review_history.jsonl` tail |
 | POST | `/api/owner/skills/{skill}/attest-review` | owner-only skip of the LLM review; deterministic preflight still runs |
 | POST | `/api/skills/{skill}/grants` | |
+| GET | `/api/skills/{skill}/mcp-connect` | |
+| POST | `/api/skills/{skill}/mcp-connect` | |
 | POST | `/api/skills/{skill}/reconcile` | |
 | GET | `/api/marketplace/clawhub/search` | |
 | GET | `/api/marketplace/clawhub/installed` | |
@@ -76,19 +78,20 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/onboarding/complete` | |
 | GET | `/api/onboarding/complete` | |
 | POST | `/api/onboarding/subagents/preview` | |
-| GET | `/api/settings` | |
-| POST | `/api/settings` | origin, change record (§7) |
+| POST | `/api/onboarding/model-catalog` | draft's access, nothing saved |
+| GET | `/api/settings` | effects, tokens (§7) |
+| POST | `/api/settings` | origin, conditions, receipt (§7) |
 | POST | `/api/settings/secret` | |
 | GET | `/api/review-pool` | |
 | GET | `/api/claudexor/status` | `last_exit`/`memory` (§9), resource-catalog evidence (§3); never wakes |
-| POST | `/api/claudexor/quota/refresh` | full or exact account (§3) |
+| POST | `/api/claudexor/quota/refresh` | full/exact; joins identical attempt in flight (§3) |
 | POST | `/api/claudexor/account-resets` | exact request (§3) |
 | GET | `/api/claudexor/account-resets/{operation_id}` | receipt inspection (§3) |
 | POST | `/api/claudexor/wake` | |
 | GET | `/api/claudexor/restart` | passive preview of what ends (§3) |
 | POST | `/api/claudexor/restart` | preview `{token}`: stop, then the ordinary start |
-| GET | `/api/claudexor/maintenance/harnesses` | passive inspection |
-| POST | `/api/claudexor/maintenance/operations` | 202 handle; Node/npm preparation: 409 `maintenance_restart_required`, 409/503 `maintenance_preparation_failed`; `not_submitted` covers this attempt only (§6) |
+| GET | `/api/claudexor/maintenance/harnesses` | selection/newest/actions/receipt; `checkLatest` reads vendor HTTPS |
+| POST | `/api/claudexor/maintenance/operations` | 202 latest/exact handle; same-key rejoin; refusal covers this attempt (§6) |
 | GET | `/api/claudexor/maintenance/operations/{operation_id}` | retained engine facts |
 | POST | `/api/claudexor/maintenance/operations/{operation_id}/cancel` | acknowledgement does not prove termination |
 | POST | `/api/claudexor/login` | |
@@ -103,14 +106,19 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/owner/context-mode` | |
 | POST | `/api/owner/effort-range` | |
 | POST | `/api/owner/subagents-mode` | `{mode, project_id?}` → `{ok, project_id, subagents_mode, cognition}` (§7) |
+| POST | `/api/owner/chat-model` | |
+| POST | `/api/owner/chat-processing` | |
 | POST | `/api/owner/safety-mode` | |
 | POST | `/api/owner/safety-model` | |
 | POST | `/api/owner/safety-rules` | |
-| GET | `/api/places` | place records and installed connector declarations |
+| GET | `/api/places` | place records, circles and installed connector declarations |
 | POST | `/api/places` | connect a place |
 | POST | `/api/places/{place_id}` | atomic owner-authored choices |
 | GET | `/api/places/{place_id}/rooms` | captured canonical conversation rooms (§12) |
 | DELETE | `/api/places/{place_id}` | disconnect, retaining room history |
+| POST | `/api/circles` | |
+| POST | `/api/circles/{circle_id}` | |
+| DELETE | `/api/circles/{circle_id}` | |
 | POST | `/api/owner/capability-ack` | |
 | GET | `/api/ui/contributions` | live skill controls, speech providers, offers |
 | GET | `/api/ui/preferences` | |
@@ -140,6 +148,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/tasks/{task_id}/artifacts/{name}` | own stores: POSIX no-follow/Windows NT relative handles; admission before child-store metadata; SVG `sandbox` CSP + `nosniff` (`gateway/task_archive.py`) |
 | POST | `/api/tasks/{task_id}/cancel` | (§5 Stop policy and hurry) |
 | POST | `/api/tasks/{task_id}/hurry` | (§5 Stop policy and hurry) |
+| POST | `/api/tasks/{task_id}/model` | `ouroboros/gateway/task_model.py`: durable root primary; set/follow/return/wait/keep |
 | POST | `/api/tasks/{task_id}/pause` | (§6 Owner Pause of a whole tree) |
 | POST | `/api/tasks/{task_id}/owner-keep` | `OwnerKeepRequest`; keep or release exactly this task's materials |
 | POST | `/api/tasks/{task_id}/continue` | (§6 Continue after interruption or an unfinished author stop) |
@@ -172,16 +181,22 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/storage/free/preview` | pure preview; 202, start/join |
 | POST | `/api/storage/free` | `StorageFreeRequest`: exact pool `items`, `groups`, or `manual` ids of `view=manual` with `accept_loss: true`; 202, `started`/`reason` |
 | GET | `/api/storage/free/items` | `StorageFreeItemsResponse`: one `view=` page: `pool`, `excluded`, `manual` or `outcomes` |
+| GET | `/api/services/kept` | `KeptServicesResponse` (§9) |
+| POST | `/api/services/kept/{launch_id}/stop` | `reason`; one launch, fresh outcome |
 | POST | `/api/storage/free/cancel` | stop preview/run; freed stays freed |
 | GET | `/api/evolution-data` | |
-| GET | `/api/projects` | 200 rows; `all=1` all; `id` (active/deleting) or `chat_id` (active): one room (missing → none; unreadable → error) |
+| GET | `/api/projects` | |
 | POST | `/api/projects` | |
 | POST | `/api/projects/from-task` | |
 | POST | `/api/projects/{project_id}/update` | |
 | POST | `/api/projects/{project_id}/delete` | |
+| GET | `/api/projects/{project_id}/folder` | |
+| POST | `/api/projects/{project_id}/folder` | |
 | GET | `/api/fs/dirs` | |
 | GET | `/api/chat/history` | |
+| GET | `/api/chat/search` | |
 | GET | `/api/logs/{name}` | |
+| GET | `/api/logs/{name}/raw` | |
 | POST | `/api/chat/upload` | |
 | DELETE | `/api/chat/upload` | pending uploads only, else 409 |
 | POST | `/api/local-model/start` | |
@@ -253,6 +268,6 @@ Each socket has one writer and outbox (`ws._Connection`), so a slow or half-open
 
 #### Reconnect and recovery
 
-The browser reconnects with bounded exponential delay; a watchdog closes a silent seemingly-open connection. One served-page decision (`ws.js decideServedPage`) governs the post-open state read and the socket-down probe, so a transient drop cannot destroy in-page state. The core attests only pages it serves: without `served_ui` (an older core), or for its marked page while it serves builtin, `decide()` reloads on a changed or unprovable SHA (a restarted server must not keep old JS/CSS alive in PyWebView), and an unchanged one keeps the page and its queued frames (an unversioned `/api/state` with no remembered SHA keeps it too, accepting possibly stale assets); the marked page reloads once after a restart applied a directory or `none`, and an unmarked page owns its refresh and only reconnects. A failed/non-OK state read never reloads (a seconds-old server can answer 500); `ws.js` forces at most one reload per disconnect episode.
+The browser reconnects with bounded exponential delay; a watchdog closes a silent seemingly-open socket. One served-page decision (`ws.js decideServedPage`) governs the post-open read and the socket-down probe, so a transient drop keeps in-page state. The core attests only pages it serves: without `served_ui` (an older core), or for its marked page while it serves builtin, `decide()` reloads on a changed or unprovable SHA and keeps the page and its queued frames on an unchanged one or an unversioned `/api/state` with no remembered SHA (possibly stale assets); the marked page reloads once after a restart applied a directory or `none`; an unmarked page owns its refresh and only reconnects. A failed/non-OK read never reloads (a seconds-old server can answer 500). Four healthy probes reload only a page that connected, once per disconnect episode; an attempt failing after one is `serverAnswersWhileDown`: an observation, not a cause.
 
 Each Chat instance handles `open` by resynchronizing durable history (a reconnect adds no feed row) and `close` by withdrawing online and accounting presentation; deduplication covers the overlap between live frames and REST replay, and large history parsing runs off the server event loop. Not every transient frame is persisted: durable chat rows, task results, queue snapshots, Project revisions, review/cost ledgers and lifecycle state remain the recovery authorities.

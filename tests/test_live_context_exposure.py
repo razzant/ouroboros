@@ -59,7 +59,7 @@ def test_fresh_connection_marks_only_fitted_pixels_seen(host_world, carried):
         call.attention.frames['owner'] = Video(payload, 'image/jpeg', 'owner')
         async def complete(): return None
         async def wait(): await asyncio.Future()
-        call.peers, call.provider, call.mailbox, call.refit_boundary = complete, wait, wait, wait
+        call.peers, call.provider, call.mailbox = complete, wait, wait
         call.finalize = complete
         await call.consume(SimpleNamespace(renewal_ready=True))
         sent = []

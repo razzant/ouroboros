@@ -14,6 +14,25 @@ def without_comments(text):
     return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
 
 
+def test_settings_minimum_spans_the_content_tracks_without_the_result():
+    css = without_comments((WEB / 'settings.css').read_text(encoding='utf-8'))
+
+    def rule(selector):
+        found = re.search(re.escape(selector) + r'\s*\{([^{}]*)\}', css)
+        assert found, selector
+        return found.group(1)
+
+    minimum = rule('.settings-row::before')
+    assert 'content: "";' in minimum
+    assert 'grid-area: 1 / 1 / 3 / -1;' in minimum
+    assert 'min-height: calc(52px - 2 * (var(--space-3) + 1px));' in minimum
+    assert 'min-height: 52px;' in rule('.ui-card > .settings-row:only-child::before')
+    assert 'grid-row: 1 / 4;' in rule('.settings-row[data-wide]::before')
+    assert 'grid-row: 1 / 4;' in rule('.settings-row[data-kind="choices"]::before')
+    assert 'content: none;' in rule('.dashboard-settings[data-solo] > .settings-row::before')
+    assert 'grid-column: 1 / -1;' in rule('.settings-row > .settings-row-result')
+
+
 # No exception: status/provenance/stat labels keep the renderer's sentence case.
 UPPERCASE_ALLOWLIST = {}
 
@@ -80,7 +99,7 @@ def test_width_inventory_sees_multiline_compound_queries_and_repeated_debt():
 # before `+`/`~` when an attribute or class in its argument changes, and for a scope-breaking argument. Browser tests
 # assert geometry, not cost, so this static check is the guard. Rewrite by asking from the styled element
 # (`.a > .x:has(~ .b)`) or by letting a common parent hold the `:has()` and set an inherited custom property the styled
-# element reads (`--chat-feed-reserve` in style.css).
+# element reads (`--project-answer-tail` in style.css).
 COMBINATORS = " \t\n>+~"
 
 
@@ -145,6 +164,62 @@ def test_has_stays_in_the_subject_compound():
     assert not found, "Keep :has() in its subject compound (comment above):\n" + "\n".join(found)
 
 
+# A `:has()` on what holds a room's rows. Measured in WebKit (2026-11-05): a room's `:has()` beside the rows' own made each
+# live card's log frame cost 3-4x (about 8 -> 2 ms with 20 rooms kept) and grow with every room kept away, though hidden; a
+# busy burst's script doubled. No browser test sees cost: ask from a narrower element, or from the element itself with
+# `:empty` (`.chat-panel-statusbar`, style.css).
+ROW_HOLDERS = re.compile(r"(?:\.chat-instance-panel|\.project-panel|\.chat-messages|#chat-messages|#page-chat|^body|^html|:root)(?![\w-])")
+
+
+def has_on_a_row_holder(selectors):
+    """A `:has()`, at any depth of the subject compound, whose compound names an element holding a room's rows."""
+    for selector in top_level(re.sub(r'"[^"]*"|\'[^\']*\'', '""', selectors), ","):
+        subject = top_level(selector, COMBINATORS)[-1]
+        if ":has(" in subject.lower() and ROW_HOLDERS.search(re.sub(r"\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)", "", subject)):
+            return True
+    return False
+
+
+def test_no_has_on_an_element_holding_a_rooms_rows():
+    found = [f"{path.relative_to(ROOT).as_posix()}:{line}: {' '.join(selectors.split())}" for path in first_party_sheets()
+             for line, selectors in selectors_by_line(path.read_text(encoding="utf-8")) if has_on_a_row_holder(selectors)]
+    assert not found, "Ask from a narrower element or with :empty (comment above):\n" + "\n".join(found)
+    for selector in (".project-panel .chat-instance-panel:has(> .bar > :not([hidden]))", ".x, .chat-messages:not(:has(> *))",
+                     "#page-chat:has(.y)", "body:has(.y)", ".project-panel:has(.y)", ":root:has(.y)"):
+        assert has_on_a_row_holder(selector), selector
+    for selector in (".chat-bubble:has(> .x)", ".project-panel-bar:has(> .x)", ".chat-messages > .row:has(.x)",
+                     ".project-panel .chat-panel-statusbar:not(:empty) ~ .chat-messages", ".nobody:has(.chat-messages)"):
+        assert not has_on_a_row_holder(selector), selector
+
+
+# DEVELOPMENT "Design System": no `:has()` argument tests `:empty`, at any depth. The system WebKit (the macOS app's
+# WKWebView, Safari, iOS; measured on 26.4, 2026-11-15) does not re-match it when content comes or goes after the
+# first paint, so the rule keeps its first answer until something else restyles the subtree: Back placed in a header
+# painted without it stood alone at the window's top edge (owner 14.11), and a Settings row whose words came later kept
+# its line hidden. Playwright's WebKit re-matches it, so no browser test sees this; this static check is the guard. Ask
+# for a child (`.x:has(> .slot > *)`) where the tested element only holds elements, or let the text's one writer say it
+# in an attribute the sheet keys on (`data-no-meta`, ui_primitives.js setRowMeta). A plain `:empty` on the element
+# itself is re-matched.
+def empty_in_has(selectors):
+    """A `:has()` whose argument tests `:empty`, at any depth (inside `:not()`/`:is()`, after a combinator)."""
+    selectors = re.sub(r'"[^"]*"|\'[^\']*\'', '""', selectors)  # quoted text is never a selector
+    return any(re.search(r"(?<!\\):empty(?![\w-])", argument, re.I) for _, argument in arguments(selectors, "has"))
+
+
+def test_has_never_tests_empty():
+    found = [f"{path.relative_to(ROOT).as_posix()}:{line}: {' '.join(selectors.split())}" for path in first_party_sheets()
+             for line, selectors in selectors_by_line(path.read_text(encoding="utf-8")) if empty_in_has(selectors)]
+    assert not found, "Ask for a child or a writer's attribute, never :empty inside :has() (comment above):\n" + "\n".join(found)
+    for selector in (".a:has(:empty)", ".a:has(> .b:empty)", ".a:not(:has(> :not(:empty)))", ".a:has(> :is(.b, .c:EMPTY))",
+                     ".a:has(+ .b > .c:not(:empty))", ".a:has(~ .b .c:empty) .d", ".x, .a:is(.b:has(> .c > :empty))"):
+        assert empty_in_has(selector), selector
+    for selector in (".a:empty", ".a:not(:empty) ~ .b", ".a:has(> *)", ".a:not(:has(> .b > *))", ".a:empty:has(> .b)",
+                     ".a:has(> .is-empty)", '.a:has([aria-label=":has(:empty)"])', ".a:has(> .b\\:empty)"):
+        assert not empty_in_has(selector), selector
+    sheet = '/* .a:has(:empty) { } */ .b:empty::after { content: ":has(:empty)"; } .c:has(> .d > *) { color: red; }'
+    assert [(line, empty_in_has(selectors)) for line, selectors in selectors_by_line(sheet)] == [(1, False), (1, False)]
+
+
 def test_has_guard_reads_every_selector_position():
     css = """
         /* .x:has(.y) .z { color: red; } */
@@ -159,7 +234,7 @@ def test_has_guard_reads_every_selector_position():
         .y:has(> .z) .aa { color: red; }
         .ab:has(:not(.cd .ef)), .gh:has(> :is(.ij, .kl:hover)) { color: red; }
         .mn:has(> :is(.op, [aria-label="q r :has(.s) t"])) { color: red; }
-        .card > .button:not(:has(~ .foot > .meta:not(:empty))), .p:has(.btn):has(+ .t) { padding: 0; }
+        .card > .button:not(:has(~ .foot > .meta > *)), .p:has(.btn):has(+ .t) { padding: 0; }
         #page .hdr[data-empty]:has(~ .scroll .card.dragging), .bar:has(.btn) + .time { margin: 0; }
     """
     assert [(line, unscoped_has(selectors)) for line, selectors in selectors_by_line(css)] == [

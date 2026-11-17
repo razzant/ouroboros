@@ -2,17 +2,21 @@
 
 Review surfaces, keyless throughout, on the wave-1/2 skeleton.
 Every scenario asserts DURABLE artifacts (never an HTTP 200 alone, never a
-harness exit code) and synchronizes by durable-event polling:
+harness exit code) and synchronizes by durable-event polling. Outside Cyber Pro
+every outcome of a committing call, a clean PASS included, returns to the author
+before any Git effect, and a commit lands only as the author's explicit
+continuation on the returned ``review_reference``; no review setting changes that
+(the Blocking setting retired), so no scenario here sets one:
 
-* S15 — COMMIT TRIAD+SCOPE, ADVISORY: critical feedback returns before Git
+* S15 — COMMIT TRIAD+SCOPE, CRITICAL FEEDBACK: critical feedback returns before Git
   effects; the scripted author reads its real reference and explicitly continues
-  without another paid panel. The commit lands with a hash-bound author record,
-  original criticism and the loud ``review_advisory_override`` event/counter.
-  S15+S16 assert the same organ under both enforcement values.
-* S16 — COMMIT TRIAD+SCOPE, BLOCKING enforcement class: a critical triad FAIL
-  blocks the commit (repo HEAD does not move), a byte-identical resubmission is
-  refused FREE with the typed ``IDENTICAL_DIFF_REFUSED`` (no reviewer paid
-  twice for the same bytes), and a fixed diff passes clean review and lands.
+  over it without another paid panel. The commit lands with a hash-bound author
+  record, original criticism and the loud ``review_advisory_override`` event/counter.
+* S16 — COMMIT TRIAD+SCOPE, REVISION AFTER CRITICAL FEEDBACK: a critical triad FAIL
+  returns before Git (repo HEAD does not move), a byte-identical resubmission
+  returns the same outcome at $0 (no reviewer paid twice for the same bytes), and
+  the fixed diff buys one fresh wave whose clean PASS also returns first; the
+  author's continuation on that PASS lands exactly the fixed bytes, once.
   Plus the post-verdict revalidation contract, pinned live: the staged material
   is mutated WHILE the paid triad+scope wave is in flight (after the
   pre-dispatch fingerprint, before settlement) — verdicts come back all-clean
@@ -54,6 +58,7 @@ from tests.system_e2e.harness import (
     classify_call,
     clone_repo,
     keyless_settings,
+    message_text,
     require_lane,
     two_part_clean_text,
     scripted_completion,
@@ -255,26 +260,110 @@ class _HoldingStubModel(ScriptedStubModel):
 
 
 # ===========================================================================
-# S15 — commit triad+scope, ADVISORY enforcement class
+# The author's landing: outside Cyber Pro a clean PASS also returns before Git
 # ===========================================================================
 
-S12_DOC = "docs/notes/system_e2e_w3a_advisory.md"
-S12_MSG = "docs: system_e2e w3a advisory-class smoke (doc-only)"
+RETURNED_BEFORE_COMMIT = "Review outcome returned before commit"
+
+
+def _returned_commit_outcome(body: dict) -> dict:
+    """What the newest ``commit_reviewed`` result handed back before Git:
+    ``{"review_reference": ..., "review_outcome": ...}``. Raises when that result is
+    something else (a landing, a refusal) or names no outcome."""
+    calls = {call["id"]: call["function"]["name"] for message in body["messages"]
+             for call in message.get("tool_calls") or []}
+    message = next(m for m in reversed(body["messages"])
+                   if m.get("role") == "tool" and calls.get(m.get("tool_call_id")) == "commit_reviewed")
+    text = message_text(message)
+    if RETURNED_BEFORE_COMMIT not in text.split("\n", 1)[0]:
+        raise ValueError(f"the newest commit_reviewed result returned no outcome: {text[:300]!r}")
+    # The JSON follows the prose; a collected record may append its id line after it.
+    return json.JSONDecoder().raw_decode(text, text.index("\n{") + 1)[0]
+
+
+def _land_on_returned_pass(commit_step: dict, rationale: str, seen: dict | None = None):
+    """A ``_HoldingStubModel`` step: the author lands a clean outcome the commit call returned.
+
+    Outside Cyber Pro every outcome of a committing call, a PASS included, returns
+    before Git; the commit is the author's explicit continuation with the returned
+    ``review_reference`` (no reviewer is bought for it). A wave still running is
+    collected by the same unchanged call, never by a second paid panel. Anything but
+    a clean returned outcome ends the script loudly (``E2E_SCRIPT_ERROR``) instead
+    of landing it. ``seen["returned"]`` keeps the outcome it landed on, ``seen["error"]``
+    why it did not."""
+    def step(body):
+        try:
+            returned = _returned_commit_outcome(body)
+            outcome = returned["review_outcome"]
+            if outcome["status"] == "reviewing":
+                return _Again(commit_step)
+            assert outcome["status"] == "reviewed" and outcome["phase"] == "review_only", outcome
+            assert not outcome.get("critical_findings"), outcome["critical_findings"]
+            reference = returned["review_reference"]
+        except (AssertionError, KeyError, ValueError, StopIteration) as exc:
+            if seen is not None:
+                seen["error"] = f"expected a clean commit outcome returned before Git: {exc}"
+            return {"final": f"E2E_SCRIPT_ERROR: expected a clean commit outcome returned before Git: {exc}"}
+        if seen is not None:
+            seen["returned"] = returned
+        return {"tool": "commit_reviewed", "arguments": {**commit_step["arguments"], "review_reference": reference,
+                "author_disposition": {"disposition": "accepted", "rationale": rationale}}}
+    return step
+
+
+def test_w3a_landing_step_lands_only_a_clean_returned_outcome():
+    """Default lane: the shared landing step continues a clean returned PASS on its exact
+    reference, collects a running wave with the same unchanged call, and never lands a
+    critical outcome or a result that returned none."""
+    commit = {"tool": "commit_reviewed", "arguments": {"commit_message": "m", "paths": ["a.md"], "skip_tests": True}}
+
+    def body(text: str) -> dict:
+        return {"messages": [
+            {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "commit_reviewed"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": text}]}
+
+    def returned(status: str, findings: list) -> str:
+        reference = {"surface": "commit", "attempt": 1}
+        outcome = {"status": status, "phase": "review_only", "critical_findings": findings}
+        return (RETURNED_BEFORE_COMMIT + ". Inspect it.\n"
+                + json.dumps({"review_reference": reference, "review_outcome": outcome})
+                + "\nreview_record_id: r1")
+
+    seen: dict = {}
+    landed = _land_on_returned_pass(commit, "clean", seen)(body(returned("reviewed", [])))
+    assert landed["tool"] == "commit_reviewed" and seen["returned"]["review_reference"] == {"surface": "commit", "attempt": 1}
+    assert landed["arguments"] == {**commit["arguments"], "review_reference": {"surface": "commit", "attempt": 1},
+                                   "author_disposition": {"disposition": "accepted", "rationale": "clean"}}
+    again = _land_on_returned_pass(commit, "clean")(body(returned("reviewing", [])))
+    assert isinstance(again, _Again) and again.step == commit
+    for text in (returned("reviewed", [{"severity": "critical"}]), "OK: committed abc123"):
+        refused: dict = {}
+        answer = _land_on_returned_pass(commit, "clean", refused)(body(text))
+        assert answer["final"].startswith("E2E_SCRIPT_ERROR:") and refused["error"], answer
+
+
+# ===========================================================================
+# S15 — commit triad+scope: critical feedback returns before Git, the author
+# explicitly continues over it
+# ===========================================================================
+
+S12_DOC = "docs/notes/system_e2e_w3a_feedback.md"
+S12_MSG = "docs: system_e2e w3a critical-feedback smoke (doc-only)"
 S12_SCRIPT = [
     {"tool": "write_file", "arguments": {"root": "system_repo", "path": S12_DOC,
-        "content": "# w3a advisory-class smoke\n\nDoc-only change for the enforcement-class pin.\n",
+        "content": "# w3a critical-feedback smoke\n\nDoc-only change the author lands over a red verdict.\n",
     }},
     {"tool": "commit_reviewed", "arguments": {
         "commit_message": S12_MSG, "paths": [S12_DOC],
         "skip_advisory_review": True, "skip_tests": True,
-        "goal": "Land the advisory-class smoke note despite a scripted red triad verdict.",
+        "goal": "Land the critical-feedback smoke note despite a scripted red triad verdict.",
         "scope": f"{S12_DOC} only.",
     }},
 ]
 
 
 @pytest.mark.integration
-def test_s15_advisory_class_red_verdict_recorded_and_commit_lands(e2e_clone, tmp_path_factory):
+def test_s15_red_verdict_returns_before_git_and_the_author_lands_over_it(e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s12")
     # One wave, one brief: the packet rows answer contract A (the scripted red
@@ -282,7 +371,7 @@ def test_s15_advisory_class_red_verdict_recorded_and_commit_lands(e2e_clone, tmp
     # makes the wave red.
     review_script = ReviewScript({"triad_review": [W3A_TRIAD_RED] * len(KEYLESS_PACKET_ROWS)})
     feedback = {}
-    decision = {"disposition": "rejected", "rationale": "I inspected the missing-marker criticism; this doc-only enforcement fixture intentionally retains the note and records my decision."}
+    decision = {"disposition": "rejected", "rationale": "I inspected the missing-marker criticism; this doc-only fixture intentionally retains the note and records my decision."}
 
     def continue_after_feedback(body):
         try:
@@ -302,12 +391,12 @@ def test_s15_advisory_class_red_verdict_recorded_and_commit_lands(e2e_clone, tmp
 
     stub = _HoldingStubModel([*S12_SCRIPT, continue_after_feedback], review_script=review_script)
     with stub:
-        settings = keyless_settings(stub, OUROBOROS_RUNTIME_MODE="advanced", OUROBOROS_REVIEW_ENFORCEMENT="advisory")
+        settings = keyless_settings(stub, OUROBOROS_RUNTIME_MODE="advanced")
         server = start_server(e2e_clone, root, settings)
         try:
             head_before = _head(e2e_clone)
             oracle = ArtifactOracle(server.data_root)
-            task_id = submit_running(server, "Write the advisory-class note, inspect the critical feedback, explicitly choose whether to commit, then finish.")
+            task_id = submit_running(server, "Write the critical-feedback note, inspect the critical feedback, explicitly choose whether to commit, then finish.")
             result = server.wait_task(task_id, timeout=600)
             assert result.get("status") == "completed", result
             assert "E2E_SCRIPT_ERROR" not in str(result), result
@@ -335,6 +424,7 @@ def test_s15_advisory_class_red_verdict_recorded_and_commit_lands(e2e_clone, tmp
             author = succeeded["author_disposition"]
             assert author["review_reference"] == reference
             assert author["subject_hash"] == succeeded["pre_review_fingerprint"] == succeeded["post_review_fingerprint"] == reference["pre_review_fingerprint"]
+            # Every review informs and none forbids: the record carries the one authority value there is.
             assert author["enforcement"] == "advisory" and author["source"] == "author"
             assert {key: author[key] for key in decision} == decision and author["recorded_at"]
             assert len(_tool_rows(task_drive, "commit_reviewed")) >= 2
@@ -349,11 +439,11 @@ def test_s15_advisory_class_red_verdict_recorded_and_commit_lands(e2e_clone, tmp
 
 
 # ===========================================================================
-# S16 — commit triad+scope, BLOCKING enforcement class + freshness staleness
+# S16 — commit triad+scope: revision after critical feedback + post-verdict freshness
 # ===========================================================================
 
-S13_DOC = "docs/notes/system_e2e_w3a_blocking.md"
-S13_MSG = "docs: system_e2e w3a blocking-class smoke (doc-only)"
+S13_DOC = "docs/notes/system_e2e_w3a_revision.md"
+S13_MSG = "docs: system_e2e w3a revision smoke (doc-only)"
 
 
 def _s13_commit_step() -> dict:
@@ -362,7 +452,7 @@ def _s13_commit_step() -> dict:
         "paths": [S13_DOC],
         "skip_advisory_review": True,
         "skip_tests": True,
-        "goal": "Land the blocking-class smoke note through the full triad+scope organ.",
+        "goal": "Land the revision smoke note through the full triad+scope organ.",
         "scope": f"{S13_DOC} only.",
     }}
 
@@ -370,56 +460,55 @@ def _s13_commit_step() -> dict:
 S13_SCRIPT = [
     {"tool": "write_file", "arguments": {
         "root": "system_repo", "path": S13_DOC,
-        "content": "# w3a blocking-class smoke\n\nFirst candidate — reviewers will block this.\n",
+        "content": "# w3a revision smoke\n\nFirst candidate — reviewers will find its marker missing.\n",
     }},
-    _s13_commit_step(),   # red triad -> REVIEW_BLOCKED
-    _s13_commit_step(),   # byte-identical resubmit -> IDENTICAL_DIFF_REFUSED (free)
+    _s13_commit_step(),   # red triad -> the FAIL returns before Git (paid wave 1)
+    _s13_commit_step(),   # byte-identical resubmit -> the same outcome collected at $0
     {"tool": "write_file", "arguments": {
         "root": "system_repo", "path": S13_DOC,
-        "content": ("# w3a blocking-class smoke\n\nSecond candidate with the marker.\n"
+        "content": ("# w3a revision smoke\n\nSecond candidate with the marker.\n"
                     "W3A_MARKER: verification marker line added per review.\n"),
     }},
-    _s13_commit_step(),   # clean triad+scope -> commit lands
+    _s13_commit_step(),   # the revision buys one fresh wave; its clean PASS returns before Git too (paid wave 2)
+    # ... and the test appends the author's landing on that PASS (``_land_on_returned_pass``).
 ]
 
 
 @pytest.mark.integration
-def test_s16_blocking_class_red_blocks_identical_refused_free_then_green_lands(
+def test_s16_red_returns_first_identical_resubmit_is_free_and_the_revision_lands_on_its_pass(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s13")
     # Wave 1: the packet rows answer red (contract A) beside a clean native seat.
     review_script = ReviewScript({"triad_review": [W3A_TRIAD_RED] * len(KEYLESS_PACKET_ROWS)})
-    stub = ScriptedStubModel(S13_SCRIPT, review_script=review_script)
+    # The author lands exactly the revised bytes on the revision's PASS (no reviewer bought).
+    landing: dict = {}
+    stub = _HoldingStubModel([*S13_SCRIPT, _land_on_returned_pass(
+        _s13_commit_step(), "I read the clean review of the revised note and land exactly it.", landing)],
+        review_script=review_script)
     with stub:
-        settings = keyless_settings(
-            stub,
-            OUROBOROS_RUNTIME_MODE="advanced",
-            OUROBOROS_REVIEW_ENFORCEMENT="blocking",
-        )
+        settings = keyless_settings(stub, OUROBOROS_RUNTIME_MODE="advanced")
         server = start_server(e2e_clone, root, settings)
         try:
             head_before = _head(e2e_clone)
             task_id = submit_running(
-                server, "Write the blocking-class note and land it via commit_reviewed, then finish.")
+                server, "Write the revision note, revise it after the review, land it via commit_reviewed, then finish.")
             result = server.wait_task(task_id, timeout=600)
             assert result.get("status") == "completed", result
+            assert "E2E_SCRIPT_ERROR" not in str(result), (result, landing)
             oracle = ArtifactOracle(server.data_root)
             wait_durable_result(oracle, task_id)
+            assert stub.script_consumed(), "S16 script was not fully consumed"
             task_drive = oracle.task_drive(task_id)
 
-            # Tool-result truth in order: blocked -> identical-refused -> landed.
+            # Tool-result truth in order: three outcomes returned before Git (the red
+            # wave, its $0 replay, the revision's PASS), then the author's landing.
             commit_rows = _tool_rows(task_drive, "commit_reviewed")
-            assert len(commit_rows) == 3, commit_rows
-            first, second, third = (json.dumps(row) for row in commit_rows)
-            assert "REVIEW_BLOCKED" in first, commit_rows[0]
-            assert "scripted critical finding (system_e2e w3a)" in first, commit_rows[0]
-            assert "IDENTICAL_DIFF_REFUSED" in second, commit_rows[1]
-            assert "REVIEW_BLOCKED" not in second, commit_rows[1]
-            assert "IDENTICAL_DIFF_REFUSED" not in third and "REVIEW_BLOCKED" not in third, commit_rows[2]
+            returned = [RETURNED_BEFORE_COMMIT in str(row.get("result_preview") or "") for row in commit_rows]
+            assert returned == [True, True, True, False], commit_rows
 
-            # The commit landed exactly once, with the FIXED content, and the
-            # blocked attempts moved HEAD not at all (one new commit total).
+            # The commit landed exactly once, with the FIXED content: nothing the
+            # returned outcomes said moved HEAD (one new commit total).
             candidate = oracle.body_candidate(task_id)
             candidate_path = pathlib.Path(candidate["path"])
             log_subjects = _git_log_subjects(candidate_path)
@@ -437,13 +526,27 @@ def test_s16_blocking_class_red_blocks_identical_refused_free_then_green_lands(
             assert head_after in candidate["reviewed_commits"] and candidate["base_sha"] == head_before
             assert _head(e2e_clone) == head_before and not (e2e_clone / S13_DOC).exists()
 
-            # Durable ledger: a VERDICT-blocked attempt (critical_findings) is
-            # recorded; the identical resubmit paid nothing (two paid waves over
-            # the whole pool: red wave + clean wave, none for the resubmit).
-            attempts = task_drive.advisory_review().get("attempts") or []
-            blocked = [a for a in attempts if isinstance(a, dict)
-                       and a.get("block_reason") == "critical_findings"]
-            assert blocked, attempts
+            # Durable ledger: the red wave's paid attempt returned the critical
+            # finding; the identical resubmit returned the same finding unpaid; the
+            # revision's paid PASS is what the unpaid landing names.
+            attempts = [a for a in task_drive.advisory_review().get("attempts") or []
+                        if isinstance(a, dict) and a.get("task_id") == task_id]
+            red = [a for a in attempts
+                   if "scripted critical finding (system_e2e w3a)" in json.dumps(a.get("critical_findings") or [])]
+            assert [bool(a.get("paid")) for a in red] == [True, False], attempts
+            assert all((a["status"], a["phase"], a.get("block_reason")) == ("reviewed", "review_only", "critical_findings")
+                       for a in red), red
+            reference = landing["returned"]["review_reference"]
+            passed = next(a for a in attempts if a["attempt"] == reference["attempt"])
+            assert passed["status"] == "reviewed" and passed["paid"] and not passed.get("critical_findings"), passed
+            succeeded = [a for a in attempts if a["status"] == "succeeded"]
+            assert len(succeeded) == 1 and not succeeded[0]["paid"], attempts
+            author = succeeded[0]["author_disposition"]
+            assert author["review_reference"] == reference and author["disposition"] == "accepted", author
+            assert author["subject_hash"] == succeeded[0]["pre_review_fingerprint"] == reference["pre_review_fingerprint"]
+            # Two paid waves over the whole pool (red + revision); the identical
+            # resubmit and the author's landing bought nothing.
+            assert sum(bool(a.get("paid")) for a in attempts) == 2, attempts
             kinds = stub.kinds()
             assert kinds.count("triad_review") == 2 * len(KEYLESS_PACKET_ROWS), kinds
             assert kinds.count("two_part_review") == 2 * (len(KEYLESS_REVIEW_ROWS) - len(KEYLESS_PACKET_ROWS)), kinds
@@ -499,11 +602,8 @@ def test_s16_rejects_post_verdict_mutation(tmp_path_factory):
     review_script = ReviewScript({"two_part_review": [_mutate_staged_tree_then_pass]})
     stub = ScriptedStubModel(S13B_SCRIPT, review_script=review_script)
     with stub:
-        settings = keyless_settings(
-            stub,
-            OUROBOROS_RUNTIME_MODE="advanced",
-            OUROBOROS_REVIEW_ENFORCEMENT="blocking",
-        )
+        # The revalidation runs before any outcome returns to the author, on every install.
+        settings = keyless_settings(stub, OUROBOROS_RUNTIME_MODE="advanced")
         server = start_server(clone, root, settings)
         try:
             head_before = _head(clone)

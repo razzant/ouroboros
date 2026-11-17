@@ -1,13 +1,17 @@
-"""Read-only consciousness facts from places, current roots and durable results."""
+"""Read-only consciousness facts from places, current roots, durable results and the ledger's period view."""
 
 import contextlib
 from datetime import datetime
 import json
+import logging
+import pathlib
 import time
 from typing import Any
 
 from ouroboros.usage_origin import cause_label
+from ouroboros.text_sentences import first_sentence
 
+log = logging.getLogger(__name__)
 RECENT_WAKE_LIMIT = 50
 _DISPLAY_ZONE = None  # the server's local zone; the browser fixture generator pins one
 
@@ -56,20 +60,23 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
     from ouroboros.deadline_utils import parse_deadline_ts
 
     outcome = str(snapshot.get("last_wake_outcome") or "")
+    note = ""  # what follows from the state, said beneath it (``detail_note``); only a proven allowance hold has one
     next_at = _when(snapshot.get("next_wake_at"))
     deadline = parse_deadline_ts(str(snapshot.get("next_wake_at") or ""))
     wake = snapshot.get("live_wake_task_id")
     if requested_enabled is None:
         status, detail = "unknown", "The stored consciousness control is unknown: runtime state is unavailable or recovering."
-    elif not requested_enabled:
-        status, detail = "disabled", "Background consciousness is off."
+    elif not requested_enabled:  # the places it already read (a Paused one does not hear either); unread, as Stop says
+        hearing = sum(row.get("state") != "paused" for row in snapshot.get("places_brief") or [])
+        unread = "places_brief" in snapshot and snapshot["places_brief"] is None
+        status, detail = "disabled", (f"Off: no own wakes; {_hearing(hearing)}." if hearing else
+                                      "Off: no own wakes; its places only hear." if unread else "Off: no own wakes.")
     elif not snapshot and supervisor_failed:
         status, detail = "stopped", "Cannot wake: Ouroboros did not finish starting. Restart Ouroboros."
     elif not snapshot:
         status, detail = "starting", "Waits for Ouroboros to finish starting."
     elif wake and snapshot.get("live_wake_held"):
-        status, detail = "wake_paused", (f"Wake-up {wake} is paused or waiting in the queue; its card shows why. "
-                                         "The next wake-up follows it.")
+        status, (detail, note) = "wake_paused", held_sentence(wake, snapshot.get("live_wake_hold"))
     elif wake:
         status, detail = "thinking", f"Wake-up {wake} is running."
     elif outcome == "skipped:waiting_for_first_conversation":
@@ -82,8 +89,11 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
         # Checked at the reset, or sooner once a changed daily limit moved the next attempt (``consciousness._due_at``).
         reset = parse_deadline_ts(str(snapshot.get("allowance_resets_at") or ""))
         sooner = deadline is not None and reset is not None and time.time() < deadline.timestamp() < reset.timestamp()
-        detail = (f"Daily allowance spent ({at_least}${float(spent or 0):.2f} of ${float(daily or 0):.2f} in the last 24 h{degraded}); "
-                  f"next check {_when(snapshot.get('allowance_resets_at')) if snapshot.get('allowance_resets_at') and not sooner else next_at}.")
+        check = _when(snapshot.get("allowance_resets_at")) if snapshot.get("allowance_resets_at") and not sooner else next_at
+        # A later window read that failed leaves the amount unknown now, never $0; the skip stays what happened.
+        counted = (f"({at_least}${float(spent):.2f} of ${float(daily or 0):.2f} in the last 24 h{degraded})"
+                   if type(spent) in (int, float) else "at its last check; what it spent in the last 24 h is unknown now")
+        detail = f"Daily allowance spent {counted}; next check {check}."
     elif outcome == "skipped:allowance_unknown":
         status, detail = "allowance_unknown", f"The usage ledger could not be read ({snapshot.get('last_error') or 'unknown error'}); retry {next_at}."
     elif outcome.startswith("rejected:"):
@@ -102,8 +112,153 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
         status, detail = "due", f"Due{since}; the wake-up has not started yet."
     else:
         status, detail = "sleeping", f"Sleeping until {_clock_of(snapshot.get('next_wake_at'))}."
-    return {**snapshot, "enabled": requested_enabled, "status": status, "detail": detail}
+    return {**{key: value for key, value in snapshot.items() if key != "detail_note"},
+            "enabled": requested_enabled, "status": status, "detail": detail, **({"detail_note": note} if note else {})}
 
+
+def _hearing(n: int) -> str:
+    return f"{n} place only hears" if n == 1 else f"{n} places only hear"
+
+
+# A held wake the allowance it started with stopped: the owner's move (DESIGN "Status marks"), said in Costs too.
+ALLOWANCE_HOLDS = frozenset({"allowance", "allowance_and_cap"})
+_STAMPED_CAUSES = {"allowance": "allowance", "both": "allowance_and_cap", "per_task_cap": "per_task_cap"}
+
+
+def held_sentence(wake: str, hold: Any) -> tuple:
+    """``(detail, note)`` of a held own wake: its proven cause (``hold_cause``) or the card's word for it, and what
+    follows from an allowance hold (``""`` otherwise). No clock: when room returns is Costs' forecast, in one zone."""
+    hold = hold if isinstance(hold, dict) else {}
+    cause, ceiling = hold.get("cause"), hold.get("ceiling_usd")
+    if cause == "owner":
+        return f"Wake-up {wake} is on an explicit pause; its card shows who paused it and how to continue.", ""
+    if cause in ALLOWANCE_HOLDS:
+        facts = [f"${float(ceiling):.2f}"] if type(ceiling) in (int, float) else []
+        facts += ["the per-task cap too"] if cause == "allowance_and_cap" else []
+        said = f" ({', '.join(facts)})" if facts else ""
+        return (f"Wake-up {wake} stopped at the allowance it had left when it started{said}.",
+                "Resume keeps that limit, so it pauses again while its known spend is at it, and a higher allowance "
+                "does not raise it. Stop now on its card ends it and frees the clock for its next check.")
+    # The limit it launched with, as far as its stamp names it (an older record names none).
+    limit = {"per_task_cap": "the per-task cost cap", "launch_ceiling": "the spending limit"}.get(cause)
+    said = f"paused at {limit} it started with" if limit else "paused or waiting in the queue"
+    return f"Wake-up {wake} is {said}; its card shows why. The next wake-up follows it.", ""
+
+
+def _at_launch_ceiling(pause: dict, ceiling, basis: str) -> bool:
+    """A live budget pause at the graceful ceiling the wake launched with: its saved ceiling is that number under the
+    producer's own basis (a member's inherited one), or, on a row older than the saved ceiling, the rail alone."""
+    import math
+    from ouroboros.budget_pause import RAIL_GRACEFUL_CEILING, STATE_PAUSED, STATE_PAUSING
+
+    if (pause.get("state") not in (STATE_PAUSED, STATE_PAUSING) or pause.get("reason") != "budget"
+            or pause.get("rail") != RAIL_GRACEFUL_CEILING or ceiling is None):
+        return False
+    saved = pause.get("cost_ceiling")
+    if not isinstance(saved, dict):
+        return True
+    number = saved.get("ceiling_usd")
+    return (saved.get("basis") == basis and type(number) in (int, float)
+            and math.isclose(float(number), ceiling, rel_tol=0.0, abs_tol=1e-9))
+
+
+def hold_cause(metadata: dict, own: dict, members=()) -> dict:
+    """``{"cause", "ceiling_usd"}``: what holds my own held wake, only as far as its records prove it (pure).
+
+    ``own`` is the wake's pause row, ``members`` the pause rows of its paused tree members. The wake paused at the
+    ceiling it launched with (``root_cost_ceiling_usd``), or, child first, its tree's latch refused it while a member
+    holding that inherited number paused at it: the launch stamp (``consciousness_wake.wake_task_metadata``) names
+    ``allowance``, ``allowance_and_cap`` or ``per_task_cap``, and a record from before the stamp is only
+    ``launch_ceiling``. Otherwise the pause's own reason or rail: ``owner``, ``sleep``, ``technical``,
+    ``total_budget``, ``per_task_fence``. ``""`` proves nothing: no live pause, a Resume granted, a lifted allowance."""
+    from ouroboros.budget_pause import (RAIL_DISPATCH_REFUSED, RAIL_GLOBAL_EXHAUSTED, REASON_AUTHORITY, REASON_OWNER,
+                                        REASON_SLEEP, STATE_PAUSED, STATE_PAUSING)
+    from ouroboros.task_pacing import recorded_producer_ceiling
+
+    metadata = metadata if isinstance(metadata, dict) else {}
+    own = own if isinstance(own, dict) else {}
+    unproven = {"cause": "", "ceiling_usd": None}
+    if own.get("state") not in (STATE_PAUSED, STATE_PAUSING):
+        return unproven
+    reason, rail = own.get("reason"), own.get("rail")
+    other = {REASON_OWNER: "owner", REASON_SLEEP: "sleep", REASON_AUTHORITY: "technical"}.get(reason)
+    if other or reason != "budget":
+        return {"cause": other or "", "ceiling_usd": None}
+    lifted = isinstance(metadata.get("producer_allowance_lifted"), dict)
+    ceiling = None if lifted else recorded_producer_ceiling({"metadata": metadata})
+    refused_root = rail == RAIL_DISPATCH_REFUSED and own.get("scope") == "root"
+    tree = refused_root and any(_at_launch_ceiling(member, ceiling, "root_resolved_ceiling")
+                                for member in members if isinstance(member, dict))
+    if _at_launch_ceiling(own, ceiling, "producer_allowance") or tree:
+        return {"cause": _STAMPED_CAUSES.get(metadata.get("root_cost_ceiling_source"), "launch_ceiling"),
+                "ceiling_usd": ceiling}
+    if rail == RAIL_GLOBAL_EXHAUSTED or rail == RAIL_DISPATCH_REFUSED and not refused_root:
+        return {"cause": "total_budget", "ceiling_usd": None}
+    return {"cause": "per_task_fence" if refused_root else "", "ceiling_usd": None}
+
+
+def held_wake_cause(drive_root, task_id: str) -> dict:
+    """``hold_cause`` of my held own wake from its records: its pool row's metadata (memory), its pause row and, only
+    when its tree's latch refused it, its paused members' rows (one compact hot-facts read each, no task body). An
+    unreadable record proves nothing."""
+    from ouroboros.budget_pause import RAIL_DISPATCH_REFUSED, budget_pause_row
+    from ouroboros.owner_pause import fence_closed
+    from ouroboros.store_hot_facts import controls
+    from supervisor.consciousness_carriers import live_task_rows, paused_tree_members
+
+    try:
+        metadata = (live_task_rows([task_id]).get(task_id) or {}).get("metadata") or {}
+        facts = controls(drive_root, task_id)
+        fence = facts.get("owner_pause") or {}
+        if fence_closed(fence) and task_id not in (fence.get("selected_members") or {}):
+            return {"cause": "owner", "ceiling_usd": None}
+        own = facts.get("budget_pause") or {}
+        members = ([budget_pause_row(root or drive_root, member) for member, root in paused_tree_members(task_id)]
+                   if own.get("rail") == RAIL_DISPATCH_REFUSED and own.get("scope") == "root" else [])
+    except Exception:
+        log.debug("The pause of held wake %s is unreadable; its cause stays unknown", task_id, exc_info=True)
+        return {"cause": "", "ceiling_usd": None}
+    return hold_cause(metadata, own, members)
+
+
+def off_sentence(places) -> str:
+    """The switch's first words as it turns consciousness off (owner 09.11, variant A). ``places`` is one read of the
+    place store, None when it could not be read; a Paused place does not hear either, so it is not counted."""
+    if places is None:
+        return "Consciousness off: no own wakes, and its places only hear until Start."
+    hearing = sum(place.state != "paused" for place in places)
+    return f"Consciousness off: no own wakes, and {_hearing(hearing)} until Start." if hearing else "Consciousness off: no own wakes."
+
+
+def stopping_words(task_ids, *, wake: str, rows: dict, authors, places) -> str:
+    """«Stopping now: …» naming each live item a stop ends, from what is in memory: its own wake-up, a reply in a
+    place (named from the place store read beside it, else «a place»), an autonomous task by its queue title, else
+    its id. ``rows`` maps a task id to its in-memory ``title`` and ``metadata``; ``authors`` are live place authors."""
+    from ouroboros.consciousness_authority import is_focus_wake, is_own_clock_wake
+    from ouroboros.place_projection import said_once
+
+    named: dict[str, str] = {}
+    for place in places or ():
+        for key in (place.place_id, *place.legacy_binding_ids):
+            named.setdefault(key, said_once(place.label or place.provider))
+    woke, replies, tasks = False, [], []
+    for task_id in task_ids:
+        row = rows.get(task_id) or {}
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        focus, presence = (meta.get(key) if isinstance(meta.get(key), dict) else {} for key in ("focus", "presence"))
+        if task_id == wake or is_own_clock_wake(meta):
+            woke = True
+        elif task_id in authors or is_focus_wake(meta) or presence:
+            cause = str(meta.get("consciousness_cause") or "")
+            key = str(focus.get("place_id") or (cause.removeprefix("place:") if cause.startswith("place:") else "")
+                      or presence.get("binding_id") or "")
+            replies.append(f"a reply in {named.get(key) or 'a place'}")
+        else:
+            tasks.append(f"«{row.get('title') or task_id}»")
+    items = (["its wake-up"] if woke else []) + replies + tasks
+    if not items:
+        return ""
+    return "Stopping now: " + (items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}") + "."
 
 
 def describe_consciousness(clock, *, supervisor_failed: bool = False) -> dict:
@@ -118,38 +273,74 @@ def describe_consciousness(clock, *, supervisor_failed: bool = False) -> dict:
 
 
 def place_views(drive_root, allowance=None) -> list[dict]:
-    """Stored PlaceSummary facts, using the caller's allowance without connector discovery."""
-    from ouroboros.place_projection import place_view
-    from ouroboros.places import load_places
+    """Stored PlaceSummary facts with each place's circle (one store read), the caller's allowance and one read of the
+    switch, no connector discovery."""
+    from ouroboros.place_arrivals import place_facts
+    from ouroboros.place_projection import consciousness_off, place_view
+    from ouroboros.places import place_records
 
-    return [place_view(drive_root, place, allowance=allowance, brief=True) for place in load_places(drive_root)]
+    records = place_records(drive_root)
+    off = consciousness_off(drive_root)
+    facts = place_facts(drive_root, records.places.values(), full=False)
+    return [place_view(drive_root, place, allowance=allowance, brief=True, records=records, off=off, facts=facts)
+            for place in records.places.values()]
 
 
 def places_text(drive_root, views) -> str:
-    from ouroboros.place_arrivals import recent_identity
-    from ouroboros.places import OwnerAccount, owner_account_matches
+    """The places as my own map: each circle once with its whole words and its places under it, then the places in
+    no circle. A place I put in a circle says so: there my human's words still restrict, but consent needs their
+    placement."""
+    from ouroboros.places import PlaceError, place_owner_accounts
     if views is None:
         return "unknown (place index unavailable)"
-    lines = []
+    try:
+        counted = place_owner_accounts(drive_root)  # one read: the accounts each place's connector account confirms
+    except PlaceError:
+        counted = {}
+    groups: dict[str, list] = {}
     for view in views:
-        identity = recent_identity(drive_root, view["place_id"])
-        sending = (identity or {}).get("sends_as") or {}
-        owner = sending.get("kind") == "user" and owner_account_matches(
-            (OwnerAccount(**a) for a in view.get("owner_accounts", [])), sending["id"], view.get("account_id", ""))
-        voice = ""
-        if sending:
-            voice = (f'; as Ouroboros (bot {sending["label"]})' if sending["kind"] == "bot"
-                     else f'; writes as {sending["label"]}' + (" (your human's own account)" if owner else ""))
-        count, rooms = view.get("unanswered"), view.get("rooms")
-        # A count; the closing line names the reader of every room, sealed ones included.
-        held = f"rooms: {len(rooms)}" if rooms else "no captured room" if rooms == [] else "rooms unknown"
-        lines.append(f'{view.get("label") or view["place_id"]} [{view["place_id"]}]: {view["state"]}; '
-                     f'open turns: {count if count is not None else "unknown"}; {held}{voice}')
-        for note in view.get("notes") or []:
-            lines.extend(f'  note ({note["author"]}): {line}' for line in note["text"].splitlines())
+        groups.setdefault((view.get("circle") or {}).get("circle_id", ""), []).append(view)
+    lines = []
+    for key in sorted(groups, key=lambda key: (not key, str((groups[key][0].get("circle") or {}).get("name", "")))):
+        indent = "  " if key or len(groups) > 1 else ""
+        if key:  # its words like a note's lines, with their author, once for every place in it
+            circle = groups[key][0]["circle"]
+            lines.append(f'circle {circle["name"]} [{key}]' + ("" if circle["text"] else ": no words yet"))
+            lines.extend(f'  words ({circle["text_author"]}): {line}' for line in circle["text"].splitlines())
+        elif indent:
+            lines.append("not in a circle:")
+        for view in groups[key]:
+            lines.extend(indent + line for line in _place_lines(drive_root, view, counted))
     if lines:
         lines.append("a place's rooms: configure_presence(action='inspect', place_id=<its id in brackets>)")
     return "\n  ".join(lines) if lines else "none"
+
+
+def _place_lines(drive_root, view, counted) -> list[str]:
+    from ouroboros.place_arrivals import recent_identity
+    from ouroboros.places import OWNER_VOICE, OwnerAccount, owner_account_matches
+    identity = recent_identity(drive_root, view["place_id"])
+    sending = (identity or {}).get("sends_as") or {}
+    owner = sending.get("kind") == "user" and owner_account_matches(
+        counted.get(view["place_id"]) or [OwnerAccount(**a) for a in view.get("owner_accounts", [])],
+        sending["id"], view.get("account_id", ""))
+    voice = ""
+    if sending:
+        voice = (f'; as Ouroboros (bot {sending["label"]})' if sending["kind"] == "bot"
+                 else f'; writes as {sending["label"]}' + (" (your human's own account)" if owner else ""))
+    count, rooms = view.get("unanswered"), view.get("rooms")
+    # A count; the closing line names the reader of every room, sealed ones included.
+    held = f"rooms: {len(rooms)}" if rooms else "no captured room" if rooms == [] else "rooms unknown"
+    circle = view.get("circle") or {}
+    placed = ""
+    if circle.get("text") and circle["placed_by"] not in OWNER_VOICE:  # words I wrote there stay my own record
+        placed = ("; you placed it in this circle: your human's words there still restrict it, but consent needs their "
+                  "placement" if circle.get("text_author") in OWNER_VOICE else "; you placed it in this circle")
+    lines = [f'{view.get("label") or view["place_id"]} [{view["place_id"]}]: {view["state"]}; '
+             f'open turns: {count if count is not None else "unknown"}; {held}{voice}{placed}']
+    for note in view.get("notes") or []:
+        lines.extend(f'  note ({note["author"]}): {line}' for line in note["text"].splitlines())
+    return lines
 
 
 def cause_views(rows, places) -> list[dict] | None:
@@ -168,6 +359,47 @@ def spend_text(rows) -> str:
         return "unknown"
     return "; ".join(f'{row["label"]}: {"at least " if row["unmetered_calls"] else ""}'
                      f'${row["usd"]:.2f} ({row["unmetered_calls"]} unmetered calls)' for row in rows) or "none"
+
+
+def cache_writes_text(drive_root, now: float = 0.0) -> str:
+    """The install's cache writes of the last 24 hours as one wake fact (``gateway.cost_period``, the Costs page's own
+    view, read once per wake). A view that cannot be read is said as unknown, never as none, and the wake goes on."""
+    try:
+        from ouroboros.gateway.cost_period import cost_period
+
+        return _cache_writes_line(cost_period(pathlib.Path(drive_root), "24h", now=now or None)["cache_writes"])
+    except Exception:
+        log.warning("The last day's cache writes could not be read for this wake", exc_info=True)
+        return "unknown (could not be read)"
+
+
+def _cache_writes_line(rows) -> str:
+    """``cost_period``'s cache-write rows as one line: the calls that wrote, their tokens, the writes' share of recorded
+    cost, then every class of what the writes followed, in the Costs page's own order (share of cost, then tokens). A
+    class goes without its detail (route and block names). A call whose cost no tariff could share is counted as
+    unsplit: a class's dollars are of its other calls, and where no call's cost could be shared the share is unknown,
+    never zero."""
+    classes: dict[str, dict] = {}
+    for row in rows:
+        held = classes.setdefault(row["class"], {"calls": 0, "tokens": 0, "usd": 0.0, "unsplit": 0})
+        held["calls"] += row["calls"]
+        held["tokens"] += row["write_tokens"]
+        held["usd"] += row["write_cost"]
+        held["unsplit"] += row["unshared_calls"]
+    if not classes:
+        return "none recorded in the last 24 h"
+    calls, tokens, usd, unsplit = (sum(held[key] for held in classes.values()) for key in ("calls", "tokens", "usd", "unsplit"))
+
+    def named(name, held) -> str:
+        if held["unsplit"] >= held["calls"]:
+            return f'{name} {held["calls"]}'  # none of its calls' cost could be shared: no dollars, never $0.00
+        return f'{name} {held["calls"]} ${held["usd"]:.2f}' + (f' ({held["unsplit"]} unsplit)' if held["unsplit"] else "")
+
+    money = ("write share of cost unknown" if unsplit >= calls else
+             f"${usd:.2f} write share of recorded cost" + (f", {unsplit} unsplit" if unsplit else ""))
+    order = sorted(classes.items(), key=lambda item: (-item[1]["usd"], -item[1]["tokens"], item[0]))
+    return (f"{calls} in the last 24 h, {tokens:,} tokens, {money}; by what they followed: "
+            + ", ".join(named(name, held) for name, held in order))
 
 
 def roots_text(rows) -> str:
@@ -304,6 +536,7 @@ def recent_wakes(drive_root, places, *, live_wake_task_id: str = "", now: float 
                      **({"as": {"label": sending["label"], "owner": bool(focus.get("identity_owner"))}} if sending else {}),
                      "chat_id": row.get("chat_id"), "conversation": str(focus.get("conversation_key") or ""),
                      "place_label": cause_label(f"place:{place_id}", places or ()) if place_id else "",
+                     **({"place_id": place_id} if place_id else {}),  # the Shade's door to that place's sheet
                      "started_at": row.get("started_at"),
                      **({"first_reply_at": first_reply_at(drive_root, task_id)} if cause == "focus" else {}),
                      "ended_at": terminal_time_fact(row)["occurred_at"],
@@ -312,7 +545,7 @@ def recent_wakes(drive_root, places, *, live_wake_task_id: str = "", now: float 
                      **({"tool_calls": row["tool_calls"]} if "tool_calls" in row else {}),
                      **({"rounds": usage["total_rounds"]} if "total_rounds" in usage else {}),
                      "checks": row.get("safety_checks", []), "note": notes.get(task_id),
-                     **({"summary": row["wake_summary"]} if isinstance(row.get("wake_summary"), str) and row["wake_summary"] else {}),
+                     **({"summary": first_sentence(row["wake_summary"])} if isinstance(row.get("wake_summary"), str) and row["wake_summary"] else {}),
                      **({"said_owner": bool(row["owner_message_sent"])} if "owner_message_sent" in row else {}),
                      **{k: row[k] for k in TASK_COST_META_FIELDS if k in row}})
     return rows

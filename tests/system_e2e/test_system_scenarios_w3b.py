@@ -17,15 +17,17 @@ DURABLE artifact or a recorded WIRE fact (never an HTTP 200 alone):
   capability_delta disclosure), and two TYPED START refusals (a scripted 400 and
   the pinned-profile 409) landing as definite START_FAILED rows that retire
   their invocations — three POSTs, three DISTINCT logical invocation ids.
-* S12 — NO-ORPHANS RESTART RECOVERY: the nanny sits in ``delegate_wait`` on a
-  hung run; the WHOLE server tree is SIGKILLed (hard crash, no cleanup), a new
-  generation boots on the same clone + data root, and its startup custody sweep
-  records ``left_live`` from DURABLE custody while saved parent work stays held
-  for Resume (#1689; ARCHITECTURE §6 "Saved working state and application stops").
-  The original run then finishes; another boot verifies one settlement and
-  ledger receipt, matching SQLite custody, with EXACTLY ONE physical
-  ``POST /v2/runs`` across all generations, no unsolicited cancellation or
-  parent redispatch, and no process outside the live server tree.
+* S12 — NO-ORPHANS RESTART RECOVERY: the nanny's ``delegate_wait`` on a hung run
+  is a COLD sleep (owner Q2 = A): its process is released once the body accepted
+  the run's custody, and it parks as a sleeper. The WHOLE server tree is then
+  SIGKILLed (hard crash, no cleanup) and a new generation boots on the same clone
+  + data root: the sleeper is still parked, its run still open and observed by the
+  new body, never cancelled or settled (a boot sweep that reads it leaves it live),
+  and nothing wakes the nanny. The original run then finishes; another boot settles
+  it once (one settlement and ledger receipt, matching SQLite custody) and its
+  terminal wakes the sleeper, which finishes with the owed wake, with EXACTLY ONE
+  physical ``POST /v2/runs`` across all generations, no unsolicited cancellation,
+  and no process outside the live server tree.
 * S13 — SKILLS LIFECYCLE E2E over the same HTTP surface the UI drives: a local
   extension payload lands in ``skills/external/``, the review endpoint runs the
   REAL triad panel against the loopback stub (canned all-PASS skill verdict →
@@ -440,7 +442,6 @@ S12_SCRIPT = [
 def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
         e2e_clone, tmp_path_factory):
     from ouroboros.delegate_custody import open_runs, replay
-    from ouroboros.working_checkpoint import read_working
 
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s12")
@@ -456,15 +457,18 @@ def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
             killed = False
             try:
                 task_id = submit_running(server, "Delegate a long survey and babysit it until stopped.")
-                # The physical run is LIVE: durable STARTED row, and the nanny is
-                # actually polling the daemon (wire GETs observed).
+                # The physical run is LIVE: durable STARTED row, and the body is actually
+                # observing it on the daemon (wire GETs observed).
                 assert wait_until(lambda: _custody_rows(oracle, "delegate_run_started"), 180), (
                     "delegated run never reached a durable STARTED row")
                 run_id = str(_custody_rows(oracle, "delegate_run_started")[-1]["run_id"])
                 assert wait_until(lambda: daemon.calls("GET", f"/v2/runs/{run_id}"), 60)
-                assert wait_until(lambda: _custody_rows(
+                entered = wait_until(lambda: _custody_rows(
                     oracle, "delegate_supervision_wait_entered", run_id), 60)
-                assert read_working(data_root, task_id, 1)[0], "the crash must interrupt saved work"
+                assert entered and entered[-1].get("mode") == "cold", entered
+                # The wait with no named mode sleeps cold: the nanny is parked, its process released.
+                assert wait_until(lambda: oracle.task_result(task_id).get("reason_code") == "model_sleeping", 120), (
+                    oracle.task_result(task_id))
                 assert len(daemon.run_start_posts()) == 1
 
                 # HARD CRASH: SIGKILL the whole server tree mid-wait, no cleanup.
@@ -484,19 +488,20 @@ def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
                 if not killed:
                     server.stop()
 
-        # A crash is not an owner Stop. #1689 retains the saved parent for Resume;
-        # ARCHITECTURE §6 "Durable custody" leaves its healthy leaf live.
+        # A crash is not an owner Stop and no wake: the sleeper stays parked and its
+        # healthy leaf live (ARCHITECTURE §6 "Durable custody"), observed by the new body.
+        observed_before = len(daemon.calls("GET", f"/v2/runs/{run_id}"))
         with ScriptedStubModel([]) as stub_b:
             server_b = start_server(e2e_clone, root, keyless_settings(
                 stub_b, OUROBOROS_SUBAGENTS=roster))
             try:
                 oracle = ArtifactOracle(server_b.data_root)
-                reconciled = wait_until(lambda: _custody_rows(
-                    oracle, "delegate_run_reconciled", run_id), 240)
-                assert reconciled and reconciled[-1].get("action") == "left_live", reconciled
-                assert reconciled[-1].get("state") == "running", reconciled
+                assert wait_until(lambda: len(daemon.calls("GET", f"/v2/runs/{run_id}")) > observed_before, 240), (
+                    "the new body never observed the sleeper's run")
+                reconciled = _custody_rows(oracle, "delegate_run_reconciled", run_id)
+                assert all(row.get("action") == "left_live" for row in reconciled), reconciled
                 held = oracle.task_result(task_id)
-                assert held.get("status") == "scheduled" and held.get("reason_code") == "saved_work_hold", held
+                assert held.get("status") == "scheduled" and held.get("reason_code") == "model_sleeping", held
                 assert {run.run_id for run in open_runs(data_root)} == {run_id}
                 assert replay(data_root)[run_id].task_id == task_id
                 assert not _custody_rows(oracle, "delegate_run_cancel_outcome", run_id)
@@ -504,7 +509,7 @@ def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
                 assert not daemon.calls("POST", f"/v2/runs/{run_id}/control")
                 assert len(daemon.run_start_posts()) == 1, (
                     "restart recovery re-POSTed a run that already had a STARTED row")
-                assert not stub_b.calls, "a crash must not grant the parent a Resume"
+                assert not stub_b.calls, "a crash wakes no sleeper: its run has not ended"
 
                 # No orphans: every live pid carrying this data root sits inside
                 # the gen-B server tree.
@@ -515,8 +520,8 @@ def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
             finally:
                 server_b.stop()
 
-        # The engine completes the ORIGINAL run. A further boot exercises durable
-        # settlement without waiting for the production 600-second sweep cadence.
+        # The engine completes the ORIGINAL run. A further boot's body settles it, and its
+        # terminal wakes the sleeper, which finishes with the owed wake in its next request.
         with daemon._lock:
             daemon.runs[run_id]["hang"] = False
         with ScriptedStubModel([]) as stub_c:
@@ -524,9 +529,10 @@ def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
                 stub_c, OUROBOROS_SUBAGENTS=roster))
             try:
                 oracle = ArtifactOracle(data_root)
-                assert wait_until(lambda: any(
-                    row.get("action") == "settle_attempted" and row.get("settled") is True
-                    for row in _custody_rows(oracle, "delegate_run_reconciled", run_id)), 240)
+                assert wait_until(lambda: _custody_rows(oracle, "delegate_run_settled", run_id), 240)
+                result = server_c.wait_task(task_id, timeout=600)
+                assert result.get("status") == "completed", result
+                assert stub_c.calls, "the run's terminal woke the sleeping nanny"
                 settled = _custody_rows(oracle, "delegate_run_settled", run_id)
                 assert len(settled) == 1 and settled[0].get("state") == "succeeded", settled
                 assert len(_custody_rows(oracle, "delegate_run_ledger_recorded", run_id)) == 1
@@ -537,10 +543,9 @@ def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
                 custody = replay(data_root)[run_id]
                 assert custody.settled and custody.ledger_recorded and custody.terminal_state == "succeeded"
                 assert not open_runs(data_root)
-                assert oracle.task_result(task_id).get("reason_code") == "saved_work_hold"
                 assert not _custody_rows(oracle, "delegate_run_cancel_outcome", run_id)
                 assert not daemon.calls("POST", f"/v2/runs/{run_id}/control")
-                assert len(daemon.run_start_posts()) == 1 and not stub_c.calls
+                assert len(daemon.run_start_posts()) == 1
                 assert wait_until(
                     lambda: set(pids_with_env_value(str(data_root)))
                     <= set(process_tree_pids(server_c.proc.pid)), 45)

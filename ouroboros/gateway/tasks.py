@@ -16,6 +16,7 @@ from starlette.responses import JSONResponse
 from ouroboros.gateway._helpers import coerce_int, json_error, json_exception, migrating_error, request_drive_root, request_json_or, request_repo_dir, run_sync_to_completion, stage_initial_task_attachments, task_time_limits
 from ouroboros.gateway.cost_breakdown import _task_cost_breakdown_view  # noqa: F401
 from ouroboros.gateway.contracts import TaskCreateRequest
+from ouroboros.gateway.completion_gist import short_gist
 from ouroboros.gateway.schema import validate_ingress
 from ouroboros.depth_evidence import parse_task_depth
 from ouroboros.project_naming import admission_names
@@ -89,9 +90,8 @@ from ouroboros.workspace_executor import normalize_executor_ref
 log = logging.getLogger(__name__)
 
 _RESERVED_METADATA_KEYS = frozenset({
-    "work_diagnostic",
     "work_kind", "schedule_writer_kind", "wake_cause", "focus", "consciousness_cause", "origin_wake_task_id",
-    "task_id",
+    "task_id", "lead", "processing",
     "parent_task_id",
     "root_task_id",
     "session_id",
@@ -112,6 +112,9 @@ _RESERVED_METADATA_KEYS = frozenset({
     # Owner provenance (its recorded absence, a late answer's place relation) belongs to the host, never a caller.
     "origin_message_ref",
     "origin_suppressed", "origin_message_absent", "presence_binding_relation",
+    # Who wrote the text, the words a tree carries and a control press: host attestations, never a caller's.
+    "objective_author", "context_author", "owner_corpus", "ui_control",
+    "governing_owner_words", "governing_owner_words_absent", "governing_schedule_text",
 })
 
 
@@ -177,6 +180,8 @@ def _fold_contract_policies(body: Dict[str, Any], raw_metadata: Dict[str, Any], 
     answer_protocol = normalize_answer_protocol(body.get("answer_protocol") or raw_metadata.get("answer_protocol"))
     if answer_protocol:
         metadata["answer_protocol"] = answer_protocol
+    if normalize_bool(body.get("review_answer") or raw_metadata.get("review_answer")):
+        metadata["review_answer"] = True  # task_contract.review_answer: Required reviews the whole final answer
     service_teardown = str(body.get("service_teardown") or raw_metadata.get("service_teardown") or "").strip().lower()
     if service_teardown:
         if service_teardown not in {"stop", "keep"}:
@@ -788,7 +793,7 @@ def _compact_list_row(row: Dict[str, Any]) -> Dict[str, Any]:
     objective/title/role, lineage, project_id, reason_code, artifact_status,
     workspace fields, the TASK_COST_META_FIELDS, outcome_axes — all preserved
     because the projection is subtractive, never a whitelist)."""
-    return {key: value for key, value in row.items() if key not in _LIST_ROW_OMITTED_FIELDS}
+    return short_gist({key: value for key, value in row.items() if key not in _LIST_ROW_OMITTED_FIELDS})
 
 
 def _tasks_list_payload(
@@ -908,7 +913,7 @@ def _task_get_response(request: Request) -> JSONResponse:
         data = None  # the store cannot answer for this id: unavailable, not absent
     if not data:
         return json_error("task result is unavailable", 503)
-    payload = public_task_result(data)
+    payload = short_gist(public_task_result(data))
     from ouroboros.gateway.main_decisions import question_display_rooms
     payload["question_rooms"] = question_display_rooms(drive_root, task_id, payload.get("owner_quiz"))
     from ouroboros.owner_continue import continuation_offer  # Batch4: a Continue, or its accepted successor

@@ -41,7 +41,7 @@ from ouroboros.settings_defaults import (
 )
 from ouroboros.settings_scales import (
     EFFORT_SCALE, EFFORT_RANGE_KEYS, EFFORT_FORMAT_KEY, normalize_effort_document, OPTIONAL_BOUND_LEGACY, UNLIMITED,  # noqa: F401
-    PROMPT_CACHE_TTL_SCALE, defaults_for_settings_document, optional_bound_value,  # noqa: F401
+    PROMPT_CACHE_TTL_SCALE, defaults_for_settings_document, optional_bound_value, OPTIONAL_VALUE_KEYS, document_optional_value, unchosen_saved_document,  # noqa: F401
     REVIEW_POOL_DEFAULT_EFFORT,  # noqa: F401
     VALID_RUNTIME_MODES, VALID_SUBAGENTS_MODES, normalize_subagents_mode,  # noqa: F401
     VALID_SAFETY_MODES,  # noqa: F401
@@ -77,7 +77,6 @@ from ouroboros.model_slots import (
 from ouroboros.review_model_routes import (
     _exclusive_direct_remote_provider_env,  # noqa: F401
     adaptive_quorum,  # noqa: F401
-    get_review_enforcement,  # noqa: F401
     resolved_review_model_target,  # noqa: F401
 )
 from ouroboros.runtime_limits import (
@@ -98,8 +97,7 @@ from ouroboros.runtime_limits import (
     MCP_BROWSER_GUARD_PENDING, MCP_STDIO_STDERR_TAIL_BYTES, MCP_STDIO_STDERR_NOTE_BYTES,  # noqa: F401
     CLAUDEXOR_MODEL_POLL_INTERVAL_SEC, CLAUDEXOR_OPERATOR_STOP_TIMEOUT_SEC,  # noqa: F401
     CLAUDEXOR_STOP_EXIT_WAIT_SEC, BODY_MAINTENANCE_INTERVAL_SEC,  # noqa: F401
-    DELEGATE_WAIT_CEILING_SEC,  # noqa: F401
-    DELEGATE_WAIT_WINDOW_MAX_SEC, IDLE_LEASE_MAX_SEC,  # noqa: F401
+    IDLE_LEASE_MAX_SEC,  # noqa: F401
     MAX_ACTIVE_SUBAGENTS_HARD_CAP, MAX_SUBAGENT_DEPTH_HARD_CAP,  # noqa: F401
     WAKE_DEFAULT_SEC,  # noqa: F401
     _bounded_positive_int_setting,  # noqa: F401
@@ -110,7 +108,6 @@ from ouroboros.runtime_limits import (
     get_consciousness_autonomy,  # noqa: F401
     get_consciousness_daily_usd,  # noqa: F401
     get_consciousness_max_tasks,  # noqa: F401
-    get_delegate_wait_max_sec, get_delegate_wait_sec,  # noqa: F401
     get_finalization_grace_sec,  # noqa: F401
     get_direct_turn_stop_wait_sec,  # noqa: F401
     get_llm_transport_read_timeout_sec,  # noqa: F401
@@ -135,7 +132,7 @@ from ouroboros.update_channels import UPDATE_SETTINGS_DEFAULTS, normalize_update
 
 # Physical safety budgets, not test-value judgments or kernel-enforced quotas.
 TEST_WORKER_PEAK_RSS_BYTES = 1024**3  # Provisional 1 GiB; loaded P0 observed 690 MiB/worker.
-TEST_MEMORY_RESERVE_FRACTION = 0.10  # Keep physical headroom for the OS and other work.
+HOST_MEMORY_RESERVE_FRACTION = 0.10  # Kept out of every physical-memory admission for the OS and other work.
 TEST_PROCESS_SAMPLE_SEC = 1.0  # Poll latency; allocations between samples can outrun the stop.
 TEST_PROCESS_TOKEN_SCAN_SEC = 5.0  # Detached members are found by token this often; the scan reads every environment.
 
@@ -177,11 +174,11 @@ HOME = pathlib.Path.home()
 APP_ROOT, REPO_DIR, DATA_DIR, SETTINGS_PATH, PID_FILE, PORT_FILE = _launch_roots.configured_roots()
 
 # Settings pin + write guards: SSOT settings_integrity; re-exported for config.X imports.
-from ouroboros import settings_integrity as _settings_integrity  # noqa: E402
+from ouroboros import deployment_policy as _deployment_policy, settings_integrity as _settings_integrity  # noqa: E402
 SETTINGS_INTEGRITY_ENV = _settings_integrity.SETTINGS_INTEGRITY_ENV
 SettingsIntegrityError = _settings_integrity.SettingsIntegrityError
 from ouroboros.settings_integrity import (  # noqa: E402, F401 — public config read seam
-    runtime_setting, runtime_settings, runtime_environ, task_settings_scope,
+    runtime_setting, runtime_settings, runtime_environ, selection_settings, task_settings_scope,
 )
 
 RESTART_EXIT_CODE = 42
@@ -405,14 +402,9 @@ def get_starter_skills_turn_on() -> bool:
 
 
 def get_runtime_mode() -> str:
-    """Return effective Access, preserving the process's restart-bound baseline."""
-    default_val = str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"])
-    if _BOOT_RUNTIME_MODE is not None:
-        return normalize_runtime_mode(_BOOT_RUNTIME_MODE)
-    inherited = _resolve_baseline_from_env()
-    if inherited is not None:
-        return normalize_runtime_mode(inherited)
-    return normalize_runtime_mode(os.environ.get("OUROBOROS_RUNTIME_MODE", default_val) or default_val)
+    """Effective Access: the restart-bound baseline (the ratchets' raw pin) under the deployment's ceiling."""
+    mode = _BOOT_RUNTIME_MODE or _resolve_baseline_from_env() or os.environ.get("OUROBOROS_RUNTIME_MODE", "")
+    return _deployment_policy.effective_value("OUROBOROS_RUNTIME_MODE", normalize_runtime_mode(mode))
 
 
 def get_context_mode() -> str:
@@ -472,11 +464,13 @@ def prepare_settings_for_persist(settings: dict, *, authored_keys: Sequence[str]
         allow_context_lowering: bool = False, allow_safety_lowering: bool = False) -> dict:
     """Normalize settings writes under existing ratchets. Only the actual writer names authored_keys; a defaults
     merge preserves absent disk-owned intent, forwarded environment choices (an absent ``SAVED_CHOICE_SETTINGS``
-    key stays absent) and install-time provenance."""
+    key stays absent) and install-time provenance. A deployment policy judges the write first, before any effect."""
+    stored = _settings_integrity.read_settings_json_verified(SETTINGS_PATH)
+    settings = _deployment_policy.prepare_write(settings, lambda: normalize_settings_raw(stored) if isinstance(stored, dict) else {})
     from ouroboros.review_pool_receipts import persist_write_receipts
     persist_write_receipts(DATA_DIR, settings, SETTINGS_PATH)  # the review-pool receipts THIS write owes, before the pre-image goes
     authored = set(authored_keys or ())
-    unauthored = unauthored_saved_choices(settings, _settings_integrity.read_settings_json_verified(SETTINGS_PATH), authored)
+    unauthored = unauthored_saved_choices(settings, stored, authored)
     prepared = {k: v for k, v in settings.items() if k not in unauthored and not (
         k in _DISK_AUTHORED_SETTINGS and k not in authored and not _settings_file_value(k, "")
         and not (
@@ -655,8 +649,8 @@ def _coerce_setting_value(key: str, value):
         return normalize_subagents_mode(value)
     if key == "OUROBOROS_CONTEXT_MODE":
         return normalize_context_mode(value)
-    if key in OPTIONAL_BOUND_LEGACY:  # document spelling: "unlimited" or a positive int; a typo is finite
-        return UNLIMITED if (bound := optional_bound_value(key, value)) is None else bound
+    if key in OPTIONAL_VALUE_KEYS:  # a number, else "unlimited" or blank; a typo is finite
+        return document_optional_value(key, value)
     # Trim so whitespace-only config is not treated as a configured skills repo.
     if key == "OUROBOROS_SKILLS_REPO_PATH":
         return str(value or "").strip()
@@ -686,7 +680,9 @@ def coerce_settings_raw(raw: Any) -> dict:
 
 
 def verify_settings_integrity() -> str | None:
-    """Verify the strict child pin, returning the observed digest when present."""
+    """A server start's settings trust roots: load and pin this generation's deployment policy, then verify the
+    strict child pin, returning its observed digest when present; either failure is a ``SettingsIntegrityError``."""
+    _deployment_policy.load_for_generation()
     return _settings_integrity.verify_settings_integrity(SETTINGS_PATH)
 
 
@@ -743,7 +739,7 @@ def normalize_settings_raw(raw: dict) -> dict:
     (``retired_key_sets_seen`` -> ``server_maintenance._startup_retired_settings_notice``)."""
     from ouroboros.retention import LEGACY_RETENTION_KEYS, pick_legacy_retention_seed
 
-    loaded = normalize_consciousness_safety(coerce_settings_raw(raw))
+    loaded = normalize_consciousness_safety(coerce_settings_raw(unchosen_saved_document(raw)))  # a saved shipped 10 or 3 reads blank
     # Prefer a CUSTOMIZED legacy retention value so a rename never orphans it; an
     # all-defaults file collapses to the unified default.
     if "OUROBOROS_GC_RETENTION_DAYS" not in loaded:
@@ -763,6 +759,7 @@ def normalize_settings_raw(raw: dict) -> dict:
         _passes = 1  # 1 = shipped legacy default: nothing to seed
     if _passes != 1 and "OUROBOROS_REVIEW_MAX_CYCLES" not in loaded:
         loaded["OUROBOROS_REVIEW_MAX_CYCLES"] = str(max(0, _passes) + 1)
+    loaded.pop("OUROBOROS_REVIEW_ENFORCEMENT", None)  # value-aware notice: upgrade_notices.review_enforcement_notice
     from ouroboros.review_pool_migration import apply_at_read_seam
     _retained = apply_at_read_seam(loaded)  # the lanes become reviewer rows BEFORE the purge
     dropped = tuple(key for key in RETIRED_SETTING_KEYS if key in loaded and key not in _retained)
@@ -794,28 +791,29 @@ def serialize_settings(settings: dict) -> str:
     return json.dumps(settings, ensure_ascii=False, indent=2)
 
 
-def load_settings(*, migrate: bool = False) -> dict:
-    """A read takes no lock file and writes nothing; ``migrate`` (boot, onboarding) persists the compatibility upgrades."""
+def load_settings(*, migrate: bool = False, strict: bool = False) -> dict:
+    """A read takes no lock file and writes nothing; ``migrate`` (boot, onboarding) persists the compatibility upgrades;
+    ``strict``: a present document that is not one readable object is ``SettingsDocumentUnknown``, never defaults."""
     fd = _acquire_settings_lock() if migrate else None
     try:
-        return load_settings_lock_held(_settings_lock_held=fd is not None)
+        return load_settings_lock_held(_settings_lock_held=fd is not None, strict=strict)
     finally:
         _release_settings_lock(fd)
 
 
-def load_settings_lock_held(*, _settings_lock_held: bool = True) -> dict:
+def load_settings_lock_held(*, _settings_lock_held: bool = True, strict: bool = False) -> dict:
     """The same read, for a caller that ALREADY holds the (not re-entrant) settings lock: a write
     precondition needs the effective settings as of NOW. Only under that lock (a writer, or a
     ``load_settings(migrate=True)`` that acquired it) are the raw compatibility upgrades persisted: the
     raw mapping plus the normalized pair, never a defaults-merged document; a lock-free read writes nothing."""
-    from ouroboros.review_pool_migration import apply_at_read_seam, environment_overridable_keys
-    from ouroboros.server_runtime import SAVED_MODEL_ROLE_KEYS, authored_model_slots, propose_unauthored_model_slots
-    loaded: dict = {}
     try:
-        raw = _settings_integrity.read_settings_json_verified(SETTINGS_PATH, behind_writer=not _settings_lock_held)
-    except SettingsIntegrityError:
+        reader = _settings_integrity.read_settings_json_strict if strict else _settings_integrity.read_settings_json_verified
+        raw = reader(SETTINGS_PATH, behind_writer=not _settings_lock_held)
+    except (SettingsIntegrityError, _settings_integrity.SettingsDocumentUnknown):
         raise
     except Exception:
+        if strict:  # an unexpected read failure is unknown too, never defaults
+            raise _settings_integrity.SettingsDocumentUnknown("settings document could not be read")
         raw = None
     if isinstance(raw, dict):
         raw = _migrate_consciousness_safety(raw, lock_held=_settings_lock_held)
@@ -825,9 +823,18 @@ def load_settings_lock_held(*, _settings_lock_held: bool = True) -> dict:
             lock_held=_settings_lock_held,
             guard_live_write=_guard_live_settings_write,
         )
-        loaded = normalize_settings_raw(raw)
     # An existing (even unreadable) document keeps the optional bounds it ran under.
-    settings = defaults_for_settings_document(raw is not None or SETTINGS_PATH.exists())
+    return settings_of_document(raw, present=raw is not None or SETTINGS_PATH.exists())
+
+
+def settings_of_document(raw: Any, *, present: bool = True) -> dict:
+    """The loader's read of one document, pure: defaults, its normalized keys, the environment the read
+    binds (``settings_integrity.read_environ``) where it leaves a key to it, proposals, the deployment policy
+    last. ``load_settings`` reads the saved document; a write's policy step, the one it would save."""
+    from ouroboros.review_pool_migration import apply_at_read_seam, environment_overridable_keys
+    from ouroboros.server_runtime import SAVED_MODEL_ROLE_KEYS, authored_model_slots, propose_unauthored_model_slots
+    loaded = normalize_settings_raw(raw) if isinstance(raw, dict) else {}
+    settings = defaults_for_settings_document(present)
     settings.update(loaded)
     env_wins = environment_overridable_keys(raw)  # a seam default for an ABSENT key is not the owner's value
     env_authored, echo = set(), _settings_integrity.projected_proposals(environ := _settings_integrity.read_environ())
@@ -851,7 +858,7 @@ def load_settings_lock_held(*, _settings_lock_held: bool = True) -> dict:
     # Unauthored slots and the never-configured catalog follow the configured access.
     propose_unauthored_model_slots(settings, authored_model_slots(loaded) | env_authored)
     apply_at_read_seam(settings, merged=True)
-    return settings
+    return _deployment_policy.effective_settings(settings)
 
 
 def save_settings(
@@ -977,8 +984,6 @@ def apply_settings_to_env(settings: dict, *, environ=None) -> None:
                     val = json.dumps(val, ensure_ascii=False, separators=(",", ":"))
                 environ[k] = str(val)
         _settings_integrity.note_proposal_projection(environ, before)
-        if not environ.get("OUROBOROS_REVIEW_ENFORCEMENT"):
-            environ["OUROBOROS_REVIEW_ENFORCEMENT"] = str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"])
         if not environ.get("OUROBOROS_TASK_REVIEW_MODE"):
             environ["OUROBOROS_TASK_REVIEW_MODE"] = str(SETTINGS_DEFAULTS["OUROBOROS_TASK_REVIEW_MODE"])
 

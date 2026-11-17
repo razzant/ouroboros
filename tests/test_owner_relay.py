@@ -802,3 +802,88 @@ def test_cross_root_return_reference_survives_continue(tmp_path):
     assert _send_user_message(successor, "Done", reply_to_relay="return").startswith("OK:")
     [event] = successor.pending_events
     assert event["progress_meta"]["reply_to"]["snippet"] == "exact owner words"
+
+
+def test_running_work_content_contract_delivers_its_room_to_root_child_and_nanny(tmp_path, monkeypatch):
+    """Ingress -> addressed mailbox -> next drain -> every member, without cross-room broadcast.
+
+    The first-request contract lives in test_memory_view_content_contract. This is
+    the already-running half: real routing and drains, exact words and provenance,
+    append-only requests and a quiet repeat. Marks have a separate contract.
+    """
+    from copy import deepcopy
+
+    from ouroboros import server_owner_routing
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.projects_registry import create_project
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.registry import ToolContext
+    from supervisor import queue as supervisor_queue
+    from tests.test_project_routing_v664 import _ctx
+
+    room = create_project(tmp_path, "contract-running", name="Running compass")
+    other = create_project(tmp_path, "contract-unrelated", name="Unrelated orchard")
+    tasks = {
+        "root": {"id": "running-root", "root_task_id": "running-root", "delegation_role": "root"},
+        "child": {"id": "running-child", "parent_task_id": "running-root", "root_task_id": "running-root",
+                  "delegation_role": "subagent", "configured_subagent": {"id": "child", "route": {"kind": "api_model"}}},
+        "nanny": {"id": "running-nanny", "parent_task_id": "running-root", "root_task_id": "running-root",
+                  "delegation_role": "subagent", "configured_subagent": {"id": "nanny", "route": {"kind": "agent_session"}}},
+        "other": {"id": "unrelated-root", "root_task_id": "unrelated-root", "delegation_role": "root"},
+    }
+    actors, messages, seen = {}, {}, {}
+    prefix = [{"role": "system", "content": "Captured start view stays unchanged."},
+              {"role": "user", "content": "The original assignment."},
+              {"role": "assistant", "content": "I have started the work."}]
+    for role, task in tasks.items():
+        project = other if role == "other" else room
+        task.update(chat_id=project["chat_id"], project_id=project["id"], drive_root=str(tmp_path))
+        write_task_result(tmp_path, task["id"], "running", **{key: value for key, value in task.items() if key != "id"})
+        actors[role] = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=task["id"],
+                                  current_chat_id=task["chat_id"], project_id=task["project_id"], task_metadata=task)
+        messages[role], seen[role] = deepcopy(prefix), set()
+    running = {task["id"]: {"task": task, "started_at": 1.0} for task in tasks.values()}
+    host = _ctx(tmp_path, running=running, direct=lambda *_a, **_kw: pytest.fail("a sole room reader takes this message"))
+    monkeypatch.setattr(supervisor_queue, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(supervisor_queue, "ACCEPTANCE_FENCES", {})
+
+    def arrives(project, ident, text, stamp):
+        row = {"chat_id": project["chat_id"], "client_message_id": ident, "text": text,
+               "ts": stamp, "direction": "in"}
+        assert dialogue_store.append(tmp_path, "chat", row) is not None
+        server_owner_routing._route_owner_message(object(), host, {
+            "chat_id": row["chat_id"], "text": text, "log_text": text, "client_message_id": ident,
+            "origin_message_ref": build_owner_message_ref(chat_id=row["chat_id"], client_message_id=ident,
+                                                          ts=stamp, text=text),
+        })
+        return row
+
+    def drain(role):
+        _drain_incoming_messages(messages[role], queue.Queue(), tmp_path, tasks[role]["id"],
+                                 None, seen[role], owner_ctx=actors[role])
+        assert messages[role][:len(prefix)] == prefix
+        return "\n".join(message["content"] for message in messages[role][len(prefix):])
+
+    foreign = arrives(other, "late-orchard", "Leave the unrelated orchard open.", "2026-11-10T10:01:00+00:00")
+    assert "Leave the unrelated orchard open." in drain("other")  # ingress really delivered somewhere
+    for role in ("root", "child", "nanny"):
+        assert drain(role) == "" and not held_owner_messages(actors[role])
+    own = arrives(room, "late-compass", "  Keep north exactly here; do not rotate it.  ", "2026-11-10T10:02:00+00:00")
+    address = format_address(row_address(own))
+    root_text = drain("root")  # this very drain carries the row to the children
+    assert "[Message from my human]" in root_text and own["text"] in root_text
+    assert address in root_text  # the printed source address carries the exact room and timestamp
+    assert f"row:{room['chat_id']}@2026-11-10T10:02:00+00:00#" in root_text
+    for role in ("child", "nanny"):
+        text = drain(role)
+        assert (f"[Owner words quoted verbatim; 2026-11-10T10:02:00+00:00; Running compass; "
+                f"carried to this work by the host (reached this work); handle {address}]\n{own['text']}") in text
+    for role in ("root", "child", "nanny"):
+        text = "\n".join(message["content"] for message in messages[role])
+        assert text.count(own["text"]) == 1 and foreign["text"] not in text
+        held = held_owner_messages(actors[role])[address]
+        assert (held["text"], held["chat_id"], held["ts"]) == (own["text"], room["chat_id"], own["ts"])
+        before = deepcopy(messages[role])
+        drain(role)
+        assert messages[role] == before
+    assert own["text"] not in drain("other")

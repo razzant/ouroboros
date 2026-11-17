@@ -31,7 +31,6 @@ from ouroboros.utils import utc_now_iso
 
 REPO_DIR: pathlib.Path = pathlib.Path(CONFIG_REPO_DIR)
 DRIVE_ROOT: pathlib.Path = pathlib.Path(DATA_DIR)
-MAX_WORKERS: int = 10
 HEARTBEAT_STALE_SEC: int = 120
 QUEUE_MAX_RETRIES: int = 1
 BRANCH_DEV: str = "ouroboros"
@@ -66,12 +65,11 @@ def _get_ctx():
     return _CTX
 
 
-def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, max_workers: int,
+def init(repo_dir: pathlib.Path, drive_root: pathlib.Path,
          branch_dev: str = "ouroboros", branch_stable: str = "ouroboros-stable") -> None:
-    global REPO_DIR, DRIVE_ROOT, MAX_WORKERS, BRANCH_DEV, BRANCH_STABLE
+    global REPO_DIR, DRIVE_ROOT, BRANCH_DEV, BRANCH_STABLE
     REPO_DIR = repo_dir
     DRIVE_ROOT = drive_root
-    MAX_WORKERS = max_workers
     BRANCH_DEV = branch_dev
     BRANCH_STABLE = branch_stable
 
@@ -99,9 +97,8 @@ class Worker:
     quiescence_token: str = ""
     quiescence_confirmed: bool = False
     retiring: bool = False  # intentional, charged until observed dead; never crash recovery
-    resume_hold: str = ""  # this tick's authorized warm Resume: held idle slot, or the parked author
-    # The pool slots this worker serves: ``project`` (queued work, counted against MAX_WORKERS,
-    # fenced by readiness exhaustion) or ``conversation`` (the lane that carries
+    # The pool slots this worker serves: ``project`` (queued work, admitted by memory and the owner's
+    # cap, fenced by readiness exhaustion) or ``conversation`` (the lane that carries
     # owner turns, wakes and Presence bodies; outside every project fence and count).
     lane: str = LANE_PROJECT
     # ``worker``: a custodied child process. The disclosed inline executors (``inline_degraded``,
@@ -151,7 +148,7 @@ def event_bus_exitcode() -> Optional[int]:
     return getattr(proc, "exitcode", None) if proc is not None else None
 
 
-def get_event_q(*, create: bool = True):
+def get_event_q(*, create: bool = True, drive_root=None, stop_requested=None):
     """Return the process-lifetime supervisor event bus, creating it lazily.
 
     Worker-pool generations are replaceable; the producers that publish onto
@@ -162,7 +159,11 @@ def get_event_q(*, create: bool = True):
     with ``create=False``; they never create an undrained child-local bus.
     Every call, the cached return included, reads the manager process's exit
     code first and raises ``EventBusLost`` once it is set: the bus is whole or
-    it is over, and nothing is respawned onto a dead one.
+    it is over, and nothing is respawned onto a dead one. Boot may supply an explicit
+    custody/log root before workers.init, plus a stop predicate rechecked under this lock.
+    A failed attempt never published its queue, so no producer holds it: the next creating
+    call ends that manager first (``_end_manager``) and only then starts another; one whose
+    process does not exit stays owned for shutdown, and creation refuses until Restart.
     """
     global _EVENT_Q, _EVENT_Q_MANAGER, _EVENT_Q_GENERATION
     with _EVENT_Q_LOCK:
@@ -175,6 +176,10 @@ def get_event_q(*, create: bool = True):
             return _EVENT_Q
         if not create:
             raise RuntimeError("supervisor event bus is not attached")
+        if stop_requested is not None and stop_requested():
+            raise RuntimeError("supervisor event bus preparation stopped")
+        if _EVENT_Q_MANAGER is not None and not _end_manager(_EVENT_Q_MANAGER, ""):
+            raise RuntimeError("supervisor event bus: an earlier attempt's manager did not exit; Restart ends it")
         # A raw multiprocessing.Queue has an asynchronous feeder and its
         # pipe can be corrupted when a worker is force-killed mid-frame.
         # A manager-backed queue serializes synchronously in the producer
@@ -185,9 +190,14 @@ def get_event_q(*, create: bool = True):
         from supervisor.event_observation import EventQueueManager
 
         _EVENT_Q_MANAGER = EventQueueManager(ctx=mp.get_context("spawn"))
+        root = pathlib.Path(drive_root) if drive_root is not None else DRIVE_ROOT
+        _EVENT_Q_MANAGER._ouroboros_drive_root = root
+        started, cpu = time.monotonic(), time.thread_time()
         _EVENT_Q_MANAGER.start(initializer=_ignore_stop_signals)
-        _EVENT_Q = _EVENT_Q_MANAGER.Queue()
-        _EVENT_Q_GENERATION = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"
+        if stop_requested is not None and stop_requested():
+            _EVENT_Q_MANAGER._process.kill()  # no extra wait on Panic; the normal owner joins it
+            raise RuntimeError("supervisor event bus preparation stopped")
+        manager_wall, manager_cpu = time.monotonic() - started, time.thread_time() - cpu
         try:
             from ouroboros.process_custody import record_process
 
@@ -195,7 +205,7 @@ def get_event_q(*, create: bool = True):
             manager_pid = int(getattr(manager_proc, "pid", 0) or 0)
             if manager_pid:
                 record_process(
-                    DRIVE_ROOT,
+                    root,
                     pid=manager_pid,
                     cmd="multiprocessing SyncManager",
                     purpose="supervisor_event_queue_manager",
@@ -204,15 +214,21 @@ def get_event_q(*, create: bool = True):
                 )
         except Exception:
             log.warning("Failed to custody-track event queue manager", exc_info=True)
+        started, cpu = time.monotonic(), time.thread_time()
+        _EVENT_Q = _EVENT_Q_MANAGER.Queue()
+        queue_wall, queue_cpu = time.monotonic() - started, time.thread_time() - cpu
+        _EVENT_Q_GENERATION = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"
         try:
             append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                root / "logs" / "supervisor.jsonl",
                 {
                     "ts": utc_now_iso(),
                     "type": "event_queue_generation_started",
                     "generation": _EVENT_Q_GENERATION,
                     "server_pid": os.getpid(),
                     "start_method": "spawn",
+                    "manager_start_wall_seconds": manager_wall, "manager_start_cpu_seconds": manager_cpu,
+                    "queue_create_wall_seconds": queue_wall, "queue_create_cpu_seconds": queue_cpu,
                 },
             )
         except Exception:
@@ -234,12 +250,19 @@ def shutdown_event_q() -> None:
         _EVENT_Q = None
         _EVENT_Q_MANAGER = None
         _EVENT_Q_GENERATION = ""
-    if manager is None:
-        return
+    if manager is not None:
+        _end_manager(manager, generation)
+
+
+def _end_manager(manager: Any, generation: str) -> bool:
+    """End one manager and journal it; True once its process is confirmed gone (or never started).
+
+    The teardown's stop and the retirement of a failed, never-published attempt (``generation``
+    empty) share it. A process alive after kill and join stays the caller's, never forgotten."""
     proc = getattr(manager, "_process", None)
     exitcode_before = getattr(proc, "exitcode", None) if proc is not None else None
     try:
-        manager.shutdown()
+        manager.shutdown()  # absent on an attempt whose start failed first: nothing to ask
     except Exception:
         log.debug("Event queue manager shutdown failed", exc_info=True)
     killed = False
@@ -248,11 +271,12 @@ def shutdown_event_q() -> None:
         proc.join(5)
         killed = True
     try:
-        append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
+        append_jsonl(getattr(manager, "_ouroboros_drive_root", DRIVE_ROOT) / "logs" / "supervisor.jsonl", {
             "ts": utc_now_iso(), "type": "event_queue_generation_stopped", "generation": generation,
             "exitcode_before_shutdown": exitcode_before, "killed": killed})
     except Exception:
         log.debug("Failed to record the event queue generation's end", exc_info=True)
+    return proc is None or not proc.is_alive()
 
 
 def event_queue_generation() -> str:
@@ -272,9 +296,7 @@ from supervisor.queue import _queue_lock
 
 def worker_pool_admission_state(ctx: Any = None) -> Dict[str, Any]:
     """Busy/booting pools and live owner waits can queue work; exhausted pools cannot."""
-    state = _worker_pool_execution_state(
-        getattr(ctx, "WORKERS", None), running=getattr(ctx, "RUNNING", None),
-    )
+    state = _worker_pool_execution_state(getattr(ctx, "WORKERS", None))
     update_reason = repo_writer_admission_closed()
     available = state["available"] and not update_reason
     return {
@@ -1233,10 +1255,6 @@ def spawn_workers(n: int = 0) -> None:
                 "spawn_workers requires an empty pool; stop the current workers "
                 "or use respawn_worker for one slot"
             )
-    from supervisor.worker_pool_lifecycle import record_demand_forecast
-
-    # A new generation: no pass of it has computed demand yet (an in-process restart keeps the module).
-    record_demand_forecast(None, reason="new_pool_generation", assignment_pass=False)
     # Never hold the queue's process-local threading.RLock across fork: a child
     # would inherit it owned by a vanished thread.  The dedicated lifecycle lock
     # is not used by worker code and serializes competing full-pool starts/kills.
@@ -1310,17 +1328,12 @@ def _partition_slots_for_stop(lanes: Optional[frozenset]) -> List[Worker]:
     """Under the lifecycle serializer, then Q (``kill_workers``' order): the slots a stop owns, marked ``reaping``.
 
     ``lanes`` None owns every slot and ends the generation (no carrier grows behind the stop).
-    A stop owning the project slots also leaves the growth forecast unknown: it described them.
     """
     doomed = [w for w in WORKERS.values() if lanes is None or getattr(w, "lane", LANE_PROJECT) in lanes]
     if lanes is None:
         from supervisor import conversation_lane
 
         conversation_lane.arm(None)
-    if lanes is None or LANE_PROJECT in lanes:
-        from supervisor.worker_pool_lifecycle import record_demand_forecast
-
-        record_demand_forecast(None, reason="pool_stopped", assignment_pass=False)
     for w in doomed:
         # The timeout reaper's ownership mark: assignment, the health check
         # and the crash detector skip the slot while it is torn down.
@@ -1397,14 +1410,15 @@ def kill_workers(
 ) -> bool:
     """Stop the pool's workers and settle the rows they carried.
 
-    ``lanes`` scopes a PROJECT fence (readiness exhaustion) to the
-    project slots: conversation carriers, and the rows they or an awaited carrier
-    own, are partitioned out of the sweep under Q and restored at its end, so a
+    ``lanes`` scopes a PROJECT fence (readiness exhaustion) to the project slots:
+    conversation carriers and the rows they or an awaited carrier own leave the sweep
+    under Q and return at its end, a returned owner turn still queued stays queued, so a
     project-pool fence never terminalises an owner's turn (owner decision 1A).
     A stop without ``lanes`` owns every slot: Panic, Restart and a managed update.
     """
     global _WORKER_POOL_DISABLED_REASON
-    from supervisor import queue, restart_retention as retention  # every door retains saved pauses
+    from supervisor import conversation_lane, queue, restart_retention as retention  # every door retains saved pauses
+    lane_spared = lanes is not None and LANE_CONVERSATION not in lanes  # a project fence: the lane's rows stay
     with _queue_lock:
         if disable_reason:
             previous_disable_reason, _WORKER_POOL_DISABLED_REASON = _WORKER_POOL_DISABLED_REASON, str(disable_reason)
@@ -1587,10 +1601,10 @@ def kill_workers(
                     PENDING.append(task)
                     continue
                 paused = retention.retained_pending(task, sleep_hold_reason=sleep_hold_reason)
-                # Accepted work never ends with the application (boot decides), except a child
-                # whose parent this stop interrupted: invariant 19 settles it as before.
-                if paused or retain_saved_work and not retention.child_of_interrupted(
-                        task, running_task_ids, interrupted_roots):
+                # Accepted work never ends with the application (boot decides), nor a returned owner turn with a project
+                # fence (1A), except a child whose parent this stop interrupted: invariant 19 settles it as before.
+                if paused or ((retain_saved_work or lane_spared and conversation_lane.resumes_on_lane(task))
+                              and not retention.child_of_interrupted(task, running_task_ids, interrupted_roots)):
                     retained_paused_ids.extend([tid] if paused else [])
                     PENDING.append(task)
                     continue
@@ -1898,7 +1912,7 @@ def _settle_cancelled_pending_row(
     try:
         from supervisor.cancel_publication import queued_address
         stored = write_task_result(
-            DRIVE_ROOT, task_id, status_cancelled,
+            DRIVE_ROOT, task_id, status_cancelled, _cancel_observed=True,
             strict_existing_dict=True,
             result=("Cancelled before this continuation started." if int(task.get("_attempt") or 1) > 1
                     else "Cancelled before start."), **cost_fields,
@@ -2013,10 +2027,14 @@ def _drop_cancelled_pending() -> bool:
     if not PENDING:
         return True
     try:
-        from supervisor.restart_retention import conserve_unreadable_pending
         from ouroboros.task_results import (
-            STATUS_CANCEL_REQUESTED, STATUS_CANCELLED, _TRULY_TERMINAL_STATUSES, write_task_result,
+            _TRULY_TERMINAL_STATUSES,
+            STATUS_CANCEL_REQUESTED,
+            STATUS_CANCELLED,
+            write_task_result,
         )
+        from supervisor.ended_work_helpers import closes_only_parked_row
+        from supervisor.restart_retention import conserve_unreadable_pending
     except Exception:
         log.error(
             "Pending task-result authority imports are unavailable; assignment is blocked",
@@ -2132,6 +2150,9 @@ def _drop_cancelled_pending() -> bool:
             or (current_intents is not None and tid in current_intents)
         ):
             survivors.append(t)
+            continue
+        if closes_only_parked_row(current_intents.get(tid)):
+            survivors.append(t)  # its settlement rechecks the row and captures off Q (``ended_work_helpers``)
             continue
         if tid and (
             status == STATUS_CANCEL_REQUESTED or tid in current_intents
@@ -2321,21 +2342,6 @@ def _drop_assignable_evolution_tasks(deferred_ids: set[str]) -> list[str]:
             kept.append(task)
     PENDING[:] = kept
     return blocked_ids
-
-
-def _running_subagent_count(root_task_id: str, running=None) -> int:
-    if not root_task_id:
-        return 0
-    count = 0
-    for meta in RUNNING.values() if running is None else running:
-        task = meta.get("task") if isinstance(meta, dict) else None
-        if (
-            isinstance(task, dict)
-            and str(task.get("delegation_role") or "") == "subagent"
-            and str(task.get("root_task_id") or "") == root_task_id
-        ):
-            count += 1
-    return count
 
 
 def _assignment_depth_reservation_admits(candidate: dict, running=None) -> bool:

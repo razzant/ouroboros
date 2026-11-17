@@ -366,7 +366,7 @@ def test_same_boot_sweep_settlement_is_cleared_in_the_same_generation(tmp_path, 
     monkeypatch.setattr(server_mod, "DATA_DIR", tmp_path)
 
     def fake_reconcile(drive_root, *, running_task_ids, gateway_factory,
-                       recoverable_handles, replay_pending):
+                       recoverable_handles, replay_pending, observe_pending):
         _emit_settled(tmp_path, "run-5", "t-late")
         return []
 
@@ -407,7 +407,7 @@ def _kill_env(tmp_path, monkeypatch):
     monkeypatch.setattr(q, "PENDING", [])
     monkeypatch.setattr(q, "RUNNING", {}, raising=False)
     monkeypatch.setattr(workers, "WORKERS", {}, raising=False)
-    monkeypatch.setattr(workers, "respawn_worker", lambda wid: None, raising=False)
+    monkeypatch.setattr(workers, "respawn_worker", lambda wid, **_kwargs: None, raising=False)
     monkeypatch.setattr(q, "persist_queue_snapshot", lambda reason="": None)
     monkeypatch.setattr(task_lifecycle, "CANCELLED_ROOT_FENCES", {}, raising=False)
     monkeypatch.setattr(task_lifecycle, "_ACTIVE_CASCADE_FENCES", {}, raising=False)

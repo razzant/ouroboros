@@ -58,6 +58,50 @@ def test_large_single_message_is_fully_readable_inside_frozen_ceiling(tmp_path):
     assert "chat_history" not in {item["function"]["name"] for item in registry.schemas()}
 
 
+def test_reentry_carries_unstaged_files_and_forward_provenance_beside_the_exact_words(tmp_path):
+    registry, ctx = _actor(tmp_path)
+    cursor = pc._chat_cursor(tmp_path)
+    raw = "  Somebody else's words.\n"
+    forwarded = _row(KEY, raw, source="presence:telegram")
+    forwarded["transport"]["message"] = {"forward_origin": {"sender_user_name": "Original author"}}
+    empty = _row(KEY, "", source="presence:telegram")
+    empty["transport"]["message"] = {
+        "attachments": [{"file_name": "data.zip", "file_size": 300 * 1024**2, "status": "too_large"}],
+        "non_text": [{"kind": "poll", "description": "Choose Tuesday or Wednesday"}]}
+    _append(tmp_path, forwarded, empty)
+    note = pc.reentry_note(_binding(tmp_path, cursor), ctx)
+    assert "Forwarded:" in note and "Original author" in note
+    assert "Not received:" in note and "data.zip" in note and "300.0 MiB" in note
+    assert "Choose Tuesday or Wednesday" in note and "host facts, not their words" in note
+    worded = next(line for line in note.splitlines() if json.dumps(raw) in line)
+    assert worded.endswith(": " + json.dumps(raw)), "their words, and only those, are quoted as theirs"
+    assert "\n  What the connector reports about this message (host facts, not their words):\n  - Forwarded:" in note
+    source = _read_all(registry, _reader(note))
+    assert [row["text"] for row in source["rows"]] == [raw, ""], "retained words are never manufactured"
+
+
+def test_a_cut_description_in_history_names_the_rows_own_address_which_reads_it_whole(tmp_path):
+    """A history view cuts a connector description at 4000 characters; the cut names ``memory_read`` of the row's
+    recorded context, and that reader returns the whole description."""
+    from ouroboros.dialogue_provenance import dialogue_text
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    registry, ctx = _actor(tmp_path)
+    cursor = pc._chat_cursor(tmp_path)
+    description = "Tuesday or Wednesday? " * 300
+    row = _row(KEY, "", source="presence:telegram")
+    row["transport"]["message"] = {"non_text": [{"kind": "poll", "description": description}]}
+    _append(tmp_path, row)
+    stored = list(ds.iter_rows(tmp_path, "chat"))[-1].row  # the row as history reads it
+    for text in (pc.reentry_note(_binding(tmp_path, cursor), ctx), dialogue_text(stored)):
+        found = re.search(r"\[truncated \d+ chars; whole: memory_read\(source_ref=(\{[^\n]+?\})\)\]", text)
+        assert found, text[-600:]
+        reader = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+        reader.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="reader"))
+        whole = reader.execute("memory_read", {"source_ref": json.loads(found.group(1))})
+        assert description.strip() in whole, whole[:400]
+
+
 def test_old_snapshot_remains_readable_after_new_reentry_and_rotation(tmp_path):
     from supervisor.state import rotate_jsonl_log_if_needed
 

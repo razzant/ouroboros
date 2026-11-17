@@ -5,8 +5,8 @@
 that the next genuine drain delivers, never a wake, even when any mail would wake the wait; a
 missing or non-bool fact keeps the ordinary mail rule. Driven through the real consumers:
 ``await_messages`` in-slot, its warm park (``direct_owner_wait``), the cold sleep-wake pass
-(``supervisor.sleep_wake``), ``wait_task``/``wait_tasks``, a review panel's wait,
-``delegate_wait`` (``delegate_supervision.supervised_wait``) and a provider-outage backoff
+(``supervisor.sleep_wake``), ``wait_task``/``wait_tasks``, a review panel's wait, ``delegate_wait``'s
+sleep on runs and its wake (``delegate_supervision``) and a provider-outage backoff
 (``loop_transport.transport_wait_step``). Real connectors' reactions through these consumers:
 ``tests/test_place_reaction_connectors.py``.
 """
@@ -26,6 +26,7 @@ from ouroboros.owner_mailbox import (
     write_task_message,
 )
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._run_wait_shared import held_run, wake_now
 from tests.test_model_sleep import _cold_park, _ctx, _mail, _result
 from tests.test_place_focus import focus as focus
 
@@ -98,7 +99,7 @@ def test_in_slot_wait_does_not_end_on_passive_place_mail_and_its_drain_still_del
     _result(tmp_path, "sleeper")
     ctx = _ctx(tmp_path)
     _place(tmp_path, "sleeper", False)
-    out = json.loads(_await_messages(ctx, 1))
+    out = json.loads(_await_messages(ctx, 1, mode="in_slot"))
     assert out["reason"] == "timeout" and out["pending"] is False
     assert acknowledged_task_message_ids(tmp_path, "sleeper", attempt_key=1) == set()
     assert "reaction:+1" in _delivered(tmp_path, ctx), "the next genuine drain still delivers it"
@@ -112,7 +113,7 @@ def test_in_slot_wait_ends_on_a_waking_or_legacy_place_arrival(tmp_path, wake):
     _result(tmp_path, "sleeper")
     ctx = _ctx(tmp_path)
     _place(tmp_path, "sleeper", wake)
-    out = json.loads(_await_messages(ctx, 5))
+    out = json.loads(_await_messages(ctx, 5, mode="in_slot"))
     assert out["reason"] == "owner_mailbox_pending" and out["pending"] is True
 
 
@@ -331,9 +332,10 @@ def test_a_review_wait_hears_only_a_waking_place_arrival(tmp_path, wake, expecte
     assert wake_reason(ctx, {}) == expected
 
 
-# -- delegate_wait: the supervised wait over a delegated run ----------------------------------------
-# Only the physical observer (``wait_once``) is replaced; the arrival is written by the production
-# producer (``place_intake.offer_to_author``) into the live author's mailbox.
+# -- delegate_wait: a sleep on a delegated run, and its wake ----------------------------------------
+# The sleep's readiness is the real ``model_sleep.wake_reason`` over the wait's sources; only the wake's one
+# addressed read of the run is scripted. The arrival is written by the production producer
+# (``place_intake.offer_to_author``) into the live author's mailbox.
 
 def _author(focus):
     import threading
@@ -347,6 +349,7 @@ def _author(focus):
                                          _accepting_owner_messages=True, _busy=True, _current_task_id="author")
     ctx = SimpleNamespace(task_id="author", task_attempt=1, drive_root=root, budget_drive_root=str(root),
                           task_metadata={}, _loop_mailbox_seen_ids=set())
+    held_run(root, "run-1", "author")
     return lease, ctx
 
 
@@ -363,12 +366,19 @@ def _arrive(focus, wake, source_event_id="event1"):
     return "place-event:" + task["metadata"]["presence_event_identity"]
 
 
+def _woke(ctx, run_id="run-1"):
+    """What ends a ``delegate_wait``'s sleep on ``run_id`` now: its sleep's own readiness over the wait's sources."""
+    from ouroboros import delegate_supervision as supervision, model_sleep
+
+    return model_sleep.wake_reason(ctx, supervision._choice({"runs": [run_id]}))
+
+
 def _observer(*steps):
-    """Each read returns the next status; ``then`` (optional) runs before it, as an event landing mid-wait."""
+    """Each read returns the next status; ``then`` (optional) runs before it, as an event landing mid-read."""
     calls = []
 
     def wait_once(_ctx, run_id, *_args, **_kwargs):
-        assert len(calls) < len(steps), "the wait kept polling past its last scripted read"
+        assert len(calls) < len(steps), "the wake read its run more than once"
         status, then = steps[len(calls)]
         calls.append(status)
         if then:
@@ -388,10 +398,12 @@ def test_delegate_wait_sleeps_over_a_passive_arrival_and_the_drain_still_deliver
     lease, ctx = _author(focus)
     try:
         quiet = _arrive(focus, False)
-        wait_once, calls = _observer(("no_progress", None), ("terminal", None))
-        wake = json.loads(supervision.supervised_wait(ctx, "run-1", wait_once=wait_once).text)
-        assert calls == ["no_progress", "terminal"], "a passive arrival must survive the quiet poll"
-        assert wake["status"] == "terminal" and quiet not in _wake_ids(wake)
+        assert _woke(ctx) == "", "a passive arrival never ends the sleep on the run"
+        held_run(focus[0], "run-1", "author", ended="succeeded")
+        assert _woke(ctx) == "run:run-1"
+        wait_once, calls = _observer(("terminal", None))
+        wake = json.loads(wake_now(ctx, "run-1", wait_once=wait_once, woke_by="run:run-1").text)
+        assert calls == ["terminal"] and wake["status"] == "terminal" and quiet not in _wake_ids(wake)
         assert supervision.acknowledge_pending_wake(ctx, wake)
         assert quiet not in acknowledged_task_message_ids(focus[0], "author", attempt_key=1)
         assert quiet not in ctx._loop_mailbox_seen_ids
@@ -408,14 +420,15 @@ def test_delegate_wait_wakes_for_a_later_waking_arrival_and_leaves_the_passive_o
     lease, ctx = _author(focus)
     try:
         quiet = _arrive(focus, False)
-        landed = []
-        wait_once, calls = _observer(("no_progress", None),
-                                     ("no_progress", lambda: landed.append(_arrive(focus, True, "event2"))))
-        wake = json.loads(supervision.supervised_wait(ctx, "run-1", wait_once=wait_once).text)
-        assert calls == ["no_progress", "no_progress"] and _wake_ids(wake) == landed
+        assert _woke(ctx) == ""
+        loud = _arrive(focus, True, "event2")
+        assert _woke(ctx).startswith("mail:"), "the waking arrival ends the sleep"
+        wait_once, calls = _observer(("no_progress", None))
+        wake = json.loads(wake_now(ctx, "run-1", wait_once=wait_once).text)
+        assert calls == ["no_progress"] and _wake_ids(wake) == [loud]
         assert supervision.acknowledge_pending_wake(ctx, wake)
         acked = acknowledged_task_message_ids(focus[0], "author", attempt_key=1)
-        assert landed[0] in acked and quiet not in acked
+        assert loud in acked and quiet not in acked
         assert "Place event; context only" in _delivered(focus[0], ctx)
         assert quiet in acknowledged_task_message_ids(focus[0], "author", attempt_key=1)
     finally:
@@ -436,8 +449,10 @@ def test_delegate_wait_still_wakes_for_genuine_input_beside_a_passive_arrival(fo
                                       provenance="peer_task", relation="sibling", msg_id="peer-1")
         else:
             ctx.task_metadata = {"deadline_at": "2000-01-01T00:00:00+00:00"}
+        woke = _woke(ctx)
+        assert woke and (genuine != "peer" or woke == "mail:peer") and (genuine != "deadline" or woke == "control:deadline")
         wait_once, calls = _observer(("no_progress", None))
-        wake = json.loads(supervision.supervised_wait(ctx, "run-1", wait_once=wait_once).text)
+        wake = json.loads(wake_now(ctx, "run-1", wait_once=wait_once, woke_by=woke).text)
         expected = {"owner": ["owner-b"], "peer": ["peer-1"], "deadline": []}[genuine]
         assert _wake_ids(wake) == expected
         if genuine == "deadline":
@@ -450,24 +465,23 @@ def test_delegate_wait_still_wakes_for_genuine_input_beside_a_passive_arrival(fo
 
 @pytest.mark.parametrize("wake", [_LEGACY, "false", None])
 def test_delegate_wait_keeps_waking_for_place_mail_without_a_typed_fact(tmp_path, wake):
-    import ouroboros.delegate_supervision as supervision
-
     ctx = SimpleNamespace(task_id="author", task_attempt=1, drive_root=tmp_path, budget_drive_root=str(tmp_path),
                           task_metadata={}, _loop_mailbox_seen_ids=set())
+    held_run(tmp_path, "run-1", "author")
     _place(tmp_path, "author", wake)
+    assert _woke(ctx) == "mail:presence-turn"
     wait_once, calls = _observer(("no_progress", None))
-    wake_out = json.loads(supervision.supervised_wait(ctx, "run-1", wait_once=wait_once).text)
+    wake_out = json.loads(wake_now(ctx, "run-1", wait_once=wait_once).text)
     assert calls == ["no_progress"] and _wake_ids(wake_out) == ["place-event:e1"]
 
 
 def test_delegate_wait_wakes_at_once_for_a_waking_arrival(focus):
-    import ouroboros.delegate_supervision as supervision
-
     lease, ctx = _author(focus)
     try:
         loud = _arrive(focus, True)
+        assert _woke(ctx).startswith("mail:")
         wait_once, calls = _observer(("no_progress", None))
-        wake = json.loads(supervision.supervised_wait(ctx, "run-1", wait_once=wait_once).text)
+        wake = json.loads(wake_now(ctx, "run-1", wait_once=wait_once).text)
         assert calls == ["no_progress"] and _wake_ids(wake) == [loud]
     finally:
         lease.release()

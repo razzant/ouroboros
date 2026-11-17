@@ -28,6 +28,9 @@ def test_starter_implements_frozen_plan_with_authorization_before_send(plan_setu
     path, request, key = p.engine.calls[-1]
     assert path == f"/v2/threads/{prior.thread_id}/turns"
     assert request["mode"] == "agent" and request["access"] == "workspace_write"
+    assert "ACCESS: you may edit inside this root" in request["prompt"]
+    assert "ACCESS: The starting folder is a location, not a read boundary" not in request["prompt"]
+    assert request["prompt"].count("this line governs native process access") == 1
     assert request["planRunId"] == prior.run_id
     assert hashlib.sha256(p.engine.plan).hexdigest() == result["promotion"]["plan_sha256"]
     assert request["overridePlanReadiness"] is False and "continueFrom" not in request

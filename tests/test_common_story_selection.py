@@ -412,8 +412,9 @@ def test_withdrawing_one_teller_does_not_claim_a_page_hidden_by_another_returns(
     assert result["shown"] is False
     assert "Alpha asked again and I counted." not in _story(tmp_path)
     assert result["effect"] == (
-        "withdrawal saved: other selections and folds still determine what appears. This "
-        "task's view is not refreshed; the next start re-measures its Max room.")
+        "withdrawal saved: other selections and folds still determine what appears. My story's drawn size is not "
+        "re-measured by a write: memory_read(story=true) measures it whole, each record's tokens and the pages no part "
+        "or account holds yet. This task's view is not refreshed; the next start re-measures its Max room.")
     assert "the account tells 0 records" in result["receipt"]
     assert "the records it told return there" not in str(result)
 
@@ -672,3 +673,85 @@ def test_an_edge_whose_cited_revision_the_journal_lost_cites_nothing_so_later_co
     block = _block(_story(tmp_path), g)
     assert f"that revision of {a1} is not in this chronicle" in block  # the source line names the loss, not the words
     assert f"- correction by me of page {a1} (room {alpha}, " in block and "  A1 FIX AFTER THE LOSS" in block
+
+
+def test_the_proposal_fits_the_next_start_now_and_with_it_in_this_tasks_frame_and_the_real_start_agrees(
+        tmp_path, monkeypatch):
+    """The proposal read refits my story now and with the selection as the next start of this task's one captured
+    frame (``memory_floor.counterfactual_starts``): a long Main page an account would tell keeps Max out now and lets
+    it in with the selection. The read writes nothing, and the production start fit agrees with both arms: the
+    captured view starts Low, and after the real selection a fresh capture in the same frame starts Max."""
+    from ouroboros import artifacts
+    from tests import _memory_scale_fixture as scale
+
+    rooms, alpha, beta, a1, b1, h1 = _rooms(tmp_path)
+    long = _page(tmp_path, "1", 12, 12, text="Main heard a long reply. " + "It went on and on. " * 1800)
+    g = _write(tmp_path, kind="account", text="Main heard a long reply; one sentence holds it.", sources=[long])["node_id"]
+    captured = mv.capture_memory_view(tmp_path, {"id": "scale-fit", "chat_id": 1, "_is_direct_chat": True},
+                                      mv.view_spec_for_task({"id": "scale-fit", "chat_id": 1}, tmp_path))
+    def room(window):  # the production start's Max room in this frame: the memory allowance and my story
+        fact = scale.build(tmp_path, monkeypatch, window=window, snap=captured).projection("max").memory_facts["max_room"]
+        return fact["allowance"], fact["story"]
+    story, (low, high) = room(1_000_000)[1], (100_000, 1_000_000)
+    while high - low > 50:  # the smallest window whose start allowance holds the story less 1,500 tokens
+        middle = (low + high) // 2
+        low, high = (low, middle) if room(middle)[0] >= story - 1_500 else (middle, high)
+    found = high
+    plan = scale.build(tmp_path, monkeypatch, window=found, snap=captured)
+    _pages, read = _proposal_with(tmp_path, plan, target_id=g, replaces=[long])
+    assert [re.search(rf"- {name}: starts (\w+)", read)[1] for name in ("now", "with this selection")] == ["Low", "Max"]
+    assert "- now: starts Low; Max room crowded: window " in read
+    assert plan.initial_mode == "low"  # the production start of the captured view is the "now" arm
+    assert "This task started in low (its start projection, a separate fact" in read
+    files, views, capture = tree(tmp_path), [], mv.capture_memory_view
+    monkeypatch.setattr(artifacts, "store_actor_source_bytes", lambda *a, **kw: pytest.fail("the read wrote"))
+    monkeypatch.setattr(mv, "capture_memory_view", lambda *a, **kw: (views.append(a[2]), capture(*a, **kw))[1])
+    pages, _read = _proposal_with(tmp_path, plan, target_id=g, replaces=[long])
+    assert len(views) == 2 * len(pages)  # its own room and spec: the fit reuses the read's two captures per page
+    assert tree(tmp_path) == files  # no record, no index byte, no artifact, no receipt
+    monkeypatch.undo()
+    _write(tmp_path, kind="selection", target_id=g, replaces=[long], reason="one sentence holds it")
+    after = mv.capture_memory_view(tmp_path, {"id": "scale-fit", "chat_id": 1, "_is_direct_chat": True}, captured.spec)
+    assert scale.build(tmp_path, monkeypatch, window=found, snap=after).initial_mode == "max"
+
+
+def test_a_proposal_with_an_unreadable_memory_capture_never_reports_that_its_empty_story_starts_max(tmp_path, monkeypatch):
+    """The proposal consumer passes capture validity through reprojected, not just its empty story. Only the failed
+    arm becomes unmeasured; a successful arm still uses the captured production fitter, without another read or write."""
+    from dataclasses import replace
+
+    from tests import _memory_scale_fixture as scale
+
+    rooms, alpha, beta, a1, b1, h1 = _rooms(tmp_path)
+    account = _write(tmp_path, kind="account", text=G_TEXT, sources=[a1])["node_id"]
+    captured = mv.capture_memory_view(tmp_path, {"id": "scale-fit", "chat_id": 1, "_is_direct_chat": True},
+                                      mv.view_spec_for_task({"id": "scale-fit", "chat_id": 1}, tmp_path))
+    plan = scale.build(tmp_path, monkeypatch, window=1_000_000, snap=captured)
+    capture, calls = mv.capture_memory_view, []
+
+    def fail_proposed(*args, **kwargs):
+        fresh = capture(*args, **kwargs)
+        calls.append(fresh)
+        return replace(fresh, story=[], legacy_blocks=[], store_status={"state": "journal_unreadable"}) if len(calls) % 2 == 0 else fresh
+
+    monkeypatch.setattr(mv, "capture_memory_view", fail_proposed)
+    before = tree(tmp_path)
+    pages, read = _proposal_with(tmp_path, plan, target_id=account, replaces=[a1])
+    assert len(calls) == 2 * len(pages)
+    assert "- now: starts Max;" in read
+    assert "- with this selection: not measured (memory capture unavailable: journal_unreadable); its mode is unknown" in read
+    assert "- with this selection: starts" not in read
+    assert tree(tmp_path) == before
+
+
+def _proposal_with(root, plan, **proposal):
+    """``_proposal`` read by a task whose context holds ``plan``: its captured frame."""
+    pages, bound = [], {}
+    while True:
+        ctx = _ctx(root)
+        ctx.context_fit_plan = plan
+        text = _memory_read(ctx, proposed_selection=proposal, room_id="1", **bound)
+        pages.append(text)
+        if text.split("\n", 2)[1].endswith("complete"):
+            return pages, "".join(page.split("\n", 2)[2] for page in pages)
+        bound = dict(zip(("start", "fingerprint"), _continuation(text)))

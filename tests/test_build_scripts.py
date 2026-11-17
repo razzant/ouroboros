@@ -12,6 +12,7 @@ In v5.15.x this module also absorbed packaging-asset completeness checks
 contract checks (formerly tests/test_release_workflow.py) so packaging
 contracts evolve in one place.
 """
+import json
 import os
 import pathlib
 import re
@@ -463,6 +464,7 @@ class TestBuildWindowsPs1:
             "WebKit installation",
             "Managed repo bundle build",
             "PyInstaller build",
+            "Playwright driver Node replacement",
         ):
             assert f'Invoke-NativeChecked "{description}"' in src
 
@@ -690,12 +692,12 @@ class TestDockerfile:
     def test_runtime_stage_keeps_the_python_base_packages(self):
         """debian:trixie-slim lacks what python:3.10-slim installed: without CA
         certificates git and OpenSSL cannot verify HTTPS (Update fetches), and
-        tzdata/netbase back zoneinfo and service lookups."""
+        tzdata/netbase back zoneinfo and service lookups; vendor installers need curl."""
         src = _read("Dockerfile")
         runtime = src[src.index("FROM debian:trixie-slim AS runtime"):]
         install = re.search(r"apt-get install -y --no-install-recommends ([^\\\n]+)", runtime)
         assert install is not None
-        assert {"ca-certificates", "git", "netbase", "tzdata"} <= set(install.group(1).split())
+        assert {"ca-certificates", "curl", "git", "netbase", "tzdata"} <= set(install.group(1).split())
         assert "LANG=C.UTF-8" in runtime
 
     def test_playwright_pin_matches_lock(self):
@@ -1300,6 +1302,46 @@ def test_spec_collects_the_chrome_for_testing_payload_verbatim_only_on_macos(mac
 
 
 @pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
+def test_spec_runs_windows_analysis_on_a_thread_with_a_stack_this_os_accepts():
+    """The Windows build's Analysis runs on a deep-stack thread (7.11.0 tag build: 0xC00000FD). This runs the spec's
+    own wrapper with a stand-in Analysis on every OS, Windows included, so a stack size the OS refuses fails here."""
+    import ast
+    import threading
+
+    spec = _pkg_read("Ouroboros.spec")
+    wrapper = next(node for node in ast.parse(spec).body
+                   if isinstance(node, ast.FunctionDef) and node.name == "_analysis_on_a_deep_stack")
+    assert "(_analysis_on_a_deep_stack if _is_windows else Analysis)(" in spec
+
+    def deep(depth):
+        return 0 if depth == 0 else 1 + deep(depth - 1)
+
+    class Analysis:
+        def __init__(self, *args, **kwargs):
+            self.args, self.kwargs, self.depth = args, kwargs, deep(4000)
+
+    class Refused:
+        def __init__(self, *args, **kwargs):
+            raise ValueError("the analysis failed")
+
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(limit * 5)  # what the spec does for its own process
+    try:
+        for stand_in in (Analysis, Refused):
+            namespace = {"Analysis": stand_in}
+            exec(compile(ast.Module(body=[wrapper], type_ignores=[]), "Ouroboros.spec", "exec"), namespace)
+            if stand_in is Analysis:
+                made = namespace["_analysis_on_a_deep_stack"](["launcher.py"], noarchive=False)
+                assert (made.args, made.kwargs, made.depth) == ((["launcher.py"],), {"noarchive": False}, 4000)
+            else:
+                with pytest.raises(ValueError, match="the analysis failed"):
+                    namespace["_analysis_on_a_deep_stack"]()
+            assert threading.stack_size() == 0, "the default thread stack size is restored"
+    finally:
+        sys.setrecursionlimit(limit)
+
+
+@pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
 def test_launcher_retains_cross_platform_runtime_hooks():
     launcher_source = _pkg_read("launcher.py")
     assert "find_embedded_python" in launcher_source
@@ -1365,6 +1407,147 @@ def test_release_builds_stage_one_pinned_betterleaks_runtime_before_bundle_and_p
     assert "('betterleaks-standalone', 'betterleaks-standalone')" in spec
     assert "ouroboros.betterleaks_runtime install --build-output" in spec
     assert "/betterleaks-standalone/" in _pkg_read(".gitignore")
+
+
+def _node_script(monkeypatch, tmp_path, key: str, version: str = "24.22.3"):
+    """The stdlib Node stager against a fixture pin; ``node --version`` is answered from the bytes."""
+    import runpy
+    script = runpy.run_path(str(REPO_ROOT / "scripts" / "download_node_standalone.py"))
+    namespace = script["stage"].__globals__
+    root = tmp_path / "source"
+    (root / "ouroboros").mkdir(parents=True)
+    monkeypatch.setitem(namespace, "ROOT", root)
+    monkeypatch.setitem(namespace, "platform_key", lambda: key)
+    monkeypatch.setitem(namespace, "WINDOWS", key.startswith("win32-"))
+    runs = []
+
+    def node_version(node):
+        runs.append(pathlib.Path(node))
+        return "v" + pathlib.Path(node).read_bytes().decode().split(":", 1)[1]
+
+    monkeypatch.setitem(namespace, "node_version", node_version)
+
+    def write_pin(artifacts):
+        (root / "ouroboros" / "claudexor_runtime_pin.json").write_text(json.dumps(
+            {"schema_version": 1, "release": {"node_version": version, "node_artifacts": artifacts}}))
+
+    return script, write_pin, runs
+
+
+@pytest.mark.parametrize("key,suffix,executable", [("linux-x64", ".tar.gz", "bin/node"),
+                                                   ("win32-x64", ".zip", "node.exe")])
+def test_node_stager_authenticates_the_pinned_archive_before_running_it(tmp_path, monkeypatch, key, suffix, executable):
+    import hashlib
+    import io
+    import tarfile
+    import zipfile
+
+    script, write_pin, runs = _node_script(monkeypatch, tmp_path, key)
+    archive = tmp_path / ("node-v24.22.3" + suffix)
+    files = {f"node-v24.22.3/{executable}": b"node:24.22.3", "node-v24.22.3/LICENSE": b"license",
+             "node-v24.22.3/lib/node_modules/npm/x.js": b"npm"}
+    if suffix == ".zip":
+        with zipfile.ZipFile(archive, "w") as bundle:
+            for name, data in files.items():
+                bundle.writestr(name, data)
+    else:
+        with tarfile.open(archive, "w:gz") as bundle:
+            for name, data in files.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                bundle.addfile(info, io.BytesIO(data))
+    data = archive.read_bytes()
+    write_pin({key: {"archive_url": "https://nodejs.org/dist/v24.22.3/" + archive.name,
+                     "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data),
+                     "executable": f"node-v24.22.3/{executable}"}})
+    destination = tmp_path / "node-standalone"
+    destination.mkdir()
+    (destination / "stale").write_text("an earlier build's Node")
+    staged = script["stage"](destination, archive=archive)
+    assert staged == destination / executable and staged.read_bytes() == b"node:24.22.3"
+    assert sorted(p.name for p in destination.rglob("*") if p.is_file()) == sorted(["LICENSE", pathlib.Path(executable).name])
+    assert len(runs) == 1
+    archive.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))  # same size, other bytes
+    with pytest.raises(SystemExit, match="size/SHA-256"):
+        script["stage"](destination, archive=archive)
+    assert len(runs) == 1 and staged.read_bytes() == b"node:24.22.3"  # refused before anything ran
+
+
+def test_node_stager_replaces_every_playwright_driver_copy_and_verifies_links(tmp_path, monkeypatch):
+    script, write_pin, runs = _node_script(monkeypatch, tmp_path, "darwin-arm64")
+    write_pin({})
+    node = tmp_path / "node-standalone" / "bin" / "node"
+    node.parent.mkdir(parents=True)
+    node.write_bytes(b"node:24.22.3")
+    (node.parent.parent / "LICENSE").write_text("Node.js license and third-party notices")
+    app = tmp_path / "Ouroboros.app" / "Contents"
+    copies = [app / "Frameworks/playwright/driver/node",
+              app / "Frameworks/python-standalone/lib/python3.10/site-packages/playwright/driver/node"]
+    for copy in copies:
+        copy.parent.mkdir(parents=True)
+        copy.write_bytes(b"node:24.18.1")
+    link = app / "Resources/playwright/driver/node"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(copies[0])
+    facts = script["replace_playwright"]([tmp_path / "Ouroboros.app"], node)
+    assert all(copy.read_bytes() == b"node:24.22.3" and os.access(copy, os.X_OK) for copy in copies)
+    assert link.is_symlink() and sorted(fact["link"] for fact in facts) == [False, False, True]
+    assert {fact["version"] for fact in facts} == {"v24.22.3"}
+    # Upstream notices beside the copies; macOS Contents/Frameworks holds code only, its Resources mirror the text.
+    assert (link.parent / "LICENSE.node").read_text() == "Node.js license and third-party notices"
+    assert not any((copy.parent / "LICENSE.node").exists() for copy in copies)
+    docker_venv = tmp_path / "venv/lib/python3.10/site-packages/playwright/driver/node"
+    docker_venv.parent.mkdir(parents=True)
+    docker_venv.write_bytes(b"node:24.18.1")
+    script["replace_playwright"]([tmp_path / "venv"], node)
+    assert (docker_venv.parent / "LICENSE.node").read_text() == "Node.js license and third-party notices"
+    (node.parent.parent / "LICENSE").unlink()
+    with pytest.raises(SystemExit, match="upstream LICENSE"):
+        script["replace_playwright"]([tmp_path / "venv"], node)
+    (node.parent.parent / "LICENSE").write_text("Node.js license and third-party notices")
+    with pytest.raises(SystemExit, match="No Playwright driver"):
+        script["replace_playwright"]([tmp_path / "node-standalone"], node)
+    node.write_bytes(b"node:24.18.1")
+    with pytest.raises(SystemExit, match="is not the pinned Node v24.22.3"):
+        script["replace_playwright"]([tmp_path / "Ouroboros.app"], node)
+
+
+def test_every_package_build_stages_the_pinned_node_and_replaces_sdk_copies_before_signing():
+    for name in ("build.sh", "build_linux.sh", "build_windows.ps1", "scripts/build_linux_native_experiment.sh"):
+        source = _pkg_read(name)
+        stage = source.find("download_node_standalone")
+        replace = source.find("--replace-playwright")
+        assert stage != -1 and "PLAYWRIGHT_NODEJS_PATH" in source, name
+        assert 'node-standalone/bin/node" ]' not in source and 'Test-Path "node-standalone' not in source, (
+            f"{name} must re-verify, never reuse, an existing node-standalone/")
+        assert _find_pyinstaller_cmd_pos(source) < replace, f"{name} replaces what PyInstaller collected"
+    macos = _pkg_read("build.sh")
+    assert macos.find("--replace-playwright") < macos.find("=== Signing Ouroboros.app ===")
+    assert macos.find("--replace-playwright") < macos.find("-m compileall")
+    linux = _pkg_read("build_linux.sh")
+    assert linux.find("--replace-playwright") < linux.find('tar -czf "$ARCHIVE_NAME"') < linux.find("bash scripts/build_appimage.sh")
+    for wrapper in ("scripts/download_node_standalone.sh", "scripts/download_node_standalone.ps1"):
+        text = _pkg_read(wrapper)
+        assert "download_node_standalone.py" in text and "24.16" not in text and "SHASUMS256" not in text
+
+
+def test_docker_runs_its_playwright_cli_on_the_pin_and_ships_no_node_override():
+    docker = _pkg_read("Dockerfile")
+    assert "FROM python-standalone AS node-standalone" in docker
+    assert docker.count("--mount=type=bind,from=node-standalone") == 2
+    assert docker.find("export PLAYWRIGHT_NODEJS_PATH=/opt/node-standalone/bin/node") < docker.find("playwright install-deps")
+    assert "--replace-playwright /app/.venv --node /opt/node-standalone/bin/node" in docker  # also LICENSE.node
+    assert "COPY --from=node-standalone /opt/node-standalone /opt/node-standalone" in docker  # resolver layout
+    # An image-wide override would outlive the next pin; the managed body venv selects at run time.
+    assert not re.search(r"^ENV[^\n]*PLAYWRIGHT_NODEJS_PATH|^\s+PLAYWRIGHT_NODEJS_PATH=", docker, re.M)
+
+
+def test_node_stager_prints_this_hosts_pinned_url():
+    result = subprocess.run([sys.executable, "-I", str(REPO_ROOT / "scripts" / "download_node_standalone.py"), "--url"],
+                            capture_output=True, text=True, check=False)
+    pin = json.loads(_read("ouroboros/claudexor_runtime_pin.json"))["release"]
+    urls = {artifact["archive_url"] for artifact in pin["node_artifacts"].values()}
+    assert result.returncode == 0 and result.stdout.strip() in urls, result.stderr
 
 
 def test_build_sh_supports_unsigned_macos_release():

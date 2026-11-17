@@ -12,6 +12,7 @@ import hashlib
 import json
 import pathlib
 import shutil
+import sys
 
 import pytest
 
@@ -159,7 +160,7 @@ def test_a_session_childs_selection_crosses_admission_snapshot_and_bootstrap_to_
         parent.task_metadata["resource_intent"] = {"kind": "explicit_none"}
     reply, event = _schedule(chain, sid, input_sources="declared", input_files=SELECTION[:1])
     if folderless:
-        assert "agent_session selected source: folderless task/artifact lineage" in reply
+        assert "agent_session selected source: folderless selected files" in reply
     else:
         assert "agent_session selected source: inherited repository/folder" in reply
     assert "supervisor: child capabilities — profile=" in reply
@@ -179,6 +180,15 @@ def test_a_session_childs_selection_crosses_admission_snapshot_and_bootstrap_to_
     assert payload["prepared_input_files"] == [row]
     (drive / "brief.md").write_bytes(b"edited after queueing\n")
 
+    if folderless:
+        from ouroboros import delegate_readonly_inputs as inputs
+
+        def unexpected_lineage(_base):
+            raise AssertionError("prepared selection must skip automatic lineage enumeration")
+            yield
+
+        monkeypatch.setattr(inputs, "_input_files", unexpected_lineage)
+
     child, wake = _session_first_start(chain, monkeypatch, payload)
     receipt = json.loads(wake)
     assert receipt["status"] == "configured_session_started", receipt
@@ -196,6 +206,11 @@ def test_a_session_childs_selection_crosses_admission_snapshot_and_bootstrap_to_
         manifest = json.loads((scope / "inputs.json").read_text(encoding="utf-8"))
         assert sum(item["sha256"] == digest for item in manifest) == 1, "one copy of the bytes, no lineage recopy"
         assert not [item for item in manifest if "delegated_readonly_inputs" in item["source"]]
+        assert [item for item in manifest if "selected_path" not in item] == [], "the selection replaced lineage"
+        if sys.platform == "darwin":  # #2945: the first start clones the retained copy into its scope, not rewritten
+            from ouroboros.artifact_storage import _may_share
+
+            assert _may_share(pathlib.Path(started["retained"])) is True and _may_share(pathlib.Path(started["local"])) is True
     else:
         assert body["scope"]["root"] == str(rt.repo) and "execution" not in body, "the repository stays scope and cwd"
         assert started["carrier"] == "outside_scope_path" and started["local"] == row["local"], "no second copy"

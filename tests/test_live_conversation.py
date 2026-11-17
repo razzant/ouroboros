@@ -541,3 +541,23 @@ def test_the_opening_is_the_cue_plus_the_engine_line_and_the_turn_tells_its_visi
     assert host.turn.opening == ('The owner has just opened this call and can hear you now. '
                                  'Engine: Fixture engine, Voice test; sees the shared screen.')
     assert host.turn.supports_images is host.turn.catalog_model.vision is True
+
+
+@pytest.mark.parametrize('kind', ['own', 'heard', 'presence'])
+def test_only_the_owners_own_call_speech_can_be_cited(host_world, monkeypatch, kind):
+    from ouroboros.owner_words import cited_owner_basis, carried_owner_corpus
+    host = host_world.host
+    words = 'Keep the complete report. Use the other one for this task.'
+    before = carried_owner_corpus(host.ctx)
+    if kind == 'presence':
+        host.turn.spec = replace(host.turn.spec, presence_binding_id='place')
+        host.task['metadata']['presence'] = {'event': {'source_event_id': 'call-event'}}
+        monkeypatch.setattr('ouroboros.presence_call.record_call_utterance', lambda *a, **kw: True)
+        monkeypatch.setattr('ouroboros.dialogue_store.rows_by_client_id', lambda *a, **kw: [SimpleNamespace(seq=1)])
+    asyncio.run(host.caption('owner', words, 'citation-item', heard=kind == 'heard'))
+    assert cited_owner_basis(host.ctx, 'Use the other one')[0] is None
+    basis, _error = cited_owner_basis(host.ctx, 'Use the other one', call_speech=True)
+    assert bool(basis) is (kind == 'own')
+    if basis:
+        assert basis['cited'] == 'Use the other one' and basis['source'] == 'live_call'
+    assert carried_owner_corpus(host.ctx) == before

@@ -23,10 +23,10 @@ LONG = ("Sasha's estimate is fine, but before you start: keep the old export pat
         "write the migration as a reversible step, and only then switch the default. ") * 3 + "Do NOT ship on Friday."
 
 
-def _place_turn(tmp_path, *, confirmed=True, reply_to_message_id="", forwarded=False):
+def _place_turn(tmp_path, *, confirmed=True, reply_to_message_id="", forwarded=False, message=None):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, current_task_type="presence")
     ctx.task_id = "place-turn"
-    message = {"reply_to_message_id": reply_to_message_id} if reply_to_message_id else {}
+    message = {**(message or {}), **({"reply_to_message_id": reply_to_message_id} if reply_to_message_id else {})}
     message.update({"forward_origin": {"sender_user_name": "Andrew"}} if forwarded else {})
     ctx.task_metadata = {
         "focus": {"place_id": "p1", "room_chat_id": 2 ** 41 + 3,
@@ -74,6 +74,22 @@ def test_a_place_reply_names_its_target_by_address_when_the_connector_gave_no_wo
     assert "author not recorded: the message my human replied to, not my human's words" in text
     assert "(its words are not carried: the connector named only its platform message id, no host address)" in text
     assert "this address reads them" not in text, "no host address reads a platform message id"
+
+
+def test_a_place_reply_carries_its_known_words_and_their_author_as_context_not_an_order(tmp_path):
+    from ouroboros.owner_words import cited_owner_basis, owner_words_contain
+
+    words = "  A proposal from someone else.\n"
+    ctx = _place_turn(tmp_path, message={"reply_to_message": {"message_id": 41,
+        "from": {"id": 8, "first_name": "Sasha"}, "text": words}, "quote": {"text": "proposal"}})
+    basis, error = cited_owner_basis(ctx, LONG)
+    assert not error and basis["reply_to"]["text"] == words
+    assert "Sasha" in basis["reply_to"]["author"] and "41" in basis["reply_to"]["address"]
+    seeded = SimpleNamespace(task_id="new-work", task_metadata={"owner_corpus": [basis],
+        "objective_author": {"kind": "task", "task_id": "place-turn"}})
+    _initialize_owner_directives(seeded, [{"role": "user", "content": "drafted"}])
+    assert "not my human's words" in render_owner_words(governing_words_for_schedule(seeded)[FIELD], audience="child")
+    assert not owner_words_contain(seeded, words), "a reply target is context, never the owner's order"
 
 
 def _owner_root(tmp_path, metadata=None):
@@ -195,3 +211,74 @@ def test_a_root_hands_on_the_words_it_carries_beside_its_own(tmp_path):
     ctx = _owner_root(tmp_path, {FIELD: [carried], "origin_message_ref": {"chat_id": 1, "client_message_id": "o2"}})
     _initialize_owner_directives(ctx, [{"role": "user", "content": "A newer word."}])
     assert [row["text"] for row in governing_words_for_schedule(ctx)[FIELD]] == ["The original ask.", "A newer word."]
+
+
+@pytest.fixture(params=["live_call", "initial_user", "confirmed_owner_place"])
+def cited_door(tmp_path, monkeypatch, request):
+    from ouroboros.owner_words import PLACE_CONFIRMED
+    from ouroboros.tools import control_models, control_routing
+    from ouroboros.tools.tool_result import _install_tool_result_sidecar, _restore_tool_result_sidecar
+
+    ctx = _owner_root(tmp_path)
+    source = PLACE_CONFIRMED if request.param == "confirmed_owner_place" else request.param
+    ctx._owner_directives = [{"source": source, "content": LONG, "msg_id": "cited-item"}]
+    events = []
+    monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing",
+                        lambda _ctx, event: (events.append(event) or "live", {"status": "scheduled"}))
+    monkeypatch.setattr(control_routing, "_promotion_pool_disabled_from_snapshot", lambda ctx: "")
+    monkeypatch.setattr(control_models, "known_models", lambda: [{"model": "vendor/example", "use_local": False}])
+    token = _install_tool_result_sidecar(ctx, object())
+    try:
+        yield ctx, events, source == "live_call"
+    finally:
+        _restore_tool_result_sidecar(token)
+
+
+@pytest.mark.parametrize("door", ["start", "schedule", "update"])
+def test_only_typed_or_confirmed_place_words_authorise_a_plain_start_or_schedule(cited_door, door):
+    from ouroboros.tools import control_routing, followup
+    from ouroboros.tools.tool_result import _published_tool_result
+    from supervisor import queue as schedules
+
+    ctx, events, spoken = cited_door
+    if door == "update":
+        assert followup._handle_schedule_followup(ctx, relation="independent", objective="Original work",
+            run_at="2030-01-01T00:00:00+00:00").startswith("FOLLOWUP_SCHEDULED")
+    before = schedules.list_scheduled_tasks(ctx.drive_root)["tasks"]
+    if door == "start":
+        text = control_routing._start_task(ctx, "Prepare the work", title="Report", owner_words="Do NOT ship on Friday.")
+    elif door == "schedule":
+        text = followup._handle_schedule_followup(ctx, relation="independent", objective="Prepare the work",
+            run_at="2030-01-01T00:00:00+00:00", owner_words="Do NOT ship on Friday.")
+    else:
+        text = followup._manage_schedules(ctx, action="update", schedule_id=before[0]["id"],
+            objective="Prepare the work", reason="The assignment changed", owner_words="Do NOT ship on Friday.")
+    after = schedules.list_scheduled_tasks(ctx.drive_root)["tasks"]
+    if spoken:
+        assert "OWNER_WORDS_UNVERIFIED" in text and not events and after == before
+        assert _published_tool_result(ctx, None).status == "error"
+        return
+    assert "OWNER_WORDS_UNVERIFIED" not in text
+    corpus = events[-1]["owner_corpus"] if door == "start" else after[0]["task"]["metadata"]["owner_corpus"]
+    assert any(row.get("cited") == "Do NOT ship on Friday." and row["content"] == LONG for row in corpus)
+    if door == "update":
+        assert after[0]["task"]["text"] == "Prepare the work"
+
+
+def test_a_model_start_carries_spoken_words_only_on_the_lead_and_keeps_typed_owner_words_whole(cited_door):
+    from ouroboros.owner_words import owner_words_text
+    from ouroboros.tools.control_routing import _start_task
+
+    ctx, events, spoken = cited_door
+    text = _start_task(ctx, "Prepare the work", title="Report", model="vendor/example", owner_words="Do NOT ship on Friday.")
+    assert text.startswith("OK: task")
+    event = events[-1]
+    assert event["metadata"]["lead"]["cited"] == "Do NOT ship on Friday."
+    assert event["objective_author"]["kind"] == "task"
+    assert bool(event["owner_corpus"]) is not spoken
+    seeded = SimpleNamespace(task_metadata={"objective_author": event["objective_author"], "owner_corpus": event["owner_corpus"]})
+    _initialize_owner_directives(seeded, [{"role": "user", "content": "drafted"}])
+    assert bool(governing_words_for_schedule(seeded).get(FIELD)) is not spoken
+    assert (LONG in owner_words_text(seeded, audience="reviewer")) is not spoken
+    if not spoken:
+        assert all(row["content"] == LONG for row in event["owner_corpus"])

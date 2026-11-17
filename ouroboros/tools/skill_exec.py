@@ -6,7 +6,6 @@ import os
 import pathlib
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 import uuid
@@ -29,9 +28,11 @@ from ouroboros.skill_loader import (
     grant_status_for_skill,
     skill_conflict_status,
     skill_review_gate,
-    skill_state_dir,
     summarize_skills,
 )
+from ouroboros.execution_domain import build_dir, current as current_execution_domain, skill_state_dir
+from ouroboros.work_skill_payloads import launch as work_launch  # managed: the reviewed payload's verified work copy
+from ouroboros.skill_readiness import grant_gap_sentence
 from ouroboros.skill_review import review_skill as _review_skill_impl
 from ouroboros.review_continuation import CONTINUE_SEATS_SCHEMA
 from ouroboros.skill_review_status import executable_review_requirement, normalize_skill_review_status
@@ -45,7 +46,7 @@ from ouroboros.tools.process_facts import publish_process_facts as _publish_proc
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.shell import _kill_process_group
 from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
-from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
+from ouroboros.tools.tool_result import TOOL_CODE_SPECS, ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -70,14 +71,9 @@ _ALLOWED_RUNTIMES = {
 _ALWAYS_FORWARDED_ENV = frozenset({
     "PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
     "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT", "TMPDIR", "TMP", "TEMP",
-    # WA6: a python/python3 skill can fall back to the embedded sys.executable
-    # (_resolve_runtime_binary); forward the bytecode-suppression policy so it
-    # never writes __pycache__/*.pyc into a signed macOS bundle (parity with
-    # isolated_deps._SAFE_ENV_KEYS and extension_process_runner._child_env).
+    # Preserve the signed bundle's bytecode policy for the embedded-interpreter fallback (WA6).
     "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX",
-    # Login identity: CLIs a skill may call (gh, claude, codex, cursor-agent) key
-    # their keychain/credential lookups on it (parity with
-    # workspace_executor.service_env()); a secret-shaped sibling is not forwarded.
+    # Login identity for CLI keychain lookups (parity with workspace_executor.service_env), not arbitrary siblings.
     "USER", "LOGNAME", "USERNAME",
 })
 
@@ -87,23 +83,18 @@ _FORBIDDEN_ENV_FORWARD_KEYS = FORBIDDEN_SKILL_SETTINGS
 def _resolve_runtime_binary(runtime: str) -> Tuple[Optional[str], str]:
     """Resolve a skill runtime binary: ``(path, "")`` or ``(None, reason)``.
 
-    The reason (when known) carries the node health verdicts verbatim so the
-    surface error can say WHY nothing was usable, not just that it was not.
+    The reason keeps the node health verdicts verbatim, explaining why no runtime was usable.
     """
     import sys
     if runtime == "node":
-        # Skill-family node precedence is owned by
-        # platform_layer.select_skill_node_runtime: bundled-first (the signed
-        # runtime macOS code-signing enforcement cannot SIGKILL inside the
-        # packaged app), with a health ROLLBACK to a working PATH node when the
-        # bundled one is absent or execution-probed broken. A provably dead
-        # candidate is never selected while a usable neighbour exists.
+        # Skill-family node precedence is owned by platform_layer.select_skill_node_runtime: the pin's reviewed Node
+        # where the pin governs this host (a skill waits while it is unprepared; only a run asks for it, never this
+        # lookup, which availability and skill lists read too), else bundled-first with a health ROLLBACK to a working
+        # PATH node. A provably dead candidate is never selected.
         try:
             from ouroboros.platform_layer import select_skill_node_runtime
             selected, info = select_skill_node_runtime()
-            if selected:
-                return selected, ""
-            return None, info
+            return (selected, "") if selected else (None, info)
         except Exception as exc:
             # An unexpected selector failure must not be invisible: the PATH
             # scan below still runs, but the operator sees WHY the skill-family
@@ -124,11 +115,18 @@ def _resolve_runtime_binary(runtime: str) -> Tuple[Optional[str], str]:
     return None, ""
 
 
+def _payload_hash(loaded: Any) -> str:
+    """The loader's review-staleness digest of an installed skill's payload (``compute_content_hash``)."""
+    return compute_content_hash(loaded.skill_dir, manifest_entry=loaded.manifest.entry,
+                                manifest_scripts=loaded.manifest.scripts)
+
+
 def _scrub_env(
     manifest_env_keys: List[str],
     skill_state_dir_path: pathlib.Path,
     skill_name: str,
     granted_keys: List[str] | None = None,
+    settings: Dict[str, Any] | None = None,
 ) -> Dict[str, str]:
     env: Dict[str, str] = {}
     for key in _ALWAYS_FORWARDED_ENV:
@@ -138,10 +136,12 @@ def _scrub_env(
     if manifest_env_keys:
         # What the skill's PluginAPI reads now: a key saved or cleared mid-task reaches the next
         # script or companion; grants still filter it.
-        settings = skill_settings(load_settings)
+        # ``settings``: one strict read a caller already holds (a companion refresh compares and spawns from it).
+        # The values and the custom secrets among them both come from this one read.
+        settings = skill_settings(load_settings) if settings is None else settings
         from ouroboros.skill_loader import requested_core_setting_keys
         protected_upper = {k.upper() for k in _FORBIDDEN_ENV_FORWARD_KEYS}
-        protected_upper.update(requested_core_setting_keys(list(manifest_env_keys or [])))
+        protected_upper.update(requested_core_setting_keys(list(manifest_env_keys or []), settings))
         granted_upper = {str(k).strip().upper() for k in (granted_keys or []) if str(k).strip()}
         allow = {str(k).strip() for k in manifest_env_keys if str(k).strip()}
         for key in allow:
@@ -156,9 +156,12 @@ def _scrub_env(
             if val is None or val == "":
                 continue
             env[canonical if canonical in protected_upper else key] = str(val)
+    from ouroboros.node_runtime import forward_playwright_node
     from ouroboros.process_scope import installation_scope_entries
 
     env.update(installation_scope_entries())
+    if current_execution_domain() is None:  # a managed work domain supplies its own runtime, never a host path
+        forward_playwright_node(env)
     env["OUROBOROS_SKILL_NAME"] = skill_name
     env["OUROBOROS_SKILL_STATE_DIR"] = str(skill_state_dir_path)
     return env
@@ -183,6 +186,43 @@ def _drain_pipe_with_cap(pipe, cap: int, buf: bytearray, overflow_flag: Dict[str
         return
 
 
+def _attached(cmd: List[str], cwd: str, env: Dict[str, str]) -> Any:
+    """A managed deployment's launch of a skill process (``execution_domain.attached_launch``); its refusal before
+    any start is this tool's pre-exec cause, as a vanished runtime's is, and carries its own words."""
+    from ouroboros.execution_domain import attached_launch
+
+    try:
+        launch = attached_launch(cmd, cwd, env)
+    except (ValueError, RuntimeError) as refused:  # a path or network contract refused: nothing started anywhere
+        _publish_process_facts(started_ts=time.monotonic(), pre_exec_failure=type(refused).__name__)
+        raise PermissionError(str(refused)) from refused
+    if launch is not None:
+        launch.adopt()  # the executor's foreground record before the start, as its own launches write it
+    return launch
+
+
+def _stop_failed_skill_start(proc, launch, confirmed):
+    """After spawn, failing bookkeeping must stop the work group too; a Docker CLI's exit is not settlement."""
+    try:
+        _kill_process_group(proc)
+        proc.wait(timeout=2)
+    except Exception:
+        pass
+    if proc.poll() is not None:
+        confirmed()
+    retire_tracked(proc)
+    for pipe in (proc.stdout, proc.stderr):
+        try:
+            if pipe:
+                pipe.close()
+        except OSError:
+            pass
+    if launch is not None and not launch.settle():
+        from ouroboros.work_domain import WorkDomainUnsettled
+        raise WorkDomainUnsettled("Script startup failed after spawn; its backend group is unconfirmed and custody "
+                                  "is retained. Do not repeat blindly.", (proc.returncode, b"", b"", False))
+
+
 def _run_skill_subprocess(
     cmd: List[str],
     *,
@@ -196,6 +236,9 @@ def _run_skill_subprocess(
     from ouroboros.process_scope import record_task_group, scoped_child_env, task_launch_target
     from ouroboros.tool_custody import invocation_binding
 
+    launch = _attached(cmd, cwd, env)  # a managed domain runs it in its pinned executor, never on the service
+    if launch is not None:
+        cmd, cwd, env = launch.argv, None, launch.env
     target = task_launch_target(invocation_binding())
     popen_kwargs: Dict[str, Any] = {
         "cwd": cwd,
@@ -215,19 +258,15 @@ def _run_skill_subprocess(
         with tracked_start() as publish, operation_start():
             proc = contained_popen(Popen, cmd, **popen_kwargs)  # noqa: S603 — cmd is a vetted list, not shell
             publish(proc)
-    except OSError as exc:
-        if proc is None:
-            confirmed()
-        # Pre-exec: no child ever existed (a runtime binary that vanished
-        # between resolution and spawn). The platform's exception class is the
-        # typed cause; there is no exit code to invent for it.
-        _publish_process_facts(
-            started_ts=_child_started_ts, pre_exec_failure=type(exc).__name__,
-        )
-        raise
-    except BaseException:
+    except BaseException as exc:
         if proc is None:
             confirmed()  # the final gate or a closed admission refused before Popen returned
+            if launch is not None:
+                launch.abandon()
+            if isinstance(exc, OSError):
+                _publish_process_facts(started_ts=_child_started_ts, pre_exec_failure=type(exc).__name__)
+        else:
+            _stop_failed_skill_start(proc, launch, confirmed)
         raise
     try:
         if target is not None:
@@ -235,22 +274,7 @@ def _run_skill_subprocess(
         if on_spawn is not None:
             on_spawn()
     except BaseException:
-        # The child exists once Popen returns.  If the durable disclosure
-        # cannot be written, fail closed without leaving an untracked process.
-        try:
-            _kill_process_group(proc)
-            proc.wait(timeout=2)
-        except Exception:
-            pass
-        if proc.poll() is not None:
-            confirmed()
-        retire_tracked(proc)  # unconfirmed: a running root or live tree stays named
-        for pipe in (proc.stdout, proc.stderr):
-            try:
-                if pipe:
-                    pipe.close()
-            except OSError:
-                pass
+        _stop_failed_skill_start(proc, launch, confirmed)
         raise
 
     stdout_buf = bytearray()
@@ -267,13 +291,12 @@ def _run_skill_subprocess(
         args=(proc.stderr, stderr_cap, stderr_buf, overflow_flag, "stderr"),
         daemon=True,
     )
-    stdout_thread.start()
-    stderr_thread.start()
-
     deadline = time.monotonic() + max(0.0, float(timeout_sec))
     overflowed = False
     timed_out = False
     try:
+        stdout_thread.start()
+        stderr_thread.start()
         while True:
             if overflow_flag["stdout"] or overflow_flag["stderr"]:
                 overflowed = True
@@ -293,10 +316,14 @@ def _run_skill_subprocess(
             proc.wait(timeout=2)
         stdout_thread.join(timeout=2)
         stderr_thread.join(timeout=2)
+    except BaseException:
+        _stop_failed_skill_start(proc, launch, confirmed)
+        raise
     finally:
         if proc.poll() is not None:
             confirmed()
         retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
+        backend_settled = launch is None or launch.settle()  # CLI exit does not prove its container group ended
         try:
             if proc.stdout:
                 proc.stdout.close()
@@ -305,17 +332,19 @@ def _run_skill_subprocess(
         except OSError:
             pass
 
-    # Typed process facts for the skill child, published where the truth is
-    # known (D02): the deadline kill and the output-cap kill have no exit code
-    # of their own to report and say so as host kills, while a child that
-    # returned reports its exact code — including a NEGATIVE one, which the
-    # ``or 0`` return below flattens for the legacy text renderer.
+    # D02: exact observed child exit (negative included); a deadline/output-cap kill has no exit code of its own.
     _publish_process_facts(
         returncode=proc.returncode if not (timed_out or overflowed) else None,
         started_ts=_child_started_ts,
         timed_out=timed_out,
         killed_by_host=timed_out or overflowed,
     )
+    if not backend_settled:
+        from ouroboros.work_domain import WorkDomainUnsettled
+
+        raise WorkDomainUnsettled("The script's container process group has not been confirmed ended; its executor "
+                                  "record is kept. Effects may have happened; do not repeat the operation blindly.",
+                                  (proc.returncode, bytes(stdout_buf), bytes(stderr_buf), overflowed))
     if timed_out:
         raise subprocess.TimeoutExpired(
             cmd=cmd,
@@ -358,7 +387,7 @@ def _run_go_skill(cmd: List[str], *, state_dir: pathlib.Path, **kwargs: Any) -> 
     env = dict(kwargs["env"])
     env.setdefault("GOCACHE", str(state_dir / "go-cache"))
     env.setdefault("GOPATH", str(state_dir / "go"))
-    with tempfile.TemporaryDirectory(prefix="go-exec-", dir=state_dir) as directory:
+    with build_dir(state_dir, "go-exec-") as directory:  # in the work domain when managed (``execution_domain``)
         executable = str(pathlib.Path(directory) / ("skill.exe" if os.name == "nt" else "skill"))
         compiled = _run_skill_subprocess(
             [cmd[0], "build", "-o", executable, cmd[1]], **{**kwargs, "env": env},
@@ -584,8 +613,8 @@ def _skill_tool_preflight(
         return None
     return (
         "⚠️ SKILLS_UNAVAILABLE: No skills are discoverable. Point "
-        "OUROBOROS_SKILLS_REPO_PATH at a local checkout in Settings → "
-        "Behavior → External Skills Repo, or install skills into the data plane."
+        "OUROBOROS_SKILLS_REPO_PATH at a local checkout in Skills → "
+        "Sources, or install skills into the data plane."
     )
 
 
@@ -604,8 +633,6 @@ def _handle_list_skills(ctx: ToolContext, *, name: str = "", offset: int = 0,
 
 
 def _skill_review_refusal(ctx: ToolContext, code: str, text: str) -> str:
-    from ouroboros.tools.tool_result import TOOL_CODE_SPECS, ToolResult, _publish_tool_result
-
     return _publish_tool_result(ctx, ToolResult(status=TOOL_CODE_SPECS[code].status, code=code, text=text))
 
 
@@ -695,23 +722,19 @@ def _author_finish_existing_skill_review(
     rationale: str,
     review_reference: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Record author finish in Advisory or Cyber without buying a new panel.
+    """Record author finish without buying a new panel.
 
-    Advisory needs earlier feedback (a verdict in review.json or a settled skill record with findings) or
-    a returned terminal reference of a review that formed no verdict, plus a passing current preflight;
+    Outside Cyber Pro it needs earlier feedback (a verdict in review.json or a settled skill record with findings)
+    or a returned terminal reference of a review that formed no verdict, plus a passing current preflight;
     Cyber may continue with either missing or failed. Critic facts stay intact; only the author record
     binds the newly accepted bytes.
     """
-    from ouroboros.config import get_review_enforcement
-    from ouroboros.review_records import build_author_disposition
+    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY, build_author_disposition
     from ouroboros.skill_loader import compute_content_hash, load_review_state, save_review_state
     from ouroboros.skill_review import _run_deterministic_preflight
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
+    from ouroboros.tools.review_helpers import cyber_review_authority
 
-    enforcement = str(get_review_enforcement() or "").strip().lower()
-    cyber = not review_enforcement_blocks("blocking")
-    if review_enforcement_blocks(enforcement):
-        return {"error": _skill_review_refusal(ctx, "LEGACY_BLOCKED", "SKILL_REVIEW_ERROR: explicit author finish requires advisory enforcement.")}
+    cyber = cyber_review_authority()
     loaded = load_bound_skill(binding)
     if loaded is None:
         return {"error": _skill_review_refusal(ctx, "LEGACY_UNAVAILABLE", "SKILL_REVIEW_ERROR: selected skill is unavailable for author finish.")}
@@ -731,21 +754,19 @@ def _author_finish_existing_skill_review(
             rationale=rationale,
             subject_hash=current_hash,
             reviewer_signal=review_state.status,
-            enforcement=enforcement,
+            enforcement=RECORDED_REVIEW_AUTHORITY,
         )
     except ValueError as exc:
         return {"error": _skill_review_refusal(ctx, "TOOL_ARG_ERROR", f"SKILL_REVIEW_ERROR: {exc}")}
     previous_hash = str(review_state.reviewed_content_hash or review_state.content_hash or "")
     preflight_facts = None
-    # Current preflight is independent evidence; Cyber may continue with its failure, Advisory may not.
+    # Current preflight is independent evidence; Cyber may continue with its failure, nothing else may.
     preflight = _run_deterministic_preflight(
         ctx, drive_root, loaded, current_hash, persist=False, binding=binding,
     )
     if preflight is not None and not cyber:
         return {"error": _skill_review_refusal(ctx, "TOOL_ERROR", "SKILL_REVIEW_ERROR: deterministic preflight did not pass for the current payload.")}
     if preflight is not None:
-        from ouroboros.utils import append_jsonl, utc_now_iso
-
         preflight_facts = {"content_hash": current_hash, "status": preflight.status,
                            "findings": list(preflight.findings or []), "error": preflight.error}
         append_jsonl(ctx.drive_logs() / "events.jsonl", {
@@ -756,6 +777,7 @@ def _author_finish_existing_skill_review(
     author_record["review_reference"] = basis
     review_state.author_disposition = author_record
     save_review_state(drive_root, skill_name, review_state)
+    from ouroboros.review_overrides import note_skill_over_review
     from ouroboros.skill_dependencies import ensure_skill_dependencies
     from ouroboros.skill_loader import auto_grant_if_enabled
     from ouroboros.skill_review_runner import _reconcile_extension_payload
@@ -766,6 +788,8 @@ def _author_finish_existing_skill_review(
     extension = (_reconcile_extension_payload(ctx, skill_name, drive_root=drive_root,
                                              repo_path=None, binding=binding)
                  if loaded.manifest.is_extension() else {})
+    if loaded.enabled:  # on, and accepted by its author without a passed review: named on the work's card
+        note_skill_over_review(ctx, skill_name, review_state.gate_for(current_hash), "author_finish")
     return {
         "skill_name": skill_name,
         "status": review_state.status,
@@ -875,9 +899,10 @@ def _handle_review_skill(
     # suggestions) — that is what the agent needs; forensic records stay on disk in review.json and the
     # review ledger (Skills page + on-demand reads).
     if payload.get("pending"):
+        from ouroboros.tools.review_change import left_wave_terms
         markdown += ("\n\nThe review is still running: an addressed message reached you, or a seat is still answering. "
-                     "Read what reached you; the same skill_review call collects this review at $0 (no second dispatch), "
-                     "and a [Review settled] notice follows the whole wave.")
+                     "Read what reached you; the same skill_review call collects this review at $0 (no second dispatch); "
+                     "if a message left it, " + left_wave_terms())
     if payload.get("job_id") and payload.get("content_hash"):
         reference = {"job_id": payload["job_id"], "content_hash": payload["content_hash"]}
         if payload.get("record_id"):
@@ -905,18 +930,10 @@ def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
     )
 
 
-
 def _non_executable_review_message(prefix: str, skill_name: str, status: str, *, stale: bool = False,
                                    gate: Dict[str, Any] | None = None, strict_review: bool = False) -> str:
     gate = gate or skill_review_gate(status, stale=stale)
     normalized_status = normalize_skill_review_status(status)
-    if gate["blocking_reason"] == "blocker_findings_under_blocking_enforcement":
-        return (
-            f"⚠️ {prefix}: skill {skill_name!r} review status is 'blockers' "
-            "and review enforcement is blocking, so it is not executable. "
-            "Fix the listed blocker findings or switch review enforcement to "
-            "advisory and reload the skill state."
-        )
     stale_note = f", stale={stale}" if stale else ""
     return (
         f"⚠️ {prefix}: skill {skill_name!r} review status is {normalized_status!r}{stale_note}, "
@@ -980,6 +997,28 @@ def _extension_not_executable_message(loaded: Any, drive_root: pathlib.Path) -> 
     )
 
 
+def _grant_refusal(skill_name: str, grants: Dict[str, Any]) -> str:
+    """The execution refusal while the owner has not granted the request for these bytes: what is
+    missing, and the plain-words cause when the grant belongs to an earlier version of the files
+    (``grant_gap_sentence``). Empty when nothing is missing."""
+    missing_core = list(grants.get("missing_keys") or [])
+    missing_permissions = list(grants.get("missing_permissions") or [])
+    if not (missing_core or missing_permissions):
+        return ""
+    requested = []
+    if missing_core:
+        requested.append(f"core settings keys {missing_core}")
+    if missing_permissions:
+        requested.append(f"permissions {missing_permissions}")
+    cause = grant_gap_sentence(grants)
+    return (
+        "⚠️ SKILL_EXEC_GRANT_REQUIRED: skill "
+        f"{skill_name!r} requests {' and '.join(requested)}. "
+        "Its review gate already permits these bytes; grant them from the Skills UI before execution."
+        + (f" {cause}" if cause else "")
+    )
+
+
 def _handle_skill_exec(
     ctx: ToolContext,
     skill: str = "",
@@ -1029,11 +1068,7 @@ def _handle_skill_exec(
             f"enabled skills {names}. Disable the conflicting skill first."
         )
     try:
-        current_hash = compute_content_hash(
-            loaded.skill_dir,
-            manifest_entry=loaded.manifest.entry,
-            manifest_scripts=loaded.manifest.scripts,
-        )
+        current_hash = _payload_hash(loaded)
     except SkillPayloadUnreadable as exc:
         return (
             f"⚠️ SKILL_EXEC_ERROR: skill {skill_name!r} payload became unreadable "
@@ -1064,13 +1099,18 @@ def _handle_skill_exec(
             runtime_binary = str(isolated) if isolated is not None else runtime_binary
     except Exception:
         log.debug("Could not resolve isolated Python runtime", exc_info=True)
+    runtime_unavailable = ""
     if runtime_binary is None:
         reason = (f"is not in the allowlist {sorted(_ALLOWED_RUNTIMES)}" if runtime not in _ALLOWED_RUNTIMES
                   else "has no available binary on PATH")
-        return (
+        runtime_unavailable = (
             f"⚠️ SKILL_EXEC_ERROR: skill {skill_name!r} declared runtime {runtime!r} {reason}."
             + (f" ({runtime_unavailable_reason})" if runtime_unavailable_reason else "")
         )
+        from ouroboros.node_runtime import pinned_node_wait
+
+        if runtime != "node" or not pinned_node_wait()[1]:  # waiting for the pin's Node: refused after the checks below
+            return runtime_unavailable
 
     def _canonical_declared_path(declared_name: str) -> Optional[pathlib.Path]:
         name = declared_name.strip()
@@ -1142,19 +1182,14 @@ def _handle_skill_exec(
 
     state_dir = skill_state_dir(drive_root, loaded.name)
     grants = grant_status_for_skill(drive_root, loaded)
-    missing_core = list(grants.get("missing_keys") or [])
-    missing_permissions = list(grants.get("missing_permissions") or [])
-    if missing_core or missing_permissions:
-        requested = []
-        if missing_core:
-            requested.append(f"core settings keys {missing_core}")
-        if missing_permissions:
-            requested.append(f"permissions {missing_permissions}")
-        return (
-            "⚠️ SKILL_EXEC_GRANT_REQUIRED: skill "
-            f"{loaded.name!r} requests {' and '.join(requested)}. "
-            "Its review gate already permits these bytes; grant them from the Skills UI before execution."
-        )
+    refusal = _grant_refusal(loaded.name, grants)
+    if refusal:
+        return refusal
+    if runtime_unavailable:  # only a call that would run asks for the pin's Node (single-flight), then waits for it
+        from ouroboros.server_boot import request_pinned_node
+
+        request_pinned_node()
+        return runtime_unavailable
     env = _scrub_env(
         manifest_env_keys=list(loaded.manifest.env_from_settings or []),
         skill_state_dir_path=state_dir,
@@ -1190,11 +1225,7 @@ def _handle_skill_exec(
     # gate-time hash above ran before grants/env/deps resolution — a write
     # landing in that window would execute unreviewed code under a PASS verdict.
     try:
-        spawn_hash = compute_content_hash(
-            loaded.skill_dir,
-            manifest_entry=loaded.manifest.entry,
-            manifest_scripts=loaded.manifest.scripts,
-        )
+        spawn_hash = _payload_hash(loaded)
     except SkillPayloadUnreadable as exc:
         return (
             f"⚠️ SKILL_EXEC_ERROR: skill {skill_name!r} payload became unreadable "
@@ -1209,8 +1240,9 @@ def _handle_skill_exec(
     dispatch_id = f"skill_exec:{uuid.uuid4().hex}"
     model_capable = any(str(env.get(key) or "").strip() for key in MODEL_PROVIDER_CREDENTIAL_KEYS)
     try:
+        cmd, launch_dir, env = work_launch(drive_root, loaded, spawn_hash, cmd, env, runtime)
         process_options = dict(
-            cwd=str(loaded.skill_dir), env=env, timeout_sec=timeout,
+            cwd=launch_dir, env=env, timeout_sec=timeout,
             stdout_cap=_MAX_STDOUT_BYTES, stderr_cap=_MAX_STDERR_BYTES,
             on_spawn=((
                 lambda: _record_skill_exec_dispatch(
@@ -1228,45 +1260,10 @@ def _handle_skill_exec(
         else:
             returncode, stdout_bytes, stderr_bytes, overflowed = _run_skill_subprocess(cmd, **process_options)
             phase = "execute"
-    except subprocess.TimeoutExpired as exc:
-        _emit_skill_lifecycle_event(
-            ctx,
-            event_type="skill_exec_failed",
-            skill=loaded.name,
-            script=script_rel,
-            error=f"timeout after {timeout}s",
-        )
-        return (
-            f"⚠️ SKILL_EXEC_TIMEOUT: skill {skill_name!r} script "
-            f"{script_rel!r} exceeded {timeout}s limit.\n"
-            f"stdout_partial:\n{_cap(exc.stdout or b'', _MAX_STDOUT_BYTES, 'stdout')}\n"
-            f"stderr_partial:\n{_cap(exc.stderr or b'', _MAX_STDERR_BYTES, 'stderr')}"
-        )
-    except FileNotFoundError:
-        _emit_skill_lifecycle_event(
-            ctx,
-            event_type="skill_exec_failed",
-            skill=loaded.name,
-            script=script_rel,
-            error=f"runtime binary {runtime_binary!r} unavailable",
-        )
-        return (
-            f"⚠️ SKILL_EXEC_ERROR: runtime binary {runtime_binary!r} is no "
-            "longer available."
-        )
-    except OSError as exc:
-        _emit_skill_lifecycle_event(
-            ctx,
-            event_type="skill_exec_failed",
-            skill=loaded.name,
-            script=script_rel,
-            error=f"OS error running skill: {exc}",
-        )
-        return f"⚠️ SKILL_EXEC_ERROR: OS error running skill: {exc}"
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return _skill_execution_failure(ctx, loaded.name, script_rel, runtime_binary, timeout, exc)
 
-    return _render_skill_exec_result(
-        ctx,
-        payload={
+    return _render_skill_exec_result(ctx, payload={
             "skill": loaded.name,
             "script": script_rel,
             "runtime": runtime,
@@ -1275,10 +1272,32 @@ def _handle_skill_exec(
             "exit_code": int(returncode),
             "timeout_sec": timeout,
         },
-        stdout_bytes=stdout_bytes,
-        stderr_bytes=stderr_bytes,
-        overflowed=overflowed,
+        stdout_bytes=stdout_bytes, stderr_bytes=stderr_bytes, overflowed=overflowed,
     )
+
+
+def _skill_execution_failure(ctx, skill_name, script_rel, runtime_binary, timeout, exc):
+    """Publish the execution failure and retain any observed output, including uncertain group cleanup."""
+    from ouroboros.work_domain import WorkDomainUnsettled
+
+    if isinstance(exc, subprocess.TimeoutExpired):
+        error = f"timeout after {timeout}s"
+        answer = (
+            f"⚠️ SKILL_EXEC_TIMEOUT: skill {skill_name!r} script {script_rel!r} exceeded {timeout}s limit.\n"
+            f"stdout_partial:\n{_cap(exc.stdout or b'', _MAX_STDOUT_BYTES, 'stdout')}\n"
+            f"stderr_partial:\n{_cap(exc.stderr or b'', _MAX_STDERR_BYTES, 'stderr')}"
+        )
+    elif isinstance(exc, FileNotFoundError):
+        error = f"runtime binary {runtime_binary!r} unavailable"
+        answer = f"⚠️ SKILL_EXEC_ERROR: runtime binary {runtime_binary!r} is no longer available."
+    else:
+        error = f"OS error running skill: {exc}"
+        partial = (f"\nexit_code: {exc.result[0]}\nstdout:\n{_cap(exc.result[1], _MAX_STDOUT_BYTES, 'stdout')}"
+                   f"\nstderr:\n{_cap(exc.result[2], _MAX_STDERR_BYTES, 'stderr')}"
+                   if isinstance(exc, WorkDomainUnsettled) and exc.result is not None else "")
+        answer = f"⚠️ SKILL_EXEC_ERROR: {error}{partial}"
+    _emit_skill_lifecycle_event(ctx, event_type="skill_exec_failed", skill=skill_name, script=script_rel, error=error)
+    return answer
 
 
 _TRUE_LITERALS = {"true", "yes", "on", "1"}
@@ -1330,16 +1349,17 @@ def _handle_toggle_skill(
 
 def _handle_skill_owner_action(
     ctx: ToolContext, skill: str, action: str, expected_content_hash: str,
-    owner_source: dict, items: list[str] | None = None,
+    owner_source: dict, items: list[str] | None = None, preview: bool = False,
+    settings_digest: str = "", confirm_other_servers: bool = False,
 ) -> str:
     """Carry expressed owner intent to its real effect without an HTTP self-call."""
-    from ouroboros.skill_lifecycle_actions import run_skill_action
+    from ouroboros.skill_lifecycle_actions import preview_connect_mcp, run_skill_action
 
-    if action not in {"grant", "attest", "delete"}:
+    if action not in {"grant", "attest", "delete", "connect_mcp"}:
         return "⚠️ SKILL_ACTION_BLOCKED: use toggle_skill for enable/disable."
-    payload = run_skill_action(
-        ctx, skill, action, expected_content_hash=expected_content_hash,
-        owner_source=owner_source, items=items,
+    payload = preview_connect_mcp(ctx, skill, owner_source) if action == "connect_mcp" and preview is True else run_skill_action(
+        ctx, skill, action, expected_content_hash=expected_content_hash, owner_source=owner_source, items=items,
+        settings_digest=settings_digest, confirm_other_servers=confirm_other_servers is True,
     )
     rendered = json.dumps(payload, ensure_ascii=False, indent=2)
     return "⚠️ SKILL_ACTION_BLOCKED: " + rendered if payload.get("error") else rendered
@@ -1355,7 +1375,7 @@ _REVIEW_SCHEMA = {
         "Max Review Cycles semantics: an identical request never buys a new "
         "panel over a verdict — the settled verdict of the same subject REPLAYS free, "
         "keyed by the shared reuse identity (the subject's bytes and rules, the "
-        "assigned seats, enforcement, the answer contract and the round: "
+        "assigned seats, the answer contract and the round: "
         "rebuttal, goal, scope), so only changed content, a changed panel or "
         "contract, or a NEW rebuttal dispatches reviewers again. After a settled "
         "wave formed no verdict, the identical request is a new paid wave; a "
@@ -1365,8 +1385,8 @@ _REVIEW_SCHEMA = {
         "task-driven reviews; the current content snapshot for the manual "
         "lane); on exhaustion the review is refused free with a typed "
         "review_cycles_exhausted event and stays honestly PENDING — no verdict "
-        "is fabricated. Whether the payload may run is the skill's review_gate "
-        "under the effective enforcement; Cyber Pro leaves it to Ouroboros's "
+        "is fabricated. Whether the payload may run is the skill's review_gate; "
+        "Cyber Pro leaves it to Ouroboros's "
         "judgment, with the review as evidence, not a PASS."
     ),
     "parameters": {
@@ -1376,8 +1396,8 @@ _REVIEW_SCHEMA = {
                 "type": "string",
                 "description": "Skill name (directory name in OUROBOROS_SKILLS_REPO_PATH).",
             },
-            "reviewers": {"type": "array", "items": {"type": "string"}, "description": "Enabled row ids/handles; omitted means the whole pool. Blocking widens to all ticked reviewers; Advisory requires at least one ticked reviewer and a reason when narrowed. Unticked advisers are heard, not counted. Cyber Pro composes freely."},
-            "reason": {"type": "string", "description": "Why these reviewers; required for a narrowed Advisory panel, including a re-review after blockers."},
+            "reviewers": {"type": "array", "items": {"type": "string"}, "description": "Enabled row ids/handles; omitted means the whole pool. Outside Cyber Pro name at least one ticked reviewer, with a reason when you name fewer than all. Unticked advisers are heard, not counted. Cyber Pro composes freely."},
+            "reason": {"type": "string", "description": "Why these reviewers; required for a narrowed panel outside Cyber Pro, including a re-review after blockers."},
             "review_rebuttal": {
                 "type": "string",
                 "description": (
@@ -1394,7 +1414,7 @@ _REVIEW_SCHEMA = {
             "author_disposition": {
                 "type": "string",
                 "enum": ["accepted", "rejected", "partial", "deferred"],
-                "description": "Optional Advisory author finish for the current content hash. Keeps original critic evidence; changed or unavailable-review cases require current deterministic preflight. For terminal partial-feedback or unavailable outcomes, pass the returned review_reference.",
+                "description": "Optional author finish for the current content hash. Keeps original critic evidence; changed or unavailable-review cases require current deterministic preflight. For terminal partial-feedback or unavailable outcomes, pass the returned review_reference.",
             },
             "review_reference": {
                 "type": "object", "properties": {"job_id": {"type": "string"}, "record_id": {"type": "string"}, "content_hash": {"type": "string"}},
@@ -1418,7 +1438,7 @@ _EXEC_SCHEMA = {
         "Run one manifest-declared script of a type=script skill. The skill must be "
         "enabled and its review_gate must permit the current bytes: outside "
         "Cyber Pro, a current executable reviewer verdict or a qualified "
-        "Advisory author acceptance of these exact bytes (the reviewer status "
+        "author acceptance of these exact bytes (the reviewer status "
         "may then still be pending or stale); Cyber Pro leaves it to "
         "Ouroboros's judgment. Requested key/permission grants and isolated "
         "dependencies still apply. Only type=script "
@@ -1469,7 +1489,7 @@ _TOGGLE_SCHEMA = {
         "Enable or disable a skill. Disabled skills are excluded from "
         "skill_exec regardless of review status. Enabling requires the "
         "skill's review_gate to permit the current bytes (outside Cyber Pro: "
-        "a current executable reviewer verdict or a qualified Advisory author "
+        "a current executable reviewer verdict or a qualified author "
         "acceptance of these exact bytes), any requested key or "
         "host-permission grants; enabling installs or refreshes the declared isolated dependencies "
         "itself (a review is never needed for packages) and repairs an enabled skill whose packages broke. "
@@ -1502,7 +1522,9 @@ _OWNER_ACTION_SCHEMA = {
     "description": (
         "Carry an already expressed owner instruction to one exact skill revision: "
         "grant manifest-requested permissions/settings keys, perform eligible owner attestation, "
-        "or delete a local external skill. Ordinary Repair does not imply these actions. "
+        "delete a local external skill, or connect_mcp: write the skill's declared MCP servers as Settings rows and "
+        "turn MCP on, once the owner saw its preview (what will run, every other server it starts; usually a quiz) "
+        "and answered: that answer is the confirm's owner_source. Ordinary Repair does not imply these actions. "
         "Interpret the referenced owner's actual words; do not invent a source or treat an ID "
         "as approval. Host validates source membership, caller and revision. Attestation still "
         "runs deterministic preflight and is unavailable for ClawHub/native payloads. "
@@ -1512,9 +1534,12 @@ _OWNER_ACTION_SCHEMA = {
         "type": "object",
         "properties": {
             "skill": {"type": "string"},
-            "action": {"type": "string", "enum": ["grant", "attest", "delete"]},
+            "action": {"type": "string", "enum": ["grant", "attest", "delete", "connect_mcp"]},
             "expected_content_hash": {"type": "string", "description": "Current selected content hash from list_skills."},
             "items": {"type": "array", "items": {"type": "string"}, "description": "For grant only: exact manifest-requested key/permission names, never secret values."},
+            "preview": {"type": "boolean", "description": "connect_mcp only: return the exact change and its disclosure; write nothing."},
+            "settings_digest": {"type": "string", "description": "connect_mcp confirm: the settings_digest its preview returned."},
+            "confirm_other_servers": {"type": "boolean", "description": "connect_mcp confirm: the owner accepted that the preview's other_servers start too."},
             "owner_source": {
                 "type": "object",
                 "description": (

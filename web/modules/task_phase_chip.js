@@ -185,10 +185,12 @@ export function taskActivityPresentation({ phase = 'working', outcome = '', ende
     else if (phase === 'thinking') current = phaseView('working', CHIP.thinking(), 'working', live('thinking'));
     else if (phase === 'working') current = phaseView('working', CHIP.working(), 'working', live('working'));
     else current = phaseView('unknown', CHIP.unconfirmed(), 'warn', { mark: CENSUS_MARKS.unknown });
-    current = withOwner(current, theirs);
+    // Only its work's turn makes the owner's move: its words say what waits there (work_status.turnAmber).
+    const said = !current.owner && !ownerMove && work?.owner && work.note ? { ownerNote: work.note } : {};
+    current = { ...withOwner(current, theirs), ...said };
     // The outcome owns the chip; the work still running is its quieter second fact, and the owner's move keeps its dot.
     if (finalizing && outcome) return { ...outcomeView(outcome), secondary: [current.text, current.secondary]
-        .filter(Boolean).join(' · '), waiting: current.waiting, owner: current.owner };
+        .filter(Boolean).join(' · '), waiting: current.waiting, owner: current.owner, ...said };
     return current;
 }
 
@@ -258,7 +260,8 @@ export function desiredLiveCardPhase(record = {}, terminalPhase = 'done') {
 
 // The look a chip's view carries to its painter (and to a work-list row that says a card's words).
 function chipLook(view) {
-    return { mark: view.mark, tone: view.tone, owner: Boolean(view.owner), ...(view.outcome ? { outcome: view.outcome } : {}) };
+    return { mark: view.mark, tone: view.tone, owner: Boolean(view.owner), ...(view.outcome ? { outcome: view.outcome } : {}),
+        ...(view.owner && view.ownerNote ? { ownerNote: view.ownerNote } : {}) };
 }
 
 /**
@@ -339,7 +342,7 @@ export function paintTaskPhase(phaseEl, view, secondaryEl = null, isSubagent = f
     const secondaryText = String(view.secondary || '');
     // The owner's move is said in words too, unless the word already says it: the mark is decorative.
     const said = `${activeText} ${secondaryText}`.includes(CHIP.ownerWait());
-    const ownerNote = view.owner && !said ? tr('work.amber.action', 'Something here waits for you') : '';
+    const ownerNote = view.owner && !said ? view.ownerNote || tr('work.amber.action', 'Something here waits for you') : '';
     const activeLabel = `${isSubagent ? 'Subagent' : 'Task'} status: ${activeText}`
         + (secondaryText ? `, ${secondaryText}` : '') + (ownerNote ? ` · ${ownerNote}` : '');
     const secondaryChanged = paintPhaseSecondary(secondaryEl, secondaryText, phaseEl.hidden);

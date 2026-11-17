@@ -1,14 +1,20 @@
 """Main's route-bound window facts, independent of review capability authority.
 
 Acceptances are lower bounds, never evidence of room for a reply. A numbered
-refusal, or a numberless one at the refused request's measured size, constrains
-planning until a later larger acceptance or evidence expiry.
+refusal, or a numberless one at the refused request's measured size, caps (never
+raises) its kind of limit until a later larger acceptance or the 24-hour evidence
+expiry; a cold numberless refusal adds none (``record_refusal``).
 The observations share the capability JSON store; old stores need no migration.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
+
+
+_REPLY_INSIDE = frozenset({"refusal", "local_health"})  # what proves a total holds the reply: ``WindowRecord.admitted``
+#: Recognition bases that state no unit (``context_budget.size_refusal``, ``context_anchor.cited_limit_refusal``).
+UNTAUGHT_BASES = frozenset({"status_413", "number_equals_declared"})
 
 
 @dataclass(frozen=True)
@@ -18,6 +24,10 @@ class WindowLimit:
     source: str
     observed_at: str = ""
     acceptance_can_raise: bool = True
+    # A refusal's number: ``provider_stated``, ``exact_local_count`` (a local instance counted the request the
+    # host refused before sending), ``anchored_estimate`` from a numberless refusal (a measured input or
+    # confirmation of an existing total), or ``unrecorded`` (stored before bases were kept); "" for every other source.
+    basis: str = ""
 
 
 @dataclass(frozen=True)
@@ -33,11 +43,26 @@ class WindowRecord:
     accepted_at: str = ""
     contradicted_by: Optional[WindowLimit] = None
     retired_ack: dict = field(default_factory=dict)
+    floor: Optional[int] = None  # the reply floor ``admitted`` charges an unproven total; None: the whole reserve
 
     @property
     def usable(self) -> Optional[int]:
+        """The input a start is sized to: a total always leaves the whole reply reserve."""
         limits = ([self.input.tokens] if self.input else []) + (
             [max(0, self.total.tokens - self.reserve)] if self.total else [])
+        return min(limits) if limits else None
+
+    @property
+    def admitted(self) -> Optional[int]:
+        """The largest input a request that exists goes out at, each stated number read most favourably: an input
+        limit whole; a total less the whole reserve where it is known to hold the reply too (a size refusal said so,
+        or a local server stated its one buffer), else less the reply floor. Every question a round asks about its
+        own request reads this one line (the pre-send check, the room a tool result is shown in, whether a view is
+        kept, what a pass leaves), so nothing is cut on the guess that the reply is inside. A provider that counts
+        the reply refuses such a request once, and that refusal proves the total."""
+        proven = self.floor is None or (self.total is not None and self.total.source in _REPLY_INSIDE)
+        limits = ([self.input.tokens] if self.input else []) + ([max(0, self.total.tokens - (
+            self.reserve if proven else min(self.reserve, self.floor)))] if self.total else [])
         return min(limits) if limits else None
 
     @property
@@ -63,9 +88,15 @@ class WindowRecord:
         """Compatibility frame for consumers which subtract R; never provider evidence."""
         return self.usable + self.reserve if self.usable is not None else 0
 
+    @property
+    def admitted_equivalent(self) -> int:
+        """``admitted`` in that same frame: what a round's measurement reports as its capacity."""
+        return self.admitted + self.reserve if self.admitted is not None else 0
+
 
 def record_observation(root, route_fp: str, *, accepted: int = 0, refused: int = 0,
-                       kind: str = "total", reserve: int = 0, transmitted: int = 0) -> None:
+                       kind: str = "total", reserve: int = 0, transmitted: int = 0, basis: str = "") -> None:
+    """``basis``: how a refused size was known (``WindowLimit.basis``), kept on its row; rows without one stay as written."""
     from ouroboros import capability_evidence as ce
 
     if not route_fp or not (accepted > 0 or refused > 0):
@@ -76,27 +107,32 @@ def record_observation(root, route_fp: str, *, accepted: int = 0, refused: int =
             record = data.setdefault("main_windows", {}).setdefault(route_fp, {})
             rows = record.setdefault("observations", [])
             prior = list(rows)
-            # Retain immutable frontier observations, including a later acceptance
-            # below a historic maximum that nevertheless supersedes a newer refusal.
-            last_refusal = next((row for row in reversed(rows) if row.get("refused")), {})
+            # Retain immutable frontier observations: the largest acceptance, the newest refusal of each kind (a total
+            # proved to hold the reply stays proved beside a later input refusal) and, for each, the first later
+            # acceptance above it, which answers it even below a historic maximum.
+            def answer(index):
+                return next((later for later in range(index + 1, len(rows))
+                             if rows[later].get("accepted", 0) > rows[index]["refused"]), None)
+
+            def refusals():
+                newest = {}
+                for index in reversed(range(len(rows))):
+                    if rows[index].get("refused"):
+                        newest.setdefault(rows[index].get("kind"), index)
+                return list(newest.values())
+
             high = max((row.get("accepted", 0) for row in rows), default=0)
-            supersedes = accepted > last_refusal.get("refused", accepted) and not any(
-                row.get("accepted", 0) > last_refusal.get("refused", 0)
-                for row in rows[rows.index(last_refusal) + 1:]) if last_refusal else False
-            if refused or accepted > high or supersedes:
+            if refused or accepted > high or any(
+                    accepted > rows[index]["refused"] for index in refusals() if answer(index) is None):
                 rows.append({"accepted": accepted, "refused": refused, "kind": "input" if accepted else kind,
-                             "reserve": reserve, "transmitted": transmitted, "ts": ce.utc_now_iso()})
+                             "reserve": reserve, "transmitted": transmitted, "ts": ce.utc_now_iso(),
+                             **({"basis": basis} if refused and basis else {})})
             keep = set()
             largest = max(range(len(rows)), key=lambda i: rows[i].get("accepted", 0), default=None)
             if largest is not None and rows[largest].get("accepted"):
                 keep.add(largest)
-            newest = next((i for i in reversed(range(len(rows))) if rows[i].get("refused")), None)
-            if newest is not None:
-                keep.add(newest)
-                later = next((i for i in range(newest + 1, len(rows))
-                              if rows[i].get("accepted", 0) > rows[newest]["refused"]), None)
-                if later is not None:
-                    keep.add(later)
+            for index in refusals():
+                keep.update(i for i in (index, answer(index)) if i is not None)
             record["observations"] = [rows[i] for i in sorted(keep)]
             if record["observations"] != prior:
                 ce._save(root, data)
@@ -164,49 +200,75 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
     if any(limit.acceptance_can_raise and accepted > limit.tokens for limit in limits.values()):
         limits = {kind: limit for kind, limit in limits.items() if not limit.acceptance_can_raise}
         limits["input"] = WindowLimit(accepted, "input", "accepted", accepted_at)
+    kinds, inside = set(), False
     for index in range(len(rows) - 1, -1, -1):
         row = rows[index]
-        if row.get("refused"):
+        if row.get("refused") and row["kind"] not in kinds:  # the newest refusal of each kind
+            kinds.add(row["kind"])
             if ce._age_seconds(row["ts"]) <= ce._CONFIRMED_TTL_SEC and not any(
                     later.get("accepted", 0) > row["refused"] for later in rows[index + 1:]):
                 current = limits.get(row["kind"])
-                if current is None or row["refused"] < current.tokens:
-                    limits[row["kind"]] = WindowLimit(row["refused"], row["kind"], "refusal", row["ts"])
-            break
+                if current is None or row["refused"] <= current.tokens:
+                    limits[row["kind"]] = WindowLimit(row["refused"], row["kind"], "refusal", row["ts"],
+                                                      basis=str(row.get("basis") or "unrecorded"))
+                else:  # above the stated number it names no limit under it; a total's says the reply is counted inside
+                    inside = inside or row["kind"] == "total"
     output = getattr(evidence, "response_limit", {}) or {}
     maximum = output.get("max_output_tokens", 0)
+    from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
+    # The least a request leaves for its reply: Nano's own reserve, or a route's larger declared working room.
+    working = getattr(evidence, "working_reserve_tokens", None) or route_window_kwargs(evidence)["working_reserve_tokens"] or 0
     return WindowRecord(fp, limits.get("input"), limits.get("total"),
                         WindowLimit(maximum, "output", output.get("source", "metadata"),
                                     output.get("observed_at", "")) if maximum and not output.get("stale")
                         else captured.output if captured else None,
+                        floor=None if inside else min(int(reserve), max(NANO_MIN_HEADROOM_TOKENS, int(working))),
                         reserve=reserve, accepted=accepted, declared=declared, accepted_at=accepted_at,
                         contradicted_by=contradiction,
                         retired_ack=getattr(evidence, "retired_ack", {}) or (captured.retired_ack if captured else {}))
 
 
-def record_refusal(usage, plan, refused_input: int = 0) -> None:
-    """Record a typed size refusal for the refusing account: its stated limit, else ``refused_input``.
+def record_refusal(usage, plan, refused_input: int = 0, basis: str = "anchored_estimate") -> None:
+    """Record a typed size refusal for the refusing account: its stated limit (``provider_stated``), else
+    ``refused_input`` under ``basis``: ``anchored_estimate``, or ``exact_local_count`` where a local instance counted it.
 
     ``refused_input`` is the caller's measured provider-unit size of the refused request (anchored on an
     accepted request of this conversation), passed only when measured: Codex states no number, and a
     route that never records its refusals keeps planning at a larger acceptance and is refused again.
-    Without a stated limit or a measured size a refusal adds no ceiling."""
+    A numberless refusal of a request sent inside the reply reservation of a stated total says that total holds the
+    reply too, so it is recorded as the total's own refusal (``WindowRecord.admitted`` then charges the reserve).
+    Without a stated limit or a measured size a refusal adds no ceiling, and a refusal of one input string's
+    length (``INPUT_STRING_LENGTH_CODES``) adds none at any size: it says nothing of the token window.
+    A refusal recognised only by HTTP 413 or by a cited number equal to a declared limit (``UNTAUGHT_BASES``)
+    writes nothing, the measured size included: neither states a unit, and the host's estimate is no provider
+    limit. A token-qualified limit below an input this scope has already had accepted writes no ceiling either:
+    the scope does not name the serving endpoint, so that statement is one endpoint's; it still sizes this
+    round's pass (``loop_model_call._refusal_window``)."""
     from ouroboros import capability_evidence as ce
+    from ouroboros.context_budget import INPUT_STRING_LENGTH_CODES
 
     plan = observed_plan(plan, usage)
-    if plan is None or not getattr(plan, "window_witness_bound", True):
+    if (plan is None or not getattr(plan, "window_witness_bound", True)
+            or (usage.get("_last_llm_provider_answer") or {}).get("basis") in UNTAUGHT_BASES):
         return
     message = str(usage.get("_last_llm_provider_message") or "")
     limit = ce._parse_ctx_limit_number(message)
     if not limit:
-        if int(refused_input or 0) > 0:
-            record_observation(ce.canonical_evidence_root(), observation_scope(plan),
-                               refused=int(refused_input), kind="input")
+        if (int(refused_input or 0) > 0
+                and str(usage.get("_last_llm_provider_code") or "").lower() not in INPUT_STRING_LENGTH_CODES):
+            record, size = getattr(plan, "window_record", None), int(refused_input)
+            total = record.total.tokens if record is not None and record.total else 0
+            confirms = total - (record.reserve if record is not None else 0) < size <= total
+            record_observation(ce.canonical_evidence_root(), observation_scope(plan), basis=basis,
+                               refused=total if confirms else size, kind="total" if confirms else "input")
+        return
+    rows = (ce._read(ce.canonical_evidence_root()).get("main_windows", {}).get(observation_scope(plan)) or {})
+    if limit < max((row.get("accepted", 0) for row in rows.get("observations", [])), default=0):
         return
     # Sglang shares its input bound with generation, so its length refusal stays total.
     input_only = any(marker in message.lower() for marker in ("prompt is too long", "maximum input", "input token count"))
     record_observation(ce.canonical_evidence_root(), observation_scope(plan), refused=limit,
-                       kind="input" if input_only else "total")
+                       kind="input" if input_only else "total", basis="provider_stated")
 
 
 def observed_plan(plan, usage):
@@ -218,8 +280,8 @@ def observed_plan(plan, usage):
     from ouroboros.provider_models import parse_claudexor_model
 
     observed = usage.get("_model_route") or {}
-    if not observed:
-        return plan if getattr(plan, "window_witness_bound", False) else None
+    if not observed:  # an answer naming no route: its account is the pin's, and on Auto no account's to write
+        return plan if getattr(plan, "window_witness_bound", False) and getattr(plan, "account_pin", "") else None
     source, model = parse_claudexor_model(plan.model)
     if observed.get("source") != source or observed.get("model") != model or not all(
             observed.get(key) for key in ("credentialProfileId", "accountFingerprint")):

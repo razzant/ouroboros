@@ -6,6 +6,7 @@
 // claim.
 
 import { accountRows, familyLabel, nextUpAccount } from './claudexor_status_store.js';
+import { translateString } from './i18n.js';
 import {
     ROUTE_KIND_AGENT_SESSION,
     describeExecutionEvidence,
@@ -18,7 +19,10 @@ import {
     accountScopedModelCatalog,
     sessionModelMatches,
     CLAUDE_BASE_QUALIFIER,
+    PRICE_UNKNOWN,
+    modelPriceWords,
     routeSupportsAccount,
+    tierPriced,
 } from './route_editor_primitives.js';
 
 /**
@@ -333,20 +337,47 @@ export function rowTaskRun(row, state) {
     return [qualifier, evidence].filter(Boolean).join(' · ');
 }
 
+/** The published tariff of an API row's model, in a role line's words (USD per 1M tokens: a rate, never an estimate
+ * of one review; or the condition its entry prices it under, `modelPriceWords`): `Price unknown` where its source
+ * listed the model, or the whole catalog was read, and no price is stated; '' for a session or subscription row, a
+ * local model, a Fast or Economy row (its calls pay another rate) and for a model no read listed while the catalog
+ * is not read whole (the section says that once). The words are
+ * composed through the translation seam. `catalog` is the editor's merged catalog. */
+export function modelTariffText(row, catalog = {}, processingPreference = '') {
+    const target = String(row?.route?.target_id || '').trim();
+    const item = (Array.isArray(catalog.items) ? catalog.items : []).find((entry) => entry.value === target);
+    if (!target || routeSupportsAccount(row.route) || item?.use_local || / \(local\)$/.test(target)
+        || tierPriced(row.processing_preference || processingPreference)) return '';
+    // A row its own source listed is known even when another source of the read failed (a partial catalog).
+    return modelPriceWords(item, { unit: true }) || (item || catalog.read_state === 'ok' ? translateString(PRICE_UNKNOWN) : '');
+}
+
+/** The one money line beside a marked API row's delivery: what one review cost once reviews were measured (or its
+ * non-money equivalent); until then the model's published tariff; with neither, that its cost is unknown, and
+ * for a row not saved yet that its price is. */
+export function reviewMoneyLine(row, cost, tariff) {
+    const measured = reviewCostText(row, cost);
+    if (cost && cost.basis !== 'unknown') return measured;
+    return tariff && tariff !== translateString(PRICE_UNKNOWN) ? tariff : measured || tariff;
+}
+
 /** What one review by this row actually cost — the median of its measured reviews with their count
- * and range (the words `## Review` prints) — or its non-money equivalent; unknown is never zero. */
+ * and range (the words `## Review` prints) — or its non-money equivalent; unknown is never zero, and a row
+ * whose cost was not read (a draft not saved yet) says nothing. */
 export function reviewCostText(row, cost = null) {
     if (routeSupportsAccount(row?.route || {})) return 'uses a session seat and time';
-    if (!cost) return 'price appears after saving';
+    if (!cost) return '';
     if (cost.basis === 'local_route') return 'no API cost per review';
     const usd = cost.usd_per_review;
     if (cost.basis !== 'observed_reviews' || typeof usd !== 'number' || !Number.isFinite(usd)) return 'cost unknown';
     const high = Number(cost.high);
     if (usd === 0 && !(high > 0)) return 'no API cost per review';
-    const money = (value) => `$${value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`;
+    // A charge below the printed precision is never a proven zero.
+    const money = (value) => (value > 0 && value < 0.00005 ? '<$0.0001' : `$${value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`);
+    const about = usd > 0 && usd < 0.00005 ? '' : '≈';
     const reviews = Number(cost.reviews) || 0;
-    return reviews < 2 ? `≈${money(usd)} per review (1 measured)`
-        : `≈${money(usd)} per review (median of ${reviews} measured, ${money(Number(cost.low))}–${money(high)})`;
+    return reviews < 2 ? `${about}${money(usd)} per review (1 measured)`
+        : `${about}${money(usd)} per review (median of ${reviews} measured, ${money(Number(cost.low))}–${money(high)})`;
 }
 
 /** What actually ran the last time this row reviewed, with its review record (the card's "Last review"). */

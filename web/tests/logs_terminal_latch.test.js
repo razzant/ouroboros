@@ -65,6 +65,12 @@ class NodeStub {
         }
     }
     appendChild(node) { node.remove(); node.parentElement = this; this.children.push(node); return node; }
+    insertBefore(node, before) {  // as the DOM: before null appends
+        node.remove();
+        node.parentElement = this;
+        this.children.splice(before ? this.children.indexOf(before) : this.children.length, 0, node);
+        return node;
+    }
     append(...nodes) { nodes.forEach((node) => this.appendChild(node)); }
     remove() {
         if (this.parentElement) this.parentElement.children.splice(this.parentElement.children.indexOf(this), 1);
@@ -126,7 +132,13 @@ function setup(t) {
         headline: () => card().querySelector('[data-task-headline]').textContent,
         phase: () => card().querySelector('[data-task-phase]').textContent,
         tone: () => card().querySelector('[data-task-phase]').dataset.chipTone,
-        timelineRows: () => card().querySelector('[data-task-timeline]').querySelectorAll('.log-task-event').length,
+        // A Timeline's rows exist while it is open: opened the way the browser does (its `toggle` reaches the list).
+        timelineRows: () => {
+            const details = card().querySelector('details');
+            details.open = true;
+            mount.querySelector('#log-entries').dispatchEvent({ type: 'toggle', target: details });
+            return card().querySelector('[data-task-timeline]').querySelectorAll('.log-task-event').length;
+        },
     };
 }
 

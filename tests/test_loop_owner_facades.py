@@ -36,8 +36,8 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
         "_skill_names_touched_by_trace _skill_finalization_message _plan_gate_decision "
         "_plan_gate_reminder _plan_gate_disclosure _maybe_inject_time_budget_milestone "
         "_maybe_inject_cost_budget_milestone "
-        "_inject_round_checkpoints _forced_delegation_note _nanny_finalization_message "
-        "_maybe_inject_finalization_nudges _answer_protocol_active"
+        "_inject_round_checkpoints _forced_delegation_note "
+        "_maybe_inject_finalization_nudges _claim_pre_delivery_notice _pre_delivery_notice _answer_protocol_active"
     ),
     "loop_model_call": (
         "_adopt_fallback_route _snapshot_context_fit_usage _restore_context_fit_usage "
@@ -48,6 +48,7 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
         "_failed_capture_is_comparable _strict_context_shrink_predicate "
         "_emit_overflow_retry_skipped _call_round_model"
     ),
+    "loop_routes": "_apply_round_route_overrides",
     "loop_budget": (
         "_server_web_allowed_by_task _check_budget_limits _resolve_task_cost_ceiling _TREE_ACCOUNTING_MAX_STALE_SEC "
         "_loop_tree_accounting _soft_land_exhausted_ceiling "
@@ -71,7 +72,6 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
         "_direct_child_results "
         "_project_child_result_dispositions _record_forced_finalization "
         "_forced_orphan_note _claimed_child_dispositions _undispositioned_children "
-        "_maybe_enforce_child_absorption_gate "
         "_enforce_plan_gate _finalize_forced_services _disclose_service_finalization "
         "_drain_forced_owner_directives "
         "_call_forced_model_once _publish_model_forced_candidate "
@@ -112,7 +112,7 @@ def test_loop_leaves_keep_the_hot_code_label():
     from supervisor.update_merge_policy import HOT_CODE_PATHS
 
     assert "ouroboros/loop.py" in HOT_CODE_PATHS
-    for leaf in LOOP_LEAF_OWNERS:
+    for leaf in (*LOOP_LEAF_OWNERS, "route_choice", "owner_model"):
         assert f"ouroboros/{leaf}.py" in HOT_CODE_PATHS, leaf
     for owner, _names in LOOP_LEAF_REEXPORTS.values():  # the label follows a moved body to its owner
         assert owner.replace(".", "/") + ".py" in HOT_CODE_PATHS, owner

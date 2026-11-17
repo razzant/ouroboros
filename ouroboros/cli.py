@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -36,6 +37,10 @@ class TaskTimeoutCLIError(CLIError):
 
 class ConnectionCLIError(CLIError):
     pass
+
+
+class StreamInterruptedCLIError(ConnectionCLIError):
+    """An answered event stream that broke off: a read timeout, reset or truncated response."""
 
 
 class OuroborosHTTPClient:
@@ -115,6 +120,9 @@ class OuroborosHTTPClient:
             raise CLIError(f"HTTP {exc.code}: {raw}") from exc
         except urllib.error.URLError as exc:
             raise ConnectionCLIError(f"cannot stream from Ouroboros server at {self.base_url}: {exc}") from exc
+        except (TimeoutError, ConnectionError, http.client.HTTPException) as exc:
+            raise StreamInterruptedCLIError(
+                f"stream from Ouroboros server at {self.base_url} broke off: {exc or type(exc).__name__}") from exc
 
 
 def _server_command(args: argparse.Namespace) -> int:
@@ -878,6 +886,9 @@ def _watch_task(
     Streams with POST v2 (resumable cursor); falls back to GET with a sequence
     number only when the first connection, before any event, fails with HTTP 405.
     Replays are deduplicated by log identity over the most recent 4096 identities.
+    A stream that broke off after its cursor moved reconnects from the last event
+    consumed; one that broke off without moving it is a connection error, so a
+    failure that recurs at the same place is reported, never retried forever.
     """
     cursor: Optional[dict] = None
     legacy_seq = 0
@@ -899,6 +910,7 @@ def _watch_task(
             request_timeout = max(1.0, min(40.0, remaining + 1.0))
         path = f"/api/tasks/{urllib.parse.quote(task_id)}/events"
         saw_event = False
+        resumed_from = (cursor, legacy_seq)
         try:
             events = (client.stream_sse(f"{path}?cursor={legacy_seq}&wait={wait_param}", timeout=request_timeout)
                       if legacy else client.stream_sse(path, timeout=request_timeout,
@@ -933,6 +945,11 @@ def _watch_task(
                         raise CLIError("v2 task event is missing its cursor")
                     cursor = next_cursor
                 legacy_seq = max(legacy_seq, int(event.get("seq") or legacy_seq))
+        except StreamInterruptedCLIError:
+            if deadline is not None and time.time() >= deadline:
+                raise TaskTimeoutCLIError(f"task {task_id} did not finish within {timeout_sec:g}s")
+            if (cursor, legacy_seq) == resumed_from:
+                raise  # nothing this connection delivered moved the stream
         except CLIError as exc:
             if (first_connection and not saw_event and not legacy
                     and isinstance(exc.__cause__, urllib.error.HTTPError) and exc.__cause__.code == 405):

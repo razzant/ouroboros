@@ -647,6 +647,21 @@ def test_history_preserves_typed_wait_map_without_counting_progress_or_human_row
     assert rows[0]["task_terminal_status"] == "completed"
 
 
+@pytest.mark.parametrize("tier", ["economy", "standard"])
+def test_a_waiting_row_names_the_processing_tier_its_call_pays(elapsed_quota_wait, tier):
+    """The card's model picker names a catalog price only where the continuation pays it (model_wait.js)."""
+    _root, transport, client, _controller, events, _decide = elapsed_quota_wait
+    transport.results = [result(outcome="failed", problem={
+        "code": "credential_pool_exhausted", "retryable": False,
+        "message": "No account can serve this model request",
+        "context": {"poolCause": "mixed", "resetsAt": None},
+    }), result()]
+    transport.dispatch = ["not_started", "response_received"]
+    client.chat([{"role": "user", "content": "Keep completed work"}], MODEL, model_role="light", processing_preference=tier)
+    rows = list(events.queue)
+    assert rows[0]["state"] == "waiting" and rows[0]["processing_preference"] == tier
+
+
 @pytest.mark.parametrize(("dispatch", "asynchronous"), [("not_started", False), ("response_received", True)])
 def test_confirmed_mixed_pool_waits_and_heals_on_the_same_live_call(elapsed_quota_wait, dispatch, asynchronous):
     root, transport, client, controller, events, _decide = elapsed_quota_wait

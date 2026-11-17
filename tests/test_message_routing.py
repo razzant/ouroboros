@@ -148,7 +148,8 @@ class TestOwnerInjectPerTask(unittest.TestCase):
         self.assertFalse(cleanup_task_mailbox(self.drive_root, "t1"))
         self.assertTrue(path.exists())
         write_task_result(self.drive_root, "t1", "cancelled", result="Cancelled before start.")
-        self.assertIn('"msg_id": "m1"', load_task_result(self.drive_root, "t1")["unread_mailbox"]["rows"][0])
+        kept = load_task_result(self.drive_root, "t1")["unread_mailbox"]["rows"][0]
+        self.assertEqual(json.loads(kept)["msg_id"], "m1")
         self.assertTrue(cleanup_task_mailbox(self.drive_root, "t1"))
         self.assertFalse(path.exists())
 

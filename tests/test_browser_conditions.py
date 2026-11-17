@@ -26,7 +26,9 @@ import pytest
 import ouroboros.tools.browser as browser_mod
 from ouroboros import chromium_runtime, owner_pause
 from ouroboros.task_results import write_task_result
+from ouroboros.tools import browser_session
 from ouroboros.tools.registry import ToolRegistry
+from tests._browser_fakes import close_generations, coro, install_async_api, track_sessions, wait_event
 
 PINNED = chromium_runtime.CHROMIUM_VERSION
 CHROMIUM_SUPPLY = ("(Playwright; pinned Chrome for Testing headless shell, Chromium sandbox requested at launch "
@@ -40,7 +42,7 @@ class FakeStealth:
     def __init__(self, **options):
         self.options = options
 
-    def apply_stealth_sync(self, page):
+    async def apply_stealth_async(self, page):
         FakeStealth.applied.append((self.options, page))
 
 
@@ -54,21 +56,21 @@ class FakePage:
     def on(self, *_a):
         pass
 
-    def goto(self, url, **_kw):
+    async def goto(self, url, **_kw):
         self.url = url
 
-    def title(self):
+    async def title(self):
         return "Observed"
 
-    def inner_text(self, _selector):
+    async def inner_text(self, _selector):
         if self.on_read:
             self.on_read()
         return self.text
 
-    def content(self):
+    async def content(self):
         return f"<html><body>{self.text}</body></html>"
 
-    def evaluate(self, expression, *_a):
+    async def evaluate(self, expression, *_a):
         if "__obo_result" in expression and "MARKDOWN_PROBE" in expression:
             return "# Fake markdown"
         if "__obo_result" in expression and "querySelectorAll('canvas')" in expression:
@@ -77,30 +79,33 @@ class FakePage:
             return 42
         return None
 
-    def wait_for_function(self, *_a, **_kw):
+    async def wait_for_function(self, *_a, **_kw):
         pass
 
-    def wait_for_timeout(self, _ms):
+    async def wait_for_timeout(self, _ms):
         pass
 
-    def screenshot(self, **_kw):
+    async def screenshot(self, **_kw):
         return PNG
 
-    def click(self, *_a, **_kw):
+    async def click(self, *_a, **_kw):
         pass
+
+    async def close(self):
+        pass  # as Playwright's: a page closes, and one whose target is already gone answers as closed too
 
 
 def _fake_playwright(ctx, launches, page_factory):
     def engine(name, version):
-        def launch(**_kw):
+        async def launch(**_kw):
             launches.append(name)
-            context = types.SimpleNamespace(new_page=lambda: page_factory(ctx), route=lambda *_a: None,
-                                            close=lambda: None)
-            return types.SimpleNamespace(new_context=lambda **_kw: context, is_connected=lambda: True,
-                                         close=lambda: None, version=version)
+            context = types.SimpleNamespace(new_page=coro(lambda: page_factory(ctx)), route=coro(lambda *_a: None),
+                                            close=coro(lambda: None))
+            return types.SimpleNamespace(new_context=coro(lambda **_kw: context), is_connected=lambda: True,
+                                         close=coro(lambda: None), version=version)
         return types.SimpleNamespace(launch=launch)
     return types.SimpleNamespace(chromium=engine("chromium", PINNED), webkit=engine("webkit", "26.0"),
-                                 devices={}, stop=lambda: None)
+                                 devices={}, stop=coro(lambda: None))
 
 
 def pinned_install(*, engine="chromium", **_kw):
@@ -108,13 +113,20 @@ def pinned_install(*, engine="chromium", **_kw):
     return "/pinned/chrome-headless-shell" if engine == "chromium" else None
 
 
+@pytest.fixture(autouse=True)
+def _sessions_close(monkeypatch):
+    """Every generation a test opened closes with it, as at a task's end: no session loop outlives it."""
+    seen = track_sessions(monkeypatch)
+    yield
+    close_generations(*seen)
+
+
 @pytest.fixture
 def fake_browser(monkeypatch):
     def install(ctx, *, stealth=True, page_factory=FakePage):
         launches = []
         playwright = _fake_playwright(ctx, launches, page_factory)
-        sync_api = types.SimpleNamespace(sync_playwright=lambda: types.SimpleNamespace(start=lambda: playwright))
-        monkeypatch.setitem(__import__("sys").modules, "playwright.sync_api", sync_api)
+        install_async_api(monkeypatch, playwright)
         monkeypatch.setattr(browser_mod, "_ensure_playwright_installed", pinned_install)
         monkeypatch.delenv(chromium_runtime.SANDBOX_ENV, raising=False)
         monkeypatch.setattr(browser_mod, "_HAS_STEALTH", stealth)
@@ -255,8 +267,9 @@ def test_markdown_output_is_annotated_like_the_other_reads(sticky, monkeypatch):
 def test_a_blocked_subrequest_and_the_conditions_are_both_host_notes(sticky):
     ctx = sticky.registry._ctx
     reason = "BROWSER_REQUEST_BLOCKED: a subresource target was refused"
-    sticky.install(page_factory=lambda c: FakePage(c, on_read=lambda: setattr(
-        ctx.browser_state, "request_block_reason", reason)))
+    # The page's own request guard records it on the call's generation while the read runs.
+    sticky.install(page_factory=lambda c: FakePage(c, on_read=lambda: browser_session.record_block(
+        ctx.browser_state, reason)))
 
     result = sticky.call("browse_page", {"url": "https://observed.example/"})
 
@@ -270,7 +283,7 @@ def test_refusals_and_action_receipts_are_never_relabelled(sticky, monkeypatch):
     assert clicked.text == "Clicked: #go" and clicked.producer_text is None
     missing = sticky.call("browser_action", {"action": "evaluate", "value": ""})
     assert missing.producer_text is None and CONDITIONS not in missing.text
-    monkeypatch.setattr(browser_mod, "_navigation_block_reason", lambda *a, **k: "BROWSER_URL_BLOCKED: refused")
+    monkeypatch.setattr(browser_mod, "_navigation_block_reason", coro(lambda *a, **k: "BROWSER_URL_BLOCKED: refused"))
     blocked = sticky.call("browse_page", {"url": "https://observed.example/"})
     assert blocked.text == "⚠️ BROWSER_URL_BLOCKED: refused" and blocked.status != "ok"
     assert blocked.producer_text is None
@@ -284,9 +297,9 @@ class DyingPage(FakePage):
         self.closed, self.release = False, release
         self.generation = ctx.browser_state
 
-    def goto(self, url, **_kw):
+    async def goto(self, url, **_kw):
         if self.release is not None:
-            assert self.release.wait(10)
+            assert await wait_event(self.release, 10)
         self.generation.browser_conditions = "Browser conditions: FAILED FIRST ATTEMPT"
         self.closed = True
         raise RuntimeError("Target page, context or browser has been closed")
@@ -373,15 +386,13 @@ def test_engine_switch_then_infrastructure_retry_keeps_its_own_expectation(stick
         executor.shutdown()
 
 
-@pytest.mark.parametrize("replacement_kind", ["engine", "disconnected", "thread"])
+@pytest.mark.parametrize("replacement_kind", ["engine", "disconnected"])
 def test_timeout_wins_ensure_replacement_race(fake_browser, monkeypatch, replacement_kind):
     ctx = _ctx()
     launches = fake_browser(ctx)
     _, own = browser_mod._ensure_browser(ctx)
     if replacement_kind == "disconnected":
         own.browser.is_connected = lambda: False
-    elif replacement_kind == "thread":
-        own._thread_id = -1
     detach = browser_mod._detach_browser
     retirements = []
 
@@ -463,22 +474,28 @@ def test_abandoned_a_unwinds_while_b_opens_on_the_replacement(sticky, tmp_path, 
         assert release_a.wait(10)
         trace.append("A released")
 
+    async def hold_a_on_its_loop():  # the page waits without blocking its session's other requests
+        trace.append(f"A entered {a_stage}")
+        a_entered.set()
+        assert await wait_event(release_a, 10)
+        trace.append("A released")
+
     class Page(FakePage):
         def __init__(self, c):
             super().__init__(c)
             self.generation = c.browser_state
 
-        def goto(self, url, **kw):
+        async def goto(self, url, **kw):
             navigations.append(url)
             if self.generation is first:
-                hold_a()
+                await hold_a_on_its_loop()
                 trace.append("A raises")
                 raise RuntimeError("Target page, context or browser has been closed")
-            return super().goto(url, **kw)
+            return await super().goto(url, **kw)
 
-        def click(self, selector, **_kw):
+        async def click(self, selector, **_kw):
             clicks.append(selector)
-            hold_a()
+            await hold_a_on_its_loop()
             raise RuntimeError("Target page, context or browser has been closed")
 
     sticky.install(page_factory=Page)

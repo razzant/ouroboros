@@ -78,24 +78,45 @@ def test_real_directory_producer_recovers_owed_capture_under_each_existing_owner
     assert (entry.run_id in current.runs(ctx.drive_root, "state=?", (current.HELD,))) == (strategy == "copy")
 
 
-def test_actual_terminal_boundary_retries_money_without_an_extra_runtime(tmp_path, monkeypatch):
+@pytest.mark.parametrize("state", sorted(custody.TERMINAL_STATES))
+def test_actual_terminal_boundary_retries_money_without_an_extra_runtime(tmp_path, monkeypatch, state):
+    """A run delegate_wait delivered, its end recorded and its ledger write failed (#3329): the finish door names no
+    open execution and takes no extra round, the forced note says only that its collection/accounting has not settled,
+    and the terminal boundary books its money and never cancels it."""
     from ouroboros import usage_accounting
+    from ouroboros.loop_nudges import _forced_delegation_note, _maybe_inject_finalization_nudges
     entry = started(tmp_path)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
-    calls = []
+    calls, cancels = [], []
     def record(*a, **kw):
         calls.append(True)
         if len(calls) == 1:
             raise OSError("controlled ledger gap")
     monkeypatch.setattr(usage_accounting, "record_subscription_session", record)
-    first = collect_and_deliver_terminal(ctx, entry.run_id, terminal(), body._shape(entry), entry, None)
+    def ended(rid="run-one"):
+        detail = terminal(rid)
+        detail["summary"]["state"] = state
+        return detail
+    first = collect_and_deliver_terminal(ctx, entry.run_id, ended(), body._shape(entry), entry, None)
     assert first["output_delivery"]["complete"] and not first["settlement"]["settled"]
+    owed = current.run(tmp_path, entry.run_id)
+    assert (owed.terminal_state, owed.settled) == (state, False)
+    tools, messages = SimpleNamespace(_ctx=ctx, available_tools=lambda: ["delegate_start", "delegate_wait"]), []
+    assert _maybe_inject_finalization_nudges(tools, tmp_path, entry.task_id, {"reasoning_notes": [], "tool_calls": []},
+                                             "done", messages, lambda *_: None) is False, "no extra round"
+    assert messages == [] and not getattr(ctx, "_completion_hold_cause", "")
+    ctx._nanny_route_dispatched = True
+    note = _forced_delegation_note(ctx, {"tool_calls": []})
+    assert "collection/accounting" in note and "not settled" in note and "1 of 1" in note
+    assert "not in this transcript" not in note, "delegate_wait delivered its output"
     class Gateway:
         def handshake(self): pass
-        def get_run(self, rid): return terminal(rid)
+        def get_run(self, rid): return ended(rid)
+        def cancel_run(self, rid, reason=""): cancels.append((rid, reason))
         def close(self): pass
-    assert custody.release_task_runs(tmp_path, entry.task_id, gateway_factory=Gateway)
-    assert len(calls) == 2 and current.run(tmp_path, entry.run_id).settled
+    assert [row["action"] for row in custody.release_task_runs(tmp_path, entry.task_id, gateway_factory=Gateway)] == [
+        "settle_attempted"]
+    assert len(calls) == 2 and current.run(tmp_path, entry.run_id).settled and cancels == []
     assert body.body_runtime(tmp_path) is None
 
 
@@ -106,7 +127,7 @@ def test_public_wait_delivers_verified_local_output_without_any_gateway(tmp_path
     body.collect_terminal(tmp_path, entry.run_id, detail=terminal())
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
     monkeypatch.setattr(claudexor, "ClaudexorGateway", lambda *a, **k: pytest.fail("available output opened transport"))
-    result = json.loads(delegate_supervision.supervised_wait(ctx, entry.run_id).text)
+    result = json.loads(delegate_supervision.run_wait(ctx, entry.run_id).text)
     assert result["status"] == "terminal" and result["primary_output"]["text"] == "complete answer"
     assert result["current_observation"]["status"] == "retained"
     assert not current.run(tmp_path, entry.run_id).output_consumed
@@ -114,8 +135,11 @@ def test_public_wait_delivers_verified_local_output_without_any_gateway(tmp_path
 
 @pytest.mark.parametrize("source", ["missing", "incomplete"])
 def test_public_wait_still_reads_engine_when_full_local_source_is_unavailable(tmp_path, monkeypatch, money, source):  # noqa: F811
+    """Its run ended with an incomplete local source, or a wake for another reason (here its inspection time) finds
+    no local source at all: the wake reads the engine once."""
     from ouroboros import delegate_supervision
     from ouroboros.gateways import claudexor
+    from tests._run_wait_shared import publish
     entry = started(tmp_path)
     if source == "incomplete":
         detail = terminal()
@@ -133,7 +157,8 @@ def test_public_wait_still_reads_engine_when_full_local_source_is_unavailable(tm
         def close(self): pass
     monkeypatch.setattr(claudexor, "ClaudexorGateway", Gateway)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
-    result = json.loads(delegate_supervision.supervised_wait(ctx, entry.run_id).text)
+    result = json.loads((delegate_supervision.run_wait(ctx, entry.run_id) if source == "incomplete"
+                         else publish(ctx, entry.run_id, woke_by="timeout")).text)
     assert calls == [entry.run_id] and result["status"] == "terminal"
     assert result["output_delivery"]["complete"]
 
@@ -141,7 +166,6 @@ def test_public_wait_still_reads_engine_when_full_local_source_is_unavailable(tm
 @pytest.mark.parametrize("kind", ["review", "ordinary", "retained_review"])
 def test_registered_wait_preserves_collection_outcome(tmp_path, monkeypatch, money, kind):  # noqa: F811
     """The public string ABI must keep the native failure, not just wake the model."""
-    from ouroboros import delegate_supervision
     from ouroboros.gateways import claudexor
     from ouroboros.tools import delegate
     from ouroboros.tools.tool_result import (
@@ -151,6 +175,8 @@ def test_registered_wait_preserves_collection_outcome(tmp_path, monkeypatch, mon
     entry = started(tmp_path, source="review_substrate_commit" if kind != "ordinary" else "")
     if kind == "retained_review":
         assert body.collect_terminal(tmp_path, entry.run_id, detail=terminal(), allow_review=True)["status"] == "collected"
+    else:  # the body saw the run end; its output is the engine's to give
+        assert body.observe_run(tmp_path, entry, {"summary": {"runId": entry.run_id, "state": "succeeded"}, "lastSeq": 1})
     calls, closed = [], []
 
     class Gateway:
@@ -165,7 +191,6 @@ def test_registered_wait_preserves_collection_outcome(tmp_path, monkeypatch, mon
             closed.append(True)
 
     monkeypatch.setattr(claudexor, "ClaudexorGateway", Gateway)
-    monkeypatch.setattr(delegate_supervision, "_TICK_SEC", 0)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
     tool = next(item for item in delegate.get_tools() if item.name == "delegate_wait")
     sentinel = object()
@@ -204,7 +229,7 @@ def test_ready_local_result_does_not_override_owner_control_or_foreign_authority
     assert retained_terminal_result(foreign, entry.run_id) is None
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
     monkeypatch.setattr(delegate_supervision, "_control_wakes", lambda _: [{"type": "cancellation_intent"}])
-    result = json.loads(delegate_supervision.supervised_wait(ctx, entry.run_id).text)
+    result = json.loads(delegate_supervision.run_wait(ctx, entry.run_id).text)
     assert result["status"] == "no_progress" and result["wake_events"] == [{"type": "cancellation_intent"}]
     assert not current.run(tmp_path, entry.run_id).output_consumed
 
@@ -251,7 +276,7 @@ def driven_runtime(tmp_path, monkeypatch, capture_child):  # noqa: F811
     class Gateway:
         def get_run(self, rid, **kwargs): return terminal(rid)
         def close(self): pass
-    runtime = body.start_body_runtime(tmp_path, gateway_factory=Gateway, max_workers=2)
+    runtime = body.start_body_runtime(tmp_path, gateway_factory=Gateway)
     assert entered.wait(3)
     def step():
         tick(runtime)

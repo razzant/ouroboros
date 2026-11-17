@@ -46,3 +46,17 @@ test('a task message landing in a task is a visible row in the receiver\'s chat 
     assert.ok(summarizeLogEvent(evt).body.includes('the PR is ready'));
 });
 
+
+test('a host message with no sending task says System, a task message keeps naming its sender', () => {
+    // The silence fact reaches its work as provenance=system mail with no source task (owner_mailbox labels the
+    // source "unknown"); the row must not read «Message from task unknown». A real sender keeps its name.
+    for (const source of ['unknown', '', undefined]) {
+        const host = { type: 'task_message_injected', task_id: 'receiver-1', source_task_id: source, provenance: 'system',
+            text_preview: 'No recognized progress or active wait since 2026-11-09 02:10 UTC' };
+        assert.equal(summarizeChatLiveEvent(host).headline, 'System message');
+        assert.equal(summarizeLogEvent(host).headline, 'System message');
+    }
+    const relayed = { type: 'task_message_injected', task_id: 'receiver-1', source_task_id: 'sender-9', provenance: 'system' };
+    assert.equal(summarizeChatLiveEvent(relayed).headline, 'Message from task sender-9');
+    assert.equal(summarizeLogEvent(relayed).headline, 'Message from task sender-9');
+});

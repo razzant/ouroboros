@@ -46,7 +46,7 @@ test('purposes use the words of the card\'s Reviews doors, routes their product 
     // are recorded as `multi_model_review_review` (review_price.REVIEW_USAGE_CATEGORY).
     assert.deepEqual(['task', 'subagent', 'multi_model_review_review', 'advisory_review', 'commit_gate_review',
         'preflight_review', 'task_acceptance_review', 'plan_review_review', 'consciousness_task', ''].map(purposeWord),
-    ['Work', 'Helpers', 'Code review', 'Early look', 'Code review', 'Early look', 'Result review', 'Plan review',
+    ['Work', 'Subagents', 'Code review', 'Pre-review', 'Code review', 'Pre-review', 'Result review', 'Plan review',
         'Consciousness task', 'Other']);
     assert.deepEqual(['openrouter', 'openai', 'codex', 'claude', 'agy', 'claudexor', 'external-extension'].map(routeWord),
         ['OpenRouter', 'OpenAI', 'Codex', 'Claude Code', 'Antigravity', 'Claudexor', 'External extension']);

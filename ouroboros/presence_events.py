@@ -1,8 +1,10 @@
-"""Presence event identity, origin and typed reaction validation for meeting calls (text turns parse in
-host_service_places)."""
+"""The one parser of a live Presence event: ``/presence/turn``, ``/call/open`` and the carrier's re-admission.
+
+History imports keep their own narrower contract (``presence_history``)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any, Mapping, Sequence
 
 from ouroboros.dialogue_store import thread_references
@@ -31,6 +33,15 @@ class PresenceTurnError(ValueError):
             dict(row) for row in attachment_manifest if isinstance(row, Mapping)
         ]
         super().__init__(f"{self.code}: {self.field}")
+
+
+class PresenceEventInvalid(PresenceTurnError):
+    """A malformed connector event: every door refuses it 400 before the room hears it; ``message`` is the
+    text door's long-standing words for it."""
+
+    def __init__(self, code: str, field: str, message: str) -> None:
+        super().__init__(code, field)
+        self.message = message
 
 
 @dataclass(frozen=True)
@@ -65,54 +76,117 @@ def presence_event_origin(payload: Any) -> dict[str, str]:
     return {key: str(source.get(key) or "").strip() for key in ("provider", "account_id", "conversation_id", "thread_id")}
 
 
-def presence_turn_event(payload: Any, admission: PresenceAdmission, *,
-                        reporting_version: int = 0, continuing: int = 0, vouched_facts: Any = ()) -> PresenceTurnEvent:
-    """Validate a call's source event against its admitted place, as ``/presence/turn`` does.
+def outside_origin(admission: PresenceAdmission, event: Any) -> bool:
+    """Whether an event's provider facts lie outside the owner-created place/binding origin it was admitted by."""
+    origin = admission.origin
+    return (event.provider != origin.transport or event.account_id != origin.account_id
+            or (origin.conversation_id != "*" and event.conversation_id != origin.conversation_id)
+            or bool(origin.thread_id and event.thread_id != origin.thread_id))
 
-    The transport's claimed conversation_key never chooses the host history
-    or concurrency key; that key comes from the checked origin facts.
-    ``vouched_facts``: the declared connector signals the Host already admitted for this event from the
-    authenticated connector's live publication (``places.declared_wake_signals``); a carrier re-admitting the
-    Host's event takes them by value, never from its own process's registry.
+
+_EVENT_KEYS = frozenset({"source_event_id", "provider", "account_id", "conversation_id", "thread_id",
+                         "conversation_key", "actor", "conversation", "message", "text"})
+_REPLY_TARGET_KEYS = frozenset({"conversation", "effect", "match", "thread"})
+
+
+def reply_targets(message: Any) -> tuple[dict[str, str], ...] | None:
+    """``message.reply_targets``: the further literal addresses an automatic reply to this message reaches, as the
+    connector knows them (``[]``: none); None when absent, a message from a connector that sends none (the legacy
+    boundary). Each is ``{conversation, effect: "write", match: "scope"|"exact"|"exact_casefold", thread?}``: an id,
+    never a selector, met in the reply's own route (the reply place's connector, its retained destination's provider
+    and account, never the source event's). Anything else is ``ValueError``, never read as absent."""
+    from ouroboros.places import MATCHES
+    from ouroboros.tool_effects import EFFECT_WRITE
+
+    if not isinstance(message, Mapping) or "reply_targets" not in message:
+        return None
+    raw, where = message["reply_targets"], "event.message.reply_targets"
+    if not isinstance(raw, list):
+        raise ValueError(f"{where} must be a list of addresses")
+    found = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, Mapping) or not {"conversation", "effect", "match"} <= set(item) <= _REPLY_TARGET_KEYS:
+            raise ValueError(f"{where}[{index}] holds conversation, effect and match, and optionally thread")
+        if any(not isinstance(item.get(key, ""), str) for key in ("conversation", "thread")) or not item["conversation"].strip():
+            raise ValueError(f"{where}[{index}]: conversation is a non-empty string id, thread a string")
+        if item["effect"] != EFFECT_WRITE or item["match"] not in MATCHES:
+            raise ValueError(f"{where}[{index}]: effect is {EFFECT_WRITE!r} and match is {' or '.join(MATCHES)}")
+        thread = item.get("thread", "").strip()
+        found.append({"conversation": item["conversation"].strip(), "effect": EFFECT_WRITE, "match": item["match"],
+                      **({"thread": thread} if thread else {})})
+    return tuple({json.dumps(entry, sort_keys=True): entry for entry in found}.values())
+
+
+def parse_presence_event(payload: Any, *, vouched_facts: Any = (), staged_files: Any = None,
+                         reporting_version: int = 0, continuing: int = 0) -> PresenceTurnEvent:
+    """A connector's live event, checked whole before any admission; malformed is ``PresenceEventInvalid``.
+
+    ``vouched_facts``: the declared connector signals admissible beside ``WAKE_FACTS``. A door takes them from
+    the authenticated connector's live publication (``places.declared_wake_signals``); a carrier re-admitting
+    the Host's event takes the facts the Host admitted, by value, never its own process's registry.
+    ``staged_files``: the files the event carries (a typed reaction carries none). The transport's claimed
+    conversation_key never chooses the host history or concurrency key; it comes from the provider facts,
+    which the admission then checks against the place (``outside_origin``).
     """
+    from ouroboros.place_intake import reaction_refusal
     from ouroboros.places import WAKE_FACTS, validate_presence_identity
     from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_history import source_order
 
-    expected = {"source_event_id", "provider", "account_id", "conversation_id", "thread_id",
-                "conversation_key", "actor", "conversation", "message", "text"}
-    if not isinstance(payload, dict) or set(payload) - {"facts", "identity"} != expected:
-        raise PresenceTurnError("presence_event_invalid", "event")
+    if not isinstance(payload, dict) or set(payload) - {"facts", "identity"} != _EVENT_KEYS:
+        raise PresenceEventInvalid("presence_event_invalid", "event", message="invalid presence event")
     try:  # the account the connector reads and sends as, when it negotiated ``presence_identity``
         identity = validate_presence_identity(payload["identity"]) if "identity" in payload else None
-    except ValueError:
-        raise PresenceTurnError("presence_identity_invalid", "event.identity") from None
+    except ValueError as exc:
+        raise PresenceEventInvalid("presence_identity_invalid", "event.identity", message=str(exc)) from None
+    actor = payload["actor"]
+    if not isinstance(actor, dict) or ("authenticated" in actor and type(actor["authenticated"]) is not bool):
+        raise PresenceEventInvalid("presence_actor_invalid", "event.actor",
+                                   message="actor must be an object; authenticated must be a boolean")
+    if refusal := reaction_refusal(payload, staged_files):
+        raise PresenceEventInvalid("presence_reaction_invalid", "event.message.reaction", message=refusal)
     facts, allowed = payload.get("facts"), set(WAKE_FACTS) | set(vouched_facts or ())
-    if "facts" in payload and (not isinstance(facts, list) or any(fact not in allowed for fact in facts)):
-        raise PresenceTurnError("presence_event_invalid", "event.facts")
-    provider, account_id, conversation_id, thread_id = (
-        str(payload.get(key) or "").strip()
-        for key in ("provider", "account_id", "conversation_id", "thread_id"))
-    origin = admission.origin
-    if (provider != origin.transport or account_id != origin.account_id
-            or (origin.conversation_id != "*" and conversation_id != origin.conversation_id)
-            or (origin.thread_id and thread_id != origin.thread_id)):
-        raise PresenceTurnError("presence_origin_mismatch", "event")
+    if "facts" in payload and (not isinstance(facts, list)
+                               or any(not isinstance(fact, str) or fact not in allowed for fact in facts)):
+        raise PresenceEventInvalid("presence_payload_invalid", "event.facts",
+                                   message="event.facts must be a list of declared wake facts")
+    try:  # the provider's order, as history carries it
+        source_order(payload["message"])
+    except ValueError as exc:
+        raise PresenceEventInvalid("presence_payload_invalid", "event.message.source_order", message=str(exc)) from None
+    try:  # an automatic reply's further addresses: absent is the legacy boundary, malformed never reads as absent
+        reply_targets(payload["message"])
+    except ValueError as exc:
+        raise PresenceEventInvalid("presence_payload_invalid", "event.message.reply_targets", message=str(exc)) from None
+    provider, account_id, conversation_id, thread_id = presence_event_origin(payload).values()
     event = PresenceTurnEvent(
         source_event_id=str(payload["source_event_id"] or "").strip(),
         provider=provider, account_id=account_id, conversation_id=conversation_id, thread_id=thread_id,
         conversation_key=conversation_key(provider, account_id, conversation_id, thread_id),
-        actor=dict(payload["actor"]) if isinstance(payload["actor"], dict) else {},
+        actor=dict(actor),
         conversation=dict(payload["conversation"]) if isinstance(payload["conversation"], dict) else {},
         message=dict(payload["message"]) if isinstance(payload["message"], dict) else {},
         text=str(payload["text"] or ""), delivery_reporting_version=reporting_version,
         continuation_version=continuing, facts=tuple(facts) if facts is not None else None, identity=identity)
     if not event.source_event_id or not event.conversation_key or not event.actor:
-        raise PresenceTurnError("presence_identity_missing", "event")
-    from ouroboros.place_intake import reaction_refusal
-    if reaction_refusal(payload):  # refused before the room hears it, as ``/presence/turn`` refuses it
-        raise PresenceTurnError("presence_reaction_invalid", "event.message.reaction")
+        raise PresenceEventInvalid("presence_identity_missing", "event",
+                                   message="presence event is missing identity facts")
     if "transport_queue" in event.conversation:
         from ouroboros.presence_observations import validate_transport_queue
-        validate_transport_queue(event.conversation["transport_queue"], event.conversation_key,
-                                 event.source_event_id)
+        try:
+            validate_transport_queue(event.conversation["transport_queue"], event.conversation_key,
+                                     event.source_event_id)
+        except ValueError as exc:
+            raise PresenceEventInvalid("presence_payload_invalid", "event.conversation.transport_queue",
+                                       message=str(exc)) from None
+    return event
+
+
+def presence_turn_event(payload: Any, admission: PresenceAdmission, *,
+                        reporting_version: int = 0, continuing: int = 0, vouched_facts: Any = ()) -> PresenceTurnEvent:
+    """``parse_presence_event`` of a payload whose place is already admitted, then its origin checked."""
+    event = parse_presence_event(payload, vouched_facts=vouched_facts, reporting_version=reporting_version,
+                                 continuing=continuing)
+    if outside_origin(admission, event):
+        raise PresenceTurnError("presence_origin_mismatch", "event")
     return event

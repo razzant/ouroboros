@@ -281,6 +281,32 @@ test('the description hides wherever it could only mislead', () => {
 });
 
 
+test('the host line about the update on offer shows with or without a description, only from that range\'s facts', () => {
+    const range = { base_sha: 'a'.repeat(40), target_sha: 'b'.repeat(40) };
+    const receipt = { checks: [], review: { observed: 'FAIL', declared: 'PASS' } };
+    const facts = { ...range, landed_over_review: [], commits: [{ sha: 'm'.repeat(40), subject: 'merge', receipt }] };
+    const line = 'Went in over a review FAIL or no verdict: 1 merge.';
+    const described = updateLetterView({ ...AVAILABLE, letter: letter({ qualification: facts, checked_key: range }) });
+    assert.equal(described.over, line);
+    assert.equal(described.overDetail, 'Went in over a review FAIL or no verdict: mmmmmmmm (merge; review FAIL).');
+    // No description yet: the section shows for the update on offer, and the line with it.
+    const bare = updateLetterView({ ...AVAILABLE, letter: { state: 'none', text: '', checked_key: range, qualification: facts } });
+    assert.equal(bare.state, 'empty');
+    assert.equal(bare.over, line);
+    // Facts of another range, a range that is not on offer, or facts that name nothing: no line.
+    const other = { ...facts, target_sha: 'c'.repeat(40) };
+    assert.equal(updateLetterView({ ...AVAILABLE, letter: letter({ qualification: other, checked_key: range }) }).over, '');
+    assert.equal(updateLetterView({ ...CURRENT, letter: letter({ relation: 'applied', qualification: facts }) }).over, '');
+    const quiet = { ...facts, commits: [{ sha: 'm'.repeat(40), subject: 'merge', receipt: { checks: [], review: { observed: 'PASS' } } }] };
+    assert.equal(updateLetterView({ ...AVAILABLE, letter: letter({ qualification: quiet, checked_key: range }) }).over, '');
+    // Rows of this computer that were not read are said in Details, with or without a line; what is painted and
+    // where is the browser test's (tests/test_update_description_browser.py).
+    const { landed_over_review: _unread, ...blind } = quiet;
+    const unreadView = updateLetterView({ ...AVAILABLE, letter: letter({ qualification: blind, checked_key: range }) });
+    assert.equal(unreadView.over, '');
+    assert.match(unreadView.overDetail, /^Made on this computer: Not read for this range/);
+});
+
 test('a description-bearing payload leaves the verdict byte-for-byte identical', () => {
     for (const base of [CURRENT, AVAILABLE, { managed: true, update_tx: { active: true, phase: 'rolling_back' } }]) {
         for (const phase of ['', 'checking', 'updating', 'restart_required']) {
@@ -393,6 +419,9 @@ test('the letter body goes through the sanitizing markdown pipeline and is dispo
     assert.match(render, /const nextKey = letterContentKey\(view\);\s*if \(nextKey === letterKey\) \{\s*if \(letterMeasureOwed\) requestAnimationFrame\(measureLetter\);\s*return;\s*\}/);
     assert.match(SOURCE, /function measureLetter\(\) \{\s*if \(!letterMeasureOwed \|\| letterBody\.hidden \|\| !letterBody\.clientHeight\) return;/);
     assert.match(SOURCE, /'ouro:dashboard-subtab-shown', \(event\) => \{\s*if \(event\.detail\?\.tab !== 'updates'[^\n]*\n\s*requestAnimationFrame\(measureLetter\);/);
+    // Whichever door shows the body, its own box takes the owed measure: the page opened from the Dashboard's list by
+    // the row already chosen changes no tab and announces nothing (tests/test_update_description_browser.py, step 7).
+    assert.match(SOURCE, /new ResizeObserver\(\(\) => measureLetter\(\)\)\.observe\(letterBody\)/);
     // Content identity is the CONTENT: two different paragraphs of equal length must not
     // share a key, and a rewrite that produced the same text must not throw the DOM away.
     assert.match(SOURCE, /function letterContentKey\(view\) \{[\s\S]*?return view\.markdown;/);

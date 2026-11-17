@@ -542,7 +542,7 @@ def _withdraw(record):
     record["asks"].append({"ask_id": "a2", "ts": "t2", "revision": 1, "message": "", "participants": [seat]})
 
 
-def _planned_root(tmp_path, monkeypatch, enforcement, *, owner_marked=True, unreadable=None, known=False):
+def _planned_root(tmp_path, monkeypatch, *, owner_marked=True, unreadable=None, known=False):
     """A root's normal finalization whose plan carries one open objection of an owner-marked reviewer (or of an
     unmarked one); ``unreadable`` is a mutable ``[bool]``: while true the record reads as ``_plan_facts`` reports a
     store that refused, an empty record that cannot be judged (``known`` keeps the readable part's objection, as when
@@ -554,7 +554,6 @@ def _planned_root(tmp_path, monkeypatch, enforcement, *, owner_marked=True, unre
 
     loop, registry, limit_ctx, trace = _forced_test_context(tmp_path)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
-    monkeypatch.setattr(loop, "get_review_enforcement", lambda: enforcement)
     record = _plan_record("held")
     record["asks"][0]["participants"][0]["owner_marked"] = owner_marked
     monkeypatch.setattr(oh, "_plan_facts", lambda _ctx: (record if known else pr.empty_record(), {}, True)
@@ -589,7 +588,7 @@ def _recorded(text, usage, trace):
 ])
 def test_a_withdrawn_objection_leaves_no_plan_clause_on_the_answer_held_before_it(tmp_path, monkeypatch,
                                                                                   exit_by, prior):
-    """Advisory: the answer is disclosed with an open objection and its result review holds it; the raiser then
+    """The answer is disclosed with an open objection and its result review holds it; the raiser then
     withdraws, and the SAME candidate ends the task (selected again, or kept by a round-limit rail). The typed
     flag, the notice, the candidate's plan mark, the outcome class and the forced call's facts follow the plan at
     that exit; another owner's degradation of the candidate is neither written over nor cleared."""
@@ -600,7 +599,7 @@ def test_a_withdrawn_objection_leaves_no_plan_clause_on_the_answer_held_before_i
     from ouroboros.task_finalization import terminal_result_fields
     from tests.test_delivery_forced_finalization import _select_completion
 
-    loop, registry, limit_ctx, trace, record, candidate = _planned_root(tmp_path, monkeypatch, "advisory")
+    loop, registry, limit_ctx, trace, record, candidate = _planned_root(tmp_path, monkeypatch)
     candidate.degraded, candidate.degraded_reason = bool(prior), prior
     holds = iter([True, False])
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", lambda *_a, **_k: next(holds))
@@ -630,91 +629,20 @@ def test_a_withdrawn_objection_leaves_no_plan_clause_on_the_answer_held_before_i
     assert not any(_terminal_limitations(stored, {}, outcome["reason_code"])), "no stale limitation on the card"
 
 
-@pytest.mark.parametrize("withdrawn", [False, True])
-def test_an_author_stop_under_blocking_names_its_own_exit_from_the_plan_as_it_stands(tmp_path, monkeypatch,
-                                                                                    withdrawn):
-    """Blocking holds the normal answer over an owner-marked objection; the author then stops. The stop passes no
-    plan gate (no new hold, no review) and its disclosure reads the plan NOW: an objection still open is named with
-    Blocking and the author's stop, never as work going on under advisory enforcement; one withdrawn after the hold
-    leaves no clause, though the gate's projection from that hold still named it. The card states the stop as the
-    primary cause, the author's reason, and a review that stayed open: never that the work went on."""
-    import queue
-
-    from tests.test_delivery_forced_finalization import _select_completion
-
-    loop, registry, limit_ctx, trace, record, candidate = _planned_root(tmp_path, monkeypatch, "blocking")
-    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery",
-                        lambda *_a, **_k: pytest.fail("a stop buys no review"))
-    assert loop._no_tool_final_answer(
-        PLANNED_ANSWER, limit_ctx, trace, registry, queue.Queue(), set(), lambda _t: None) is None
-    assert trace["plan_gate"]["status"] == "held" and "[PLAN_REVIEW_HOLD]" in str(limit_ctx.messages[-1]["content"])
-    if withdrawn:
-        _withdraw(record)
-    _select_completion(registry, limit_ctx, trace, answer_sha256=candidate.content_sha256, action="stop",
-                       rationale="The objection stands; stopping with the draft.")
-    text, usage, trace = loop._no_tool_final_answer(PLANNED_ANSWER, limit_ctx, trace, registry, queue.Queue(), set(),
-                                                    lambda _t: None, explicit_candidate=True)
-    assert text == PLANNED_ANSWER and trace["task_completion"]["action"] == "stop"
-    notice = str(usage.get("terminal_host_notice") or "")
-    execution, line = _recorded(text, usage, trace)
-    assert "advisory" not in notice
-    if withdrawn:
-        assert notice == "" and "terminal_plan_review_open" not in usage and "plan_review" not in execution
-        assert line == f"{STOPPED} · The objection stands; stopping with the draft."
-    else:
-        assert "triad_a/o1" in notice and "Blocking enforcement" in notice and "stopped" in notice
-        assert usage["terminal_plan_review_open"] is True and execution["plan_review"] == "objections_open"
-        assert line == f"{STOPPED} · The objection stands; stopping with the draft · {STILL_OPEN}."
-
-
-@pytest.mark.parametrize("stop", [False, True])
-def test_blocking_says_why_objections_of_unmarked_reviewers_did_not_hold(tmp_path, monkeypatch, stop):
-    """Blocking with only an unmarked reviewer's objection open: nothing holds, so the normal answer is delivered
-    (and a stop passes no gate); either exit's notice says that such objections do not hold under Blocking, never
-    that the work went on under advisory enforcement. The delivered answer's card says the work went on with them;
-    the stop's names the stop and the review still open."""
-    import queue
-
-    from ouroboros.project_dialogue import TASK_CAUSE_PHRASES
-    from tests.test_delivery_forced_finalization import _select_completion
-
-    loop, registry, limit_ctx, trace, _record, candidate = _planned_root(tmp_path, monkeypatch, "blocking",
-                                                                         owner_marked=False)
-    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", lambda *_a, **_k: False)
-    if stop:
-        _select_completion(registry, limit_ctx, trace, answer_sha256=candidate.content_sha256, action="stop",
-                           rationale="Stopping with the draft.")
-    text, usage, trace = loop._no_tool_final_answer(PLANNED_ANSWER, limit_ctx, trace, registry, queue.Queue(), set(),
-                                                    lambda _t: None, explicit_candidate=stop)
-    notice = usage["terminal_host_notice"]
-    assert text == PLANNED_ANSWER and trace["plan_gate"]["status"] == "objections_open"
-    assert "triad_a/o1" in notice and "advisory" not in notice and usage["terminal_plan_review_open"] is True
-    assert "under Blocking enforcement, objections of unmarked reviewers and advisers do not hold the answer" in notice
-    execution, line = _recorded(text, usage, trace)
-    assert execution["plan_review"] == "objections_open"
-    if stop:
-        assert notice.endswith("do not hold the answer and Ouroboros stopped with the work unfinished.")
-        assert line == f"{STOPPED} · Stopping with the draft · {STILL_OPEN}."
-    else:
-        assert line == TASK_CAUSE_PHRASES["plan_review_objections_open"] and "went on" in line
-
-
-@pytest.mark.parametrize(("enforcement", "stop"), [("advisory", False), ("cyber_pro", True)])
+@pytest.mark.parametrize(("mode", "stop"), [("pro", False), ("cyber_pro", True)])
 def test_an_authors_stop_over_objections_that_hold_nothing_never_says_the_work_proceeded(
-        tmp_path, monkeypatch, enforcement, stop):
-    """Advisory and Cyber Pro hold no answer over an owner-marked objection. Delivered, the notice and the card say
-    the work went on with it; after the author's stop, the notice names the objection and the stop, never work that
+        tmp_path, monkeypatch, mode, stop):
+    """No Access holds an answer over an owner-marked objection. Delivered, the notice and the card say the work
+    went on with it; after the author's stop, the notice names the objection and the stop, never work that
     proceeded, and the card reads the stop with the review still open."""
     import queue
 
     from ouroboros.project_dialogue import TASK_CAUSE_PHRASES
     from tests.test_delivery_forced_finalization import _select_completion
 
-    cyber = enforcement == "cyber_pro"
-    if cyber:
-        monkeypatch.setattr("ouroboros.tools.review_helpers.review_enforcement_blocks", lambda *_a, **_k: False)
-    loop, registry, limit_ctx, trace, _record, candidate = _planned_root(
-        tmp_path, monkeypatch, "blocking" if cyber else "advisory")
+    cyber = mode == "cyber_pro"
+    monkeypatch.setattr("ouroboros.tools.review_helpers.cyber_review_authority", lambda: cyber)
+    loop, registry, limit_ctx, trace, _record, candidate = _planned_root(tmp_path, monkeypatch)
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", lambda *_a, **_k: False)
     if stop:
         _select_completion(registry, limit_ctx, trace, answer_sha256=candidate.content_sha256, action="stop",
@@ -723,7 +651,7 @@ def test_an_authors_stop_over_objections_that_hold_nothing_never_says_the_work_p
                                                     lambda _t: None, explicit_candidate=stop)
     listed = "⚠️ Plan review: 1 open objection remains open — triad_a/o1 (ask a1, revision 1): no; "
     why = ("Ouroboros stopped with the work unfinished" if stop else "Cyber Pro: Ouroboros proceeded by its own judgment"
-           if cyber else "work proceeded under the owner-selected advisory enforcement")
+           if cyber else "work proceeded with them open")
     assert text == PLANNED_ANSWER and usage["terminal_host_notice"] == f"{listed}{why}."
     execution, line = _recorded(text, usage, trace)
     assert execution["plan_review"] == "objections_open"
@@ -731,10 +659,9 @@ def test_an_authors_stop_over_objections_that_hold_nothing_never_says_the_work_p
                     else TASK_CAUSE_PHRASES["plan_review_objections_open"])
 
 
-@pytest.mark.parametrize("enforcement, exit_by", [("advisory", "stop"), ("cyber_pro", "stop"),
-                                                  ("blocking", "round_limit")])
+@pytest.mark.parametrize("mode, exit_by", [("pro", "stop"), ("cyber_pro", "stop"), ("pro", "round_limit")])
 def test_an_unreadable_plan_record_names_the_authors_stop_and_leaves_other_exits_as_they_were(
-        tmp_path, monkeypatch, enforcement, exit_by):
+        tmp_path, monkeypatch, mode, exit_by):
     """An unreadable record holds a normal answer outside Cyber Pro (its reminder unchanged). The author's stop then
     says the record could not be read, the review's state is unknown and the work stopped unfinished; a rail keeps
     its own wording, and Cyber Pro, which never holds, still discloses nothing. Every exit records the plan review's
@@ -744,11 +671,10 @@ def test_an_unreadable_plan_record_names_the_authors_stop_and_leaves_other_exits
 
     from tests.test_delivery_forced_finalization import _select_completion
 
-    cyber = enforcement == "cyber_pro"
-    if cyber:
-        monkeypatch.setattr("ouroboros.tools.review_helpers.review_enforcement_blocks", lambda *_a, **_k: False)
+    cyber = mode == "cyber_pro"
+    monkeypatch.setattr("ouroboros.tools.review_helpers.cyber_review_authority", lambda: cyber)
     loop, registry, limit_ctx, trace, _record, candidate = _planned_root(
-        tmp_path, monkeypatch, "blocking" if cyber else enforcement, unreadable=[True], known=exit_by == "stop_known")
+        tmp_path, monkeypatch, unreadable=[True], known=exit_by == "stop_known")
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", lambda *_a, **_k: False)
     if not cyber:
         assert loop._no_tool_final_answer(
@@ -758,7 +684,7 @@ def test_an_unreadable_plan_record_names_the_authors_stop_and_leaves_other_exits
         monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: ({"content": PLANNED_ANSWER}, 0.0))
         text, usage, trace = loop._handle_round_limit(limit_ctx)
         assert usage["terminal_host_notice"].startswith(
-            "⚠️ Blocking plan review state is unknown (the plan record could not be read); the task-wide rail `round_limit`")
+            "⚠️ Plan review state is unknown (the plan record could not be read); the task-wide rail `round_limit`")
         execution, line = _recorded(text, usage, trace)
         assert execution.get("plan_review") == "unreadable"
         assert line == f"The task hit its round limit before it could finish cleanly · {UNKNOWN}"
@@ -789,8 +715,7 @@ def test_a_normal_answer_after_a_transient_unreadable_read_claims_no_stop(tmp_pa
     import queue
 
     unreadable = [True]
-    loop, registry, limit_ctx, trace, record, _candidate = _planned_root(tmp_path, monkeypatch, "blocking",
-                                                                         unreadable=unreadable)
+    loop, registry, limit_ctx, trace, record, _candidate = _planned_root(tmp_path, monkeypatch, unreadable=unreadable)
     record.update(revisions=[], asks=[])  # no plan at all once the store reads again
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", lambda *_a, **_k: False)
     assert loop._no_tool_final_answer(
@@ -818,8 +743,8 @@ def test_an_unreadable_record_with_a_pending_ask_stays_unknown_not_merely_awaite
     from ouroboros import owner_hurry
     from tests.test_owner_hurry_s3 import _plan_record
 
-    monkeypatch.setattr("ouroboros.tools.review_helpers.review_enforcement_blocks", lambda *_a, **_k: False)
-    loop, registry, limit_ctx, trace, _record, _candidate = _planned_root(tmp_path, monkeypatch, "blocking")
+    monkeypatch.setattr("ouroboros.tools.review_helpers.cyber_review_authority", lambda: True)
+    loop, registry, limit_ctx, trace, _record, _candidate = _planned_root(tmp_path, monkeypatch)
     monkeypatch.setattr(owner_hurry, "_plan_facts", lambda _ctx: (_plan_record("awaiting"), {}, True))
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", lambda *_a, **_k: False)
     text, usage, trace = loop._no_tool_final_answer(

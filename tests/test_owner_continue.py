@@ -474,7 +474,9 @@ def test_continue_carries_my_humans_confirmed_place_words_citable_without_promot
     """Astra finding 3 (R1 MINOR-3): the words a focus heard from my human's confirmed account are provenance rows in
     its corpus. Continue carries them to the successor whole, with their id and reply target, shows them verbatim in
     its start text and seeds them so a cite verifies there; they owe no reply and are no order. A peer task's words
-    and a forwarded line stay what they were: context, uncitable."""
+    and a forwarded line stay what they were: context, uncitable. The row keeps its provider identity through the
+    Continue, so once my send receipt names it (my own post through my human's account), the successor's cite is
+    refused, while my human's own message in the same words stays citable."""
     from types import SimpleNamespace
 
     from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision
@@ -489,12 +491,14 @@ def test_continue_carries_my_humans_confirmed_place_words_citable_without_promot
     _settled_with_corpus(  # a forward reaches a focus only inside its frame text, never as a provenance row
         tmp_path,
         {"source": "initial_text", "content": f"[FOCUS] frame\n\n{forwarded}"},
-        {"source": "place_confirmed", "content": words, "carried": True, "msg_id": "chat 7 / e1", "reply_to": target},
+        {"source": "place_confirmed", "content": words, "carried": True, "msg_id": "chat 7 / e1", "reply_to": target,
+         "conversation_id": "C7", "message_id": "1793991999.000001"},
         {"source": "principal_task_message", "content": peer, "msg_id": "t-1", "source_task_id": "parent-x"},
     )
     sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
     assert sources["gaps"] == []
-    assert sources["confirmed_place"] == [{"source": "place_confirmed", "content": words, "msg_id": "chat 7 / e1", "reply_to": target}]
+    assert sources["confirmed_place"] == [{"source": "place_confirmed", "content": words, "msg_id": "chat 7 / e1",
+                                           "conversation_id": "C7", "message_id": "1793991999.000001", "reply_to": target}]
     assert [row["text"] for row in sources["peer_context"]] == ["peer says hi", peer]
     text = work_order_text("pred-1", "cancelled", sources, successor_task_id="succ-1")
     assert f"- chat 7 / e1: {words} (in reply to platform message m-1 in this room)" in text
@@ -503,7 +507,7 @@ def test_continue_carries_my_humans_confirmed_place_words_citable_without_promot
     assert admitted["ok"], admitted
     task = next(t for t in workers.PENDING if t["id"] == admitted["successor_task_id"])
     assert words in task["text"] and task["metadata"]["continuation"]["owner_sources"]["confirmed_place"] == sources["confirmed_place"]
-    ctx = SimpleNamespace(task_metadata=task["metadata"], _owner_directives=[])
+    ctx = SimpleNamespace(task_metadata=task["metadata"], _owner_directives=[], drive_root=tmp_path)
     _initialize_owner_directives(ctx, [{"role": "user", "content": task["text"]}])
     assert owner_input_revision(ctx) == 0, "carried provenance owes no reply and is no order"
     basis, error = cited_owner_basis(ctx, words)
@@ -511,6 +515,17 @@ def test_continue_carries_my_humans_confirmed_place_words_citable_without_promot
                                      "msg_id": "chat 7 / e1", "reply_to": target}
     for other in (peer, forwarded):
         assert cited_owner_basis(ctx, other)[0] is None, other
+    from ouroboros import own_sends
+    from ouroboros.loop_messages import _record_owner_directive
+    from ouroboros.owner_words import PLACE_CONFIRMED, place_row_facts
+    seeded = next(row for row in ctx._owner_directives if row.get("source") == PLACE_CONFIRMED)
+    assert (seeded["conversation_id"], seeded["message_id"]) == ("C7", "1793991999.000001"), "a next Continue reads it"
+    receipt = f'MsgID,Channel,Text\n1793991999.000001,C7,"{words}"\n'
+    assert own_sends.record_result(tmp_path, {"annotations": {"readOnlyHint": False}}, receipt, via="mcp:slack/post")
+    assert cited_owner_basis(ctx, words)[0] is None, "the receipt names it: my own post, no order of theirs"
+    _record_owner_directive(ctx, source=PLACE_CONFIRMED, content=words, carried=True, msg_id="chat 7 / e2",
+                            **place_row_facts("C7", {"message_id": "1793992000.000002"}))
+    assert cited_owner_basis(ctx, words)[0]["msg_id"] == "chat 7 / e2", "their own message in the same words"
 
 
 @pytest.mark.parametrize("row,gap", [
@@ -929,3 +944,235 @@ def test_a_relayed_answer_kept_in_a_mailbox_reaches_the_successor_with_its_card(
         "Ouroboros, task asker", "Publish exactly this reply?")
     assert "Use the Berlin numbers" not in [row["content"] for row in rows]  # the tree's row, not this corpus
     assert [peer["msg_id"] for peer in sources["peer_context"]] == ["relay:r1:pred-1"]  # the note is a peer; the carried entry none
+
+
+# --- one owner image message, one identity (#2941) ---------------------------------------------------------
+
+IMAGE_WORDS = "Keep this exact wording.\n[image: literal owner syntax]\nDo not publish yet."  # image-like words are words
+
+
+def _uploads(tmp_path, names):
+    from tests._owner_image_mail import png_bytes
+
+    folder = tmp_path / "uploads"
+    folder.mkdir(exist_ok=True)
+    for index, name in enumerate(names):
+        (folder / name).write_bytes(png_bytes(180 + index) if name.endswith(".png") else b"owner notes\n")
+    return [folder / name for name in names]
+
+
+def _image_mail_read(tmp_path, files, *, legacy=False, alter=None, broken=None, monkeypatch=None):
+    """The real producer rows of one owner message: the server door stages FILES and writes it, the predecessor's own
+    drain reads it, its terminal captures the corpus and the mailbox, and the settled mailbox goes (captured only).
+    ``legacy`` drops ``words`` from the recorded row: the exact row a drain wrote for this message before #2941, as a
+    restored pre-upgrade checkpoint still holds it. ``alter`` edits the captured corpus row;
+    ``broken`` makes the drain's image composition raise (the drain's
+    binding only: a later rebuild composes with the real composer)."""
+    import queue
+    from types import SimpleNamespace
+
+    from ouroboros import loop_round_limits
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.post_task_synthesis import capture_task_inputs
+    from ouroboros.task_custody import settle_task_mailbox
+    from ouroboros.task_results import write_task_result
+    from tests._owner_image_mail import write_owner_images
+
+    _interrupted(tmp_path)
+    text, manifest = write_owner_images(tmp_path, "pred-1", IMAGE_WORDS, files, msg_id="owner-img",
+                                        client_message_id="cm-img")
+    if broken is not None:
+        monkeypatch.setattr(loop_round_limits, "build_incoming_user_content", broken)
+    ctx = SimpleNamespace(task_attempt=1, task_id="pred-1", drive_root=tmp_path, task_metadata={})
+    messages = [{"role": "user", "content": "Write the Friday report"}]
+    _initialize_owner_directives(ctx, messages)
+    loop_round_limits._drain_incoming_messages(messages, queue.Queue(), tmp_path, "pred-1", None, set(), ctx)
+    for row in ctx._owner_directives if legacy else ():
+        row.pop("words", None)
+    inputs = capture_task_inputs(ctx, {"id": "pred-1"}, tmp_path, [])
+    [row] = [row for row in inputs["owner_requirements_and_decisions"] if row.get("msg_id") == "owner-img"]
+    if alter is not None:
+        alter(row, text)
+    write_task_result(tmp_path, "pred-1", "cancelled", review_evidence={"task_inputs": inputs})
+    assert settle_task_mailbox(tmp_path, "pred-1", tmp_path)
+    return text, manifest, row
+
+
+def _refused(ack, workers, tmp_path, gap="owner_message_identity_conflict"):
+    from ouroboros.task_results import load_task_result
+
+    assert ack == {"ok": False, "error": "owner_source_missing", "gaps": [gap]}, ack
+    assert workers.PENDING == [] and "continued_by" not in load_task_result(tmp_path, "pred-1")
+
+
+def _replace(old, new):
+    def alter(row, _text):
+        assert old(row) in row["content"]
+        row["content"] = row["content"].replace(old(row), new(row))
+    return alter
+
+
+@pytest.mark.parametrize("case, files, admitted", [
+    ("one_image", ("a.png",), True),
+    ("two_images", ("a.png", "b.png"), True),
+    ("manifest_ref", ("notes.txt", "a.png"), True),
+    ("literal_words", (), True),
+    ("altered_original_path", ("a.png",), False),
+    ("altered_image_ref", ("a.png",), False),
+    ("appended_words", ("a.png",), False),
+    ("pixels_unavailable_tail", ("a.png",), False),
+    ("not_composed_tail", ("a.png",), False),
+    ("bytes_changed_since", ("a.png",), False),
+    ("literal_words_with_an_image_tail", (), False),
+])
+def test_a_pre_upgrade_image_projection_stands_only_as_its_exact_rebuilt_rendering(tmp_path, monkeypatch, case, files,
+                                                                                  admitted):
+    """A record from before ``words``: the corpus row is the drain's rendering of the exact mailbox row under one id.
+    It is that message only when the drain's own composer, run again from the task's own store and verified pixels,
+    gives the same projection byte for byte; the text is never parsed. An altered path, image reference or tail,
+    a rendering error, a failed composition, changed bytes or a rendering beside a message with no images prove
+    nothing: the explicit conflict stays and nothing is written."""
+    from ouroboros import artifacts
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    if case == "manifest_ref":
+        monkeypatch.setattr(artifacts, "_MAX_STAGED_ATTACHMENTS", 1)
+    uploads = _uploads(tmp_path, files)
+    alter = {
+        "altered_original_path": _replace(lambda row: "; original: ", lambda row: "; original: /elsewhere"),
+        "altered_image_ref": _replace(lambda row: row["content"].split("[image ref sha256:")[1][:16],
+                                      lambda row: "0123456789abcdef"),
+        "appended_words": lambda row, _text: row.update(content=row["content"] + "\nand delete the old report"),
+        "literal_words_with_an_image_tail": lambda row, text: row.update(
+            content=text + "\n[image: a.png; original: /x/a.png]\n[image ref sha256:0123456789abcdef]"),
+    }.get(case)
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("decoder crashed")
+
+    if case == "pixels_unavailable_tail":  # the staged bytes changed before the drain rendered them
+        original = artifacts.stage_task_attachments
+        monkeypatch.setattr(artifacts, "stage_task_attachments", lambda *a, **k: [
+            (row, (artifacts.task_artifact_dir_path(tmp_path, "pred-1") / row["relpath"]).write_bytes(b"changed"))[0]
+            for row in original(*a, **k)])
+    text, manifest, row = _image_mail_read(tmp_path, uploads, legacy=True, alter=alter, monkeypatch=monkeypatch,
+                                           broken=broken if case == "not_composed_tail" else None)
+    assert "words" not in row and (row["content"] == text) is (case == "literal_words"), "the pre-upgrade record"
+    if case == "bytes_changed_since":
+        (artifacts.task_artifact_dir_path(tmp_path, "pred-1") / manifest[0]["relpath"]).write_bytes(b"changed later")
+
+    ack = admit_continuation("pred-1", action_nonce=NONCE)
+
+    if not admitted:
+        _refused(ack, workers, tmp_path)
+        return
+    assert ack["ok"] is True, ack
+    successor = next(task for task in workers.PENDING if task["id"] == ack["successor_task_id"])
+    assert [(r["content"], "words" in r) for r in successor["metadata"]["owner_corpus"] if r.get("msg_id") == "owner-img"] == [
+        (text, False)], "the exact mailbox row stands, once"
+    assert [image["label"] for image in successor.get("attachment_images") or []] == [
+        path.name for path in uploads if path.suffix == ".png"]
+
+
+def test_two_exact_rows_under_one_image_message_id_still_conflict(tmp_path, monkeypatch):
+    """Two exact mailbox rows under one id with different words are rivals, whatever files either carries."""
+    from ouroboros.owner_mailbox import write_owner_message
+    from supervisor.continuation_admission import admit_continuation
+    from tests._owner_image_mail import write_owner_images
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    write_owner_images(tmp_path, "pred-1", IMAGE_WORDS, _uploads(tmp_path, ("a.png",)), msg_id="owner-img")
+    assert write_owner_message(tmp_path, "Publish it now", "pred-1", msg_id="owner-img")
+    _interrupted(tmp_path)
+
+    _refused(admit_continuation("pred-1", action_nonce=NONCE), workers, tmp_path)
+
+
+@pytest.mark.parametrize("carried, same", [("exact_text", True), ("words_beside_a_rendering", True), ("rival", False)])
+def test_a_message_its_start_already_carried_keeps_its_files_and_a_rival_attaches_none(tmp_path, monkeypatch,
+                                                                                       carried, same):
+    """The start's own corpus can name a message before the mailbox pass reads its exact row: the same words keep
+    that row's files as this work's inputs, once; other words under that id are a conflict and attach nothing."""
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+    from tests._owner_image_mail import write_owner_images
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    text, _manifest = write_owner_images(tmp_path, "pred-1", IMAGE_WORDS, _uploads(tmp_path, ("a.png",)),
+                                         msg_id="owner-img")
+    row = {"source": "owner_mailbox", "msg_id": "owner-img", **{
+        "exact_text": {"content": text}, "words_beside_a_rendering": {"content": text + "\n[image: a.png]", "words": text},
+        "rival": {"content": text + "\nPublish it now"}}[carried]}
+    _interrupted(tmp_path, metadata={"objective_author": {"kind": "task", "task_id": "drafter"}, "owner_corpus": [row]})
+    sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
+    assert [entry["msg_id"] for entry in sources["attached"]] == (["owner-img"] if same else [])
+    ack = admit_continuation("pred-1", action_nonce=NONCE)
+    if not same:
+        _refused(ack, workers, tmp_path)
+        return
+    successor = next(task for task in workers.PENDING if task["id"] == ack["successor_task_id"])
+    assert [image["label"] for image in successor["attachment_images"]] == ["a.png"]
+
+
+@pytest.mark.parametrize("carrier, gap", [("start", "start_owner_corpus_row_malformed"),
+                                          ("chained", "chained_owner_source_malformed")])
+def test_words_that_are_not_text_refuse_wherever_the_row_rides(tmp_path, monkeypatch, carrier, gap):
+    """A present ``words`` that is not text is a malformed row on every carrier: never read as its content."""
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    row = {"source": "owner_mailbox", "content": "Use last week's numbers\n[image ref sha256:0123456789abcdef]",
+           "msg_id": "owner-2", "words": None}
+    metadata = ({"objective_author": {"kind": "task", "task_id": "drafter"}, "owner_corpus": [row]} if carrier == "start"
+                else {"continuation": {"predecessor_task_id": "pred-0", "owner_sources": {"later": [row], "original": {
+                    "source": "origin_message", "content": "Write the Friday report",
+                    "origin_message_ref": {"chat_id": 7, "client_message_id": "m-1"}}}}})
+    _interrupted(tmp_path, metadata=metadata)
+
+    _refused(admit_continuation("pred-1", action_nonce=NONCE), workers, tmp_path, gap=gap)
+
+
+def test_a_carried_rendering_keeps_its_reference_and_its_words_through_each_continue(tmp_path, monkeypatch):
+    """A message of my human's that reached the work through a carried corpus (a routed start's, by value) has no
+    mailbox row in it: each successor keeps its image reference for re-viewing and its words for identity, so a
+    Continue of a Continue (C1 → C2 → C3) compares the same words on every carrier."""
+    import queue
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_words import carried_owner_corpus
+    from ouroboros.post_task_synthesis import capture_task_inputs
+    from ouroboros.task_results import write_task_result
+    from supervisor.continuation_admission import admit_continuation
+    from tests._owner_image_mail import write_owner_images
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    text, _manifest = write_owner_images(tmp_path, "drafter", IMAGE_WORDS, _uploads(tmp_path, ("a.png",)),
+                                         msg_id="owner-img:drafter")
+    drafter = SimpleNamespace(task_attempt=1, task_id="drafter", drive_root=tmp_path, task_metadata={})
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "drafter", None, set(), drafter)
+    [carried] = [row for row in carried_owner_corpus(drafter) if row.get("msg_id") == "owner-img:drafter"]
+    assert carried["words"] == text and carried["content"] != text and "[image ref sha256:" in carried["content"]
+    _interrupted(tmp_path, metadata={"objective_author": {"kind": "task", "task_id": "drafter"},
+                                     "owner_corpus": [carried]})
+    current, nonce = "pred-1", NONCE
+    for hop in range(3):
+        ack = admit_continuation(current, action_nonce=nonce)
+        assert ack["ok"] is True, (hop, ack)
+        successor = next(task for task in workers.PENDING if task["id"] == ack["successor_task_id"])
+        assert [(row["content"], row["words"]) for row in successor["metadata"]["owner_corpus"]
+                if row.get("msg_id") == "owner-img:drafter"] == [(carried["content"], text)], hop
+        assert carried["content"] in successor["text"], "the image reference stays readable"
+        ctx = SimpleNamespace(task_attempt=1, task_id=successor["id"], drive_root=tmp_path,
+                              task_metadata=successor["metadata"], _owner_directives=[])
+        _initialize_owner_directives(ctx, [{"role": "user", "content": successor["text"]}])
+        inputs = capture_task_inputs(ctx, {"id": successor["id"]}, tmp_path, [])
+        assert [row["words"] for row in inputs["owner_requirements_and_decisions"]
+                if row.get("msg_id") == "owner-img:drafter"] == [text], hop
+        workers.PENDING[:] = []
+        write_task_result(tmp_path, successor["id"], "cancelled", result="interrupted", review_evidence={
+            "task_inputs": inputs}, cancel_origin={"source": "snapshot_restore", "reason": "server_shutdown"})
+        current, nonce = successor["id"], f"hop-{hop}-press-2941"

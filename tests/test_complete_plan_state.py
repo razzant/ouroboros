@@ -89,7 +89,7 @@ def test_unavailable_full_spec_preserves_paid_state_and_never_becomes_empty_clai
     # The claims binder the result review reads raises; it never answers with an empty bar.
     with pytest.raises(artifacts.PlanReviewSourceUnavailable):
         _accept_effective_claims(ctx, ctx.task_contract, tmp_path, "large-plan")
-    assert plan_gate_decision(ctx, {}, enforcement="blocking")["allow"] is False
+    assert plan_gate_decision(ctx, {})["allow"] is False
 
 
 def test_legacy_cut_without_source_keeps_its_gap(tmp_path):

@@ -29,6 +29,7 @@
  * @property {Object=} client_surface
  * @property {"command"} type
  * @property {string} cmd
+ * @property {Object=} ui_control
  */
 /**
  * Emergency request accepted on this connection; does not prove process exit.
@@ -83,10 +84,11 @@
  * @property {string} note
  * @property {string} settingsInputId
  * @property {string} settingsToggleId
+ * @property {boolean} managed  // a deployment policy fixes it: shown, never edited or written
  */
 
 /**
- * A `reviewModes` or `runtimeModes` row; `value` is what the setting stores.
+ * A `runtimeModes` row; `value` is what the setting stores.
  * @typedef {Object} SetupModeChoice
  * @property {string} value
  * @property {string} label
@@ -108,7 +110,6 @@
  * @property {string} stateKey
  * @property {string} settingKey
  * @property {string} inputId
- * @property {string} settingsInputId
  * @property {string} title
  * @property {string} label
  * @property {string} note
@@ -134,7 +135,6 @@
  * @property {SetupProviderField[]} providerFields
  * @property {Object.<string,SetupProviderProfile>} providerProfiles
  * @property {SetupModelSlot[]} modelSlots
- * @property {SetupModeChoice[]} reviewModes
  * @property {SetupModeChoice[]} runtimeModes
  * @property {SetupLocalRoutingMode[]} localRoutingModes
  * @property {SetupBudgetField[]} budgetFields
@@ -158,7 +158,6 @@
  * @property {string} legacyCompatibleBaseUrl Saved OPENAI_BASE_URL, display only: completion never writes it.
  * @property {string} safetyModel
  * @property {string} providerProfile
- * @property {string} reviewEnforcement
  * @property {string} runtimeMode
  * @property {string} skillsRepoPath
  * @property {string} localPreset
@@ -172,6 +171,7 @@
  * @property {Object} modelContextWindows
  * @property {string} processingPreference
  * @property {Object} modelProcessingPreferences
+ * @property {string[]} automaticModels Model-slot stateKeys neither the document nor an operator's variable sets.
  */
 
 /**
@@ -198,6 +198,7 @@
  * @property {SetupContract} contract
  * @property {SetupInitialState} initialState
  * @property {SetupConsciousnessOffer} consciousnessOffer  // display; a ticked row sends the ordinary Start after the save
+ * @property {?SettingsDeploymentPolicy} deployment  // Settings' `_meta.policy_state.deployment`; null unmanaged
  */
 
 /**
@@ -210,7 +211,80 @@
 /**
  * `GET /api/settings`: every effective setting with its (masked) value, plus `_meta`.
  * @typedef {Object} SettingsReadResponse
- * @property {import('./api_types.js').SettingsMeta=} _meta
+ * @property {SettingsMeta=} _meta
+ */
+/** `_meta` of `GET /api/settings`.
+ * @typedef {Object} SettingsMeta
+ * @property {Object<string, 'now'|'next_call'|'next_wake'|'next_task'|'restart'|'local_model'>} effects
+ * @property {Object<string, string>} tokens
+ * @property {string[]=} custom_secret_keys
+ * @property {Object=} setup_contract
+ * @property {import('./api_types.js').AvailableSubagentsSettingsMeta=} available_subagents
+ * @property {SettingsPolicyState=} policy_state
+ * @property {SettingsRestartState=} restart_state Component application and source uncertainty.
+ * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
+ * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
+ * @property {string[]=} known_spend_gaps What spends money the limits cannot count: roles whose route has no known price.
+ * @property {Array<{name: string, condition: string}>=} partly_counted_spend What they count only under a price condition (`off_peak_usd`, `usd`).
+ */
+
+/**
+ * `_meta.policy_state`: configured versus effective Access and Supervisor, plus what a managed
+ * deployment's policy file fixes.
+ * @typedef {Object} SettingsPolicyState
+ * @property {{configured:string,effective:string,current_process:string,next_task:string,restart_required:boolean,applies:string}} access
+ * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} supervisor
+ * @property {boolean} running_task_snapshot
+ * @property {SettingsDeploymentPolicy=} deployment  // absent outside a managed deployment
+ */
+
+/**
+ * The organization's Safety Supervisor route; no connection value or secret.
+ * @typedef {Object} SettingsDeploymentChecker
+ * @property {string} model
+ * @property {string} account
+ * @property {string[]} fallbacks
+ * @property {string[]} connections  // the connections its routes use, by picker id (`kind` or `kind@name`)
+ * @property {string[]} fields  // the flat settings its built-in routes read now (a compatible lane's pair included)
+ * @property {boolean} local  // a route answers from the local model server
+ */
+
+/**
+ * One extension the policy requires: its pin and the custom settings it fixes, by name only; Settings and Skills
+ * add how the observing process sees it.
+ * @typedef {Object} SettingsDeploymentRequirement
+ * @property {string} name
+ * @property {string} path
+ * @property {string} content_hash
+ * @property {string[]} settings
+ * @property {"met"|"unmet"=} state
+ * @property {string=} reason  // running, missing, collision, elsewhere, changed, review, grants, load_error, ...
+ * @property {string=} detail  // the owner's sentence, with no fixed value in it
+ * @property {string=} observed_hash  // the digest of other bytes found at the path
+ * @property {Object=} process  // role, pid, started (birth token) and observed_at of the observer
+ */
+
+/**
+ * The policy's required extensions and what ordinary work does while one is not running ('' when none is); with an
+ * execution domain, `trusted` lists the only packages whose code the service runs.
+ * @typedef {Object} SettingsDeploymentExtensions
+ * @property {"hold"|"warn"|""} when_unmet
+ * @property {SettingsDeploymentRequirement[]} required
+ * @property {{name: string, path: string, content_hash: string}[]=} trusted
+ */
+
+/**
+ * What a managed deployment's policy file fixes.
+ * @typedef {Object} SettingsDeploymentPolicy
+ * @property {"deployment_policy"} source
+ * @property {number} version
+ * @property {string} digest  // the first 16 hex digits of the file's SHA-256 this server generation read
+ * @property {?string} access_max
+ * @property {?string} min_coverage
+ * @property {?SettingsDeploymentChecker} checker
+ * @property {string[]} allowed_exits  // agent repeat, human release after DANGEROUS, human unchecked release
+ * @property {boolean} organization_rules
+ * @property {?SettingsDeploymentExtensions} extensions
  */
 
 /**
@@ -252,7 +326,7 @@
  * @property {string[]=} query
  * @property {string[]=} headers  // request headers the handler reads; a trailing "!" marks a required one
  * @property {ContractBody=} request
- * @property {Object.<string,ContractBody>=} responses  // by HTTP status
+ * @property {Object.<string,ContractBody>=} responses  // HTTP status, then 4xx/5xx for unlisted errors
  * @property {string=} note
  */
 
@@ -407,6 +481,7 @@
  * @property {ChatHistoryCard=} card
  * @property {string=} summary_kind
  * @property {Object=} historical_terminal
+ * @property {Object=} current_outcome  // current terminal outcome projection, distinct from historical_terminal
  * @property {Object=} model_waits
  * @property {boolean=} lifecycle_virtual
  * @property {Object=} review_group
@@ -441,6 +516,8 @@
  * @property {*=} elapsed_sec
  * @property {Object=} tool_evidence
  * @property {Object=} cancel_origin
+ * @property {Object=} finalization_recovery
+ * @property {string=} terminal_origin
  * @property {Object=} continuation_offer
  */
 
@@ -534,6 +611,96 @@
  * @property {ChatHistoryAnchor=} anchor  // an `around` read only
  * @property {string=} error
  * @property {string=} reason_code
+ * @property {string=} detail  // a 503 history_source_unavailable: the store's cause, when it has one
+ */
+
+/**
+ * An owner attachment as its bubble draws it (history's ChatAttachmentView, no address): its file card or player
+ * shows `name`, an available image only its picture; the composer's file-name tail the bubble hides is built from
+ * the names.
+ * @typedef {Object} ChatSearchAttachment
+ * @property {string} name
+ * @property {'image'|'video'|'audio'|'file'} kind
+ * @property {boolean} available
+ */
+
+/**
+ * A link button of a delivered links row: its label is shown, its address only decides whether it is.
+ * @typedef {Object} ChatSearchLink
+ * @property {string} label
+ * @property {string} url
+ */
+
+/**
+ * A question row's card as its words are drawn (the question is the row's `text`): the offered answers' labels and
+ * details (`QuizOption` rows, or a legacy row's labels with `option_details`), the stake and the owner's own words
+ * (`comment`) once the card is settled as answered.
+ * @typedef {Object} ChatSearchQuestion
+ * @property {string} quiz_id
+ * @property {Array<Object|string|null>=} options
+ * @property {string[]=} option_details
+ * @property {string=} stake
+ * @property {string=} comment
+ */
+
+/**
+ * A saved message as the fields the room's renderer draws its words from (chat_search_words.js `candidateBox`): the
+ * text history gives it (`system_type`, `markdown`, `narration`, `source` and the owner's `attachments` names choose
+ * how), a photo, video or file's `caption` and a file's `filename`, a links row's `title` and `actions`, a question's
+ * `quiz` card, a Project lifecycle row's answer and ending. Whether its words contain the query is the client's
+ * reading.
+ * `history_id` and `row_address` are its identity in `GET /api/chat/history` (`around=<row_address>`).
+ * @typedef {Object} ChatSearchCandidate
+ * @property {string} history_id
+ * @property {string} row_address
+ * @property {'user'|'assistant'|'system'} role
+ * @property {string} ts
+ * @property {string} text
+ * @property {string=} system_type
+ * @property {boolean=} markdown
+ * @property {boolean=} narration
+ * @property {string=} source
+ * @property {string=} sender_label
+ * @property {string=} task_id
+ * @property {ChatSearchAttachment[]=} attachments
+ * @property {boolean=} text_placeholder
+ * @property {'photo'|'video'|'document'|'links'|'quiz'=} msg_type
+ * @property {string=} caption
+ * @property {string=} filename
+ * @property {string=} title
+ * @property {ChatSearchLink[]=} actions
+ * @property {ChatSearchQuestion=} quiz
+ * @property {string=} completion_answer
+ * @property {string=} project_id
+ * @property {string=} project_name
+ * @property {string=} task_name
+ * @property {string=} completion_reason
+ * @property {Object=} completion_notice
+ */
+
+/**
+ * What one search read covered: `rows` of the room back to `reached_ts`; `beginning`: the room's first
+ * message was reached; `importing`: older history is not readable yet; `gaps`: lines it could not read.
+ * @typedef {Object} ChatSearchSpan
+ * @property {number} rows
+ * @property {string} reached_ts
+ * @property {boolean} beginning
+ * @property {boolean} importing
+ * @property {string[]} gaps
+ */
+
+/**
+ * `GET /api/chat/search`: one bounded read of the room's saved messages as candidates, newest first; a page may hold
+ * none and still continue (`next_cursor`). The whole room was searched only when a chain reached `beginning` with no
+ * `gaps`. An error answer keeps this shape with no candidates and the cursor that was sent.
+ * @typedef {Object} ChatSearchResponse
+ * @property {string} query
+ * @property {ChatSearchCandidate[]} candidates
+ * @property {boolean} has_more
+ * @property {?string} next_cursor
+ * @property {ChatSearchSpan} searched
+ * @property {string=} error
+ * @property {string=} reason_code
  */
 
 // --- Journey bodies of routes whose handlers check fields by hand (ProjectEntry: ./api_types.js) ---
@@ -566,6 +733,61 @@
  */
 
 /**
+ * A Project follows Main (`main`) or chooses a model (`model`); without `project_id` the write is Main itself, and
+ * then only `model` is a choice.
+ * @typedef {Object} OwnerChatModelRequest
+ * @property {"main"|"model"} kind
+ * @property {string=} model  // kind "model" only: the raw route, its source included
+ * @property {boolean=} use_local  // kind "model" only
+ * @property {string=} project_id
+ */
+/**
+ * A room follows Main or chooses a route; following is a reference, never the same model pinned.
+ * @typedef {Object} ChatModelChoice
+ * @property {"main"|"model"} kind
+ * @property {string=} model  // kind "model" only: the raw route, its source included
+ * @property {boolean=} use_local  // kind "model" only
+ */
+
+/** A model route shared by room choices, Main, a work's lead and the owner's recent models.
+ * @typedef {Object} ChatModelRoute
+ * @property {string} model
+ * @property {boolean} use_local
+ */
+
+/**
+ * A Project's answer carries its choice; Main's own carries what Main is and was, what became of its pinned account
+ * (`kept`, dropped to `auto`, or `none` on a route without accounts) and whether a window set by hand was cleared.
+ * @typedef {Object} OwnerChatModelResponse
+ * @property {boolean} ok
+ * @property {string} project_id  // '' for Main
+ * @property {ChatModelChoice=} model_choice  // Project response
+ * @property {ChatModelChoice=} previous_model_choice
+ * @property {ChatModelRoute=} main_route  // Main response
+ * @property {ChatModelRoute=} previous_main_route
+ * @property {"kept"|"auto"|"none"=} account
+ * @property {boolean=} window_reset
+ */
+
+/**
+ * A room's processing tier for its new owner work, or Main's own without `project_id`; '' is Default.
+ * @typedef {Object} OwnerChatProcessingRequest
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"} processing
+ * @property {string=} project_id
+ */
+/**
+ * A Project's answer carries its tier; Main's own carries Main's tier, what it was, and what Default resolves to.
+ * @typedef {Object} OwnerChatProcessingResponse
+ * @property {boolean} ok
+ * @property {string} project_id  // '' for Main
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} processing_choice  // Project response
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} previous_processing_choice
+ * @property {""|"standard"|"fast"|"economy"=} main_processing  // Main response: Main's own tier (a Settings value)
+ * @property {""|"standard"|"fast"|"economy"=} previous_main_processing
+ * @property {""|"standard"|"fast"|"economy"=} processing_default  // what Default resolves to
+ */
+
+/**
  * @typedef {Object} OwnerSafetyModeRequest
  * @property {'your_work'|'consciousness'=} kind
  * @property {'full'|'light'|'off'} mode
@@ -594,6 +816,7 @@
  * @property {?number} chat_id
  * @property {'own'|'focus'} cause
  * @property {string} place_label
+ * @property {string=} place_id
  * @property {string} conversation
  * @property {?string} started_at
  * @property {?string=} first_reply_at
@@ -632,6 +855,7 @@
 /** @typedef {import('./place_contract_types.js').PlaceConnectRequest} PlaceConnectRequest */
 /** @typedef {import('./place_contract_types.js').PlaceIcon} PlaceIcon */
 /** @typedef {import('./place_contract_types.js').PlaceReadiness} PlaceReadiness */
+/** @typedef {import('./place_contract_types.js').PlaceModelRoute} PlaceModelRoute */
 /** @typedef {import('./place_contract_types.js').PlaceSummary} PlaceSummary */
 /** @typedef {import('./place_contract_types.js').PlaceIdentityAccount} PlaceIdentityAccount */
 /** @typedef {import('./place_contract_types.js').PlaceIdentity} PlaceIdentity */
@@ -646,6 +870,12 @@
 /** @typedef {import('./place_contract_types.js').PlaceRoomsCoverage} PlaceRoomsCoverage */
 /** @typedef {import('./place_contract_types.js').PlaceRoomsResponse} PlaceRoomsResponse */
 /** @typedef {import('./place_contract_types.js').PlaceUpdateRequest} PlaceUpdateRequest */
+/** @typedef {import('./place_contract_types.js').PlaceCircleChoice} PlaceCircleChoice */
+/** @typedef {import('./place_contract_types.js').PlaceDescription} PlaceDescription */
+/** @typedef {import('./place_contract_types.js').CircleSummary} CircleSummary */
+/** @typedef {import('./place_contract_types.js').CircleCreateRequest} CircleCreateRequest */
+/** @typedef {import('./place_contract_types.js').CircleUpdateRequest} CircleUpdateRequest */
+/** @typedef {import('./place_contract_types.js').CircleDeleteRequest} CircleDeleteRequest */
 
 /**
  * `POST /api/settings/secret`: exactly one selector, `{key}`, `{mcp_server_id}`, `{mcp_server_id,
@@ -676,7 +906,7 @@
  */
 
 /**
- * `GET /api/projects`: active and deleting projects, at most 200, most recently active first; `?all=1` lists
+ * `GET /api/projects`: active and deleting projects, at most 200, newest message first (`last_message_at`); `?all=1` lists
  * every one of them. `?id=<project_id>` answers that project while active or deleting, `?chat_id=<n>` the active
  * project of that room; either answers none otherwise.
  * @typedef {Object} ProjectListResponse
@@ -1182,17 +1412,22 @@
 
 /**
  * @typedef {Object} OwnerSafetyRulesResponse
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  * @property {string} rules
  */
 
 /**
  * @typedef {Object} OwnerSafetyModelRequest
+ * @property {Object<string, string>=} if_unchanged
  * @property {Object} settings
  */
 
 /**
  * @typedef {Object} OwnerSafetyModelResponse
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  */
 
@@ -1233,4 +1468,45 @@
  * @property {number} model_calls
  * @property {number} sessions
  * @property {?number} tokens
+ */
+
+/** @typedef {Object} SettingsChange
+ * @property {*=} old
+ * @property {*=} new
+ * @property {boolean=} old_absent
+ * @property {string=} token
+ * @property {'secret'|'structure'=} withheld
+ */
+/** @typedef {Object} SettingsReceipt
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
+ */
+/** @typedef {Object} SettingsTiming
+ * @property {Object<string, 'now'|'next_call'|'next_wake'|'next_task'|'restart'|'local_model'>} effects
+ * @property {Object<string, string>} tokens
+ */
+/** @typedef {Object} SettingsRestartState
+ * @property {boolean=} restart_required
+ * @property {string[]=} restart_keys
+ * @property {string[]=} restart_source_unknown_keys
+ * @property {string[]=} unknown_keys
+ * @property {Object=} local_model
+ * @property {string=} summary
+ * @property {Object<string, *>=} running
+ */
+
+/**
+ * 500 AFTER settings landed: retry the named later step, never re-save (settings/onboarding writes).
+ * @typedef {Object} SettingsPostCommitFailureResponse
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
+ * @property {string} error
+ * @property {string} status  // saved_with_post_commit_error
+ * @property {boolean} saved  // always true
+ * @property {string} post_commit_failed
+ */
+
+/** @typedef {Object} SettingsSaveRequest Open partial document of setting keys.
+ * @property {Object<string, string>=} if_unchanged
+ * @property {string[]=} unset
  */

@@ -46,7 +46,7 @@ response-assembly truth is covered transitively by the next round's
 | Durable candidate manifest + redacted CAS blob, written before dispatch, with two labelled digest domains (`canonical_json_v1_pre_redaction` facts vs `observability_json_v1_post_default_redaction_cas` blob); the blob is a request view stored once — its messages and tool schemas are parts, its skeleton placement is spliced back into the exact whole on read (`shared_values`, PERSISTENCE observability row), so the CAS digest and size are the whole's | `observability.persist_physical_candidate` / `persist_call` | The sealed record carrier |
 | Attempt lifecycle `reserved → dispatched → settled|unresolved` / `reserved → released`, short-lock append + sequence replay | `usage_accounting` | The join target for the reverse direction |
 | Anthropic native custody projection (opaque provider-native content replaced before persistence; disclosed as `anthropic_native_custody_projected`) | `anthropic_native_custody.physical_custody_projection` | Prototype of a typed exclusion |
-| Secret redaction with per-hit `RedactionRecord`s | `observability._redact_text` + rules | Prototype of a typed exclusion |
+| Secret redaction with per-hit `RedactionRecord`s, worked out once per part of a request view and reused by the task's other records (`redaction.part_fact`) | `redaction._redact_text` + rules | Prototype of a typed exclusion |
 
 An identity gate that compares only two **in-memory** serializations cannot
 establish whether the durable record matches either copy.
@@ -59,7 +59,7 @@ fact** on any inequality (§3.2 — a fact, not a refusal).
 
 The pre-dispatch gate compares exact raw/context identities without repeating token, clock or image measurement. Claudexor uploads those validated canonical bytes with their measured hash and length; the defensive send copy remains, and mutation after measurement refuses dispatch. Claudexor acceptance merges the operation identity and capture facts into its existing operational request manifest without rereading or serializing the payload. Raw/projection references and prior metadata survive; the separate pre-dispatch physical manifest and send seal remain immutable.
 
-A released Claudexor prepare failure repeats on the primary within `max_retries` (three sends, 4 s then 8 s) only with `ClaudexorModelNotDispatched`, provider `claudexor`, an empty operation ID and gateway code `daemon_unreachable`, `daemon_not_answering`, `daemon_starting` or `daemon_descriptor_changed`. The configured-route walk follows a spent bound. An open transport wait or held unknown-repeat record still prevents a new burst. Direct-API connect failures, undated credential-pool refusals and local slot refusals retain one attempt; a lost create reply remains unknown and rejoins the same invocation.
+A released Claudexor prepare failure repeats on the primary within `max_retries` (three sends, 4 s then 8 s) only with `ClaudexorModelNotDispatched`, provider `claudexor`, an empty operation ID and gateway code `daemon_unreachable`, `daemon_not_answering`, `daemon_starting` or `daemon_descriptor_changed` (`llm_claudexor.daemon_not_delivered`). A spent bound walks no configured route: the own daemon is no model failure, so the round's wait episode redials the same model (owner wait-first). An open transport wait or held unknown-repeat record still prevents a new burst. Direct-API connect failures, undated credential-pool refusals and local slot refusals retain one attempt; a lost create reply remains unknown and rejoins the same invocation.
 
 ## 3. The contract
 
@@ -84,7 +84,11 @@ The existing physical-candidate manifest carries a
 The send seam holds one frozen request representation, verifies its in-memory
 identity and persists one durable pre-send record. It never calls
 `verify_sealed_candidate` or reads that record back. Persistence remains a
-precondition of dispatch.
+precondition of dispatch. Its redaction scans only parts the task has not met:
+`redaction.part_fact` keeps each part's result by its bytes, in their key order,
+and its parent's flags (`observability.task_parts`, shared with the logical request,
+the Claudexor request and the working checkpoint), re-roots its records where the
+part stands, and the stored bytes and exclusion rows equal the whole walk's.
 
 The explicit audit compares the manifest's raw digest and size with the
 attempt's recorded digest and size, checks serializer/exclusion metadata and
@@ -217,3 +221,131 @@ from "our two copies agree" to "the durable record agrees with the wire".
   non-blocking dispatch and reverse joins. History folded before the usage store
   existed is resolved through the retained evidence described in
   [Usage store](USAGE_STORE.md#8-explicit-history-audit).
+
+## 8. Round receipt
+
+Each round's `llm_round` carries what the host did to prepare its request
+(`llm_observability.round_window` around the model call; `round_starts` marks
+the batch's end). When the round's own call fails, its recovery (a configured
+fallback, an owner-wait resend) runs in a window of its own: the answer's row
+carries the recovery's facts from its start, without `round_top`, its
+`model_call` step including the choice and fit of the route. Facts for the log
+only; nothing decides by them.
+
+- `work` (`context_timing.counted`): `secret_scan`, bytes of request-view parts
+  the redaction worked out (once per part per task, §3.2); `new_parts`, bytes
+  of shared parts the CAS stored for the first time (`observability.write_parts`).
+  R1 (`tests/test_cost_round.py`): round 2 scans exactly the bytes it adds, at
+  any start size. A scan is keyed by the part's own key order and the CAS by its
+  sorted bytes, so a part met in two orders is scanned twice and stored once.
+- `host_steps.steps`: `[wall ms, thread CPU ms]` between marks: `round_top`
+  (the batch's end to the model call), `model_call` (to the first record),
+  `request_record`, `physical_candidate`, `daemon_upload`, `create_operation`
+  (CPU null: it ends on the model sender's thread).
+- `host_steps.sections_ms`: wall ms of each record's `redact`, `blobs`,
+  `lock_wait` and `manifest_write`; `context_facts`;
+  `daemon.gateway|operations|upload|create`; `event_put`; `total` (the window).
+- `host_steps.rusage`: the process's voluntary and involuntary context
+  switches, major faults and block writes since the batch's end; absent on
+  Windows.
+
+About a kilobyte a round lands in the events archive kept for good (~14 MB a
+day at the 14,000 rounds a busy install made on 09.11).
+
+## 9. What a request did to its route's cached start
+
+A provider keeps one cache per model and reads it in the wire order tools, system
+blocks, messages. A cache mark closes a reuse scope: the shared blocks (tool schemas,
+governance A′, the handbook D, resident memory B) are reused across captures and so
+are bytes of their sources alone; the changing context C and the transcript are
+reused within one captured view (DEVELOPMENT "Cache-friendliness invariant"). Resident
+memory is two scopes: its head (identity, the catalogue, the maps) follows the state of
+memory, the mode and the forms the host gave its sections, while my story after it is one
+text only until a work has it narrowed for its window. On Anthropic routes, where the
+transport gives the changing context the spare mark
+(`llm_messages._cache_declared_system_context`), the block goes as those two texts and its
+mark ends the story while that is whole, the head once it was narrowed
+(`llm_messages.SHARED_HEAD_KEY`), so a new work reads another work's start through the
+head. The cut is the transport's: the canonical messages, and with them the prefix fact
+below, do not see it. Before
+a Main candidate is dispatched, the host compares it with
+the last ANSWERED request of the same route in this task and writes the result on
+the attempt's ledger row (`transcript_prefix.attempt_prefix_fact` →
+`PhysicalAttemptContext.prefix` → `attempts.extra.physical_context.prefix`). It is an
+observation of the authored prefix by `message_digest`'s identity (cache markers,
+reasoning, outer whitespace and image detail are not in it), never the provider's
+verdict: the row's measured `cached_tokens` and `cache_write_tokens` are that fact,
+and an `append` beside a large write is not a contradiction this record resolves.
+
+- `departs`: `first` (no answered request on the slot yet), `route` (answered
+  requests, none on this route), `tools`, `system` (with `index`, `of` and `block`,
+  the block's name as the round facts name it), `messages` (with `index`, `of`),
+  `append` (the candidate only extends that request) or `unrecorded` (a slot
+  restored from before the record, or a route whose full record was let go: the
+  slot keeps four, in memory and in a checkpoint alike, and an older route keeps
+  its name alone).
+- `origins`: every seam that rewrote the view since the last answered request, in
+  order (compaction, a restored continuation, a route or tool change, …).
+- `from_route`: the route of the last answered request when it was another one.
+- `base_at`: when this route's last answered request was answered (epoch seconds).
+  Its start was earlier, so the time from `base_at` to an attempt's own dispatch is at
+  most the time between the two starts (a cache lifetime runs from a request's start).
+
+A candidate becomes its route's base when an answer of that route that read its
+input arrives (`note_prefix_answer`, where the response arrives: input tokens
+reported or output generated, no provider error; a body error read nothing): the accepted answer (it must
+start with the candidate that waited for it; a send adds its own later rows, as its
+clock line), or, at the next measurement, an answer the loop did not accept (an empty
+or output-limited reply was still written and charged); the waiting candidate and the
+answer ride a continuation checkpoint. A candidate never answered moves no base; an
+answer of another route, or a route sent unmeasured, ends its wait. A retry inside one
+call after its own answer extends that answered request (`refresh_attempt_prefix`);
+a retry after a failed send keeps its call's fact. Seams named after the measurement
+stay for the next request.
+Sends outside Main's loop (helpers, reviews) carry no fact; the forced final takes its
+fact from the input it measured. The routes' records ride the continuation
+checkpoint with the observer's other state (`OBSERVER_STATE_ATTRS`).
+
+One reader names the class (`transcript_prefix.prefix_class`), in the provider's
+own order: `first_request`, `entered_model`, `tools_changed` (a reworded tool
+description or parameter rewrites every running task's start once), `system_changed`
+(which block), `history_rewritten` (origins); then, for pure extensions, `paused`
+(from `base_at` to the row's own `ts_dispatched` is longer than the lifetime the
+row's `prompt_cache_ttl` names, so the previous start was longer ago still:
+arithmetic over recorded facts, said as time, never as "expired", and never derived
+for `default`, an absent lifetime or an undispatched row), `returned_to_model`,
+`append`; a row without a fact is `not_recorded`. Nothing decides by the fact or the
+class.
+
+The Costs page's period view (`gateway/cost_period.py`,
+`GET /api/cost-breakdown?period=24h|7d|30d`) reads the calls reserved in a period
+(membership by the reservation instant; the slices are found by position,
+`usage_store.Txn.period_bounds`, in point reads; each slice is one short read, and the
+tariffs are looked up outside it) and shares
+each call's RECORDED cost among cache writes, cache reads, output and uncached
+input by what the route's tariff charges for that call's own tokens. Only price
+ratios enter; the parts and the cost that could not be shared (no tariff, a token
+count the row does not have, a write whose lifetime neither the row nor the
+provider's split names) add up to the recorded cost. Input is classed only for calls
+that reported both cache counts; the others are counted apart (`uncounted_calls`,
+`uncounted_input_tokens`), never as uncached. A money figure and the tokens beside it are of
+the same calls: `tokens_shared` are the tokens of the calls whose cost was shared (`tokens`
+counts every call), the cost no tariff or count could share is its own part with
+`unshared_calls`, and a cause row's `write_cost` is of its `shared_write_tokens`. A model
+none of whose calls has a recorded price has `cost: null`. `write_price_in_reads` is how many read tokens one
+written token costs at `write_price_lifetime` (the lifetime most of the model's
+tokens were written at, by the provider's split when it accounts for every write)
+at the model's base price.
+Delegated subscription sessions and unmetered dispatches carry no reservation time
+and are not in a period.
+A consciousness wake reads the 24-hour view once and carries its cache writes as one
+fact row of its message (`consciousness_view.cache_writes_text`): the calls that wrote,
+their tokens, the writes' share of recorded cost and every class in this view's order,
+without its detail. Dollars appear where the install holds a price list for the call's
+route (`pricing.display_tariffs`); any other call is counted as unsplit, and a route
+that reports no write count leaves no row. It is a fact for the mind's own judgment;
+nothing decides by it.
+The tariff is read without a fetch: what the process holds, else the install's
+dated catalogue record (`state/openrouter_models.json`), whose date the view
+names. Cache writes are listed by `prefix_class`. Nothing is stored and no
+verdict, threshold or signal is derived.

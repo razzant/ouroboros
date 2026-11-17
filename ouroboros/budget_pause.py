@@ -361,7 +361,7 @@ def pending_tool_call_ids(messages: List[Dict[str, Any]]) -> List[str]:
 from ouroboros.external_runs import (  # noqa: E402,F401 -- the pause's historical import surface
     EXTERNAL_RUNNING, EXTERNAL_STOP_CONFIRMED, EXTERNAL_STOP_REQUESTED, EXTERNAL_STOP_UNKNOWN,
     STOP_POLICIES, STOP_POLICY_ALL, STOP_POLICY_OBSERVE, STOP_POLICY_TASK_OWNED,
-    episode_fields, observe_task_runs, owner_pause_runs, task_owned_runs_open,
+    episode_fields, held_run_line, observe_task_runs, owner_pause_runs, passed_reviews_notice, task_owned_runs_open,
 )
 
 
@@ -529,8 +529,8 @@ class ColdSleepWritersUnsettled(ValueError):
     """A fresh cold-sleep census still has writers; no source write failed."""
 
 
-class ColdSleepDependencyBlocked(ValueError):
-    """The proposed sleep fence prevents a selected queued dependency running."""
+class ColdDetachBlocked(ValueError):
+    """A background handoff's final census still finds work: it stays awake instead of holding."""
 
 
 def _hold_row(reason: str, *, exc: Optional[BaseException] = None,
@@ -616,20 +616,17 @@ def _publish_hold(ctx: Any, row: Dict[str, Any]) -> None:
 
 def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: str, scope: str,
                             reason_text: str, root_task_id: str,
-                            local: Dict[str, Any]) -> Dict[str, Any]:
+                            local: Dict[str, Any], context_view: tuple | None = None) -> Dict[str, Any]:
     """Observe external custody, store the ONE continuation source, build the row."""
     from ouroboros.owner_wait import continuation_state, store_continuation_source
 
-    if rail == RAIL_MODEL_SLEEP:
+    if rail == RAIL_MODEL_SLEEP:  # its own work only: a sleep never fences or waits for its tree's members
+        from ouroboros.model_detach import is_detach
         from ouroboros.model_sleep import cold_blockers
 
-        blockers = cold_blockers(ctx, allow_transfer=True)
-        from ouroboros.model_detach import is_detach
-        if blockers and (is_detach(getattr(ctx, "_model_sleep", None))
-                         or any(blocker.get("kind") == "queued_member" for blocker in blockers)):
-            raise ColdSleepDependencyBlocked(f"selected queued dependency: {blockers}")
-        if blockers:
-            raise ColdSleepWritersUnsettled(f"{HOLD_COLD_WRITERS_UNSETTLED}: {blockers}")
+        if blockers := cold_blockers(ctx, allow_transfer=True):  # a handoff stays awake; a sleep holds
+            raise (ColdDetachBlocked if is_detach(getattr(ctx, "_model_sleep", None)) else ColdSleepWritersUnsettled)(
+                f"{HOLD_COLD_WRITERS_UNSETTLED}: {blockers}")
     # Owner Q8, loop side: resolve THIS context's custody root, then share the
     # one observer body with the grant. A root that cannot be resolved is the
     # same typed ``custody_read=failed`` fact as an unreadable store.
@@ -669,7 +666,7 @@ def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: st
                                       "_best_effort_extracted", "budget_pause_hold", "_llm_round_started")}
     state = {
         **continuation_state(ctx, messages, trace, usage_for_state, limit_ctx.round_idx,
-                             list(limit_ctx.tool_schemas or []), set(limit_ctx.owner_msg_seen or ())),
+                             list(limit_ctx.tool_schemas or []), set(limit_ctx.owner_msg_seen or ()), context_view=context_view),
         "pause_id": pause_id, "reason": reason, "rail": rail, "scope": scope,
         "resume_point": point, "external_runs": external, "local_producers": local,
     }
@@ -739,14 +736,13 @@ def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: st
 
 
 def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
-                  root_task_id: str = "") -> None:
+                  root_task_id: str = "", context_view: tuple | None = None) -> None:
     """Fence, save and unwind only after producer quiescence and a stored source.
 
     Unsettled producers/ambiguous transfer retain the worker and typed pausing hold;
     no paid wrap-up or durable pause is invented. Stop/Panic/deadline/cancel end it.
     Ineligibility or a definite authority-rail save failure returns unavailable;
-    other save failures hold. A cold sleep blocking its selected queued dependency
-    withdraws its exact seed and stays awake instead.
+    other save failures hold. A background handoff whose final census finds work stays awake.
     """
     ctx = getattr(getattr(limit_ctx, "tools", None), "_ctx", None)
     if ctx is None or rail not in RAILS:
@@ -866,7 +862,7 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
                     if prepared is None:
                         prepared = _exact_continuation_row(
                             limit_ctx, ctx, pause_id=pause_id, rail=rail, scope=scope,
-                            reason_text=reason_text, root_task_id=root_task_id, local=local)
+                            reason_text=reason_text, root_task_id=root_task_id, local=local, context_view=context_view)
                     # A publication that failed is retried with the SAME prepared
                     # snapshot: its custody stop requests and its stored source are
                     # one observation, not one per poll.
@@ -885,10 +881,10 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
                         set_budget_pause(root, task_id, prepared, expected_pause_id=pause_id)
                         row = prepared
                     break
-                except ColdSleepDependencyBlocked as exc:
+                except ColdDetachBlocked as exc:
                     try:
                         set_budget_pause(root, task_id, {**seed, "state": STATE_ABANDONED,
-                            "abandon_reason": "cold_sleep_dependency_blocked", "abandoned_at": time.time()},
+                            "abandon_reason": "cold_detach_blocked", "abandoned_at": time.time()},
                             expected_pause_id=pause_id, expected_state=STATE_PAUSING)
                     except Exception as write_error:
                         hold = _hold_row(HOLD_PAUSE_RECORD_UNWRITABLE, exc=write_error)
@@ -896,9 +892,8 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
                         end_dispatch_fence(task_id)
                         ctx._budget_pausing, ctx._model_sleep = False, None
                         usage.pop("budget_pause_hold", None)
-                        limit_ctx.messages.append({"role": "user", "content": (
-                            "[SYSTEM NOTICE]\nCold sleep was not taken: " + str(exc)
-                            + ". Sleep warm to let the selected child run; no child was cancelled.")})
+                        limit_ctx.messages.append({"role": "user", "content": "[SYSTEM NOTICE]\nThe background "
+                            f"handoff was not taken: {exc}. You stay awake; wait for that work or stop it first."})
                         return
                 except ColdSleepWritersUnsettled as exc:
                     hold = _hold_row(HOLD_COLD_WRITERS_UNSETTLED, exc=exc)
@@ -1342,10 +1337,7 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
     external_basis = ("re-observed at this Resume" if fresh_observation is not None
                       else "as recorded at the pause, NOT re-observed")
     external = external_observation.get("runs") or []
-    external_lines = "".join(
-        f"\n- run {run.get('run_id')}: {run.get('state')} (stop outcome: {run.get('stop_outcome') or 'n/a'})"
-        for run in external if isinstance(run, dict)
-    ) or "\n- none"
+    external_lines = "".join(held_run_line(run) for run in external if isinstance(run, dict)) or "\n- none"
     if owner_runs := owner_pause_runs(ctx, row, external_observation):  # an owner Pause's participants (#1562)
         external_basis, external_lines = "its participants, read now", "\n" + owner_runs
     pending = pending_tool_call_ids(messages)
@@ -1367,6 +1359,8 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
         if owner_runs:  # the owner's Pause stopped or observed these runs while it slept
             messages.append({"role": "user", "content": "[SYSTEM NOTICE]\nWhile you slept the Pause stopped or observed "
                              "these delegated runs (current custody; engine facts are evidence, never a grant):\n" + owner_runs})
+        elif not row.get("external_custody") and (passed := passed_reviews_notice(external_observation)):
+            messages.append({"role": "user", "content": passed})
         return
     kind = {REASON_OWNER: "Pause", REASON_AUTHORITY: f"technical pause ({str(row.get('rail')).replace('_', ' ')})"}.get(
         str(row.get("reason") or ""), "budget pause")

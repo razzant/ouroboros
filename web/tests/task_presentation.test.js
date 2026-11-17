@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { clearStickyCardState } from '../modules/chat_activity.js';
+import { createChatInstance } from '../modules/chat.js';
+import { classifyLiveFrame } from '../modules/notifications.js';
 
 import {
     OWNER_STOP_DETAIL_MARKER,
@@ -9,6 +11,7 @@ import {
     summarizeLogEvent,
     taskDoneIsTerminal,
     taskPresentation,
+    taskReasonDetail,
     taskTerminalPhase,
     taskTerminalSummary,
 } from '../modules/log_events.js';
@@ -22,7 +25,7 @@ import {
     syncParkedPhase,
     taskActivityPresentation,
 } from '../modules/task_phase_chip.js';
-import { ElementStub, TextStub } from './chat_dom_fixture.js';
+import { ElementStub, TextStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 // A chip as the page has it: the shared status mark first, its words one text node beside it.
 const chipDoc = { createElement: (tag) => new ElementStub(tag, chipDoc), createTextNode: (data) => new TextStub(data) };
@@ -700,4 +703,72 @@ test('a census pause says its word alone and what holds it on its line, never wh
     for (const cause of ['budget', 'restart', 'authority', 'sleep', 'owner']) {
         assert.doesNotMatch(view(cause).text, / · /, `${cause}: the chip never carries a reason`);
     }
+});
+
+// An ending whose record keeps calls Safety returned or could not read that nothing replaced (owner 11.11, A).
+const RETURNED = 'A GitHub write was returned by the Safety Supervisor';
+const heldEnding = (taskId, held, ...loud) => ({
+    task_id: taskId, status: 'completed', reason_code: 'final_message', outcome_final: true,
+    outcome_axes: {
+        execution: { status: 'ok', reason_code: 'final_message', cosmetic_tool_errors: [], unresolved_tool_errors: [
+            ...Array.from({ length: held }, (_, index) => (index ? { tool: 'run_command', status: 'safety_unavailable' }
+                : { tool: 'github_write', status: 'safety_returned' })), ...loud] },
+        objective: { status: 'not_evaluated', ...(loud.length ? { warning: 'residual_tool_errors_without_review' } : {}) },
+        review: { status: 'skipped' },
+    },
+});
+
+test('a call Safety held is named only in the open card, on a line of its own with its count', () => {
+    const notice = (evt) => classifyLiveFrame({ ...evt, chat_id: 1 }, { kind: 'log', isMain: true, isRoot: true, taskId: 'held' }).body;
+    for (const [held, line] of [[1, `${RETURNED}.`], [2, `${RETURNED}, plus 1 more held by Safety.`],
+        [3, `${RETURNED}, plus 2 more held by Safety.`], [20, `${RETURNED}, plus more held by Safety.`]]) {
+        const evt = { type: 'task_done', ...heldEnding('held', held) };
+        const summary = taskTerminalSummary(evt);
+        assert.deepEqual([summary.phase, summary.headline, summary.body], ['done', 'Done', line], `${held}`);
+        assert.equal(taskReasonDetail(evt), '', `${held}`);
+        assert.equal(Object.hasOwn(summary, 'activityPreview'), false, `${held}: the collapsed line of no cause`);
+        assert.equal(notice(evt), 'Done', `${held}`);
+    }
+    const warned = { type: 'task_done', ...heldEnding('held', 1, { tool: 'write_file', status: 'error' }) };
+    const summary = taskTerminalSummary(warned);
+    assert.equal(summary.activityPreview, 'A file write failed.', 'a real warning keeps its sentence on the line');
+    assert.equal(summary.body, `A file write failed.\n${RETURNED}.`, 'and the held line stays in the body');
+    assert.equal(notice(warned), 'Done with warnings: A file write failed.');
+    const reply = { type: 'task_done', ...heldEnding('held', 0) };
+    reply.outcome_axes.execution.unresolved_tool_errors = [{ tool: 'place_reply', status: 'safety_returned' }];
+    assert.equal(taskTerminalSummary(reply).body, 'A reply was returned by the Safety Supervisor.', 'a reply has its own noun');
+});
+
+test('an ending whose only remark is a held call keeps the collapsed line of no cause, for a root and a child', async () => {
+    const lines = async (held) => {
+        const rows = [
+            { chat_id: 2, role: 'system', is_progress: true, content: 'Reading the brief.', narration: true,
+                ts: '2026-11-11T10:00:00Z', task_id: 'root-1' },
+            { chat_id: 2, role: 'system', type: 'send_message', is_progress: true, delegation_role: 'subagent',
+                task_id: 'child-1', parent_task_id: 'root-1', root_task_id: 'root-1', subagent_task_id: 'child-1',
+                subagent_role: '', subagent_event: 'completed', status: 'completed', result: 'The sources agree.',
+                content: '', text: '', narration: false, ts: '2026-11-11T10:01:00Z' },
+            ...['child-1', 'root-1'].map((taskId, index) => ({ ...heldEnding(taskId, held), chat_id: 2, role: 'system',
+                system_type: 'task_summary', text: 'Done', history_id: `end-${taskId}`, ts: `2026-11-11T10:0${index + 2}:00Z` })),
+        ];
+        const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () => (String(url).startsWith('/api/chat/history')
+            ? { messages: rows, window: { complete: true } } : { active_direct_turns: [] }) }));
+        const instance = createChatInstance({ ws: { on() { return () => {}; }, isConnected: () => true, send() {} },
+            state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 }, updateUnreadBadge() {},
+            stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+                gate() { return Promise.resolve(this.begin()); }, isCurrent: () => true, apply() {} },
+            chatId: 2, idPrefix: 'chat', mountEl: mount, asPanel: true });
+        try {
+            await instance.refreshHistory({ revision: 1 });
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            const messages = globalThis.document.byId.get('chat-messages');
+            return ['root-1', 'child-1'].map((id) => walkCard(messages, id)?.querySelector('[data-live-activity]')?.textContent);
+        } finally {
+            instance.destroy();
+            restoreDom(prior);
+        }
+    };
+    const clean = await lines(0);
+    assert.equal(clean[1], 'The sources agree.', 'the child card keeps its report on the line');
+    for (const held of [1, 2]) assert.deepEqual(await lines(held), clean, `${held}`);
 });

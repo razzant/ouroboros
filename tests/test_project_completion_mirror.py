@@ -151,7 +151,8 @@ def test_the_answer_survives_live_frame_durable_row_and_history_replay(monkeypat
         "cause": "The recorded reason has no description yet.", "undescribed": ["future_reason"]}
 
 
-@pytest.mark.parametrize("sentence", ["Empty tables now export as a header-only CSV.", "   ", None])
+@pytest.mark.parametrize("sentence", ["Empty tables now export as a header-only CSV.",
+    "Empty tables now export as a header-only CSV.\n\n42 rows at /tmp/export.csv. The owner checks next.", "   ", None])
 def test_the_roots_closing_sentence_rides_its_row_live_durable_and_replayed(monkeypatch, tmp_path, sentence):
     """The portal of a work that moved into a Project settles from this row, not from the task record, so the
     root's own closing sentence (``wake_summary``) rides it whole or not at all (DESIGN "Work portal")."""
@@ -180,7 +181,9 @@ def test_the_roots_closing_sentence_rides_its_row_live_durable_and_replayed(monk
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "1"})))
     replayed = next(row for row in json.loads(response.body.decode("utf-8"))["messages"]
                     if row.get("system_type") == "project_completion_summary")
-    assert live["wake_summary"] == stored["wake_summary"] == replayed["wake_summary"] == sentence
+    assert live["wake_summary"] == stored["wake_summary"] == sentence
+    from ouroboros.gateway.ws import _encode
+    assert json.loads(_encode(live))["wake_summary"] == replayed["wake_summary"] == "Empty tables now export as a header-only CSV."
 
 
 def test_a_row_without_the_key_replays_without_it(monkeypatch, tmp_path):

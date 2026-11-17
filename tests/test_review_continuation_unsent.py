@@ -9,7 +9,7 @@ a START some earlier call wrote but never carried is retired and offered again (
 it within what remains, never on its stale bytes), and settling unsent and carrying meet on that row,
 so two callers straddling the window end never leave an unsent seat with a sent run. An UNKNOWN send,
 whose row carried it, replays its exact key and bytes. An identical reissue of the round, the result delivery's collection and a
-Blocking commit's explicit collection reach the recorded choice before any cached roster, so none of
+commit's explicit collection reach the recorded choice before any cached roster, so none of
 them mints a competing wave. Only the engine and the API seat's model are scripted; time moves by
 patching ``deadline_utils.utc_now``.
 """
@@ -665,29 +665,35 @@ def test_an_identical_reissue_after_a_crash_after_the_choice_sends_that_choice_n
     assert seat["status"] == "responded" and len(seat["continuations"]) == 1
 
 
-def test_a_blocking_commit_offers_its_stopped_seat_and_the_explicit_choice_resumes_its_own_gate(stopped_wave, monkeypatch):
+def test_a_commit_offers_its_stopped_seat_and_the_landing_after_the_explicit_choice_runs_its_own_gate(
+        stopped_wave, monkeypatch):
     from ouroboros.tools import git
 
     a = stopped_wave
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     head = _git(a.repo, "rev-parse", "HEAD")
     gate_tests = []
     monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *a_, **k: gate_tests.append(
         _git(a.repo, "rev-parse", "HEAD")) and None)
-    blocked = _commit_call(a)
-    assert "continuable_seats" in blocked and _git(a.repo, "rev-parse", "HEAD") == head, blocked
-    handback = json.JSONDecoder().raw_decode(blocked, blocked.index("{\"review_reference\""))[0]
+    returned = _commit_call(a)
+    assert "continuable_seats" in returned and _git(a.repo, "rev-parse", "HEAD") == head, returned
+    handback = json.JSONDecoder().raw_decode(returned, returned.index("{\"review_reference\""))[0]
     reference, offer = handback["review_reference"], handback["continuable_seats"]
     assert [item["seat_id"] for item in offer] == ["second"] and len(a.engine.posts) == 1
-    _git(a.repo, "add", "change.py")  # the block unstaged the candidate; the same reviewed bytes are staged again
-    tested_before = len(gate_tests)
+    _git(a.repo, "add", "change.py")  # the handback unstaged the candidate; the same reviewed bytes are staged again
     continued = _commit_call(a, review_reference=reference, continue_seats=[
         {"seat_id": "second", "operation_id": offer[0]["operation_id"]}])
     assert len(a.engine.posts) == 2 and a.engine.posts[1][0]["continueFrom"] == "run-1", continued
     assert _seat(a, reference["review_record_id"])["status"] == "responded"
+    assert _git(a.repo, "rev-parse", "HEAD") == head and "Review outcome returned before commit" in continued, continued
+    _git(a.repo, "add", "change.py")
+    tested_before = len(gate_tests)
+    landing = _commit_call(a, review_reference=json.JSONDecoder().raw_decode(
+        continued, continued.index("{\"review_reference\""))[0]["review_reference"],
+        author_disposition={"disposition": "accepted", "rationale": "test"})
     landed = _git(a.repo, "rev-parse", "HEAD")
-    assert landed != head and _git(a.repo, "rev-list", "--count", f"{head}..{landed}") == "1", continued
-    assert len(gate_tests) > tested_before and gate_tests[-1] == head  # this call's gate tests ran before Git
+    assert landed != head and _git(a.repo, "rev-list", "--count", f"{head}..{landed}") == "1", landing
+    assert len(gate_tests) > tested_before and gate_tests[-1] == head  # the landing call's gate tests ran before Git
+    assert len(a.engine.posts) == 2  # the landing buys no reviewer
 
 
 def test_the_result_delivery_sends_a_choice_a_crash_left_unprojected_and_buys_no_other_wave(tmp_path, monkeypatch,
@@ -742,11 +748,9 @@ def test_the_result_delivery_sends_a_choice_a_crash_left_unprojected_and_buys_no
     assert (run["record_id"], run["aggregate_signal"]) == (first["record_id"], "PASS")
 
 
-@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
 def test_a_plain_identical_commit_after_a_crash_after_the_choice_sends_that_choice_never_a_new_wave(
-        stopped_wave, monkeypatch, enforcement):
+        stopped_wave, monkeypatch):
     a = stopped_wave
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     head = _git(a.repo, "rev-parse", "HEAD")
     first = _commit_call(a)
     handback = json.JSONDecoder().raw_decode(first, first.index("{\"review_reference\""))[0]
@@ -763,20 +767,17 @@ def test_a_plain_identical_commit_after_a_crash_after_the_choice_sends_that_choi
     token = _seat(a, record_id)["continuations"][0]["invocation_id"]
     attempts = len(load_state(a.data).attempts)
 
-    if enforcement == "advisory":  # the retry key binds bytes and intent in every mode; Blocking would land these
-        (a.repo / "change.py").write_text("value = 3\n", encoding="utf-8")  # other bytes: not the choice's subject
-        other = _commit_call(a)
-        assert token not in [key for _body, key in a.engine.posts] and _git(a.repo, "rev-parse", "HEAD") == head, other
-        assert _seat(a, record_id)["status"] == "pending"  # the recorded choice stays its own subject's, unsent
-        (a.repo / "change.py").write_text("value = 2\n", encoding="utf-8")
+    # The retry key binds bytes and intent: other bytes are not the choice's subject.
+    (a.repo / "change.py").write_text("value = 3\n", encoding="utf-8")
+    other = _commit_call(a)
+    assert token not in [key for _body, key in a.engine.posts] and _git(a.repo, "rev-parse", "HEAD") == head, other
+    assert _seat(a, record_id)["status"] == "pending"  # the recorded choice stays its own subject's, unsent
+    (a.repo / "change.py").write_text("value = 2\n", encoding="utf-8")
     sent_before, attempts = len(a.engine.posts), len(load_state(a.data).attempts)
 
     again = _commit_call(a)  # the same unchanged commit call of the choice's subject, with no reference
     assert [key for _body, key in a.engine.posts][sent_before:] == [token], again  # the recorded choice, once
     assert len(load_state(a.data).attempts) == attempts, "no new attempt row: the same round's attempt rejoined"
     assert _seat(a, record_id)["status"] == "responded"
-    landed = _git(a.repo, "rev-parse", "HEAD")
-    if enforcement == "blocking":  # its own gate: PASS lands once, after this call's checks
-        assert landed != head and _git(a.repo, "rev-list", "--count", f"{head}..{landed}") == "1", again
-    else:  # Advisory hands the collected outcome back; only the author's continuation commits
-        assert landed == head and "Review outcome returned before commit" in again, again
+    # The collected outcome is handed back; only the author's continuation commits.
+    assert _git(a.repo, "rev-parse", "HEAD") == head and "Review outcome returned before commit" in again, again

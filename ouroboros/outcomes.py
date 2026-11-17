@@ -23,11 +23,8 @@ from ouroboros import _outcome_receipts
 # The receipt projections below parameterize the reconciliation core and live
 # with it; these historical names stay resolvable through this module.
 from ouroboros._outcome_receipts import (  # explicit re-exports, one statement
-    latest_agent_defined_verification as latest_agent_defined_verification,
     latest_unreconciled_failed_receipt as latest_unreconciled_failed_receipt,
-    latest_unreconciled_failed_verification as latest_unreconciled_failed_verification,
     latest_unreconciled_masked_pass as latest_unreconciled_masked_pass,
-    latest_unreconciled_masked_verification as latest_unreconciled_masked_verification,
 )
 # Tool-call trace vocabulary + execution-axis classifier (leaf module). Re-exported
 # here so `from ouroboros.outcomes import _classify_tool_errors/_POLICY_DENIAL_STATUSES/...`
@@ -44,6 +41,7 @@ from ouroboros._outcome_tool_errors import (  # explicit re-exports, one stateme
     _POLICY_DENIAL_STATUSES as _POLICY_DENIAL_STATUSES,
     _RECOVERY_TOOL_NAMES as _RECOVERY_TOOL_NAMES,
     _ROOT_WRITE_TOOLS as _ROOT_WRITE_TOOLS,
+    SAFETY_HELD_STATUSES as SAFETY_HELD_STATUSES,
     _unresolved_tool_errors as _unresolved_tool_errors,
     warns_without_review as warns_without_review,
     _user_file_basenames as _user_file_basenames,
@@ -214,32 +212,22 @@ ACCEPTANCE_FINALIZED_UNACCEPTED = "finalized_unaccepted"
 # execution axis is OK yet "did it actually work?" was never judged: surface a
 # structural warning so a default-`auto` overclaim isn't displayed as clean.
 WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW = "residual_tool_errors_without_review"
-# FR3: a turn produced real effects and finished cleanly, but the agent recorded
-# NO host-attested verification (no verify_and_record receipt and no trivial
-# write/edit deliverable). A BINARY transparency flag that keeps the result solved
-# (never a downgrade — anti-oscillation), surfaced loudly on the objective axis.
+# A turn produced reviewable effects and nothing examined the result after its last effect
+# (``result_unexamined``): no executed check and no result review. A declaration that nothing
+# is machine-checkable, a confirmed path and the write itself are statements, not an
+# examination. A BINARY transparency flag that keeps the result solved (never a downgrade —
+# anti-oscillation), shown in the details, never on the headline (owner, 9 Nov 2026).
 WARN_RECEIPT_ABSENT = "receipt_absent"
-# Receipt statuses that count as host-attested grounding (suppress receipt_absent):
-# a verify_and_record pass, an observed artifact, or an honest no_visible_machine_contract
-# declaration. NOT a fail (that is an overclaim signal, not grounding). A trivial write/
-# edit deliverable is its OWN grounding via _trace_has_write_edit_grounding (derived from
-# the trace, not a receipt), so it needs no receipt status here.
+# A failed check no later check of the same verification passed; ``verification_red`` beside it holds the fact.
+WARN_VERIFICATION_RED = "verification_red_unreconciled"
+# Finished direct children whose results carry no recorded decision (``child_result_dispositions.undecided``).
+WARN_CHILDREN_UNDECIDED = "children_undecided"
+# Facts for the owner's details that ask nothing of the owner: the headline stays Done (9 Nov 2026).
+DETAIL_ONLY_WARNINGS = frozenset({WARN_RECEIPT_ABSENT, WARN_VERIFICATION_RED, WARN_CHILDREN_UNDECIDED})
+# The verify_and_record kinds that RUN a check whose outcome the author then sees.
+_EXAMINING_VERIFY_KINDS = frozenset({"explicit_command", "explicit_metric", "visible_verifier"})
+# Receipt statuses that are not ledger failures: a pass, an observed artifact, an honest declaration.
 _RECEIPT_GROUNDING_STATUSES = frozenset({"pass", "observed", "declared"})
-
-
-def _verification_receipt_is_grounding(receipt: Dict[str, Any]) -> bool:
-    """Whether one receipt grounds the task's declared deliverable.
-
-    ``delegation_zero_run`` is a typed lifecycle decision: it proves that the
-    configured actor deliberately closed the no-leaf branch, not that the
-    requested artifact or answer is correct.  It stays visible among the normal
-    receipts, but must not suppress ``receipt_absent`` or turn a
-    lifecycle declaration into host-attested deliverable evidence.
-    """
-    return (
-        str(receipt.get("status") or "") in _RECEIPT_GROUNDING_STATUSES
-        and str(receipt.get("contract_kind") or "") != "delegation_zero_run"
-    )
 
 
 def _terminal_zero_run_receipt_present(receipts: List[Dict[str, Any]]) -> bool:
@@ -274,6 +262,8 @@ _LEDGER_NON_FAILURE_STATUSES = (
     # tool_reported_failure: the tool RAN and answered honestly ({"ok": false} — a
     # diagnostic reporting what it was called to find). A finding, not a failure.
     | frozenset({"tool_reported_failure"}) | _NON_EFFECT_OBSERVATION_STATUSES
+    | SAFETY_HELD_STATUSES  # a call Safety held is no failure; its execution-axis record keeps it visible
+    | _OK_TOOL_STATUSES  # a typed ok answer with its own bucket (autocorrected, undeclared-output note): listed, no failure
 )
 
 
@@ -296,66 +286,48 @@ def _merge_objective_warning(objective: Dict[str, Any], code: str) -> None:
         objective["warning"] = code
 
 
-def _trace_has_write_edit_grounding(llm_trace: Dict[str, Any]) -> bool:
-    """Host-derived trivial grounding (FR3): a successful non-scratch write_file/
-    edit_text IS its own file-exists receipt (the deliverable provably exists), so it
-    suppresses receipt_absent without forcing the agent to call verify_and_record for
-    a plain write. Derived from the durable trace at finalization, so no per-write
-    handler hook is needed."""
-    for call in llm_trace.get("tool_calls") or []:
+def result_unexamined(llm_trace: Dict[str, Any]) -> bool:
+    """Whether nothing examined this result since it last changed: the turn has reviewable effects
+    and, after the last of them, no executed check ran (``verify_and_record`` of a run kind, any
+    verdict: its author saw the outcome) and no result review was asked for or bound. A reviewed
+    commit as the last effect passed its change review. The finish-door notice and the
+    ``receipt_absent`` record read this one fact (P7; audit 11.11, item 18). Typed calls only,
+    never message content (P5)."""
+    effects = reviewable_effect_projection(llm_trace)
+    if not effects:
+        return False
+    last = effects[-1]
+    if last["tool"] in _EFFECT_COMMIT_TOOLS:
+        return False
+    for call in (llm_trace.get("tool_calls") or [])[last["index"] + 1:]:
         if not isinstance(call, dict) or call.get("is_error"):
             continue
-        if str(call.get("status") or "ok") not in _OK_TOOL_STATUSES:
-            continue
-        if str(call.get("tool") or "") in _ROOT_WRITE_TOOLS:
-            args = call.get("args") if isinstance(call.get("args"), dict) else {}
-            if str(args.get("root") or "active_workspace") not in _SCRATCH_ROOTS:
-                return True
-    return False
-
-
-def verification_grounding_present(
-    llm_trace: Dict[str, Any], drive_root: Any, task_id: str,
-    *, receipts: Optional[List[Dict[str, Any]]] = None,
-) -> bool:
-    """True when the turn already carries host-attested grounding — a verify_and_record
-    receipt with a grounding status, or a trivial write/edit deliverable. Read-only
-    (shared by the one-shot nudge gate and the receipt_absent flag)."""
-    receipt_rows = (
-        receipts if isinstance(receipts, list)
-        else read_verification_receipts(drive_root, task_id)
-    )
-    if any(_verification_receipt_is_grounding(receipt) for receipt in receipt_rows):
-        return True
-    return _trace_has_write_edit_grounding(llm_trace)
-
-
-def should_nudge_verification(
-    llm_trace: Dict[str, Any], drive_root: Any, task_id: str,
-    *, receipts: Optional[List[Dict[str, Any]]] = None,
-) -> bool:
-    """FR3 one-shot nudge gate: the turn produced real reviewable effects but recorded
-    NO host-attested grounding yet — ping the agent ONCE to verify_and_record before it
-    finalizes. Binary; the caller latches it so it fires at most once per task."""
-    if not turn_has_reviewable_effects(llm_trace):
-        return False
-    return not verification_grounding_present(
-        llm_trace, drive_root, task_id, receipts=receipts,
-    )
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        tool = str(call.get("tool") or "")
+        if tool == "verify_and_record" and str(args.get("contract_kind") or "") in _EXAMINING_VERIFY_KINDS:
+            return False
+        if tool == "review_change" and str(args.get("subject") or "") == "result":
+            return False
+    # Only a current bound review speaks for this result: every new delivery candidate supersedes the runs bound
+    # so far (``review_result.supersede_result_runs``), a run of an earlier version stands beside the delivered
+    # bytes as that version's, and a $0 refusal examined nothing.
+    return not any(isinstance(run, dict) and run.get("surface") == "result" and not run.get("superseded_by_revision")
+                   and not run.get("earlier_revision") and run.get("aggregate") != "NOT_DISPATCHED"
+                   for run in llm_trace.get("review_runs") or [])
 
 
 def apply_receipt_absent_flag(
     loop_outcome: Dict[str, Any], llm_trace: Dict[str, Any], drive_root: Any, task_id: str,
     *, receipts: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
-    """FR3 flag — run by the host AFTER ``derive_loop_outcome`` and BEFORE the
-    verification ledger. Inject durable verify_and_record receipts into the trace so
-    the ledger records them, then on a clean turn (execution ok — NOT best_effort/
-    degraded/failed) with real reviewable effects but no host-attested grounding flag
-    ``receipt_absent`` on the objective axis: a BINARY warning that keeps the result
-    solved (never a downgrade — anti-oscillation). A turn without effects is never
-    flagged: how many tools an answer used is not a judgment of the answer (plain prose
-    can itself be the deliverable). Applied before ``outcome_axes`` is normalized so the
+    """Run by the host AFTER ``derive_loop_outcome`` and BEFORE the verification ledger. Inject durable
+    verify_and_record receipts into the trace so the ledger records them; then, on a clean turn (execution ok — NOT
+    best_effort/degraded/failed), flag ``receipt_absent`` when nothing examined the result after it last changed
+    (``result_unexamined``; never a turn without effects: plain prose can itself be the deliverable),
+    ``verification_red_unreconciled`` with its fact ``verification_red`` (``_outcome_receipts.red_check_fact``) when a
+    check failed and no later check of it passed, and ``children_undecided`` for finished direct children without a
+    recorded decision. All are BINARY details that keep the result solved (never a downgrade — anti-oscillation) and
+    never raise the headline (``DETAIL_ONLY_WARNINGS``). Applied before ``outcome_axes`` is normalized so the
     persisted axes and the ledger agree."""
     receipt_rows = (
         receipts if isinstance(receipts, list)
@@ -366,17 +338,16 @@ def apply_receipt_absent_flag(
     axes = loop_outcome.get("outcome_axes") if isinstance(loop_outcome.get("outcome_axes"), dict) else {}
     objective = axes.get("objective") if isinstance(axes.get("objective"), dict) else None
     execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
-    if not isinstance(objective, dict):
+    if not isinstance(objective, dict) or str(execution.get("status") or "") != EXECUTION_OK:
         return
-    if str(execution.get("status") or "") != EXECUTION_OK:
-        return
-    if not turn_has_reviewable_effects(llm_trace):
-        return
-    if verification_grounding_present(
-        llm_trace, drive_root, task_id, receipts=receipt_rows,
-    ):
-        return
-    _merge_objective_warning(objective, WARN_RECEIPT_ABSENT)
+    if result_unexamined(llm_trace):
+        _merge_objective_warning(objective, WARN_RECEIPT_ABSENT)
+    red = _outcome_receipts.red_check_fact(receipt_rows)
+    if red:  # the task row keeps the typed fact its sentence reads; the command stays in the receipt
+        _merge_objective_warning(objective, WARN_VERIFICATION_RED)
+        objective["verification_red"] = {key: value for key, value in red.items() if key != "check"}
+    if (llm_trace.get("child_result_dispositions") or {}).get("undecided"):
+        _merge_objective_warning(objective, WARN_CHILDREN_UNDECIDED)
 
 
 def terminal_outcome_axes(
@@ -435,15 +406,17 @@ def current_custody_debt(*records: Any) -> Optional[list]:
 
 
 def objective_warned(objective: Any, debt: Optional[list]) -> bool:
-    """The headline's objective warning: a nonempty current debt list warns, and an older
-    row's custody warning stops counting once that list is known empty; every other warning,
-    and one beside an absent list, keep the stored word. Twin: log_events.js ``objectiveWarned``."""
+    """The headline's objective warning: a nonempty current debt list warns, and an older row's custody warning
+    stops counting once that list is known empty; every other warning, and one beside an absent list, keep the stored
+    word; a detail-only fact (``DETAIL_ONLY_WARNINGS``) asks nothing of the owner (9 Nov 2026). Twin:
+    log_events.js ``objectiveWarned``."""
     objective = objective if isinstance(objective, dict) else {}
-    primary = objective.get("warning")
-    if debt or debt is None or primary != WARN_DELEGATED_CUSTODY_UNRECONCILED:
-        return bool(debt) or bool(primary)
+    if debt:
+        return True
     warnings = objective.get("warnings") if isinstance(objective.get("warnings"), list) else []
-    return any(code and code != WARN_DELEGATED_CUSTODY_UNRECONCILED for code in warnings)
+    return any(code and code not in DETAIL_ONLY_WARNINGS
+               and not (debt is not None and code == WARN_DELEGATED_CUSTODY_UNRECONCILED)
+               for code in [objective.get("warning"), *warnings])
 
 # Tools/roots whose successful use means the turn produced reviewable work.
 # Root-aware write tools: these take a `root` arg, so the scratch-exclusion rule
@@ -470,10 +443,10 @@ def reviewable_effect_projection(llm_trace: Dict[str, Any], *, observed_only: bo
 
     Reviewable effects are a successful repo commit; a successful write_file/
     edit_text/apply_patch/edit_batch to any non-scratch root; a successful
-    tool that registered a canonical artifact (including partial output on error;
-    artifact_registered — a
-    stopped service's outputs or a user_files write). Pure scratch (root=task_drive)
-    write_file/edit_text does NOT count. Cognitive-memory updates go through
+    tool that registered a canonical artifact; or a native editor's typed changed-path receipt even on error.
+    Failed capture does not erase the write, nor does that write make the call successful. Pure scratch (root=task_drive)
+    writes and a call its producer typed ``completed_no_effect`` (a write of the bytes a
+    file already held) do NOT count. Cognitive-memory updates go through
     update_identity/update_scratchpad/knowledge_write (not write tools) and are
     intentionally not effects; a light-mode generic cognitive write is
     advisory-redirected and never succeeds here. This is a P3 deterministic immune
@@ -490,12 +463,14 @@ def reviewable_effect_projection(llm_trace: Dict[str, Any], *, observed_only: bo
         if observed_only and not (artifact or isinstance(call.get("is_error"), bool)):
             continue
         succeeded = not call.get("is_error") and str(call.get("status") or "ok") in _OK_TOOL_STATUSES
-        if not (succeeded or artifact):
-            continue
+        meta = call.get("tool_result_meta") if isinstance(call.get("tool_result_meta"), dict) else {}
         tool = str(call.get("tool") or "")
+        partial = tool in _ROOT_WRITE_TOOLS and bool(meta.get("changed_paths") or meta.get("changed_paths_omitted"))
+        if not (succeeded or artifact or partial) or (meta.get("operation_outcome") == "completed_no_effect" and not artifact):
+            continue  # the producer proved this call changed nothing (a same-byte write): an outcome, no effect
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
         is_effect = succeeded and (tool in _EFFECT_COMMIT_TOOLS or tool in _EFFECT_CODING_TOOLS or tool in _EFFECT_INTEGRATION_TOOLS)
-        if succeeded and tool in _ROOT_WRITE_TOOLS and str(args.get("root") or "active_workspace") not in _SCRATCH_ROOTS:
+        if (succeeded or partial) and tool in _ROOT_WRITE_TOOLS and str(args.get("root") or "active_workspace") not in _SCRATCH_ROOTS:
             is_effect = True
         # Structured flag set from the full (untruncated) tool result at capture time;
         # covers stopped-service outputs and user_files writes regardless of preview length.
@@ -580,6 +555,7 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
         axis = {
             "status": "degraded" if selection.superseded_only_acceptance_gap else "skipped",
             "eligibility": str(review_decision.get("eligibility") or "not_eligible"),
+            **({"mode": review_decision["mode"]} if review_decision.get("mode") else {}),
             "trigger": str(review_decision.get("trigger") or "not_evaluated"),
             "run_count": 0,
         }
@@ -595,6 +571,8 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     signals = [str(run.get("aggregate_signal") or "").upper() for run in runs]
     if "FAIL" in signals:
         status = "fail"
+    elif all(run.get("pending_finish") for run in runs):  # the author finished while its review still ran
+        status = AWAITING_PROJECTION
     elif "DEGRADED" in signals or any(bool(run.get("degraded")) for run in runs):
         # A panel that was only awaited holds no verdict yet: a gap, not a degraded review.
         status = AWAITING_PROJECTION if _outcome_receipts.review_runs_only_awaited(runs) else "degraded"
@@ -605,23 +583,36 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     axis = {
         "status": status,
         "eligibility": str(review_decision.get("eligibility") or "eligible"),
+        **({"mode": review_decision["mode"]} if review_decision.get("mode") else {}),
         "trigger": str(review_decision.get("trigger") or "review_run"),
         "run_count": len(runs),
         "aggregate_signals": signals,
     }
     if all(run.get("surface") == "result" for run in runs):
         axis["source"] = "result_review"  # review_change(subject="result") bound to the delivered answer
-        if status != "pass" and any(run.get("informed_finish") for run in runs):
-            axis["author_finish"] = True  # the mind read the findings and delivered under advisory enforcement
+        # The author's own acceptance counts only on a current run and for the exact subject it accepted: a
+        # superseded run kept for its critique never carries its acceptance to another answer (owner, 8 Nov 2026).
+        accepted = [run for run in runs if run.get("informed_finish") and not run.get("superseded_by_revision") and (
+            not isinstance(run["informed_finish"], dict) or run["informed_finish"].get("subject_sha") == run.get("binding_hash"))]
+        if accepted and (status != "pass" or any(run.get("earlier_revision") for run in accepted)):
+            axis["author_finish"] = ("author_finish_pending" if status == AWAITING_PROJECTION else
+                                     "previous_revision_accepted" if status == "pass" else "author_finish")
+            if status == AWAITING_PROJECTION:  # the review its late verdict will be read from (``late_review_marks``)
+                axis["pending_review"] = {"record_id": str(accepted[0].get("record_id") or ""),
+                                          "subject_sha": str(accepted[0].get("binding_hash") or "")}
         if any(run.get("enforcement") == "blocking" and run.get("dispatch_refusal") == REASON_REVIEW_CYCLES_EXHAUSTED
                for run in runs):
             axis["blocked_reason"] = REASON_REVIEW_CYCLES_EXHAUSTED  # no review of this result could be bought
         if axis.get("author_finish") or axis.get("blocked_reason"):
             # The task card's cause sentence reads the decision shape (project_dialogue / log_events twins).
+            finish = (accepted[0]["informed_finish"] if accepted else None) if axis.get("author_finish") else None
             axis["acceptance_decision"] = {
-                "status": ACCEPTANCE_FINALIZED_UNACCEPTED, "source": "result_review",
-                "reason": "author_finish" if axis.get("author_finish") else REASON_REVIEW_CYCLES_EXHAUSTED,
-                "enforcement": "advisory" if axis.get("author_finish") else "blocking"}
+                "status": ACCEPTANCE_ACCEPTED if axis.get("author_finish") == "previous_revision_accepted"
+                else ACCEPTANCE_FINALIZED_UNACCEPTED, "source": "result_review",
+                "reason": axis.get("author_finish") or REASON_REVIEW_CYCLES_EXHAUSTED,
+                "enforcement": "advisory" if axis.get("author_finish") else "blocking",
+                **({"author_disposition": {"action": "finish", "rationale": finish["rationale"]}}
+                   if isinstance(finish, dict) and finish.get("rationale") else {})}
     tier = _aggregate_outcome_tier(_extract_outcome_tiers(runs))
     if tier and status != AWAITING_PROJECTION:  # a minority answer is not the panel's tier
         axis["outcome_tier"] = tier
@@ -643,7 +634,8 @@ def _objective_axis(review: Dict[str, Any]) -> Dict[str, Any]:
     tier = str(review.get("outcome_tier") or "")
     if review.get("source") == "result_review" and review.get("author_finish"):
         # The author's own informed finish, not a grade: the host derives no tier from it.
-        return {"status": OBJECTIVE_PASS, "source": "author_acceptance", "review_status": status, "reason": "author_finish"}
+        reason = review["author_finish"] if isinstance(review["author_finish"], str) else "author_finish"
+        return {"status": OBJECTIVE_PASS, "source": "author_acceptance", "review_status": status, "reason": reason}
     if review.get("source") == "result_review" and review.get("blocked_reason"):
         # Blocking enforcement with no review of this result left to buy: never approved, never green.
         return {"status": OBJECTIVE_FAIL, "source": "result_review", "review_status": status,
@@ -1141,6 +1133,8 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "verification_failures": verification_failures[:20],
         }
     review = _review_axis(llm_trace)
+    if usage_reason in ACCEPTANCE_BYPASS_REASON_BY_RAIL:  # a rail ended the task before its delivery's review step
+        review.update(trigger="forced_rail", rail=usage_reason)
     objective = _objective_axis(review)
     # The planning gate holds or releases the final answer; it names no objective of its
     # own (plans have no cycle cap, no quorum and no author stop: the stop path is the
@@ -1495,10 +1489,10 @@ def build_verification_ledger(
             "errors": artifact_bundle.get("errors") or [],
         })
     review = review_evidence or {}
-    for key in ("critical_findings", "advisory_findings", "open_obligations"):
+    for key in ("critical_findings", "advisory_findings"):
         items = review.get(key)
         if isinstance(items, list) and items:
-            status = "failed" if key in {"critical_findings", "open_obligations"} else "partial"
+            status = "failed" if key == "critical_findings" else "partial"
             entries.append({
                 "kind": "review",
                 "category": key,

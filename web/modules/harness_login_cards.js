@@ -481,6 +481,9 @@ export function loginCardHtml(active, nowMs = Date.now(), { mode = LOGIN_CARD_FU
         `<h4>Connect ${harnessAccountIdentityMarkup(active.harness, { label: active.familyLabel, profile: active.profile })}</h4>`];
     if (face === 'error') {
         bits.push(`<div class="settings-inline-note" data-tone="error">${escapeHtml(active.error)}</div>`);
+        for (const action of active.maintenanceProblem ? active.requiredActions || [] : []) {
+            bits.push(`<div class="settings-inline-note" data-login-required-action>${escapeHtml(action)}</div>`);
+        }
         if (loginRetryAvailable(active)) {
             bits.push('<button type="button" class="btn btn-primary" data-login-retry>Try again</button>');
         }
@@ -1310,6 +1313,7 @@ export function createLoginCardController({
                 const problemCode = typeof data?.code === 'string' ? data.code : '';
                 active.problemCode = problemCode;
                 active.requiredActions = actions;
+                active.maintenanceProblem = Boolean(data?.context?.operationId);
                 if (problemCode) {
                     // A typed daemon refusal before a durable job was returned
                     // proves this client owns no setup custody. Generic

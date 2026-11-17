@@ -346,3 +346,184 @@ def test_task_event_omits_only_an_equal_contract_mirror_without_mutation(tmp_pat
     assert ("task_contract" in projected["metadata"]) is different
     if different:
         assert projected["metadata"]["task_contract"] == original["metadata"]["task_contract"]
+
+
+@pytest.mark.parametrize("start_row", ["written", "billing_refused", "unknown_error", "not_written"])
+def test_a_review_start_proven_unsent_spends_no_paid_wave_and_any_other_is_paid_before_its_post(
+        tmp_path, fake_route, monkeypatch, start_row):
+    """F4 (owner, 8 Nov 2026): the paid stamp follows the durable start row and precedes every POST. A start the
+    billing authority refused before any row or POST is proven unsent: no stamp, and the seat says unrequested. A
+    start row whose landing is unknown (an error, a False write a replay could still POST) is paid; a POST never
+    happens without the stamp before it."""
+    from ouroboros.review_execution import ReviewRouteUnavailable, SessionInvocation, run_delegated_review_session
+    from ouroboros.usage_accounting import BillingAuthorityUnavailable
+
+    order: list = []
+
+    def stamp():
+        order.append("stamp")
+
+    real_record, real_start = custody.record_start_requested, fake_route.start_run
+
+    def record(*args, **kwargs):
+        order.append("row")
+        if start_row == "billing_refused":
+            raise BillingAuthorityUnavailable("fixture: billing authority unreadable before any row")
+        if start_row == "unknown_error":
+            raise OSError("fixture: the row write's landing is unknown")
+        return False if start_row == "not_written" else real_record(*args, **kwargs)
+
+    def post(self, request, **kwargs):
+        order.append("post")
+        return real_start(self, request, **kwargs)
+
+    monkeypatch.setattr(custody, "record_start_requested", record)
+    monkeypatch.setattr(fake_route, "start_run", post)
+    invocation = SessionInvocation(task_id="t-paid", surface="scope_review", slot_id="scope_slot_1", timeout_sec=30,
+                                   dispatch_stamp=stamp)
+    if start_row == "written":
+        run_delegated_review_session(invocation=invocation, prompt="review this", root="/tmp/fake-repo",
+                                     custody_drive=tmp_path)
+        assert order == ["row", "stamp", "post"], "paid before the POST, after the start row"
+        return
+    with pytest.raises((ReviewRouteUnavailable, OSError)) as caught:
+        run_delegated_review_session(invocation=invocation, prompt="review this", root="/tmp/fake-repo",
+                                     custody_drive=tmp_path)
+    assert "post" not in order
+    if start_row == "billing_refused":
+        assert order == ["row"] and getattr(caught.value, "delegated_start_unrequested", None) is True
+        assert getattr(caught.value, "code", "") == "billing_authority_unavailable"
+    else:
+        assert order == ["row", "stamp"], "an unknown landing is paid, never refunded"
+        assert getattr(caught.value, "delegated_start_unrequested", None) is not True
+
+
+@pytest.mark.parametrize('configured', [None, '', 'standard'])
+@pytest.mark.parametrize('refused', [False, True])
+def test_pending_recovery_keeps_row_tier_separate_from_execution(tmp_path, monkeypatch, configured, refused):
+    from ouroboros import store
+    from ouroboros.delegate_custody_reconcile import _recover_pending_invocation
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.subagent_history import record_session_execution
+    from ouroboros import subagent_metrics
+    from ouroboros.subagent_history import subagent_last_delegation
+
+    class Engine(_LiveRunStub):
+        store_identity = 'fixture-store'
+
+        def start_run(self, body, *, idempotency_key=''):
+            assert body['processingPreference'] == 'fast'
+            assert idempotency_key == 'pending-tier'
+            if refused:
+                raise ClaudexorUnavailable('fixture_refused', 'not started', status_code=400)
+            return {'runId': self.run_id, 'storeId': self.store_identity}
+
+    engine = Engine()
+    assert custody.record_start_requested(tmp_path, invocation_id='pending-tier', task_id='owner',
+        selected_subagent_id='fixture-row', route='some-route', project_id='prj-existing', project_owned=False,
+        handshake_store_id=engine.store_identity, idempotency_key='pending-tier',
+        request={'prompt': 'Fixture inspection', 'model': 'fixture-model', 'access': 'readonly',
+                 'mode': 'ask', 'processingPreference': 'fast'}, processing={'requested': 'fast'},
+        **({'row_processing': configured} if configured is not None else {}))
+    # Both the addressed store reader and the historical fold start from the real recorded request.
+    rows = list(custody.custody_rows(tmp_path))
+    for record in (custody.invocation_record(tmp_path, 'pending-tier'),
+                   custody.invocation_record(tmp_path, 'pending-tier', rows=rows),
+                   custody.pending_invocations(tmp_path)[0],
+                   custody.pending_invocations(tmp_path, rows=rows)[0]):
+        assert ('row_processing' in record) == (configured is not None)
+        assert record.get('row_processing') == configured
+        assert record['processing']['requested'] == 'fast'
+    # Exercise an already cached pending projection from before the new fields existed.
+    with store.open_store(tmp_path, write=True) as txn:
+        cached = txn.get_row('custody_open', 'invocation:pending-tier')
+        for pending in cached.get('pending', []):
+            pending.pop('row_processing', None)
+            pending.pop('processing', None)
+        txn.put_row('custody_open', 'invocation:pending-tier', cached)
+    pending = custody.pending_invocations(tmp_path)[0]
+    result = _recover_pending_invocation(tmp_path, engine, pending)
+    if refused:
+        assert result['action'] == 'invocation_retired'
+        event = next(row for row in custody.custody_rows(tmp_path) if row['type'] == custody.START_FAILED)
+        assert event.get('row_processing') == configured
+        assert event['processing_preference'] == 'fast'
+    else:
+        recovered = custody.replay(tmp_path)[engine.run_id]
+        assert recovered.row_processing == configured
+        assert recovered.processing_preference == 'fast'
+        record_session_execution(tmp_path, recovered, {'summary': {'state': 'succeeded'}}, {})
+    # The real history producer and metrics store retain the configured row identity.
+    identity = subagent_last_delegation(tmp_path)['latest_by_subagent']['fixture-row']['identity']
+    assert identity['processing_preference'] == ('fast' if configured is None else configured)
+    if not refused:
+        subagent_metrics.catch_up(tmp_path)
+        measured = subagent_metrics.read(tmp_path, 'fixture-row')['rows']
+        assert len(measured) == 1 and measured[0]['row_identity']['processing_preference'] == identity['processing_preference']
+
+
+@pytest.mark.parametrize("own", ["economy", ""])  # a row's own tier; a row without one ('' = its decided default)
+@pytest.mark.parametrize("recovery", ["retry", "reconcile", "reconcile_refused"])
+def test_a_session_start_carries_its_rows_own_tier_from_the_real_producer_through_a_lost_ack(
+        tmp_path, monkeypatch, own, recovery):
+    """``_delegate_start`` writes the row's own tier on START_REQUESTED beside the run's (a work's Fast), never into
+    the engine request; a lost acknowledgement recovered by ``retry_of`` or the reconcile sweep keeps it on STARTED or
+    START_FAILED, so the history files the run under its row, not under the work's tier."""
+    import tests._delegated_transport_shared as shared
+    from ouroboros.delegate_custody_reconcile import _recover_pending_invocation
+    from ouroboros.gateways import claudexor as gateway
+    from ouroboros.subagent_history import record_session_execution, subagent_last_delegation
+    from ouroboros.tools import delegate
+
+    keys = []
+
+    class LostAcknowledgment(_LiveRunStub):
+        store_identity = ""
+
+        def agent_capabilities(self):
+            return {"harnesses": [{"id": "some-route", "enabled": True, "status": "ok",
+                                   "accessProfilesSupported": ["readonly"],
+                                   "processingPreferences": ["standard", "fast", "economy"]}]}
+
+        def start_run(self, body, *, idempotency_key=""):
+            keys.append((copy.deepcopy(body), idempotency_key))
+            if len(keys) == 1:
+                raise gateway.ClaudexorUnavailable("daemon_unreachable", "fixture accepted start then lost reply")
+            if recovery == "reconcile_refused":
+                raise gateway.ClaudexorUnavailable("fixture_refused", "not started", status_code=400)
+            return {"runId": self.run_id}
+
+    real = shared._transport_snapshot
+    monkeypatch.setattr(shared, "_transport_snapshot", lambda route, access=None: {
+        **real(route, access), **({"processing_preference": own} if own else {}), "work_processing": "fast"})
+    stub = LostAcknowledgment()
+    _select_transport_access(monkeypatch, "readonly")
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak-model:low")
+    monkeypatch.setattr(gateway, "ClaudexorGateway", lambda *args, **kwargs: stub)
+    ctx = _nanny_ctx(tmp_path, task_id="owner")
+    first = json.loads(delegate._delegate_start(ctx, "Inspect fixture files.").text)
+    token = first["pending_invocation_id"]
+    body = keys[0][0]
+    assert body["processingPreference"] == "fast", "the run asks the work's tier"
+    assert not {"row_processing", "rowProcessing"} & set(body), "the row's own tier is custody, never a request option"
+    requested = _start_rows(tmp_path)[0]
+    assert requested["row_processing"] == own and requested["processing"]["requested"] == "fast"
+    assert custody.invocation_record(tmp_path, token)["row_processing"] == own
+    if recovery == "retry":
+        retried = json.loads(delegate._delegate_start(ctx, "Inspect fixture files.", retry_of=token).text)
+        assert retried["status"] == "started" and keys[1] == (body, token), "byte-identical replay"
+        assert all(row.get("row_processing") == own for row in _start_rows(tmp_path))
+    else:
+        result = _recover_pending_invocation(tmp_path, stub, custody.pending_invocations(tmp_path)[0])
+        assert keys[1] == (body, token)
+        if recovery == "reconcile_refused":
+            assert result["action"] == "invocation_retired"
+            failed = next(row for row in custody.custody_rows(tmp_path) if row["type"] == custody.START_FAILED
+                          and row.get("invocation_id") == token)
+            assert failed["row_processing"] == own and failed["processing_preference"] == "fast"
+    if recovery != "reconcile_refused":
+        entry = custody.replay(tmp_path)[stub.run_id]
+        assert (entry.row_processing, entry.processing_preference) == (own, "fast")
+        record_session_execution(tmp_path, entry, {"summary": {"state": "succeeded"}}, {})
+    identity = subagent_last_delegation(tmp_path)["latest_by_subagent"]["transport-fixture"]["identity"]
+    assert identity["processing_preference"] == own, "filed under the row's own tier, not the work's Fast"

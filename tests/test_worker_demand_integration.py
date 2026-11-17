@@ -17,6 +17,7 @@ import pytest
 
 from ouroboros.platform_layer import pid_is_alive, process_start_time
 from ouroboros.process_custody import _read_ledger
+from ouroboros.queue_observation import load_queue_document
 from tests.candidate_checkout import candidate_checkout
 from tests.system_e2e.harness import (
     ArtifactOracle, ScriptedStubModel, keyless_settings, start_server,
@@ -68,15 +69,18 @@ def test_small_install_then_repeated_burst_keeps_one_spare_without_lowering_cap(
                                   keyless_settings(stub, OUROBOROS_MAX_WORKERS=cap))
             oracle = ArtifactOracle(server.data_root)
 
+            def published():  # the pool's counts as every reader sees them: certified on queue.alive
+                return load_queue_document(server.data_root)
+
             def census(phase, since):
                 rows = native_worker_census(server.data_root)
                 sample = {"phase": phase, "elapsed_sec": time.monotonic() - since,
-                          "workers": rows, "snapshot": oracle.queue_snapshot()}
+                          "workers": rows, "snapshot": published()}
                 measurements["samples"].append(sample)
                 return rows
 
             try:
-                assert wait_until(lambda: oracle.queue_snapshot().get("assignable_idle_workers") == 1, 90)
+                assert wait_until(lambda: published().get("assignable_idle_workers") == 1, 90)
                 initial = census("ready_idle", started)
                 assert len(initial) == 1
                 # The first small task uses the already-ready process, with no rotation.
@@ -97,16 +101,16 @@ def test_small_install_then_repeated_burst_keeps_one_spare_without_lowering_cap(
                     assert wait_until(lambda: len(oracle.running_ids()) == cap and len(calls) == cap, 120)
                     current = census(f"burst_{wave}", before)
                     assert len(current) == cap
-                    assert oracle.queue_snapshot()["active_worker_count"] == cap
+                    assert published()["acting_worker_count"] == cap
                     release.set()
                     for tid in ids:
                         assert wait_durable_result(oracle, tid)["status"] == "completed"
                     assert wait_until(lambda: not oracle.running_ids()
-                                      and oracle.queue_snapshot().get("worker_total") == 1
+                                      and published().get("worker_total") == 1
                                       and len(native_worker_census(server.data_root)) == 1, 90)
                     idle = census(f"idle_after_{wave}", before)
                     assert idle[0]["pid"] == initial[0]["pid"]
-                assert not oracle.queue_snapshot().get("worker_pool_disabled_reason")
+                assert not published().get("worker_pool_disabled_reason")
             finally:
                 release.set()
                 record_property("native_pool_measurements", json.dumps(measurements))

@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests.settings_browser_helpers import open_entry, open_settings, commit_row
 
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
@@ -16,8 +16,7 @@ pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize("transition", ["login", "reconnect"])
-@pytest.mark.parametrize("settle_first", ["settings", "catalog"])
-def test_confirmed_accounts_refresh_models_without_replacing_draft(subscription_ui, transition, settle_first):
+def test_confirmed_accounts_refresh_models_without_replacing_draft(subscription_ui, transition):
     from playwright.sync_api import expect
 
     ui, page = subscription_ui, subscription_ui["page"]
@@ -27,45 +26,11 @@ def test_confirmed_accounts_refresh_models_without_replacing_draft(subscription_
     ui["fixture"]["catalog"] = {"items": [], "model_sources": [], "errors": []}
     if transition == "login":
         ui["fixture"]["status"]["profiles"]["profiles"] = []
-    held_settings, held_catalog = [], []
-    hold_catalog = True
-
-    def hold_settings_read(route):
-        if len(held_settings) == 2:
-            route.fallback()
-            return
-        ui["reads"].append(route.request.url)
-        held_settings.append(route)
-        page.evaluate("count => window.heldSettingsReads = count", len(held_settings))
-
-    def hold_catalog_read(route):
-        if not hold_catalog:
-            route.fallback()
-            return
-        ui["reads"].append(route.request.url)
-        held_catalog.append(route)
-        page.evaluate("window.heldCatalogRead = true")
-
-    page.route("**/api/settings", hold_settings_read)
-    page.route("**/api/model-catalog", hold_catalog_read)
     page.goto(ui["url"] + "/#settings")
-    page.wait_for_function("window.heldSettingsReads === 2")
-    # Page-show supersedes the initial GET before either document is applied.
-    held_settings[0].fulfill(json=ui["settings"])
-    page.wait_for_function("window.heldCatalogRead === true")
-    if settle_first == "settings":
-        held_settings[1].fulfill(json=ui["settings"])
-        expect(page.locator("#btn-save-settings")).to_be_enabled()
-    hold_catalog = False
-    held_catalog[0].fulfill(json=ui["fixture"]["catalog"])
-    expect(page.locator("#settings-model-catalog-status")).to_contain_text("No provider catalogs")
-    if settle_first == "catalog":
-        expect(page.locator("#btn-save-settings")).to_be_disabled()
-        held_settings[1].fulfill(json=ui["settings"])
-    expect(page.locator("#settings-status")).to_have_text("Settings refreshed")
-    page.locator('[data-settings-tab="models"]').click()
+    open_settings(page, "models/role/main")
     row = page.locator('[data-model-role="main"]')
     source, model = row.locator('[data-model-role-source]'), row.locator('[data-model-role-model]')
+    expect(model).to_have_value("saved-model")
     expect(source.locator('option[value="subscription:codex"]')).to_have_count(0)
     model.fill("owner-unsaved-model")
     model.evaluate("e => { window.ownerDraftNode = e; e.setSelectionRange(4, 9); }")
@@ -94,11 +59,58 @@ def test_confirmed_accounts_refresh_models_without_replacing_draft(subscription_
     refresh_accounts()
     assert sum(url.endswith("/api/model-catalog") for url in ui["reads"]) == reads
     assert not ui["posts"], "discovery cannot save or replace the owner's draft"
-    capture(page, f"settings-account-{transition}-{settle_first}-first")
+    capture(page, f"settings-account-{transition}")
+
+
+def test_an_agents_form_renews_its_model_list_when_a_sign_in_settles(subscription_ui):
+    """An agent's form arms the watch a role's page arms: a changed account answer reads the
+    catalogue once, the same answer again reads nothing, and the form's unsaved words stay."""
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    connected = copy.deepcopy(ui["fixture"]["status"])
+    ui["fixture"]["status"]["profiles"]["profiles"] = []
+    page.goto(ui["url"] + "/#settings")
+    open_settings(page, "agents").locator("[data-entry-id]").first.wait_for(state="visible")
+    form = open_entry(page, "codex").locator("[data-subagent-row]")
+    words = form.locator('[data-subagent-field="recommended_use"]')
+    expect(words).to_be_visible()
+
+    def refresh_accounts():
+        # The same store refresh used when a sign-in card settles.
+        page.evaluate("""async () => {
+            const {claudexorStatus} = await import('/static/modules/claudexor_status_store.js');
+            await claudexorStatus.refresh();
+        }""")
+
+    def catalogue_reads():
+        return sum("/api/model-catalog" in url for url in ui["reads"])
+
+    refresh_accounts()  # the answer the form opened with is confirmed and is not a change
+    words.fill("An unsaved description.")
+    words.evaluate("e => { window.ownerDraftNode = e; }")
+    settings_reads = sum(url.endswith("/api/settings") for url in ui["reads"])
+    quiet = catalogue_reads()
+    refresh_accounts()
+    assert catalogue_reads() == quiet, "the same account answer reads no catalogue"
+    ui["fixture"]["status"] = connected
+    with page.expect_response(lambda response: "/api/model-catalog" in response.url, timeout=5000):
+        refresh_accounts()
+    assert words.evaluate("e => e === window.ownerDraftNode && e.value") == "An unsaved description."
+    assert sum(url.endswith("/api/settings") for url in ui["reads"]) == settings_reads
+    after = catalogue_reads()
+    assert after == quiet + 1, "one catalogue read for one changed answer"
+    refresh_accounts()
+    assert catalogue_reads() == after
+    # Shown again (a return from another page, a reconnect), the form reads its roster and catches the catalogue up;
+    # the unsaved words stay (the form is drawn again around them).
+    with page.expect_response(lambda response: "/api/model-catalog" in response.url, timeout=5000):
+        page.evaluate("window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }))")
+    expect(words).to_have_value("An unsaved description.")
+    assert not ui["posts"], "discovery cannot save or replace the owner's draft"
 
 
 def test_legacy_30_second_cadence_loads_as_valid_settings_form(subscription_ui, tmp_path, monkeypatch):
-    from playwright.sync_api import expect
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient
@@ -137,18 +149,13 @@ def test_legacy_30_second_cadence_loads_as_valid_settings_form(subscription_ui, 
 
     page.route("**/api/settings", save_response)
     page.goto(ui["url"] + "/#settings")
-    expect(page.locator("#settings-status")).to_have_text(re.compile("Settings (loaded|refreshed)"))
-    expect(page.locator("#s-bg-wakeup-min")).to_have_value("60")
-    expect(page.locator("#s-bg-wakeup-max")).to_have_value("7200")
-    assert page.locator("#s-bg-wakeup-min").evaluate("e => e.checkValidity()")
-    page.locator('[data-settings-tab="advanced"]').click()
-    page.locator("#s-gh-repo").fill("owner/unrelated-edit")
-    with page.expect_request(lambda request: request.url.endswith("/api/settings") and request.method == "POST", timeout=5000):
-        page.locator("#btn-save-settings").click()
+    # Cadence lives on Consciousness. Its GET normalization still never rewrites the file;
+    # an unrelated row now writes only its own key instead of authoring the whole form.
+    assert ui["settings"]["OUROBOROS_BG_WAKEUP_MIN"] == 60
+    assert ui["settings"]["OUROBOROS_BG_WAKEUP_MAX"] == 7200
+    open_settings(page, "accounts")
+    assert "Saved" in commit_row(page, "GITHUB_REPO", "owner/unrelated-edit")
     saved = [body for url, body in ui["posts"] if url == "/api/settings"][-1]
-    assert saved["OUROBOROS_BG_WAKEUP_MIN"] == 60
-    assert saved["GITHUB_REPO"] == "owner/unrelated-edit"
-    expect(page.locator("#settings-status")).to_have_text("Settings saved")
-    page.locator('[data-settings-tab="behavior"]').click()
-    page.locator("#s-bg-wakeup-min").scroll_into_view_if_needed()
+    assert saved == {"GITHUB_REPO": "owner/unrelated-edit"}
+    assert path.read_bytes() == before
     capture(page, "settings-legacy-cadence")

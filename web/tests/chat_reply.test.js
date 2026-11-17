@@ -58,7 +58,7 @@ test('an explicit quote landing replaces the old-width anchor before reflow; lat
     const replies = createChatReplies({ feed, input, reading: () => reading,
         history: () => ({ exact: () => { feed.clientWidth = 389; return row; } }) });
     t.after(() => { replies.destroy(); unbind(); });
-    assert.deepEqual(await replies.reveal(row.dataset.rowAddress), { state: 'found' });
+    assert.deepEqual(await replies.reveal(row.dataset.rowAddress), { state: 'found', target: row }, 'a landing names its row');
     assert.equal(env.doc.activeElement, row);
     assert.equal(feed.scrollTop, 528);
     reading.reflow();

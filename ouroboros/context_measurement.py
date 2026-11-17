@@ -66,6 +66,18 @@ class MainFitMeasurement:
     # What a directly required handbook adds to this candidate, its start note included (density applied): it
     # counts against the window, while nothing automatic narrows or shrinks for it and no owner target sizes it.
     required_book_tokens: int = 0
+    preferred_mode: str = ""  # the plan's owner mode at this measurement
+    mode_cause: str = ""  # why ``rendered_mode`` is lower than it (``mode_cause``); "" when it is not
+
+    @property
+    def probes_reply_reservation(self) -> bool:
+        """This request goes out inside the reply reservation of a stated total nothing has proved, measured on a
+        request this route answered: only the favourable reading (``WindowRecord.admitted``) admits it, so the
+        provider's size refusal of it is that reading's answer, whatever its words (owner 30.09: the host sends once
+        and records the provider's answer). A proved total and an input limit have no such band."""
+        usable, admitted = self.window.get("usable"), self.window.get("admitted")
+        return bool(self.anchor_input_tokens is not None and usable is not None and admitted is not None
+                    and usable < self.estimated_input_tokens <= admitted)
 
     @property
     def reprojection_input_tokens(self) -> Optional[int]:
@@ -175,7 +187,9 @@ def measure_main_fit(
     reading = int(plan.window_tokens or 0) if is_known(plan, require_fresh=True) else None
     current = resolve_window(plan, reserve, bound=plan.window_witness_bound,
                              accepted_input_tokens=accepted_input_tokens)
-    capacity = current.total_equivalent if current.usable is not None else None
+    # A round measures a request that exists: its capacity is the admitted line (``WindowRecord.admitted``) in the
+    # frame of consumers which subtract R, so the check, tool delivery, the passes and the facts line read one number.
+    capacity = current.admitted_equivalent if current.admitted is not None else None
     if capacity is None:
         reading = None
     raw_book = required_book_addition(plan, rendered_mode)
@@ -195,7 +209,7 @@ def measure_main_fit(
     goal = deficit + margin
     from ouroboros.context_view_facts import window_projection
     measurement = MainFitMeasurement(
-        window=window_projection(current),
+        window=window_projection(current, under_way=True),
         view_kind=plan.view_kind,
         route_fp=str(plan.route_fp or ""),
         round_id=str(round_id or ""),
@@ -220,7 +234,7 @@ def measure_main_fit(
         window_reading_tokens=reading,
         window_witness_bound=plan.window_witness_bound,
         window_observation_fp=current.route_fp,
-        required_book_tokens=book,
+        required_book_tokens=book, preferred_mode=str(plan.preferred_mode or ""), mode_cause=mode_cause(plan, rendered_mode),
     )
     action: Literal["send", "send_target_miss"] = (
         "send_target_miss" if target_deficit and target_deficit > 0 else "send")
@@ -230,3 +244,22 @@ def measure_main_fit(
         automatic_pass_used=bool(automatic_pass_used),
         predicted_capacity_miss=bool(capacity_deficit and capacity_deficit > 0),
     )
+
+
+def mode_cause(plan: Any, rendered_mode: str) -> str:
+    """Why a candidate renders below the plan's owner mode, from the plan's own facts: ``""`` when it does not; the
+    start's own mode carries the start's cause (``ContextFitPlan.start``, ``memory_floor.start_cause``: ``memory``,
+    ``route`` or ``window``), which no reprojection or route rebind replaces; any other lower mode, or a start
+    lowered by no mode switch, is ``after_start`` (taken by the task after its start). A restored task whose start
+    was not carried (``context_fit.UNKNOWN_START``) names no cause: ``""`` beside a lower mode is unknown."""
+    from ouroboros.memory_floor import start_cause
+
+    if rendered_mode == str(getattr(plan, "preferred_mode", "") or "") or not hasattr(plan, "projection"):
+        return ""
+    started, cause = getattr(plan, "start", None) or ("", "")
+    if started == "unknown":  # a restore whose continuation did not carry the start: why it is lower is unknown
+        return ""
+    if not started:  # a plan no start fit built: its current selection and that projection's facts
+        started = str(getattr(plan, "initial_mode", "") or "")
+        cause = start_cause(plan.projection(started).memory_facts) if started else ""
+    return cause if rendered_mode == started and cause else "after_start"

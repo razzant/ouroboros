@@ -21,12 +21,14 @@ from ouroboros.presence_runner import _notify_unresolved_turn, presence_result_f
 from ouroboros.task_results import load_task_result, task_result_path, write_task_result
 from tests._store_shared import result_signature, seed_result, unreadable_result
 from ouroboros.tools.registry import ToolRegistry
+from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 from tests.test_host_service_responsiveness import _answer, _event, _presence_app, _request, _turn
 from tests.test_presence_delivery import _payload
 from tests.test_transport_death_retry import _LedgerLLM, _events, _ledger, _no_chain
 from tests._shared import saved_settings
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_auth_block_and_origin_rejection_share_status_not_disposition(tmp_path):
     app, binding, _ctx = _presence_app(tmp_path, _answer)
     request = _request(app, {"binding_id": binding, "event": _event("event")})
@@ -48,6 +50,7 @@ def test_auth_block_and_origin_rejection_share_status_not_disposition(tmp_path):
     ("presence_result_missing", "retry"),
     ("presence_attachment_admission_rejected", "rejected"),
 ])
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_turn_refusals_keep_legacy_facts_and_semantic_disposition(tmp_path, code, disposition):
     manifest = [{"status": "rejected", "label": "input"}]
 
@@ -68,6 +71,7 @@ def test_turn_refusals_keep_legacy_facts_and_semantic_disposition(tmp_path, code
     ("presence_required_capability_unavailable", "blocked"),
     ("presence_bindings_unreadable", "retry"),
 ])
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_admission_dispositions(tmp_path, monkeypatch, code, disposition):
     app, binding, _ctx = _presence_app(tmp_path, _answer)
 
@@ -82,6 +86,7 @@ def test_admission_dispositions(tmp_path, monkeypatch, code, disposition):
     assert body["disposition"] == disposition
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_receipt_write_retry_and_conflict_do_not_share_disposition(tmp_path, monkeypatch):
     app, _binding, ctx = _presence_app(tmp_path, _answer)
     payload = _payload()
@@ -111,6 +116,7 @@ def test_receipt_write_retry_and_conflict_do_not_share_disposition(tmp_path, mon
     assert json.loads(waiting.body)["code"] == "presence_history_importing", "an import is not a failed write"
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_missing_work_is_rejected_without_losing_original_error(tmp_path):
     app, binding, _ctx = _presence_app(tmp_path, _answer)
     request = _request(app)
@@ -130,6 +136,7 @@ def test_missing_work_is_rejected_without_losing_original_error(tmp_path):
     ("interrupted", "presence_attempt_outcome_unknown", "retained"),
     ("cancelled", "presence_turn_cancelled", "retained"),
 ])
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_lost_or_cancelled_turn_never_regenerates_and_releases_host_capacity(tmp_path, status, code, disposition):
     attempted = []
 
@@ -171,6 +178,7 @@ def test_retained_turn_records_facts_without_forced_owner_or_correspondent_speec
 
 
 @pytest.mark.parametrize("quarantined", [False, True])
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_unreadable_or_quarantined_result_never_becomes_a_new_turn(tmp_path, monkeypatch, quarantined):
     """A row the store cannot answer for, or an id an old quarantined file still occupies,
     is an admitted event whose state is unknown: a retry, never a fresh turn."""
@@ -205,6 +213,7 @@ def test_unreadable_or_quarantined_result_never_becomes_a_new_turn(tmp_path, mon
         assert result_signature(tmp_path, task_id) == before  # nothing was written over the row
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_failed_durable_start_never_calls_agent_then_same_event_may_retry(tmp_path, monkeypatch):
     from ouroboros import task_results
     from ouroboros.presence_runner import PresenceTurnEvent, presence_event_identity
@@ -249,6 +258,7 @@ def test_failed_durable_start_never_calls_agent_then_same_event_may_retry(tmp_pa
     assert stored["metadata"]["presence_event_identity"] == presence_event_identity(binding, PresenceTurnEvent(**event))
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_resource_refusal_never_returns_a_prepared_reply_as_completed(tmp_path):
     invoked = []
 
@@ -271,6 +281,7 @@ def test_resource_refusal_never_returns_a_prepared_reply_as_completed(tmp_path):
     assert len(invoked) == 1  # retry cannot regenerate work behind an already terminal row
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_resource_refusal_preserves_scheduled_child_work_ref_on_first_call_and_replay(tmp_path):
     child_id = "scheduled-presence-child"
     invoked = []
@@ -393,6 +404,7 @@ def test_producer_records_only_terminal_engine_not_started_as_no_effect(tmp_path
     assert usage["_presence_pre_dispatch_only"] is False
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_host_retries_only_attested_no_effect_after_reset_with_new_physical_identity(tmp_path, monkeypatch):
     from ouroboros import presence_runner
 
@@ -457,6 +469,7 @@ def test_host_retries_only_attested_no_effect_after_reset_with_new_physical_iden
                 row.get("client_message_id") == "event"]) == 1
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_late_source_bound_terminal_outweighs_old_quarantine(tmp_path):
     from ouroboros.presence_runner import PresenceTurnEvent, presence_event_identity
     from ouroboros.presence_bindings import conversation_key
@@ -499,9 +512,10 @@ def test_required_jsonl_boundary_read_error_refuses_append(tmp_path, monkeypatch
         assert append_jsonl(path, {"new": 2}, ensure_record_boundary=True, require_lock=True) is False
     assert path.read_bytes() == original_bytes
     assert append_jsonl(path, {"new": 2}, ensure_record_boundary=True, require_lock=True) is True
-    assert path.read_bytes().splitlines()[1] == b'{"new": 2}'
+    assert json.loads(path.read_bytes().splitlines()[1]) == {"new": 2}
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_ambiguous_start_write_never_regenerates_after_error(tmp_path, monkeypatch):
     from ouroboros import task_results
 
@@ -549,6 +563,7 @@ _UNKNOWN_FENCE = pytest.mark.parametrize("usage", [
 
 
 @_UNKNOWN_FENCE
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_unknown_outcome_fallback_terminal_never_acknowledges_the_event(tmp_path, monkeypatch, usage):
     """A quota-refused primary whose fallback died with an unknown outcome is not a silent answer.
 
@@ -608,6 +623,7 @@ def test_unknown_outcome_fallback_terminal_never_acknowledges_the_event(tmp_path
     assert (view.outcome, view.text, view.work_ref) == ("silent", "", child_id)
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_lost_terminal_write_after_start_barrier_never_acknowledges_the_event(tmp_path, monkeypatch):
     """The in-memory envelope is not authority: a RUNNING row after handle_task is an unproven effect.
 
@@ -635,6 +651,7 @@ def test_lost_terminal_write_after_start_barrier_never_acknowledges_the_event(tm
     assert invoked == [presence_turn_task_id(binding, "event")] and ctx.presence_turns.live() == []
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_inline_turn_recovers_lost_response_without_replaying_event(tmp_path, monkeypatch):
     """A lost pure response follows the shared same-turn recovery path; the event never reruns."""
     from ouroboros import agent_task_pipeline as pipeline

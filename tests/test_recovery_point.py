@@ -173,13 +173,18 @@ def test_a_recovery_point_whose_dialogue_store_reads_no_reference_is_never_start
 
 
 def test_a_recovery_point_that_reads_the_stores_is_handed_off_and_checked_out_dev_untouched(managed, monkeypatch):
+    """A recovery point without the reader of the wake transition chain still reads every store: it is started, and
+    the accepted wake transitions are written back in the form it reads first (``store_switch.lacks_wake_chain_reader``)."""
     repo, _drive, _calls, _first = managed
     dev_head, stable = _store_aware_point(repo)
-    handed = []
+    handed, exported = [], []
     monkeypatch.setattr("ouroboros.store_switch._hand_off_stores", lambda root: handed.append(root) or "")
+    monkeypatch.setattr("ouroboros.consciousness_transitions.export_for_older_body",
+                        lambda root: exported.append(root) or {"status": "nothing_to_export"})
     _failing_dev_smoke(monkeypatch, repo, dev_head)
     assert git_ops.safe_restart(reason="bootstrap") == (True, "OK: fell back to ouroboros-stable")
     assert handed, "the stores were handed off before the checkout"
+    assert len(exported) == 1, "the accepted wake transitions were written back for a body without their reader"
     assert _git(repo, "rev-parse", "HEAD") == stable and _git(repo, "rev-parse", "ouroboros") == dev_head
 
 

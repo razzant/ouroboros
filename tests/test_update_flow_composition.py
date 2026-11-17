@@ -5,11 +5,11 @@ review-object) through the MERGED machinery. Lane-internal behavior is not
 re-tested here; where a composition item is already covered verbatim by a lane
 test, that coverage is cited instead of duplicated:
 
-- B5 (advisory half): ``test_advisory_replay_reasons_drive_the_stage_cycle_to_a
-  _disclosed_pass`` (tests/test_review_cycles_dispatch.py) drives BOTH
-  free-replay reasons — identical verdict and exhausted ceiling — through the
-  real stage cycle to a disclosed advisory pass; the blocking half end-to-end
-  lives here (``test_blocking_exhaustion_end_to_end_...``).
+- B5: ``test_the_ceiling_replay_drives_the_stage_cycle_to_a_disclosed_outcome``
+  (tests/test_review_cycles_dispatch.py) drives the free replay of an exhausted
+  ceiling through the real stage cycle to an outcome returned for the author's
+  decision; the managed resolver's exhaustion end-to-end lives here
+  (``test_exhaustion_end_to_end_...``).
 - B8 (rerere immunity of M0): ``test_materialize_is_immune_to_a_poisoned_
   rerere_cache`` (tests/test_update_merge_assisted.py) poisons the rr-cache
   with a recorded WRONG resolution and proves the pinned M0 baseline (the only
@@ -489,14 +489,14 @@ def test_managed_phase_writes_merge_onto_fresh_tx_not_stale_snapshot(
 
 
 # ---------------------------------------------------------------------------
-# B5 (blocking half) + exhaustion chain — the REAL authorized resolver hits the
-# paid-cycle ceiling: free typed refusal (money never bought again), the staged
-# merge survives the refusal, and the orphan-terminal rollback preserves the
-# attempt on the deterministic retry branch.
+# B5 + exhaustion chain — the REAL authorized resolver hits the paid-cycle
+# ceiling: a free replay of the outcome (money never bought again, nothing
+# refused or unstaged), the staged merge stays as it was, and the orphan-terminal
+# rollback preserves the attempt on the deterministic retry branch.
 # ---------------------------------------------------------------------------
 
 
-def test_blocking_exhaustion_end_to_end_rolls_back_and_preserves_retry_pointer(
+def test_exhaustion_end_to_end_replays_rolls_back_and_preserves_retry_pointer(
     tmp_path, monkeypatch,
 ):
     import ouroboros.tools.git as git_mod
@@ -504,7 +504,7 @@ def test_blocking_exhaustion_end_to_end_rolls_back_and_preserves_retry_pointer(
 
     repo, head, plan, tx = tua._materialized_conflict_tx(tmp_path, monkeypatch)
     drive = tmp_path / "data"
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
     monkeypatch.setenv(KEY, "1")
     monkeypatch.setattr(git_mod, "commit_review_contract_fingerprint", lambda: "cf-1")
     ctx = SimpleNamespace(
@@ -524,13 +524,13 @@ def test_blocking_exhaustion_end_to_end_rolls_back_and_preserves_retry_pointer(
         ctx, "resolve", 0.0, pre_fingerprint={"fingerprint": "fp-new"}, review_rebuttal="",
     )
 
-    assert outcome is not None and outcome["block_reason"] == "review_cycles_exhausted"
-    assert "REVIEW_CYCLES_EXHAUSTED" in outcome["message"]
+    assert outcome is not None and "status" not in outcome and outcome["replay_reason"] == "review_cycles_exhausted"
+    assert "REVIEW_CYCLES_EXHAUSTED" in outcome["advisory_replay"]
     exhausted = _events(drive, "review_cycles_exhausted")
     assert exhausted and exhausted[-1]["surface"] == "commit_gate"
-    assert exhausted[-1]["enforcement"] == "blocking"
-    # The refusal path repaired the REAL merge state for the resolver: the
-    # staged managed merge survives the typed refusal.
+    assert exhausted[-1]["enforcement"] == "advisory"
+    # Nothing was refused or unstaged: the REAL staged managed merge of the
+    # resolver is as it was.
     assert update_merge._merge_head_sha() == plan["target_sha"]
     assert (repo / "a.txt").read_text() == "the resolver's precious resolution\n"
 
@@ -594,24 +594,21 @@ def test_binding_mismatch_is_infra_never_streak_or_anchor(tmp_path, monkeypatch)
     assert attempt_block_class(legacy) == "infra"
     assert attempt_block_class(recorded) == "infra"
     # An identical resubmit is NOT refused for free off the mismatch rows…
-    for enforcement in ("blocking", "advisory"):
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
-        assert git_mod._free_cycle_gate(
-            ctx, "msg", 0.0, pre_fingerprint={"fingerprint": "fp-1"}, review_rebuttal="",
-        ) is None
+    assert git_mod._free_cycle_gate(
+        ctx, "msg", 0.0, pre_fingerprint={"fingerprint": "fp-1"}, review_rebuttal="",
+    ) is None
     # …while the dispatched waves both count toward the money ceiling.
     assert count_paid_review_cycles(ctx, root_task_id="root-1") == 2
 
 
 def test_dispatched_infra_terminal_counts_money_but_never_identity(tmp_path, monkeypatch):
     """B7: one dispatched infra terminal (quorum failure after a paid dispatch)
-    counts a paid cycle — and ONLY the ceiling, never the identical-diff
-    refusal, can stop the next attempt."""
+    counts a paid cycle — and ONLY the spent ceiling turns the next attempt into
+    a free replay."""
     import ouroboros.tools.git as git_mod
     from ouroboros.review_state import CommitAttemptRecord, make_repo_key, update_state, _utc_now
     from ouroboros.tools.commit_gate import count_paid_review_cycles
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setattr(git_mod, "commit_review_contract_fingerprint", lambda: "cf-1")
     monkeypatch.setattr(git_mod, "run_cmd", lambda *a, **k: "")
     monkeypatch.setattr(git_mod, "_authorized_managed_update_resolver", lambda ctx: False)
@@ -637,12 +634,12 @@ def test_dispatched_infra_terminal_counts_money_but_never_identity(tmp_path, mon
     assert git_mod._free_cycle_gate(
         ctx, "msg", 0.0, pre_fingerprint={"fingerprint": "fp-1"}, review_rebuttal="",
     ) is None
-    # With the ceiling at the money already spent, ONLY exhaustion refuses.
+    # With the ceiling at the money already spent, ONLY exhaustion replays.
     monkeypatch.setenv(KEY, "1")
     outcome = git_mod._free_cycle_gate(
         ctx, "msg", 0.0, pre_fingerprint={"fingerprint": "fp-1"}, review_rebuttal="",
     )
-    assert outcome is not None and outcome["block_reason"] == "review_cycles_exhausted"
+    assert outcome is not None and outcome["replay_reason"] == "review_cycles_exhausted"
 
 
 # ---------------------------------------------------------------------------
@@ -732,12 +729,12 @@ def test_zero_result_panel_preserves_withheld_seat_records(monkeypatch):
     prepared = {
         "prompt": "p", "stable_prefix_len": 0, "models": ["session-1"],
         "routes": ["agent_session"], "row_plan": {}, "session_task": "t",
-        "target_repo": ".", "blocking_review": True,
+        "target_repo": ".",
     }
 
     blocked = review_mod._dispatch_unified_review(ctx, "msg", prepared)
 
-    assert blocked and "no results from any model" in blocked
+    assert blocked is None and any("no results from any model" in str(item) for item in ctx._review_advisory)
     assert ctx._last_review_block_reason == "infra_failure"
     # The withheld seat identities survived into the durable channel the gate
     # records (previously only the degraded-reason string survived).

@@ -137,3 +137,24 @@ def test_legacy_lookup_refuses_missing_archive_even_if_the_record_answers(tmp_pa
     with pytest.raises(smoke.SmokeFailure) as error:
         smoke.retained_legacy_run(SimpleNamespace(get_run=get_run), daemon, fixture)
     assert error.value.code == 'legacy_source_not_preserved'
+
+
+def test_every_runtime_name_the_witness_imports_inside_a_step_exists():
+    """The witness imports runtime internals inside its steps, which only the platform gate runs; a removed or
+    renamed name fails here instead (#3167: ``settle`` still imported the deleted ``_delegate_wait``)."""
+    import ast
+    import importlib
+    import importlib.util
+
+    tree = ast.parse(Path(smoke.__file__).read_text(encoding='utf-8'))
+    steps = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    late = [(node.module, alias.name) for step in steps
+            for node in ast.walk(step) if isinstance(node, ast.ImportFrom) and node.module
+            and node.module.split('.')[0] in {'ouroboros', 'scripts', 'supervisor'} for alias in node.names]
+    def found(module, name):  # an attribute, or a submodule of a package (a plain module has no __path__)
+        parent = importlib.import_module(module)
+        return hasattr(parent, name) or (hasattr(parent, '__path__')
+                                         and importlib.util.find_spec(f'{module}.{name}') is not None)
+
+    missing = [f'{module}.{name}' for module, name in late if not found(module, name)]
+    assert late and missing == []

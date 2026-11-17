@@ -66,10 +66,11 @@ def test_descendant_is_informational_and_problem_stays_warning(width, tmp_path):
                 assert problem.locator('.log-phase').inner_text() == 'warn'
                 assert page.locator('.log-entry').filter(has_text='comparison unavailable').locator('.log-phase').inner_text() == 'warn'
                 descendant.get_by_role('button', name='Raw', exact=True).click()
-                assert 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' in descendant.locator('.log-raw').inner_text()
+                # Raw reads a Blob asynchronously (logs_raw.js); the click opens it before its bytes arrive.
+                playwright.expect(descendant.locator('.log-raw')).to_contain_text('b' * 40)
                 assert 'Worker SHA mismatch' not in page.locator('#page-logs').inner_text()
                 assert not errors, errors
-                output = diagnostic_directory(tmp_path, "worker-sha") / f'worker-sha-{width}.png'
+                output = diagnostic_directory(tmp_path, "worker-sha", publish=True) / f'worker-sha-{width}.png'
                 page.screenshot(path=str(output), full_page=True)
                 print(f'WORKER_SHA_SCREENSHOT={output}')
             finally:

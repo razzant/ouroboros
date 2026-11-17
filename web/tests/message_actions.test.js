@@ -3,7 +3,7 @@
 // skills' `message.action` contributions joining it on Ouroboros's saved replies only.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { bindBubbleActions, bridgeContributedActions, createMessageActions, messageRow, presentAction }
+import { bindBubbleActions, bridgeContributedActions, createMessageActions, messageRow, presentAction, recordAnswerWords }
     from '../modules/message_actions.js';
 import { installDomDouble } from './dom_double.js';
 
@@ -36,7 +36,7 @@ test('actions come in order, then registration; a key replaces; an unregister re
     assert.deepEqual(notices, [''], 'a batch tells its listeners once');
 });
 
-test('the row an action sees: a saved bubble\'s address, role, task and plain words; an unsaved one is no row', () => {
+test('the row an action sees: a saved bubble\'s address, role, task, plain words and recorded source; an unsaved one is no row', () => {
     const env = installDomDouble();
     try {
         const { el } = env;
@@ -44,8 +44,15 @@ test('the row an action sees: a saved bubble\'s address, role, task and plain wo
             el('div', { className: 'sender', text: 'Ouroboros' }), el('div', { className: 'message', text: '  Milk and eggs ' }));
         const row = messageRow(saved);
         assert.deepEqual({ ...row, content: undefined }, { address: 'row:1@t#a', role: 'assistant', taskId: 't-1',
-            text: 'Milk and eggs', content: undefined });
+            text: 'Milk and eggs', content: undefined, answerWords: '', card: null, holdTransient: null },
+            'a bubble whose words nobody recorded has no source to pass on');
         assert.equal(row.content, saved.children[1]);
+        const hold = (close) => () => close;
+        recordAnswerWords(saved, '  **Milk** and eggs\n', hold);
+        const recorded = messageRow(saved);
+        assert.equal(recorded.answerWords, '  **Milk** and eggs\n', 'the recorded source stays exact, untrimmed');
+        assert.equal(recorded.text, 'Milk and eggs', 'the plain words a skill reads are unchanged');
+        assert.equal(recorded.holdTransient, hold);
         assert.equal(messageRow(el('div', { className: 'chat-bubble user' })), null);
         assert.deepEqual(presentAction({ label: 'Read aloud', icon: 'volume', state: () => ({ label: 'Stop', icon: 'stop', pressed: true }) }, row),
             { label: 'Stop', icon: 'stop', title: 'Stop', pressed: true });

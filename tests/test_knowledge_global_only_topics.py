@@ -25,7 +25,7 @@ def project_ctx(tmp_path, project_id: str = "demo") -> ToolContext:
 
 def test_reserved_set_is_exactly_the_three_shared_topics():
     assert tools.GLOBAL_ONLY_TOPICS == frozenset({
-        tools.BACKLOG_TOPIC, store.OVERVIEW_TOPIC, tools.PATTERNS_TOPIC})
+        tools.BACKLOG_TOPIC, store.OVERVIEW_TOPIC, "patterns"})
 
 
 def test_the_former_register_keeps_its_one_global_home(tmp_path):
@@ -35,13 +35,13 @@ def test_the_former_register_keeps_its_one_global_home(tmp_path):
     canonical = tmp_path / "memory" / "knowledge" / "patterns.md"
 
     written = tools._knowledge_write(
-        ctx, topic=tools.PATTERNS_TOPIC,
+        ctx, topic="patterns", mode="overwrite",
         content="# Pattern Register\n\n| Error class | Count |\n|---|---|\n| x | 1 |\n")
 
     assert "✅" in written
     assert canonical.exists()
     assert not (tmp_path / "projects" / "demo" / "knowledge" / "patterns.md").exists()
-    assert "| x | 1 |" in tools._knowledge_read(ctx, tools.PATTERNS_TOPIC)
+    assert "| x | 1 |" in tools._knowledge_read(ctx, "patterns")
 
 
 def test_reserved_topics_resolve_globally_from_a_project_room(subtests, tmp_path):
@@ -71,7 +71,7 @@ def test_overview_written_from_a_project_room_is_read_back_globally(tmp_path):
     ctx = project_ctx(tmp_path)
 
     written = tools._knowledge_write(
-        ctx, topic="overview", content="# What I understand\n\nA short orientation.\n")
+        ctx, topic="overview", mode="overwrite", content="# What I understand\n\nA short orientation.\n")
 
     assert "✅" in written
     assert (tmp_path / "memory" / "knowledge" / "overview.md").exists()
@@ -98,14 +98,14 @@ def test_the_backlog_is_one_authored_global_note_from_a_project_room(tmp_path):
     ctx = project_ctx(tmp_path)
     item = "- Trim the index preview.\n"
 
-    written = tools._knowledge_write(ctx, topic=tools.BACKLOG_TOPIC, content=item)
+    written = tools._knowledge_write(ctx, topic=tools.BACKLOG_TOPIC, mode="overwrite", content=item)
 
     assert written.startswith("✅")
     path = tmp_path / "memory" / "knowledge" / f"{tools.BACKLOG_TOPIC}.md"
     assert path.read_text(encoding="utf-8").endswith(item)  # the author's text, not a re-rendered item list
     assert not (tmp_path / "projects" / "demo" / "knowledge").exists()
     # A second overwrite without the current revision is refused, never merged.
-    stale = tools._knowledge_write(ctx, topic=tools.BACKLOG_TOPIC, content="- Another item.\n")
+    stale = tools._knowledge_write(ctx, topic=tools.BACKLOG_TOPIC, mode="overwrite", content="- Another item.\n")
     assert "revision_required" in stale and path.read_text(encoding="utf-8").endswith(item)
 
 
@@ -120,17 +120,32 @@ def test_write_schema_states_the_rules_the_code_actually_enforces(tmp_path):
     assert "people and relationships" in props["scope"]["description"]
     assert "no scope prefixes" in props["topic"]["description"]
     assert "stays resident in the index" in schemas["knowledge_write"]["description"]
+    # Where a summary is in front of me: a global note's in every room and place, a project note's in its project
+    # (context_sections.knowledge_navigation_sections). The fact sits in the tool text, which direct OpenAI routes
+    # carry whole (test_openai_chat_custom_contract.test_actual_profile_catalogs_carry_every_tool_lead_whole).
+    audience = "(a global note's in every room and place I work in, a project note's in that project)"
+    assert audience in schemas["knowledge_write"]["description"]
+    # The operation is chosen, never assumed. The lead says so too: a route that drops parameter prose still
+    # carries the tool text whole (test_openai_chat_custom_contract).
+    assert schemas["knowledge_write"]["parameters"]["required"] == ["topic", "mode"]
+    assert props["mode"]["description"].startswith("Required, with no default:")
+    assert "mode is required and has no default; a call without it writes nothing." in schemas["knowledge_write"]["description"]
 
     # …and the retained-frontmatter claim is true: a body-only overwrite keeps
     # the authored summary that the index renders.
     ctx = project_ctx(tmp_path)
-    tools._knowledge_write(ctx, topic="people/ada", scope="global",
+    tools._knowledge_write(ctx, topic="people/ada", scope="global", mode="overwrite",
                            content="---\ntype: note\nsummary: Prefers short answers.\n---\n\nFirst.\n")
     address = tools._address(ctx, "people/ada", "global")
     revision = store.read_knowledge_note(address).revision
-    tools._knowledge_write(ctx, topic="people/ada", scope="global",
+    tools._knowledge_write(ctx, topic="people/ada", scope="global", mode="overwrite",
                            content="Second, revised.\n", expected_revision=revision)
 
     note = store.read_knowledge_note(address)
     assert note.summary == "Prefers short answers."
     assert "Second, revised." in note.text
+    # …and the required mode is required: the same replacement without it writes nothing.
+    refused = tools._knowledge_write(ctx, topic="people/ada", scope="global", content="Third.\n",
+                                     expected_revision=note.revision)
+    assert refused.startswith("⚠️ TOOL_ARG_ERROR: mode is missing or null.") and "Nothing was written." in refused
+    assert address.path.read_bytes() == note.raw

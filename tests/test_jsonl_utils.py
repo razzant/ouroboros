@@ -132,6 +132,16 @@ def test_every_writer_lands_every_byte_through_short_os_writes(tmp_path, monkeyp
     assert (tmp_path / "state.json").read_bytes() == state.encode("utf-8")
 
 
+def test_append_jsonl_writes_one_compact_line_that_keeps_every_value(tmp_path):
+    """A row takes no separator spaces (``utils.machine_json``); every value, the key order and the text inside strings stay."""
+    row = {"type": "tool_call", "args": {"cmd": "echo a, b: c", "path": "\u0436.txt"}, "n": [1, 2.5, None, True], "text": "two\nlines"}
+    target = tmp_path / "logs" / "events.jsonl"
+    assert utils.append_jsonl(target, row) is True
+    raw = target.read_bytes()
+    assert raw == '{"type":"tool_call","args":{"cmd":"echo a, b: c","path":"\u0436.txt"},"n":[1,2.5,null,true],"text":"two\\nlines"}\n'.encode("utf-8")
+    assert json.loads(raw) == row and list(json.loads(raw)) == list(row)
+
+
 def test_append_jsonl_reports_a_write_that_dies_mid_record_and_never_replays_it(tmp_path, monkeypatch):
     """A write that dies mid-record reports False and is not retried whole: a replay would duplicate the prefix
     already on disk. Only the open is retried."""

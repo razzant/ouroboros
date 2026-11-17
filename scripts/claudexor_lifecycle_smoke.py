@@ -138,12 +138,13 @@ def wait_running(gateway, row, seconds):
 
 def settle(ctx, gateway, row, seconds, expected):
     from ouroboros import delegate_custody as custody
-    from ouroboros.tools.delegate import _delegate_wait
+    from ouroboros.tools.delegate import _read_run
 
     detail = poll_to_terminal(gateway, row.run_id, seconds)
     state = (detail.get('summary') or {}).get('state')
     require(state == expected, 'unexpected_terminal', state=state, expected=expected)
-    answer = json.loads(_delegate_wait(ctx, row.run_id, wait_sec=1, gateway=gateway))
+    # The read a delegate_wait wake makes of its run: a terminal run is collected and settled here.
+    answer = json.loads(_read_run(ctx, row.run_id, gateway=gateway))
     require((answer.get('settlement') or {}).get('settled'), 'production_settlement_failed', answer=answer)
     recorded = custody.replay(ctx.drive_root)[row.run_id]
     require(recorded.settled and recorded.ledger_recorded, 'durable_settlement_missing')
@@ -213,6 +214,20 @@ def retained_legacy_run(gateway, daemon_dir, fixture):
     return observed
 
 
+def absent_run_store(gateway):
+    """The store a real run 404 names (``context.storeId``): absence is only that store's fact."""
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    try:
+        gateway.get_run('run-store-probe-absent')
+    except ClaudexorUnavailable as exc:
+        named = ((getattr(exc, 'problem', None) or {}).get('context') or {}).get('storeId')
+        require(exc.status_code == 404 and named and named == gateway.store_identity,
+                'absent_run_store_unnamed', status=exc.status_code, named=named)
+        return named
+    raise SmokeFailure('unknown_native_run_found', 'An absent probe run id returned a record.')
+
+
 def lifecycle(seconds):
     from ouroboros import delegate_custody as custody
     from ouroboros.claudexor_daemon import ensure_owned_gateway, get_owned_daemon, owned_config_dir
@@ -235,9 +250,12 @@ def lifecycle(seconds):
         children.append(manager._proc)
         facts = capacity(manager)
         facts['legacy_native_run_after_import'] = retained_legacy_run(gateway, daemon_dir, legacy)
+        facts['absent_run_store'] = absent_run_store(gateway)
         first = owner_context(DATA_DIR, 'lifecycle-cancel-owner')
         a = start(first, 'fake-hang', seconds)
         require(a.project_owned and not a.project_persistent, 'fixture_project_not_owned')
+        require(a.daemon_store_id and a.daemon_store_id == gateway.store_identity,  # the receipt's own store
+                'start_store_unbound', bound=a.daemon_store_id, serving=gateway.store_identity)
         wait_running(gateway, a, seconds)
         cancel = json.loads(_delegate_cancel(first, a.run_id, reason='fixture interrupt A').text)
         require(cancel.get('status') in {'requested', 'confirmed'}, 'cancel_refused', result=cancel)
@@ -259,8 +277,10 @@ def lifecycle(seconds):
         require(manager._proc is not None and manager._proc.pid != victim.pid, 'host_did_not_respawn')
         children.append(manager._proc)
         facts['legacy_native_run_after_restart'] = retained_legacy_run(gateway, daemon_dir, legacy)
+        require(absent_run_store(gateway) == facts['absent_run_store'], 'store_changed_across_restart')
         settle(second, gateway, b, seconds, 'interrupted')
         b2 = start(second, 'fake-implement', seconds, b.run_id)
+        require(b2.daemon_store_id == facts['absent_run_store'], 'start_store_unbound', bound=b2.daemon_store_id)
         settle(second, gateway, b2, seconds, 'succeeded')
 
         # Deferred registrations must be swept even when no orphan run remains.

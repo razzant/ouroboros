@@ -48,10 +48,14 @@ def test_the_real_producers_emit_exactly_the_declared_fields(tmp_path, monkeypat
                                                "OUROBOROS_WEBSEARCH_MODEL": "vendor/future"})
     assert _required(contracts.WebSearchRoute) <= set(route) <= _py_fields(contracts.WebSearchRoute)
     assert route["legs"] and all(set(leg) == _required(contracts.WebSearchLeg) for leg in route["legs"])
-    assert route["unavailable"] and all(set(leg) == _py_fields(contracts.WebSearchLeg) for leg in route["unavailable"])
+    assert route["unavailable"] and all(set(leg) == _required(contracts.WebSearchLeg) | {"unavailable_reason"}
+                                        for leg in route["unavailable"])
     refused = resolve_web_search_route(settings={"OUROBOROS_WEBSEARCH_BACKEND": "openai",
                                                  "OUROBOROS_WEBSEARCH_MODEL": "anthropic::future"})
     assert "error" in refused and set(refused) <= _py_fields(contracts.WebSearchRoute)
+    named = resolve_web_search_route(settings={"OUROBOROS_WEBSEARCH_BACKEND": "deepseek", "OUROBOROS_WEBSEARCH_MODEL": "deepseek@work::",
+                                               "OUROBOROS_CONNECTIONS": [{"kind": "deepseek", "name": "work", "api_key": "k"}]})
+    assert set(named["legs"][0]) == _py_fields(contracts.WebSearchLeg) - {"unavailable_reason"}  # every optional fact
 
     assert set(asdict(ResponseLimit())) == _py_fields(contracts.ResponseLimit)
     monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://compatible.invalid/v1")

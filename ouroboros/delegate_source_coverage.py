@@ -298,9 +298,15 @@ def record_started_custody(
     resource_ref: Dict[str, Any], capture_mode: str, processing: Mapping[str, Any] | None = None,
     prompt_cache_ttl: Mapping[str, Any] | None = None,
     continuation_of: str = "", capture_id: str = "", snapshot_task_id: str = "", max_seconds_basis: str = "",
-    row_effort: Optional[str] = None, plan_facts: Optional[dict] = None,
-) -> bool:
-    """Write the one STARTED custody row, including the source binding.
+    row_effort: Optional[str] = None, row_processing: Optional[str] = None, plan_facts: Optional[dict] = None,
+    daemon_store_id: str = "", engine_ref: Optional[dict] = None,
+) -> Tuple[str, bool]:
+    """Write the one STARTED custody row, including the source binding: ``(run id custody holds, durable)``.
+
+    The row converges with any other writer of the same invocation (``delegate_accepted.bind_started``):
+    when a recovery read already bound its accepted work, under the job id or the run id, that run keeps
+    this start's facts and its name is the one returned, so one custody and cost row remains. Without
+    the decision lock nothing is published: the run stays this process's ``started_uncustodied`` handle.
 
     ``continuation_of`` names the prior run this start explicitly continues
     (``delegate_continuation``); ``capture_id``/``snapshot_task_id`` bind a run
@@ -308,7 +314,9 @@ def record_started_custody(
     lineage and the hand-over replay with every other start fact. ``max_seconds_basis``
     records HOW ``seconds`` was decided (``delegate_registration_policy.CAP_BASIS_*``)
     beside the cap itself, so a later expiry can be told apart from the nanny's
-    own deadline or lifetime.
+    own deadline or lifetime. ``daemon_store_id`` is the store the start's own receipt named
+    (``delegate_custody.admitted_store_id``); "" leaves the run unbound.
+    ``engine_ref`` independently keeps the managed endpoint chosen before POST.
     """
 
     from ouroboros import delegate_custody as custody_module
@@ -332,6 +340,7 @@ def record_started_custody(
         ledger_root=str(drive),
         idempotency_key=key,
         invocation_id=invocation_id,
+        daemon_store_id=str(daemon_store_id or ""),
         selected_subagent_id=selected_subagent_id,
         config_fingerprint=config_fingerprint,
         work_order_fingerprint=work_order_fingerprint,
@@ -354,23 +363,25 @@ def record_started_custody(
         continuation_of=str(continuation_of or ""),
         capture_id=str(capture_id or ""),
         snapshot_task_id=str(snapshot_task_id or ""),
+        engine_ref=dict(engine_ref or {}),
     )
-    recorded = custody_module.record_started(
+    entry, recorded = custody_module.bind_started(
         drive,
         entry,
         shape={
             "effort": route.effort, "access": access, "mode": authority.mode,
             **({"row_effort": str(row_effort)} if row_effort is not None else {}),
+            **({"row_processing": str(row_processing)} if row_processing is not None else {}),
             "isolation": authority.isolation, "delegated": authority.delegated,
             "root": root, "max_seconds": seconds, "max_seconds_basis": str(max_seconds_basis or ""),
             "capture_mode": capture_mode,
         },
-    )
+    )[:2]
     if recorded and entry.promotion:
         from ouroboros.delegate_plan import promotion_notice
 
         promotion_notice(ctx, entry)
-    return recorded
+    return entry.run_id, recorded
 
 
 __all__ = [

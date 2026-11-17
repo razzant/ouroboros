@@ -242,13 +242,15 @@ def load_manifest(path: pathlib.Path = MANIFEST_PATH) -> Manifest:
     )
 
 
-def tracked_population(root: pathlib.Path = REPO_ROOT) -> set[str]:
+def tracked_population(root: pathlib.Path = REPO_ROOT, *, untracked: bool = False) -> set[str]:
+    """The runtime modules git knows; ``untracked`` adds the ones not ignored and not yet staged."""
     out = subprocess.run(
-        ["git", "ls-files", "ouroboros/**/*.py", "ouroboros/*.py",
+        ["git", "ls-files", "-z", *(("--cached", "--others", "--exclude-standard") if untracked else ()),
+         "ouroboros/**/*.py", "ouroboros/*.py",
          "supervisor/*.py", "supervisor/**/*.py", "server.py", "launcher.py"],
-        cwd=root, capture_output=True, text=True, check=True,
-    ).stdout.split()
-    return set(out)
+        cwd=root, capture_output=True, check=True,
+    ).stdout
+    return {p for p in out.decode("utf-8", "surrogateescape").split("\0") if p}
 
 
 @dataclass

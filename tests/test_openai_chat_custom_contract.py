@@ -25,6 +25,8 @@ from ouroboros.openai_chat_custom import (
 )
 from ouroboros.request_wire_contract import canonical_json
 from ouroboros.request_wire_receipts import WireCandidateSpec, bind_wire_candidate
+from tests.test_mcp_headers_loopback import loopback  # noqa: F401
+from tests.test_mcp_redirects import recorder  # noqa: F401
 
 _SCHEMA_CLAUSE = "Input must be one JSON object matching this schema: "
 
@@ -98,9 +100,20 @@ def _projected_schema(catalog, name):
     return value
 
 
+def _schema_text(schema):
+    """A schema as a tool that fits whole carries it: canonical, with non-ASCII text as written."""
+    return json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _lead_one_over_the_whole_schema(schema):
+    """A lead one character too long to stand beside the whole schema: the structure alone is sent."""
+    return "l" * max(1, MAX_CUSTOM_DESCRIPTION_CHARS - len(_SCHEMA_CLAUSE + _schema_text(schema)))
+
+
 def _assert_validator_parity(schema, cases, validator_class):
     tool = copy.deepcopy(_tools()[0])
     tool["function"]["parameters"] = schema
+    tool["function"]["description"] = _lead_one_over_the_whole_schema(schema)
     compact = _projected_schema(project_function_tools_to_openai_custom([tool]), "probe")
     validator_class.check_schema(schema)
     validator_class.check_schema(compact)
@@ -125,8 +138,39 @@ def test_projection_is_deterministic_structural_and_schema_bound():
     )
     probe_description = first.wire_tools()[0]["custom"]["description"]
     assert '"enum":["ok"]' in probe_description
-    assert "Nested prose" not in probe_description
     assert first.schema_binding("probe").schema()["properties"]["marker"]["description"]
+
+
+def test_a_tool_that_fits_whole_keeps_its_field_prose_and_a_larger_one_sends_structure_alone():
+    """OpenAI bounds custom.description in code points, and the schema inside it is all the model reads of a
+    tool's fields. Up to the bound a tool's lead and whole schema go as the function dialect sends them, every
+    annotation included and non-ASCII prose as written, one character each; one character over, the same tool
+    sends its structure alone with its lead still whole. The schema bound for argument validation is the
+    original either way."""
+    tool = copy.deepcopy(_tools()[0])
+    function = tool["function"]
+    lead = function["description"]
+    field = function["parameters"]["properties"]["marker"]
+    field.update({"default": "ok", "x-note": "kept", "description": ""})
+    structure = copy.deepcopy(function["parameters"])
+    for annotation in ("default", "x-note", "description"):
+        del structure["properties"]["marker"][annotation]
+    room = MAX_CUSTOM_DESCRIPTION_CHARS - len(lead + "\n" + _SCHEMA_CLAUSE + _schema_text(function["parameters"]))
+
+    def projected(prose, description=lead):
+        field["description"], function["description"] = prose, description
+        catalog = project_function_tools_to_openai_custom([tool])
+        assert catalog.schema_binding("probe").schema() == function["parameters"]
+        return catalog.wire_tools()[0]["custom"]["description"]
+
+    at_the_bound = projected("я" * room)
+    assert len(at_the_bound) == MAX_CUSTOM_DESCRIPTION_CHARS
+    assert at_the_bound == lead + "\n" + _SCHEMA_CLAUSE + _schema_text(function["parameters"])
+    assert "я" * room in at_the_bound and '"default":"ok"' in at_the_bound and '"x-note":"kept"' in at_the_bound
+    assert _projected_schema(project_function_tools_to_openai_custom([tool]), "probe") == function["parameters"]
+    assert projected("я" * (room + 1)) == lead + "\n" + _SCHEMA_CLAUSE + canonical_json(structure)
+    # A tool without a lead is its schema alone, under the same bound.
+    assert projected("p", description=None) == _SCHEMA_CLAUSE + _schema_text(function["parameters"])
 
 
 def test_compaction_preserves_literal_enum_and_const_objects_exactly():
@@ -436,6 +480,15 @@ def test_custom_calls_normalize_and_full_schema_receipt_gates_execution():
     assert invalid_receipts[0].error_code == "schema_validation_failed"
     assert not invalid_receipts[0].allows_execution
     assert custom_receipts_prove_wire_acceptance(invalid_receipts)
+    # The refusal says which constraint failed where, in jsonschema's own words, bounded; a valid call carries none.
+    assert invalid_receipts[0].detail == "marker: 'wrong' is not one of ['ok']" and valid_receipts[0].detail == ""
+    _, long_receipts = normalize_openai_custom_tool_calls([{
+        "id": "call_long",
+        "type": "custom",
+        "custom": {"name": "probe", "input": json.dumps({"marker": "w" * 5000})},
+    }], candidate)
+    detail = long_receipts[0].detail
+    assert detail.startswith("marker: 'www") and "OMISSION NOTE" in detail and len(detail) == 200
 
     _, malformed = normalize_openai_custom_tool_calls([{
         "id": "call_malformed",
@@ -479,6 +532,139 @@ def test_missing_local_schema_ref_returns_typed_non_executable_receipt():
     }], candidate)
 
     assert receipts[0].decoded_object is True
+    assert receipts[0].error_code == "invalid_schema"
+    assert not receipts[0].allows_execution
+    assert custom_receipts_prove_wire_acceptance(receipts)
+
+
+def _mcp_input_schema_app(schema):
+    from mcp import types
+    from mcp.server.fastmcp import FastMCP
+
+    server = FastMCP("custom-schema-refs", host="127.0.0.1", log_level="WARNING")
+
+    @server._mcp_server.list_tools()
+    async def list_tools():
+        return [types.Tool(name="probe", inputSchema=schema)]
+
+    return server.streamable_http_app()
+
+
+@pytest.mark.parametrize(("keyword", "dialect", "relative"), [
+    ("$ref", None, False),
+    ("$dynamicRef", None, False),
+    ("$ref", "http://json-schema.org/draft-07/schema#", False),
+    ("$ref", None, True),
+])
+def test_mcp_custom_arguments_never_fetch_external_schema_refs(loopback, recorder, monkeypatch, tmp_path, keyword, dialect, relative):  # noqa: F811
+    """A real MCP listing reaches the custom consumer, without a hidden GET."""
+    from ouroboros import config, mcp_client
+    from ouroboros.tools.registry_core import _dynamic_tool_schema
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    body = b'{"type":"string","enum":["ok"]}'
+    target = recorder(reply=b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode()
+                      + b"\r\nConnection: close\r\n\r\n" + body)
+    schema = {"type": "object", "properties": {
+        "marker": {keyword: "marker" if relative else target.url("/marker")},
+    }}
+    if relative:
+        schema["$id"] = target.url("/tool")
+    if dialect:
+        schema["$schema"] = dialect
+    _app, url = loopback("http", {}, wrap=lambda _app: _mcp_input_schema_app(schema))
+    manager = mcp_client.get_manager()
+    manager.reconfigure({"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 20, "MCP_SERVERS": [
+        {"id": "ref_probe", "enabled": True, "url": url},
+    ]})
+    listing = manager.refresh_server("ref_probe")
+    assert listing["ok"] and [tool["name"] for tool in listing["tools"]] == ["probe"], listing
+    catalog = [_dynamic_tool_schema(tool) for tool in manager.list_tools_for_registry()]
+    assert len(catalog) == 1
+    candidate = _wire_candidate(catalog)
+    name = catalog[0]["function"]["name"]
+    assert candidate.custom_catalog.schema_binding(name).schema() == schema
+    _, receipts = normalize_openai_custom_tool_calls([{
+        "id": "call_external_ref", "type": "custom",
+        "custom": {"name": name, "input": '{"marker":"ok"}'},
+    }], candidate)
+    assert target.connections == [], target.connections
+    assert receipts[0].error_code == "invalid_schema"
+    assert not receipts[0].allows_execution
+    assert custom_receipts_prove_wire_acceptance(receipts)
+
+
+@pytest.mark.parametrize(("dialect", "definitions", "reference", "identifier"), [
+    ("http://json-schema.org/draft-07/schema#", "definitions", "#/definitions/marker", {}),
+    ("https://json-schema.org/draft/2020-12/schema", "$defs", "#/$defs/marker", {}),
+    ("https://json-schema.org/draft/2020-12/schema", "$defs", "#marker", {"$anchor": "marker"}),
+    ("https://json-schema.org/draft/2020-12/schema", "$defs", "marker", {"$id": "marker"}),
+    ("https://json-schema.org/draft/2020-12/schema", "$defs", "https://schema.example/marker", {
+        "$id": "https://schema.example/marker",
+    }),
+])
+def test_custom_argument_local_refs_preserve_validation(monkeypatch, dialect, definitions, reference, identifier):
+    import urllib.request
+
+    def no_retrieval(*_args, **_kwargs):
+        pytest.fail("an in-document reference tried to retrieve a resource")
+
+    monkeypatch.setattr(urllib.request, "urlopen", no_retrieval)
+    tools = _tools()
+    tools[0]["function"]["parameters"] = {
+        "$schema": dialect, "$id": "https://schema.example/tool",
+        "type": "object", "properties": {"marker": {"$ref": reference}},
+        definitions: {"marker": {"type": "string", "enum": ["ok"], **identifier}},
+    }
+    candidate = _wire_candidate(tools)
+    for marker, expected in (("ok", ""), ("wrong", "schema_validation_failed")):
+        _, receipts = normalize_openai_custom_tool_calls([{
+            "id": "call_local_ref", "type": "custom",
+            "custom": {"name": "probe", "input": json.dumps({"marker": marker})},
+        }], candidate)
+        assert receipts[0].error_code == expected
+        assert receipts[0].allows_execution is (not expected)
+        assert custom_receipts_prove_wire_acceptance(receipts)
+
+
+@pytest.mark.parametrize(("schema", "valid", "invalid"), [
+    ({"type": "object", "properties": {
+        "marker": {"type": "string"}, "child": {"$ref": "#"},
+    }}, {"child": {"marker": "ok"}}, {"child": {"marker": 3}}),
+    ({"$ref": "https://json-schema.org/draft/2020-12/schema"},
+     {"type": "string"}, {"type": "not-a-schema-type"}),
+])
+def test_custom_argument_refs_keep_recursion_and_bundled_metaschemas(monkeypatch, schema, valid, invalid):
+    import urllib.request
+
+    def no_retrieval(*_args, **_kwargs):
+        pytest.fail("a local resource tried to retrieve an external document")
+
+    monkeypatch.setattr(urllib.request, "urlopen", no_retrieval)
+    tools = _tools()
+    tools[0]["function"]["parameters"] = schema
+    candidate = _wire_candidate(tools)
+    for arguments, expected in ((valid, ""), (invalid, "schema_validation_failed")):
+        _, receipts = normalize_openai_custom_tool_calls([{
+            "id": "call_resource", "type": "custom",
+            "custom": {"name": "probe", "input": json.dumps(arguments)},
+        }], candidate)
+        assert receipts[0].error_code == expected
+        assert receipts[0].allows_execution is (not expected)
+        assert custom_receipts_prove_wire_acceptance(receipts)
+
+
+def test_custom_argument_validation_does_not_load_file_references(tmp_path):
+    referenced = tmp_path / "marker.json"
+    referenced.write_text('{"type":"string","const":"ok"}', encoding="utf-8")
+    tools = _tools()
+    tools[0]["function"]["parameters"] = {
+        "type": "object", "properties": {"marker": {"$ref": referenced.as_uri()}},
+    }
+    _, receipts = normalize_openai_custom_tool_calls([{
+        "id": "call_file_ref", "type": "custom",
+        "custom": {"name": "probe", "input": '{"marker":"ok"}'},
+    }], _wire_candidate(tools))
     assert receipts[0].error_code == "invalid_schema"
     assert not receipts[0].allows_execution
     assert custom_receipts_prove_wire_acceptance(receipts)
@@ -640,9 +826,9 @@ _ACTUAL_PROFILES = {
 
 @pytest.mark.parametrize("profile", sorted(_ACTUAL_PROFILES))
 def test_actual_profile_catalogs_carry_every_tool_lead_whole(tmp_path, profile):
-    """Custom tools drop parameter prose, so a first-party lead clipped to fit beside its compact
-    schema loses pre-call conditions nothing else on that wire carries (schedule_subagent's tail
-    did, #502). Extension and MCP descriptions are external text, not covered here."""
+    """A tool too large for the description bound goes without parameter prose, so a first-party lead
+    clipped to fit beside its bare structure loses pre-call conditions nothing else on that wire carries
+    (schedule_subagent's tail did, #502). Extension and MCP descriptions are external text, not covered here."""
     from ouroboros.tools.registry import ToolRegistry
 
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=tmp_path)
@@ -662,3 +848,62 @@ def test_actual_profile_catalogs_carry_every_tool_lead_whole(tmp_path, profile):
             over[name] = len(lead) - (MAX_CUSTOM_DESCRIPTION_CHARS - len(clause) - 1)
     assert "schedule_subagent" in checked, sorted(checked)
     assert over == {}, f"{profile}: leads clipped by the custom description bound (chars over): {over}"
+
+
+@pytest.mark.parametrize("name", ["knowledge_read", "knowledge_write"])
+def test_knowledge_tools_project_whole_where_parameter_prose_does_not_arrive(name):
+    """A tool that does not fit the custom description bound whole goes without parameter descriptions,
+    so every knowledge mode must be explained in the tool's own lead, unclipped."""
+    from ouroboros.tools.knowledge import get_tools
+
+    entry = next(entry for entry in get_tools() if entry.name == name)
+    projected = project_function_tools_to_openai_custom([{"type": "function", "function": entry.schema}]).wire_tools()
+    description = projected[0]["custom"]["description"]
+    lead = " ".join(entry.schema["description"].split())
+    assert len(description) <= MAX_CUSTOM_DESCRIPTION_CHARS
+    assert description.startswith(lead + "\n" + _SCHEMA_CLAUSE), f"{name} lead clipped on the custom route"
+    words = (["view='outline'", "view='history'", "version="] if name == "knowledge_read" else
+             ["mode is required and has no default", "overwrite", "append", "edit", "edits", "{old_str, new_str}",
+              "revert", "archive", "restore", "reason",
+              "summary", "expected_revision", "names the note's enduring scope and when to open it",
+              "not a dated log of the latest edit", "Text a write removes stays in the note's history",
+              "view='history' or version=", "put back (mode='revert')"])
+    assert all(word in lead for word in words), [word for word in words if word not in lead]
+
+
+_MEMORY_TEXT_WORDS = {
+    "update_identity": ["mode='edit'", "edits=[{old_str, new_str}, ...]", "found once in the revision I read",
+                        "all applied or none", "mode='overwrite'", "mode='revert'", "expected_revision", "stale",
+                        "never empty", "reason", "memory_read(source='identity', version=...)"],
+    "update_world": ["mode='edit'", "edits=[{old_str, new_str}, ...]", "all or none", "mode='overwrite'",
+                     "mode='revert'", "measured block", "byte for byte", "no marker line", "current block",
+                     "expected_revision", "stale", "never empty", "memory_read(source='world', version=...)"],
+    "workpad_write": ["mode='edit'", "edits=[{old_str, new_str}, ...]", "all or none", "mode='overwrite'",
+                      "mode='revert'", "required for edit and revert", "an overwrite without it still lands",
+                      "warning", "enters every request of its project whole", "memory_read(source='workpad:"],
+    "workpad_read": ["revision", "memory_read(source='workpad')"],
+    "memory_read": ["source=identity, world, workpad or workpad:<project id>", "version=<revision>",
+                    "newest first", "need no chronicle"],
+}
+
+
+@pytest.mark.parametrize("name", sorted(_MEMORY_TEXT_WORDS))
+def test_memory_text_tools_project_whole_where_parameter_prose_does_not_arrive(name):
+    """The writers of identity, the map and a workpad, and the version door, lead with their modes (edit first),
+    their revision rule and the map's block rule: where parameter prose does not arrive the lead stands alone,
+    and it must project unclipped beside the schema."""
+    from ouroboros.tools.chronicle import chronicle_tools
+    from ouroboros.tools.control import get_tools as control_tools
+    from ouroboros.tools.project_journal import get_tools as journal_tools
+
+    entry = next(entry for entry in [*control_tools(), *journal_tools(), *chronicle_tools()] if entry.name == name)
+    projected = project_function_tools_to_openai_custom([{"type": "function", "function": entry.schema}]).wire_tools()
+    description = projected[0]["custom"]["description"]
+    lead = " ".join(entry.schema["description"].split())
+    assert len(description) <= MAX_CUSTOM_DESCRIPTION_CHARS
+    assert description.startswith(lead + "\n" + _SCHEMA_CLAUSE), f"{name} lead clipped on the custom route"
+    words = _MEMORY_TEXT_WORDS[name]
+    assert all(word in lead for word in words), [word for word in words if word not in lead]
+    if name.startswith(("update_", "workpad_write")):
+        assert lead.index("mode='edit'") < lead.index("mode='overwrite'")  # edit first
+        assert "content" not in entry.schema["parameters"].get("required", [])

@@ -477,18 +477,19 @@ def plan_panel_health_snapshot(slots: list) -> Optional[Dict[str, Dict[str, str]
     session_slots = [slot for slot in slots if slot_is_session(slot)]
     if not session_slots:
         return {}
-    from ouroboros.claudexor_daemon import ensure_owned_gateway, owned_daemon_provisioned
+    from ouroboros.claudexor_daemon import owned_daemon_provisioned
+    from ouroboros.execution_domain import current as execution_domain, native_gateway
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.subagents import delegated_run_shape, route_health
     from ouroboros.review_execution import ReviewRouteUnavailable, session_route_for_review_slot
 
-    if not owned_daemon_provisioned():
+    if execution_domain() is None and not owned_daemon_provisioned():
         return None
     evidence: Dict[str, Dict[str, str]] = {}
     by_route: Dict[tuple, tuple[str, str]] = {}
     gateway = None
     try:
-        gateway = ensure_owned_gateway()
+        gateway = native_gateway()  # the seats' engine: the domain's work engine, else the owned one
         for slot in session_slots:
             try:
                 route = session_route_for_review_slot(slot)

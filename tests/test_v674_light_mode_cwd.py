@@ -76,9 +76,9 @@ def test_posix_wrappers_preserve_light_read_and_deliverable_guards(
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(user_root))
     monkeypatch.setenv("OUROBOROS_DELIVERABLES_ROOT", str(deliverables))
 
-    def guard(body, cwd="system_repo"):
+    def guard(body, cwd="system_repo", tail=()):
         field = "check" if tool_name == "verify_and_record" else "cmd"
-        args = process_shell_guard_args(tool_name, {field: [head, "-c", body], "cwd": cwd})
+        args = process_shell_guard_args(tool_name, {field: [head, "-c", body, *tail], "cwd": cwd})
         return _run_shell_safety_check(reg, args, "light")
 
     assert guard("cat BIBLE.md") is None
@@ -102,6 +102,10 @@ def test_posix_wrappers_preserve_light_read_and_deliverable_guards(
         assert refusal is not None, body
         assert (refusal.status, refusal.code) == ("blocked", "CORE_PROTECTION_BLOCKED" if "BIBLE_DELETE_BLOCKED" in refusal.text else "LIGHT_MODE_BLOCKED"), refusal
     assert shell_writer_targets_protected([head, "-c", "rm BIBLE.md"]) is True
+    # An empty argument keeps its position (#2919): `-c ''` runs an empty body and the
+    # next word is only $0, while an empty $0 leaves the real body inspected.
+    assert guard("", tail=("rm ordinary.py",)) is None
+    assert guard("rm ordinary.py", tail=("",)).code == "LIGHT_MODE_BLOCKED"
     rows = writer_target_rows([head, "-c", "printf result > report.txt"])
     assert [target for _argv, targets, _inline, _unknown in rows for target in targets] == ["report.txt"]
     assert not (deliverables / "report.txt").exists()  # inspection never executes

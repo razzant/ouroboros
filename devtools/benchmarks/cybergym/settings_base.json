@@ -8,7 +8,6 @@
   "OUROBOROS_MODEL_FALLBACKS": "deepseek/deepseek-v4-flash-0731",
   "OUROBOROS_WEBSEARCH_MODEL": "deepseek/deepseek-v4-flash-0731",
   "OUROBOROS_TASK_REVIEW_MODE": "off",
-  "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
   "OUROBOROS_REVIEW_MAX_CYCLES": "2",
   "OUROBOROS_EFFORT_TASK": "high",
   "OUROBOROS_EFFORT_MIN": "low",

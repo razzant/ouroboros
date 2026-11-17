@@ -1,8 +1,8 @@
 # Written by scripts/promote_stable.py into main's promotion commit for this
 # Stable release, from its published proof. Do not edit by hand.
 cask "ouroboros" do
-  version "7.10.0"
-  sha256 "ec134ed0f6b861c973dceeaee2b5df80a3f1c100cc1763ee395830f9b2174330"
+  version "7.11.0"
+  sha256 "d45a1a5b0d042d9cca9bf700256e07c350bf0ab63e4cc15998cbc7f47d3723b9"
 
   url "https://github.com/razzant/ouroboros/releases/download/v#{version}/Ouroboros-#{version}.dmg"
   name "Ouroboros"

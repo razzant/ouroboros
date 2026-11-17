@@ -1,16 +1,8 @@
 """Unix computer-use extension: screenshot + desktop input for macOS/Linux.
 
-The implementation is intentionally substrate-thin: it detects already-installed
-platform tools and returns clear unsupported/capability errors instead of
-downloading binaries. All GUI actions are meant to run UNDER HUMAN OBSERVATION;
-the agent should prefer semantic application APIs when available and ask before
-destructive or sensitive UI actions.
-
-Coordinate contract (normalization): ``screenshot`` may downscale the captured
-image to fit WXGA (1280x800, Anthropic computer-use guidance) and persists its
-image->input transform with an observation id, connection and display geometry.
-Pointer inputs require that id for screenshot coordinates. Pass ``raw=true``
-explicitly to address native input coordinates directly.
+Platform requirements, coordinate mapping, human-observation and input receipt contracts
+live in SKILL.md; this module discovers installed tools rather than downloading binaries.
+WXGA capture follows Anthropic's computer-use guidance.
 
 Permissions (honest): ``screencapture``/``cliclick`` exit 0 even when a macOS grant is
 missing (capturing only the wallpaper, or dropping synthetic input). ``capabilities``
@@ -43,7 +35,7 @@ from typing import Any
 from .place import PlaceMixin
 from .remote import (  # noqa: F401 - re-exported names the tests and the key/hold_key remote branches use
     _MAX_REMOTE_SHOT_BYTES, _OSWORLD_PKGS_PREFIX, _PYAUTOGUI_BASE_ALIASES, _PYAUTOGUI_MODS, PASTE_CHORD_ARGV,
-    RemoteBackends, _osworld_result_ok, cliclick_point, cliclick_keys, PBCOPY_LOCALE,
+    RemoteBackends, _osworld_result_ok, cliclick_point, cliclick_keys, command_chord_argv, PBCOPY_LOCALE,
 )
 
 _TIMEOUT_SEC = 10
@@ -1230,8 +1222,7 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
         if name == "local":
             if backend == "linux" and _session_type() == "wayland":
                 raise ValueError("key/hold_key unsupported on Wayland; use type_text or an X11 session")
-            tool = {"macos": "cliclick", "linux": "xdotool"}.get(backend)
-            if not tool or not _which(tool):
+            if backend not in ("macos", "linux") or (backend == "linux" and not _which("xdotool")):
                 raise ValueError("no supported key backend found")
         prepared, remote_tokens = [], []
         for combo in steps:
@@ -1245,9 +1236,15 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                 aliases = {**_MAC_MODS, "super": "cmd", "meta": "cmd"} if backend == "ssh_macos" else _MAC_MODS
                 if any(m not in aliases for m in mods):
                     raise ValueError(f"modifier(s) {mods} are not available on macOS")
-                args = cliclick_keys([aliases[m] for m in mods], aliases.get(low, low) if hold_ms else base,
-                                     hold_ms=hold_ms)
-                prepared.append(["cliclick", *args])
+                held = [aliases[m] for m in mods]
+                if held == ["cmd"] and hold_ms is None and len(base) == 1 and base.isprintable() and not base.isspace():
+                    # Menus match the Command plane, not the typing plane; reuse paste's layout resolver.
+                    prepared.append(command_chord_argv(base, remote=backend == "ssh_macos"))
+                else:
+                    args = cliclick_keys(held, aliases.get(low, low) if hold_ms else base, hold_ms=hold_ms)
+                    prepared.append(["cliclick", *args])
+                if name == "local" and not _which(prepared[-1][0]):
+                    raise ValueError(f"no supported key backend found ({prepared[-1][0]} is not installed)")
             elif backend == "osworld_http":
                 tokens = [_PYAUTOGUI_MODS[m] for m in mods] + [
                     _PYAUTOGUI_BASE_ALIASES.get(low, _PYAUTOGUI_MODS.get(low, base if len(base) == 1 else low))]
@@ -1275,12 +1272,14 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
 
     def _send_key(self, prepared, connection, *, ctx, recheck=False, raise_policy="allow", timeout=None, keys=""):
         timeout = timeout or (30 if connection[0] != "local" else _TIMEOUT_SEC)
+        # A Command chord's receipt says so: its refusal (no key, no right to post) is a known "nothing was posted".
+        method = {"method": "command_chord"} if isinstance(prepared, list) and prepared[0] == "osascript" else {}
         if connection[0] != "local":
             import shlex
             ssh = shlex.join(prepared) if isinstance(prepared, list) else ""
-            return self._remote_input(connection[1], prepared if not ssh else "", ssh_command=ssh,
+            return self._remote_input(connection[1], prepared if not ssh else "", ssh_command=ssh, note=method or None,
                                       ctx=ctx, later=recheck, raise_policy=raise_policy, timeout=timeout)
-        return self._exec_input_dict(prepared, ctx=ctx, recheck=recheck, extra={"keys": keys},
+        return self._exec_input_dict(prepared, ctx=ctx, recheck=recheck, extra={"keys": keys, **method},
                                      raise_policy=raise_policy, timeout=timeout)
 
     def key(self, *, keys: str, app: str = "", raise_policy: str = "allow") -> str:
@@ -1588,12 +1587,12 @@ def register(api: Any) -> None:
     api.register_tool("mouse_up", impl.mouse_up, description="Release a held mouse button at the pointer without coordinates or observation_id. With screenshot-space coordinates, observation_id is required unless raw=true. Never changes which app is in front.", schema={"type": "object", "properties": {**_xy, "button": {"type": "string", "default": "left"}}}, timeout_sec=60)
     api.register_tool("cursor_position", lambda: impl.cursor_position(), description="Report the current pointer position in native input coordinates.", schema={"type": "object", "properties": {}}, timeout_sec=10)
     api.register_tool("type_text", impl.type_text, description="Type text into the focused field of the frontmost app, or of app=. raise_policy=never requires app already in front and never activates it. via=paste writes the clipboard and pastes (long or non-ASCII text on a local or SSH Mac; the clipboard is replaced); an OSWorld guest pastes such text through its clipboard by itself.", schema={"type": "object", "properties": {"text": {"type": "string"}, "interval_ms": {"type": "integer", "default": 0}, **_input_app, "via": {"type": "string", "default": ""}}, "required": ["text"]}, timeout_sec=180)
-    api.register_tool("key", impl.key, description="Press keys in the front app or app= (verified; else nothing sent). Result: who was in front, not that the app reacted. Combos with '+', sequences with spaces (cmd+s, ctrl+l, page-down, 'down down return'); all steps are validated before activation/input and a targeted sequence stops when its app leaves the front. raise_policy=never requires app already in front and never activates it. Scriptable apps are better driven by their own commands through run_command.", schema={"type": "object", "properties": {"keys": {"type": "string"}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
+    api.register_tool("key", impl.key, description="Press keys in the front app or app= (verified; else nothing sent). Result: who was in front, not that the app reacted. Combos with '+', sequences with spaces (cmd+s, ctrl+l, page-down, 'down down return'); on a Mac, Command plus one character presses the key giving it under Command (cmd+g, not a layout's own cmd+п); other combos type through the layout and may differ; all steps are validated before activation/input and a targeted sequence stops when its app leaves the front. raise_policy=never requires app already in front and never activates it. Scriptable apps are better driven by their own commands through run_command.", schema={"type": "object", "properties": {"keys": {"type": "string"}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
     api.register_tool("hold_key", impl.hold_key, description="Hold a key or modifier combo for a duration (50-10000 ms). " + _targeted, schema={"type": "object", "properties": {"keys": {"type": "string"}, "duration_ms": {"type": "integer", "default": 500}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
     api.register_tool("scroll", impl.scroll, description="Scroll 1-20 wheel steps; app= acts in that app (verified first, else nothing is sent). X11/OSWorld: up/down/left/right; Wayland: up/down; macOS: unsupported, page with key. The result names who was in front at dispatch.", schema={"type": "object", "properties": {"clicks": {"type": "integer", "default": 3}, "direction": {"type": "string", "default": "down"}, **_input_app}}, timeout_sec=90)
     api.register_tool("wait", impl.wait, description="Sleep up to 10s so the UI can settle before the next observation.", schema={"type": "object", "properties": {"ms": {"type": "integer", "default": 500}}}, timeout_sec=12)
     api.register_tool("activate_app", impl.activate_app, description="Bring a running application to the front (name, bundle id / WM_CLASS, or pid:<n> from window_list; resolved from the running list, never launched) and report who is in front afterwards. Inputs with app= do this themselves; use this to switch before several inputs or to check that a switch works.", schema={"type": "object", "properties": {"app": {"type": "string"}, "wait_ms": {"type": "integer", "default": 2000}}, "required": ["app"]}, timeout_sec=90)
     api.register_tool("window_list", impl.window_list, description="Running applications with their windows: who is in front, titles, bounds, pid, and on macOS whether the app has its own scripting commands (scriptable). app= filters; limit caps the rows (truncated says so).", schema={"type": "object", "properties": {**_app, "limit": {"type": "integer", "default": 50}}}, timeout_sec=60)
-    api.register_tool("ax_tree", impl.ax_tree, description="Read one window as text through the Accessibility API (macOS), bounded: the frontmost app's window or app='s (without bringing it forward). Nodes with role/label/value/bounds and parent_id (title, description, url, enabled:false, focused:true when present) plus numbered marks (positions to click with raw=true; a mark is not proof the element reacts); truncated_by names every cut. text_limit (1-100000) is the characters kept per title/description/value/url; a cut one of those gives its whole length as <field>_len, so a larger text_limit reads the rest (label stays the 200-character legacy field, without a length). window= reads that window (window_id or exact title as window_list prints it) instead of the focused one. An OSWorld remote returns the guest's whole tree; Linux reports unsupported with the window rows, SSH Macs unsupported.", schema={"type": "object", "properties": {**_app, "max_nodes": {"type": "integer", "default": 150}, "timeout_ms": {"type": "integer", "default": 3000}, "root": {"type": "string", "default": "window"}, "include_web": {"type": "boolean", "default": False}, "text_limit": {"type": "integer", "default": 200}, "window": {"type": ["integer", "string"], "default": ""}}}, timeout_sec=45)
-    api.register_tool("element_act", impl.element_act, description="Act on ONE element of app= through the element's own Accessibility action (local macOS only): do=press (AXPress: a button, checkbox, menu item, link) or do=set_value (the text of a field; text='' clears, text is required for set_value). Name the element by identity, never by a mark or node id of an earlier read: select={role, label (exact title or description), identifier (AXIdentifier), nth (1-based, among the matches in ax_tree order)}; window= a window_id or exact title as window_list prints it (default: the focused window). No pointer and no switch: the app is NOT brought forward, front_before/front_after only report who is in front. Several matches without nth, an incomplete window walk even with nth, unread window/element identity, a disabled element or one without the action is a refusal (nothing done). action_outcome is completed (the mark), unknown (the app did not answer in time and may still act: do not retry blindly) or failed; element/element_after show the before/after read; whether the goal was achieved is yours to judge. timeout_ms is one budget counted from the helper's start of the operation (resolution included, interpreter startup not) and checked between steps, so a call can outlast it: once it is spent no action is made (budget_exhausted). observe=true adds observation: the same window read again after the action (ax_tree's node shape, text_limit as there) with what is left of timeout_ms; its failure never changes the action's receipt.", schema={"type": "object", "properties": {"app": {"type": "string"}, "do": {"type": "string", "enum": ["press", "set_value"]}, "select": {"type": "object", "properties": {"role": {"type": "string"}, "label": {"type": "string"}, "identifier": {"type": "string"}, "nth": {"type": "integer"}}, "additionalProperties": False}, "text": {"type": "string"}, "window": {"type": ["integer", "string"], "default": ""}, "max_nodes": {"type": "integer", "default": 600}, "timeout_ms": {"type": "integer", "default": 3000}, "include_web": {"type": "boolean", "default": False}, "observe": {"type": "boolean", "default": False}, "text_limit": {"type": "integer", "default": 200}}, "required": ["app", "do", "select"]}, timeout_sec=60)
+    api.register_tool("ax_tree", impl.ax_tree, description="Read one window as text through the Accessibility API (macOS), bounded: the frontmost app's window or app='s (without bringing it forward). Nodes with role/label/value/bounds and parent_id (title, description, url, enabled:false, focused:true when present) plus numbered marks (positions to click with raw=true; a mark is not proof the element reacts); truncated_by names every cut. text_limit (1-100000) is the characters kept per title/description/value/url; a cut one of those gives its whole length as <field>_len, so a larger text_limit reads the rest (label stays the 200-character legacy field, without a length). window= reads that window (window_id or exact title as window_list prints it) instead of the focused one. include_web=true reads web content (Electron, browsers; else web_content_skipped). until_text (local macOS) rereads this window until a returned title/description/value/url holds that literal, case-sensitive text (matched even in a cut read), within timeout_ms (max 15000); no match by then after a cut or failed read is unknown, its cuts kept. An OSWorld remote returns the guest's whole tree; Linux reports unsupported with the window rows, SSH Macs unsupported.", schema={"type": "object", "properties": {**_app, "max_nodes": {"type": "integer", "default": 150}, "timeout_ms": {"type": "integer", "default": 3000}, "root": {"type": "string", "default": "window"}, "include_web": {"type": "boolean", "default": False}, "text_limit": {"type": "integer", "default": 200}, "window": {"type": ["integer", "string"], "default": ""}, "until_text": {"type": "string", "default": ""}}}, timeout_sec=45)
+    api.register_tool("element_act", impl.element_act, description="Act on ONE element of app= through the element's own Accessibility action (local macOS only): do=press (AXPress: a button, checkbox, menu item, link) or do=set_value (the text of a field; text='' clears, text is required for set_value). Name the element by identity, never by a mark or node id of an earlier read: select={role, label (exact title or description), identifier (AXIdentifier), nth (1-based, among the matches in ax_tree order)}; window= a window_id or exact title as window_list prints it (default: the focused window). No pointer and no switch: the app is NOT brought forward, front_before/front_after only report who is in front. Several matches without nth, an incomplete window walk even with nth, unread window/element identity, a disabled element or one without the action is a refusal (nothing done). action_outcome is completed (the mark), unknown (the app did not answer in time and may still act: do not retry blindly) or failed; element/element_after show the before/after read; whether the goal was achieved is yours to judge. timeout_ms is one budget counted from the helper's start of the operation (resolution included, interpreter startup not) and checked between steps, so a call can outlast it: once it is spent no action is made (budget_exhausted). observe=true adds observation: the same window read again after the action (ax_tree's node shape, text_limit as there) with what is left of timeout_ms; its failure never changes the action's receipt. until_text (with observe=true) repeats only that read, as in ax_tree, within the same timeout_ms; the action is never repeated.", schema={"type": "object", "properties": {"app": {"type": "string"}, "do": {"type": "string", "enum": ["press", "set_value"]}, "select": {"type": "object", "properties": {"role": {"type": "string"}, "label": {"type": "string"}, "identifier": {"type": "string"}, "nth": {"type": "integer"}}, "additionalProperties": False}, "text": {"type": "string"}, "window": {"type": ["integer", "string"], "default": ""}, "max_nodes": {"type": "integer", "default": 600}, "timeout_ms": {"type": "integer", "default": 3000}, "include_web": {"type": "boolean", "default": False}, "observe": {"type": "boolean", "default": False}, "text_limit": {"type": "integer", "default": 200}, "until_text": {"type": "string", "default": ""}}, "required": ["app", "do", "select"]}, timeout_sec=60)
     api.register_tool("remote_exec", impl.remote_exec, description="Run a shell command on the active remote connection only; refuses on local backend. OSWorld/Linux guest: each call is a FRESH `bash -lc` starting in $HOME. SSH Mac: each call runs through the remote account's login shell via ssh. Either way this is NOT the visible desktop terminal: it does not inherit that terminal's working directory and leaves nothing in its shell history.", schema={"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer", "default": 60}}, "required": ["command"]}, timeout_sec=120)

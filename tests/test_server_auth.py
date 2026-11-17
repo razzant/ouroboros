@@ -197,7 +197,28 @@ def test_builtin_form_under_a_selected_interface_wears_only_builtin_files(monkey
 
 def test_builtin_form_without_readable_assets_stays_a_usable_form(tmp_path, caplog):
     page = server_auth._login_page("/", "Invalid password.", web_dir=tmp_path / "missing")
-    assert "<script>" not in page and '<meta name="color-scheme" content="light dark">' in page
+    # No appearance owner is inlined; only the saved-conversation release below runs.
+    assert re.findall(r"<script>(.*?)</script>", page, re.S) == [server_auth._END_OF_SESSION_SCRIPT]
+    assert '<meta name="color-scheme" content="light dark">' in page
     assert 'name="password"' in page and "Unlock" in page and "Invalid password." in page
     assert "var(--bg-primary, Canvas)" in page  # the system's own colours, readable in either appearance
     assert "was not inlined" in caplog.text
+
+
+PREVIEW_KEY = re.search(r"export const PREVIEW_KEY = '([^']+)'",
+                        (WEB / "modules" / "chat_preview.js").read_text(encoding="utf-8")).group(1)
+
+
+def test_every_sign_out_and_ended_session_reaches_the_form_that_releases_the_saved_conversation(monkeypatch):
+    """GET or POST /auth/logout and any page whose session ended land on the builtin form before the interface can run
+    again. It removes this browser's saved conversation preview (web/modules/chat_preview.js PREVIEW_KEY), nothing else
+    the browser keeps, after the appearance owner (tests/test_phone_chat_reopen_browser.py runs it in real engines)."""
+    theme = (WEB / "theme.js").read_text(encoding="utf-8")
+    with _make_client(monkeypatch) as client:
+        for response in (client.get("/auth/logout"), client.post("/auth/logout", data={"next": "/api/secret"}, headers={"accept": "text/html"}),
+                         client.get("/auth/login?next=/"), client.get("/api/secret", headers={"accept": "text/html"})):
+            assert response.status_code in (200, 401) and "Enter the network password" in response.text
+            scripts = re.findall(r"<script>(.*?)</script>", response.text, re.S)
+            assert scripts == [theme, server_auth._END_OF_SESSION_SCRIPT], response.url
+    assert server_auth._END_OF_SESSION_SCRIPT.count("removeItem") == 1
+    assert f'removeItem("{PREVIEW_KEY}")' in server_auth._END_OF_SESSION_SCRIPT

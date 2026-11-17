@@ -56,3 +56,47 @@ test('historical starts are unknown and event aliases retain their actual phase'
     noteToolCall(record, summarizeChatLiveEvent({ type: 'tool_call', task_id: 't', invocation_id: 'i' }).toolCall);
     assert.doesNotMatch(toolEvidenceView(record.toolFold).headline, /unknown|error/);
 });
+
+test('a call Safety held reads as held outside the error phase, and the block counts no error for it', () => {
+    const frame = (status, invocation_id) => summarizeChatLiveEvent({ type: 'tool_call_finished', task_id: 't',
+        tool: 'run_command', invocation_id, is_error: true, status });
+    const views = [frame('safety_returned', 'i1'), frame('safety_unavailable', 'i2'), frame('error', 'i3')];
+    assert.deepEqual(views.map((view) => [view.phase, view.headline]), [
+        ['warn', 'A command was returned by the Safety Supervisor'],
+        ['warn', 'A command was not run: the Safety Supervisor could not read it'],
+        ['error', 'One of the steps failed · run_command']]);
+    const record = {};
+    for (const view of views) noteToolCall(record, view.toolCall);
+    assert.deepEqual([...record.toolFold.calls.values()].map((call) => call.status), ['held', 'held', 'error']);
+    assert.deepEqual([toolEvidenceView(record.toolFold).calls, toolEvidenceView(record.toolFold).errors], [3, 1]);
+    const logged = summarizeLogEvent({ type: 'tool_call', tool: 'run_command', is_error: true, status: 'safety_unavailable' });
+    assert.deepEqual([logged.phase, logged.headline], ['warn', 'A command was not run: the Safety Supervisor could not read it']);
+});
+
+test('a call a control ended reads by its control outside the error phase, and the block counts no error for it', () => {
+    const frame = (control_reason, invocation_id, extra = {}) => summarizeChatLiveEvent({ type: 'tool_call', task_id: 't',
+        tool: 'run_command', invocation_id, is_error: true, status: 'interrupted', control_reason, ...extra });
+    const views = [frame('owner_pause', 'i1'), frame('cancelled', 'i2'), frame('spend_limit_root', 'i3'),
+        frame('model_wait_reprepare_required', 'i4'),
+        summarizeChatLiveEvent({ type: 'tool_call', task_id: 't', tool: 'run_command', invocation_id: 'i5', is_error: true, status: 'host_error' })];
+    assert.deepEqual(views.map((view) => [view.phase, view.headline]), [
+        ['info', 'Interrupted by Pause · run_command'], ['info', 'Interrupted by Stop · run_command'],
+        ['info', 'Interrupted: spend limit · run_command'], ['info', 'Interrupted · run_command'],
+        ['error', 'One of the steps failed · run_command']]);
+    // A Pause fence's own reason and a live call's end name their control; a word that merely shares a property
+    // name with every object names none.
+    assert.deepEqual(['owner_pause_before_review_launch', "the call's end", 'toString'].map((word) => frame(word, word).headline),
+        ['Interrupted by Pause · run_command', 'Interrupted: the call ended · run_command', 'Interrupted · run_command']);
+    const record = {};
+    for (const view of views) noteToolCall(record, view.toolCall);
+    assert.deepEqual([...record.toolFold.calls.values()].map((call) => call.status),
+        ['interrupted', 'interrupted', 'interrupted', 'interrupted', 'error']);
+    assert.deepEqual([toolEvidenceView(record.toolFold).calls, toolEvidenceView(record.toolFold).errors], [5, 1]);
+    // A row the host settled itself is provisional: the handler's own later settlement of the same call replaces it.
+    noteToolCall(record, summarizeChatLiveEvent({ type: 'tool_call', task_id: 't', tool: 'run_command', invocation_id: 'i1',
+        status: 'ok' }).toolCall);
+    assert.equal(record.toolFold.calls.get([...record.toolFold.calls.keys()][0]).status, 'ok');
+    const logged = summarizeLogEvent({ type: 'tool_call', tool: 'run_command', is_error: true, status: 'interrupted',
+        control_reason: 'owner_pause' });
+    assert.deepEqual([logged.phase, logged.headline], ['info', 'run_command interrupted (owner_pause)']);
+});

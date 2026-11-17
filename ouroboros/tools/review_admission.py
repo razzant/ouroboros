@@ -374,9 +374,6 @@ disclosing a residual are remedies too.
 
 {json_contract}
 
-If an open obligation record below already names an `obligation_id` for this root cause,
-reuse that exact `obligation_id`. Do NOT invent a new id when the same root cause persists.
-
 ## Anti pattern-lock guard
 
 Run the shared semantic-breadth guard before returning:
@@ -652,7 +649,7 @@ def prepare_retrieving_seats(ctx: Any, row_plan: dict, models: list, row_routes:
                 commit_message=commit_message, intent=intent, parts=parts, delegated=delegated,
                 model=models[i], slot_id=str(row_plan["slot_ids"][i]),
                 session_profile=str(row_plan["session_profiles"][i] or ""), use_local=row_plan["use_local"][i],
-                drive_root=getattr(ctx, "drive_root", None),
+                drive_root=getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None),
                 task_id=str(getattr(ctx, "task_id", "") or "") or "commit_review",
                 source_root=source_root_for(ctx, task_evidence), review_words=review_words)
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -708,7 +705,7 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
     from ouroboros.tools.review_brief_coupling import BriefIntent
     from ouroboros.tools.review_helpers import (
         build_goal_section, build_rebuttal_section, build_scope_section, goal_with_author_questions,
-        review_history_with_obligations, review_subject_pulse,
+        review_history_brief, review_subject_pulse,
     )
     from ouroboros.tools.review_multi_model import TRIAD_USER_TURN, triad_api_messages
     from ouroboros.review_records import ReviewSlot
@@ -735,8 +732,8 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
     rebuttal_section = build_rebuttal_section(review_rebuttal)
     review_history = review_dispute_history(review_history, drive_root=drive_root, repo_root=frozen_subject.spec.root,
                                             task_id=task_id)
-    history_section = review_history_with_obligations(review_history, drive_root=drive_root,
-                                                      repo_root=frozen_subject.spec.root, task_id=task_id)
+    history_section = review_history_brief(review_history, drive_root=drive_root,
+                                           repo_root=frozen_subject.spec.root, task_id=task_id)
     model, slot_id = str(_field("model") or ""), str(_field("slot_id") or "")
     route = _field("route", None)
     delegated = str(getattr(route, "value", route) or "") == "agent_session"

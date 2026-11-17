@@ -15,7 +15,7 @@ from starlette.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from ouroboros.gateway._helpers import json_exception, request_drive_root, request_repo_dir
-from ouroboros.project_admission import ProjectAdmissionError
+from ouroboros.project_admission import ProjectAdmissionError, project_admission_basis
 
 log = logging.getLogger(__name__)
 
@@ -293,15 +293,15 @@ async def api_projects_list(request: Request) -> JSONResponse:
         drive_root = request_drive_root(request)
         query = request.query_params
         if "chat_id" in query:
-            projects = await run_in_threadpool(projects_summary, drive_root, chat_id=query["chat_id"])
+            projects = await run_in_threadpool(projects_summary, drive_root, chat_id=query["chat_id"], by_message=True)
             return JSONResponse({"projects": projects})
         if "id" in query:
             if not explicit_project_id_ok(query["id"]):
                 return JSONResponse({"projects": []})
-            projects = await run_in_threadpool(projects_summary, drive_root, project_id=query["id"])
+            projects = await run_in_threadpool(projects_summary, drive_root, project_id=query["id"], by_message=True)
             return JSONResponse({"projects": projects})
         # The plain list stays capped; `all=1` names the complete list (every active and deleting Project).
-        projects = await run_in_threadpool(projects_summary, drive_root,
+        projects = await run_in_threadpool(projects_summary, drive_root, by_message=True,
                                            limit=None if query.get("all") == "1" else 200)
         return JSONResponse({"projects": projects})
     except Exception as exc:
@@ -317,7 +317,9 @@ async def api_projects_create(request: Request) -> JSONResponse:
     - ``git_url=``    server-side clone into the durable projects root (atomic
                       tmp→rename, non-interactive, typed ``auth_required``);
     - ``with_workspace`` provision a fresh genesis folder (pre-v6.59 behavior);
-    - none of these   a file-less project (research/chat-only).
+    - ``no_folder``   record the choice to keep none (``project_sources``), 409 if the row
+                      was registered or changed meanwhile (a promoted ``source=``);
+    - none of these   a file-less project whose first promoted task provisions one.
 
     ``provenance`` (attached|cloned|genesis|none) + ``clone_url`` are recorded as
     historical facts; ``trusted_at`` is stamped automatically for attach/clone
@@ -375,9 +377,10 @@ async def api_projects_create(request: Request) -> JSONResponse:
         attach_path = str(body.get("path") or "").strip()
         git_url = str(body.get("git_url") or "").strip()
         with_workspace = bool(body.get("with_workspace"))
-        if sum(1 for flag in (bool(attach_path), bool(git_url), with_workspace) if flag) > 1:
+        no_folder = body.get("no_folder") is True
+        if sum(1 for flag in (bool(attach_path), bool(git_url), with_workspace, no_folder) if flag) > 1:
             return JSONResponse(
-                {"error": "choose ONE source: path= (attach) | git_url= (clone) | with_workspace (genesis)"},
+                {"error": "choose ONE source: path= (attach) | git_url= (clone) | with_workspace (genesis) | no_folder"},
                 status_code=400,
             )
         drive_root = request_drive_root(request)
@@ -389,8 +392,7 @@ async def api_projects_create(request: Request) -> JSONResponse:
         # and the fresh clone dangling. Source-less create stays idempotent.
         from ouroboros.projects_registry import get_project
 
-        _existing = get_project(drive_root, sanitize_project_id(raw_id), strict=True)
-        if _existing and (attach_path or git_url or with_workspace):
+        def _project_exists() -> JSONResponse:
             return JSONResponse(
                 {
                     "error": (
@@ -401,6 +403,10 @@ async def api_projects_create(request: Request) -> JSONResponse:
                 },
                 status_code=409,
             )
+
+        _existing = get_project(drive_root, sanitize_project_id(raw_id), strict=True)
+        if _existing and (attach_path or git_url or with_workspace or no_folder):
+            return _project_exists()
 
         working_dir, provenance, clone_url = "", "none", ""
         init_git_skipped: list = []
@@ -446,6 +452,8 @@ async def api_projects_create(request: Request) -> JSONResponse:
             working_dir=working_dir,
             origin="owner_ui",
         )
+        if no_folder and not entry.get("created"):
+            return _project_exists()  # registered since the check above (a promoted source=): never re-chosen here
         if with_workspace:
             workspace = ensure_project_workspace(drive_root, entry["id"], repo_dir)
             if workspace:
@@ -460,12 +468,17 @@ async def api_projects_create(request: Request) -> JSONResponse:
             # "none" (triad r1 scope critical: a folder-bearing attached project
             # would be relabeled provenance=none).
             return JSONResponse({"project": entry})
-        stamped = update_project(
-            drive_root, entry["id"],
-            provenance=provenance,
-            clone_url=clone_url,
-            trusted_at=utc_now_iso() if provenance in ("attached", "cloned") else str(entry.get("trusted_at") or ""),
-        )
+        trusted_at = utc_now_iso() if provenance in ("attached", "cloned") else str(entry.get("trusted_at") or "")
+        try:  # No folder binds the row this request registered: a folder attached since refuses it, never cleared
+            stamped = update_project(
+                drive_root, entry["id"], provenance=provenance, clone_url=clone_url, trusted_at=trusted_at,
+                **({"no_folder": {"at": utc_now_iso(), "by": "owner"},
+                    "admission_basis": project_admission_basis(entry["id"], entry)} if no_folder else {}),
+            )
+        except ProjectAdmissionError as exc:
+            return JSONResponse({"error": f"project {entry['id']!r} changed while it was being created, so No folder "
+                                          "was not recorded; see its Working folder…", "reason_code": exc.reason},
+                                status_code=409)
         payload: dict = {"project": stamped or entry}
         if init_git_warnings:
             from ouroboros.utils import append_jsonl
@@ -559,6 +572,40 @@ async def api_project_delete(request: Request) -> JSONResponse:
         if str(fenced.get("lifecycle") or "") != PROJECT_TOMBSTONED:
             start_project_deletion(drive_root, project_id, chat_id)
         return JSONResponse({"ok": True, "project_id": project_id, "folder_untouched": True})
+    except Exception as exc:
+        return json_exception(exc)
+
+
+async def api_project_folder(request: Request) -> JSONResponse:
+    """GET/POST /api/projects/{project_id}/folder — the room's working folder as ``project_folder`` sees it,
+    or one change of it by the owner. A refusal answers its typed ``reason_code``; nothing was written."""
+    try:
+        from ouroboros import project_folder
+        from ouroboros.gateway.project_folder_contracts import ProjectFolderRequest
+        from ouroboros.gateway.schema import validate_ingress
+
+        project_id = str(request.path_params.get("project_id") or "").strip()
+        drive_root, repo_dir = request_drive_root(request), request_repo_dir(request)
+        if request.method == "GET":
+            view = await run_in_threadpool(project_folder.folder_view, drive_root, project_id, repo_dir=repo_dir)
+            if view is None:
+                return JSONResponse({"error": f"unknown project: {project_id}"}, status_code=404)
+            return JSONResponse({"folder": view})
+        body = await request.json()
+        errors = validate_ingress(body, ProjectFolderRequest)
+        if errors:
+            return JSONResponse({"error": f"invalid request body: {errors[0]}"}, status_code=400)
+        outcome = await run_in_threadpool(
+            lambda: project_folder.change_folder(
+                drive_root, project_id, action=body["action"], expected=body["expected"], actor="owner",
+                repo_dir=repo_dir, path=str(body.get("path") or "")))
+        if outcome["status"] != "changed":
+            status = {"unknown_project": 404, "invalid_folder": 400}.get(outcome["reason"], 409)
+            return JSONResponse({"error": outcome["detail"], "reason_code": outcome["reason"]}, status_code=status)
+        view = outcome["view"]  # None: changed, but the look after it failed (``folder_error``); the change stands
+        _broadcast_projects_changed(outcome["receipt"]["project_id"], view["chat_id"] if view else None)
+        return JSONResponse({"folder": view, "receipt": outcome["receipt"],
+                             **({"folder_error": outcome["view_error"]} if view is None else {})})
     except Exception as exc:
         return json_exception(exc)
 
@@ -729,6 +776,7 @@ async def api_project_from_task(request: Request) -> JSONResponse:
 __all__ = [
     "api_fs_dirs",
     "api_project_delete",
+    "api_project_folder",
     "api_project_from_task",
     "api_project_update",
     "api_projects_create",

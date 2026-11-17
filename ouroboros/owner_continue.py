@@ -46,8 +46,11 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.owner_words import OWNER_SOURCES, answered_card, answered_card_reply, carded, reply_target
+from ouroboros.owner_words import (OWNER_SOURCES, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card, answered_card_reply,
+                                   carded, reply_target, scheduled_text_items)
+from ouroboros.review_evidence_sections import renders_exactly
 from ouroboros.utils import utc_now_iso
+from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
 from ouroboros.task_store import patch_document
 
 log = logging.getLogger(__name__)
@@ -106,9 +109,14 @@ CORPUS_OWNER_SOURCES = OWNER_SOURCES - CORPUS_INITIAL_SOURCES
 CARRIED_DOOR_SOURCES = frozenset({"origin_message", "initial_user"})
 CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message"})
 CORPUS_PLACE_SOURCES = frozenset({"place_confirmed"})  # my human's confirmed account in a place: provenance, whole
+# A schedule's text under its recorded supplier (``owner_words.SCHEDULE_TEXT``): the work's assignment and conditions,
+# carried whole to every successor and from it to its helpers, never owner text.
+CORPUS_SCHEDULE_SOURCES = frozenset({SCHEDULE_TEXT})
 # The typed ids an owner-source row may carry, each a string when present: its message, a task message's sender and
-# relaying sibling, an owner answer's card, the chat row it is and that id's room; its ``reply_to`` rides beside them.
-ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id")
+# relaying sibling, an owner answer's card, the chat row it is and that id's room, a place message's provider
+# identity (``owner_words.place_row_facts``); its ``reply_to`` rides beside them.
+PLACE_ROW_IDS = ("conversation_id", "message_id")  # a confirmed place row's provider identity, read again at a cite
+ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id", *PLACE_ROW_IDS)
 
 
 def row_identity(row: Dict[str, Any]) -> str:
@@ -308,17 +316,27 @@ def valid_start(start: Any) -> bool:
 def _wake_opening(metadata: Dict[str, Any], task_id: str, gaps: List[str]) -> Optional[Dict[str, Any]]:
     """The opening a consciousness wake's own row recorded, copied by value, or a named gap: own clock, its
     ``wake_task_metadata`` reason; place focus, ``focus_metadata``'s facts (sender, ``owner_confirmed`` as the place
-    recorded it) and the event's exact words (``metadata.presence.observed_text``), the room's context. None is owner
-    text here: an addressed event from my human's confirmed account is its own ``place_owner`` corpus row."""
+    recorded it), the event's exact words (``metadata.presence.observed_text``), the room's context, and what the
+    connector reported about that message (``reported``, its labelled block; a cut names this task's record). None is
+    owner text here: an addressed event from my human's confirmed account is its own ``place_owner`` corpus row."""
     from ouroboros.consciousness_authority import (
         WAKE_CAUSE_FOCUS, WORK_KIND_CONSCIOUSNESS, is_consciousness_origin, wake_cause, work_kind,
     )
+    from ouroboros.presence_message_facts import connector_facts, event_reader
 
     cause = wake_cause(metadata)
     presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
     opening = {"source": WAKE_OPENING, "task_id": task_id, "wake_cause": cause}
     if cause == WAKE_CAUSE_FOCUS:
         opening.update(focus=copy.deepcopy(metadata.get("focus")), observed_text=presence.get("observed_text"))
+        focus = opening["focus"] if isinstance(opening["focus"], dict) else {}
+        actor = focus.get("actor") if isinstance(focus.get("actor"), dict) else {}
+        event = presence.get("event") if isinstance(presence.get("event"), dict) else {}
+        reported = connector_facts(event.get("message"), text=str(presence.get("observed_text") or ""), sender=str(
+            actor.get("display_name") or actor.get("platform_actor_id") or ""),
+            source=event_reader(task_id, "message.non_text"))
+        if reported:
+            opening["reported"] = reported
     else:
         opening["wake_reason"] = metadata.get("wake_reason")
     if not (is_consciousness_origin(metadata) and work_kind(metadata) == WORK_KIND_CONSCIOUSNESS
@@ -339,6 +357,7 @@ def valid_wake(wake: Any) -> bool:
         return isinstance(wake.get("wake_reason"), str) and bool(wake["wake_reason"].strip())
     focus = wake.get("focus")
     return (wake.get("wake_cause") == WAKE_CAUSE_FOCUS and isinstance(wake.get("observed_text"), str)
+            and isinstance(wake.get("reported", ""), str)
             and isinstance(focus, dict) and isinstance(focus.get("actor"), dict)
             and all(isinstance(focus.get(key), str) and focus[key].strip() for key in ("place_id", "conversation_key")))
 
@@ -396,6 +415,28 @@ def inputs_text(predecessor_task_id: str, copied: List[Dict[str, Any]], authorit
             f"each copy matched the identity its row records:\n[ATTACHMENTS]\n{render_attachment_lines(authority)}\n"
             "[END_ATTACHMENTS]" + (f"\nMissing (their recorded bytes were gone when a Continue copied this work's "
                                    f"inputs): {lost}." if lost else ""))
+
+
+def _keep_schedule_text(kept: List[Dict[str, Any]], item: Dict[str, Any]) -> None:
+    """One ``SCHEDULE_TEXT`` row per schedule, field and words, under the supplier the host recorded for it."""
+    row = {"source": SCHEDULE_TEXT, "content": item["content"],
+           **{key: str(item[key]) for key in SCHEDULE_ITEM_IDS if item.get(key)}}
+    if not any((old.get("schedule_id"), old.get("field"), old["content"])
+               == (row.get("schedule_id"), row.get("field"), row["content"]) for old in kept):
+        kept.append(row)
+
+
+def occurrence_schedule_text(result: Dict[str, Any], task_id: str) -> List[Dict[str, Any]]:
+    """The text a scheduled occurrence was accepted with (its frozen admission receipt) as ``SCHEDULE_TEXT`` rows;
+    empty for work no schedule admitted: a successor's copy rides its chained corpus (``owner_corpus``)."""
+    from ouroboros.schedule_continuation import admission_basis, valid_basis
+    kept: List[Dict[str, Any]] = []
+    if valid_basis(admission_basis(result, task_id)):
+        frozen = result["schedule_admission"]["task"]
+        for item in scheduled_text_items(frozen.get("metadata"), frozen.get("task_contract")
+                                         or (frozen.get("metadata") or {}).get("task_contract")):
+            _keep_schedule_text(kept, item)
+    return kept
 
 
 def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict[str, Any]:
@@ -474,6 +515,26 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     attached, quoted = [], []  # an owner message's staged files; the chat uploads a relay quoted
     # The start's answers keep their one identity: a corpus copy is the same message.
     seen: Dict[str, Tuple[str, bool]] = {row["msg_id"]: (row["content"], True) for row in (start or {}).get("answers") or []}
+    exact: Dict[str, str] = {}  # this task's own exact rows by msg_id: the mailbox pass fills it after reading drives
+
+    schedule_text = occurrence_schedule_text(result, task_id)  # then the chained corpus's: one per schedule/field/words
+    def named(identity: str, words: str, owner: bool, corpus: Optional[Dict[str, Any]] = None) -> Optional[bool]:
+        """One message under one identity, compared by its words (#2941): None when first named (now recorded), True
+        when its words and owner/peer side repeat, else False and a gap. A corpus row also stands for its exact twin
+        as a late answer's frame or, recorded before ``words``, as the twin's own rendering (``renders_exactly``)."""
+        if not identity or identity not in seen:
+            if identity:
+                seen[identity] = (words, owner)
+            return None
+        if seen[identity] == (words, owner):
+            return True
+        twin = json.loads(exact[identity]) if corpus is not None and identity in exact else {}
+        if twin and seen[identity][1] == owner and (isinstance(twin.get("late_answer"), dict) or "words" not in corpus
+                                                   and renders_exactly(twin, corpus["content"], drives, task_id)):
+            return True
+        gaps.append("owner_message_identity_conflict")
+        return False
+
     for gap in container(chained, "gaps", list, "chained_owner_source_malformed"):
         gaps.append(gap if isinstance(gap, str) and gap else "chained_owner_source_malformed")
     # Validate identities before deduplication: a dict comprehension would hide rivals.
@@ -485,21 +546,14 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         for row in container(continuation if key == "peer_context" else chained, key, list,
                              "chained_owner_source_malformed"):
             if not (isinstance(row, dict) and isinstance(row.get(text_key), str)
-                    and all(isinstance(row.get(field, ""), str) for field in (source_key, *ROW_IDS))):
+                    and all(isinstance(row.get(field, ""), str) for field in (source_key, "words", *ROW_IDS))):
                 gaps.append("chained_owner_source_malformed")
                 continue
             if sources is not None and row.get(source_key, "") not in sources:
                 gaps.append("owner_source_provenance_unknown")
                 continue
-            identity, text = row_identity(row), row[text_key]
-            if identity and identity in seen:
-                if seen[identity] != (text, target is later):
-                    gaps.append("owner_message_identity_conflict")
-                continue
-            if identity:
-                seen[identity] = (text, target is later)
-            target.append(dict(row))
-    late_framed: set = set()  # ids whose exact row carries typed late-answer provenance
+            if named(row_identity(row), row.get("words", row[text_key]), target is later) is None:
+                target.append(dict(row))
     quizzes = result.get("owner_quiz") if isinstance(result.get("owner_quiz"), dict) else {}
 
     def corpus_pass(rows: List[Any], malformed: str, *, carried: bool = False) -> None:
@@ -507,7 +561,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         run's first text is the original's projection; a door row the start carried by value (``carried``) is my
         human's words unless it repeats that original; a task's words are context and an unknown label is never
         promoted to owner text."""
-        texts = {True: {row["content"] for row in later} | {str((original or {}).get("content") or "")},
+        texts = {True: {row.get("words", row["content"]) for row in later} | {str((original or {}).get("content") or "")},
                  False: {row["text"] for row in peers}}
         original_ref = (original or {}).get("origin_message_ref") or {}
         original_chat_id = original_ref.get("chat_id")
@@ -515,12 +569,13 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         original_id = row_identity({"chat_id": original_chat_id,
                                     "client_message_id": original_client_id})
         for row in rows:
-            # The recorder writes a non-empty text body, a source label and string ids.
+            # The recorder writes a non-empty text body, a source label, string ids and, beside a rendering, its words.
             if not (isinstance(row, dict) and isinstance(row.get("content"), str) and row["content"].strip()
-                    and all(isinstance(row.get(key, ""), str) for key in ("source", *ROW_IDS))):
+                    and all(isinstance(row.get(key, ""), str) for key in ("source", "words", *ROW_IDS))):
                 gaps.append(malformed)
                 continue
             msg_id, source, text = str(row.get("msg_id") or ""), str(row.get("source") or ""), row["content"]
+            words = row.get("words", text)  # the exact text a rendered row was delivered as; the rendering stays
             client, identity = str(row.get("client_message_id") or ""), row_identity(row)
             if original_client_id and not original_chat_id:
                 client_identity, origin_identity = client, original_client_id
@@ -528,36 +583,34 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                 client_identity = row_identity({"chat_id": row.get("chat_id") or original_chat_id,
                                                 "client_message_id": client})
                 origin_identity = original_id
+            if source in CORPUS_SCHEDULE_SOURCES:  # the assignment's text, carried whole beside the words, never theirs
+                _keep_schedule_text(schedule_text, row)
+                continue
             if source not in CORPUS_INITIAL_SOURCES | CORPUS_OWNER_SOURCES | CORPUS_TASK_SOURCES | CORPUS_PLACE_SOURCES:
                 gaps.append("owner_source_provenance_unknown")
                 continue
             door = carried and source in CARRIED_DOOR_SOURCES
             if door and original is not None:  # a carried copy of the original's own message is that message
                 door = not (client_identity == origin_identity if client_identity and origin_identity
-                            else text == original.get("content"))
+                            else words == original.get("content"))
             if source in CORPUS_INITIAL_SOURCES and not door:  # the run's first text: the original's own projection
                 if original is not None and isinstance(row.get("reply_to"), dict):
                     original.setdefault("reply_to", row["reply_to"])  # and the message it replies to
                 continue
             owner = source in CORPUS_OWNER_SOURCES or door
-            if identity and identity in seen:
-                if seen[identity][1] != owner or (seen[identity][0] != text and identity not in late_framed):
-                    gaps.append("owner_message_identity_conflict")
+            if named(identity, words, owner, row) is not None or not identity and words in texts[owner]:
                 continue
-            if not identity and text in texts[owner]:
-                continue
-            if identity:
-                seen[identity] = (text, owner)
-            texts[owner].add(text)
+            texts[owner].add(words)
             if owner:
                 ids = {key: row[key] for key in (*ROW_IDS[1:], "reply_to") if row.get(key)}
                 # An answer to the predecessor's own card reads that card from its own record.
                 card = (answered_card(quizzes.get(ids.get("quiz_id", "")), text)
                         if source == "owner_quiz_answer" and ids.get("source_task_id") == task_id else None)
                 later.append({"source": source, "content": text, "msg_id": msg_id, **ids,
-                              **({"card": card} if card else {})})
-            elif source in CORPUS_PLACE_SOURCES:  # carried to the successor whole, with its id and reply target
+                              **({"card": card} if card else {}), **({"words": words} if "words" in row else {})})
+            elif source in CORPUS_PLACE_SOURCES:  # carried whole, with its ids, provider identity and reply target
                 confirmed.append({"source": source, "content": text, "msg_id": msg_id,
+                                  **{key: row[key] for key in PLACE_ROW_IDS if row.get(key)},
                                   **({"reply_to": row["reply_to"]} if isinstance(row.get("reply_to"), dict) else {})})
             elif source in CORPUS_TASK_SOURCES:
                 peers.append({"msg_id": msg_id, "ts": "", "source_task_id": str(row.get("source_task_id") or ""),
@@ -601,6 +654,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         gaps.append("retained_mailbox_row_malformed")
     rows = held + rows
     exact_seen: set = set()
+    from ouroboros.owner_quiz import late_answer_owner_text, secret_outcome_block
     for entry in rows:
         if any(not isinstance(entry.get(key, ""), str) for key in ("msg_id", "kind", "source_task_id")):
             gaps.append("owner_mailbox_row_malformed")
@@ -612,24 +666,19 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         if kind in OWNER_SOURCE_KINDS | {"task_message"} and not isinstance(entry.get("text") or "", str):
             gaps.append("owner_mailbox_row_malformed")  # the writer stores text; never str() a body
             continue
-        from ouroboros.owner_quiz import secret_outcome_block
-
-        if secret_outcome_block(entry) is not None:
-            # Form outcomes remain recoverable task evidence, never fabricated owner words.
-            exact_seen.add(entry["_exact_row"])
-            continue
-        if kind == "quiz_answer" and (entry.get("quiz_delivery") or {}).get("answer_snapshot"):
-            from ouroboros.owner_quiz import late_answer_owner_text
-            entry = {**entry, "text": late_answer_owner_text(entry["quiz_delivery"]["answer_snapshot"])}
-        if msg_id and msg_id in seen:
-            if seen[msg_id] != (str(entry.get("text") or ""), kind in OWNER_SOURCE_KINDS):
-                gaps.append("owner_message_identity_conflict")
-            continue
         exact_seen.add(entry["_exact_row"])
+        if secret_outcome_block(entry) is not None:
+            continue  # form outcomes remain recoverable task evidence, never fabricated owner words
+        if kind == "quiz_answer" and (entry.get("quiz_delivery") or {}).get("answer_snapshot"):
+            entry = {**entry, "text": late_answer_owner_text(entry["quiz_delivery"]["answer_snapshot"])}
+        files = kind in OWNER_SOURCE_KINDS and (entry.get("attachment_manifest") or "attachment_manifest_ref" in entry)
+        if (same := named(msg_id, str(entry.get("text") or ""), kind in OWNER_SOURCE_KINDS)) is not None:
+            if same and files and msg_id not in exact:  # a message an earlier source carried: its files are still ours
+                exact[msg_id] = entry["_exact_row"]
+                attached.append(entry)
+            continue
         if msg_id:
-            seen[msg_id] = (str(entry.get("text") or ""), kind in OWNER_SOURCE_KINDS)
-            if isinstance(entry.get("late_answer"), dict):
-                late_framed.add(msg_id)
+            exact[msg_id] = entry["_exact_row"]  # a late answer's frame, or an earlier rendering, is proven against it
         if kind in OWNER_SOURCE_KINDS:
             row = {"source": "owner_quiz_answer" if kind == "quiz_answer" else "owner_mailbox",
                    "content": str(entry.get("text") or ""), "msg_id": msg_id,
@@ -637,15 +686,14 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             if target := reply_target(root, entry.get("reply_reference")):  # the message these words reply to
                 row["reply_to"] = target
             later.append(carded(row, entry))  # a live delivery's card, or a late answer's snapshot, beside the words
-            if entry.get("attachment_manifest") or "attachment_manifest_ref" in entry:
+            if files:
                 attached.append(entry)  # the files that message attached, staged in this task's own store
         elif kind == "relay_entry" and not entry.get("host_carried"):  # a carried row is the tree's, not this corpus
-            from ouroboros.owner_relay import owner_text, quotable_owner_row
+            from ouroboros.owner_relay import owner_row_address, owner_text, quotable_owner_row
             from ouroboros.owner_words import owner_place_accounts
             fallback_root = entry.get("relay_canonical_root") or root
             accounts_by_root = {}
             for row in entry.get("owner_rows") or []:
-                from ouroboros.owner_relay import owner_row_address
                 source_root = row.get("_owner_source_root") or fallback_root
                 key = str(source_root)
                 if key not in accounts_by_root:
@@ -667,8 +715,8 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                           "text": str(entry.get("text") or "")})
     # The retained corpus keeps what the mailbox may no longer hold (a direct
     # turn's input, a row consumed before any capture) under the SAME identity
-    # rules; an exact mailbox row outranks its projection (a late answer's
-    # corpus row is the model-facing frame of that typed row, not a rival text).
+    # rules; an exact mailbox row outranks its projection (a rendered row's words, a
+    # late answer's frame of that typed row or a pre-``words`` rendering: no rival text).
     evidence = container(result, "review_evidence", dict, "retained_owner_corpus_malformed")
     inputs = container(evidence, "task_inputs", dict, "retained_owner_corpus_malformed")
     unavailable = container(inputs, "unavailable_sections", list, "retained_owner_corpus_malformed")
@@ -682,7 +730,8 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                    and row.get("kind") == "memory_export" and pathlib.Path(str(row.get("path") or "")).is_file()), "")
     readable = (*(drive / "task_drives" / task_id for drive in drives), *task_artifact_stores(root, task_id))
     return {"original": original, "schedule": schedule, "start": start, "wake": wake, "api": api, "later": later,
-            "peer_context": peers, "confirmed_place": confirmed, "gaps": list(dict.fromkeys(gaps)),
+            "peer_context": peers, "confirmed_place": confirmed, "schedule_text": schedule_text,
+            "gaps": list(dict.fromkeys(gaps)),
             "open_relays": result.get("open_relays", chained.get("open_relays", {})),
             "held_owner_messages": {**chained.get("held_owner_messages", {}), **result.get("held_owner_messages", {})},
             "attached": attached, "quoted": quoted, "drives": drives, "memory_export": export,
@@ -723,8 +772,8 @@ def carried_execution_fields(binding: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """The successor's seeded owner corpus (``_initialize_owner_directives``): exact words with their typed ids and
-    reply targets, the start's answers first; an answered card rides beside its answer as its reply target."""
+    """The successor's seeded owner corpus (``_initialize_owner_directives``): exact words with their typed ids, reply
+    targets and a rendering's ``words``, the start's answers first; an answered card rides beside its answer as its reply target."""
     rows: List[Dict[str, Any]] = []
     original = sources.get("original") if isinstance(sources.get("original"), dict) else {}
     start = sources.get("start") if isinstance(sources.get("start"), dict) else {}
@@ -732,10 +781,16 @@ def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
         if isinstance(row, dict) and str(row.get("content") or "").strip():
             card = answered_card_reply(row.get("card"), row.get("source_task_id"))
             rows.append({"source": row.get("source") or "owner_mailbox", "content": row["content"],  # a card wins
-                         **{key: row[key] for key in (*ROW_IDS, "reply_to") if row.get(key)}, **({"reply_to": card} if card else {})})
+                         **{key: row[key] for key in (*ROW_IDS, "reply_to") if row.get(key)}, **({"reply_to": card} if card else {}),
+                         **{key: row[key] for key in ("words",) if key in row}})  # exact, even empty
+    for row in sources.get("schedule_text") or []:  # a schedule's text under its supplier, by value, never owner words
+        if isinstance(row, dict) and str(row.get("content") or "").strip():
+            rows.append({"source": SCHEDULE_TEXT, "content": row["content"],
+                         **{key: row[key] for key in SCHEDULE_ITEM_IDS if row.get(key)}})
     for row in sources.get("confirmed_place") or []:  # provenance rows ride beside the owner's, outside the owner sources
         if isinstance(row, dict) and str(row.get("content") or "").strip():
-            rows.append({"source": "place_confirmed", "content": row["content"], **{key: row[key] for key in ("msg_id", "reply_to") if row.get(key)}})
+            rows.append({"source": "place_confirmed", "content": row["content"],
+                         **{key: row[key] for key in ("msg_id", *PLACE_ROW_IDS, "reply_to") if row.get(key)}})
     return rows
 
 
@@ -785,7 +840,7 @@ def recorded_system_checkout(result: Dict[str, Any]) -> Dict[str, str]:
 def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any], *,
                     deadline_at: str = "", authority_source: Optional[Dict[str, Any]] = None,
                     checkout: Optional[Dict[str, str]] = None, successor_task_id: str = "",
-                    drive_mode: str = "", stop_note: str = "", tree_note: str = "") -> str:
+                    drive_mode: str = "", stop_note: str = "", tree_note: str = "", work_name_open: bool = False) -> str:
     """The successor's first message: host-authored FACTS, the owner's words verbatim.
 
     It frames nothing as a decision: the model judges whether and how to go on and asks the owner in this
@@ -817,14 +872,15 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         "conversation and folder; the old task is not resumed and its helpers are not yours to steer; with "
         "integrate_subagent_patch(task_id=...) a helper's FINISHED native result can be applied or verified (the "
         "default), accepted as it stands when it is a shared result (decision='accept' with your reason, never a "
-        "verification) or rejected, "
+        "verification) or rejected (a cancelled helper stays cancelled, but its ready retained capture is decided "
+        "the same ways with your reason), "
         "and the old task's stopped delegated runs are yours to continue with delegate_start(subagent_id=..., "
         "continue_from=<run_id>, prompt=...) instead of redoing them.",
         *([tree_note] if tree_note else []),
         result_line,
         *([stop_note] if stop_note else []),
-        "Decide whether and how to continue; if the right next step is unclear (for example the work "
-        "may no longer be wanted), ask the owner in this conversation instead of guessing.",
+        "Decide whether and how to continue; if whether the work is still wanted is unclear, ask the "
+        "owner in this conversation.",
         "Use manage_schedules(action='list') to inspect related or unknown future follow-ups. "
         "Continue does not release their holds. Resolve unknown relationships explicitly; restore "
         "only an observed hold_id. Original money and hard deadlines still apply to related work.",
@@ -871,7 +927,10 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
     if wake:
         lines += ["", "That task was a wake of your consciousness; no owner message opened it. Its recorded "
                       "opening (host facts, not owner words):",
-                  json.dumps({key: value for key, value in wake.items() if key != "observed_text"}, ensure_ascii=False)]
+                  json.dumps({key: value for key, value in wake.items() if key not in ("observed_text", "reported")},
+                             ensure_ascii=False)]
+        if isinstance(wake.get("reported"), str) and wake["reported"]:
+            lines.append(wake["reported"])  # the connector's facts about that message, labelled, beside its words
         # Once, below, only when my human's confirmed account opened the wake and a ``place_owner`` row (cited, or an
         # older record's) or their confirmed place words hold these words; a participant's same words stay theirs.
         focus = wake.get("focus") if isinstance(wake.get("focus"), dict) else {}
@@ -910,21 +969,21 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
                        f"message{'s' if len(peers) != 1 else ''}, {chars} characters, from {', '.join(senders)}. "
                        "They are not repeated here; query_data(op='json', kind='task_result', "
                        f"ids=[{own!r}], select='metadata.continuation.peer_context') returns them exactly, in order.")]
+    if work_name_open:
+        lines += ["", "This work has no subject name of its own yet. With your first update_focus, also pass work_name: "
+                      "a short name for what the work is about that stays as it continues, not its status; the "
+                      "tool's answer says whether it was taken."]
     return "\n".join(lines)
 
 
-def claim_on_predecessor(drive_root: Any, predecessor_task_id: str, nonce: str,
-                         binding: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+def claim_on_predecessor(drive_root: Any, predecessor_task_id: str, nonce: str, binding: Dict[str, Any],
+                         *, declared_by: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], bool]:
     """Bind this action on the predecessor BEFORE any effect; ``(claim, created)``.
 
     Same nonce: the recorded claim (replay). Another nonce while a claim
     exists: ``ValueError("already_continued:<successor>")``. A predecessor that
     turned ineligible refuses. Every refusal writes nothing.
     """
-    from ouroboros.task_results import (
-        require_writable_task_result_schema, stamp_task_result_schema,
-    )
-
     outcome: Dict[str, Any] = {}
 
     def update(current: dict) -> Optional[dict]:
@@ -941,7 +1000,8 @@ def claim_on_predecessor(drive_root: Any, predecessor_task_id: str, nonce: str,
         if (execution_carry(current) or {}) != {key: binding[key] for key in EXECUTION_CARRY_KEYS if key in binding}:
             raise ValueError("execution_budget_changed")  # a later close: the same nonce rebinds
         from ouroboros.control_actor import control_actor
-        claim = {"by": control_actor(), "successor_task_id": binding["successor_task_id"], "action_nonce": nonce,
+        claim = {"by": control_actor() or dict(declared_by or {}), "successor_task_id": binding["successor_task_id"],
+                 "action_nonce": nonce,
                  "binding": dict(binding), "binding_sha256": binding_sha(binding),
                  "bound_at": utc_now_iso(), "state": "bound"}
         outcome.update(claim=claim, created=True)
@@ -953,10 +1013,6 @@ def claim_on_predecessor(drive_root: Any, predecessor_task_id: str, nonce: str,
 
 def mark_claim_admitted(drive_root: Any, predecessor_task_id: str, nonce: str) -> None:
     """Record on the predecessor that its claimed successor is durably admitted."""
-    from ouroboros.task_results import (
-        require_writable_task_result_schema, stamp_task_result_schema,
-    )
-
     def update(current: dict) -> Optional[dict]:
         require_writable_task_result_schema(current)
         claim = current.get("continued_by") if isinstance(current.get("continued_by"), dict) else {}
@@ -1019,3 +1075,16 @@ def continuation_offer(result: Dict[str, Any], task_id: str) -> Dict[str, Any]:
         return {"eligible": False, "refusal": "already_continued",
                 "successor_task_id": str(claim["successor_task_id"]), "state": str(claim.get("state") or "")}
     return continuation_eligibility(result, task_id)
+
+
+OFFER_VIEW_KEYS = ("eligible", "cause", "refusal", "successor_task_id", "state")
+
+
+def offer_view(result: Dict[str, Any], task_id: str) -> Optional[Dict[str, Any]]:
+    """The offer a later reader of a ROOT's whole stored row is shown, recomputed on every read: the card's own
+    ``continuation_offer`` without a claim's nonce. ``None`` for a non-root row, live or settled (a child's work
+    is its root's): decided first, since eligibility names a live row ``predecessor_live`` before it asks."""
+    if not _is_root(result, task_id):
+        return None
+    offer = continuation_offer(result, task_id)
+    return {key: offer[key] for key in OFFER_VIEW_KEYS if key in offer}

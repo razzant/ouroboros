@@ -9,15 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from ouroboros.config import SETTINGS_DEFAULTS, VALID_RUNTIME_MODES
 from ouroboros.review_run_isolation import run_cap_from_env
-from ouroboros.provider_models import (
-    ANTHROPIC_DIRECT_DEFAULTS,
-    CLOUDRU_DIRECT_DEFAULTS,
-    DEEPSEEK_DIRECT_DEFAULTS,
-    ZAI_DIRECT_DEFAULTS,
-    MINIMAX_DIRECT_DEFAULTS,
-    MINIMAX_REGION_ENDPOINTS,
-    OPENAI_DIRECT_DEFAULTS,
-)
+from ouroboros.provider_models import DIRECT_PROVIDER_DEFAULTS, MINIMAX_REGION_ENDPOINTS
 from ouroboros.secret_masking import (
     CONFIGURED_SECRET_PLACEHOLDER,
     MASKED_SECRET_SETTING_KEYS as SECRET_SETTING_KEYS,
@@ -28,7 +20,8 @@ from ouroboros.model_slots import (
 )
 from ouroboros.provider_models import compatible_endpoint_configured, parse_claudexor_model, provider_for_model
 from ouroboros.provider_connections import configured_connections, connection_rows, normalize_connections
-from ouroboros.gateway.secret_rows import mask_connections, rehydrate_connections
+from ouroboros.gateway.secret_rows import mask_connections, rehydrate_connections, typed_connection_secrets
+from ouroboros.settings_integrity import operator_variables, skill_environ
 
 
 
@@ -131,12 +124,9 @@ _MODEL_DEFAULTS = {
         "consciousness": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_CONSCIOUSNESS"]),
         "fallback": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"]),
     },
-    "openai": {key: value for key, value in OPENAI_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "cloudru": {key: value for key, value in CLOUDRU_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "minimax": {key: value for key, value in MINIMAX_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "deepseek": {key: value for key, value in DEEPSEEK_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "zai": {key: value for key, value in ZAI_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "anthropic": {key: value for key, value in ANTHROPIC_DIRECT_DEFAULTS.items() if key != "heavy"},
+    # Every direct provider's own defaults (provider_models.DIRECT_PROVIDER_DEFAULTS), never a second list.
+    **{kind: {key: value for key, value in defaults.items() if key != "heavy"}
+       for kind, defaults in DIRECT_PROVIDER_DEFAULTS.items()},
     # No defaults: model names are server-specific; user must fill all slots.
     "openai-compatible": {"main": "", "light": "", "vision": "", "fallback": ""},
     # Several direct providers and no router: the owner chooses Main; no provider is guessed.
@@ -151,11 +141,11 @@ for _profile_defaults in _MODEL_DEFAULTS.values():
     _profile_defaults.setdefault("safety", "")
 
 _STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
-    ("accounts", "Connect your accounts", "Subscriptions + API", "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.", "Add more subscriptions or API access later in Settings → Accounts. Subscription limits and optional provider credits still apply."),
+    ("accounts", "Connect your accounts", "Subscriptions + API", "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.", "Add more subscriptions or API access later in Settings → Accounts and keys."),
     ("models", "Choose models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider."),
-    ("review_mode", "Choose review mode", "Advisory vs blocking", "Reviewers read how Ouroboros understood a request, its plans, its results and its changes. Decide whether their critical findings block the work or only inform Ouroboros.", "Pick both review enforcement and the initial runtime mode before Ouroboros starts."),
+    ("review_mode", "Choose access", "Reach", "Choose how much access Ouroboros gets.", ""),
     ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
-    ("summary", "Review before launch", "Final check", "Check the final provider, model, review, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
+    ("summary", "Review before launch", "Final check", "Check the final provider, model, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
 ))
 _STEP_ORDER = [step["id"] for step in _STEPS]
 
@@ -163,15 +153,19 @@ _STEP_ORDER = [step["id"] for step in _STEPS]
 # the always-visible access grid, "more" fields render inside the collapsed
 # "More options" disclosure. Every input stays mounted in the DOM either way.
 _PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "label", "placeholder", "note", "inputType", "group"), (
-    ("openrouter-key", "openrouterKey", "OPENROUTER_API_KEY", "s-openrouter", "OpenRouter API Key", "sk-or-v1-...", "Optional. Best when you want one router for OpenAI, Anthropic, Google, and more.", "password", "primary"),
-    ("openai-key", "openaiKey", "OPENAI_API_KEY", "s-openai", "OpenAI API Key", "sk-...", "Optional. If this is the only remote key, the next step prefills OpenAI's own model ids.", "password", "primary"),
-    ("cloudru-key", "cloudruKey", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "s-cloudru-key", "Cloud.ru Foundation Models API Key", "Cloud.ru API key", "Optional. If this is the only remote key, the next step prefills Cloud.ru's own model ids.", "password", "more"),
-    ("minimax-key", "minimaxKey", "MINIMAX_API_KEY", "s-minimax-key", "MiniMax API Key", "MiniMax API key", "Optional. If this is the only remote key, the next step prefills MiniMax's own model ids.", "password", "more"),
+    ("openrouter-key", "openrouterKey", "OPENROUTER_API_KEY", "s-openrouter", "OpenRouter API Key", "sk-or-v1-...", "Best when you want one router for OpenAI, Anthropic, Google, and more.", "password", "primary"),
+    ("openai-key", "openaiKey", "OPENAI_API_KEY", "s-openai", "OpenAI API Key", "sk-...", "", "password", "primary"),
+    ("cloudru-key", "cloudruKey", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "s-cloudru-key", "Cloud.ru Foundation Models API Key", "Cloud.ru API key", "", "password", "more"),
+    # GigaChat is ready with an authorization key, or a user and password (provider_models.PROVIDER_KINDS).
+    ("gigachat-credentials", "gigachatCredentials", "GIGACHAT_CREDENTIALS", "s-gigachat-credentials", "GigaChat Authorization Key", "Base64 client_id:secret", "", "password", "more"),
+    ("gigachat-user", "gigachatUser", "GIGACHAT_USER", "s-gigachat-user", "GigaChat User", "username", "Basic auth instead of an authorization key, with the password below.", "text", "more"),
+    ("gigachat-password", "gigachatPassword", "GIGACHAT_PASSWORD", "s-gigachat-password", "GigaChat Password", "password", "Basic auth, with the user above.", "password", "more"),
+    ("minimax-key", "minimaxKey", "MINIMAX_API_KEY", "s-minimax-key", "MiniMax API Key", "MiniMax API key", "", "password", "more"),
     ("minimax-region", "minimaxRegion", "MINIMAX_REGION", "s-minimax-region", "MiniMax Region", "global_en or cn_zh", "Choose global_en for the global endpoint or cn_zh for the China endpoint.", "text", "more"),
-    ("deepseek-key", "deepseekKey", "DEEPSEEK_API_KEY", "s-deepseek-key", "DeepSeek API Key", "sk-...", "Optional. If this is the only remote key, the next step prefills DeepSeek's own model ids.", "password", "more"),
-    ("zai-key", "zaiKey", "ZAI_API_KEY", "s-zai-key", "Z.ai API Key (GLM)", "...", "Optional. If this is the only remote key, the next step prefills Z.ai's own GLM model ids.", "password", "more"),
+    ("deepseek-key", "deepseekKey", "DEEPSEEK_API_KEY", "s-deepseek-key", "DeepSeek API Key", "sk-...", "", "password", "more"),
+    ("zai-key", "zaiKey", "ZAI_API_KEY", "s-zai-key", "Z.ai API Key (GLM)", "...", "", "password", "more"),
     ("zai-plan", "zaiPlan", "ZAI_PLAN", "s-zai-plan", "Z.ai Plan", "payg or coding", "Choose payg (pay-as-you-go, default) or coding (Coding Plan endpoint; officially intended for supported coding tools only).", "text", "more"),
-    ("anthropic-key", "anthropicKey", "ANTHROPIC_API_KEY", "s-anthropic", "Anthropic API Key", "sk-ant-...", "Optional. Saved for models routed straight to Anthropic, and for Claude tooling.", "password", "primary"),
+    ("anthropic-key", "anthropicKey", "ANTHROPIC_API_KEY", "s-anthropic", "Anthropic API Key", "sk-ant-...", "Saved for models routed straight to Anthropic, and for Claude tooling.", "password", "primary"),
     ("openai-compatible-url", "compatibleBaseUrl", "OPENAI_COMPATIBLE_BASE_URL", "s-compatible-url", "OpenAI-compatible Base URL", "http://localhost:11434/v1", "Base URL for your OpenAI-compatible endpoint (e.g. Ollama, LM Studio, vLLM). Required whenever a slot uses the OpenAI-compatible endpoint as its source.", "url", "more"),
     ("openai-compatible-key", "compatibleApiKey", "OPENAI_COMPATIBLE_API_KEY", "s-compatible-key", "OpenAI-compatible API Key", "Leave empty for no auth", "API key for the endpoint. Leave empty if your server does not require authentication.", "password", "more"),
 ))
@@ -182,6 +176,7 @@ _PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "la
 _PROFILE_SPECS = {
     "openrouter": ("OpenRouter", "OpenRouter is present, so the next step keeps router-style defaults while still saving any extra direct keys you paste here.", "OpenRouter-style routing remains active. OpenRouter stays the source for ids such as openai/gpt-5.6-terra or anthropic/claude-sonnet-5."),
     "openai": ("OpenAI", "OpenAI is present, so the next step prefills OpenAI's own model ids.", "OpenAI-only setup detected. These defaults are explicit and official."),
+    "gigachat": ("GigaChat", "GigaChat is present, so the next step prefills GigaChat's own model ids.", "GigaChat-only setup detected. These defaults use GigaChat's own model ids."),
     "cloudru": ("Cloud.ru Foundation Models", "Cloud.ru is present, so the next step prefills Cloud.ru's own model ids.", "Cloud.ru-only setup detected. These defaults use Cloud.ru's own model ids."),
     "minimax": ("MiniMax", "MiniMax is present, so the next step prefills MiniMax's own model ids.", "MiniMax-only setup detected. These defaults include MiniMax-M3 and MiniMax-M3.1-Flash."),
     "deepseek": ("DeepSeek", "DeepSeek is present, so the next step prefills DeepSeek's own model ids.", "DeepSeek-only setup detected. These defaults use deepseek-v4-pro for main work and deepseek-v4-flash for the light lane."),
@@ -201,16 +196,11 @@ _MODEL_SLOTS = _rows(("slot", "stateKey", "settingKey", "inputId", "label", "not
     ("fallback", "fallbackModel", "OUROBOROS_MODEL_FALLBACKS", "fallback-model", "Fallback Model", "Fallback and resilience path.", "s-model-fallback", "s-local-fallback"),
 ))
 
-_REVIEW_MODES = _rows(("value", "label", "tone", "className", "copy"), (
-    ("advisory", "Advisory", "Flexible", "advisory", "Reviewers read plans, results and changes; their findings stay visible and Ouroboros decides what to do with them."),
-    ("blocking", "Blocking", "Strict", "blocking", "Outside Cyber Pro Access, unresolved critical review findings block commits. Cyber Pro keeps the findings as evidence for Ouroboros's decision."),
-))
-
 _RUNTIME_MODES = _rows(("value", "label", "tone", "className", "copy"), (
-    ("light", "Light", "Safest", "light", "Self-modification of the main repo is disabled. Best for trying Ouroboros out without repo self-modification."),
-    ("advanced", "Advanced", "Default", "advanced", "Self-modification of the evolutionary layer is allowed (current behaviour). Protected core/contract/release files stay guarded by Advanced mode."),
-    ("pro", "Pro", "Power", "pro", "Direct protected-surface mode. Protected core/contract/release edits are allowed on disk, but commits still require the normal review gate."),
-    ("cyber_pro", "Cyber Pro", "Maximum power", "cyber-pro", "Host and configuration authority, including credentials, models, Supervisor and protected rewrites. Review still runs and the Blocking or Advisory choice is kept, but review findings do not block actions in Cyber Pro: they are evidence for Ouroboros, which decides."),
+    ("light", "Light", "Safest", "light", "Works on your projects. Never changes its own code."),
+    ("advanced", "Advanced", "Default", "advanced", "May grow its own skills and outer layer."),
+    ("pro", "Pro", "Power", "pro", "May change its protected core. Reads a review before each change."),
+    ("cyber_pro", "Cyber Pro", "Maximum power", "cyber-pro", "Full say over itself and this computer. Asks for reviews when it judges."),
 ))
 
 _LOCAL_ROUTING_MODES = _rows(("value", "buttonLabel", "label", "flags"), (
@@ -241,7 +231,6 @@ _BUDGET_FIELDS = [
         "stateKey": "totalBudget",
         "settingKey": "TOTAL_BUDGET",
         "inputId": "total-budget",
-        "settingsInputId": "s-total-budget",
         "title": "Total budget",
         "label": "Total Budget (USD)",
         # Owner 2026-10-03 Q4-A / 2026-10-07: the cap is the limit itself,
@@ -255,7 +244,6 @@ _BUDGET_FIELDS = [
         "stateKey": "perTaskCostUsd",
         "settingKey": "OUROBOROS_PER_TASK_COST_USD",
         "inputId": "per-task-budget",
-        "settingsInputId": "s-settings-per-task-cost",
         "title": "Per-task cost cap",
         "label": "Per-task Cost Cap (USD)",
         "note": _BUDGET_NOTE,
@@ -267,10 +255,15 @@ _BUDGET_FIELDS = [
 _BUDGET_FIELDS_BY_KEY = {field["settingKey"]: field for field in _BUDGET_FIELDS}
 BUDGET_SETTING_KEYS = tuple(_BUDGET_FIELDS_BY_KEY)
 
+# Local presets (12.11.2026): the current Qwen generation, trained to 262,144 tokens with full attention in one
+# layer of four, so a long window costs little memory. A fresh install's first turn needs about 34K tokens of input
+# beside the reply's room (measured on Qwen3.8-27B), so each opens at 65,536. Measured memory: Qwen3.8-27B held
+# 19.45 GB resident at 65,536 (macOS footprint showed 37 GB right after a first turn); the 9B and the 35B-A3B are not
+# measured. Their GGUF files need a llama-cpp-python runtime from mid-2026 or later (0.3.36 loads the 27B).
 _LOCAL_PRESETS: Dict[str, Dict[str, Any]] = {
-    "qwen25-7b": {"label": "Qwen2.5-7B Instruct Q3_K_M", "source": "Qwen/Qwen2.5-7B-Instruct-GGUF", "filename": "qwen2.5-7b-instruct-q3_k_m.gguf", "contextLength": 16384, "chatFormat": ""},
-    "qwen3-14b": {"label": "Qwen3-14B Instruct Q4_K_M", "source": "Qwen/Qwen3-14B-GGUF", "filename": "Qwen3-14B-Q4_K_M.gguf", "contextLength": 16384, "chatFormat": ""},
-    "qwen3-32b": {"label": "Qwen3-32B Instruct Q4_K_M", "source": "Qwen/Qwen3-32B-GGUF", "filename": "Qwen3-32B-Q4_K_M.gguf", "contextLength": 32768, "chatFormat": ""},
+    "qwen35-9b": {"label": "Qwen3.5-9B Q4_K_M (5.7 GB file)", "source": "unsloth/Qwen3.5-9B-GGUF", "filename": "Qwen3.5-9B-Q4_K_M.gguf", "contextLength": 65536, "chatFormat": ""},
+    "qwen38-27b": {"label": "Qwen3.8-27B Q4_K_M (16.6 GB file)", "source": "unsloth/Qwen3.8-27B-GGUF", "filename": "Qwen3.8-27B-UD-Q4_K_M.gguf", "contextLength": 65536, "chatFormat": ""},
+    "qwen36-35b-a3b": {"label": "Qwen3.6-35B-A3B Q4_K_M (22 GB file)", "source": "unsloth/Qwen3.6-35B-A3B-GGUF", "filename": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", "contextLength": 65536, "chatFormat": ""},
 }
 
 # Agent SUBSCRIPTION intent (install-time presets, D-3/D-4). These two
@@ -405,15 +398,20 @@ def model_defaults_for_profile(profile: str) -> dict:
 
 
 def build_setup_contract(host_mode: str = "desktop") -> dict:
+    """The choices Settings and the wizard offer: under a deployment policy only the Access levels it allows,
+    and a Supervisor slot its checker fixes is ``managed`` (shown, never edited or written)."""
+    from ouroboros.deployment_policy import CHECKER_KEY, checker, choice_refusal
+
+    managed_checker = checker() is not None
     return {
         "version": 1,
         "hostMode": "web" if host_mode == "web" else "desktop",
         "steps": [dict(item) for item in _STEPS],
         "providerFields": [dict(item) for item in _PROVIDER_FIELDS],
         "providerProfiles": {key: {"label": spec[0], "providerCopy": spec[1], "modelCopy": spec[2]} for key, spec in _PROFILE_SPECS.items()},
-        "modelSlots": [dict(item) for item in _MODEL_SLOTS],
-        "reviewModes": [dict(item) for item in _REVIEW_MODES],
-        "runtimeModes": [dict(item) for item in _RUNTIME_MODES],
+        "modelSlots": [{**item, "managed": managed_checker and item["settingKey"] == CHECKER_KEY} for item in _MODEL_SLOTS],
+        "runtimeModes": [dict(item) for item in _RUNTIME_MODES
+                         if not choice_refusal("OUROBOROS_RUNTIME_MODE", item["value"])],
         "localRoutingModes": [dict(item) for item in _LOCAL_ROUTING_MODES],
         "budgetFields": [dict(item) for item in _BUDGET_FIELDS],
         "subscriptionFields": [dict(item) for item in _SUBSCRIPTION_FIELDS],
@@ -445,7 +443,7 @@ def parse_completion_attempt(data: Any) -> Tuple[str, str]:
     return "", "attempt_id must be 16-128 letters, digits, '-' or '_'."
 
 
-def build_initial_setup_state(settings: dict, host_mode: str = "desktop") -> dict:
+def build_initial_setup_state(settings: dict, host_mode: str = "desktop", document: Optional[dict] = None) -> dict:
     profile = derive_provider_profile(settings)
     defaults = model_defaults_for_profile(profile)
     local_source = _string(settings.get("LOCAL_MODEL_SOURCE"))
@@ -474,7 +472,6 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop") -> dic
         # address is empty (``compatible_endpoint``). No provider field: completion keeps it as saved.
         "legacyCompatibleBaseUrl": _string(settings.get("OPENAI_BASE_URL")),
         "providerProfile": profile,
-        "reviewEnforcement": _string(settings.get("OUROBOROS_REVIEW_ENFORCEMENT")) or str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"]),
         "runtimeMode": _string(settings.get("OUROBOROS_RUNTIME_MODE")) or str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"]),
         "skillsRepoPath": _string(settings.get("OUROBOROS_SKILLS_REPO_PATH")),
         "localPreset": local_preset,
@@ -510,6 +507,12 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop") -> dic
     # takes the profile default. A fresh install's wizard proposes its defaults itself.
     state.update({slot["stateKey"]: _string(settings[slot["settingKey"]]) if slot["settingKey"] in settings
                   else defaults[slot["slot"]] for slot in _MODEL_SLOTS})
+    # The model slots the wizard proposes and may move to another key or a subscription's model (#2969): set by
+    # neither the stored ``document`` (``settings`` when none is given) nor an operator's own variable. Any other
+    # value, blank included, is kept.
+    chosen = set(settings if document is None else document) | set(
+        operator_variables(skill_environ(), [slot["settingKey"] for slot in _MODEL_SLOTS]))
+    state["automaticModels"] = [slot["stateKey"] for slot in _MODEL_SLOTS if slot["settingKey"] not in chosen]
     return state
 
 
@@ -530,7 +533,9 @@ def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None) -> di
 
 
 def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False,
-                          consciousness_enabled: Optional[bool] = None) -> dict:
+                          consciousness_enabled: Optional[bool] = None, document: Optional[dict] = None) -> dict:
+    from ouroboros.deployment_policy import policy_state
+
     normalized_host = "web" if host_mode == "web" else "desktop"
     return {
         "hostMode": normalized_host,
@@ -546,8 +551,9 @@ def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_i
         # hardcoding it: a prefilled credential field holds this string, not a key.
         "secretPlaceholder": CONFIGURED_SECRET_PLACEHOLDER,
         "contract": build_setup_contract(normalized_host),
-        "initialState": build_initial_setup_state(settings, normalized_host),
+        "initialState": build_initial_setup_state(settings, normalized_host, document),
         "consciousnessOffer": consciousness_offer(settings, enabled=consciousness_enabled),
+        "deployment": policy_state(),
     }
 
 
@@ -566,6 +572,49 @@ def wizard_authors_safety_light() -> bool:
     from ouroboros.config import SETTINGS_PATH
 
     return not SETTINGS_PATH.exists()
+
+
+def draft_access(data: dict, current_settings: dict) -> Tuple[Any, Dict[str, str], set, str | None]:
+    """A setup draft's access as it would be saved: its connection rows and its provider fields, every kept
+    secret restored from ``current_settings`` (an untouched field posts back its marker; a row keeps its secret by
+    kind and name). ``(connections, keys, typed, error)``: what the validator below prepares and what the draft's
+    own catalog read asks the providers with (``gateway/onboarding.api_onboarding_model_catalog``); ``typed`` is
+    the secrets this draft carries as text its author typed, never a restored one."""
+    secret_keys = secret_provider_setting_keys()
+    keys: Dict[str, str] = {}
+    typed: set = set()
+    connections = current_settings.get("OUROBOROS_CONNECTIONS", [])
+    if "OUROBOROS_CONNECTIONS" in data:
+        connections, error = normalize_connections(data["OUROBOROS_CONNECTIONS"])
+        if error:
+            return [], {}, typed, error
+        typed |= typed_connection_secrets(connections)
+        try:
+            connections = rehydrate_connections(connections, current_settings.get("OUROBOROS_CONNECTIONS"))
+        except ValueError as exc:
+            return [], {}, typed, str(exc)
+    for field in _PROVIDER_FIELDS:
+        setting_key = field["settingKey"]
+        raw_value = data.get(setting_key)
+        if raw_value is not None and not isinstance(raw_value, str):
+            # A JSON object/array/number here is a malformed API post, never a
+            # credential: str()-ing it would persist unusable garbage as a
+            # "successful" setup. Honest rejection over silent stringification.
+            return [], {}, typed, f"{field['label']} must be a text value."
+        value = _string(raw_value)
+        # An untouched credential field posts back the marker it was prefilled
+        # with. It means "keep the stored secret" and NEVER "store this string":
+        # resolving it to the stored value here — before the length check, the
+        # has-remote gate and the prepared merge — is what keeps the marker out
+        # of settings.json on every host, since every save path (the atomic
+        # completion endpoint, the desktop bridge) shares this validator. With
+        # nothing stored the marker resolves to empty, so it cannot become a key.
+        if setting_key in secret_keys and _is_secret_placeholder(value):
+            value = _string(current_settings.get(setting_key))
+        elif setting_key in secret_keys and value:
+            typed.add(value)
+        keys[setting_key] = value
+    return connections, keys, typed, None
 
 
 def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, str | None]:
@@ -588,41 +637,13 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
             parse_claudexor_model(_string(data.get("OUROBOROS_MODEL")))
         except ValueError as exc:
             return {}, str(exc)
-    secret_keys = secret_provider_setting_keys()
-    keys: Dict[str, str] = {}
-    connections = current_settings.get("OUROBOROS_CONNECTIONS", [])
-    if "OUROBOROS_CONNECTIONS" in data:
-        connections, error = normalize_connections(data["OUROBOROS_CONNECTIONS"])
-        if error:
-            return {}, error
-        try:
-            connections = rehydrate_connections(connections, current_settings.get("OUROBOROS_CONNECTIONS"))
-        except ValueError as exc:
-            return {}, str(exc)
-    for field in _PROVIDER_FIELDS:
-        setting_key = field["settingKey"]
-        raw_value = data.get(setting_key)
-        if raw_value is not None and not isinstance(raw_value, str):
-            # A JSON object/array/number here is a malformed API post, never a
-            # credential: str()-ing it would persist unusable garbage as a
-            # "successful" setup. Honest rejection over silent stringification.
-            return {}, f"{field['label']} must be a text value."
-        value = _string(raw_value)
-        # An untouched credential field posts back the marker it was prefilled
-        # with. It means "keep the stored secret" and NEVER "store this string":
-        # resolving it to the stored value here — before the length check, the
-        # has-remote gate and the prepared merge — is what keeps the marker out
-        # of settings.json on every host, since every save path (the atomic
-        # completion endpoint, the desktop bridge) shares this validator. With
-        # nothing stored the marker resolves to empty, so it cannot become a key.
-        if setting_key in secret_keys and _is_secret_placeholder(value):
-            value = _string(current_settings.get(setting_key))
-        keys[setting_key] = value
+    connections, keys, _typed, error = draft_access(data, current_settings)
+    if error:
+        return {}, error
     local_source = _string(data.get("LOCAL_MODEL_SOURCE"))
     local_filename = _string(data.get("LOCAL_MODEL_FILENAME"))
     local_chat_format = _string(data.get("LOCAL_MODEL_CHAT_FORMAT"))
     local_routing_mode = _string(data.get("LOCAL_ROUTING_MODE")) or "cloud"
-    review_enforcement = _string(data.get("OUROBOROS_REVIEW_ENFORCEMENT")) or "advisory"
     raw_runtime_mode = _string(data.get("OUROBOROS_RUNTIME_MODE"))
     runtime_mode = raw_runtime_mode.lower() if raw_runtime_mode else _string(current_settings.get("OUROBOROS_RUNTIME_MODE")) or str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"])
 
@@ -639,7 +660,7 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
             continue
         if (
             value
-            and setting_key != "OPENAI_COMPATIBLE_API_KEY"
+            and setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "GIGACHAT_PASSWORD"}  # API keys only
             and (field.get("inputType") or "password") == "password"
             and len(value) < 10
         ):
@@ -648,7 +669,7 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     has_remote = any(
         value
         for setting_key, value in keys.items()
-        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN"}
+        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN", "GIGACHAT_USER", "GIGACHAT_PASSWORD"}
     )
     has_remote = has_remote or bool(configured_connections({**keys, "OUROBOROS_CONNECTIONS": connections}))
     has_local = bool(local_source)
@@ -660,8 +681,6 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     keys["MINIMAX_REGION"] = minimax_region
     if has_local and "/" in local_source and not local_source.startswith(("/", "~")) and not local_filename:
         return {}, "Local HuggingFace sources need a GGUF filename."
-    if review_enforcement not in {"advisory", "blocking"}:
-        return {}, "Choose advisory or blocking review mode."
     if runtime_mode not in VALID_RUNTIME_MODES:
         return {}, f"Choose a runtime mode from {sorted(VALID_RUNTIME_MODES)}."
 
@@ -709,7 +728,6 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     prepared.update(keys)
     prepared.update(parsed_budget)
     prepared.update({
-        "OUROBOROS_REVIEW_ENFORCEMENT": review_enforcement,
         "OUROBOROS_RUNTIME_MODE": runtime_mode,
         "OUROBOROS_SKILLS_REPO_PATH": _string(data.get("OUROBOROS_SKILLS_REPO_PATH")),
         "LOCAL_MODEL_SOURCE": local_source if has_local else "",

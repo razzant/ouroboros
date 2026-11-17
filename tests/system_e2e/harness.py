@@ -99,11 +99,12 @@ SCENARIOS = {
     # hot-adoption variant that removes the restart (W3B-F1) — enable after boot
     # must reach the workers already running, not only the pool's next generation.
     "S13": ("skills lifecycle E2E: payload -> stub review -> grants -> enable -> dispatch -> disable/delete + Model Experience; hot-adoption variant: enable after boot dispatches in an ALREADY-SPAWNED worker with no restart", LANE_MOCK),
-    # Ф4 wave 3a (plan §8: commit triad+scope BOTH enforcement classes +
-    # stale-rejection). Renumbered at integration: the parallel
+    # Ф4 wave 3a (plan §8: commit triad+scope after critical feedback +
+    # stale-rejection; the two enforcement classes it once pinned became one when
+    # Blocking retired). Renumbered at integration: the parallel
     # wave-3b lane claimed S11-S13 first; S14 (plan review) retired with its engine.
-    "S15": ("commit triad+scope, ADVISORY class: red verdicts recorded + waved through with durable override, commit lands", LANE_MOCK),
-    "S16": ("commit triad+scope, BLOCKING class: red blocks (HEAD unmoved), identical resubmit refused free, green lands; post-verdict revalidation", LANE_MOCK),
+    "S15": ("commit triad+scope, critical feedback: red verdicts return before Git, the author's explicit continuation goes over them with a durable override, commit lands", LANE_MOCK),
+    "S16": ("commit triad+scope, revision: a red outcome returns before Git (HEAD unmoved), an identical resubmit returns it again at $0, the revised diff's clean PASS returns first too and lands on the author's continuation; post-verdict revalidation", LANE_MOCK),
     # S17 (the acceptance loop) retired with the task-acceptance machine.
     # Ф4 wave 4 (plan §8 remainder: update variations, chat-lineage cancel,
     # absorb kill-recovery, delegated interactive answer).
@@ -143,7 +144,7 @@ SCENARIOS = {
     # #1539 own-body candidates: the smallest real consumer of the authoring seam.
     "S36": ("own-body candidate on a real server: the root's first body write in the installation's spelling binds a candidate, later repo/… and absolute serving spellings reach the same candidate files, the serving clone is byte-identical, a refused resume is the typed CANDIDATE_MISSING in the tool log, and a process in the candidate sees its isolated data root", LANE_MOCK),
     "S37": ("restart-bound adoption on one real server: a reviewed candidate commit, request_restart(adopt_commit) arms on the stop evidence, the in-place re-exec switches the clean serving checkout before its imports, generation B settles it adopted and verifies the restart on the serving SHA", LANE_MOCK),
-    "S38": ("evolution crash between the candidate commit and its receipts: the supervisor's cycle commits in its candidate under blocking review, the tree is SIGKILLed and the post-commit receipts removed; a fresh boot recovers the exact commit and its reviewed provenance at worker boot and does not absorb it (the serving checkout never held it)", LANE_MOCK),
+    "S38": ("evolution crash between the candidate commit and its receipts: the supervisor's cycle commits in its candidate through the review organ (its clean outcome returned first, the commit its explicit continuation), the tree is SIGKILLed and the post-commit receipts removed; a fresh boot recovers the exact commit and its reviewed provenance at worker boot and does not absorb it (the serving checkout never held it)", LANE_MOCK),
     # Deployment: both container modes on real Docker, keyless (stub models through an exec relay).
     "S39": ("container lifecycle: the managed image boots a released seed into a body checkout and runtime venv on volumes (parent and split layouts), keeps code, packages and data across recreation, stays stopped after Panic until an owner start, refuses a mounted repository and a second container on shared data; the immutable image admits one server per data volume and, networkless, serves onboarding, a project, a task with a child and an artifact across a restart; an Update adding a local-wheel dependency survives an offline recreation, a task imports it, and rollback restores the old lock with the package disclosed", LANE_CONTAINER),
     # #1729/#1730 in real processes: the owner's doors on one live task that keeps its id (no retry exists since #1376).
@@ -151,6 +152,8 @@ SCENARIOS = {
     "S41": ("live skill-smoke adapter: ordinary author, one independent rebuttal, immutable payload, true/unknown criticism red, tool-policy and identity controls", LANE_MOCK),
     "S42": ("direct Project turn across an application stop: a WS turn in a Project room writes in the room, the tree is SIGTERMed while its next model round is held, the next boot restores the same id with its saved working state, one owner Resume over HTTP releases the stop hold and the Project verification, and a worker continues the saved loop to a completed result carrying the continuation's answer; in a folderless room the resumed write still lands in the turn's task drive after a sibling start_task gives the room its first folder (#2547)", LANE_MOCK),
     "S43": ("the production-shaped stand, real half (tests/_stand.py; its counted half: tests/test_stand_counts.py): a root restored with paused trees, pending rows, held runs, schedules, markers, rooms and a story; real tasks, owner turns and a Presence burst held at the model; no server stack runs cognition (E1), the door and the controls answer and Panic ends the whole tree under load (E5, E9), the owner is answered with no pool: a worker storm, a refused spawn, a marker window (E7), Stop finalizes then kills a carrier (E9); WAL and PERSIST (E10)", LANE_MOCK),
+    # #3396 in real processes: the launcher stops reading a running server's pipe.
+    "S44": ("a server in the launcher's shape whose output pipe, once it is ready, is full and unread: a task still completes through its worker and Quit over the stop pipe exits 0 inside the launcher's grace; the base tree stalls on the same pipe", LANE_MOCK),
 }
 
 MOCK_SLUG = "openai-compatible::mock-model"
@@ -215,6 +218,10 @@ MARKER_SOURCES = {
     PLAN_REVIEW_MARKER: "ouroboros/tools/plan_packet.py",
     NATIVE_EPISODE_MARKER: "ouroboros/review_native_episode.py",
 }
+# The finish door's two ways of naming the retained answer (``loop_delivery._delivery_control_prompt`` and
+# ``hold_completion_response``), read by ``retained_answer_selection``.
+RETAINED_ANSWER_MARKERS = ("The complete answer is retained as ", "Retained answer_sha256=")
+MARKER_SOURCES.update({marker: "ouroboros/loop_delivery.py" for marker in RETAINED_ANSWER_MARKERS})
 
 
 # ---------------------------------------------------------------------------
@@ -440,8 +447,38 @@ class ReviewScript:
         assert not leftover, f"ReviewScript verdicts never served: {leftover}"
 
 
+_RETAINED_ANSWER_RE = re.compile("(?:" + "|".join(map(re.escape, RETAINED_ANSWER_MARKERS)) + ")([0-9a-f]{64})")
+_TAIL_OWNER_SOURCE_RE = re.compile(r'"owner_source_sha256": "([0-9a-f]{64})"')
+
+
+def retained_answer_selection(body: dict) -> dict | None:
+    """The author's selection of its held answer, when the host has just returned a final at the finish door.
+
+    Since #3280 the one pre-delivery notice also fires on a turn whose only effect is a written file (a write no
+    longer counts as its own check), and the notice arms delivery control: the next tool-less answer is held
+    (``selection_required``) until the author selects complete bytes or the retained ``answer_sha256`` with
+    ``finish_task`` (``loop_delivery._resolve_delivery_control``). A scripted model that answers prose again is
+    returned forever. This is what a model obeying the control prompt does: it delivers the answer it already
+    gave. ``None`` unless the rows after the last assistant row name a retained answer and ``finish_task`` is
+    offered, so an ordinary round still reads its script."""
+    if not any((row.get("function") or {}).get("name") == "finish_task" for row in body.get("tools") or []
+               if isinstance(row, dict)):
+        return None
+    messages = [m for m in body.get("messages") or [] if isinstance(m, dict)]
+    last = max((i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=-1)
+    tail = "\n".join(message_text(m) for m in messages[last + 1:])
+    retained = _RETAINED_ANSWER_RE.findall(tail)
+    if not retained:
+        return None
+    arguments = {"action": "finish", "answer_sha256": retained[-1]}
+    owner = _TAIL_OWNER_SOURCE_RE.findall(tail)
+    if owner:
+        arguments["acceptance_subject"] = {"owner_source_sha256": owner[-1]}
+    return {"tool": "finish_task", "arguments": arguments}
+
+
 def scripted_completion(body: dict, seq: int, script_next, final_answer: str,
-                        review_next=None) -> tuple[str, dict]:
+                        review_next=None, *, select_retained: bool = False) -> tuple[str, dict]:
     """The stub's whole decision function, pure so the default lane can pin it.
 
     ``script_next`` is a callable returning the next scripted tool step (or None when
@@ -453,7 +490,9 @@ def scripted_completion(body: dict, seq: int, script_next, final_answer: str,
     arguments). ``review_next(kind, body)`` (wave 3a, usually a ``ReviewScript``)
     may override the canned answer of a review-organ call; it is consulted ONLY for
     ``REVIEW_KINDS`` — the review-organ branch still sits BEFORE the finalization
-    check and review calls still never consume agent script steps. Returns
+    check and review calls still never consume agent script steps. With
+    ``select_retained`` a round the finish door returned selects the held answer
+    (``retained_answer_selection``) instead of consuming a step. Returns
     ``(kind, message)`` where message is the OpenAI-style assistant message.
     """
     kind = classify_call(body)
@@ -466,7 +505,9 @@ def scripted_completion(body: dict, seq: int, script_next, final_answer: str,
         return kind, canned
     if kind == "finalization":
         return kind, {"role": "assistant", "content": final_answer}
-    step = script_next(body) if body.get("tools") else None
+    step = (retained_answer_selection(body) if select_retained and body.get("tools") else None)
+    if step is None:
+        step = script_next(body) if body.get("tools") else None
     if callable(step):
         step = step(body)
     if step is None:
@@ -548,6 +589,7 @@ class LoopbackModelServer:
     def __init__(self, *, latency_sec: float = 0.0, gate: "ModelGate | None" = None) -> None:
         self.latency_sec = latency_sec
         self.gate = gate
+        self.window_tokens = 2_000_000  # what /models advertises (below); a test may set its own before the first probe
         self.calls: list = []          # (kind, body) in arrival order
         self._lock = threading.Lock()
         outer = self
@@ -555,15 +597,16 @@ class LoopbackModelServer:
         class _Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 - stdlib callback name
                 if self.path.rstrip("/").endswith("/models"):
-                    # >=1M ON PURPOSE, and it is load-bearing twice: the capability-
-                    # evidence /models probe stores this as a CONFIRMED window, which
-                    # (a) sizes the triad fit budget (a 400K window under the cold
-                    # 1.65 density floor caps input at ~202K — BELOW the ~226K
-                    # governance pack, blocking every commit_reviewed before
-                    # dispatch), and (b) satisfies the BIBLE P3 >=1M floor that
-                    # scope review's BLOCKING authority requires.
+                    # The default is >=1M ON PURPOSE: the capability-evidence /models probe stores
+                    # this as a CONFIRMED window, which (a) sizes the triad fit
+                    # budget (a 400K window under the cold 1.65 density floor caps
+                    # input at ~202K — BELOW the ~226K governance pack, so every
+                    # commit_reviewed would return without a verdict, nothing
+                    # dispatched), and (b) keeps the seats' absolute output reserves
+                    # (reviewer_window). A window is sizing only, never a condition
+                    # of a review's authority (owner 2026-09-17, BIBLE P3).
                     return self._send({"data": [
-                        {"id": model_id, "max_model_len": 2_000_000}
+                        {"id": model_id, "max_model_len": outer.window_tokens}
                         for model_id in outer._model_ids()
                     ]})
                 self.send_error(404)
@@ -681,9 +724,14 @@ class ScriptedStubModel(LoopbackModelServer):
 
     def __init__(self, script=None, *, final_answer: str = "Final answer: scripted scenario complete.",
                  latency_sec: float = 0.0, review_script: "ReviewScript | None" = None,
-                 gate: "ModelGate | None" = None, model_ids=None) -> None:
+                 gate: "ModelGate | None" = None, model_ids=None,
+                 select_retained: bool = False) -> None:
         super().__init__(latency_sec=latency_sec, gate=gate)
         self.script = list(script or [])
+        # Opt-in: a scenario whose turn writes and then answers plainly meets the finish door's one
+        # notice (#3280); see ``retained_answer_selection``. Off by default so scripts that select
+        # their own completion keep consuming their scripted finish_task step.
+        self.select_retained = bool(select_retained)
         self.final_answer = final_answer
         self.review_script = review_script
         # As on ReplayModel: extra wire ids to advertise on /models, so the
@@ -705,7 +753,7 @@ class ScriptedStubModel(LoopbackModelServer):
 
     def _answer(self, body: dict, seq: int) -> tuple[str, dict]:
         return scripted_completion(body, seq, self._next_step, self.final_answer,
-                                   review_next=self.review_script)
+                                   review_next=self.review_script, select_retained=self.select_retained)
 
     def script_consumed(self) -> bool:
         with self._lock:

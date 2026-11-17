@@ -30,6 +30,7 @@ from tests.test_ui_smoke_playwright import (
     REPO_ROOT, _assert_served_candidate, _browser_missing, _fixture_interpreter, _fixture_python, _free_port,
     _wait_health, _wait_supervisor_ready,
 )
+from tests.ui_console_errors import PageErrors
 from ouroboros.test_environment import isolated_environment, owned_process_temp
 from ouroboros.test_evidence import keep_startup_log
 
@@ -47,8 +48,8 @@ ROW = '[data-consciousness-offer] .consciousness-offer-row'
 DEFAULT_ROW = ("Consciousness Start consciousness with Ouroboros Between your requests it continues topics that interest "
                "it and you, notices opportunities and brings you suggestions. Autonomy: Acts. Also acts on its own: starts work, "
                "runs commands, speaks and acts in places. It does not change itself. Up to $20.00 a day in recorded "
-               "spending. Subscription quota is separate. At most 2 of its own tasks at once. Change these in "
-               "Settings › Behavior › Consciousness. Stop or start it any time in Dashboard › Consciousness.")
+               "spending. Subscription quota is separate. At most 2 of its own tasks at once. Change the allowance in "
+               "Dashboard › Costs. Its other settings, and Stop and Start, are in Dashboard › Consciousness.")
 
 
 def _provider(llm_url: str) -> dict:
@@ -172,8 +173,8 @@ def _text(page, selector: str) -> str:
 
 
 def _record(page) -> dict:
-    seen = {"commands": [], "completions": [], "errors": []}
-    page.on("pageerror", lambda error: seen["errors"].append(str(error)))
+    seen = {"commands": [], "completions": [], "errors": PageErrors(None, page.context.browser.browser_type.name)}
+    seen["errors"].watch(page, navigates=False)  # strict: only a caller driving a hand-off declares it
 
     def request(req):
         if req.url.endswith("/api/command") and req.method == "POST":
@@ -253,16 +254,31 @@ def test_first_setup_ticked_starts_once_through_the_queue_and_a_later_stop_wins(
             page.screenshot(path=str(out / "first-setup-summary-unticked-webkit-light.png"), full_page=True)
             box.check()
             page.locator(ROW).screenshot(path=str(out / "first-setup-row-ticked-webkit-light.png"))
+            seen["errors"].watch(page)  # Finish hands off to the app: leaving may cut off the page's own reads (tests/ui_console_errors.py)
             _finish(page)
             page.wait_for_selector("[data-consciousness-run]", timeout=60_000)
             page.screenshot(path=str(out / "first-setup-after-save-webkit-light.png"))
             page.wait_for_url(srv.url + "/", timeout=240_000)
             page.wait_for_timeout(1500)
+            # The press is the owner's act, its command the host's words (#2778): Main shows the one System
+            # receipt, never a "You · /bg start" bubble, on the live page and in the history a reload reads.
+            receipt = page.locator("#chat-messages .chat-bubble").filter(has_text="Background consciousness")
+            receipt.first.wait_for(state="visible", timeout=60_000)
             page.screenshot(path=str(out / "first-setup-main-after-handoff-webkit-light.png"))
-            assert seen["commands"] == [{"cmd": "/bg start", "if_boot": _get(srv.url, "/api/health")["boot"]["since"]}], seen["commands"]
+            assert page.locator("#chat-messages .chat-bubble.user").count() == 0, "a press writes no owner bubble"
+            history = _get(srv.url, "/api/chat/history?limit=50")["messages"]
+            assert [row["text"] for row in history if row.get("role") == "user"] == [], history
+            assert [row["system_type"] for row in history if "Background consciousness" in row.get("text", "")] == ["command_reply"]
+            page.reload(wait_until="networkidle")
+            page.locator("#chat-messages .chat-bubble").filter(has_text="Background consciousness").first.wait_for(
+                state="visible", timeout=60_000)
+            assert page.locator("#chat-messages .chat-bubble.user").count() == 0, "nor after a reload"
+            page.screenshot(path=str(out / "first-setup-main-after-reload-webkit-light.png"))
+            assert seen["commands"] == [{"cmd": "/bg start", "if_boot": _get(srv.url, "/api/health")["boot"]["since"],
+                                         "ui_control": {"name": "setup_consciousness"}}], seen["commands"]
             assert len(seen["completions"]) == 1
             assert not any("onscious" in key for key in seen["completions"][0]), "nothing rides the save"
-            assert not seen["errors"], seen["errors"]
+            assert not seen["errors"].unexpected(), seen["errors"].report()
         finally:
             browser.close()
     assert _control(srv.url) is True, "observed on through the real state"
@@ -307,8 +323,8 @@ def test_markerless_install_offers_its_own_limits_and_an_unticked_finish_sends_n
                     "Consciousness Start consciousness with Ouroboros Between your requests it continues topics that "
                     "interest it and you, notices opportunities and brings you suggestions. Autonomy: Advises. On its own it "
                     "studies, keeps its memory and tells you; it changes nothing outside. Up to $5.00 a day in recorded "
-                    "spending. Subscription quota is separate. At most 1 of its own tasks at once. Change these in "
-                    "Settings › Behavior › Consciousness. Stop or start it any time in Dashboard › Consciousness.")
+                    "spending. Subscription quota is separate. At most 1 of its own tasks at once. Change the "
+                    "allowance in Dashboard › Costs. Its other settings, and Stop and Start, are in Dashboard › Consciousness.")
                 page.screenshot(path=str(out / f"markerless-summary-{engine}-{theme}.png"), full_page=True)
                 page.locator(".summary-card").screenshot(path=str(out / f"markerless-summary-card-{engine}-{theme}.png"))
                 overflow = page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
@@ -330,6 +346,7 @@ def test_markerless_install_offers_its_own_limits_and_an_unticked_finish_sends_n
             page.goto(srv.url + "/onboarding?builtin=1", wait_until="networkidle", timeout=60_000)
             _to_summary(page, pro=False)
             assert not page.locator("[data-consciousness-start]").is_checked()
+            seen["errors"].watch(page)  # Finish hands off to the app: leaving may cut off the page's own reads (tests/ui_console_errors.py)
             _finish(page)
             page.wait_for_url(srv.url + "/", timeout=120_000)
             assert seen["commands"] == [], "an unticked Finish sends no Start"
@@ -341,7 +358,7 @@ def test_markerless_install_offers_its_own_limits_and_an_unticked_finish_sends_n
             _to_summary(page, pro=False)
             assert page.locator(ROW).count() == 0
             page.screenshot(path=str(out / "completed-setup-summary-no-row-webkit-light.png"), full_page=True)
-            assert not seen["errors"], seen["errors"]
+            assert not seen["errors"].unexpected(), seen["errors"].report()
         finally:
             browser.close()
 

@@ -81,21 +81,23 @@ def _ledger(**accounting):
 
 
 COST_CASES = [
-    # width, theme, ledger, status, figure, meta line, {facts in Details}
+    # width, theme, ledger, status, figure, meta line, the quiet "Not counted" line, {facts in Details}. Money beside
+    # a limit is written at the limit's own precision: a whole-dollar limit reads the spend rounded up and what is
+    # left rounded down (docs/DESIGN.md "A limit's card", PR #3369); Details keep cents.
     (390, "light", _ledger(confirmed_usd=58.1, estimated_usd=5.32, reserved_usd=4.3, unresolved_upper_bound_usd=1.25,
                            unknown_unmetered=3, cost_final=False, non_final_rows=2),
-     200, "$63.42 of $200.00", "$136.58 left · up to $1.25 for calls without a known price",
+     200, "$64 of $200", "$136 left", "Not counted: up to $2 in calls without a known price",
      {"Final": "No (2 open)", "Unresolved upper bound": "$1.25", "Calls without a price": "3", "Reserved": "$4.30"}),
-    (1100, "dark", _ledger(), 200, "$63.42 of $200.00", "$136.58 left",
+    (1100, "dark", _ledger(), 200, "$64 of $200", "$136 left", "",
      {"Final": "Yes", "Unresolved upper bound": "$0.00", "Calls without a price": "0", "Reserved": "$0.00"}),
-    (390, "dark", {"error": "Spend records could not be read"}, 500, "Unavailable", "", {}),
+    (390, "dark", {"error": "Spend records could not be read"}, 500, "Unavailable", "", "", {}),
 ]
 
 
-@pytest.mark.parametrize("width,theme,ledger,status,figure,meta,facts", COST_CASES,
+@pytest.mark.parametrize("width,theme,ledger,status,figure,meta,open_line,facts", COST_CASES,
                          ids=["open-phone-light", "closed-window-dark", "unavailable-phone-dark"])
 def test_costs_names_the_known_spend_with_what_is_still_open_before_anything_else(
-        ui, width, theme, ledger, status, figure, meta, facts):
+        ui, width, theme, ledger, status, figure, meta, open_line, facts):
     page = _open(ui, width=width, theme=theme, place="dashboard", tab="costs",
                  routes=[("**/api/cost-breakdown", _json(ledger, status))])
     page.wait_for_function("document.querySelector('#cost-known-limit').textContent !== 'Loading…'")
@@ -109,11 +111,13 @@ def test_costs_names_the_known_spend_with_what_is_still_open_before_anything_els
         const facts = {};
         for (const dt of details.querySelectorAll('dt')) facts[dt.textContent] = dt.nextElementSibling.textContent;
         return {
-            figure: el('#cost-known-limit').textContent.trim(), meta: el('#cost-left').textContent.trim(), facts,
+            figure: ['#cost-spent', '#cost-of'].map((sel) => el(sel).textContent.trim()).filter(Boolean).join(' '),
+            meta: el('#cost-left').textContent.trim(), facts,
+            open: el('#cost-open').hidden ? '' : el('#cost-open').textContent.trim(),
             body: body.classList.contains('dashboard-body') && body.parentElement.classList.contains('dashboard-panel'),
             detailsInCard: card.contains(details) && !details.open,
             lead: top('#cost-known-limit'), metaTop: top('#cost-left'),
-            budget: top('#s-budget'), tables: top('#cost-by-model'),
+            budget: top('#setting-TOTAL_BUDGET'), tables: top('#cost-by-model'),
             sizes: [size('#cost-known-limit'), size('#cost-left')],
             leadBottom: el('#cost-left').getBoundingClientRect().bottom,
             viewport: innerHeight,
@@ -121,7 +125,7 @@ def test_costs_names_the_known_spend_with_what_is_still_open_before_anything_els
             sideways: body.scrollWidth > body.clientWidth + 1,
         };
     }""")
-    assert seen["figure"] == figure and seen["meta"] == meta, seen
+    assert seen["figure"] == figure and seen["meta"] == meta and seen["open"] == open_line, seen
     assert {key: seen["facts"].get(key) for key in facts} == facts, seen["facts"]
     # One tab body is the panel's root and scroller; the open facts are the hero card's own Details, closed.
     assert seen["body"] and (seen["detailsInCard"] or status != 200), seen

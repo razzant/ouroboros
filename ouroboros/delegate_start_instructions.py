@@ -164,10 +164,17 @@ _ACCESS_PRECEDENCE = (
     "means the same relative path from there."
 )
 
+READONLY_SOURCE_SCOPE = (
+    "The starting folder is a location, not a read boundary. Task-authorized sources remain within the parent's existing read authority, "
+    "subject to explicit narrower constraints and this run's tools; naming a path copies "
+    "nothing and widens no authority. Credentials and harness runtime state are outside that scope "
+    "unless specifically authorized. "
+)
+
 ACCESS_INSTRUCTIONS = {
     "readonly": (
-        " ACCESS: you may read and run read-only commands inside this root, and make no "
-        "edits or writes; " + _ACCESS_PRECEDENCE
+        " ACCESS: " + READONLY_SOURCE_SCOPE + "Read-only commands are allowed when the effective tools provide "
+        "them. Make no edits or writes; " + _ACCESS_PRECEDENCE
     ),
     "workspace_write": (
         " ACCESS: you may edit inside this root, and outside it write only disposable process state "
@@ -193,16 +200,15 @@ INVESTIGATION_INSTRUCTION = (
 
 
 def access_instruction(access: str, *, investigation: bool = False) -> str:
-    """The ONE canonical sentence for a run's typed access profile, or "".
+    """The one instruction for a run's typed access profile, or "".
 
     A parent's prose ban ("Read-only no edits/commands...") in a work order once
     duplicated and contradicted the profile the host had already derived, and the
     run died unable to reach its own read surface. `DelegatedRunShape.access` is
-    the authority, so the host states it in exactly one sentence and says which
-    text wins. Deliberately not a paragraph and not a list of prohibitions: a
-    longer rule becomes prose competing with the typed profile, which is the
-    defect. The parent's prose is never parsed, only outranked. An unrecognized
-    profile renders nothing rather than inventing a rule.
+    the authority: this instruction explains its read/write scope and precedence,
+    rather than adding a second access policy in the work order. Naming a source
+    does not copy it or widen authority. The parent's prose is never parsed.
+    An unrecognized profile renders nothing rather than inventing a rule.
     """
     line = ACCESS_INSTRUCTIONS.get(str(access or "").strip(), "")
     if line and access != "readonly":
@@ -214,21 +220,6 @@ def access_instruction(access: str, *, investigation: bool = False) -> str:
         if investigation:
             line += INVESTIGATION_INSTRUCTION
     return line
-
-
-def execution_binding_instruction(execution_root: str, authority_root: str) -> str:
-    """State the host's effective write root after private snapshot provisioning.
-
-    The task contract names the stable authority/project root so the host can
-    reconcile and apply a result. That path is not the child write surface once
-    a private delegated snapshot exists. The binding is appended after the
-    inherited assignment so an owner-facing absolute path cannot silently win by
-    omission or by appearing earlier in the work order.
-    """
-    execution = str(execution_root or "").strip()
-    if not execution:
-        return ""
-    return execution_binding_text(execution_root, authority_root)
 
 
 def execution_binding_fingerprint(execution_root: str, authority_root: str,
@@ -244,6 +235,10 @@ def execution_binding_text(execution_root: str, authority_root: str,
                            granted_scratch: str = "") -> str:
     """The binding names one work-product root, never every process write.
 
+    The contract's stable authority/project root remains the integration identity.
+    A private snapshot is the child's write surface, so this separate typed fact
+    names both explicitly without rewriting the canonical work order. It is appended after
+    that order, so an owner-facing absolute path cannot silently win by omission or by appearing earlier.
     ``evidence_root`` defaults to the copy's retained evidence folder; "" (a skill
     payload copy, whose every file is payload) says no folder is retained.
     ``granted_scratch`` is the scratch the run's request grants, the place it names.
@@ -310,14 +305,6 @@ def no_copy_binding_instruction(workdir: str) -> str:
     """Name the root of a run no binding renderer covers (read-only, a direct folder): where
     the engine starts it, ``execution.workspaceRoot`` or else ``scope.root``."""
     return f"\n\nThis run has no private copy: its working directory is {str(workdir or '').strip() or '(unknown)'}."
-
-
-def apply_execution_binding(instructions: str, execution_root: str,
-                            authority_root: str, binding_sha256: str = "", *,
-                            evidence_root: str | None = None, granted_scratch: str = "") -> str:
-    """Append one typed binding without rewriting canonical work-order bytes."""
-    return instructions + execution_binding_text(execution_root, authority_root, binding_sha256,
-                                                 evidence_root=evidence_root, granted_scratch=granted_scratch)
 
 
 def append_coordination_context(

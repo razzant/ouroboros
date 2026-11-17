@@ -18,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros.config import load_settings
+from ouroboros.llm_pricing import openrouter_catalog_price
 from ouroboros.net_transport import ExtraCaBundleError, extra_ca_bundle, verify_kwargs
 from ouroboros.gateway._helpers import json_error, json_exception
 from ouroboros.observability import redact_projection
@@ -90,7 +91,8 @@ def _build_model_catalog_entry(
 async def _fetch_openrouter_model_catalog(
     client: httpx.AsyncClient,
     api_key: str,
-) -> list[dict[str, str]]:
+    cache_ttl: str = "",
+) -> list[dict]:
     response = await client.get(
         "https://openrouter.ai/api/v1/models",
         headers={"Authorization": f"Bearer {api_key}"},
@@ -99,20 +101,24 @@ async def _fetch_openrouter_model_catalog(
     data = response.json()
     raw_models = data.get("data", []) or []
 
-    models: list[dict[str, str]] = []
+    models: list[dict] = []
     for item in raw_models:
         model_id = str(item.get("id", "") or "").strip()
         if not model_id or "/" not in model_id:
             continue
-        models.append(
-            _build_model_catalog_entry(
-                "openrouter",
-                _provider_label_from_model_id(model_id),
-                model_id,
-                str(item.get("name", "") or "").strip() or model_id.split("/", 1)[1],
-                source="OpenRouter",
-            )
+        entry = _build_model_catalog_entry(
+            "openrouter",
+            _provider_label_from_model_id(model_id),
+            model_id,
+            str(item.get("name", "") or "").strip() or model_id.split("/", 1)[1],
+            source="OpenRouter",
         )
+        price = openrouter_catalog_price(item, cache_ttl)  # only this source's rows: a direct key's same id stays unpriced
+        # The provider's published window, for display beside the price: sizing reads its own evidence.
+        window = item.get("context_length")
+        if type(window) is int and window > 0:
+            entry["context_window"] = window
+        models.append(entry if price is None else {**entry, "price": price})
     return models
 
 
@@ -157,6 +163,11 @@ async def _fetch_openai_compatible_model_catalog(
                 str(item.get("name", "") or "").strip() or model_id,
             )
         )
+    if provider_id == "deepseek":  # what its published entry prices only under a condition, never a figure
+        from ouroboros.pricing_catalog import price_condition
+
+        conditions = await asyncio.to_thread(lambda: [price_condition(entry["id"]) for entry in models])
+        models = [{**entry, "price_condition": said} if said else entry for entry, said in zip(models, conditions)]
     return models
 
 
@@ -248,11 +259,11 @@ _CATALOG_LABELS = {"openai": "OpenAI", "minimax": "MiniMax", "deepseek": "DeepSe
                    "openai-compatible": "OpenAI Compatible", "cloudru": "Cloud.ru"}
 
 
-def _connection_loader(kind: str, target: dict, record_image_input: bool):
+def _connection_loader(kind: str, target: dict, record_image_input: bool, cache_ttl: str = ""):
     """The live ``/models`` read of one connection, from its resolved target (key and endpoint)."""
     key, base = str(target.get("api_key") or "").strip(), str(target.get("base_url") or "")
     if kind == "openrouter":
-        return lambda client: _fetch_openrouter_model_catalog(client, key)
+        return lambda client: _fetch_openrouter_model_catalog(client, key, cache_ttl)
     if kind == "anthropic":
         return lambda client: _fetch_anthropic_model_catalog(client, key, record_image_input=record_image_input)
     if kind == "gigachat":
@@ -289,6 +300,9 @@ def _provider_specs(
     from ouroboros.llm_routing import resolve_target
 
     rows = connection_rows(settings.get(CONNECTIONS_KEY))
+    from ouroboros.settings_scales import resolve_prompt_cache_ttl
+
+    cache_ttl = resolve_prompt_cache_ttl(settings.get("OUROBOROS_PROMPT_CACHE_TTL") or "")  # the tier a row's cache-write figure is of
     specs = []
     for route in connection_routes(rows):
         kind, name = route.kind, route.connection
@@ -299,8 +313,23 @@ def _provider_specs(
         # A compatible endpoint lists its models with or without a key (the legacy base too).
         if target.get("base_url") if kind == "openai-compatible" else connection_configured(route, settings.get, rows):
             specs.append((connection_id(kind, name), _labelled_loader(
-                _connection_loader(kind, target, record_image_input), kind, name, connection_display(kind, name, rows))))
+                _connection_loader(kind, target, record_image_input, cache_ttl), kind, name, connection_display(kind, name, rows))))
     return specs
+
+
+def _local_model_entry(settings: dict) -> dict | None:
+    """The configured local model as one row with ``use_local``, or None when none is configured.
+
+    A local model has no route prefix (a "use local" flag reaches it), so ``id`` names the artifact and
+    ``value`` is a label no API source claims, never a route to store."""
+    source = str(settings.get("LOCAL_MODEL_SOURCE") or "").strip()
+    if not source:
+        return None
+    filename = str(settings.get("LOCAL_MODEL_FILENAME") or "").strip()
+    name = (filename or source).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or source
+    window = settings.get("LOCAL_MODEL_CONTEXT_LENGTH")
+    known = {"context_window": window} if type(window) is int and window > 0 else {}
+    return {**_build_model_catalog_entry("local", "Local", name, name), "use_local": True, **known}
 
 
 def _catalog_error_stage(exc: Exception) -> str:
@@ -321,7 +350,8 @@ async def _load_provider(
     client: httpx.AsyncClient,
     provider_id: str,
     loader: Callable[[httpx.AsyncClient], Awaitable[list[dict[str, str]]]],
-) -> tuple[str, list[dict[str, str]], str, str, int]:
+) -> tuple[list[dict[str, str]], dict | None]:
+    """One connection's rows, or its error row for the catalog's ``errors``."""
     started = time.perf_counter()
     log.info("model_catalog provider=%s stage=start", provider_id)
     try:
@@ -333,7 +363,7 @@ async def _load_provider(
             duration_ms,
             len(items),
         )
-        return provider_id, items, "", "", duration_ms
+        return items, None
     except Exception as exc:
         duration_ms = int((time.perf_counter() - started) * 1000)
         stage = _catalog_error_stage(exc)
@@ -344,7 +374,7 @@ async def _load_provider(
             duration_ms,
             exc,
         )
-        return provider_id, [], str(exc), stage, duration_ms
+        return [], {"provider_id": provider_id, "error": str(exc), "stage": stage, "duration_ms": duration_ms}
 
 
 def account_catalog_supported(operations: list[dict], path: str) -> bool:
@@ -429,6 +459,7 @@ def _subscription_model_catalog(source_id: str = "", profile_id: str = "") -> di
                         model_id, str(model.get("label") or model_id), source="Claudexor")
                     entry.update({
                         "source_id": identifier,
+                        **({"sourceProgram": catalog.get("sourceProgram")} if not account_view else {}),
                         "value": f"claudexor::{identifier}={model_id}",
                         "credential_profile_id": catalog.get("credentialProfileId"),
                         "account_fingerprint": catalog.get("accountFingerprint"),
@@ -465,11 +496,54 @@ async def api_model_catalog(_request: Request) -> JSONResponse:
     subscription = await asyncio.to_thread(_subscription_model_catalog, source_id, profile_id)
     if source_id:
         return JSONResponse(subscription)
-    settings = load_settings()
+    return JSONResponse(await catalog_payload(load_settings(), subscription))
+
+
+async def draft_catalog(saved: dict, draft: dict, typed: set) -> dict:
+    """The catalog of an unsaved settings draft (the setup wizard's): ``catalog_payload`` over ``draft``, recording
+    no capability evidence. A connection whose kept secret the draft would send somewhere it was not saved for is
+    not asked: its reason is its error row (``_saved_secret_moved``; ``typed`` is what the draft's author typed)."""
+    subscription = await asyncio.to_thread(_subscription_model_catalog)
+    return await catalog_payload(draft, subscription, refused=lambda source_id: _saved_secret_moved(
+        source_id, *_kept_binding(source_id, saved, draft), typed))
+
+
+def _kept_binding(source_id: str, saved: dict, draft: dict) -> tuple[dict, dict]:
+    """The saved and draft settings ``_saved_secret_moved`` compares for one connection of a draft, prepared as
+    Provider Test prepares them: the kept key's binding is its own saved row or pair, whatever serves today. A saved
+    row counts as switched on (a draft may only switch it on), and the built-in compatible connection is read as
+    the one pair the draft reaches, so the other pair's saved address is never taken for this key's."""
+    from ouroboros.llm_routing import resolve_target
+
+    route = parse_model_route(f"{source_id}::")
+    own = (route.kind, route.connection or BUILTIN_CONNECTION)
+    saved = {**saved, CONNECTIONS_KEY: [{**row, "enabled": True} if (row.get("kind"), row.get("name")) == own else row
+                                        for row in connection_rows(saved.get(CONNECTIONS_KEY))]}
+    if own != ("openai-compatible", BUILTIN_CONNECTION):
+        return saved, draft
+
+    def reached(settings: dict) -> tuple:
+        try:
+            target = resolve_target(f"{source_id}::probe", settings)
+        except Exception:
+            return ()
+        return str(target.get("api_key") or ""), str(target.get("base_url") or "")
+
+    pairs = [(_pair_test_settings(saved, {}, key), _pair_test_settings(draft, {}, key)) for key in _COMPATIBLE_PAIRS]
+    return next((pair for pair in pairs if reached(pair[1]) and reached(pair[1]) == reached(draft)), (saved, draft))
+
+
+async def catalog_payload(settings: dict, subscription: dict, *, refused: Callable[[str], str] | None = None) -> dict:
+    """The catalog of ``settings``: the engine's rows (``subscription``), every API connection that can serve and
+    the local model. ``refused`` (a draft read) names why a connection is not asked, and nothing is recorded."""
     items = list(subscription["items"])
     errors = list(subscription["errors"])
-    seen_values: set[str] = set()
-    specs = _provider_specs(settings, record_image_input=True)
+    kept_at: dict[str, int] = {}
+    specs = _provider_specs(settings, record_image_input=refused is None)
+    for provider_id, reason in [(spec[0], refused(spec[0])) for spec in specs] if refused else ():
+        if reason:
+            errors.append({"provider_id": provider_id, "error": reason, "stage": "kept_key", "duration_ms": 0})
+            specs = [spec for spec in specs if spec[0] != provider_id]
 
     timeout = httpx.Timeout(_CATALOG_HTTP_TIMEOUT_SEC)
     try:
@@ -486,28 +560,26 @@ async def api_model_catalog(_request: Request) -> JSONResponse:
                 for provider_id, loader in specs
             ])
 
-    for provider_id, provider_items, error, stage, duration_ms in results:
+    for provider_items, error in results:
         if error:
-            errors.append({
-                "provider_id": provider_id,
-                "error": error,
-                "stage": stage,
-                "duration_ms": duration_ms,
-            })
+            errors.append(error)
             continue
         for item in provider_items:
             value = str(item.get("value", "") or "")
-            if not value or value in seen_values:
+            if value in kept_at:
+                kept = items[kept_at[value]]
+                # Records that disagree on a price or its condition show none of either.
+                if any(key in kept and kept[key] != item.get(key) for key in ("price", "price_condition")):
+                    items[kept_at[value]] = {key: field for key, field in kept.items()
+                                             if key not in ("price", "price_condition")}
                 continue
-            seen_values.add(value)
-            items.append(item)
+            if value:
+                kept_at[value] = len(items)
+                items.append(item)
 
+    items.extend(filter(None, [_local_model_entry(settings)]))
     items.sort(key=lambda item: (item.get("provider", "").lower(), item.get("name", "").lower()))
-    return JSONResponse({
-        **subscription,
-        "items": items,
-        "errors": errors,
-    })
+    return {**subscription, "items": items, "errors": errors}
 
 
 async def api_local_model_start(request: Request) -> JSONResponse:
@@ -522,6 +594,12 @@ async def api_local_model_start(request: Request) -> JSONResponse:
 
         if not source:
             return JSONResponse({"error": "source is required"}, status_code=400)
+        from ouroboros.deployment_policy import local_launch_refusal
+        from ouroboros.gateway.owner_settings import MANAGED_BY_DEPLOYMENT
+
+        # The deployment judges the launch before any probe, download or start; Stop stays free.
+        if refusal := local_launch_refusal(source=source, filename=filename, port=port, chat_format=chat_format):
+            return json_error(refusal, 403, code=MANAGED_BY_DEPLOYMENT)
 
         from ouroboros.local_model import get_manager, _get_runtime_hint
         mgr = get_manager()
@@ -950,7 +1028,13 @@ async def api_local_model_install_runtime(request: Request) -> JSONResponse:
     - ``"install_error"``— install failed; ``runtime_install_log`` has details
     """
     try:
+        from ouroboros.deployment_policy import body_replacement_refusal
+        from ouroboros.gateway.owner_settings import MANAGED_BY_DEPLOYMENT
         from ouroboros.local_model import get_manager
+
+        # pip writes into the interpreter this server runs: a managed deployment's administrator provisions it.
+        if refusal := body_replacement_refusal():
+            return json_error(refusal, 403, code=MANAGED_BY_DEPLOYMENT)
         mgr = get_manager()
 
         current = mgr._runtime_status

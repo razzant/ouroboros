@@ -804,7 +804,7 @@ def _outcome_payload(
     job_data: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     status = normalize_skill_review_status(outcome.status)
-    gate = skill_review_gate(status, findings=outcome.findings)
+    gate = getattr(outcome, "review_gate", None) or skill_review_gate(status, findings=outcome.findings)
     payload: Dict[str, Any] = {
         "skill": outcome.skill_name,
         "status": status,
@@ -1145,7 +1145,8 @@ def _review_finding_summary(outcome: Any) -> str:
 def _review_result_message(outcome: Any) -> str:
     status = normalize_skill_review_status(str(getattr(outcome, "status", "") or STATUS_PENDING))
     summary = _review_finding_summary(outcome)
-    gate = skill_review_gate(status)
+    # The persisted gate when the review settled (source policy, owner edit, staleness), else the status alone.
+    gate = getattr(outcome, "review_gate", None) or skill_review_gate(status)
     cyber = gate.get("blocking_reason") == "cyber_authority"
     if cyber:
         # Cyber Pro's permission to run is not the critic's outcome: name the outcome.
@@ -1154,7 +1155,7 @@ def _review_result_message(outcome: Any) -> str:
     elif gate["executable_review"]:
         prefix = "Review executable with findings" if status in {STATUS_WARNINGS, STATUS_BLOCKERS} else "Review executable"
     elif status == STATUS_WARNINGS:
-        prefix = "Review warnings blocked by current enforcement"
+        prefix = "Review warnings; not executable now (stale or pending)"
     elif status == STATUS_BLOCKERS:
         prefix = "Review blocked: blocker findings"
     else:
@@ -1297,7 +1298,10 @@ def run_skill_review_lifecycle_blocking(
                 drive_root, skill_name, repo_path=repo_path,
             )
             # Current persisted acceptance is authoritative, including staleness and author finish.
-            executable_review = bool(reviewed is not None and reviewed.review.gate_for(reviewed.content_hash)["executable_review"])
+            persisted_gate = reviewed.review.gate_for(reviewed.content_hash) if reviewed is not None else None
+            executable_review = bool(persisted_gate and persisted_gate["executable_review"])
+            if persisted_gate is not None:  # the payload and the result line say what this gate decided
+                setattr(outcome, "review_gate", persisted_gate)
             if executable_review:
                 from ouroboros.skill_dependencies import ensure_skill_dependencies
 
@@ -1342,6 +1346,15 @@ def run_skill_review_lifecycle_blocking(
             )
             for key, value in reconcile.items():
                 setattr(outcome, f"extension_{key}", value)
+            # On after this review (turned on above, by turn-on-when-ready, or on before) without a passed review of
+            # these files: the work that ran the review names it on its card.
+            settled = _load_binding_skill(binding) if binding is not None else find_skill(
+                drive_root, skill_name, repo_path=repo_path,
+            )
+            if settled is not None and settled.enabled:
+                from ouroboros.review_overrides import note_skill_over_review
+
+                note_skill_over_review(ctx, skill_name, settled.review.gate_for(settled.content_hash), "after_review")
         return outcome
 
     outcome = None

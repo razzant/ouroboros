@@ -155,7 +155,7 @@ def test_tracked_pin_names_a_cli_capable_release():
     of this proposal converged on while the pin was still pre-CLI 3.6.0)."""
     pin = runtime.load_runtime_pin()
     assert pin is not None
-    assert pin.version == "5.0.1"
+    assert pin.version == "6.1.2"
     assert pin.cli_entrypoint == "claudexor.bundle.cjs"
 
 
@@ -514,6 +514,8 @@ def test_cli_command_installs_exact_closure_and_managed_node_npm_tree(tmp_path, 
     assert command == [str(node_root / "bin" / "node"),
                        str(runtime.managed_runtime_dir(pin) / "claudexor.bundle.cjs")]
     assert (node_root / "lib/node_modules/npm/bin/npm-cli.js").read_bytes() == b"npm cli\n"
+    # The skill npm installer's seam (isolated_deps): the npm CLI it derives from this command is the delivered one.
+    assert manager._managed_npm_cli(pathlib.Path(command[0])).read_bytes() == b"npm cli\n"
     assert (node_root / "lib/node_modules/npm/package.json").read_bytes() == b"{}\n"
     node_metadata = json.loads((node_root.parent / "managed-node.json").read_text())
     assert node_metadata["schema_version"] == 2
@@ -1143,3 +1145,101 @@ def test_old_launcher_interpreter_path_recovers_bundle_resources(tmp_path):
     interpreter.parent.mkdir(parents=True)
     interpreter.write_text("python fixture\n", encoding="utf-8")
     assert resources in bundled_resource_ancestor_bases(interpreter)
+
+
+def test_a_node_only_pin_keeps_the_installed_engine_tree_and_its_next_spawn_runs_the_new_node(tmp_path, monkeypatch):
+    """R2 (Opus, Fable, Astra-reproduced): the 24.22.3 pin keeps engine 6.0.0, so the tree every installation already
+    holds stays its target, stamped with the Node it was admitted with. Its metadata equality on ``node_version`` made
+    a healthy serving engine read 'error' ("Fix & connect"), emptied the CLI command and made the next ensure extract
+    the engine again. Node is no part of the engine's identity: status reads ready and says which Node the tree was
+    admitted with, the daemon of the same engine is kept, the next spawn and a new attach role run the pin's Node, and
+    nothing is extracted or rewritten."""
+    import dataclasses
+
+    import ouroboros.platform_layer as platform
+    from ouroboros.engine_pin_policy import engine_pin_transition
+
+    _data_plane(monkeypatch, tmp_path)
+    archive = _archive(tmp_path / "runtime.tar.gz", cli_entrypoint="dist/claudexor.js")
+    pin = dataclasses.replace(_pin(archive, cli_entrypoint="dist/claudexor.js"), node_version="24.22.3")
+    target = runtime.managed_runtime_dir(pin)
+    _metadata(target, version=pin.version, build_sha=pin.build_sha, source="download")  # stamped NODE_VERSION 24.16.0
+    (target / "dist" / "claudexor.js").write_text("fixture\n", encoding="utf-8")
+    stamp = json.loads((target / "managed-runtime.json").read_text(encoding="utf-8"))
+    stamp.update(archive_sha256=pin.sha256, archive_size=pin.size_bytes, cli_entrypoint="dist/claudexor.js")
+    (target / "managed-runtime.json").write_text(json.dumps(stamp), encoding="utf-8")
+    stamped = (target / "managed-runtime.json").read_bytes()
+    artifact = pin.node_artifacts["linux-x64"]
+    generation = runtime.node_generation_root(pin, "linux-x64", artifact.sha256)
+    node = generation / "node-standalone" / "bin" / "node"
+    npm = runtime.ClaudexorRuntimeManager._managed_npm_cli(node)
+    npm.parent.mkdir(parents=True)
+    npm.write_bytes(b"npm")
+    node.parent.mkdir(parents=True, exist_ok=True)
+    node.write_bytes(b"node 24.22.3")
+    (generation / "managed-node.json").write_text(json.dumps({
+        "schema_version": 2, "version": "24.22.3", "platform": "linux-x64", "archive_url": artifact.archive_url,
+        "archive_sha256": artifact.sha256, "archive_size": artifact.size_bytes,
+        "archive_executable": artifact.executable,
+        "archive_npm_cli": runtime.ClaudexorRuntimeManager._archive_npm_cli(artifact, "linux-x64")}), encoding="utf-8")
+    monkeypatch.setattr(platform, "bundled_resource_bases", lambda: [])
+    monkeypatch.setattr(platform, "node_distribution_platform", lambda: "linux-x64")
+    monkeypatch.setattr(platform, "embedded_node_candidates", lambda base: [pathlib.Path(base) / "node-standalone/bin/node"])
+    monkeypatch.setattr(platform, "probe_node_version", lambda path: "24.22.3" if pathlib.Path(path) == node else "")
+    manager = runtime.ClaudexorRuntimeManager(pin)
+
+    serving = manager.status(running=True, engine_version=pin.version, engine_build_sha=pin.build_sha)
+    assert serving["state"] == "ready" and serving["last_error"] is None  # never "needs repair" for a healthy engine
+    assert serving["node_version"] == NODE_VERSION  # the Node the tree was admitted with: no claimed switch
+    assert engine_pin_transition(pin, (pin.version, pin.build_sha))["action"] == "keep"  # same engine: never stopped
+    entry = str(target / "dist" / "claudexord.js")
+    assert manager.resolve_command() == [str(node), entry]
+    assert manager.resolve_cli_command() == [str(node), str(target / "dist" / "claudexor.js")]
+
+    monkeypatch.setattr(manager, "_obtain_archive", lambda *_a: pytest.fail("the engine is never fetched again"))
+    monkeypatch.setattr(manager, "_promote_archive", lambda *_a: pytest.fail("the engine is never extracted again"))
+    probed = []
+    monkeypatch.setattr(manager, "_probe", lambda command, checked: probed.append((command, checked.node_version)))
+    assert manager.ensure() == [str(node), entry]  # the next spawn of this engine runs the pin's Node
+    assert probed == [([str(node), entry], "24.22.3")]
+
+    seen = {}
+
+    def role_probe(command, *, expected_node_version):
+        seen.update(command=command, node=expected_node_version)
+        return {"version": pin.version, "buildSha": pin.build_sha, "roles": ["setup_attach"]}, expected_node_version
+
+    monkeypatch.setattr(manager, "_probe_payload", role_probe)
+    role = manager.resolve_serving_role_command(engine_version=pin.version, engine_build_sha=pin.build_sha,
+                                                engine_entry=entry, role="setup_attach")
+    assert role == [str(node), str(pathlib.Path(entry).resolve())] and seen["node"] == "24.22.3"
+    assert (target / "managed-runtime.json").read_bytes() == stamped  # never rewritten under a live daemon
+
+    # The pin's Node not yet prepared: the pin's tree waits for it (typed, retryable), never the older Node its stamp
+    # or the serving daemon names. Another serving engine keeps its preserved Node, as before.
+    monkeypatch.setattr(manager, "_resolve_node", lambda *_a, **_kw: "")
+    monkeypatch.setattr(manager, "_resolve_preserved_node", lambda version: f"/preserved/{version}")
+    with pytest.raises(runtime.ClaudexorRuntimeError) as unprepared:
+        manager.resolve_serving_role_command(engine_version=pin.version, engine_build_sha=pin.build_sha,
+                                             engine_entry=entry, role="setup_attach")
+    assert unprepared.value.code == "runtime_node_unavailable"
+    assert unprepared.value.planned_node == manager.planned_node(pin) != ""  # the generation its preparation publishes
+    from ouroboros.claudexor_daemon import resolve_attach_login_argv
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    monkeypatch.setattr(runtime, "get_runtime_manager", lambda: manager)
+    with pytest.raises(ClaudexorUnavailable) as surfaced:
+        resolve_attach_login_argv({"version": pin.version, "sha": pin.build_sha, "entry": entry})
+    assert surfaced.value.required_actions == ("retry_setup_login",)
+    older = target.with_name("older-engine")
+    _metadata(older, version="5.9.0", build_sha="c" * 40, source="download")
+    monkeypatch.setattr(manager, "_probe_payload", lambda command, *, expected_node_version: (seen.update(
+        node=expected_node_version) or {"version": "5.9.0", "buildSha": "c" * 40, "roles": ["setup_attach"]}, ""))
+    assert manager.resolve_serving_role_command(
+        engine_version="5.9.0", engine_build_sha="c" * 40, engine_entry=str(older / "dist" / "claudexord.js"),
+        role="setup_attach") == [f"/preserved/{NODE_VERSION}", str((older / "dist" / "claudexord.js").resolve())]
+    assert seen["node"] == NODE_VERSION
+    # An engine archive identity that differs still fails the tree's identity, as before.
+    stamp["archive_sha256"] = "b" * 64
+    (target / "managed-runtime.json").write_text(json.dumps(stamp), encoding="utf-8")
+    assert runtime.ClaudexorRuntimeManager(pin).status()["state"] == "error"

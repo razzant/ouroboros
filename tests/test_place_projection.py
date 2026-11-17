@@ -200,17 +200,53 @@ def test_places_endpoint_keeps_full_connector_projection(client, connector, monk
     assert row["account_candidates"] == []
 
 
+@pytest.mark.parametrize("switch", [False, True, None, "panic"])
+def test_a_place_says_it_only_hears_while_consciousness_is_off(tmp_path, monkeypatch, switch):
+    """Owner 06.11: Off left every place that was not Paused only hearing for 28 hours while each surface, the mind's
+    configure_presence included, read «active». The place's own view now says so; the switch is read once a list, and
+    a switch this read cannot know (state recovering or unreadable) is no claim, though intake stays closed on it."""
+    from ouroboros.consciousness_view import place_views
+    from supervisor.state import StateRead
+    for state in ("active", "silent", "paused"):
+        places.connect_place(tmp_path, place_id=state, connector="bridge", provider="chat", conversation_id=state,
+                             label=state, state=state)
+    checks = []
+
+    def read_state(root=None):
+        if switch is None:
+            return StateRead("unavailable", "none", {}, reason="state unreadable")
+        return StateRead("current", "primary", {"bg_consciousness_enabled": switch is not False})
+    monkeypatch.setattr("supervisor.state.read_state", read_state)
+    monkeypatch.setattr("ouroboros.consciousness.panic_blocks_wake", lambda root: checks.append(root) or switch == "panic")
+    monkeypatch.setattr(projection, "place_declarations", lambda _root: [])
+    hearing = {"active", "silent"} if switch in (False, "panic") else set()
+    listed = projection.places_view(tmp_path)["places"]
+    brief = place_views(tmp_path, {})
+    assert len(checks) == 2, "one switch read for each list, never one per place"
+    for rows in (listed, brief):
+        assert {row["place_id"] for row in rows if row.get("only_hears") is True} == hearing
+        assert all("only_hears" not in row for row in rows if row["place_id"] not in hearing), "absent, never False"
+    # A single view (a write's answer, the mind's inspect) reads the switch itself; nothing is stored.
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    inspected = json.loads(_configure_presence(ctx, "inspect", "active"))["place"]
+    assert ("only_hears" in inspected) is bool(hearing)
+    assert "only_hears" not in json.loads(places.places_path(tmp_path).read_text(encoding="utf-8"))["places"]["active"]
+
+
 def test_brief_view_reads_one_index_pass_and_keeps_words_when_the_store_is_busy(tmp_path, monkeypatch):
     from ouroboros import place_projection, places
 
     place = places.connect_place(tmp_path, connector="bridge", provider="chat", label="Inbox")
     places.edit_place(tmp_path, place.place_id, "add_note", author="owner", text="Answer politely.")
     place = places.get_place(tmp_path, place.place_id)  # the stored record carries the note
-    monkeypatch.setattr(place_projection, "place_activity",
-                        lambda root, p: pytest.fail("the brief view must not read activity"))
+    from ouroboros.place_arrivals import place_facts as read_facts
     rooms = [{"room_chat_id": 7, "unanswered_count": 2, "last_at": "2027-01-01T00:00:00Z"},
              {"room_chat_id": 8, "unanswered_count": None, "last_at": ""}]
-    monkeypatch.setattr(places, "place_room_index", lambda root, place_id: rooms)
+
+    def brief_facts(root, rows, full=True):
+        assert full is False, "the brief view must not read activity"
+        return {p.place_id: {"rooms": rooms} for p in rows}
+    monkeypatch.setattr("ouroboros.place_arrivals.place_facts", brief_facts)
     view = place_projection.place_view(tmp_path, place, allowance={}, brief=True)
     assert view["label"] == "Inbox" and view["notes"][0]["text"] == "Answer politely."
     assert view["unanswered"] is None, "an unknown room count makes the total unknown, never a smaller number"
@@ -218,12 +254,23 @@ def test_brief_view_reads_one_index_pass_and_keeps_words_when_the_store_is_busy(
     rooms[1]["unanswered_count"] = 1
     assert place_projection.place_view(tmp_path, place, allowance={}, brief=True)["unanswered"] == 3
 
-    def busy(root, place_id):
-        raise RuntimeError("store busy")
-    monkeypatch.setattr(places, "place_room_index", busy)
+    from contextlib import contextmanager
+    from ouroboros import dialogue_store
+    from ouroboros.store import StoreBusy
+    dialogue_store.ensure(tmp_path)  # a dialogue store that is busy, not one that holds nothing
+
+    @contextmanager
+    def busy(*_args, **_kwargs):
+        raise StoreBusy("store busy")
+        yield  # pragma: no cover
+    monkeypatch.setattr("ouroboros.place_arrivals.place_facts", read_facts)
+    monkeypatch.setattr(dialogue_store, "transaction", busy)
     view = place_projection.place_view(tmp_path, place, allowance={}, brief=True)
     assert view["label"] == "Inbox" and view["notes"][0]["text"] == "Answer politely."
     assert view["rooms"] is None and view["unanswered"] is None and view["last_activity_at"] == ""
+    # The owner's full view raises with its store, as before: an unreadable list is no answer there.
+    with pytest.raises(StoreBusy):
+        place_projection.place_view(tmp_path, place, allowance={}, declarations=[])
 
 
 @pytest.mark.parametrize("mode", ["off", "light", "full"])
@@ -244,3 +291,37 @@ def test_owner_views_keep_manifest_labels_safety_and_accounts_without_identity(c
         assert "identity" not in row and "can_confirm" not in row
     revoked = client.post(path, json={"revoke_owner_account": "writer"}).json()["place"]
     assert revoked["owner_accounts"] == []
+
+
+@pytest.mark.parametrize("place_model,circle_model,consciousness_model,value,layer,local", [
+    ("place/model", "circle/model", "consciousness/model", "place/model", "place", False),
+    ("", "circle/model", "consciousness/model", "circle/model", "circle", False),
+    ("", "", "consciousness/model", "consciousness/model", "consciousness", False),
+    ("", "", "", "main/model", "consciousness", False),
+    ("place/model", None, "", "place/model", "place", False),
+    ("", None, "consciousness/model", "consciousness/model", "consciousness", False),
+    ("main", "circle/model", "consciousness/model", "main/model", "place", False),
+    ("", "light", "consciousness/model", "light/model", "circle", True),  # the alias runs on Light's own box
+])
+def test_model_route_is_shared_by_brief_full_and_inspect(tmp_path, monkeypatch, place_model, circle_model,
+                                                       consciousness_model, value, layer, local):
+    monkeypatch.setattr("ouroboros.route_choice.runtime_setting", lambda key, default="": {
+        "OUROBOROS_MODEL_CONSCIOUSNESS": consciousness_model, "OUROBOROS_MODEL_LIGHT": "light/model",
+        "USE_LOCAL_LIGHT": "true"}.get(key, default))
+    monkeypatch.setattr("ouroboros.model_slots._main_model", lambda: "main/model")
+    monkeypatch.setattr(projection, "place_declarations", lambda _root: [])
+    place = places.connect_place(tmp_path, connector="bridge", provider="chat")
+    place = places.edit_place(tmp_path, place.place_id, "set_model", author="owner", model=place_model)
+    if circle_model is not None:
+        circle = places.create_circle(tmp_path, name="Team", model=circle_model, author="owner")
+        place = places.edit_place(tmp_path, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
+        assert projection.places_view(tmp_path)["circles"][0]["model"] == circle_model
+    before = places.places_path(tmp_path).read_bytes()
+    brief = projection.place_view(tmp_path, place, brief=True)
+    full = projection.place_view(tmp_path, place)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    inspected = json.loads(_configure_presence(ctx, "inspect", place.place_id))["place"]
+    assert brief["model_route"] == full["model_route"] == inspected["model_route"] == {
+        "value": value, "layer": layer, "local": local}
+    assert full["model"] == place_model
+    assert places.places_path(tmp_path).read_bytes() == before  # a projection never freezes the inherited choice

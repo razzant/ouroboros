@@ -24,14 +24,7 @@ def _request_control(ctx, action: str, task_id: str, reason: str, accept_unknown
         target = validate_task_id(task_id)
     except ValueError as exc:
         return json.dumps({"ok": False, "error": "invalid_task_id", "detail": str(exc)})
-    from ouroboros.work_diagnostics import control_actor_reason
-    from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
-
     actor = str(getattr(ctx, "task_id", "") or "")
-    refusal = control_actor_reason(getattr(ctx, "budget_drive_root", "") or ctx.drive_root, actor, target)
-    if refusal:
-        return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED",
-            text=json.dumps({"ok": False, "error": refusal, "task_id": target})))
     if action == "pause_task" and target == actor:
         return json.dumps({"ok": False, "error": "self_pause_refused",
                            "note": "Use await_messages to sleep, or escalate the blocker to the owner."})

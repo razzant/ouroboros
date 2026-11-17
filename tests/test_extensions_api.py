@@ -1531,34 +1531,31 @@ def test_api_skill_grants_soft_fails_extension_reconcile_after_persist(tmp_path,
         _stop_patches(patches)
 
 
-def test_api_skill_grants_rejects_blocking_blocker_review(tmp_path, monkeypatch):
+def test_api_skill_grants_follow_the_review_gate_for_blocker_findings(tmp_path, monkeypatch):
+    """Blocker findings outside Cyber Pro leave the grant to the author's decision; a skill from a source that
+    reviews each skill keeps its blockers for the owner, and the grant is refused with what it still needs."""
+    from ouroboros.skill_install_record import write_install_record
     from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_review_state
 
     skills_root = tmp_path / "skills"
-    skill_dir = _write_ext(
-        skills_root,
-        "grant_blocked",
-        permissions=["tool", "read_settings"],
-        plugin="def register(api):\n    pass\n",
-        env_from_settings=["OPENROUTER_API_KEY"],
-    )
+    dirs = {name: _write_ext(skills_root, name, permissions=["tool", "read_settings"],
+                             plugin="def register(api):\n    pass\n", env_from_settings=["OPENROUTER_API_KEY"])
+            for name in ("grant_advised", "grant_blocked")}
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     client, drive_root, patches = _make_client(tmp_path, monkeypatch)
     try:
-        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
-        save_review_state(
-            drive_root,
-            "grant_blocked",
-            SkillReviewState(status="blockers", content_hash=content_hash),
-        )
+        for name, skill_dir in dirs.items():
+            save_review_state(drive_root, name, SkillReviewState(
+                status="blockers", content_hash=compute_content_hash(skill_dir, manifest_entry="plugin.py")))
+        write_install_record(drive_root, "grant_blocked", {"basis": "review", "release": {"digest": "d"},
+                                                            "source": {"id": "hub"}})
+        advised = client.post("/api/skills/grant_advised/grants", json={"items": ["OPENROUTER_API_KEY"]})
+        assert advised.status_code == 200 and advised.json()["granted_keys"] == ["OPENROUTER_API_KEY"], advised.text
         resp = client.post("/api/skills/grant_blocked/grants", json={"items": ["OPENROUTER_API_KEY"]})
         assert resp.status_code == 409
-        error = resp.json()["error"]
-        # Blocking enforcement admits no author acceptance: the reviewer verdict is the only authority.
-        assert error == ("key and permission grants need the review gate to permit the current bytes: "
-                         "a current executable reviewer verdict")
-        assert resp.json()["review_gate"]["blocking_reason"] == "blocker_findings_under_blocking_enforcement"
+        assert resp.json()["error"] == ("key and permission grants need the review gate to permit the current bytes: "
+                                        "the owner's Skip review for these exact bytes, or a review without blocker findings")
+        assert resp.json()["review_gate"]["blocking_reason"] == "blocker_findings_need_owner"
     finally:
         _stop_patches(patches)
 
@@ -2278,3 +2275,52 @@ def test_api_extensions_index_presents_dead_running_review_job_as_interrupted_wi
         assert _log_bytes(drive_root) == logs_before
     finally:
         _stop_patches(patches)
+
+
+def test_the_listing_projects_declared_secret_fields_as_configured_missing_or_unknown(tmp_path, monkeypatch):
+    """Skills › Installed reads whether each declared secret field holds a value from one strict read of the
+    effective settings: configured, missing or unknown; never a value, prefix or length, and no requirement."""
+    import ouroboros.gateway.extensions as extensions_api
+    from ouroboros import config as cfg
+
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr(cfg, "get_skills_repo_path", lambda: "")
+    for name, extra in (("fakeplug", "env_from_settings: [FAKEPLUG_TOKEN]\nsecret_fields:\n  botToken: FAKEPLUG_TOKEN\n"),
+                        ("plain", "")):
+        skill = tmp_path / "skills" / "external" / name
+        (skill / "scripts").mkdir(parents=True)
+        (skill / "scripts" / "run.py").write_text("print('ok')\n", encoding="utf-8")
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: d\nversion: 0.1.0\ntype: script\nruntime: python3\n{extra}"
+            "scripts:\n  - name: run.py\n---\n# skill\n", encoding="utf-8")
+
+    def rows(document):
+        if document is None:
+            cfg.SETTINGS_PATH.write_text("{\"FAKEPLUG_TOKEN\": ", encoding="utf-8")
+        else:
+            cfg.SETTINGS_PATH.write_text(json.dumps(document), encoding="utf-8")
+        payload = extensions_api._build_extensions_index(tmp_path, repo_path="")
+        return {row["name"]: row.get("secret_config") for row in payload["skills"]}
+
+    secret = "synthetic-secret-value"
+    configured = rows({"FAKEPLUG_TOKEN": secret})
+    assert configured == {"fakeplug": {"fields": [{"id": "botToken", "key": "FAKEPLUG_TOKEN", "state": "configured"}]},
+                          "plain": None}
+    assert secret not in json.dumps(extensions_api._build_extensions_index(tmp_path, repo_path=""))
+    assert rows({"FAKEPLUG_TOKEN": "  "})["fakeplug"]["fields"][0]["state"] == "missing"
+    assert rows(None)["fakeplug"]["fields"][0]["state"] == "unknown"
+
+    # One rule with the secret form: the card asks secret_requests.configured_fields, so a change there reaches it.
+    from ouroboros import secret_requests
+
+    asked: list[list[dict]] = []
+
+    def rule(document, request):
+        asked.append(request["fields"])
+        return {row["id"]: document.get(row["setting_key"]) == "counts" for row in request["fields"]}
+
+    monkeypatch.setattr(secret_requests, "configured_fields", rule)
+    assert rows({"FAKEPLUG_TOKEN": "counts"})["fakeplug"]["fields"][0]["state"] == "configured"
+    assert rows({"FAKEPLUG_TOKEN": secret})["fakeplug"]["fields"][0]["state"] == "missing"
+    assert asked and all(fields == [{"id": "botToken", "setting_key": "FAKEPLUG_TOKEN"}] for fields in asked)
+    assert rows(None)["fakeplug"]["fields"][0]["state"] == "unknown" and len(asked) == 2  # unreadable: never asked

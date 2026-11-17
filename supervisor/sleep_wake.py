@@ -12,10 +12,15 @@ through the distinct policy entry (``grant_exact_sleep_resume``) with the typed
 the owner's Resume and not its root's model selection; it is VETOED, keeping
 the readiness recorded, by any hold on the row (an owner Restart or Panic
 hold), by a closed owner Pause fence over its tree and by a root that is
-itself paused — and every money/deadline/lifetime/custody refusal of the
+itself paused (a sleeping root only waits) — and every money/deadline/lifetime/custody refusal of the
 grant owner still applies. Readiness is never permission. The off-lock record
 compares the pause id, state and grant it read, so a Resume, revocation or
 newer pause landing meanwhile wins and the next pass re-observes.
+
+The pass reads every sleeper's pause row and its tree's fence in one short transaction
+per store before it starts (``store_hot_facts.read_ahead``), and the veto under the
+queue lock answers from that read (no store under Q); the grant reads its own authority
+live. Each sleeper not yet ready still asks its own sources (``model_sleep.wake_reason``).
 """
 
 from __future__ import annotations
@@ -70,16 +75,22 @@ def _vetoed(q: Any, task: Dict[str, Any]) -> str:
 def wake_ready_sleepers(q: Any = None) -> List[Dict[str, Any]]:
     """One pass: record readiness, then grant the ready and unvetoed (typed outcomes)."""
     from ouroboros.budget_pause import BudgetPauseSuperseded, budget_pause_row, set_budget_pause
+    from ouroboros.store_hot_facts import read_ahead, serving
     from supervisor.budget_resume import grant_exact_sleep_resume
 
     if q is None:
         from supervisor import queue as q
     outcomes: List[Dict[str, Any]] = []
-    for task in _sleepers(q):
+    sleepers = _sleepers(q)
+    roots = {id(task): pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT) for task in sleepers}
+    facts = read_ahead([(roots[id(task)], str(task.get(key) or task.get("id") or ""))
+                        for task in sleepers for key in ("id", "root_task_id")]) if sleepers else {}
+    for task in sleepers:
         task_id = str(task.get("id") or "")
-        root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
+        root = roots[id(task)]
         try:
-            row = budget_pause_row(root, task_id)
+            with serving(facts):
+                row = budget_pause_row(root, task_id)
             if not isinstance(row.get("sleep"), dict):
                 continue
             ready = row.get("sleep_ready") if isinstance(row.get("sleep_ready"), dict) else {}
@@ -107,7 +118,8 @@ def wake_ready_sleepers(q: Any = None) -> List[Dict[str, Any]]:
             live = next((item for item in q.PENDING if str(item.get("id") or "") == task_id), None)
             if live is None or not isinstance(live.get("_budget_pause"), dict):
                 continue
-            veto = _vetoed(q, live)
+            with serving(facts, strict=True):  # the tree's fence as the pass read it, never a store under Q
+                veto = _vetoed(q, live)
             if veto:
                 outcomes.append({"task_id": task_id, "ok": False, "error": "sleep_wake_vetoed", "veto": veto,
                                  "ready": ready})

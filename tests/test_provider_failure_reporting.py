@@ -1,3 +1,4 @@
+import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -265,11 +266,8 @@ def test_non_main_call_does_not_project_stale_main_fit_fields(tmp_path):
         physical_context=None,
     )
     assert msg == {"content": "ok"}
-    event = next(
-        json.loads(line)
-        for line in (tmp_path / "events.jsonl").read_text().splitlines()
-        if '"type": "llm_round"' in line
-    )
+    event = next(row for row in map(json.loads, (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines())
+                 if row["type"] == "llm_round")
     assert "context_profile" not in event
     assert "context_target_miss" not in event
 
@@ -291,7 +289,7 @@ def test_empty_body_output_or_body_size_is_not_context_recovery(tmp_path):
     for provider_error in (
         {"kind": "provider_error", "code": 400,
          "message": "max_tokens 65536 exceeds maximum context length 32768"},
-        {"kind": "provider_error", "code": 413, "message": "request body too large"},
+        {"kind": "provider_error", "code": 422, "message": "request body too large"},
     ):
         usage = {}
         llm = _EmptyBodyErrorLLM(provider_error)
@@ -401,11 +399,8 @@ def test_empty_structured_context_overflow_event_carries_fit_projection(tmp_path
     )
     assert msg is None and llm.calls == 1
     assert usage["_last_llm_error_kind"] == "context_overflow"
-    event = next(
-        __import__("json").loads(line)
-        for line in (tmp_path / "events.jsonl").read_text().splitlines()
-        if '"type": "remote_context_overflow"' in line
-    )
+    event = next(row for row in map(json.loads, (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines())
+                 if row["type"] == "remote_context_overflow")
     assert event["context_profile"] == "owner_low"
     assert event["context_fit_mode"] == "low"
     assert event["context_target_miss"] is True
@@ -598,6 +593,27 @@ def test_classify_llm_exception_distinguishes_retryable_rate_limit():
     assert quota.retry_same_request is False
 
 
+def test_openrouters_in_flight_budget_answer_is_a_pause_and_every_other_402_stays_a_refusal():
+    """OpenRouter answers 402 both when a key cannot pay and when its money is only held by requests still in flight
+    ("Retry after your in-flight requests settle"). Its documentation tells the two apart by
+    ``error.metadata.limit_source``. The in-flight budget is transient: the same model is retried like a rate limit,
+    so the work keeps its route and its cached start. Credits and a key's own limit stay an exhausted quota."""
+    def refused(limit_source, reason="", unwrapped=True):
+        error = _ProviderError("Error code: 402", status_code=402, code="402")
+        inner = {"code": 402, "message": "This request would exceed your available credits given your current "
+                 "in-flight requests.", "metadata": {"reason": reason, "limit_source": limit_source}}
+        error.body = inner if unwrapped else {"error": inner}  # the OpenAI SDK hands the error object itself as the body
+        return classify_llm_exception(error)
+
+    for unwrapped in (True, False):
+        pause = refused("openrouter_in_flight_budget", "in_flight_budget_exhausted", unwrapped)
+        assert (pause.kind, pause.retry_same_request, pause.status_code) == ("provider_transient", True, 402)
+        assert pause.provider_code == "openrouter_in_flight_budget"
+        for limit_source, reason in (("openrouter_credits", "weight_exceeds_budget"), ("openrouter_key_limit", ""), ("", "")):
+            quota = refused(limit_source, reason, unwrapped)
+            assert (quota.kind, quota.retry_same_request, quota.provider_code) == ("quota_exhausted", False, "402")
+
+
 def test_classify_llm_exception_uses_provider_code_before_429_status():
     quota = classify_llm_exception(
         _ProviderError("rate limit transport status", status_code=429, code="insufficient_quota")
@@ -757,6 +773,178 @@ def test_classify_llm_exception_keeps_text_only_token_rate_retryable():
     assert plain_429.retry_same_request is True
 
 
+# Provider answers saved from live refusals (ids dropped), as the SDK hands them over: ``body`` is the error object.
+_ALIBABA_RAW = ('data: {"error":{"code":"invalid_parameter_error","param":null,"message":"Range of input length should be '
+                '[1, 983616]","type":"invalid_request_error"},"id":"chatcmpl-x"}\n\n')
+_ALIBABA = {"code": 400, "message": "Provider returned error", "metadata": {
+    "is_byok": False, "provider_name": "Alibaba", "raw": _ALIBABA_RAW,
+    "previous_errors": [{"code": 400, "message": "Provider returned error", "provider_name": "Alibaba", "raw": _ALIBABA_RAW}]}}
+_MANCER = {"message": "Provider returned error", "code": 400, "metadata": {"provider_name": "Mancer 2", "raw": (
+    '{"error":{"data":"Input too long: 4026617 input tokens, limit is 1048576 for this model",'
+    '"message":"Bad Parameters. \\n(No credits charged.)","type":"BAD_PARAMETERS"}}\n')}}
+_CLOUDFLARE = {"message": "Provider returned error", "code": 400, "metadata": {"provider_name": "Cloudflare", "raw": (
+    '{"errors":[{"message":"AiError: AiError: {\\"error\\":{\\"message\\":\\"This model\'s maximum context length is '
+    '1048576 tokens. However, you requested 1 output tokens and your prompt contains at least 1048576 input tokens.\\",'
+    '\\"type\\":\\"BadRequestError\\",\\"param\\":\\"input_tokens\\",\\"code\\":400}} (2e769af7-a677)","code":8007}],'
+    '"success":false,"result":{},"messages":[]}')}}
+_VENICE_TYPED = {"message": "Provider returned error", "code": 400, "metadata": {
+    "provider_name": "Venice", "provider_error_code": "context_length_exceeded",
+    "raw": '{"error":{"message":"Input too long: 3840008 input tokens, limit is 1048576 for this model","type":"invalid_request_error"}}'}}
+_MORPH = {"message": "Provider returned error", "code": 413, "metadata": {
+    "provider_name": "Morph", "raw": '{"error":{"message":"Payload Too Large","type":"invalid_request_error"}}'}}
+_SIGNATURE = {"code": 400, "message": "Provider returned error", "metadata": {
+    "provider_name": "Amazon Bedrock", "raw": '{"message":"Invalid `signature` in `thinking` block"}',
+    "previous_errors": [{"code": 400, "message": "Provider returned error", "provider_name": "Anthropic",
+                         "raw": '{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1018535 tokens > 1000000 maximum"}}'}]}}
+_OPENAI_200 = {"message": "Your input exceeds the context window of this model. Please adjust your input and try again.",
+               "code": 400, "metadata": {"error_type": "invalid_request", "provider_code": "context_length_exceeded"}}
+_MAKORA_200 = {"message": "Upstream error from Makora: Invalid request", "code": 400, "metadata": {"error_type": "invalid_request"}}
+_RIVER_200 = {"message": "Upstream error from River: The request exceeds the model's context limit. Reduce the input or "
+                         "requested output length.", "code": 502, "metadata": {"error_type": "provider_unavailable"}}
+
+
+def _refused(status, body):
+    error = _ProviderError(f"Error code: {status} - {body!r}", status_code=status)
+    error.body = body
+    return error
+
+
+def test_one_reader_gives_each_party_of_an_answer_its_own_sentence_and_codes():
+    """A gateway's wrapper, the upstream's own error inside ``metadata.raw`` (JSON in a string, an SSE ``data:`` line)
+    and earlier upstream attempts are parties of one answer. A sentence is any string with a space under any key;
+    an id or a name is none. A list is history only where its document also states a sentence outside lists."""
+    from ouroboros._usage_response import provider_answer
+
+    alibaba = provider_answer(_refused(400, _ALIBABA))
+    assert alibaba.innermost() == ("Alibaba", "Range of input length should be [1, 983616]")
+    assert alibaba.said[0] == ("", "Provider returned error", False)
+    assert [row for row in alibaba.said if row[2]] == [("Alibaba", "Provider returned error", True),
+                                                       ("Alibaba", "Range of input length should be [1, 983616]", True)]
+    assert "invalid_parameter_error" in alibaba.own_codes() and "chatcmpl-x" not in str(alibaba)
+    mancer = provider_answer(_refused(400, _MANCER))  # the real sentence sits under ``data``, beside a generic message
+    assert ("Mancer 2", "Input too long: 4026617 input tokens, limit is 1048576 for this model", False) in mancer.said
+    assert not any("Mancer 2" == text for _speaker, text, _history in mancer.said), "a speaker's name is no sentence"
+    cloudflare = provider_answer(_refused(400, _CLOUDFLARE))  # ``errors[]`` inside ``raw`` is the answer itself
+    assert not any(history for _speaker, _text, history in cloudflare.said)
+    assert [text for speaker, text, _history in cloudflare.said if speaker == "Cloudflare"] == [
+        "AiError: AiError: (2e769af7-a677)",
+        "This model's maximum context length is 1048576 tokens. However, you requested 1 output tokens and your prompt "
+        "contains at least 1048576 input tokens."]
+    assert "8007" in cloudflare.own_codes() and "input_tokens" not in cloudflare.own_codes(), "``param`` is no code"
+    whole = provider_answer({"id": "gen-1", "user_id": "user 1", "error": _OPENAI_200})  # an HTTP 200 body: its status
+    assert whole.status == 400 and whole.innermost() == ("", _OPENAI_200["message"]) and "user 1" not in str(whole.said)
+    assert "context_length_exceeded" in whole.own_codes()
+    # A typed size code quotes its party's sentence that states the size, not an empty wrapper line before it.
+    from ouroboros.context_budget import size_refusal
+
+    wrapped = provider_answer({"error": {"code": "context_length_exceeded", "message": "Failed to create completion. Text: ''",
+                                         "detail": "The input (4026551 tokens) is longer than the model's context length (1048576 tokens)."}})
+    assert size_refusal(wrapped, 400)[3].startswith("The input (4026551 tokens)")
+    raised = classify_llm_exception(_refused(400, {"code": "context_length_exceeded", "message": "Failed to create completion. Text: ''",
+                                                   "detail": "The input (4026551 tokens) is longer than the model's context length (1048576 tokens)."}))
+    assert raised.kind == "context_overflow" and raised.said[1].startswith("The input (4026551 tokens)")  # the raised path quotes it too
+    bare = provider_answer({"error": {"code": "context_length_exceeded", "message": "Failed to create completion. Text: ''"}})
+    assert size_refusal(bare, 400)[3] == "Failed to create completion. Text: ''"
+
+
+@pytest.mark.parametrize(("status", "body", "kind", "basis", "speaker"), [
+    (400, _VENICE_TYPED, "context_overflow", "typed", "Venice"),      # a typed size code one layer down
+    (400, _SIGNATURE, "context_overflow", "frozen", "Anthropic"),     # only an earlier upstream attempt said size
+    (413, _MORPH, "context_overflow", "status_413", "Morph"),         # the one status that means too large
+    (413, {**_MORPH, "metadata": {**_MORPH["metadata"], "provider_error_code": "rate_limit_exceeded"}},
+     "provider_transient", "", ""),                                   # a typed cause of another kind keeps its kind
+    (400, {**_SIGNATURE, "type": "insufficient_quota"}, "quota_exhausted", "", ""),
+    (429, {**_VENICE_TYPED, "code": 429}, "provider_transient", "", ""),  # every other status is its own family,
+    (502, {**_VENICE_TYPED, "code": 502}, "provider_transient", "", ""),  # whatever the answer's words or codes say
+    (404, {"code": 404, "message": "This endpoint's maximum context length is 1000000 tokens."}, "provider_error", "", ""),
+    (402, {"code": 402, "message": "Prompt tokens limit exceeded: 681176 > 402105. This endpoint's maximum context "
+                                   "length is 1000000 tokens."}, "quota_exhausted", "", ""),
+    (400, {"code": 400, "message": "Provider returned error", "metadata": {"raw": '{"message":"Invalid request"}',
+           "previous_errors": [{"code": 429, "message": "Rate limit exceeded: too many tokens per minute"},
+                               {"code": 402, "message": "Insufficient credits"}]}}, "bad_request", "", ""),
+    (400, {"code": 400, "message": "Rate limit exceeded, please retry later"}, "bad_request", "", ""),  # words re-type no known status
+    (400, {"code": 400, "message": "Input length 4026546 exceeds the maximum allowed input length of 1048544 tokens."},
+     "bad_request", "", ""),                                          # digits inside a count restate no status
+])
+def test_the_final_status_sets_the_family_and_size_is_read_from_every_layer_of_a_client_refusal(status, body, kind, basis, speaker):
+    """Only a client refusal (400, 413, 422) is read for size, from any layer of the same attempt: a typed size code,
+    the frozen wording, or HTTP 413 alone. A typed cause of another kind on the current path keeps its kind, another
+    status is its own family, and an earlier upstream attempt never re-types the final answer."""
+    classified = classify_llm_exception(_refused(status, body))
+    assert (classified.kind, classified.basis, classified.said[0]) == (kind, basis, speaker)
+    assert classified.status_code == status and classified.retry_same_request is (kind == "provider_transient")
+
+
+def test_an_http_200_error_body_is_a_refusal_under_the_status_its_code_names(tmp_path, monkeypatch):
+    """OpenRouter passes an upstream refusal through an HTTP 200 body. Its integer ``error.code`` is the status, and
+    size is read on the whole object before the transient heuristic: OpenAI's typed size refusal says "try again"
+    and is no outage, an untyped «Invalid request» stays a rejected request, and a body 502 with size words is
+    retried as the outage its status names, its sentence kept."""
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_attempt import body_error_facts, is_size_refusal
+
+    def filed(error):
+        facts = body_error_facts(error, LLMClient._is_transient_body_error(error))
+        usage, llm = {}, _EmptyBodyErrorLLM(facts)
+        call_llm_with_retry(llm, [{"role": "user", "content": "hi"}], "openai/gpt-5.5", None, "medium", 1, tmp_path,
+                            "task-body-status", 1, None, usage, "task", False, attempt_cap=1)
+        return facts, usage
+
+    assert LLMClient._is_transient_body_error(_OPENAI_200), "its words alone read as transient"
+    client = LLMClient()
+    monkeypatch.setattr(client, "_reroute_same_model_kwargs", lambda *_a, **_kw: {"rerouted": True})
+    rerouted = [client._reroute_kwargs_for_body_error(SimpleNamespace(model_dump=lambda error=error: {"error": error}), {}, {})
+                for error in (_OPENAI_200, _MAKORA_200, _RIVER_200)]
+    assert rerouted == [None, None, {"rerouted": True}]  # only the outage is asked again before Main reads the answer
+    facts, usage = filed(_OPENAI_200)
+    assert is_size_refusal(_OPENAI_200) and facts["kind"] == "provider_error" and facts["answer"]["basis"] == "typed"
+    assert usage["_last_llm_error_kind"] == "context_overflow" and usage["_last_llm_provider_answer"]["basis"] == "typed"
+    quota = {"code": 400, "type": "insufficient_quota", "message": "Account quota exceeded. Maximum context length is 128000 tokens."}
+    facts, usage = filed(quota)  # a typed cause of another kind keeps its kind on the body path too: no size recovery, no ceiling
+    assert usage["_last_llm_error_kind"] != "context_overflow"
+    facts, usage = filed({**quota, "type": "invalid_request_error"})
+    assert usage["_last_llm_error_kind"] == "context_overflow"
+    nested = {"code": 400, "message": "Provider returned error", "metadata": {
+        "raw": '{"error":{"code":"context_length_exceeded","message":"Input range exceeded"}}'}}
+    facts, usage = filed(nested)  # the code sits only inside the upstream body: the body's own recognition is read once
+    assert facts["answer"]["basis"] == "typed" and usage["_last_llm_error_kind"] == "context_overflow"
+    facts, usage = filed(_MAKORA_200)
+    assert not is_size_refusal(_MAKORA_200) and facts["kind"] == "provider_error" and facts["answer"]["untyped"] is True
+    assert usage["_last_llm_error_kind"] == "provider_body_error"
+    facts, usage = filed(_RIVER_200)
+    assert not is_size_refusal(_RIVER_200) and facts["kind"] == "provider_transient" and "untyped" not in facts["answer"]
+    assert usage["_last_llm_error_kind"] != "context_overflow"
+    assert usage["_last_llm_provider_message"] == _RIVER_200["message"]
+
+
+def test_the_owner_line_quotes_the_sentence_that_carried_the_cause_with_its_speaker():
+    """The stamp keeps the upstream's own sentence, not its gateway's wrapper, and names who said it; an answer
+    that names no upstream is the provider's. An engine-typed refusal speaks through its typed fields only."""
+    from ouroboros.llm_claudexor import ClaudexorModelError
+    from ouroboros.loop_transport import fallback_reason_text, stamp_owner_provider_message
+
+    def row(error):
+        usage = {"_last_llm_error_kind": "bad_request", "_last_llm_failure": {"model": "qwen/qwen3.8-max-0902"}}
+        stamp_owner_provider_message(usage, error, classify_llm_exception(error))
+        return usage, fallback_reason_text(usage, "qwen/qwen3.8-max-0902")
+
+    usage, text = row(_refused(400, _ALIBABA))
+    assert text == (' after a rejected request on qwen/qwen3.8-max-0902. Alibaba said: "Range of input length should be '
+                    '[1, 983616]"')
+    assert usage["_last_llm_provider_answer"]["untyped"] is True and "basis" not in usage["_last_llm_provider_answer"]
+    assert usage["_last_llm_provider_answer"]["codes"] == [
+        ["", "400"], ["Alibaba", "invalid_parameter_error"], ["Alibaba", "invalid_request_error"]]
+    assert usage["_last_llm_provider_answer"]["said"][:2] == [
+        ["", "Provider returned error", False], ["Alibaba", "Range of input length should be [1, 983616]", False]]
+    _usage, text = row(_refused(400, {"code": 400, "message": "Unsupported value: temperature"}))
+    assert text.endswith('The provider said: "Unsupported value: temperature"')
+    usage, text = row(ClaudexorModelError({"code": "invalid_request", "message": "Codex model request was refused (HTTP 400).",
+        "context": {"httpStatus": 400, "vendorCode": "invalid_value", "parameter": "input", "providerMessage": "private-body"}}))
+    assert "said" not in text and "_last_llm_provider_message" not in usage
+    assert "said" not in usage["_last_llm_provider_answer"], "no sentence is invented for an engine's refusal"
+    assert usage["_last_llm_provider_fields"] == {"code": "invalid_value", "parameter": "input"}
+
+
 def test_dispatched_unknown_outcome_is_not_retried(tmp_path):
     """A dispatched request with no terminal provider outcome whose failure is
     NOT a typed transport death (here: a bare timeout — "we gave up", the
@@ -806,8 +994,9 @@ def test_provider_failure_hint_empty_without_error():
 
 
 @pytest.mark.parametrize(("vendor", "parameter", "kind", "code"), [
-    ("string_above_max_length", "instructions", "bad_request", "provider_failed"),
-    ("string_above_max_length", "max_tokens", "bad_request", "invalid_request"),
+    ("string_above_max_length", "instructions", "context_overflow", "provider_failed"),  # a smaller input cures it
+    # The disclosed residual (CONSENSUS 1.4): no `parameter` check, so the code on a non-input field reads alike.
+    ("string_above_max_length", "max_tokens", "context_overflow", "invalid_request"),
     ("context_length_exceeded", "input", "context_overflow", "provider_failed"),
 ])
 def test_claudexor_display_reaches_error_and_terminal_without_retry(tmp_path, monkeypatch, code, vendor, parameter, kind):

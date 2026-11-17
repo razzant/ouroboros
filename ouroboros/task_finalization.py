@@ -316,6 +316,7 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
     """Carry current custody and origin facts without minting empty custody envelopes."""
     from ouroboros.delegate_terminal import _stored_disclosure_matches
     from ouroboros.project_naming import summary_names_run
+    from ouroboros.text_sentences import first_sentence
     fields: Dict[str, Any] = {}
     audit = usage.get("delegate_terminal_reconciliation")
     prior = existing or {}
@@ -334,7 +335,7 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
     if usage.get("wake_summary"):
         fields["wake_summary"] = str(usage["wake_summary"])  # a self-started run's name, never over a title
         if summary_names_run(metadata, task_contract) and not str(title or prior.get("title") or "").strip():
-            fields["suggested_name"] = fields["wake_summary"]
+            fields["suggested_name"] = first_sentence(fields["wake_summary"])
         fields.update({"fold_read": True} if usage.get("fold_read") is True else {})  # it stands for what was read
     if usage.get("owner_message_sent") is True:
         fields["owner_message_sent"] = True

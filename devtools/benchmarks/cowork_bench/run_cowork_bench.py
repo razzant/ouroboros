@@ -114,7 +114,6 @@ def render_settings(template: dict[str, Any], args: argparse.Namespace) -> tuple
         {
             "OUROBOROS_EFFORT_TASK": args.effort,
             "OUROBOROS_TASK_REVIEW_MODE": args.task_review_mode,
-            "OUROBOROS_REVIEW_ENFORCEMENT": args.review_enforcement,
             "OUROBOROS_REVIEW_MAX_CYCLES": str(args.review_max_cycles),
             "OUROBOROS_SAFETY_MODE": args.safety_mode,
             "OUROBOROS_RUNTIME_MODE": args.runtime_mode,
@@ -735,7 +734,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--review-effort", default="high")
     parser.add_argument("--review-slots", type=int, default=3)
     parser.add_argument("--task-review-mode", default="required")
-    parser.add_argument("--review-enforcement", default="blocking")
     parser.add_argument("--review-max-cycles", default="2")
     parser.add_argument("--safety-mode", default="off", choices=["full", "light", "off"])
     parser.add_argument("--runtime-mode", default="pro")

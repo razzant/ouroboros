@@ -601,16 +601,33 @@ def test_integrate_reject_records_verdict(tmp_path):
     assert child.get("child_result_disposition") == "irrelevant"
 
 
-def test_integrate_protected_blocked_in_advanced(tmp_path, monkeypatch):
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+@pytest.mark.parametrize(("mode", "caller"), [
+    ("advanced", "parent"), ("advanced", "acting"), ("pro", "acting"), ("cyber_pro", "acting"), ("pro", "granted"),
+])
+def test_integrate_protected_refusal_names_its_actual_cause(tmp_path, monkeypatch, mode, caller):
+    """The gate stays: mode allowing protected writes AND an acting caller's own protected_paths_grant.
+    #2734: a missing grant is named as the integrating task's own, never as a mode to switch to, and the
+    captured result stays for its parent; a mode refusal keeps the policy's advice."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
     repo = tmp_path / "repo"
     _init_repo(repo, {"ouroboros/safety.py": "X = 1\n"})
     drive = tmp_path / "data"; drive.mkdir()
     _make_child_patch(repo, drive, "child3", "ouroboros/safety.py", "X = 2\n")
-    ctx = _integrate_ctx(repo, drive)
-    out = _integrate_subagent_patch(ctx, task_id="child3")
-    assert "protected" in out.lower() or "PROTECTED" in out
+    acting = {} if caller == "parent" else {"mode": ACTING_SUBAGENT_MODE, "surface": "self_worktree",
+                                            "protected_paths_grant": caller == "granted"}
+    out = _integrate_subagent_patch(_integrate_ctx(repo, drive, **acting), task_id="child3")
+    if caller == "granted":
+        assert "Integrated subagent patch" in out, out
+        assert (repo / "ouroboros/safety.py").read_text(encoding="utf-8") == "X = 2\n"
+        return
+    assert out.startswith("⚠️ CORE_PROTECTION_BLOCKED") and "ouroboros/safety.py" in out, out
+    assert ("protected_paths_grant" in out) == (caller == "acting"), out
+    assert ("Switch to runtime_mode" in out) == (caller == "parent"), out
+    if caller == "acting":
+        assert f"runtime_mode={mode!r}" in out and "kept unapplied" in out and "your parent" in out, out
+    from ouroboros.task_status import load_effective_task_result
+    assert not load_effective_task_result(drive, "child3").get("child_result_disposition")  # the result stays
     assert (repo / "ouroboros/safety.py").read_text(encoding="utf-8") == "X = 1\n"  # unchanged
 
 
@@ -1245,7 +1262,7 @@ def test_acting_browser_evaluate_runs_and_keeps_resource_targets(tmp_path, monke
         def set_default_timeout(self, ms):
             calls.append(("default_timeout", ms))
 
-        def evaluate(self, script):
+        async def evaluate(self, script):
             calls.append(script)
             return 2
 
@@ -1253,7 +1270,15 @@ def test_acting_browser_evaluate_runs_and_keeps_resource_targets(tmp_path, monke
     monkeypatch.setattr(browser_mod, "_ensure_browser", lambda ctx, *_args, **_kwargs: (page, ctx.browser_state))
     registry = ToolRegistry(repo_dir=repo, drive_root=drive)
     registry.set_context(ctx)
+    from tests._browser_fakes import track_sessions, close_generations
+    sessions = track_sessions(monkeypatch)
+    try:
+        _acting_evaluate_checks(registry, ctx, page, calls, drive)
+    finally:
+        close_generations(*sessions)
 
+
+def _acting_evaluate_checks(registry, ctx, page, calls, drive):
     assert registry.execute("browser_action", {"action": "evaluate", "value": "1 + 1"}) == "2"
     # The requested expression executes (wrapped in the in-page Promise.race
     # timeout bound — harness-health O5); the contract is the script REACHES

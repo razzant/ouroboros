@@ -154,7 +154,9 @@ def test_finalization_records_one_ordered_tail_on_every_task_surface(completed_t
             "release_task_runs", "custody_reconcile", "custody_audit", "sender"} <= phases.keys()
     assert "acceptance" not in phases, "review mode off buys no panel"
     assert "custody_daemon_request" not in phases and "custody_run" not in phases
-    assert phases["child_lookup"]["count"] >= 8
+    # Each wait-free finalization segment and the post-loop pass read their children once
+    # (``finalization_child_scope``); every reducer used to read for itself, eight times or more.
+    assert 3 <= phases["child_lookup"]["count"] < 8
     assert phases["source_ack"]["finished_sec"] <= phases["admission_wait"]["started_sec"]
     assert phases["admission_wait"]["finished_sec"] <= phases["admission_close"]["started_sec"]
     assert phases["admission_close"]["finished_sec"] <= phases["cleanup"]["started_sec"]

@@ -175,7 +175,7 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
     disposeFocus = bindDialogFocus(dialog, { initialFocus: body, returnFocus, onEscape: close });
     if (installed && connectsServices(installed).length) {
         const places = dialog.querySelector('[data-sheet-places]'); places.hidden = false;
-        disposePlaces = mountConnectorPlaces(places, installed.name, { leave: close, returnFocus });
+        disposePlaces = mountConnectorPlaces(places, installed.name, { leave: close });
     }
     read();
     return {

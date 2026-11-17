@@ -1336,6 +1336,7 @@ test('required-profile code without its action and unrelated 409 remain ordinary
         required_actions: ['disable_extra_profiles'] });
     await ctl.start('zephyr', '');
     assert.ok(!host.innerHTML.includes('data-profile-name-input'));
+    assert.ok(!host.innerHTML.includes('disable_extra_profiles'));
     assert.equal(ctl.active.absent, true, 'a typed pre-job conflict proves no job exists');
     assert.equal(ctl.active.custodyStatus, LOGIN_CUSTODY_RELEASED);
     assert.equal(await ctl.dispose(), LOGIN_CUSTODY_RELEASED);
@@ -1473,4 +1474,28 @@ test('normalizeProfileName enforces the engine slug contract ^[a-z0-9][a-z0-9_-]
     const submitted = profileNameSubmission('Работа');
     assert.equal(submitted.profile, '', 'an unslugifiable name never starts a login');
     assert.ok(submitted.note.includes('starts with a lowercase letter or digit'));
+});
+
+for (const actions of [[], ['Read the program in Accounts']]) test(`Connect problems show ${actions.length} engine actions through the existing card reader`, async () => {
+    const host = fakeHost();
+    const ctl = createLoginCardController({host, store: {refresh: async () => null},
+        fetchImpl: async () => json(403, {error: 'The receipt cannot be read.', code: 'refused',
+            context: {operationId: 'accepted-operation'}, retryable: false, required_actions: actions})});
+    await ctl.start('codex', '');
+    assert.match(host.innerHTML, /The receipt cannot be read/);
+    assert.equal(host.innerHTML.includes('Read the program in Accounts'), actions.length > 0);
+    assert.doesNotMatch(host.innerHTML, /accepted-operation/);
+    await ctl.dispose();
+});
+
+for (const maintenance of [false, true]) test(`extra actions belong only to maintenance problems: ${maintenance}`, async () => {
+    const host = fakeHost();
+    const ctl = createLoginCardController({host, store: {refresh: async () => null},
+        fetchImpl: async () => json(503, {error: 'The engine is serving recovery only.', code: 'daemon_recovery_only',
+            context: maintenance ? {operationId: 'accepted-operation'} : {}, required_actions: ['Retry after recovery', 'use_external_terminal']})});
+    await ctl.start('cursor', 'work');
+    assert.match(host.innerHTML, /The engine is serving recovery only/);
+    assert.equal(host.innerHTML.includes('Retry after recovery'), maintenance);
+    assert.equal(host.innerHTML.includes('use_external_terminal'), maintenance, 'maintenance actions are not a local token allowlist');
+    await ctl.dispose();
 });

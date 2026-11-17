@@ -173,9 +173,10 @@ HOST_ROW_CLASSES = {
     "evolution_cycle_outcome": ("runtime_state", 1),
     "evolution_notice": ("runtime_state", 7),  # lifecycle x4, toggle, light-mode queue drop, /evolve off report; the failure, repeat and reserve stops are gone (owner, 2026-11-02)
     "finalization_notice": ("card_row", 2),
-    "host_progress": ("card_row", 1),
+    "historical_retirement_notice": ("runtime_state", 1),  # old reviewer sessions and minted registrations, once
+    "host_progress": ("card_row", 2),  # a task's own host progress: merge receipts + the body's delegated-run feed (delegate_feed.publisher)
     "initialization_notice": ("not_started", 1),
-    "low_start_notice": ("runtime_state", 1),  # a fresh start memory lowered to Low (owner 1B, 29.10)
+    "low_start_notice": ("runtime_state", 1),  # once per Low episode of memory-lowered starts (owner A, 07.11; was 1B)
     "managed_update_notice": ("runtime_state", 2),
     "model_capability_notice": ("runtime_state", 1),
     "owner_pause_notice": ("card_row", 1),
@@ -183,7 +184,7 @@ HOST_ROW_CLASSES = {
     "project_closure": ("runtime_state", 1),  # the mind's reversible project decision, in its room
     "project_handoff": ("main_lifecycle", 1),
     "project_started": ("main_lifecycle", 1),
-    "promotion_notice": ("runtime_state", 4),
+    "promotion_notice": ("runtime_state", 5),  # refusals (deployment-held body, stale claim, moved branch), failure, success
     "reminder": ("signed_words", 1),
     "restart_notice": ("runtime_state", 8),  # includes the saved-for-Restart input acknowledgement
     "rollback_notice": ("runtime_state", 1),
@@ -193,6 +194,7 @@ HOST_ROW_CLASSES = {
     "settings_changed": ("runtime_state", 1),  # a saved change the app did not declare (owner, 2026-11-03)
     "skill_lifecycle": ("card_row", 2),
     "skill_lifecycle_pointer": ("owner_act_receipt", 1),
+    "safety_notice": ("signed_words", 1),  # the Supervisor's own row when a re-issue goes ahead over an owner-marked flag
     "skill_notice": ("signed_words", 1),
     "skill_repair": ("owner_act_receipt", 1),  # the owner's Repair; marketplace auto-repair is retired
     "startup_notice": ("runtime_state", 3),  # the boot notice, the storage switch, a fault boot's no-turn row
@@ -210,6 +212,7 @@ HOST_ROW_CLASSES = {
     "task_reaper_notice": ("card_row", 2),  # wedged hold and stop; the two idle-retry notices are gone
     "task_scheduled": ("card_row", 1),
     "task_start_unconfirmed": ("not_started", 1),
+    "taken_walk_notice": ("runtime_state", 1),  # what the engine was told of earlier delegated results, once
     "terminal_incident": ("no_mind", 2),
     "ui_hold": ("runtime_state", 1),
     "worker_failure": ("no_mind", 2),  # the exhausted crash retry + the degraded executor's disclosure (inline_carrier._disclose); the crash-storm toast is gone

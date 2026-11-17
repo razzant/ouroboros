@@ -44,10 +44,10 @@ def test_reclaim_low_water_divisor_is_one_constant_read_at_call_time(monkeypatch
 
     assert "RECLAIM_LOW_WATER_DIVISOR" in inspect.getsource(context_fit.reclaim_low_water_margin)
     assert "/ 8" not in inspect.getsource(context_fit.measure_main_fit)
-    assert [field.name for field in dataclasses.fields(context_fit.MainFitMeasurement)][-13:] == [
+    assert [field.name for field in dataclasses.fields(context_fit.MainFitMeasurement)][-15:] == [
         "low_water_margin_tokens", "raw_input_tokens", "reply_allowance_tokens", "anchor_input_tokens",
         "anchor_round", "anchor_rewritten", "accepted_input_tokens", "window_reading_tokens", "view_kind", "window_witness_bound",
-        "window_observation_fp", "window", "required_book_tokens"]
+        "window_observation_fp", "window", "required_book_tokens", "preferred_mode", "mode_cause"]
     assert context_fit.reclaim_low_water_margin(250_000, 500_000) == 31_250  # target binds
     assert context_fit.reclaim_low_water_margin(None, 70_000) == 8_750  # capacity alone
     assert context_fit.reclaim_low_water_margin(None, None) == 0  # nothing known
@@ -65,6 +65,7 @@ def test_reclaim_request_and_receipt_are_exact_frozen_records():
         "reclaim_goal_tokens",
         "allow_partial_shrink",
         "working_note", "expected_view_revision", "keep_unit_ids", "restore_unit_refs", "schema_names",
+        "replace_note_ids",
     ]
     assert [field.name for field in dataclasses.fields(cb.ContextReclaimReceipt)] == [
         "status",
@@ -77,7 +78,7 @@ def test_reclaim_request_and_receipt_are_exact_frozen_records():
         "checkpoint_ref",
         "capsule_refs",
         "observed_view_revision", "view_revision", "retained_unit_ids", "restored_unit_refs",
-        "source_refs", "schema_names", "fit",
+        "source_refs", "schema_names", "fit", "replaced_notes",
     ]
     request = cb.ContextReclaimRequest("route", "round", "a" * 64, "cold_estimate", 1.0, 1)
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -146,10 +147,11 @@ def test_overflow_classification_is_one_shared_seam():
     the third reader, left with its engine.)"""
     import ouroboros.context_compaction as cc_mod
     import ouroboros.llm as llm_mod
+    import ouroboros.llm_attempt as attempt_mod
     import ouroboros.loop_llm_call as loop_call_mod
 
     assert llm_mod.context_overflow_message is cb.context_overflow_message
-    assert loop_call_mod._context_overflow_message is cb.context_overflow_message
+    assert loop_call_mod.size_refusal is attempt_mod.size_refusal is cb.size_refusal  # one recognition, both layers
     assert loop_call_mod._output_or_body_size_message is cb.output_or_body_size_message
     assert llm_mod.CONTEXT_OVERFLOW_CODES is cb.CONTEXT_OVERFLOW_CODES
     assert loop_call_mod._STRUCTURED_CONTEXT_OVERFLOW_CODES is cb.CONTEXT_OVERFLOW_CODES
@@ -169,6 +171,36 @@ def test_output_size_precedence_lives_inside_the_shared_helper():
     assert not cb.context_overflow_message("request body too large")
 
 
+def test_a_cited_number_recognises_size_only_by_equality_with_a_declared_limit_above_the_reply_allowance():
+    """Recognition by number compares two statements of one party: a plain integer the refusal cites and a token
+    limit declared for the route. The reply allowance the refused request sent keeps output caps quiet without
+    reading a word (a cap refuses only a reply larger than itself); a nearby, grouped or decimal number equals
+    nothing; and a declaration that costs a read is asked only for an integer still unmatched."""
+    record = {32_768: ("total", "the window record (metadata)"), 131_072: ("total", "the window record (metadata)")}
+    vllm = [("", "'max_tokens' or 'max_completion_tokens' is too large: 65536. This model's maximum context length "
+                 "is 32768 tokens and your request has 10000 input tokens (65536 > 32768 - 10000).", False)]
+    assert cb.cited_declared_limit(vllm, 8_192, record)[:2] == (32_768, record[32_768])
+    assert cb.cited_declared_limit(vllm, 65_536, record) is None  # the reply it sent is the larger number: an output cap
+    gmicloud = [("GMICloud", "max_tokens is too large: 942733. This model supports at most 131072 completion tokens, "
+                             "whereas you provided 942733.", False)]
+    assert cb.cited_declared_limit(gmicloud, 942_733, record) is None
+    assert cb.cited_declared_limit([("", "max_tokens 131072 exceeds the limit", False)], 131_072, record) is None
+    near = [("", "limit 131071, 131,072 or 131072.5 tokens; trace line 1747; id req-131072", False)]
+    assert cb.cited_declared_limit(near, 16, record) is None
+    reads = []
+
+    def catalogue():
+        reads.append(1)
+        return {983_616: ("input", "the endpoint catalogue (alibaba max_prompt_tokens)")}
+
+    alibaba = [("", "Provider returned error", False), ("Alibaba", "Range of input length should be [1, 983616]", False)]
+    assert cb.cited_declared_limit([("", "Invalid request", False)], 16, {}, catalogue) is None and not reads
+    assert cb.cited_declared_limit(alibaba, 65_536, {1_000_000: ("total", "the window record (metadata)")}, catalogue) == (
+        983_616, ("input", "the endpoint catalogue (alibaba max_prompt_tokens)"), "Alibaba", alibaba[1][1])
+    assert reads == [1]
+    assert cb.cited_declared_limit(alibaba, 65_536, {1_000_000: ("total", "record")}, dict) is None  # no catalogue row
+
+
 @pytest.mark.parametrize("reserve", ["max_tokens", "`max_tokens`"])
 def test_combined_anthropic_window_rejection_reaches_main(reserve):
     from ouroboros.loop_llm_call import classify_llm_exception
@@ -180,6 +212,8 @@ def test_combined_anthropic_window_rejection_reaches_main(reserve):
     error.body = {"error": {"type": "invalid_request_error", "message": text}}
     assert cb.context_overflow_message(text)
     assert not cb.output_or_body_size_message(text)
+    numberless = "input length and max_tokens exceed context limit"  # the same refusal with its counts left out
+    assert not cb.output_or_body_size_message(numberless) and cb.context_overflow_message(numberless)
     assert classify_llm_exception(error).kind == "context_overflow"
     for output_only in ("max_tokens 65536 exceeds maximum context length 32768",
                         "output tokens exceed context limit", "request body too large"):

@@ -42,6 +42,10 @@ export class NodeStub {
     getAttribute(key) { return this.attrs[key] ?? null; }
     hasAttribute(key) { return key in this.attrs; }
     removeAttribute(key) { delete this.attrs[key]; }
+    toggleAttribute(key, force = !this.hasAttribute(key)) {
+        if (force) this.setAttribute(key, this.getAttribute(key) ?? ''); else this.removeAttribute(key);
+        return Boolean(force);
+    }
     get firstElementChild() { return this.children.find((child) => child.nodeType !== 3); }
     get firstChild() { return this.children[0] || null; }
     get lastChild() { return this.children.at(-1) || null; }
@@ -61,7 +65,9 @@ export class NodeStub {
             if (!tag) continue;
             const node = new NodeStub(tag);
             for (const attr of token.slice(tag.length + 1, -1).matchAll(/([\w-]+)(?:="([^"]*)")?/g)) {
-                node.setAttribute(attr[1], attr[2] ?? '');
+                const value = (attr[2] ?? '').replace(/&quot;|&#39;|&lt;|&gt;|&amp;/g,
+                    (entity) => ({ '&quot;': '"', '&#39;': "'", '&lt;': '<', '&gt;': '>', '&amp;': '&' })[entity]);
+                node.setAttribute(attr[1], value);
             }
             stack.at(-1).appendChild(node);
             if (!['input', 'br', 'hr', 'img', 'meta', 'link', 'wbr'].includes(tag)) stack.push(node);
@@ -75,6 +81,12 @@ export class NodeStub {
         return node;
     }
     append(...nodes) { nodes.forEach((node) => this.appendChild(node)); }
+    replaceChildren(...nodes) {
+        this.children.forEach((child) => { child.parentElement = null; });
+        this.children = [];
+        this.append(...nodes);
+    }
+    after(node) { this.parentElement.insertBefore(node, this.nextElementSibling); }
     remove() {
         if (this.parentElement) this.parentElement.children.splice(this.parentElement.children.indexOf(this), 1);
         this.parentElement = null;
@@ -113,7 +125,8 @@ export function setup(t) {
         body,
         hidden: false,
         activeElement: null,
-        defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+        // A window a bound control may listen to (a model chooser closes its list on the window's blur).
+        defaultView: { getComputedStyle: () => ({ visibility: 'visible' }), addEventListener() {}, removeEventListener() {} },
         createElement: (tag) => new NodeStub(tag),
         createTextNode: (data) => new TextStub(data),
         getElementById: (id) => mount.querySelector(`#${id}`) || body.querySelector(`#${id}`),

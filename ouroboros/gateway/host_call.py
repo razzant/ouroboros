@@ -37,7 +37,7 @@ _REFUSAL_STATUS = {
     "place_no_wake_match": 403, "place_reaction_context_only": 403, "place_own_account": 403,
     "place_disconnected": 403, "consciousness_allowance_exhausted": 429,
     "presence_event_invalid": 400, "presence_identity_missing": 400, "presence_identity_invalid": 400,
-    "presence_reaction_invalid": 400,
+    "presence_reaction_invalid": 400, "presence_actor_invalid": 400, "presence_payload_invalid": 400,
     "presence_call_invalid_setting": 400,
     "presence_call_model_unset": 503,
     "presence_call_hub_unavailable": 503, "presence_call_not_started": 503,

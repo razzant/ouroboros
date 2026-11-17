@@ -67,7 +67,7 @@ def _address(root, topic):
 def test_the_backlog_is_an_ordinary_note_written_read_and_revised_through_the_tool(tmp_path):
     registry = _registry(tmp_path)
     address = _address(tmp_path, BACKLOG)
-    created = _ok(registry.execute("knowledge_write", {"topic": BACKLOG, "content": LEGACY_BACKLOG}))
+    created = _ok(registry.execute("knowledge_write", {"topic": BACKLOG, "mode": "overwrite", "content": LEGACY_BACKLOG}))
     assert address.path.read_bytes() == LEGACY_BACKLOG.encode()  # every field and status as written
     read = registry.execute("knowledge_read", {"topic": BACKLOG, "scope": "global"})
     assert created["knowledge_source"]["revision"] in read and "- count: 3" in read
@@ -83,31 +83,32 @@ def test_the_backlog_is_an_ordinary_note_written_read_and_revised_through_the_to
     edited = store.read_knowledge_note(address)
     assert edited.metadata["custom"] == "kept" and edited.text.endswith("resume once, then stop.\n")
     assert edited.text.count("- count: 3") == 1 and edited.text.count("- status: done") == 1
-    # A stale revision refuses and hands back the current source; a blind overwrite needs one.
-    stale = registry.execute("knowledge_write", {"topic": BACKLOG, "content": "Rewritten.",
+    # A stale revision the recent history holds refuses with what changed since it; a blind overwrite needs one.
+    stale = registry.execute("knowledge_write", {"topic": BACKLOG, "mode": "overwrite", "content": "Rewritten.",
                                                  "expected_revision": appended.revision})
-    assert "revision_conflict" in stale and "resume once, then stop." in stale
-    assert "revision_required" in registry.execute("knowledge_write", {"topic": BACKLOG, "content": "Rewritten."})
+    assert "revision_conflict" in stale and "+ Freeform: late phases resume once, then stop." in stale and edited.revision in stale
+    assert "revision_required" in registry.execute("knowledge_write", {"topic": BACKLOG, "mode": "overwrite",
+                                                                     "content": "Rewritten."})
     assert store.read_knowledge_note(address).raw == edited.raw
-    # Every revision keeps its complete new source and the old one, inline or named once.
-    from tests._knowledge_history_shared import replaced
+    # Every revision keeps its complete new source and the old one, whole or as the change from the row holding it.
+    from tests._knowledge_history_shared import published, replaced
     rows = _history(tmp_path, BACKLOG)
     assert [row["mode"] for row in rows] == ["overwrite", "append", "edit"]
     assert all(row["writer"] == "turn" for row in rows)
     assert rows[0]["old_content"] == "" and "Closed by an earlier host writer." in rows[0]["new_content"]
     assert replaced(tmp_path, rows[2]).endswith("should resume once.\n")
-    assert rows[2]["new_content"].endswith("resume once, then stop.\n")
+    assert published(tmp_path, rows[2]).endswith("resume once, then stop.\n")
 
 
 def test_two_writers_from_one_read_land_once(tmp_path):
     first, second = _registry(tmp_path, task_id="a"), _registry(tmp_path, task_id="b")
-    _ok(first.execute("knowledge_write", {"topic": BACKLOG, "content": "- one\n"}))
+    _ok(first.execute("knowledge_write", {"topic": BACKLOG, "mode": "overwrite", "content": "- one\n"}))
     revision = store.read_knowledge_note(_address(tmp_path, BACKLOG)).revision
     barrier, replies = threading.Barrier(2), {}
 
     def write(name, registry, text):
         barrier.wait(10)
-        replies[name] = registry.execute("knowledge_write", {"topic": BACKLOG, "content": text,
+        replies[name] = registry.execute("knowledge_write", {"topic": BACKLOG, "mode": "overwrite", "content": text,
                                                              "expected_revision": revision})
 
     threads = [threading.Thread(target=write, args=("a", first, "- A\n")),
@@ -130,7 +131,7 @@ def test_the_pattern_register_is_edited_like_any_note_and_read_where_it_lives(tm
     from ouroboros.context import build_knowledge_sections
 
     registry = _registry(tmp_path)
-    _ok(registry.execute("knowledge_write", {"topic": "patterns", "content": REGISTER}))
+    _ok(registry.execute("knowledge_write", {"topic": "patterns", "mode": "overwrite", "content": REGISTER}))
     current = store.read_knowledge_note(_address(tmp_path, "patterns"))
     _ok(registry.execute("knowledge_write", {
         "topic": "patterns", "mode": "edit", "old_str": "| class-39 | 39 | cause 39 | fix 39 | open |",
@@ -151,16 +152,17 @@ def test_a_correction_keeps_the_attributed_narrative_recoverable(tmp_path):
 
     registry = _registry(tmp_path)
     original = "# Alex\n\nAlex said on 2026-09-01 (chat row 42) that Alpha shipped in June.\n"
-    _ok(registry.execute("knowledge_write", {"topic": "people/alex", "scope": "global", "content": original}))
+    _ok(registry.execute("knowledge_write", {"topic": "people/alex", "scope": "global", "mode": "overwrite",
+                                             "content": original}))
     note = store.read_knowledge_note(_address(tmp_path, "people/alex"))
     _ok(registry.execute("knowledge_write", {
         "topic": "people/alex", "scope": "global", "mode": "edit",
         "old_str": "that Alpha shipped in June.", "content": "that Alpha shipped in June; it shipped in July (release notes).",
         "expected_revision": note.revision}))
     [_, correction] = _history(tmp_path, "people/alex")
-    from tests._knowledge_history_shared import replaced
+    from tests._knowledge_history_shared import published, replaced
     assert "Alex said on 2026-09-01 (chat row 42) that Alpha shipped in June.\n" in replaced(tmp_path, correction)
-    assert "it shipped in July (release notes)." in correction["new_content"]
+    assert "it shipped in July (release notes)." in published(tmp_path, correction)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="later")
     history = _read_file(ctx, path="memory/knowledge_history.jsonl", root="runtime_data")
     assert "(chat row 42) that Alpha shipped in June." in history
@@ -177,7 +179,7 @@ def test_a_delegated_child_still_authors_an_explicit_note_on_the_canonical_shelf
         repo_dir=tmp_path, drive_root=fork, budget_drive_root=str(canonical), task_id="kid",
         task_metadata={"delegation_role": "subagent", "parent_task_id": "root", "root_task_id": "root",
                        "budget_drive_root": str(canonical)}))
-    _ok(registry.execute("knowledge_write", {"topic": "notes/child-finding", "scope": "global",
+    _ok(registry.execute("knowledge_write", {"topic": "notes/child-finding", "scope": "global", "mode": "overwrite",
                                              "content": "A child's explicit finding."}))
     assert store.read_knowledge_note(_address(canonical, "notes/child-finding")).text.endswith("A child's explicit finding.")
     assert [(row["writer"], row["task_id"]) for row in _history(canonical, "notes/child-finding")] == [("turn", "kid")]

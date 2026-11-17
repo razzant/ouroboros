@@ -243,6 +243,13 @@ def test_existing_task_result_reader_returns_the_same_canonical_range(tmp_path):
     assert source["text"] == expected_text[:midpoint]
 
 
+def _pending_detail(*interaction_ids, delivery=None):
+    """The run detail the engine serves while these questions are pending (legacy rows omit ``delivery``)."""
+    return {"summary": {"state": "running", "waitingOnUser": True}, "lastSeq": 1, "pendingInteractions": [
+        {"interactionId": iid, "questions": [{"id": "q1", "question": "Send the range."}],
+         **({"delivery": delivery} if delivery else {})} for iid in interaction_ids]}
+
+
 def test_source_answer_is_verified_before_delivery_and_replayed(tmp_path, monkeypatch):
     import ouroboros.tools.delegate as delegate
     from ouroboros.gateways import claudexor as gateway_module
@@ -255,7 +262,10 @@ def test_source_answer_is_verified_before_delivery_and_replayed(tmp_path, monkey
         def handshake(self, **_kwargs):
             return {}
 
-        def answer_interaction(self, run_id, interaction_id, answers):
+        def get_run(self, _run_id, **_kwargs):
+            return _pending_detail("interaction-1", "interaction-2")
+
+        def answer_interaction(self, run_id, interaction_id, answers, *, timeout_sec=None):
             calls.append((run_id, interaction_id, answers))
             return {"accepted": True, "status": "delivered"}
 
@@ -303,7 +313,10 @@ def test_source_receipt_retries_after_delivery_when_first_append_fails(tmp_path,
         def handshake(self, **_kwargs):
             return {}
 
-        def answer_interaction(self, _run_id, _interaction_id, _answers):
+        def get_run(self, _run_id, **_kwargs):
+            return _pending_detail("interaction-retry")
+
+        def answer_interaction(self, _run_id, _interaction_id, _answers, *, timeout_sec=None):
             status = next(statuses)
             return {"accepted": status == "delivered", "status": status}
 
@@ -345,7 +358,7 @@ def test_already_resolved_without_prior_delivery_keeps_source_unverified(tmp_pat
         def handshake(self, **_kwargs):
             return {}
 
-        def answer_interaction(self, _run_id, _interaction_id, _answers):
+        def answer_interaction(self, _run_id, _interaction_id, _answers, *, timeout_sec=None):
             calls.append(True)
             return {"accepted": False, "status": "already_resolved"}
 
@@ -452,3 +465,167 @@ def test_terminal_partial_is_cannot_verify_and_apply_is_refused_but_reject_remai
     assert "no captured file changes to apply" in apply_after_complete
     assert custody.replay(tmp_path)[entry.run_id].patch_disposed == "applied"
     custody._CUSTODY.clear()
+
+
+@pytest.mark.parametrize("delivery,read", [("async", True), (None, False)], ids=["async-handoff", "unread-row"])
+def test_a_source_answer_to_a_question_that_held_nothing_confirms_no_source(tmp_path, monkeypatch, delivery, read):
+    """claudexor #628: for an async question ``delivered`` is the engine's handoff to the agent's
+    next user message, never its consumption; a row this call could not read proves nothing either.
+    Neither records a confirmed delivery, so a later ``already_resolved`` cannot authorize it."""
+    import ouroboros.tools.delegate as delegate
+    from ouroboros.gateways import claudexor as gateway_module
+
+    ctx, request, full_text, _prompt = _fixture(tmp_path)
+    entry = _started_entry(tmp_path, request, request["complete_sha256"])
+    statuses = iter(("delivered", "already_resolved"))
+
+    class Gateway:
+        def handshake(self, **_kwargs):
+            return {}
+
+        def get_run(self, _run_id, **_kwargs):
+            if not read:
+                raise gateway_module.ClaudexorUnavailable("daemon_busy", "local RPC timed out", status_code=503)
+            return _pending_detail("interaction-async", delivery=delivery)
+
+        def answer_interaction(self, _run_id, _interaction_id, _answers, *, timeout_sec=None):
+            return {"accepted": True, "status": next(statuses)}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gateway_module, "ClaudexorGateway", lambda: Gateway())
+    response = _source_response(request, full_text, 0, len(full_text))
+    out = json.loads(delegate._delegate_answer(
+        ctx, entry.run_id, "interaction-async", [{"question_id": "q1", "free_text": "all of it"}], response,
+    ).text)
+    assert out["status"] == "delivered"
+    assert out["work_order_verification"] == {"status": "cannot_verify", "reason": "source_delivery_unconfirmed",
+                                              "can_authorize": False, "interaction_delivery": delivery or "unknown"}
+    assert ("handoff" in out["note"]) is (delivery == "async")
+    again = json.loads(delegate._delegate_answer(
+        ctx, entry.run_id, "interaction-async", [{"question_id": "q1", "free_text": "all of it"}], response,
+    ).text)
+    assert again["status"] == "already_resolved" and again["work_order_verification"]["can_authorize"] is False
+
+
+@pytest.mark.parametrize("delivery,read,note_key,confirmed", [
+    (None, True, "delivered_blocking", True), ("blocking", True, "delivered_blocking", True),
+    ("async", True, "delivered_async", False), (None, False, "delivered", False),
+], ids=["legacy-row", "blocking", "async", "unread-row"])
+def test_a_source_answers_note_and_receipt_rest_on_the_same_row_read(tmp_path, monkeypatch, delivery, read,
+                                                                     note_key, confirmed):
+    """A verified source answer reads its row once, and both its sentence and its proof come
+    from that read: only a question that held the run confirms the range, and an unread row
+    gets the plain receipt and no confirmation."""
+    import ouroboros.tools.delegate as delegate
+    from ouroboros.delegate_interactions import _ANSWER_NOTES
+    from ouroboros.gateways import claudexor as gateway_module
+
+    ctx, request, full_text, _prompt = _fixture(tmp_path)
+    entry = _started_entry(tmp_path, request, request["complete_sha256"])
+
+    class Gateway:
+        def handshake(self, **_kwargs):
+            return {}
+
+        def get_run(self, _run_id, **_kwargs):
+            if not read:
+                raise gateway_module.ClaudexorUnavailable("daemon_busy", "local RPC timed out", status_code=503)
+            return _pending_detail("interaction-source", delivery=delivery)
+
+        def answer_interaction(self, _run_id, _interaction_id, _answers, *, timeout_sec=None):
+            return {"accepted": True, "status": "delivered"}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gateway_module, "ClaudexorGateway", lambda: Gateway())
+    out = json.loads(delegate._delegate_answer(
+        ctx, entry.run_id, "interaction-source", [{"question_id": "q1", "free_text": "all of it"}],
+        _source_response(request, full_text, 0, len(full_text)),
+    ).text)
+    assert out["status"] == "delivered" and out["note"] == _ANSWER_NOTES[note_key]
+    assert out["work_order_verification"]["status"] == ("complete" if confirmed else "cannot_verify")
+    assert bool(out["work_order_verification"]["can_authorize"]) is confirmed
+
+
+def _source_answer_on_a_simulated_clock(tmp_path, monkeypatch, *, handshake_sec, read_sec=0.0,
+                                        delivery="blocking", read_fails=False, addressed=False):
+    """One real ``_delegate_answer`` through the real gateway; every daemon latency is simulated."""
+    import httpx
+
+    import ouroboros.delegate_interactions as interactions
+    import ouroboros.tools.delegate as delegate
+    from ouroboros import delegate_custody as custody
+    from ouroboros.gateways import claudexor as gateway_module
+
+    ctx, request, full_text, _prompt = _fixture(tmp_path)
+    entry = _started_entry(tmp_path, request, request["complete_sha256"])
+    before = custody.work_order_source_verification(entry)
+    clock = [0.0]
+    monkeypatch.setattr(interactions, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    wire = []
+
+    def respond(sent):
+        wire.append(sent)
+        if sent.method == "POST":
+            return httpx.Response(200, json={"accepted": True, "status": "delivered"})
+        clock[0] += read_sec
+        if read_fails:
+            return httpx.Response(503, json={"code": "daemon_busy", "message": "local RPC timed out"})
+        return httpx.Response(200, json=_pending_detail("interaction-clocked", delivery=delivery))
+
+    def handshake(**_kwargs):
+        clock[0] += handshake_sec
+        return {}
+
+    gateway = gateway_module.ClaudexorGateway.__new__(gateway_module.ClaudexorGateway)
+    monkeypatch.setattr(gateway, "handshake", handshake)
+    monkeypatch.setattr(gateway_module, "ClaudexorGateway", lambda: gateway)
+    with httpx.Client(transport=httpx.MockTransport(respond), base_url="http://offline.invalid") as client:
+        gateway._client = client
+        out = json.loads(delegate._delegate_answer(
+            ctx, entry.run_id, "interaction-clocked", [{"question_id": "q1", "free_text": "all of it"}],
+            _source_response(request, full_text, 0, len(full_text)),
+            reply_to={"starter_task_id": entry.task_id, "run_id": entry.run_id,
+                      "interaction_id": "interaction-clocked", "question_ids": ["q1"]} if addressed else None,
+        ).text)
+    custody._CUSTODY.clear()
+    return out, wire, clock[0], before, custody.work_order_source_verification(custody.replay(tmp_path)[entry.run_id])
+
+
+@pytest.mark.parametrize("delivery,read_fails,addressed,note_key,confirmed", [
+    ("blocking", False, False, "delivered_blocking", True), ("async", False, False, "delivered_async", False),
+    (None, True, False, "delivered", False), ("blocking", False, True, "delivered_blocking", True),
+], ids=["blocking", "async", "unread-row", "addressed-reads-once"])
+def test_a_source_answers_post_gets_only_what_its_row_read_left(tmp_path, monkeypatch, delivery, read_fails,
+                                                                addressed, note_key, confirmed):
+    """The row read comes first because only a question that held the run can confirm the range,
+    and it spends the same budget: the POST gets the remainder, and the proof still rests on that read."""
+    from ouroboros.delegate_interactions import _ANSWER_DEADLINE_SEC, _ANSWER_NOTES
+
+    out, wire, spent, _before, after = _source_answer_on_a_simulated_clock(
+        tmp_path, monkeypatch, handshake_sec=30, read_sec=40, delivery=delivery, read_fails=read_fails,
+        addressed=addressed)
+    assert [sent.method for sent in wire] == ["GET", "POST"]
+    post_read = wire[1].extensions["timeout"]["read"]
+    assert post_read == 30 and spent + post_read <= _ANSWER_DEADLINE_SEC
+    assert out["status"] == "delivered" and out["note"] == _ANSWER_NOTES[note_key]
+    assert out["work_order_verification"]["status"] == ("complete" if confirmed else "cannot_verify")
+    assert bool(after["can_authorize"]) is confirmed
+
+
+@pytest.mark.parametrize("handshake_sec,read_sec,reads", [(30, 70, 1), (100, 0, 0)],
+                         ids=["row-read-spent-it", "handshake-spent-it"])
+def test_a_source_answer_out_of_budget_posts_nothing_and_proves_nothing(tmp_path, monkeypatch, handshake_sec,
+                                                                        read_sec, reads):
+    """Once the budget is gone: no POST and no further read, the typed outcome of any spent call,
+    and the run's source custody exactly as it was."""
+    out, wire, _spent, before, after = _source_answer_on_a_simulated_clock(
+        tmp_path, monkeypatch, handshake_sec=handshake_sec, read_sec=read_sec)
+    assert [sent.method for sent in wire] == ["GET"] * reads
+    assert out["status"] == "delivery_unknown" and out["still_pending"] is None
+    assert "before the answer POST was sent" in out["transport_error"]
+    assert "work_order_verification" not in out
+    assert after == before

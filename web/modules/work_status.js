@@ -5,14 +5,15 @@
  * (`mark`: moving | still | pause | ring | none); this module says those facts in the product's short words (a work's
  * word, and beside it its line: the episode's own reason, then what still runs beside it), keeps what an incomplete
  * body did not list again (unconfirmed: a ring), and lays a work's controls on the shared task-control doors. It
- * derives no word, mark or control of its own. Four facts only this client knows stay
- * overlays, each with its mark: the socket closed (Reconnecting…, a ring), the owner's own unconfirmed send (Sending,
- * moving), the supervisor not ready yet (Starting…, no mark) and the owner's own Stop press on a card (Cancelling… /
- * Finalizing…, moving). Whether something waits for the owner (`owner`: the server's `turn`) is a separate fact;
+ * derives no word, mark or control of its own. Five facts only this client knows stay
+ * overlays, each with its mark: the socket closed (Reconnecting…, a ring), a room back on screen or reconnected still
+ * reading what it missed (Updating…, a ring), the owner's own unconfirmed send (Sending, moving), the supervisor not
+ * ready yet (Starting…, no mark) and the owner's own Stop press on a card (Cancelling… / Finalizing…, moving). Whether something waits for the owner (`owner`: the server's `turn`) is a separate fact;
  * status_mark.js draws the two together.
  */
+import { paintCardModel } from './card_model.js';
 import { fmt, tr, tx } from './i18n.js';
-import { taskPresentation, taskTerminalPhase } from './log_events.js';
+import { isTerminalTaskDetail, taskPresentation, taskTerminalPhase } from './log_events.js';
 import { startingStatus } from './host_starting_status.js';
 import { chipWord } from './task_phase_chip.js';
 import {
@@ -30,12 +31,19 @@ const IDLE_ROOM = Object.freeze({ activity: 'idle', transition: 'none', call: ''
     confirmed: true, works: [] });
 const CALL_WORDS = { preparing: 'preparing', sending: 'sending', thinking: 'thinking' };
 const list = (value) => (Array.isArray(value) ? value : []);
+// `question`: a task waits for the owner's answer (the work's own word says so). `open_question`: a question that is
+// still unanswered while its work goes on or after it ended: the owner's turn, never the work's word.
 const asked = (state) => list(state?.turn).some((item) => item?.kind === 'question');
+const QUESTIONS = new Set(['question', 'open_question']);
 
 /** The state one chat instance shows before its first body: an idle room and no works. */
 export function emptyWorkState() {
-    return { room: IDLE_ROOM, works: [], episodes: new Map(), members: new Set(), attempts: new Map(), complete: false };
+    return { room: IDLE_ROOM, works: [], episodes: new Map(), members: new Set(), attempts: new Map(), complete: false,
+        main: null, tiers: null, leads: new Map(), processings: new Map(), questions: new Map() };
 }
+
+// One question's key across the turn, the census rows and the work list: its task and its quiz.
+export const questionKey = (item) => `${item.task_id}:${item.quiz_id || ''}`;
 
 // What an incomplete body did not list again: still shown, never as confirmed work and never with controls or a line;
 // its mark is the ring of unconfirmed state.
@@ -46,7 +54,12 @@ const unconfirmedWork = (work) => ({ ...work, activity: 'unknown', transition: '
  * One body applied to an instance's work state. `room` and `works` are this chat's (`works[].room`, keyed as the
  * server keys `rooms`); `episodes` maps every work's current episode task id to its work in EVERY room (a Main
  * portal's work runs in its Project) and `members` holds every member id; `attempts` is each census row's attempt,
- * so a control opened for one attempt of an episode is not pressed on the next. Only a complete supervisor-ready
+ * so a control opened for one attempt of an episode is not pressed on the next. `main` is Main's route as the body
+ * says it (the last one said, when this body does not) and `leads` the model fact of each activity row that
+ * publishes one, for a direct turn's card (CLIENT_CONTRACT §5). `questions` holds the current-question row of each
+ * `open_question` in this room's turn (by `task_id:quiz_id`), from the same body, else the row an earlier body carried
+ * while the turn still lists it: a question's row says its own words for exactly as long as its item makes the row.
+ * Only a complete supervisor-ready
  * body read over an open socket proves absence; an incomplete one keeps the works it omitted, unconfirmed. A body
  * without the projection, or a failed read (null), changes nothing.
  */
@@ -69,9 +82,22 @@ export function reconcileWorkState(prior, data, chatId, connected = true) {
         if (work.episode?.task_id) episodes.set(String(work.episode.task_id), work);
         for (const id of list(work.members?.ids)) members.add(String(id));
     }
-    const attempts = new Map(list(data.active_chat_activities).filter((row) => row?.activity_id)
-        .map((row) => [String(row.activity_id), row.task_attempt ?? null]));
-    return { room, works: [...listed, ...kept], episodes, members, attempts, complete };
+    const rows = list(data.active_chat_activities).filter((row) => row?.activity_id);
+    const attempts = new Map(rows.map((row) => [String(row.activity_id), row.task_attempt ?? null]));
+    const leads = new Map(rows.filter((row) => row.lead && typeof row.lead === 'object')
+        .map((row) => [String(row.activity_id), row.lead]));
+    const processings = new Map(rows.filter((row) => row.processing && typeof row.processing === 'object')
+        .map((row) => [String(row.activity_id), row.processing]));
+    const tiers = data.processing_tiers && typeof data.processing_tiers === 'object' ? data.processing_tiers : before.tiers || null;
+    const main = data.main_route && typeof data.main_route === 'object' ? data.main_route : before.main || null;
+    const carried = new Map(list(data.current_questions).filter((row) => row?.task_id).map((row) => [questionKey(row), row]));
+    const questions = new Map();
+    for (const item of list(room.turn)) {
+        if (item?.kind !== 'open_question' || !item.task_id) continue;
+        const said = carried.get(questionKey(item)) || before.questions?.get(questionKey(item));
+        if (said) questions.set(questionKey(item), said);
+    }
+    return { room, works: [...listed, ...kept], episodes, members, attempts, complete, main, tiers, leads, processings, questions };
 }
 
 /** A work's or a room's one short word, from its activity, transition and exact call (the cards' chip words). */
@@ -93,25 +119,25 @@ export function activityWord(state = {}) {
 // server's sentences (gateway/work_status.py REASON_TEXT); the web fixture pins them to the server's own.
 const COUNTED_REASONS = {
     earlier_attempt_finishing: (n) => (n === 1
-        ? tr('work.because.earlier_attempt_finishing', 'Continue starts when the helper of the earlier attempt finishes')
-        : fmt('Continue starts when {count} helpers of the earlier attempt finish', { count: n, n })),
+        ? tr('work.because.earlier_attempt_finishing', 'Continue starts when the subagent of the earlier attempt finishes')
+        : fmt('Continue starts when {count} subagents of the earlier attempt finish', { count: n, n })),
     earlier_runs_finishing: (n) => (n === 1
         ? tr('work.because.earlier_runs_finishing', 'Continue starts when the external run of the earlier attempt finishes')
         : fmt('Continue starts when {count} external runs of the earlier attempt finish', { count: n, n })),
-    helpers_running: (n) => (n === 1 ? tr('work.because.helpers_running', '1 helper still working')
-        : fmt('{count} helpers still working', { count: n, n })),
+    helpers_running: (n) => (n === 1 ? tr('work.because.helpers_running', '1 subagent still working')
+        : fmt('{count} subagents still working', { count: n, n })),
     delegated_running: (n) => (n === 1 ? tr('work.because.delegated_running', '1 external run still working')
         : fmt('{count} external runs still working', { count: n, n })),
     external_runs_unconfirmed: (n) => (n === 1 ? tr('work.because.external_runs_unconfirmed', '1 external run may still be running')
         : fmt('{count} external runs may still be running', { count: n, n })),
     awaited_helpers_mind: (n) => (n === 1
-        ? tr('work.because.awaited_helpers_mind', '1 helper it waits for is paused until Ouroboros resumes it')
-        : fmt('{count} helpers it waits for are paused until Ouroboros resumes them', { count: n, n })),
+        ? tr('work.because.awaited_helpers_mind', '1 subagent it waits for is paused until Ouroboros resumes it')
+        : fmt('{count} subagents it waits for are paused until Ouroboros resumes them', { count: n, n })),
     awaited_helpers_owner: (n) => (n === 1
-        ? tr('work.because.awaited_helpers_owner', '1 helper it waits for is paused until you resume it')
-        : fmt('{count} helpers it waits for are paused until you resume them', { count: n, n })),
-    awaited_helpers_paused: (n) => (n === 1 ? tr('work.because.awaited_helpers_paused', '1 helper it waits for is paused')
-        : fmt('{count} helpers it waits for are paused', { count: n, n })),
+        ? tr('work.because.awaited_helpers_owner', '1 subagent it waits for is paused until you resume it')
+        : fmt('{count} subagents it waits for are paused until you resume them', { count: n, n })),
+    awaited_helpers_paused: (n) => (n === 1 ? tr('work.because.awaited_helpers_paused', '1 subagent it waits for is paused')
+        : fmt('{count} subagents it waits for are paused', { count: n, n })),
 };
 
 // What a sleep waits for, one clause per kind the server named (gateway/work_status.py SLEEP_CLAUSES; the web fixture
@@ -145,9 +171,9 @@ function tailWords(tails) {
     const helpers = counted('helpers_running');
     const runs = counted('delegated_running');
     if (!helpers || !runs) return tails.map(reasonText);
-    const both = fmt('{helpers} and {runs} still working', {
-        helpers: helpers.count === 1 ? tr('work.because.one_helper', '1 helper')
-            : fmt('{count} helpers', { count: helpers.count, n: helpers.count }),
+    const both = fmt('{subagents} and {runs} still working', {
+        subagents: helpers.count === 1 ? tr('work.because.one_helper', '1 subagent')
+            : fmt('{count} subagents', { count: helpers.count, n: helpers.count }),
         runs: runs.count === 1 ? tr('work.because.one_external_run', '1 external run')
             : fmt('{count} external runs', { count: runs.count, n: runs.count }),
     });
@@ -167,6 +193,8 @@ export function reasonText(reason) {
     if (Number.isInteger(reason.count)) return COUNTED_REASONS[code] ? COUNTED_REASONS[code](reason.count) : text;
     if (reason.by?.text) return `${tr(`work.because.${code}`, text)}: ${String(reason.by.text)}`;
     if (code === 'sleeping' && Array.isArray(reason.wake)) return sleepText(reason.wake) || text;
+    // A silence dated by the host reads with its time: the date is the fact (owner 09.11).
+    if (code === 'no_progress' && clock(reason.since)) return fmt('No recorded progress since {time}', { time: clock(reason.since) });
     return tr(`work.because.${code}`, text);
 }
 
@@ -222,32 +250,68 @@ export function roomSpeaker(room, works = [], word = activityWord(room)) {
     return list(room?.works).map((id) => byId.get(id)).find((work) => work && activityWord(work) === word) || null;
 }
 
-/** What waits for the owner in a room ('question' | 'action'), '' when nothing does or its own word says so. */
-export const roomAmber = (room) => (!room?.amber || (room.activity === 'waiting' && asked(room)) ? ''
-    : asked(room) ? 'question' : 'action');
+/** What a `turn` holds for the owner ('question' | 'action' | 'unanswered' | 'delivery'), '' when nothing: a
+ *  question a task waits on, else an action only the owner takes, else a question still unanswered while its work
+ *  goes on or after it ended, or only answers whose delivery is unknown. A room's note and a card chip's name both
+ *  say it by this one rule. */
+export const turnAmber = (turn) => {
+    const items = list(turn);
+    if (!items.length) return '';
+    if (items.some((item) => item?.kind === 'question')) return 'question';
+    const open = items.filter((item) => item?.kind === 'open_question');
+    if (items.some((item) => item?.kind === 'action') || !open.length) return 'action';
+    return open.every((item) => item.code === 'delivery_unknown') ? 'delivery' : 'unanswered';
+};
 
-/** The amber mark said in words, for the room's accessible name: the colour is never the only way it is told. */
+/** The addressed question whose own words can say a `turn`, by turnAmber's rule: the first one a task waits on, else
+ *  the first still unanswered; null where what waits is an action or only an answer whose delivery is unknown (their
+ *  sentence says it) and for a bare wait without a quiz. The order is the server's; nothing here ranks questions. */
+export const turnQuestion = (turn) => {
+    const kind = turnAmber(turn);
+    const named = (item) => Boolean(item?.task_id && item.quiz_id);
+    if (kind === 'question') return list(turn).find((item) => item?.kind === 'question' && named(item)) || null;
+    if (kind !== 'unanswered') return null;
+    return list(turn).find((item) => item?.kind === 'open_question' && item.code !== 'delivery_unknown' && named(item)) || null;
+};
+
+/** What waits for the owner in a room (turnAmber), '' when nothing does or its own word says so. */
+export const roomAmber = (room) => (!room?.amber || (room.activity === 'waiting' && asked(room)) ? ''
+    : turnAmber(room.turn) || 'action');
+
+/** The amber mark said in words, for the room's accessible name: the colour is never the only way it is told. An
+ *  unanswered question nobody waits on is never said as a wait. */
 export const amberNote = (kind) => (kind === 'question' ? tr('work.amber.question', 'A question waits for your answer')
-    : kind === 'action' ? tr('work.amber.action', 'Something here waits for you') : '');
+    : kind === 'unanswered' ? tr('work.amber.unanswered', 'An unanswered question is here')
+        : kind === 'delivery' ? tr('work.amber.delivery', 'An answer here was recorded; its delivery is unknown')
+            : kind === 'action' ? tr('work.amber.action', 'Something here waits for you') : '');
 
 /**
  * The room's status in its bar: the server's room in short words, with the client's own facts on top. Tone is the
  * word's ink (live, queued, wait for the owner's own question, held, unknown, starting, offline, online); `mark` the
  * work's shape after it (the server's room mark under this module's four overlays; the transcript's typing bubble
  * shows while it is `moving`, whatever waits for the owner); `owner` whether something waits for the owner (the room's
- * turn: its amber dot takes the mark's place, the word keeps its ink); `amber` what waits (question | action), said in
+ * turn: status_mark.js draws it amber, the word keeps its ink); `amber` what waits (roomAmber's kinds), said in
  * words where the word does not already say it. `stopping` is the owner's own Stop press on every working work of the
  * room ('finalize' | 'immediate'); until the host is `ready`, an idle room says its start in the words of the host's
  * `boot` phases (host_starting_status.js). A room still preparing names as its `step` the step its speaking work
  * stands at (a direct turn's start step), said beside the word and dropped before it on a short bar, so nothing in
- * the bar reads as a model call before one is sent.
+ * the bar reads as a model call before one is sent. `serverAnswers` (ws.serverAnswersWhileDown) is said the same way
+ * beside `Reconnecting…`: an observation, never a cause.
  */
-export function roomStatusView(state, { connected = true, ready = true, boot = null, sending = false, stopping = '' } = {}) {
+export function roomStatusView(state, {
+    connected = true, serverAnswers = false, catchingUp = false, ready = true, boot = null, sending = false, stopping = '',
+} = {}) {
     const view = (kind, text, tone, mark, extra = {}) => ({ kind, text, tone, mark, owner: false, amber: '', ...extra });
-    if (!connected) return view('offline', 'Reconnecting…', 'offline', 'ring');
+    if (!connected) {
+        return view('offline', 'Reconnecting…', 'offline', 'ring', serverAnswers ? {
+            step: tr('work.server_answers.step', 'server answers'),
+            title: tr('work.server_answers', 'The server answers, but live updates cannot connect.') } : {});
+    }
     const room = state?.room || IDLE_ROOM;
     const mark = String(room.mark || 'none');
     const turn = { owner: list(room.turn).length > 0, amber: roomAmber(room) };
+    // Catch-up is visible without hiding an unanswered question the room already knows about.
+    if (catchingUp) return view('starting', 'Updating…', 'updating', 'ring', turn);
     if (room.activity !== 'working' && sending) return view('thinking', chipWord('sending'), 'live', 'moving', turn);
     switch (room.activity) {
     case 'working': {  // a Pause still settling keeps the neutral ink; its mark moves while work stops
@@ -262,8 +326,9 @@ export function roomStatusView(state, { connected = true, ready = true, boot = n
     case 'waiting': return view('online', activityWord(room), asked(room) ? 'wait' : 'held', mark, turn);
     case 'paused': return view('online', activityWord(room), 'held', mark, turn);
     case 'unknown': return view('online', activityWord(room), 'unknown', mark, turn);  // a listed turn still waits
-    default: return ready ? view('online', 'Online', 'online', mark)
-        : { ...view('starting', 'Starting…', 'starting', 'none'), ...startingStatus(boot) };
+    // A room at rest keeps the owner's turn: a question of an ended work still waits there, while the host starts too.
+    default: return ready ? view('online', 'Online', 'online', mark, turn)
+        : { ...view('starting', 'Starting…', 'starting', 'none', turn), ...startingStatus(boot) };
     }
 }
 
@@ -277,7 +342,7 @@ export function ownStopPress(state, records) {
 /**
  * One work's row in the room's work list: its word (an outcome beside Finalizing…), its line beside it, the row's tone
  * (the word's ink), its `mark` (the work's shape as the server names it; the owner's own Stop press moves it), `owner`
- * whether something in the work waits for the owner (its turn: the amber dot takes the mark's place; a Pause by the
+ * whether something in the work waits for the owner (its turn: status_mark.js draws it amber; a Pause by the
  * owner or by Ouroboros is not the owner's move) and `outcome`, the known outcome said beside Finalizing… (its dot in
  * the outcome's tone). `stopping` is the owner's own Stop press on the work's card ('finalize' | 'immediate'), said
  * at once as the card says it.
@@ -288,7 +353,8 @@ export function workRowView(work = {}, { stopping = '' } = {}) {
         return { word: chipWord(stopping === 'finalize' ? 'finalizing' : 'cancelling'), secondary: '', tone: 'live',
             mark: 'moving', owner, outcome: '', focus: '' };
     }
-    const outcome = work.transition === 'finalizing' && work.outcome
+    // Only a settled lifecycle is worded beside Finalizing…; any other (`running`) is not known.
+    const outcome = work.transition === 'finalizing' && isTerminalTaskDetail({ status: work.outcome })
         ? taskPresentation(taskTerminalPhase({ status: work.outcome })) : null;
     const word = outcome ? outcome.headline : activityWord(work);
     const secondary = [outcome ? chipWord('finalizing') : '', workLine(work, word)].filter(Boolean).join(' · ');
@@ -306,7 +372,7 @@ export function workRowView(work = {}, { stopping = '' } = {}) {
 
 /** The question a row's View question goes to: the first question in the work's turn, by its exact quiz id. */
 export function workQuestion(work) {
-    const question = list(work?.turn).find((item) => item?.kind === 'question' && item.quiz_id && item.task_id);
+    const question = list(work?.turn).find((item) => QUESTIONS.has(item?.kind) && item.quiz_id && item.task_id);
     return question ? { taskId: String(question.task_id), quizId: String(question.quiz_id) } : null;
 }
 
@@ -341,14 +407,30 @@ export function cardWorkView(work) {
  * Apart from the optional word, a work's live current episode keeps the work's look: its mark and whether something
  * in it waits for the owner (the server takes the turn from every member, a helper's included). A turn the body lists
  * is a fact even when another member could not be confirmed; a work an incomplete body omitted keeps no look.
+ * The card's model fact is painted from the same state (card_model.js): the work's published `lead`, or its
+ * activity row's for a direct turn; a Main portal, the collapsed form of a work shown in its own room, has none.
  */
 export function applyCardWorkViews(records, state) {
     let changed = false;
     for (const record of records?.values?.() || []) {
         if (record?.isSubagent) continue;
-        const work = state?.episodes?.get(String(record.groupId || ''));
+        const id = String(record.groupId || '');
+        const work = state?.episodes?.get(id);
+        const portal = record.root?.dataset?.portal === '1';
+        const lead = portal ? null : work?.lead || state?.leads?.get(id) || null;
+        // An unconfirmed work offers nothing (cardControls): its fact stays, as plain text. So does the fact of a work
+        // an incomplete body did not list again: only a complete body proves it gone.
+        if (lead) {
+            paintCardModel(record, { lead, target: work && work.confirmed !== false ? workControls(work).model : '',
+                main: state.main, queued: work?.activity === 'queued', since: clock(lead.since),
+                processing: work?.processing || state?.processings?.get(id) || null, tiers: state.tiers || null });
+        } else if (record.cardModel && !portal && !state?.complete) paintCardModel(record, { ...record.cardModel.view, target: '' });
+        else paintCardModel(record, null);
         const view = cardWorkView(work);
-        const look = work?.episode?.live ? { mark: String(work.mark || 'none'), owner: list(work.turn).length > 0 } : null;
+        // What waits in the work, said as the room says it: the chip's name names that, never only "something".
+        const note = amberNote(turnAmber(work?.turn));
+        const look = work?.episode?.live ? { mark: String(work.mark || 'none'), owner: list(work.turn).length > 0,
+            ...(note ? { note } : {}) } : null;
         if (JSON.stringify([view, look]) !== JSON.stringify([record.workView || null, record.workLook || null])) changed = true;
         record.workView = view;
         record.workLook = look;
@@ -358,11 +440,12 @@ export function applyCardWorkViews(records, state) {
 
 /**
  * A work's controls, one press each: Stop (every episode root that still owns live work, in the server's order),
- * Stop earlier attempt (each earlier root that does) and the current episode's Pause, Resume, Hurry and Wrap up.
+ * Stop earlier attempt (each earlier root that does), the current episode's Pause, Resume, Hurry and Wrap up, and
+ * the task whose model may be changed (`model`: the card's model fact is its door, card_model.js).
  * Unknown actions are not offered.
  */
 export function workControls(work) {
-    const out = { stop: [], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '' };
+    const out = { stop: [], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '', model: '' };
     for (const control of list(work?.controls)) {
         // A reusable slot (`active`) hosts many cycles: no control reaches one of them by that id.
         const target = String(control?.target || '').trim();
@@ -370,7 +453,7 @@ export function workControls(work) {
         if (control.action === 'resume' && control.scope === 'single') continue;
         const many = { stop: out.stop, stop_earlier: out.stopEarlier }[control.action];
         if (many) { if (!many.includes(target)) many.push(target); continue; }
-        const one = { pause: 'pause', resume: 'resume', hurry: 'hurry', wrap_up: 'wrapUp' }[control.action];
+        const one = { pause: 'pause', resume: 'resume', hurry: 'hurry', wrap_up: 'wrapUp', model: 'model' }[control.action];
         if (one && !out[one]) out[one] = target;
     }
     return out;

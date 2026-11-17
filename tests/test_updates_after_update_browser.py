@@ -131,7 +131,9 @@ FACTS = """() => {
         strayBlocks: document.querySelectorAll('#updates-generation-facts, #updates-status-card h4:not([class])').length,
         cardOverflow: card.scrollWidth - card.clientWidth,
         pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-        card: box(card), foot: box(foot), summary: box(details.querySelector('summary')), details: box(details),
+        card: box(card), foot: box(foot), rootEm: parseFloat(getComputedStyle(document.documentElement).fontSize),
+        paneWidth: (() => { const pane = card.closest(".dashboard-body"), s = getComputedStyle(pane);
+            return pane.clientWidth - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight); })(), summary: box(details.querySelector('summary')), details: box(details),
         restore: control('#updates-attempt-restore'),
         meta: box(document.querySelector('#updates-meta')), status: box(document.querySelector('#updates-summary')),
         contrast: {label: of(labels[0]), value: of(labels[0]?.nextElementSibling), head: of(heads[0]), raw: of(pre),
@@ -215,9 +217,25 @@ def test_action_row_preserves_empty_notes_and_hidden_primary_buttons(updates_ui)
     expect(button).to_be_visible()
     expect(note).to_be_empty()
     expect(note).not_to_be_visible()
-    # The one next action stands at the headline's end (the tab body's hero), whatever the meta lines say.
-    row_box, action_box = row.bounding_box(), button.bounding_box()
-    assert abs(action_box["x"] + action_box["width"] - row_box["x"] - row_box["width"]) <= 1
+    # DESIGN.md:3208: "components adapt to their own box". Beside the section list, this pane is narrow:
+    # Updates puts its action under the words, at their start. A wide pane keeps it at the headline's end.
+    placements = []
+    for width, wide in ((1100, False), (1440, True), (1100, False)):
+        page.set_viewport_size({"width": width, "height": 750})
+        rw.settle_frames(page)
+        measured = facts(page)
+        assert (measured["paneWidth"] > 42 * measured["rootEm"]) == wide, measured
+        row_box, action_box = row.bounding_box(), button.bounding_box()
+        if wide:
+            assert abs(action_box["x"] + action_box["width"] - row_box["x"] - row_box["width"]) <= 1
+        else:
+            assert abs(action_box["x"] - row_box["x"]) <= 1
+            assert action_box["y"] >= measured["meta"]["bottom"] - 1
+        expect(note).to_be_empty()
+        expect(note).not_to_be_visible()
+        placements.append({"width": width, "pane": measured["paneWidth"], "row": row_box, "action": action_box})
+        capture(page, f"action-placement-{width}")
+    evidence("action-placement", placements)
     capture(page, "action-with-empty-note")
     # An unmanaged checkout can still say when it was checked, without offering
     # an update. Layout must not revive that hidden primary action.
@@ -245,11 +263,12 @@ def restore_keeps_its_side(current, width):
     restore, foot, summary = current["restore"], current["foot"], current["summary"]
     if not restore:
         return False
-    side = abs(restore["right"] - foot["right"]) < 1 if width >= 640 else abs(restore["x"] - foot["x"]) < 1
+    wide = foot["right"] - foot["x"] > 34 * current["rootEm"]
+    side = abs(restore["right"] - foot["right"]) < 1 if wide else abs(restore["x"] - foot["x"]) < 1
     if current["open"]:
         row = restore["y"] >= current["details"]["bottom"]
     else:
-        row = abs(restore["y"] - summary["y"]) < 12 if width >= 640 else summary["bottom"] <= restore["y"]
+        row = abs(restore["y"] - summary["y"]) < 12 if wide else summary["bottom"] <= restore["y"]
     return side and row and restore["y"] >= current["meta"]["bottom"]
 
 
@@ -298,7 +317,7 @@ def test_samples_are_rows_of_their_last_attempt_and_survive_refreshes(updates_ui
     assert restore_keeps_its_side(opened, width) and opened["restore"]["right"] <= opened["card"]["right"], opened
     for pair in opened["pairs"]:
         assert pair["valueOverflow"] <= 1, pair
-        assert (abs(pair["valueBox"]["x"] - pair["labelBox"]["x"]) < 1) == (width < 640), (width, pair)
+        assert (abs(pair["valueBox"]["x"] - pair["labelBox"]["x"]) < 1) == (opened["paneWidth"] <= 480), (width, pair)
 
     toggle(page, "#updates-attempt-raw > summary", "Enter")
     shown = facts(page)
@@ -310,8 +329,13 @@ def test_samples_are_rows_of_their_last_attempt_and_survive_refreshes(updates_ui
 
     # A refresh, a tab switch and a changed record repaint in place; both disclosures stay as the owner left them.
     refresh(page, transport, reads)
+    # DESIGN.md:3289–3295: on a phone a section's page stands under Back; return to its list to choose another.
+    if not page.locator('[data-dashboard-tab="logs"]').is_visible():
+        page.locator('#page-dashboard').get_by_role('button', name='Back to Dashboard', exact=True).click()
     page.click('[data-dashboard-tab="logs"]')
     count = len(reads)
+    if not page.locator('[data-dashboard-tab="updates"]').is_visible():
+        page.locator('#page-dashboard').get_by_role('button', name='Back to Dashboard', exact=True).click()
     page.click('[data-dashboard-tab="updates"]')
     wait_reads(page, reads, count + 1)
     kept = facts(page)
@@ -407,15 +431,21 @@ def test_samples_wait_for_their_attempt_and_never_join_another(updates_ui):
 
 
 def drawer(page, width, opened):
-    """A phone keeps the notice in the navigation drawer: open it to reach the notice, close it to read the panel."""
+    """A phone keeps the notice in the navigation drawer: open it to reach the notice, close it to read the panel.
+    On a section's page Back leads the header, and Ouroboros's picture, the drawer's door, leads it only at the
+    section's list (docs/DESIGN.md "The drawer"): so the helper goes Back to the Dashboard's list and opens the drawer
+    from its picture, and once the drawer closes, the Updates row (still the chosen one) brings the page back."""
     if width >= 980:
         return
     if opened:
+        page.click("[data-dashboard-list-back]")
         page.locator("[data-mobile-nav-toggle]:visible").first.click()
         page.wait_for_function("document.getElementById('content').inert === true")
     else:
         page.keyboard.press("Escape")
         wait_drawer_closed(page)
+        page.click('[data-dashboard-tab="updates"]')
+        page.wait_for_selector("#dashboard-panel-updates", state="visible")
     page.evaluate("() => Promise.all(document.getAnimations().filter(a => a.effect?.getTiming().iterations !== Infinity)"
                   ".map(a => a.finished.catch(() => {})))")
     rw.settle_frames(page)

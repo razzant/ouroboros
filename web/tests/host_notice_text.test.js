@@ -245,6 +245,9 @@ test('command, plan and paused-evolution producer variants are covered', () => {
         ['ouroboros/loop_model_call.py', 'host_progress', '⚡ Fallback: trying ', 'alt/a after a rejected request on primary.'],
         ['ouroboros/primary_route_observation.py', 'host_progress', '⚡ Fallback: ', 'alt/a is now the active route; it answered.'],
         ['ouroboros/loop_model_call.py', 'host_progress', '⚡ Fallback: the last attempt, on ', 'alt/a, ended without a usable reply.'],
+        // The engine wait's entry and recovery rows (`loop_transport.reconcile_transport_wait`).
+        ['ouroboros/loop_transport.py', 'host_progress', '🌐 The local Claudexor engine is not answering, ', 'so this request was not sent ($0 for it).'],
+        ['ouroboros/loop_transport.py', 'host_progress', '🌐 Model response received after ', '2.0 min — resuming.'],
     ];
     for (const [path, type, prefix, suffix] of cases) {
         assert.ok(readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8').includes(prefix));
@@ -252,6 +255,17 @@ test('command, plan and paused-evolution producer variants are covered', () => {
         assert.equal(hostNoticeDisplayText(raw, type), raw.slice(raw.indexOf(' ') + 1));
         assert.equal(hostNoticeDisplayText(raw, 'reminder'), raw);
     }
+});
+
+test('the switch-off row from /bg stop and from the mind\'s own toggle loses its mark like every consciousness notice', () => {
+    // consciousness_view.off_sentence opens the row (owner 09.11); /bg (server.py) and the runtime control add «🧠 ».
+    assert.ok(readFileSync(new URL('../../ouroboros/consciousness_view.py', import.meta.url), 'utf8').includes('Consciousness off: no own wakes'));
+    const raw = '🧠 Consciousness off: no own wakes, and 2 places only hear until Start. Stopping now: its wake-up.';
+    for (const [path, type] of [['server.py', 'command_reply'], ['supervisor/events_runtime_controls.py', 'consciousness_notice']]) {
+        assert.ok(readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8').includes('f"🧠 {result}'));
+        assert.equal(hostNoticeDisplayText(raw, type), raw.slice('🧠 '.length));
+    }
+    assert.equal(hostNoticeDisplayText(raw, 'reminder'), raw);
 });
 
 test('a stored fallback row of the old producer keeps its own words and loses the same mark', () => {

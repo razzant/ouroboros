@@ -45,10 +45,28 @@ SCOPED_SANCTION_ATTR = "_transcript_rewrite_scoped"
 REWRITE_EPOCH_ATTR = "_transcript_rewrite_epoch"
 
 
+#: Per route (the model string a request goes to), what the last answered request on it carried: short digests
+#: of its tool list, of each system block and of its later messages, and when it started. A provider keeps one
+#: cache per model, so a request is compared with the last answered one on its own route, never with a round
+#: another model served.
+ROUTE_SENDS_ATTR = "_transcript_prefix_routes"
+LAST_ROUTE_ATTR = "_transcript_prefix_last_route"
+#: The route and start of the candidate being dispatched; its answer makes it the route's record.
+PENDING_ROUTE_ATTR = "_transcript_prefix_pending"
+#: ``accumulated_usage`` key of the candidate's prefix fact, for the dispatch that binds its physical context.
+ATTEMPT_PREFIX_KEY = "_attempt_prefix"
+#: ``accumulated_usage`` keys: the last answer that read its input (``note_prefix_answer``: count, route, time), and
+#: the count the bound fact was taken at. They ride a continuation with the rest of the usage.
+ANSWER_KEY = "_prefix_answer"
+ANSWER_SEEN_KEY = "_prefix_answer_seen"
+#: Every seam that rewrote the view since the last answered request, in order (the stamps keep one per scope).
+ORIGINS_ATTR = "_transcript_prefix_origins"
+_ROUTES_KEPT = 4  # full records a checkpoint carries; an older route keeps its name and reads ``unrecorded``
+
 #: The observer's per-slot state a continuation checkpoint carries (``owner_wait``): the last
-#: sent digests, an unconsumed origin stamp, the rewrite count and a change already counted.
+#: sent digests, an unconsumed origin stamp, the rewrite count, a change already counted and the routes' records.
 OBSERVER_STATE_ATTRS = (DIGEST_ATTR, TOOLS_DIGEST_ATTR, SANCTION_ATTR, REWRITE_EPOCH_ATTR, "_reasoning_retirement_break",
-                        SCOPED_SANCTION_ATTR)
+                        SCOPED_SANCTION_ATTR, ROUTE_SENDS_ATTR, LAST_ROUTE_ATTR, ORIGINS_ATTR, PENDING_ROUTE_ATTR)
 
 
 def sanction_rewrite(slot: Any, by: str = "compaction", scope: str = "messages") -> None:
@@ -56,6 +74,8 @@ def sanction_rewrite(slot: Any, by: str = "compaction", scope: str = "messages")
 
     A message rewrite also advances the rewrite epoch; a ``system`` or ``tools`` stamp only names
     a break of that scope (C2 S4, 06.11.2026)."""
+    seams = getattr(slot, ORIGINS_ATTR, None)
+    setattr(slot, ORIGINS_ATTR, [*(seams if isinstance(seams, list) else ()), str(by)])
     if scope == "messages":
         setattr(slot, SANCTION_ATTR, by)
         setattr(slot, REWRITE_EPOCH_ATTR, rewrite_epoch(slot) + 1)
@@ -248,6 +268,7 @@ def observe_send(
     current_tools = tools_digest(tools)
     setattr(slot, DIGEST_ATTR, current)
     setattr(slot, TOOLS_DIGEST_ATTR, current_tools)
+    _remember_route_send(slot, messages, current, current_tools, usage)
     sanction = _stamps(slot, sanctioned_by)
     setattr(slot, SANCTION_ATTR, None)
     setattr(slot, SCOPED_SANCTION_ATTR, None)
@@ -319,6 +340,268 @@ def departure(slot: Any, messages: Sequence[Mapping[str, Any]], tools: Any) -> O
     return None if index is None else (index, "system" if index == 0 else "messages")
 
 
+def _short(digest: Any) -> str:
+    return str(digest)[:16]
+
+
+def _system_block_digests(message: Mapping[str, Any]) -> List[str]:
+    """One identity per system block, read as ``message_digest`` reads text; a string row is one block."""
+    content = message.get("content")
+    return [_short(_sha(_content_identity([block]))) for block in (content if isinstance(content, list) else [content])]
+
+
+def _system_block_name(message: Mapping[str, Any], index: int) -> str:
+    """The changed block by the name the round facts already use for it (``context_view_facts.block_label``)."""
+    content = message.get("content")
+    blocks = content if isinstance(content, list) else [content]
+    if not 0 <= index < len(blocks):
+        return "removed block"
+    from ouroboros.context_view_facts import block_label
+    return block_label(message, index, blocks[index], None)
+
+
+def _route_record(messages: Sequence[Mapping[str, Any]], tools_identity: str, digests: Optional[List[str]] = None) -> dict:
+    head = bool(messages) and str(messages[0].get("role") or "") == "system"
+    later = digests[1 if head else 0:] if digests is not None else [message_digest(m) for m in messages[1 if head else 0:]]
+    return {"tools": _short(tools_identity), "blocks": _system_block_digests(messages[0]) if head else [],
+            "messages": [_short(digest) for digest in later]}
+
+
+def note_prefix_answer(usage: Any, response_usage: Any, model: Any, use_local: Any) -> None:
+    """Where a Main response arrives (``loop_llm_call``): an answer whose usage shows the provider read its input (input
+    tokens reported or output generated, no provider error) is what moves its route's base, an empty or output-limited
+    reply included; a body error read nothing and moves nothing. Kept in ``usage`` as ``(count, route, time)``."""
+    if not isinstance(usage, dict) or not isinstance(response_usage, Mapping) or response_usage.get("provider_error"):
+        return
+    try:
+        if int(response_usage.get("prompt_tokens") or 0) <= 0 and int(response_usage.get("completion_tokens") or 0) <= 0:
+            return
+    except (TypeError, ValueError):
+        return
+    import time
+
+    count = _answer(usage)[0]
+    usage[ANSWER_KEY] = {"n": count + 1, "route": str(model or "") + (" (local)" if use_local else ""),
+                         "at": round(time.time(), 1)}
+
+
+def _answer(usage: Any) -> tuple:
+    """``(count, route, epoch)`` of the last answer that read its input (``note_prefix_answer``); ``(0, "", None)``
+    without one, or for a record no writer made: reading it never stops a send or a reply."""
+    held = usage.get(ANSWER_KEY) if isinstance(usage, Mapping) else None
+    try:
+        at = held.get("at")
+        return int(held.get("n") or 0), str(held.get("route") or ""), (float(at) if isinstance(at, (int, float)) else None)
+    except Exception:
+        return 0, "", None
+
+
+def _promote(slot: Any, route: str, record: Mapping[str, Any], at: Any, carried: Optional[int] = None) -> None:
+    """``record`` becomes ``route``'s base; four full bases are kept, an older route keeps its name alone. The seams
+    the answered request carried are consumed: all of them, or the first ``carried`` (a deferred promotion keeps the
+    seams named after the candidate's measurement for the next request)."""
+    kept = getattr(slot, ROUTE_SENDS_ATTR, None)
+    routes = {key: value for key, value in (kept if isinstance(kept, Mapping) else {}).items() if key != route}
+    routes[route] = {"tools": record.get("tools"), "blocks": list(record.get("blocks") or ()),
+                     "messages": list(record.get("messages") or ()), "at": at}
+    for stale in [name for name, held in routes.items() if "messages" in held][:-_ROUTES_KEPT]:
+        routes[stale] = {"dropped": True}  # its name stays: a later request on it has no base, and says so
+    setattr(slot, ROUTE_SENDS_ATTR, routes)
+    setattr(slot, LAST_ROUTE_ATTR, route)
+    seams = getattr(slot, ORIGINS_ATTR, None)
+    setattr(slot, ORIGINS_ATTR, list(seams[carried:]) if carried is not None and isinstance(seams, list) else [])
+
+
+def _settle_pending(slot: Any, usage: Any) -> None:
+    """A measured candidate whose route answered since its measurement (``_answer``) becomes the route's base, though
+    the loop did not accept the answer (an empty or output-limited reply was still written and charged); one answered
+    by another route was not answered, and its wait ends. A checkpoint carries both, so a restored task settles too."""
+    pending = getattr(slot, PENDING_ROUTE_ATTR, None)
+    count, route, at = _answer(usage)
+    if not isinstance(pending, Mapping) or count <= int(pending.get("seen") or 0):
+        return
+    setattr(slot, PENDING_ROUTE_ATTR, None)
+    if route == pending.get("route"):
+        _promote(slot, route, pending, at if at is not None else pending.get("at"), int(pending.get("seams") or 0))
+
+
+def _remember_route_send(slot: Any, messages: Sequence[Mapping[str, Any]], digests: List[str], tools_identity: str,
+                         usage: Any = None) -> None:
+    """The answered request becomes its route's base, dated by its answer; a send that named no route, or another
+    send's answer, leaves the bases as they are."""
+    pending = getattr(slot, PENDING_ROUTE_ATTR, None)
+    setattr(slot, PENDING_ROUTE_ATTR, None)
+    record = _route_record(messages, tools_identity, digests)
+    waited = (pending.get("messages") or []) if isinstance(pending, Mapping) else []
+    if (not isinstance(pending, Mapping) or not pending.get("route") or pending.get("tools") != record["tools"]
+            or pending.get("blocks") != record["blocks"] or record["messages"][:len(waited)] != waited):
+        setattr(slot, ORIGINS_ATTR, [])  # a helper's answer on this slot: the candidate that waited was not answered
+        return
+    count, _route, at = _answer(usage)
+    _promote(slot, str(pending["route"]), record,
+             at if count > int(pending.get("seen") or 0) and at is not None else pending.get("at"))
+
+
+def attempt_prefix_fact(slot: Any, messages: Sequence[Mapping[str, Any]], tools: Any, route: str,
+                        now: Optional[float] = None, usage: Any = None) -> dict:
+    """What the candidate does to its route's cached start, read from the host's own answered sends on that route.
+
+    ``departs`` names the first place it differs from the last answered request on the same route, in the wire
+    order tools, system blocks, messages: ``append`` (it only extends that request), ``tools``, ``system`` (with
+    the block's ``index`` ``of`` the block count), ``messages`` (with the ``index`` ``of`` the earlier message
+    count, the system row counted as ``prompt_prefix_break`` counts it), ``first`` (no answered request on this
+    slot yet), ``route`` (answered requests, none on this route) or ``unrecorded`` (a slot restored from before
+    this record existed, or a route whose record a checkpoint no longer carries). ``origins`` are the seams that
+    rewrote the view since the last answered request, in order, ``from_route`` the route of that request when it
+    was another one, ``base_at`` the epoch at which this route's last answered request was answered (its start was
+    earlier: a reader measuring from it to an attempt's own dispatch gets at most the time between the two starts,
+    and a cache lifetime runs from a request's start). It is an observation of the AUTHORED
+    prefix, by ``message_digest``'s identity (reasoning, outer whitespace and image detail are not in it), of what
+    the host sent: it never says what the provider's cache did, and an ``append`` beside a large write is not a
+    contradiction to resolve here; the attempt's measured counts are that fact. The candidate waits on the slot
+    until an answer of its route makes it the base (``observe_send``, or the next measurement when the loop did not
+    accept that answer); a candidate never answered moves no base. A retry inside one call carries its call's fact."""
+    if slot is None or not route:
+        return {}
+    import time
+
+    now = time.time() if now is None else now
+    _settle_pending(slot, usage)  # an answer the loop did not accept still moved its route's base
+    record = _route_record(messages, tools_digest(tools))
+    kept = getattr(slot, ROUTE_SENDS_ATTR, None)
+    routes = kept if isinstance(kept, Mapping) else {}
+    base = routes.get(route)
+    fact: Dict[str, Any] = {}
+    if isinstance(base, Mapping) and base.get("dropped"):
+        base, fact["departs"] = None, "unrecorded"
+    elif not isinstance(base, Mapping):
+        fact["departs"] = "route" if routes else ("unrecorded" if isinstance(_baseline(slot)[0], list) else "first")
+    elif base.get("tools") != record["tools"]:
+        fact["departs"] = "tools"
+    elif base.get("blocks") != record["blocks"]:
+        old = base.get("blocks") or []
+        index = next((i for i, (a, b) in enumerate(zip(old, record["blocks"])) if a != b), min(len(old), len(record["blocks"])))
+        fact.update(departs="system", index=index, of=len(record["blocks"]),
+                    block=_system_block_name(messages[0], index) if record["blocks"] else "removed block")
+    else:
+        old, new = base.get("messages") or [], record["messages"]
+        index = next((i for i, (a, b) in enumerate(zip(old, new)) if a != b), None)
+        if index is None and len(new) >= len(old):
+            fact["departs"] = "append"
+        else:
+            head = 1 if record["blocks"] else 0
+            fact.update(departs="messages", index=(len(new) if index is None else index) + head, of=len(old) + head)
+    seams = getattr(slot, ORIGINS_ATTR, None)  # a slot restored from before the list still has its stamps
+    origins = list(dict.fromkeys(str(by) for by in (seams if isinstance(seams, list) else _stamps(slot).values()) if by))
+    if origins:
+        fact["origins"] = origins
+    last = getattr(slot, LAST_ROUTE_ATTR, None)
+    if last and last != route:
+        fact["from_route"] = str(last)
+    if isinstance(base, Mapping) and isinstance(base.get("at"), (int, float)):
+        fact["base_at"] = round(float(base["at"]), 1)
+    # The answered request starts with this candidate (the send may add its own later rows, as its clock line);
+    # ``seen`` tells a later answer from those before its measurement, ``seams`` how many seams it carries.
+    setattr(slot, PENDING_ROUTE_ATTR, {"route": route, "at": now, "seen": _answer(usage)[0],
+                                       "seams": len(seams) if isinstance(seams, list) else 0, **record})
+    return fact
+
+
+_CACHE_LIFETIME_SEC = {"5m": 300.0, "1h": 3600.0}  # the provider's two published cache lifetimes (a tariff fact)
+
+
+def prefix_class(fact: Any, ttl: Any = "", dispatched_at: Any = None) -> tuple[str, str]:
+    """What a request did to its route's cached start, named for a reader from the stored fact: ``(class, detail)``.
+
+    The order is the provider's own: a model keeps its own cache, then tools, system blocks, messages, and last the
+    entry's lifetime. ``paused`` is arithmetic over recorded facts: from the answer of this route's previous
+    request (``base_at``) to this attempt's own dispatch (``dispatched_at``, the row's) more than the lifetime
+    ``ttl`` names, so that request's start was longer ago still; it says nothing of the provider's state, and
+    without a named lifetime or a dispatch time it is never derived. A row that carries no fact (written before
+    the record, or sent outside Main's own loop) is ``not_recorded``."""
+    if not isinstance(fact, Mapping) or not fact.get("departs") or fact.get("departs") == "unrecorded":
+        return "not_recorded", ""
+    departs, origins = str(fact["departs"]), ", ".join(str(item) for item in fact.get("origins") or ())
+    if departs == "first":
+        return "first_request", ""
+    if departs == "route":
+        return "entered_model", str(fact.get("from_route") or "")
+    if departs == "tools":
+        return "tools_changed", origins
+    if departs == "system":
+        return "system_changed", str(fact.get("block") or "")
+    if departs == "messages":
+        return "history_rewritten", origins
+    lifetime, base = _CACHE_LIFETIME_SEC.get(str(ttl or "")), fact.get("base_at")
+    if (lifetime is not None and isinstance(base, (int, float)) and isinstance(dispatched_at, (int, float))
+            and dispatched_at - base > lifetime):
+        return "paused", ""
+    return ("returned_to_model", str(fact["from_route"])) if fact.get("from_route") else ("append", "")
+
+
+def remember_attempt_prefix(ctx: Any, messages: Any = None) -> None:
+    """Main's fit measurement leaves the candidate's prefix fact for the dispatch that binds its physical context;
+    ``messages`` is the measured input when it is not ``ctx.messages`` (the forced final)."""
+    slot = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    usage = getattr(ctx, "accumulated_usage", None)
+    if slot is None or not isinstance(usage, dict):
+        return
+    try:
+        route = str(getattr(ctx, "active_model", "") or "") + (" (local)" if getattr(ctx, "active_use_local", False) else "")
+        usage[ATTEMPT_PREFIX_KEY] = attempt_prefix_fact(slot, ctx.messages if messages is None else messages,
+                                                        getattr(ctx, "tool_schemas", None), route, usage=usage)
+    except Exception:  # a record of the send, never a condition of it
+        usage.pop(ATTEMPT_PREFIX_KEY, None)
+        log.debug("attempt prefix fact unavailable", exc_info=True)
+
+
+def forget_attempt_prefix(ctx: Any) -> None:
+    """A candidate that is not measured carries no fact and waits for no answer: the request of an unmeasured
+    route is never recorded as the last measured route's."""
+    usage = getattr(ctx, "accumulated_usage", None)
+    if isinstance(usage, dict):
+        usage.pop(ATTEMPT_PREFIX_KEY, None)
+    slot = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    if slot is not None:
+        try:
+            _settle_pending(slot, usage)  # an answer to the measured candidate still counts before its wait ends
+        except Exception:  # a record of the send, never a condition of it
+            log.debug("attempt prefix settlement unavailable", exc_info=True)
+        setattr(slot, PENDING_ROUTE_ATTR, None)
+
+
+def with_attempt_prefix(physical: Any, usage: Any, ctx: Any = None, messages: Any = None) -> Any:
+    """The physical context carrying the candidate's prefix fact into its ledger row (``PhysicalAttemptContext.prefix``).
+    With ``ctx`` and ``messages`` the fact is taken for that measured input first (``remember_attempt_prefix``)."""
+    if ctx is not None and messages is not None and physical is not None:
+        remember_attempt_prefix(ctx, messages)
+    fact = usage.get(ATTEMPT_PREFIX_KEY) if isinstance(usage, Mapping) else None
+    if physical is None or not isinstance(fact, Mapping) or not fact:
+        return physical
+    from dataclasses import replace
+
+    usage[ANSWER_SEEN_KEY] = _answer(usage)[0]  # the answers this fact already accounts for
+    return replace(physical, prefix=dict(fact))
+
+
+def refresh_attempt_prefix(physical: Any, usage: Any, model: Any, use_local: Any) -> Any:
+    """Before each physical attempt of one call (``loop_llm_call``): when this route answered the same candidate since
+    its fact was bound (a reply the loop retries), the retry extends that answered request, dated by its answer."""
+    try:
+        count, route, at = _answer(usage)
+        current = str(model or "") + (" (local)" if use_local else "")
+        if (getattr(physical, "prefix", None) is None or not isinstance(usage, dict) or at is None or route != current
+                or count <= int(usage.get(ANSWER_SEEN_KEY) or 0)):
+            return physical
+        from dataclasses import replace
+
+        usage[ANSWER_SEEN_KEY] = count
+        return replace(physical, prefix={"departs": "append", "base_at": at})
+    except Exception:  # a record of the send, never a condition of it
+        log.debug("attempt prefix refresh unavailable", exc_info=True)
+        return physical
+
+
 def retire_unbound_reasoning(slot: Any, messages: List[Dict[str, Any]], tools: Any) -> Optional[Dict[str, Any]]:
     """Retire bound reasoning from the first change to the recorded send.
 
@@ -379,9 +662,26 @@ def history_change_text(facts: Any, round_idx: Any) -> str:
     return f"; before that request sent message {fact.get('index')} changed ({history_change_origin(fact)})"
 
 
+def _previous_call_money(previous: Mapping[str, Any]) -> str:
+    """That call's own money as its producer stated it. An API call without a price says so: it adds nothing to
+    known spend (``usage_accounting.paid_admission``); the subscription engine and the local lane say nothing."""
+    from ouroboros.primary_route_observation import call_cost_words
+    from ouroboros.usage_accounting import paid_admission
+
+    provider = previous.get("provider")
+    if provider == "local":
+        return ""
+    words = call_cost_words(dict(previous))
+    if not words and paid_admission(provider, None):
+        words = "cost unknown (not in known spend)"
+    return "; " + words if words else ""
+
+
 def previous_cache_fact(usage: Mapping[str, Any]) -> str:
-    """The previous request's cache share as its provider reported it, and a change of sent history before it."""
+    """The previous request's cache share as its provider reported it, the cache TTL its send stamped, its own
+    money, and a change of sent history before it."""
     from ouroboros.event_usage import event_token_counts
+    from ouroboros.llm_attempt import cache_ttl_seconds
 
     previous = usage.get("_last_round_cache_usage") or {}
     counts = event_token_counts(previous)  # the provider's own report outranks a synthesized billing zero
@@ -393,9 +693,12 @@ def previous_cache_fact(usage: Mapping[str, Any]) -> str:
         account, moved = previous.get("served_account"), previous.get("previous_served_account")
         served = (f", served by account {account}" + (f" (moved from {moved})" if moved and moved != account else "")
                   if account else "")
-        cache += f" [round {previous['round']}, {previous.get('provider') or 'provider unknown'}, {previous.get('model') or 'model unknown'}{served}]"
+        # Only an explicitly stamped tier names a horizon; a bare marker's is the provider's business.
+        ttl = str(usage.get("_last_prompt_cache_ttl") or "").strip()
+        stamped = f", cache TTL {ttl}" if cache_ttl_seconds(ttl) is not None else ""
+        cache += f" [round {previous['round']}, {previous.get('provider') or 'provider unknown'}, {previous.get('model') or 'model unknown'}{served}{stamped}]"
         cache += f"; write {int(written):,} tokens" if written is not None else "; write unknown"
-        cache += history_change_text(usage.get("_recent_prefix_breaks"), previous["round"])
+        cache += _previous_call_money(previous) + history_change_text(usage.get("_recent_prefix_breaks"), previous["round"])
     return cache
 
 

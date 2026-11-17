@@ -1,6 +1,7 @@
 """Owner settings surfaces preserve ordinary provider and roster decisions."""
 import copy
 import json
+from unittest.mock import ANY
 
 import pytest
 from starlette.applications import Starlette
@@ -11,6 +12,7 @@ from tests._safety_fixtures import settings_install as install_fixture
 from tests.test_safety_second_check import catalog
 
 install = install_fixture
+ROSTER_CHANGED = {"OUROBOROS_SUBAGENTS": {"withheld": "structure", "token": ANY}}
 
 
 @pytest.fixture
@@ -73,7 +75,7 @@ def test_catalog_owner_endpoint_uses_same_roster_judgement(settings_client):
     assert owner.json()["error"] == generic.json()["error"]
     assert path.read_bytes() == before
     accepted = client.post("/api/owner/safety-model", json={"settings": {"OUROBOROS_SUBAGENTS": valid}})
-    assert accepted.status_code == 200 and accepted.json() == {"ok": True}
+    assert accepted.status_code == 200 and accepted.json() == {"ok": True, "changes": ROSTER_CHANGED}
     stored = json.loads(json.loads(path.read_text())["OUROBOROS_SUBAGENTS"])
     assert stored["items"][0]["rechecks_flags"] is True
 
@@ -90,13 +92,13 @@ def test_empty_review_pool_needs_same_explicit_confirmation(settings_client, unc
     assert owner.json()["error"] == generic.json()["error"]
     assert path.read_bytes() == before
     accepted = client.post("/api/owner/safety-model", json={**body, "allow_empty_review_pool": True})
-    assert accepted.status_code == 200 and accepted.json() == {"ok": True}
+    assert accepted.status_code == 200 and accepted.json() == {"ok": True, "changes": ROSTER_CHANGED}
     assert "allow_empty_review_pool" not in json.loads(path.read_text())
     from ouroboros.configured_subagents import parse_configured_subagents
     assert not parse_configured_subagents(json.loads(path.read_text())["OUROBOROS_SUBAGENTS"]).items[0].review_eligible
     # Reposting the unchanged catalog is not another empty-pool decision.
     repeated = client.post("/api/owner/safety-model", json={"settings": body["settings"]})
-    assert repeated.status_code == 200 and repeated.json() == {"ok": True}
+    assert repeated.status_code == 200 and repeated.json() == {"ok": True, "changes": {}}
 
 
 def test_operator_checker_is_not_replaced_by_generic_save_of_the_disk_default(settings_client, monkeypatch):
@@ -121,7 +123,8 @@ def test_owner_roster_save_retires_legacy_lanes_only_with_catalog(settings_clien
     assert model_only.status_code == 200, model_only.json()
     assert json.loads(path.read_text())["OUROBOROS_REVIEWER_SLOTS"] == "invalid legacy lanes"
     roster = client.post("/api/owner/safety-model", json={"settings": {"OUROBOROS_SUBAGENTS": catalog(review_eligible=True)}})
-    assert roster.status_code == 200 and roster.json() == {"ok": True}
+    assert roster.status_code == 200 and roster.json() == {"ok": True, "changes": {
+        **ROSTER_CHANGED, "OUROBOROS_REVIEWER_SLOTS": {"old": "invalid legacy lanes", "token": ANY}}}
     assert "OUROBOROS_REVIEWER_SLOTS" not in json.loads(path.read_text())
 
 
@@ -135,15 +138,18 @@ def test_owner_checker_save_preserves_startup_ready_route(settings_client, remot
     }))
     before = path.read_bytes()
     response = client.post("/api/owner/safety-model", json={"settings": {"USE_LOCAL_MAIN": False}})
+    main_off = {"USE_LOCAL_MAIN": {"old": True, "new": False, "token": ANY}}
     if remote:
-        assert response.status_code == 200 and response.json() == {"ok": True}
+        assert response.status_code == 200 and response.json() == {"ok": True, "changes": main_off}
         assert json.loads(path.read_text())["USE_LOCAL_MAIN"] is False
     else:
         assert response.status_code == 400
         assert response.json()["error"] == "Local-only setups must route at least one model to the local runtime."
         assert path.read_bytes() == before
     allowed = client.post("/api/owner/safety-model", json={"settings": {"USE_LOCAL_MAIN": False, "USE_LOCAL_LIGHT": True}})
-    assert allowed.status_code == 200 and allowed.json() == {"ok": True}
+    light_on = {"USE_LOCAL_LIGHT": {"old": False, "new": True, "token": ANY}}
+    assert allowed.status_code == 200 and allowed.json() == {"ok": True, "changes": {
+        **light_on, **({} if remote else main_off)}}
     stored = json.loads(path.read_text())
     assert stored["USE_LOCAL_MAIN"] is False and stored["USE_LOCAL_LIGHT"] is True
 
@@ -163,7 +169,8 @@ def test_owner_checker_readiness_counts_an_environment_provider(settings_client,
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-environment-provider")
     assert has_startup_ready_provider({**config.load_settings(), **body["settings"]})
     allowed = client.post("/api/owner/safety-model", json=body)
-    assert allowed.status_code == 200 and allowed.json() == {"ok": True}
+    assert allowed.status_code == 200 and allowed.json() == {"ok": True, "changes": {
+        "USE_LOCAL_MAIN": {"old": True, "new": False, "token": ANY}}}
     stored = json.loads(path.read_text())
     assert stored["USE_LOCAL_MAIN"] is False
     assert stored.get("OPENROUTER_API_KEY") != "fixture-environment-provider"

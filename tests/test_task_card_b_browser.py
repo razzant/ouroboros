@@ -36,7 +36,7 @@ const ws={ws:{readyState:1},on(type,fn){const rows=handlers.get(type)||[];rows.p
     isConnected:()=>true,send(frame){return {status:'sent',clientMessageId:frame.client_message_id||'cm'};}};
 window.emit=(type,row)=>(handlers.get(type)||[]).forEach(fn=>fn(row));
 window.chat=createChatInstance({ws,state:{activePage:'chat',projectChatIds:new Set([7]),unreadCount:0},
-    updateUnreadBadge(){},openSettingsTab(){},openDashboardTab(){},chatId:1,
+    updateUnreadBadge(){},openSettings(){},openDashboardTab(){},chatId:1,
     mountEl:document.getElementById('content'),stateSnapshots:{begin:()=>({generation:1,requestedAt:Date.now()}),
     gate(){return Promise.resolve(this.begin());},isCurrent:()=>true,
     apply(request,data){window.chat?.hydrateStateSnapshot(data);}}});
@@ -175,7 +175,7 @@ ROOT_FACTS = """id => {
         card: box(card), contentRight: inner.right - pad - 20, contentLeft: inner.left + pad + 20,
         hscroll: card.scrollWidth > card.clientWidth + 1, order: parts,
         kids: kids.map((kid) => ({id: kid.dataset.taskId, role: kid.querySelector('[data-live-title]').textContent,
-            box: box(kid), titleBox: box(kid.querySelector(':scope > .chat-live-summary-button [data-live-title]')),
+            box: box(kid), finished: kid.dataset.finished === '1', titleBox: box(kid.querySelector(':scope > .chat-live-summary-button [data-live-title]')),
             chipBox: box(kid.querySelector(':scope > .chat-live-summary-button [data-live-phase]')),
             sideBox: box(kid.querySelector(':scope > .chat-live-summary-button .chat-live-summary-side')),
             when: kid.querySelector('[data-live-when]')?.hidden === false,
@@ -454,6 +454,18 @@ def test_root_card_live_terminal_and_reload_keep_one_composition(engine):
         ended = room["facts"]("w-root")
         _assert_b_root(ended, clock="", reviews="Reviews 2", buttons=("Turn into project",))
         assert ended["chip"] == "Done" and (ended["title"], ended["line"]) == (WORK_TITLE, WORK_LINE), ended
+        # Helpers' outcomes are the finished root's Details: a finished helper folds away, a running one stays in view.
+        assert {kid["finished"] for kid in ended["kids"]} == {True, False}, ended["kids"]
+        assert all((kid["box"] is None) == kid["finished"] for kid in ended["kids"]), ended["kids"]
+        # A finished helper that holds a running helper of its own stays in view while that one runs.
+        room["emit"]([("chat", {"chat_id": 1, "task_id": "w-grand-3d1f", "subagent_task_id": "w-grand-3d1f",
+                                "parent_task_id": "w-kid-7c2e", "root_task_id": "w-root", "delegation_role": "subagent",
+                                "subagent_event": "running", "subagent_role": "Сверка таблиц", "role": "assistant",
+                                "is_progress": True, "narration": True, "content": "Сверяю таблицы.",
+                                "text": "Сверяю таблицы.", "ts": _at("22:59:30")})])
+        _settle(page)
+        held = {kid["id"]: kid for kid in room["facts"]("w-root")["kids"]}
+        assert held["w-kid-7c2e"]["finished"] and held["w-kid-7c2e"]["box"], held
         room["rows"][:] = _history(WORK + end)
         room["load"]()
         page.locator('#chat-messages > .chat-live-card[data-task-id="w-root"]').wait_for()
@@ -463,6 +475,11 @@ def test_root_card_live_terminal_and_reload_keep_one_composition(engine):
         for key in ("chip", "title", "line", "meta"):
             assert replayed[key] == ended[key], (key, ended, replayed)
         assert [kid["role"] for kid in replayed["kids"]] == [kid["role"] for kid in ended["kids"]], replayed
+        assert all((kid["box"] is None) == kid["finished"] for kid in replayed["kids"]), replayed["kids"]
+        page.locator('#chat-messages > .chat-live-card[data-task-id="w-root"] > .chat-live-summary-button [data-live-disclosure]').click()
+        _settle(page)
+        opened = room["facts"]("w-root")
+        assert opened["expanded"] and all(kid["box"] for kid in opened["kids"]), opened["kids"]  # an open root shows every helper
 
 
 FOOT = """id => { const card = document.querySelector(`.chat-live-card[data-task-id="${id}"]:not(.subagent)`);
@@ -650,13 +667,13 @@ def test_each_door_chevron_says_its_own_door_in_every_state(engine):
 
 # A Swarm root's stored detail in the host's receipt facts. Details reads it, the way the line reaches a card.
 SWARM = {"status": "failed", "metadata": {"subagents_mode": "swarm"}, "swarm_efficiency": {"subagent_count": 2}}
-SWARM_SHORT = "Swarm · 2 helpers requested"
+SWARM_SHORT = "Swarm · 2 subagents requested"
 SWARM_LONG = {**SWARM, "swarm_efficiency": {"subagent_count": 12}, "swarm_receipt": {"cost": {
     "known_final_usd": 12.34, "unknown_attempts": 3, "attempts": [
         {"attempt_id": "a1", "task_id": "w-root", "model": "model-alpha"},
         {"attempt_id": "a2", "task_id": "s1", "model": "model-bravo", "kind": "subscription_session"},
         {"attempt_id": "a3", "task_id": "s2", "model": "model-charlie", "kind": "subscription_session"}]}}}
-SWARM_LONG_TEXT = "Swarm · 12 helpers requested · 3 models · $12.34 known + 3 not final · 2 subscription sessions"
+SWARM_LONG_TEXT = "Swarm · 12 subagents requested · 3 models · $12.34 known + 3 not final · 2 subscription sessions"
 
 
 def _read_receipt(room, task_id):
@@ -835,13 +852,13 @@ def test_a_root_proven_solo_closes_its_foot_and_an_open_fact_reopens_it(engine, 
             if shot:
                 card.screenshot(path=shot)
 
-        read(details["sw-solo"], "Swarm · helpers unknown · 1 model · $0.12 known")
+        read(details["sw-solo"], "Swarm · subagents unknown · 1 model · $0.12 known")
         unknown = page.evaluate(FOOT, "sw-solo")
         assert unknown["shown"] and abs(unknown["inset"] - 16) <= 1.5, unknown
         snap("1-unknown")
         # The same tree from a receipt that never read the refusals: no proof, so the line stays rather than going.
         older = {key: value for key, value in SOLO_RECEIPT.items() if key != "refused_starts"}
-        read({**SOLO_BASE, "swarm_efficiency": SOLO_NONE, "swarm_receipt": older}, "Swarm · helpers unknown · 1 model · $0.12 known")
+        read({**SOLO_BASE, "swarm_efficiency": SOLO_NONE, "swarm_receipt": older}, "Swarm · subagents unknown · 1 model · $0.12 known")
         snap("1b-older-receipt-stays")
         read({**SOLO_BASE, "swarm_efficiency": SOLO_NONE, "swarm_receipt": SOLO_RECEIPT}, "")
         assert line.count() == 0
@@ -849,7 +866,7 @@ def test_a_root_proven_solo_closes_its_foot_and_an_open_fact_reopens_it(engine, 
         assert not proven["shown"] and abs(proven["inset"] - untouched["inset"]) <= 1, (proven, untouched)
         snap("2-proven-solo")
         refused = {**SOLO_RECEIPT, "refused_starts": [{"invocation_id": "i1", "task_id": "sw-solo", "reason": "engine_refused"}]}
-        read({**SOLO_BASE, "swarm_efficiency": SOLO_NONE, "swarm_receipt": refused}, "Swarm · 1 helper start failed · 1 model · $0.12 known")
+        read({**SOLO_BASE, "swarm_efficiency": SOLO_NONE, "swarm_receipt": refused}, "Swarm · 1 subagent start failed · 1 model · $0.12 known")
         reopened = page.evaluate(FOOT, "sw-solo")
         assert reopened["shown"] and abs(reopened["inset"] - 16) <= 1.5, reopened
         snap("3-refused-start")
@@ -858,5 +875,5 @@ def test_a_root_proven_solo_closes_its_foot_and_an_open_fact_reopens_it(engine, 
             {"id": "run:r1", "task_id": "sw-solo", "kind": "delegated_run", "start": _at("22:41")},
             {"id": "invocation:i2", "task_id": "sw-solo", "kind": "delegated_start", "start": None, "state": "pending"}]}
         read({**SOLO_BASE, "swarm_efficiency": {"subagent_count": 1}, "swarm_receipt": mixed},
-             "Swarm · 1 helper started · 1 helper start unconfirmed · 1 model · $0.12 known")
+             "Swarm · 1 subagent started · 1 subagent start unconfirmed · 1 model · $0.12 known")
         snap("4-started-and-open")

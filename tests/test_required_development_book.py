@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import queue
+import re
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -55,9 +56,9 @@ def fixed_density(monkeypatch):
                         lambda *_a, **_kw: (RATIO, "fresh_route_usage"))
 
 
-def _route(window, known=True):
+def _route(window, known=True, source="metadata"):
     evidence = SimpleNamespace(route_fp="route", status="confirmed" if known else "unprobeable",
-                               stale=False, window_tokens=window)
+                               stale=False, window_tokens=window, source=source)
     return lambda *_a, **_kw: ({"provider": "fixture", "model": "fixture"}, evidence)
 
 
@@ -76,9 +77,10 @@ def _core(root, *, required=False, subject=False, book_tokens=40_000, assignment
         memory_view_json=memory_view.snapshot_json(snapshot) if memory else "")
 
 
-def _plan(root, core, preferred, window, *, known=True, task=None):
+def _plan(root, core, preferred, window, *, known=True, task=None, source="metadata"):
     return fit.build_context_fit_plan(SimpleNamespace(drive_root=root), core, task or {"id": "t", "type": "task"},
-                                      preferred_mode=preferred, tool_schemas=SCHEMAS, route_resolver=_route(window, known))
+                                      preferred_mode=preferred, tool_schemas=SCHEMAS,
+                                      route_resolver=_route(window, known, source))
 
 
 def _blocks(plan, mode):
@@ -95,7 +97,7 @@ def _choices(plan):
 
     facts = plan.projection(plan.initial_mode).memory_facts
     floor = facts.get("floor") or {}
-    return (plan.initial_mode, floor.get("steps"), floor.get("addressed"), floor.get("mode_switch"),
+    return (plan.initial_mode, floor.get("steps"), floor.get("runs"), floor.get("mode_switch"),
             [row["section_id"] for row in facts.get("host_sections_addressed", ())],
             select_tool_schemas(SCHEMAS, context_mode=plan.initial_mode).chosen,
             json.loads(plan.projection(plan.initial_mode).user_content_json or plan.user_content_json))
@@ -455,8 +457,8 @@ def test_reprojection_keeps_the_book_and_asks_nothing_of_memory_for_it(tmp_path,
     # A window the ordinary view itself cannot hold narrows both alike; the book stays resident.
     tight = enough - 20_000
     plain, kept = on_route(ordinary, tight), on_route(required, tight)
-    assert kept.low_projection.memory_facts["floor"]["addressed"] == plain.low_projection.memory_facts["floor"]["addressed"]
-    assert plain.low_projection.memory_facts["floor"]["addressed"]
+    assert kept.low_projection.memory_facts["floor"]["runs"] == plain.low_projection.memory_facts["floor"]["runs"]
+    assert plain.low_projection.memory_facts["floor"]["runs"]
     assert len(_book_blocks(kept, "low")) == 1
     assert kept.initial_mode == plain.initial_mode == "low"
 
@@ -505,14 +507,17 @@ def test_ordinary_unasked_outputs_are_the_same_beside_the_book_on_a_roomy_route(
 
 
 def test_a_tight_route_delivers_the_ordinary_output_and_the_admission_charges_the_book(tmp_path, fixed_density):
-    """Astra's pair: a window with 2,000 tokens beside the book's start. The output is the one the same view without
-    the book gets; the next request is then over by what the book adds alone, which the admission refuses by name."""
+    """Astra's pair: a window with 2,000 tokens beside the book's start, on a route whose one buffer holds the reply
+    too (a local server states it), so a request under way has the room its start had. The output is the one the same
+    view without the book gets; the next request is then over by what the book adds alone, which the admission
+    refuses by name."""
     shape = dict(memory=False, book_tokens=100_000)
     roomy = _plan(tmp_path, _core(tmp_path, required=True, **shape), "low", 1_000_000)
     window = math.ceil((roomy.low_projection.estimated_tokens + fit.tool_schema_tokens(SCHEMAS)) * RATIO) + RESERVE + 2_000
     text = "An ordinary command output line.\n" * 1_000
     (plain, plain_receipt), (held, receipt) = (_batch(_plan(tmp_path, _core(tmp_path, required=required, **shape), "low",
-                                                            window), text) for required in (False, True))
+                                                            window, source="local_health"), text)
+                                               for required in (False, True))
     assert held["result"] == plain["result"] == text and not held.get("result_partial")
     assert receipt["unsolicited_allowance_tokens"] == plain_receipt["unsolicited_allowance_tokens"] > 2_000
     assert not plain_receipt["fit"]["capacity_deficit_tokens"]
@@ -610,6 +615,7 @@ def test_the_physical_cut_is_sized_without_the_book(tmp_path, monkeypatch):
 def test_a_real_round_refuses_only_the_books_own_excess_and_keeps_the_view(main_call, tmp_path, fixed_density, required):
     """The real measure, pre-send check and refusal passes on a grown transcript; only the provider is a stand-in."""
     from ouroboros.context_renewal import renew_after_refusal
+    from ouroboros.context_view_facts import SIZE_REFUSAL_KEY
     from ouroboros.outcomes import derive_loop_outcome
     from ouroboros.owner_continue import continuation_offer
     from tests.test_provider_unknown_terminal_text import _ctx as _limit_ctx
@@ -626,7 +632,9 @@ def test_a_real_round_refuses_only_the_books_own_excess_and_keeps_the_view(main_
     grown = [*plan.messages_for("low"),
              {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {
                  "name": "read_file", "arguments": "{}"}}]},
-             {"role": "tool", "tool_call_id": "c1", "content": "A chosen read. " * 12_000}]  # more than the room left
+             # With the book the request passes its send ceiling (the stated window less the reply floor); the same
+             # transcript without the book stays under it.
+             {"role": "tool", "tool_call_id": "c1", "content": "A chosen read. " * 26_000}]
     ctx.messages[:] = grown
     ctx.tool_schemas = SCHEMAS
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
@@ -635,7 +643,8 @@ def test_a_real_round_refuses_only_the_books_own_excess_and_keeps_the_view(main_
     answer, _cost, mode = loop._call_round_model(ctx)
     assert mode == "low"
     if not required:
-        # The same transcript without the book fits this window: the ordinary send, the control that this is the book's.
+        # The same transcript without the book is admitted on this window: the ordinary send, the control that the
+        # refusal below is the book's own.
         assert answer and len(gateway.creates) == 1
         return
     assert answer is None and not gateway.creates, "a request the window cannot hold is never sent"
@@ -654,19 +663,28 @@ def test_a_real_round_refuses_only_the_books_own_excess_and_keeps_the_view(main_
     assert renew_after_refusal(limit, ctx.tools) is False
     text, usage, trace = loop._handle_provider_unavailable(_limit_ctx(tmp_path, usage), error_kind="context_overflow")
     assert usage["reason_code"] == "context_capacity" and "Context mode" in text and "a Continue keeps it" in text
+    # What the input is without the book: the admission's own refusal of this round's unchanged measured request.
+    slot = usage[SIZE_REFUSAL_KEY]
+    usable = slot["capacity"] - slot["reserve"]
+    assert slot["basis"] == "known_window_prediction" and slot["book"] == usage["_context_required_book_tokens"]
+    assert slot["capacity"] == usage["_context_capacity_total_tokens"] and slot["tokens"] - slot["book"] <= usable < slot["tokens"]
+    assert (f"handbook (~{slot['book']:,} tokens), which stayed; without it the input is "
+            f"~{slot['tokens'] - slot['book']:,} against {usable:,} usable.") in text
     outcome = derive_loop_outcome(text, usage, trace)  # an infra-failed execution settles its row as failed
     assert outcome["outcome_axes"]["execution"]["status"] == "infra_failed" and outcome["reason_code"] == "context_capacity"
     row = {"status": "failed", "reason_code": outcome["reason_code"], "outcome_axes": outcome["outcome_axes"]}
     assert continuation_offer({**row, "root_task_id": "grown", "task_contract": {KEY: True}}, "grown")["eligible"]
 
 
-EXPOSED = "Exposed command output.\n" * 8_000
+EXPOSED = "Exposed command output.\n" * 24_000  # larger than the reply reserve: a start without it fits the window below
 
 
 @pytest.mark.parametrize("excess", ["book_only", "ordinary_too"])
 def test_an_exposed_body_never_pays_for_the_book_at_the_real_round(main_call, tmp_path, fixed_density, excess):
-    """A shown tool body the first refusal pass may address stays when the request is over only by the required book;
-    what the same request without the book would also exceed is still recovered as before, from that body."""
+    """A shown tool body the first refusal pass may address stays when the request is over only by the required book
+    (without it the send would go out); what the same request without the book would also exceed is still recovered
+    as before, from that body."""
+    from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
     from tests.test_context_source_view import _observation, _tool
     from tests.test_subscription_main_wait import MODEL, ROUTE
 
@@ -685,7 +703,9 @@ def test_an_exposed_body_never_pays_for_the_book_at_the_real_round(main_call, tm
                                   round_id="r").measurement
     book = fit_before.required_book_tokens
     shortfall = book // 2 if excess == "book_only" else book + 8_000
-    plan = build(fit_before.estimated_input_tokens + fit_before.response_reserve_tokens - shortfall)
+    # Over its send ceiling (the stated window less the reply floor) by ``shortfall``: by less than the book, or by
+    # the book and 8,000 more.
+    plan = build(fit_before.estimated_input_tokens + NANO_MIN_HEADROOM_TOKENS - shortfall)
     assert plan.low_projection.system_content_json == roomy.low_projection.system_content_json
     ctx.messages[:] = [*head, *exposed, *latest]
     ctx.tool_schemas = SCHEMAS
@@ -706,24 +726,44 @@ def test_an_exposed_body_never_pays_for_the_book_at_the_real_round(main_call, tm
 
 
 def test_the_overflow_terminal_names_the_book_and_what_fits_without_it():
+    """The figure is the round's own size refusal's: the host's admission refused the candidate before sending, with
+    the book, size, window and reserve it judged (``remember_size_refusal``). A request the provider refused keeps
+    its own size of the book and no arithmetic; with no refusal kept for this round the book is named and no figure is
+    made up. The refusal's own book names it also where the current view, restored after a failed walk, adds none."""
     from ouroboros.context_budget import REQUIRED_BOOK_UNFIT_KEY
+    from ouroboros.context_view_facts import SIZE_REFUSAL_KEY, remember_size_refusal
     from ouroboros.loop_transport import provider_terminal_fallback_text
+    from ouroboros.physical_attempt_context import PhysicalAttemptContext
 
-    flags = dict(is_context_overflow=True, is_transport_wait=False, waited_sec=0, interactive=False, is_deadline_exhausted=False)
-    usage = {"_context_required_book_tokens": 51_000, "_context_prompt_estimate": 160_000,
-             "_context_capacity_total_tokens": 240_000, "_context_response_reserve_tokens": 65_536}
-    text = provider_terminal_fallback_text(usage, is_context_overflow=True, is_transport_wait=False, waited_sec=0,
-                                            interactive=False, is_deadline_exhausted=False)
+    flags = dict(round_idx=1, is_context_overflow=True, is_transport_wait=False, waited_sec=0, interactive=False,
+                 is_deadline_exhausted=False)
+    physical = PhysicalAttemptContext(profile="owner_low", rendered_mode="low", measurement_basis="fresh_route_usage",
+                                      route_fp="r", round_id="e:round:1", target_total_tokens=None,
+                                      capacity_total_tokens=240_000, context_target_miss=False, automatic_pass_used=False,
+                                      measurement_density=1.0, response_reserve_tokens=65_536, required_book_tokens=51_000)
+    refused = SimpleNamespace(physical_context=physical, estimated_input_tokens=190_000, predicted_free_tokens=-15_536,
+                              capacity_total_tokens=240_000, response_reserve_tokens=65_536)
+    usage = {"execution_id": "e", "_context_required_book_tokens": 51_000}
+    remember_size_refusal(SimpleNamespace(accumulated_usage=usage, context_fit_plan=None, round_idx=1, active_model="m"),
+                          refused, measured=False)
+    text = provider_terminal_fallback_text(usage, **flags)
     assert "directly requires the whole development handbook (~51,000 tokens)" in text
-    assert "without it the input is ~109,000 against 174,464 usable" in text
+    assert "without it the input is ~139,000 against 174,464 usable" in text
     assert "larger window" in text and "Context mode" in text and "without this requirement" in text
     # The Continue it names is the terminal cause's: a host forecast gets none, the book's known unfit gets it.
     forecast = {**usage, "reason_code": "context_overflow"}
     assert "a Continue keeps it" in text and "a Continue keeps it" not in provider_terminal_fallback_text(forecast, **flags)
     assert "a Continue keeps it" in provider_terminal_fallback_text({**forecast, REQUIRED_BOOK_UNFIT_KEY: True}, **flags)
-    assert "handbook" not in provider_terminal_fallback_text(
-        {**usage, "_context_required_book_tokens": 0}, is_context_overflow=True, is_transport_wait=False, waited_sec=0,
-        interactive=False, is_deadline_exhausted=False)
+    # A restored Max primary holds the book with no addition (0): the refusing candidate's own facts still stand.
+    assert provider_terminal_fallback_text({**usage, "_context_required_book_tokens": 0}, **flags) == text
+    sent = {key: value for key, value in usage[SIZE_REFUSAL_KEY].items() if key not in {"book", "capacity"}}
+    stated = {**sent, "basis": "provider_stated"}
+    sized = provider_terminal_fallback_text({**usage, SIZE_REFUSAL_KEY: {**stated, "book": 51_000}}, **flags)
+    assert "handbook (~51,000 tokens), which stayed. The choices" in sized and "without it" not in sized
+    for slot in (stated, {}, {**usage[SIZE_REFUSAL_KEY], "round": 0}):  # no book of this round's own refusal
+        named = provider_terminal_fallback_text({**usage, SIZE_REFUSAL_KEY: slot}, **flags)
+        assert "handbook, which stayed. The choices" in named and "without it" not in named and "~51,000" not in named
+        assert "handbook" not in provider_terminal_fallback_text({"execution_id": "e", SIZE_REFUSAL_KEY: slot}, **flags)
 
 
 def test_the_facts_row_sizes_the_ordinary_target_without_repeating_the_book_note():
@@ -740,40 +780,52 @@ def test_the_facts_row_sizes_the_ordinary_target_without_repeating_the_book_note
 
 
 def test_a_fallback_too_small_for_the_book_changes_no_memory(tmp_path, fixed_density, monkeypatch):
-    """A primary outage walks to a configured route the book does not fit: its view stays, the request is refused."""
+    """A primary outage walks to a configured route the book does not fit: the request is refused there and the
+    primary's view stays. The book costs the candidate no form: its memory is exactly what the same move shows
+    without the book."""
     from ouroboros import config, fallback_cooldown
     from tests.test_primary_view_return import _registry
 
     primary, reserve = "openai/gpt-primary", "openai/gpt-reserve"
-    plan = _plan(tmp_path, _core(tmp_path, required=True, book_tokens=60_000), "low", 1_000_000)
     ordinary = _plan(tmp_path, _core(tmp_path), "low", 1_000_000)
     small = math.ceil(ordinary.low_projection.estimated_tokens * RATIO) + RESERVE + 2_000  # holds it without the book
-    plan = replace(plan, model=primary, model_role="main")
     monkeypatch.setattr(context, "_context_fit_route", lambda task, **_kw: (
         {"model": task["model"], "provider": "openrouter", "base_url": "", "use_local": False},
         SimpleNamespace(status="confirmed", stale=False, route_fp=task["model"],
                         window_tokens={primary: 1_000_000, reserve: small}[task["model"]])))
     monkeypatch.setattr(config, "fallback_candidate_targets", lambda **_kw: [SimpleNamespace(model_id=reserve)])
-    fallback_cooldown.reset_for_tests()
-    registry = _registry(tmp_path)
-    registry._ctx.primary_route["model"] = registry._ctx.active_model = primary
-    messages = plan.messages_for("low")
-    shown, sent = messages[0], {}
 
-    def refused_round(call):
-        sent.update(view=call.messages[0], plan=call.context_fit_plan, mode=call.active_context_mode)
-        call.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
-        return None, 0.0, call.active_context_mode
+    def walk(root, plan):
+        fallback_cooldown.reset_for_tests()
+        registry = _registry(root)
+        registry._ctx.primary_route["model"] = registry._ctx.active_model = primary
+        plan = replace(plan, model=primary, model_role="main")
+        messages = plan.messages_for("low")
+        shown, sent = messages[0], {}
 
-    monkeypatch.setattr(loop, "_call_round_model", refused_round)
-    msg, model, _local, after, mode = loop._run_cross_model_fallback_chain(
-        llm=SimpleNamespace(), ctx=registry._ctx, tools=registry, messages=messages, active_model=primary,
-        active_use_local=False, tool_schemas=SCHEMAS, active_effort="medium", max_retries=3, drive_logs=tmp_path,
-        task_id="outage", round_idx=2, event_queue=None, accumulated_usage={"_last_llm_error_kind": "transport_unavailable"},
-        task_type="", emit_progress=lambda *_a, **_kw: None, context_fit_plan=plan, active_context_mode="low")
-    assert msg is None and model == primary and mode == "low"
-    assert sent["view"] == shown  # the candidate carried the same memory and the book; nothing paid for it
-    assert sent["mode"] == "low" and messages[0] == shown
+        def refused_round(call):
+            sent.update(view=call.messages[0], plan=call.context_fit_plan, mode=call.active_context_mode)
+            call.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
+            return None, 0.0, call.active_context_mode
+
+        monkeypatch.setattr(loop, "_call_round_model", refused_round)
+        msg, model, _local, _after, mode = loop._run_cross_model_fallback_chain(
+            llm=SimpleNamespace(), ctx=registry._ctx, tools=registry, messages=messages, active_model=primary,
+            active_use_local=False, tool_schemas=SCHEMAS, active_effort="medium", max_retries=3, drive_logs=root,
+            task_id="outage", round_idx=2, event_queue=None, accumulated_usage={"_last_llm_error_kind": "transport_unavailable"},
+            task_type="", emit_progress=lambda *_a, **_kw: None, context_fit_plan=plan, active_context_mode="low")
+        assert msg is None and model == primary and mode == "low" and sent["mode"] == "low"
+        assert sent["view"] == shown  # the candidate carried the same memory (and the book, if any): nothing paid
+        assert messages[0] == shown  # the primary's own view is untouched by the refused candidate
+        return sent
+
+    (tmp_path / "with").mkdir()
+    (tmp_path / "without").mkdir()
+    book = walk(tmp_path / "with", _plan(tmp_path, _core(tmp_path, required=True, book_tokens=60_000), "low", 1_000_000))
+    plain = walk(tmp_path / "without", ordinary)
+    assert len(_book_blocks(book["plan"], "low")) == 1 and not _book_blocks(plain["plan"], "low")  # the book rode along
+    floors = [walked["plan"].low_projection.memory_facts["floor"] for walked in (book, plain)]
+    assert floors[0]["steps"] == floors[1]["steps"] and floors[0]["runs"] == floors[1]["runs"]  # nothing paid for it
 
 
 # --- A known incompatibility at a pooled start is the task's outcome ------------------------------------------------
@@ -851,7 +903,14 @@ def test_a_nonfit_start_ends_its_task_named_and_the_same_worker_runs_the_next(tm
     assert stored["status"] == "failed" and stored["reason_code"] == "context_capacity"
     assert stored["outcome_axes"]["execution"]["reason_code"] == "context_capacity"
     text = next(row["text"] for row in events if row.get("type") == "send_message" and row.get("task_id") == "needs-book")
-    assert "directly requires the whole development handbook" in text and "window=150000" in text
+    assert "directly requires the whole development handbook" in text and "without it the start fits" in text
+    assert "the model's limit here is 150,000" in text
+    assert "window=" not in text, "a person reads the limit in words, never the refusal's key=value record"
+    # The measured parts name the handbook on its own and add up to the input: the core part excludes it.
+    measured = text.split("Measured, in tokens: ", 1)[1]
+    parts = dict(re.findall(r"(core, request and tools|handbook|further memory) ([\d,]+)", measured))
+    total = int(re.match(r"input ([\d,]+)", measured).group(1).replace(",", ""))
+    assert "handbook" in parts and sum(int(value.replace(",", "")) for value in parts.values()) == total, measured
     assert "larger window" in text and "Context mode" in text and "without this requirement" in text
     assert "Error during processing" not in text and "task_exception" not in json.dumps(stored.get("outcome_axes"))
     # Nothing is invented for this attempt: its own loop evidence is absent, never a zero or a no-effect claim.
@@ -992,3 +1051,21 @@ def test_the_book_beside_the_nano_target_never_shrinks_the_reply(tmp_path, fixed
     assert 0 < raised.value.deficit_tokens < raised.value.required_book_tokens  # without it, this request fits
     (plain_window, plain_window_sent), (held_window, held_window_sent) = pair(1_000_000, 100_000)
     assert held_window.reply_allowance_tokens == plain_window.reply_allowance_tokens and held_window_sent == plain_window_sent
+
+
+def test_a_starts_answer_review_requirement_rides_its_contract_through_promotion_and_continue(tmp_path, monkeypatch):
+    """``start_task(review_answer=true)`` (owner, 8 Nov 2026) is the mind's recorded "this answer itself must be
+    checked": the new root's own contract carries it, and its Continue keeps it; absent stays absent."""
+    from supervisor.continuation_admission import admit_continuation
+
+    task, row, _workers = _promoted(tmp_path / "start", monkeypatch, review_answer=True)
+    assert task["task_contract"]["review_answer"] is True and row["task_contract"]["review_answer"] is True
+    plain, _row, _w = _promoted(tmp_path / "plain", monkeypatch)
+    assert "review_answer" not in plain["task_contract"]
+
+    _queue_module, _state, workers = _install_queue(tmp_path / "continue", monkeypatch)
+    _interrupted(tmp_path / "continue", task_contract={"context": "predecessor", "review_answer": True})
+    ack = admit_continuation("pred-1", action_nonce=NONCE)
+    assert ack["ok"] is True, ack
+    successor = next(row for row in workers.PENDING if row["id"] == ack["successor_task_id"])
+    assert successor["task_contract"]["review_answer"] is True

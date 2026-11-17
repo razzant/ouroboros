@@ -148,23 +148,23 @@ _PENDING_FIELDS = (
     '_attempt', 'review_reason', 'review_source_task_id', '_budget_pause',
     'budget_resumed_at', '_terminalization_retry', '_cancel_intent_authority_hold', '_owner_wait_resume',
     '_budget_pause_resume', '_budget_pause_hold', '_resume_selection', '_continuation_prepared', '_admission_owner_token',
-    '_is_direct_chat', '_presence_turn', 'source', 'detached_at', 'detached_by',
+    '_is_direct_chat', '_presence_turn', 'source', 'detached_at', 'detached_by', '_folder_wait', '_placement_folder',
     '_conversation_prepare',  # a turn saved across Restart still owes its first step in the worker that runs it
 )
 
 def _saved_pending_task(row: dict) -> dict:
-    """A saved PENDING row's task with the queue time its outer row keeps (#1805).
-
-    The outer value decides, an explicit null included; only a row without one
-    falls back to a nested copy. Text and a finite epoch (``direct_pause.retain_direct_hold``
-    stamps one) are known; a time no row kept stays unknown (``None``), never this restore's clock.
+    """A saved PENDING row's task with the queue time its outer row keeps (#1805) and the carrier record a previous
+    release's row lacks, from its own result (``conversation_lane.saved_carrier``, #2870). The outer value decides,
+    an explicit null included; only a row without one falls back to a nested copy. Text and a finite epoch
+    (``direct_pause.retain_direct_hold`` stamps one) are known; a time no row kept stays unknown (``None``), never
+    this restore's clock.
     """
     task = dict(row["task"])
     value = row["queued_at"] if "queued_at" in row else task.get("queued_at")
     known = (isinstance(value, str) and value.strip()) or (
         isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0)
-    task["queued_at"] = value if known else None
-    return task
+    from supervisor.conversation_lane import saved_carrier
+    return {**task, "queued_at": value if known else None, **saved_carrier(task, _queue().DRIVE_ROOT)}
 
 
 def parse_iso_to_ts(iso_ts: str) -> Optional[float]:
@@ -193,10 +193,9 @@ def _fence_snapshot_running_rows(rows: Any, *, restored_ids: "set[str]") -> "lis
     not_found and write nothing, leaving the boot notice naming a cancellation
     that never happens. Returns the fenced task ids.
     """
-    from ouroboros.cancel_intents import has_active_intent, request_cancel
-    from ouroboros.task_results import (
-        _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED, load_task_result,
-    )
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED, load_task_result
+    from supervisor.ended_work_helpers import restore_custody_owns
 
     fenced: list[str] = []
     unreadable: list[str] = []
@@ -222,8 +221,8 @@ def _fence_snapshot_running_rows(rows: Any, *, restored_ids: "set[str]") -> "lis
             status = str(stored.get("status") or "")
             if status in _TRULY_TERMINAL_STATUSES or status == STATUS_CANCEL_REQUESTED:
                 continue
-            if has_active_intent(_queue().DRIVE_ROOT, task_id, strict=True):
-                continue  # cancellation custody already owns this row
+            if restore_custody_owns(_queue().DRIVE_ROOT, task_id, running=True):
+                continue  # cancellation custody already owns this row (a closure owns only a parked one)
             intent = request_cancel(
                 _queue().DRIVE_ROOT, task_id,
                 reason="server_shutdown", source="snapshot_restore",
@@ -293,7 +292,7 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                                           budget_hold_fact, hold_budget_row, hold_restored_budget_pause)
     from supervisor.restart_retention import (fresh_return_transaction, hold_after_stop, hold_for_owner_restart,
                                               hold_stopped_queue, never_started, park_saved_pause, pause_ids,
-                                              recover_saved_running, returned_before_body,
+                                              continues_saved_step, recover_saved_running, returned_before_body,
                                               retained_pending, HOLD_SAVED_SLEEP_RECOVERY, unseen_pause)
     from supervisor.schedule_occurrence import first_attempt, first_dispatch_unsent, restore_verdict
     from supervisor.task_admission import SEED_RETURN
@@ -494,8 +493,9 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                                          persist_result=returned is not None)
             elif kept:
                 row = task
-            elif str(task.get("id") or "") in returning_queue and (saved_or_accepted and schedule_replay or recheck):
-                row = task  # the fresh Restart returns it: ordinary admission, at any age
+            elif str(task.get("id") or "") in returning_queue and (saved_or_accepted and (schedule_replay or (
+                    verdict == "possible" and continues_saved_step(task, _queue().DRIVE_ROOT))) or recheck):
+                row = task  # the fresh Restart returns it, or its own saved step past a schedule's ``possible`` (#3192)
             elif owner_restart and (returned or returned is None):
                 row = hold_stopped_queue(dict(task), _queue().DRIVE_ROOT, stop_door, proof=returned,
                                          persist_result=returned is not None)
@@ -1099,12 +1099,10 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
                         skip_revival = True
                     elif not isinstance(task.get("_terminalization_retry"), dict):
                         try:
-                            from ouroboros.cancel_intents import has_active_intent
+                            from supervisor.ended_work_helpers import restore_custody_owns
 
-                            if has_active_intent(
-                                _queue().DRIVE_ROOT, str(task.get("id")), strict=True,
-                            ):
-                                # Cancellation custody owns it; never revive a pending row.
+                            if restore_custody_owns(_queue().DRIVE_ROOT, str(task.get("id"))):
+                                # Cancellation custody owns it; never revive a pending row (a parked closure's returns).
                                 skip_revival = True
                         except Exception:
                             # This is an UNKNOWN cancel fact, not a terminal

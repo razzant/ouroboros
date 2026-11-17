@@ -511,8 +511,8 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
     // Every still-held message (or only `ids`) whose bubble is in the feed: a plain saved mark ends it; anything else offers the actions.
     function unsettle(ids = [...frames.keys()]) {
         for (const id of ids) {
-            const bubble = bubbleOf(id);
-            if (!bubble) continue;  // not in the feed now: still unsaved, the frame stays
+            const bubble = frames.has(id) && bubbleOf(id);
+            if (!bubble) continue;  // settled meanwhile, or not in the feed now: still unsaved, the frame stays
             if (bubble.querySelector('[data-ingress-saved]')?.dataset.ingressSaved === '') forget(id);
             else if (!frames.get(id).queued) onDomWrite(() => mark(id, bubble));  // the socket's own queue still holds a queued one
         }
@@ -551,6 +551,8 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         },
         /** The socket closed or a frame was refused: every still-unsaved sent message in the feed says so. */
         unsettle,
+        /** What a disconnect now puts in doubt: the held messages the socket has written (a queued one is the queue's). */
+        written: () => [...frames].filter(([, entry]) => !entry.queued).map(([id]) => id),
         /** After a reload's first history read (or its failure): a kept message it did not settle (nor show
          *  `ingress_pending`) shows its bubble again from the kept words and views if the read did not, then its doubt.
          *  A message this page sent while that read was pending is not in doubt: the read predates it. */

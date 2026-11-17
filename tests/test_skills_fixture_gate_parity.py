@@ -18,7 +18,7 @@ UI_REASONS = re.findall(r"'([^']+)'", re.search(
 
 @pytest.fixture(autouse=True)
 def not_cyber(monkeypatch):
-    monkeypatch.setattr("ouroboros.tools.review_helpers.review_enforcement_blocks", lambda _: True)
+    monkeypatch.setattr("ouroboros.tools.review_helpers.cyber_review_authority", lambda: False)
 
 
 def gates(value):
@@ -34,10 +34,10 @@ def gates(value):
 
 
 def test_every_fixture_review_gate_uses_real_host_keys():
-    basic = skill_review_gate("pending", enforcement="blocking")
+    basic = skill_review_gate("pending")
     author = build_author_disposition(disposition="accepted", rationale="checked",
                                       subject_hash="d" * 64, enforcement="advisory", action="finish")
-    extended = skill_review_gate("clean", enforcement="advisory", findings=[],
+    extended = skill_review_gate("clean", findings=[],
                                  author_disposition=author, current_hash="d" * 64)
     count = 0
     for path in (ROOT / "web/tests/fixtures").rglob("*.json"):
@@ -61,11 +61,11 @@ def test_every_ui_acceptance_reason_is_emitted_for_exact_bytes(subtests, monkeyp
                 acceptance["owner_edit_digest"] = "d" * 64
             cyber = reason == "self_check"  # Ouroboros's own check admits bytes only under Cyber Pro
             if cyber:
-                outside = skill_review_gate("pending", enforcement="blocking", current_hash="d" * 64, acceptance=acceptance)
+                outside = skill_review_gate("pending", current_hash="d" * 64, acceptance=acceptance)
                 assert outside["blocking_reason"] != reason and outside["executable_review"] is False
-                monkeypatch.setattr("ouroboros.tools.review_helpers.review_enforcement_blocks", lambda _: False)
-            current = skill_review_gate("pending", enforcement="blocking", current_hash="d" * 64, acceptance=acceptance)
-            changed = skill_review_gate("pending", enforcement="blocking", current_hash="e" * 64, acceptance=acceptance)
+                monkeypatch.setattr("ouroboros.tools.review_helpers.cyber_review_authority", lambda: True)
+            current = skill_review_gate("pending", current_hash="d" * 64, acceptance=acceptance)
+            changed = skill_review_gate("pending", current_hash="e" * 64, acceptance=acceptance)
             assert (current["blocking_reason"], current["executable_review"]) == (reason, True)
             assert changed["blocking_reason"] != reason and changed["executable_review"] is cyber
 

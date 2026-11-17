@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ouroboros.artifacts import attachment_manifest_projection, resolve_attachment_manifest
-from ouroboros.config import get_max_subagent_depth, runtime_settings
+from ouroboros.config import get_max_subagent_depth
 from ouroboros.consciousness_authority import consciousness_origin_metadata
 from ouroboros.depth_evidence import parse_task_depth
 from ouroboros.dialogue_provenance import presence_binding_authority_metadata
@@ -36,7 +36,7 @@ from ouroboros.subagent_history import snapshot_handle
 from ouroboros.subagent_runtime import (
     SubagentSelectionError,
     _require_room_subagents,
-    effective_runtime_subagent_settings,
+    runtime_subagent_settings,
     select_subagent_snapshot,
 )
 from ouroboros.subagent_work_order import declared_words_fact
@@ -296,17 +296,20 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     leaf_scope_note = ""
     if route_kind == "agent_session" and not write_surface:
         selected = emission.get("input_files")
-        selected_note = " Selected input_files are retained; preparation is not a read." if selected else ""
+        selected_note = (" Selected input_files replace automatic folderless lineage copies; they are retained, "
+                         "and preparation is not a read." if selected else "")
         workspace = str(emission.get("workspace_root") or "").strip()
         if workspace:
             leaf_scope_note = f"\nagent_session selected source: workspace_root={workspace}; one directory."
         else:
             intent = emission.get("resource_intent") or {}
-            source = ("folderless task/artifact lineage and selected files" if intent.get("kind") == "explicit_none"
+            source = (("folderless selected files" if selected else "folderless task/artifact lineage")
+                      if intent.get("kind") == "explicit_none"
                       else "inherited repository/folder")
             leaf_scope_note = f"\nagent_session selected source: {source}."
         leaf_scope_note += (" First start confirms the scope or private checking copy; supervisor read roots "
-                            "are not a leaf-access guarantee. Prompt-only paths are not prepared." + selected_note)
+                            "are not a leaf-access guarantee. Native/nanny tools are not automatically leaf session "
+                            "tools. Prompt-only paths are not prepared." + selected_note)
     if write_surface in {"self_worktree", "genesis"}:
         write_note = f"\nwrite root: provisioned for this child at admission ({write_surface})"
     elif not write_surface:
@@ -805,9 +808,11 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         from ouroboros.supervisor_route import capture_cognitive_route
 
         _require_room_subagents()
-        settings = effective_runtime_subagent_settings(runtime_settings(settings_reader=_ctl().load_settings))
+        settings = runtime_subagent_settings(settings_reader=_ctl().load_settings)
+        from ouroboros.supervisor_route import work_tier
+
         configured_subagent, legacy_selection = select_subagent_snapshot(
-            settings,
+            settings, work_tier=work_tier(ctx, settings),
             subagent_id=str(params.get("subagent_id") or ""), access=params.get("access"),
             legacy_model_lane=params.get("model_lane"),
             legacy_executor=params.get("executor"),

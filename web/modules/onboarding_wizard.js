@@ -1,7 +1,7 @@
 // The served wizard shares the SPA's escaping, request, login and status owners.
 import { fetchJson } from './api_client.js';
 import {
-    agentsStepHtml,
+    accessRowState, agentsStepHtml, mainSourceReason,
     EARLIER_SAVE_KEPT_TEXT,
     EARLIER_SAVE_OTHER_VALUES_TEXT,
     completionAttemptId,
@@ -18,8 +18,8 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
 import { createModelRolesEditor, inheritTargetOf, modelRolesHost, modelRoleMap, parseModelSource } from './model_roles.js';
 import { ALLOW_EMPTY_REVIEW_POOL, PACKET_ONLY_POOL_WARNING, availableSubagentsEditorHost, packetOnlyReviewPool, reviewPoolRows, reviewerTickCaption } from './subagents_settings.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, processingIntentLabel,
-    configuredApiProviders, apiProviderLabel, compatibleEndpoint } from './route_editor_primitives.js';
-import { MODEL_CATALOG_TIMEOUT_MS, mergeModelCatalog, catalogReadState, summarizeReadErrors } from './settings_catalog.js';
+    configuredApiProviders, apiProviderLabel, compatibleEndpoint, connectionDefaults, spendGapsWords } from './route_editor_primitives.js';
+import { mergeModelCatalog, catalogReadState, readDraftCatalog, summarizeReadErrors } from './settings_catalog.js';
 import { accountRows } from './claudexor_status_store.js';
 import { accountRowFacts } from './harness_accounts.js';
 import { createStarterSkillsRow } from './onboarding_starter_skills.js';
@@ -27,6 +27,7 @@ import { createConsciousnessOffer } from './onboarding_consciousness.js';
 import { createConnectionsEditor } from './settings_connections.js';
 import { PROVIDER_CARDS, providerSettingsCard } from './settings_provider_cards.js';
 import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
+import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_policy.js';
 
 (() => {
         // The served wizard document needs its own menu-key binding.
@@ -37,7 +38,6 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         installDesktopShellLinkInterceptor();
         const bootstrap = window.__OURO_ONBOARDING_BOOTSTRAP__ || {};
         const SETUP_CONTRACT = bootstrap.contract || {};
-        const HOST_MODE = bootstrap.hostMode || 'desktop';
         const LOCAL_RUNTIME_CONTROLS = Boolean(bootstrap.supportsLocalRuntimeControls);
         const STEP_ORDER = bootstrap.stepOrder || (SETUP_CONTRACT.steps || []).map((step) => step.id);
         const STEP_META = Object.fromEntries((SETUP_CONTRACT.steps || []).map((step) => [step.id, step]));
@@ -46,17 +46,14 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         // The backend contract exports active slots only. Heavy remains a
         // bounded stored-value migration input and never enters this editor.
         const MODEL_SLOTS = SETUP_CONTRACT.modelSlots || [];
-        const REVIEW_MODES = SETUP_CONTRACT.reviewModes || [];
         const RUNTIME_MODES = SETUP_CONTRACT.runtimeModes || [];
-        // The setup contract owns the access ladder. Pick the matching layout
-        // for its current number of choices so adding Cyber Pro does not leave
-        // the fourth card stranded under a three-column presentation.
-        const RUNTIME_MODE_GRID_CLASS = RUNTIME_MODES.length > 3 ? 'four' : 'three';
+        // The setup contract owns the access ladder (a deployment's ceiling included): one column per choice.
+        const RUNTIME_MODE_GRID_CLASS = ['one', 'two', 'three', 'four'][Math.min(RUNTIME_MODES.length, 4) - 1] || 'four';
         const LOCAL_ROUTING_MODES = SETUP_CONTRACT.localRoutingModes || [];
         const BUDGET_FIELDS = SETUP_CONTRACT.budgetFields || [];
         const LOCAL_FIELDS = [
-            ['local-source', 'localSource', 'Model Source', 'Qwen/Qwen2.5-7B-Instruct-GGUF or /absolute/path/model.gguf', 'Use either a HuggingFace repo ID or a local absolute GGUF path.', 'field field-full'],
-            ['local-filename', 'localFilename', 'GGUF Filename', 'qwen2.5-7b-instruct-q3_k_m.gguf', 'Required only for HuggingFace repo IDs. Leave empty when the source is a direct filesystem path.', 'field field-full'],
+            ['local-source', 'localSource', 'Model Source', 'unsloth/Qwen3.5-9B-GGUF or /absolute/path/model.gguf', 'Use either a HuggingFace repo ID or a local absolute GGUF path.', 'field field-full'],
+            ['local-filename', 'localFilename', 'GGUF Filename', 'Qwen3.5-9B-Q4_K_M.gguf', 'Required only for HuggingFace repo IDs. Leave empty when the source is a direct filesystem path.', 'field field-full'],
             ['local-context', 'localContextLength', 'Context Length', '', '', 'field', 'number', '2048', '1024'],
             ['local-gpu-layers', 'localGpuLayers', 'GPU Layers', '', '', 'field', 'number', '', '1'],
             ['local-chat-format', 'localChatFormat', 'Chat Format', 'Leave empty for auto-detect', '', 'field field-full'],
@@ -77,8 +74,8 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         apiBudgetOpen: false,
         subagentsOpen: false,
         localSourceOpen: Boolean(INITIAL_STATE.localSource),
-        moreProvidersOpen: Boolean(INITIAL_STATE.cloudruKey || INITIAL_STATE.minimaxKey || INITIAL_STATE.deepseekKey
-            || INITIAL_STATE.zaiKey),
+        moreProvidersOpen: PROVIDER_FIELDS.some((field) => field.group === 'more' && field.inputType === 'password'
+            && !field.settingKey.startsWith('OPENAI_COMPATIBLE_') && Boolean(INITIAL_STATE[field.stateKey])),
         localStatusText: 'Status: Offline',
         localStatusTone: 'muted',
         localTestResult: '',
@@ -110,11 +107,16 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     let modelSources = [];
     let modelCatalog = {};
     let catalogRequest = null;
+    let catalogRead = '';  // the access whose catalog was read whole
+    let askedAccess = '';  // the keys, rows and local model the owner last asked the model catalog with (the Models step, Retry)
     let disposed = false;
     let disposeLanguage = null;
     let catalogGeneration = 0;
     const stepScrollPositions = new Map();
-    let suggestedVisionModel = null;
+    // What we proposed, per slot: seeded with the slots no document or operator variable sets (#2969); a slot the
+    // owner edits leaves it, and only one still holding it takes a later proposal: saved values and blanks stay.
+    const proposedModels = Object.fromEntries((INITIAL_STATE.automaticModels || []).map((key) => [key, INITIAL_STATE[key]]));
+    const ours = (key) => key in proposedModels && state[key] === proposedModels[key];
     let connectionsEditor = null;
     let footerObserver = null;
     let compatibleCatalogs = {};
@@ -122,7 +124,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     const starterSkills = createStarterSkillsRow(); // the Summary's Starter skills row keeps its ticks across renders
     const consciousness = createConsciousnessOffer(bootstrap.consciousnessOffer, { onChange: () => render() }); // its one Start waits for the confirmed save
     const modelRoles = createModelRolesEditor({ hostId: 'onboarding-model-roles', onChange: (settings, { slot } = {}) => {
-        if (slot === 'vision') suggestedVisionModel = null;
+        delete proposedModels[MODEL_SLOTS.find((entry) => entry.slot === slot)?.stateKey];  // edited: the owner's now
         adoptModelSettings(settings);
         state.modelsDirty = true;
         markStepEdited();
@@ -132,6 +134,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         return onboardingSettingsDraft({ state, providerFields: PROVIDER_FIELDS,
             budgetFields: BUDGET_FIELDS, modelSlots: MODEL_SLOTS, trim });
     }
+    const openedDraft = draftSettings();  // the access the install had saved when the wizard opened
 
     function adoptModelSettings(settings = {}) {
         MODEL_SLOTS.forEach((slot) => {
@@ -153,59 +156,70 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     }
 
     function clearFreshSubscriptionDefaults() {
-        if (bootstrap.freshInstall !== true || state.modelsDirty || !hasModelSubscription() || hasApiAccess() || hasLocalModel()) return;
+        if (!hasModelSubscription() || hasApiAccess() || hasLocalModel()) return;
         const defaults = MODEL_DEFAULTS.openrouter || {};
         for (const [key, name] of [['mainModel', 'main'], ['lightModel', 'light'], ['fallbackModel', 'fallback']]) {
-            if (state[key] === defaults[name]) state[key] = '';
+            if (ours(key) && state[key] === defaults[name]) state[key] = proposedModels[key] = '';
         }
     }
 
-    function refreshModelSources() {
-        const connected = state.agentsConnected.join(',');
-        if (catalogRequest?.connected === connected) return catalogRequest.promise;
-        catalogRequest?.controller.abort();
+    // The catalog of the draft's access: its keys, rows and local model, which only this draft knows, and the
+    // connected subscriptions. `once` skips an access already read whole (the Models step asks it when it opens).
+    // A read the owner did not ask for (`asked: false`: a preview's answer, a changed account) sends the draft only
+    // while it is the one he last asked with, else the access the wizard opened with: a key or an address typed,
+    // changed or deleted since leaves this page only when the Models step opens or on Retry.
+    function refreshModelSources({ once = false, asked = true } = {}) {
+        const own = (draft) => JSON.stringify([draft.OUROBOROS_CONNECTIONS, PROVIDER_FIELDS.map((field) => draft[field.settingKey]),
+            draft.LOCAL_MODEL_SOURCE, draft.LOCAL_MODEL_FILENAME, draft.LOCAL_MODEL_CONTEXT_LENGTH]);
+        const current = draftSettings();
+        const draft = asked || own(current) === askedAccess ? current : openedDraft;
+        const access = JSON.stringify([state.agentsConnected, own(draft)]);
+        if (asked) askedAccess = own(draft);  // his ask, also when its list is already read or in flight
+        if (catalogRequest?.access === access) return catalogRequest.promise;
+        // A read in flight for another access is no longer wanted, also when this access needs none.
+        catalogRequest?.abort();
         const generation = ++catalogGeneration;
-        if (!connected) { catalogRequest = null; return Promise.resolve(); }
-        const controller = new AbortController();
-        const request = { connected, controller };
-        catalogRequest = request;
-        const timer = setTimeout(() => controller.abort(), MODEL_CATALOG_TIMEOUT_MS);
-        request.promise = fetchJson('/api/model-catalog', { cache: 'no-store', signal: controller.signal })
-            .then((catalog) => {
-                if (!catalog || typeof catalog !== 'object') throw new Error('Model catalog response is unreadable.');
-                if (generation !== catalogGeneration) return;
-                modelCatalog = mergeModelCatalog(modelCatalog, catalog);
-            }).catch((error) => {
-                if (generation !== catalogGeneration) return;
-                modelCatalog = mergeModelCatalog(modelCatalog, { read_state: 'transport',
-                    errors: [{ error: error.name === 'AbortError' ? 'Model catalog request timed out.' : error.message }] });
-            }).finally(() => {
-                clearTimeout(timer);
-                if (generation !== catalogGeneration) return;
-                catalogRequest = null;
-                adoptModelCatalog();
-                refreshSummary();
-            });
+        catalogRequest = null;
+        if ((once && access === catalogRead) || (!state.agentsConnected.length && !hasApiAccess() && !hasLocalModel())) {
+            syncCurrentStepActionState();
+            return Promise.resolve();
+        }
+        const request = catalogRequest = { access, ...readDraftCatalog(draft) };
+        request.promise = request.promise.then((catalog) => {
+            if (generation !== catalogGeneration) return;
+            modelCatalog = mergeModelCatalog(modelCatalog, catalog);
+            catalogRead = catalogReadState(catalog) === 'ok' ? access : '';
+            catalogRequest = null;
+            adoptModelCatalog();
+            refreshSummary();
+        });
         syncCurrentStepActionState();
         return request.promise;
     }
 
     // The reviewers arrive inside the previewed catalog (rows marked Reviewer),
-    // which the Available subagents editor itself adopts.
+    // which the Available subagents editor itself adopts. A proposed model lands only
+    // in a slot still ours, and stays ours: a saved or edited slot, blank included, is kept (#2969).
     function applySetupPreview(response) {
         if (!state.skipSubscriptionPresets) state.presetFailure = null;
         if (!state.modelsDirty && response.model_settings) {
             const previous = JSON.stringify(draftSettings());
-            adoptModelSettings(response.model_settings);
+            MODEL_SLOTS.filter((slot) => slot.settingKey in response.model_settings && ours(slot.stateKey))
+                .forEach((slot) => {
+                    state[slot.stateKey] = proposedModels[slot.stateKey] = response.model_settings[slot.settingKey];
+                });
             if (JSON.stringify(draftSettings()) !== previous) loadModelRoles();
         }
         if (Array.isArray(response.items)) adoptModelCatalog(response);
-        if (state.agentsConnected.length) void refreshModelSources();
+        if (state.agentsConnected.length) void refreshModelSources({ asked: false });
+        state.spendGaps = response.known_spend_gaps;  // what this draft's limits cannot count, said on the limits step
+        state.partlyCounted = response.partly_counted_spend;
         refreshSummary();
     }
 
-    function loadModelRoles() {
-        modelRoles.load(draftSettings(), { ...SETUP_CONTRACT,
+    function loadModelRoles() {  // a Main still on a key that does not serve, among several named ones, asks which (#2969)
+        const { choice } = connectionDefaults(MODEL_DEFAULTS, activeProviderProfile(), draftSettings(), PROVIDER_PROFILES, state.mainModel);
+        modelRoles.load({ ...draftSettings(), _meta: { main_connection_choice: ours('mainModel') ? choice : null } }, { ...SETUP_CONTRACT,
             modelSlots: MODEL_SLOTS.map((slot) => ({ ...slot, settingsToggleId: '' })) });
     }
 
@@ -214,6 +228,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         modelSources = (modelCatalog.model_sources || []).filter((source) => state.agentsConnected.includes(source.credentialHarness));
         clearFreshSubscriptionDefaults();
         modelRoles.adoptCatalog({ ...modelCatalog, model_sources: modelSources }, { connectionCatalogs: compatibleCatalogs });
+        agentsStep?.adoptCatalog({ ...modelCatalog, model_sources: modelSources });
     }
 
     function trim(value) {
@@ -272,10 +287,6 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             return PROVIDER_PROFILES[profile]?.label || PROVIDER_PROFILES.openrouter?.label || 'OpenRouter';
         }
 
-        function reviewLabel(mode) {
-            return optionByValue(REVIEW_MODES, mode).label || 'Advisory';
-        }
-
         function runtimeModeLabel(mode) {
             return optionByValue(RUNTIME_MODES, mode).label || 'Advanced';
         }
@@ -290,28 +301,32 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         return Boolean(validateCurrentStep());
     }
 
+    // The limits step's line: what the last answered preview of this draft could not count; none while a preview failed.
+    const gapsShown = () => (agentsStep?.previewError ? '' : spendGapsWords(state.spendGaps, state.partlyCounted));
+
+    // Its words are composed (data-i18n-fmt): a language change says them again, as Dashboard › Costs does.
+    function paintGaps() {
+        const gaps = document.getElementById('budget-gaps');
+        if (gaps) Object.assign(gaps, { textContent: gapsShown(), hidden: !gapsShown() });
+    }
+
     function syncCurrentStepActionState() {
         const next = document.getElementById('next-btn');
         if (next) next.disabled = nextButtonShouldBeDisabled();
+        paintGaps();
         const quick = document.getElementById('quick-start-btn');
         if (quick) quick.hidden = !hasModelSubscription();
         const error = root.querySelector('.wizard-error');
         if (error) error.textContent = state.error || (['accounts', 'models'].includes(state.currentStep) ? validateCurrentStep() : '');
+        const access = accessRowState({ connected: state.agentsConnected, sources: modelCatalog.model_sources,
+            read: catalogReadState(modelCatalog), checking: Boolean(catalogRequest), readErrors: summarizeReadErrors(modelCatalog.errors),
+            previewError: agentsStep?.previewError, configured: hasApiAccess() || hasLocalModel(), continueBlocked: Boolean(next?.disabled) });
         const note = document.getElementById('onboarding-access-note');
-        if (note) {
-            const read = catalogReadState(modelCatalog);
-            const messages = [catalogRequest ? 'Checking model sources…' : '',
-                !catalogRequest && read !== 'ok' && state.agentsConnected.length
-                    ? `Model discovery is ${read === 'not_read' ? 'not available yet' : read}. ${summarizeReadErrors(modelCatalog.errors)} Your choices are kept.` : '',
-                agentsStep?.previewError ? `Automatic assignments could not be prepared: ${agentsStep.previewError} Retry, or Continue to choose models yourself.` : ''];
-            note.textContent = messages.filter(Boolean).join(' ');
-            note.hidden = !note.textContent;
-        }
+        if (note) Object.assign(note, { textContent: access.note, hidden: !access.note });
         const retry = document.getElementById('onboarding-access-retry');
-        if (retry) {
-            retry.hidden = !state.agentsConnected.length && !agentsStep?.previewError;
-            retry.disabled = Boolean(catalogRequest || agentsStep?.previewPending);
-        }
+        if (retry) Object.assign(retry, { hidden: access.retryHidden, disabled: Boolean(catalogRequest || agentsStep?.previewPending) });
+        const optional = root.querySelector('[data-collapse="api-access"] > summary .selection-badge');
+        if (optional) Object.assign(optional, { textContent: access.badge, hidden: !access.badge });
         const accessRow = document.getElementById('onboarding-access-row');
         if (accessRow) accessRow.hidden = Boolean(note?.hidden && retry?.hidden);
         const recover = document.getElementById('skip-presets-btn');
@@ -341,7 +356,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         if (!presetId) {
             state.localSource = '';
             state.localFilename = '';
-            state.localContextLength = 16384;
+            state.localContextLength = 65536;
             state.localGpuLayers = -1;
             state.localChatFormat = '';
             state.localRoutingMode = 'cloud';
@@ -377,23 +392,16 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         return 'custom';
     }
 
-    function applyModelDefaults(force) {
+    // Our slots take the profile's defaults on the key the draft's proposals name, Main's own once the owner set it.
+    function applyModelDefaults() {
         const localMain = hasLocalModel() && LOCAL_ROUTING_MODES.find((mode) => mode.value === state.localRoutingMode)?.flags?.[0];
-        // Withdraw only our suggestion when Main moves local, even if another
-        // model was edited. A deliberate Vision choice remains the owner's.
-        if (localMain && suggestedVisionModel !== null && state.visionModel === suggestedVisionModel) {
-            state.visionModel = '';
-            suggestedVisionModel = null;
-        }
-        if (state.modelsDirty && !force) return;
-        if (!force && bootstrap.freshInstall !== true && MODEL_SLOTS.some((slot) => trim(INITIAL_STATE[slot.stateKey]))) return;
+        if (localMain && ours('visionModel')) state.visionModel = proposedModels.visionModel = '';  // Vision follows a local Main
         if (hasModelSubscription()) return;
-        const defaults = MODEL_DEFAULTS[activeProviderProfile()] || MODEL_DEFAULTS.openrouter || {};
+        const main = ours('mainModel') ? '' : state.mainModel;
+        const { defaults } = connectionDefaults(MODEL_DEFAULTS, activeProviderProfile(), draftSettings(), PROVIDER_PROFILES, main);
         for (const [key, name] of [['mainModel', 'main'], ['lightModel', 'light'], ['visionModel', 'vision'], ['fallbackModel', 'fallback']]) {
-            state[key] = name === 'vision' && localMain ? '' : defaults[name] || '';
+            if (ours(key)) state[key] = proposedModels[key] = name === 'vision' && localMain ? '' : defaults[name] || '';
         }
-        suggestedVisionModel = state.visionModel;
-        state.modelsDirty = false;
     }
 
         function validateProvidersStep() {
@@ -408,13 +416,12 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             // the owner never touched arrives here unchanged; rejecting it blocks
             // Next/Save on the providers step and the offending value becomes the
             // one value the wizard can never replace.
-            const shortKey = keyValues.find(([field, value]) => field.settingKey !== 'OPENAI_COMPATIBLE_API_KEY' && value && (field.inputType || 'password') === 'password' && value.length < 10 && value !== trim(INITIAL_STATE[field.stateKey]));
+            const shortKey = keyValues.find(([field, value]) => !['OPENAI_COMPATIBLE_API_KEY', 'GIGACHAT_PASSWORD'].includes(field.settingKey) && value && (field.inputType || 'password') === 'password' && value.length < 10 && value !== trim(INITIAL_STATE[field.stateKey]));
             if (shortKey) return `${shortKey[0].label.replace(' API Key', '')} API key looks too short.`;
             const hasRemote = hasApiAccess();
             if (!hasRemote && !localSource && !hasModelSubscription()) {
-                return state.agentsConnected.length
-                    ? 'A Main model source has not been confirmed. Retry discovery, add an API key, or choose a local model.'
-                    : 'Connect Codex, enter an API key, or choose a local model before continuing.';
+                return mainSourceReason(state.agentsConnected, modelCatalog.model_sources,
+                    { snapshot: agentsStep?.snapshot, catalogKnown: agentsStep?.catalogKnown });
             }
             if (trim(state.minimaxRegion) && !['global_en', 'cn_zh'].includes(trim(state.minimaxRegion).toLowerCase())) {
                 return 'MiniMax Region must be global_en or cn_zh.';
@@ -442,11 +449,6 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         return state.currentStep === 'models' ? modelRoles.validate() : '';
     }
 
-    function validateReviewStep() {
-        if (!['advisory', 'blocking'].includes(trim(state.reviewEnforcement))) return 'Choose advisory or blocking review mode.';
-        return '';
-    }
-
     function validateBudgetStep() {
         for (const field of BUDGET_FIELDS) {
             if (hasModelSubscription() && !hasApiAccess() && state[field.stateKey] === '') continue;
@@ -460,7 +462,6 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     function validateCurrentStep() {
         if (state.currentStep === 'accounts') return validateProvidersStep();
         if (state.currentStep === 'models') return validateModelsStep();
-        if (state.currentStep === 'review_mode') return validateReviewStep();
         if (state.currentStep === 'budget') return validateBudgetStep();
         return '';
     }
@@ -469,7 +470,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         const error = validateCurrentStep();
         state.error = error;
         if (error) return syncCurrentStepActionState();
-        if (state.currentStep === 'accounts') applyModelDefaults(false);
+        if (state.currentStep === 'accounts' || state.currentStep === 'models') applyModelDefaults();
         // Preview is enrichment, never a navigation or model-discovery gate. Refresh (also Retry) in the background
         // after a valid draft; it replaces generated rows only and keeps owner-edited models, reviewers and subagents.
         // Finish checks the receipt only if generated rows still own the editor.
@@ -552,7 +553,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             filename: trim(state.localFilename),
             port: 8766,
             n_gpu_layers: parseInt(state.localGpuLayers, 10),
-            n_ctx: parseInt(state.localContextLength, 10) || 16384,
+            n_ctx: parseInt(state.localContextLength, 10) || 65536,
             chat_format: trim(state.localChatFormat),
         };
     }
@@ -583,8 +584,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 ? modelSources.filter((source) => state.agentsConnected.includes(source.credentialHarness))
                     .map((source) => source.label || source.id).join(', ') + ' subscription · no API key'
                 : profileLabel(activeProviderProfile())],
-            ['Review mode', reviewLabel(state.reviewEnforcement)],
-            ['Runtime mode', runtimeModeLabel(state.runtimeMode)],
+            ['Access level', runtimeModeLabel(state.runtimeMode)],
             ...((hasApiAccess() || !hasModelSubscription()) ? [['Total API budget', formatUsd(state.totalBudget)],
                 ['Per-task API cap', formatUsd(state.perTaskCostUsd)]] : []),
             ...(MODEL_SLOTS.some((slot) => trim(state[slot.stateKey]).split(',').some((value) => parseModelSource(value.trim()).source.startsWith('subscription:'))) ? [['When quota runs out', trim(state.fallbackModel) ? 'Tries the Fallback, then waits for the reset' : 'Waits for the reset, then continues']] : []),  // a subscription serves a slot
@@ -670,16 +670,16 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     }
     function mainBinding() { return JSON.stringify([state.mainModel, state.modelAccounts.main || '', state.modelProcessingPreferences?.main || state.processingPreference || '']); }
 
-        function providerKeyField({ id, label, placeholder, stateKey, note, inputType }) {
-            const type = inputType || 'password';
+        function providerKeyField({ id, label, placeholder, stateKey, note, inputType, settingKey }) {
+            const type = inputType || 'password', fixed = checkerFieldsNote(checkerReads(bootstrap.deployment, settingKey) ? [label] : []);
             return `
                 <div class="field ui-field">
                 <div class="field-label-row">
                     <label for="${escapeHtml(id)}">${escapeHtml(label)}</label>
-                    <button class="field-clear" data-clear="${escapeHtml(id)}" type="button" aria-label="Clear ${escapeHtml(label)}">Clear</button>
+                    ${fixed ? '' : `<button class="field-clear" data-clear="${escapeHtml(id)}" type="button" aria-label="Clear ${escapeHtml(label)}">Clear</button>`}
                 </div>
-                <input id="${escapeHtml(id)}" class="ui-control" type="${escapeHtml(type)}" aria-describedby="${escapeHtml(id)}-help" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(state[stateKey])}">
-                <div id="${escapeHtml(id)}-help" class="field-note ui-field-help">${escapeHtml(note)}</div>
+                <input id="${escapeHtml(id)}" class="ui-control" type="${escapeHtml(type)}"${fixed || note ? ` aria-describedby="${escapeHtml(id)}-help"` : ''} placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(state[stateKey])}"${fixed ? ' readonly' : ''}>
+                ${fixed || note ? `<div id="${escapeHtml(id)}-help" class="${fixed ? 'wizard-inline-note' : 'field-note ui-field-help'}" data-checker-field="${fixed ? '1' : ''}">${escapeHtml(fixed || note)}</div>` : ''}
             </div>
             `;
         }
@@ -761,7 +761,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 isVisible: () => ['accounts', 'models', 'budget'].includes(state.currentStep),
                 onChange: (connected) => {
                     state.agentsConnected = connected;
-                    void refreshModelSources();
+                    void refreshModelSources({ asked: false });
                     syncCurrentStepActionState();
                 },
                 previewPayload: draftSettings,
@@ -785,15 +785,14 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         return `
             <div class="step-header"><div>
                 <h2 class="step-title">Accounts</h2>
-                <p class="step-copy">Start with Codex, or connect API access. You can add more accounts any time.</p>
             </div></div>
             ${agentsStepHtml({ compact: true, showRoster: false })}
             <div id="onboarding-access-row" class="wizard-access-row" hidden>
                 <div id="onboarding-access-note" class="wizard-inline-note" role="status" hidden></div>
                 <button id="onboarding-access-retry" class="btn btn-default" type="button" hidden>Retry model discovery</button>
             </div>
-            <details class="wizard-collapse" data-collapse="api-access" ${state.apiAccessOpen || hasApiAccess() ? 'open' : ''}>
-                <summary><span>API keys and local models</span><span class="selection-badge">${hasApiAccess() ? 'Configured' : 'Optional'}</span></summary>
+            <details class="wizard-collapse" data-collapse="api-access" ${state.apiAccessOpen || hasApiAccess() || hasLocalModel() ? 'open' : ''}>
+                <summary><span>API keys and local models</span><span class="selection-badge">${hasApiAccess() || hasLocalModel() ? 'Configured' : 'Optional'}</span></summary>
                 <div class="wizard-collapse-body">${renderProvidersStep()}</div>
             </details>
         `;
@@ -802,7 +801,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     async function reviewAndStart() {
         if (validateProvidersStep()) return;
         state.error = '';
-        applyModelDefaults(false);
+        applyModelDefaults();
         const originStep = state.currentStep;
         const ready = await agentsStep.refreshSubagentsPreview({ force: true });
         if (state.currentStep !== originStep) return;
@@ -867,7 +866,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
 
     function reviewersNote() {
         const count = reviewPoolRows(catalogDraft()).length;
-        if (count) return `Reviewers: ${count} — the rows marked Reviewer under Models → Available subagents. ${reviewerTickCaption(state.reviewEnforcement, state.runtimeMode)}`;
+        if (count) return `Reviewers: ${count} — the rows marked Reviewer under Models → Available subagents. ${reviewerTickCaption(state.runtimeMode)}`;
         if (agentsStep?.previewError) return 'Automatic reviewers are unavailable. Mark rows as Reviewer under Models → Available subagents, or use Main on the summary.';
         return (catalogDraft()?.items || []).length ? 'No row is marked Reviewer, so the main model reviews alone. Mark rows under Models → Available subagents for a second opinion.'
             : 'Reviewers will be prepared from your connected access.';
@@ -875,9 +874,8 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
 
     function renderReviewModeStep() {
         const runtimeMode = trim(state.runtimeMode) || 'advanced';
-        const runtimeModeCopy = HOST_MODE === 'desktop'
-            ? 'Separate axis from review enforcement. This first-run choice becomes the boot baseline before Ouroboros starts; later elevation requires native launcher confirmation.'
-            : 'Separate axis from review enforcement. Web/Docker onboarding saves this through the owner endpoint; the selected mode becomes active after restart.';
+        const runtimeModeCopy = 'How far Ouroboros reaches into its own code and this computer.';
+        const accessBound = deploymentNote(bootstrap.deployment, 'access');  // a constraint, kept on compact screens too
         return `
             <div class="step-header">
                 <div>
@@ -886,18 +884,10 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 </div>
                 </div>
                 <div class="wizard-inline-note" data-reviewers-note>${escapeHtml(reviewersNote())}</div>
-                <div class="wizard-choice-grid">
-                    ${REVIEW_MODES.map((mode) => `
-                        <button type="button" class="wizard-choice ${escapeHtml(mode.className || mode.value)} ${state.reviewEnforcement === mode.value ? 'active' : ''}" data-review-mode="${escapeHtml(mode.value)}" aria-pressed="${state.reviewEnforcement === mode.value}">
-                            <span class="tone">${escapeHtml(mode.tone)}</span>
-                            <h3>${escapeHtml(mode.label)}</h3>
-                            <p>${escapeHtml(mode.copy)}</p>
-                        </button>
-                    `).join('')}
-                </div>
             <div class="panel-card runtime-mode-card">
                 <h3>Access level</h3>
                     <p class="field-note">${escapeHtml(runtimeModeCopy)}</p>
+                    ${accessBound ? `<div class="wizard-inline-note" data-access-bound>${escapeHtml(accessBound)}</div>` : ''}
                     <div class="wizard-choice-grid ${RUNTIME_MODE_GRID_CLASS}">
                         ${RUNTIME_MODES.map((mode) => `
                             <button type="button" class="wizard-choice ${escapeHtml(mode.className || mode.value)} ${runtimeMode === mode.value ? 'active' : ''}" data-runtime-mode="${escapeHtml(mode.value)}" aria-pressed="${runtimeMode === mode.value}">
@@ -909,11 +899,10 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                     </div>
                 <div class="field ui-field">
                     <div class="field-label-row">
-                        <label for="skills-repo-path">External skills repo (optional)</label>
-                        <button class="field-clear" data-clear="skills-repo-path" type="button" aria-label="Clear external skills repo">Clear</button>
+                        <label for="skills-repo-path">Folder of your own skills (optional)</label>
+                        <button class="field-clear" data-clear="skills-repo-path" type="button" aria-label="Clear the skills folder">Clear</button>
                     </div>
-                    <input id="skills-repo-path" class="ui-control" type="text" aria-describedby="skills-repo-path-help" placeholder="~/Ouroboros/skills or /absolute/path/to/skills" value="${escapeHtml(state.skillsRepoPath || '')}">
-                    <div id="skills-repo-path-help" class="field-note ui-field-help">Optional. Extra discovery root on top of the in-data-plane <code>data/skills/{native,clawhub,external}/</code> tree. Leave empty if you do not maintain your own skills checkout — Ouroboros never clones/pulls this directory.</div>
+                    <input id="skills-repo-path" class="ui-control" type="text" placeholder="~/Ouroboros/skills or /absolute/path/to/skills" value="${escapeHtml(state.skillsRepoPath || '')}">
                 </div>
             </div>
         `;
@@ -942,7 +931,8 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                         </div>
                     `).join('')}
                 </div>
-                ${budgetNote ? `<div id="budget-fields-help" class="field-note ui-field-help budget-shared-note">${escapeHtml(budgetNote)}</div>` : ''}
+                <div id="budget-gaps" class="field-note ui-field-help" data-i18n-fmt="spend gaps"${gapsShown() ? '' : ' hidden'}>${escapeHtml(gapsShown())}</div>
+                ${budgetNote ? `<div id="budget-fields-help" class="field-note ui-field-help">${escapeHtml(budgetNote)}</div>` : ''}
                 </details>
             `;
         }
@@ -971,7 +961,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 </div>
             </div>
             <div class="summary-card"><div data-starter-skills></div><div data-consciousness-offer></div><div class="summary-card-rows">${summaryRowsHtml()}</div></div>
-            ${state.reviewEnforcement === 'blocking' && trim(state.runtimeMode) !== 'cyber_pro' && packetOnlyReviewPool(catalogDraft())
+            ${packetOnlyReviewPool(catalogDraft())
                 ? `<div class="wizard-inline-note" data-tone="warn" data-review-pool-warning>${escapeHtml(PACKET_ONLY_POOL_WARNING)}</div>` : ''}
             ${languageBlockHtml({ onboarding: true })}
             ${state.recoveryPrepared ? `<div class="wizard-inline-note">Automatic subscription presets were skipped. ${state.recoveryMain === mainBinding() ? 'Reviewers were assigned to Main.' : 'Main changed; reviewers keep the assignments shown above. Use Main for reviewers again if you want to update them.'} Check the assignments, then Start Ouroboros to save this draft. Later changes in Settings are manual.</div>` : ''}
@@ -987,12 +977,10 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 </div>
             </div>
             <div class="panel-card">
-                <h3>Runtime mode takes effect at the next boot</h3>
-                <div class="wizard-inline-note">Ouroboros saved <code>${escapeHtml(state.completedRestartMode)}</code> as the runtime mode for the next boot, but this
-                process is still running the mode it started with. Restart Ouroboros to run in the mode you chose.
-                Opening the app now works — it simply runs in the previous mode until you do.</div>
+                <h3>${escapeHtml(runtimeModeLabel(state.completedRestartMode))} access applies from the next start</h3>
+                <div class="wizard-inline-note">Until you restart Ouroboros, it keeps the access level it started with.</div>
                 <div class="wizard-runtime-strip">
-                    <button type="button" class="btn btn-primary" id="open-app-btn">Open Ouroboros in the current mode</button>
+                    <button type="button" class="btn btn-primary" id="open-app-btn">Open Ouroboros now</button>
                 </div>
             </div>
         `;
@@ -1045,7 +1033,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                     ${state.completedRestartMode || consciousness.running() ? '' : `
                     <div class="wizard-footer">
                         <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
-                        <div class="footer-copy">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
+                        <div class="footer-copy${saveUnknown ? ' footer-warning' : ''}">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
                         <div class="footer-actions">
                             <button class="btn btn-default" id="back-btn" type="button" ${index === 0 || state.saving || state.preparingRecovery ? 'disabled' : ''}>Back</button>
                             ${state.currentStep === 'accounts' ? `<button class="btn btn-default" id="quick-start-btn" type="button" ${hasModelSubscription() ? '' : 'hidden'}>Review &amp; start</button>` : ''}
@@ -1156,7 +1144,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             }
             // The card's own fields first, as Settings does: load() binds each row it mounts.
             bindSecretInputs(panel);
-            connectionsEditor.load(draftSettings(), { modelSlots: MODEL_SLOTS });
+            connectionsEditor.load({ ...draftSettings(), _meta: { policy_state: { deployment: bootstrap.deployment } } }, { modelSlots: MODEL_SLOTS });
             // Back remounts the draft, not a saved document. Show and Test must still
             // use edited values locally rather than look up an unsaved row's key.
             panel.querySelectorAll('[data-connection-row][data-uid]').forEach((row) => {
@@ -1225,8 +1213,8 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                     if (resp.status === 412 && data.error === 'runtime_missing') {
                         setLocalTestResult(
                             'Local runtime (llama-cpp-python) is not installed.\n' +
-                            'Go to Settings → Advanced → Local Model Runtime\n' +
-                            'and click "Install Local Runtime".\n\n' +
+                            'Go to Settings › Models › Local model\n' +
+                            'and press "Install the local runtime".\n\n' +
                             'Manual: ' + (data.hint || 'pip install llama-cpp-python[server]'),
                             'error'
                         );
@@ -1306,6 +1294,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         loadModelRoles();
         modelRoles.mount();
         adoptModelCatalog();
+        void refreshModelSources({ once: true });
         agentsStep?.mount();
         agentsStep?.setProcessingPreference(state.processingPreference);
         syncCurrentStepActionState();
@@ -1327,7 +1316,6 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     }
 
     function bindReviewModeStep() {
-        bindChoices('data-review-mode', 'reviewEnforcement');
         bindChoices('data-runtime-mode', 'runtimeMode');
         const skillsInput = document.getElementById('skills-repo-path');
         if (skillsInput) skillsInput.addEventListener('input', () => { state.skillsRepoPath = skillsInput.value; markStepEdited(); });
@@ -1360,6 +1348,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 type: 'ouroboros:onboarding-complete',
                 restart_required: restartRequired,
                 runtime_mode: runtimeMode,
+                runtime_label: runtimeModeLabel(runtimeMode),
             }, targetOrigin);
             return;
         }
@@ -1488,7 +1477,6 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         if (state.saving || state.preparingRecovery) return;
         const providersError = validateProvidersStep();
         const modelsError = validateModelsStep();
-        const reviewError = validateReviewStep();
         const budgetError = validateBudgetStep();
         agentsStep?.noteSaveAttempt?.();
         const subagentsError = agentsStep?.validateSubagents?.()?.[0] || '';
@@ -1498,7 +1486,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 : `Available subagents could not be refreshed from your latest setup choices${agentsStep.previewError ? `: ${agentsStep.previewError}` : '.'}`)
             : '';
         state.error = (state.skipSubscriptionPresets && !state.recoveryPrepared ? 'Use Main for reviewers to prepare the assignments before saving.' : '')
-            || providersError || modelsError || reviewError || budgetError
+            || providersError || modelsError || budgetError
             || subagentsError || previewError;
         if (state.error) return syncCurrentStepActionState();
         state.saving = true;
@@ -1576,17 +1564,19 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         syncCurrentStepActionState();
     }
 
-    applyModelDefaults(false);
+    applyModelDefaults();
     root.addEventListener('focusin', clearFooterOnFocus);
+    window.addEventListener('ouro:language-changed', paintGaps);
     window.addEventListener('pagehide', (event) => {
         consciousness.leave();  // every departure retires a Start not sent yet; the form itself survives the back/forward cache
         if (event.persisted) return;
         disposed = true;
         consciousness.dispose();
         root.removeEventListener('focusin', clearFooterOnFocus);
+        window.removeEventListener('ouro:language-changed', paintGaps);
         disposeLanguage?.();
         catalogGeneration += 1;
-        catalogRequest?.controller.abort();
+        catalogRequest?.abort();
         modelRoles.destroy();
         connectionsEditor?.destroy();
         footerObserver?.disconnect();

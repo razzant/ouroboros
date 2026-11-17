@@ -10,6 +10,7 @@ import pytest
 from ouroboros.gateway import host_service
 from ouroboros.presence_runner import PresenceTurnGate, presence_turn_task_id, run_presence_turn
 from ouroboros.task_results import load_task_result, write_task_result
+from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 from tests.test_host_service_responsiveness import _event, _presence_app, _request, _turn
 from tests.test_presence_lane_rows import _checkpoint
 from tests.test_presence_moved_lifecycle import _boot_window_row, _seed_and_built, root as root
@@ -59,6 +60,7 @@ def _host(tmp_path, *, cause="unknown", child=False, proof=False):
     return app, binding, ctx, started
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_retained_receipt_releases_next_event_preserves_original_and_late_child(tmp_path):
     app, binding, ctx, started = _host(tmp_path, child=True)
     old = presence_turn_task_id(binding, "old")
@@ -101,6 +103,7 @@ def test_retained_receipt_releases_next_event_preserves_original_and_late_child(
 
 
 @pytest.mark.parametrize("proof,disposition", [(False, "retained"), (True, "retry")])
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_only_source_bound_no_start_proof_keeps_quota_event_retryable(tmp_path, proof, disposition):
     app, binding, _, started = _host(tmp_path, cause="quota", proof=proof)
     for _ in range(2):
@@ -112,6 +115,7 @@ def test_only_source_bound_no_start_proof_keeps_quota_event_retryable(tmp_path, 
 
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_work_poll_distinguishes_live_then_retained_lost_turn_and_late_terminal(tmp_path):
     """One real Host author: live pending, lost retained uncertainty, then its canonical late answer."""
     from concurrent.futures import ThreadPoolExecutor

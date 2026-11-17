@@ -28,6 +28,7 @@ from ouroboros.llm_attempt import effort_request_facts
 from ouroboros.llm_claudexor import _usage as managed_usage
 from supervisor.events_budget import _handle_llm_usage
 from tests.test_delegated_activity_browser import engine_ui as engine_ui
+from tests.test_design_system_gate_browser import open_nav
 from tests.test_subscription_setup_browser import capture
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 from tests._usage_store_testing import root as root
@@ -100,14 +101,19 @@ def _disclosed(page, selector: str) -> list[str]:
 
 
 def _navigate(page, target: str):
-    if page.viewport_size["width"] < 700:  # The rail is an off-canvas drawer on phones.
-        page.locator('[data-mobile-nav-toggle]:visible').first.click()
-    page.click(f'[data-nav-page="{target}"]')
+    open_nav(page, target)
 
 
 def _open_logs(page):
     _navigate(page, "dashboard")
+    # DESIGN "Navigation": Dashboard is a section; Logs is one of its pages.
+    logs_row = page.locator('[data-dashboard-tab="logs"]')
+    if logs_row.is_visible():
+        logs_row.click()
     page.wait_for_selector('#page-logs', state="visible")
+    # Shown, Logs reads its recent history (logs.js): a reloaded page has no task card until that read has landed.
+    page.wait_for_function("""() => !document.querySelector('.logs-history-status')?.textContent.includes('Loading')
+        && Boolean(document.querySelector('#log-entries .log-task-card'))""")
     for details in page.locator('#log-entries .log-task-details').all():
         if details.get_attribute('open') is None:
             details.locator(':scope > summary').click()

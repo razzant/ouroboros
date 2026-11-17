@@ -39,6 +39,17 @@ A visible toolbar stays as an opaque band over a full-screen page, so it hides o
 ends the exit with the toolbar hidden again, one set during the exit too, so it is shown again once
 the window is out; the style mask never changes in full screen.
 
+The window's full-screen phase is AppKit's four notifications, observed from ``before_show`` with or without the
+document script, and its two failures, which AppKit sends only to the window's delegate: a small delegate stands in
+front of pywebview's, forwarding what that one answers, and gives it back on close. A failure is a hint the live style
+mask checks (macOS also says a succeeding exit failed). A warm source handoff replaces this process only from the main
+thread, in the turn that found every window out of full screen (``transfer_when_windowed``): once no window refuses, one
+in full screen is asked once to leave, and the handoff follows its DidExit (isolated macOS 26.4 probes saw an exec in
+full screen leave its Space briefly windowless, one after DidExit not). No window, or one no ``before_show`` has
+registered (not yet shown, or the setup window), refuses at once, before anything is queued; one hidden in full screen,
+a failed exit, a Stop before the windows agree, or no confirmation within ``MACOS_HANDOFF_FULLSCREEN_WAIT_SEC`` also
+keeps the running shell: nothing is torn down.
+
 The window's appearance follows the document's painted ``data-theme-choice`` (``data-theme`` for a
 page without one): Light and Dark force Aqua or DarkAqua on this window only, System and an unthemed
 page inherit. The window's appearance is also its page's ``prefers-color-scheme``, so forcing the
@@ -59,6 +70,17 @@ surface, opaque white by default, covers it on every host until a page paints (h
 and WebKitGTK 2.50.4; a head-blocked ``html=`` document still showed the theme's colour). ``paint_room``
 gives that surface the room of the palette the theme resolved; a subsequent hosted run observed it
 before the held URL's page painted.
+
+On Windows a window can open larger than its screen shows. pywebview 5.4 gives the WinForms form the size and minimum
+it was asked for, the form scales both by the display's DPI (``AutoScaleMode.Dpi``), and a form taller than its screen's
+working area (the screen less the taskbar) opens top-aligned, its bottom edge under the taskbar and the setup window's
+Continue with it: both desktop windows already on a 1366×768 laptop at 100 %, more so at a larger scale.
+``fit_to_work_area`` hooks the form's ``Load`` and, once, its ``Shown``, because which of ``Load`` and the DPI scaling
+comes first is unproven: each lowers the minimum where it exceeds the area (WinForms otherwise restores it), then sizes
+the form to the area at most and moves it inside, in the form's own pixels. A form that lies inside is not touched,
+nothing is maximized or shown, and a failure is logged and never keeps the window from opening. macOS and Linux are left
+to their window managers (not measured here). The home test's native case measures a real window; it is opt-in and
+needs Windows with pywebview and pythonnet, which ``.github/workflows/desktop-window.yml`` provides (100 % scale only).
 """
 
 from __future__ import annotations
@@ -67,14 +89,17 @@ import json
 import logging
 import math
 import sys
-from typing import Any, Optional
+import threading
+from typing import Any, Callable, Optional
 
 from ouroboros.launcher_appearance import NativeAppearance, host_palette, palette_of_background
+from ouroboros.runtime_limits import MACOS_HANDOFF_FULLSCREEN_WAIT_SEC
 
 log = logging.getLogger("launcher.window_chrome")
 
 _MACOS = sys.platform == "darwin"
 _LINUX = sys.platform.startswith("linux")
+_WINDOWS = sys.platform == "win32"
 HANDLER = "ouroborosWindowChrome"
 WORLD = "ouroboros-window"
 TOOLBAR = "ouroboros-window-chrome"
@@ -90,6 +115,11 @@ _SEPARATOR_NONE = 1  # NSTitlebarSeparatorStyleNone
 _TABBING_DISALLOWED = 2
 _LEFT_MOUSE_DOWN, _LEFT_MOUSE_UP, _LEFT_MOUSE_DRAGGED = 1, 2, 6
 _BUTTONS = (0, 1, 2)  # close, miniaturize, zoom
+_FULL_SCREEN = 1 << 14  # NSWindowStyleMaskFullScreen
+# AppKit's full-screen notifications, each with the phase it begins; its failures are delegate messages only.
+_PHASES = (("NSWindowWillEnterFullScreenNotification", "entering"), ("NSWindowDidEnterFullScreenNotification", "full"),
+           ("NSWindowWillExitFullScreenNotification", "exiting"), ("NSWindowDidExitFullScreenNotification", "windowed"))
+_FAILED_ENTER, _FAILED_EXIT = "windowDidFailToEnterFullScreen:", "windowDidFailToExitFullScreen:"
 # System Settings → Desktop & Dock → "Double-click a window's title bar to", in the global defaults domain.
 # Undocumented by Apple; Chromium's native_widget_mac_nswindow.mm uses these words and guarded
 # _zoomFill: (source inspected 2026-10-17). Selector presence cannot guarantee future semantics.
@@ -170,6 +200,8 @@ DOCUMENT_SCRIPT = r"""(() => {
 """ % {"handler": HANDLER, "integrated": INTEGRATED}
 
 _classes: dict = {}  # Objective-C class names are process-wide: the handler class is defined once
+_tracked: list = []  # WindowChrome observing its window's full-screen phase: from before_show until closed
+_transfer: Any = None  # the warm source handoff waiting for the windows, if any
 
 
 def _handler_class():
@@ -182,6 +214,58 @@ def _handler_class():
 
         _classes["handler"] = OuroborosWindowChromeHandler
     return _classes["handler"]
+
+
+def _delegate_class():
+    """The window delegate that hears AppKit's two full-screen failures. NSWindow keeps one weak delegate, so this one
+    stands in front of the previous (pywebview's: close, resize, move...), answers what it answers and forwards those
+    messages to it unchanged; ``chrome`` and ``previous`` are its strong references."""
+    if "delegate" not in _classes:
+        import Foundation
+        import objc
+
+        def failed(delegate: Any, selector: str, window: Any, entering: bool) -> None:
+            """AppKit passes the NSWindow itself to these two (NSWindow.h), not a notification."""
+            previous = getattr(delegate, "previous", None)
+            try:
+                if previous is not None and previous.respondsToSelector_(selector):
+                    getattr(previous, selector.replace(":", "_"))(window)
+            except Exception:
+                log.warning("The window's own delegate did not take %s.", selector, exc_info=True)
+            chrome = getattr(delegate, "chrome", None)
+            if chrome is not None:
+                chrome._failed(entering)
+
+        class OuroborosWindowDelegate(Foundation.NSObject):
+            def respondsToSelector_(self, selector):
+                previous = getattr(self, "previous", None)
+                return bool(objc.super(OuroborosWindowDelegate, self).respondsToSelector_(selector)
+                            or (previous is not None and previous.respondsToSelector_(selector)))
+
+            def forwardingTargetForSelector_(self, selector):
+                previous = getattr(self, "previous", None)
+                if previous is not None and previous.respondsToSelector_(selector):
+                    return previous
+                return objc.super(OuroborosWindowDelegate, self).forwardingTargetForSelector_(selector)
+
+            def windowDidFailToEnterFullScreen_(self, window):
+                failed(self, _FAILED_ENTER, window, True)
+
+            def windowDidFailToExitFullScreen_(self, window):
+                failed(self, _FAILED_EXIT, window, False)
+
+        _classes["delegate"] = OuroborosWindowDelegate
+    return _classes["delegate"]
+
+
+def _give_back_delegate(native: Any, delegate: Any) -> None:
+    """Main thread, after close: the previous delegate again, unless another one replaced this one meanwhile."""
+    try:
+        if native.delegate() is delegate:
+            native.setDelegate_(delegate.previous)
+    except Exception:
+        log.debug("The window's previous delegate was not restored.", exc_info=True)
+    delegate.chrome = None
 
 
 def _webview_of(window: Any) -> Any:
@@ -259,6 +343,53 @@ def _paint_gtk_room(window: Any) -> None:
         log.warning("The web view keeps WebKit's white until its page paints.", exc_info=True)
 
 
+def fit_to_work_area(window: Any) -> None:
+    """Before ``webview.start``, Windows only: ``window`` opens no larger than its screen's working area. Its form
+    exists in ``before_show`` (its UI thread, not shown yet) and takes the fit's two handlers there."""
+    if _WINDOWS and window is not None:
+        window.events.before_show += lambda: _fit_when_loaded_and_first_shown(window)
+
+
+def _fit_when_loaded_and_first_shown(window: Any) -> None:
+    try:
+        form = window.native
+
+        def shown(*_event: Any) -> None:
+            _fit(form)
+            try:
+                form.Shown -= shown  # once: a restore from the tray or the owner's own size is never fitted again
+            except Exception:
+                log.debug("The fit stays subscribed to the form's Shown.", exc_info=True)
+
+        form.Load += lambda *_event: _fit(form)
+        form.Shown += shown
+    except Exception:
+        log.warning("The window is not fitted to its screen: its form takes no handlers.", exc_info=True)
+
+
+def _fit(form: Any) -> None:
+    """A WinForms event of ``form`` (its UI thread). Its size and its screen's working area are the same pixels, so
+    there is no DPI arithmetic; the minimum goes down first, or WinForms holds the form at it."""
+    try:
+        from System.Drawing import Point, Size
+        from System.Windows.Forms import FormWindowState, Screen
+
+        if form.WindowState != FormWindowState.Normal:
+            return  # a first show Windows itself maximizes (a shortcut set to run maximized) is whole already
+        area, size, least = Screen.FromControl(form).WorkingArea, form.Size, form.MinimumSize
+        width, height = min(size.Width, area.Width), min(size.Height, area.Height)
+        left = max(area.Left, min(form.Left, area.Right - width))
+        top = max(area.Top, min(form.Top, area.Bottom - height))
+        if (width, height) != (size.Width, size.Height):
+            if least.Width > width or least.Height > height:
+                form.MinimumSize = Size(min(least.Width, width), min(least.Height, height))
+            form.Size = Size(width, height)
+        if (left, top) != (form.Left, form.Top):  # also a form of a fitting size that hangs over an edge
+            form.Location = Point(left, top)
+    except Exception:
+        log.warning("The window was not fitted to its screen's working area.", exc_info=True)
+
+
 class WindowChrome:
     """One window's title bar and appearance, decided per document on the main thread."""
 
@@ -271,19 +402,30 @@ class WindowChrome:
         self._fill: Any = None  # the title bar container pywebview painted; None: never integrate
         self._ordinary: dict = {}  # the switches integration changed, as they were before
         self._observers: list = []
+        self._delegate: Any = None  # (window, failure delegate in front of its own) while installed
         self._doc = -math.inf  # the window's current document (its time origin)
         self._declared = False  # that document's script spoke since the last finished navigation
         self._wanted = False
         self._integrated = False
         self._refused = False
-        self._fullscreen = False
+        self._phase: Optional[str] = None  # AppKit's full-screen phase (_PHASES); None: not observed
+        self._leaving: Any = None  # the handoff, or the close's ``later``, that asked this full-screen stint to end
+        self._hiding: Optional[Callable[[], None]] = None  # the background close waiting for its turn or DidExit
+        self._hiding_lock = threading.Lock()  # a reopen may drop that close from another thread
         self._appearance: Optional[str] = None  # None: inherited
         self._sent: tuple = ()
         self._closed = False
 
+    @property
+    def _fullscreen(self) -> bool:
+        """From WillEnter until DidExit: the title bar's switches wait and nothing is reserved."""
+        return self._phase not in (None, "windowed")
+
     def attach(self, window: Any) -> None:
-        """Register on ``window`` before ``webview.start``: its room colour everywhere, the rest on macOS only."""
+        """Register on ``window`` before ``webview.start``: its room colour everywhere, its fit to the screen on
+        Windows, the rest on macOS only."""
         paint_room(window)
+        fit_to_work_area(window)
         if not _MACOS or window is None:
             return
         self._window = window
@@ -296,6 +438,7 @@ class WindowChrome:
         native = getattr(self._window, "native", None)
         if native is None:
             return
+        self._observe_full_screen(native)  # a source handoff needs the phase even without the document script
         try:
             import WebKit
 
@@ -318,7 +461,6 @@ class WindowChrome:
             self._fill = None
         if self._fill is None:
             log.warning("pywebview's title bar fill is not the traffic lights' container; the title bar stays ordinary.")
-        self._observe_full_screen()
         # Nothing is on screen to collide with yet: pywebview adds the web view to the window only once the first
         # document has finished loading, after it declared, so the bar never flashes at launch and an undeclaring
         # first document is ordinary again before it is seen.
@@ -475,32 +617,201 @@ class WindowChrome:
         top = round(max(0.0, top) / zoom, 2)
         return {"top": top, "start": round(start / zoom, 2) if top else 0}
 
-    def _observe_full_screen(self) -> None:
-        import AppKit
+    def _observe_full_screen(self, native: Any) -> None:
+        """The phase is known only once all four notifications are observed; a new window is not in full screen."""
+        try:
+            import AppKit
 
-        center = AppKit.NSNotificationCenter.defaultCenter()
-        for name, handler in (("NSWindowWillEnterFullScreenNotification", self._entering_full_screen),
-                              ("NSWindowWillExitFullScreenNotification", self._leaving_full_screen),
-                              ("NSWindowDidExitFullScreenNotification", self._left_full_screen)):
-            # No queue: the block runs where AppKit posts, the main thread, before the transition.
-            self._observers.append(center.addObserverForName_object_queue_usingBlock_(
-                name, self._native, None, lambda _note, handler=handler: handler()))
+            center = AppKit.NSNotificationCenter.defaultCenter()
+            for name, phase in _PHASES:
+                # No queue: the block runs where AppKit posts, the main thread, around the transition.
+                self._observers.append(center.addObserverForName_object_queue_usingBlock_(
+                    name, native, None, lambda _note, phase=phase: self._full_screen(phase)))
+        except Exception:
+            log.warning("Full-screen notifications unavailable; a source handoff keeps this shell.", exc_info=True)
+            return
+        self._phase = "windowed"
+        _tracked.append(self)
+        try:
+            delegate = _delegate_class().alloc().init()
+            delegate.previous, delegate.chrome = native.delegate(), self
+            native.setDelegate_(delegate)
+            self._delegate = (native, delegate)
+        except Exception:
+            log.warning("Full-screen failures unheard; a failed exit keeps this shell after the wait.", exc_info=True)
 
-    def _entering_full_screen(self) -> None:
-        self._fullscreen = True
-        self._show_toolbar(False)
+    def _full_screen(self, phase: str) -> None:
+        """An observed notification (main thread): the window's phase, its title bar, then a waiting handoff."""
+        self._phase = phase
+        if phase == "entering":
+            self._show_toolbar(False)
+            self._publish()
+        elif phase == "exiting":
+            self._show_toolbar(True)
+        elif phase == "windowed":
+            self._switch()  # a document that arrived in full screen gets its title bar now
+            # AppKit ends the exit with the toolbar hidden, after WillExit showed it, and a toolbar set here starts
+            # hidden too: shown now, before the band is measured, or the page reserves only the bare title bar.
+            self._show_toolbar(True)
+            self._publish()
+        if phase in ("full", "windowed"):
+            self._leaving = None  # a stint began or ended: a handoff still waiting asks this one anew
+        if phase == "entering":
+            self._drop_hiding("A new full-screen entry keeps the closed window open.")
+        elif phase == "full" and self._hiding is not None:
+            self._queue_close(self._hiding)  # AppKit ignores a toggle sent inside DidEnter: ask in the next turn
+        elif phase == "windowed":
+            self._hide_now()
+        _resume()
+
+    def _failed(self, entering: bool) -> None:
+        """AppKit's delegate call (main thread), a hint the live mask checks. A failed entry the mask confirms (bit
+        clear) while entering is windowed, and a handoff looks again; a failed exit the mask does not deny (unreadable
+        too) stays full screen, refusing a handoff at once, unasked again. Anything else changes nothing."""
+        if self._closed or self._phase is None:
+            return
+        try:
+            full: Optional[bool] = bool(self._window.native.styleMask() & _FULL_SCREEN)
+        except Exception:
+            log.debug("The window's style mask is unreadable after a full-screen failure.", exc_info=True)
+            full = None  # unknown: never the reading that makes an exec likelier
+        if entering:
+            if full is False and self._phase == "entering":  # exiting clears the bit too: never windowed before DidExit
+                self._full_screen("windowed")
+            return
+        if full is False:
+            log.info("macOS said a full-screen exit failed with the window's mask already out; a handoff waits for "
+                     "DidExit.")
+            return
+        self._phase, self._leaving = "full", None
+        self._drop_hiding("macOS could not take the closed window out of full screen; it stays open.", logging.WARNING)
+        self._show_toolbar(False)  # WillExit showed it
         self._publish()
+        transfer = _transfer
+        if transfer is not None and transfer.settle("refused"):
+            log.warning("macOS could not take a window out of full screen; this shell keeps running.")
 
-    def _leaving_full_screen(self) -> None:
-        self._show_toolbar(True)
+    def windowed(self) -> Optional[bool]:
+        """Main thread, for a source handoff: True when AppKit's last word and the live style mask both say this window
+        is out of full screen; None while it is in or moving through full screen; False when unknown or hidden in full
+        screen, where only showing it could end the stint."""
+        native = getattr(self._window, "native", None)
+        if self._phase is None or self._closed or native is None:
+            return False
+        if self._phase == "windowed":
+            return not native.styleMask() & _FULL_SCREEN  # the mask disagreeing is unknown, not windowed
+        return None if native.isVisible() else False
 
-    def _left_full_screen(self) -> None:
-        self._fullscreen = False
-        self._switch()  # a document that arrived in full screen gets its title bar now
-        # AppKit ends the exit with the toolbar hidden, after WillExit showed it, and a toolbar set here starts
-        # hidden too: shown now, before the band is measured, or the page reserves only the bare title bar.
-        self._show_toolbar(True)
-        self._publish()
+    def leave(self, request: Any) -> None:
+        """Ask once per stint, in a main-thread turn after DidEnter (never inside it): a transition under way is never
+        toggled. A handoff or the background close (its ``later``) that asked still waits; one that gave up (abandoned,
+        refused, a close dropped by a reopen, failure or entry) leaves a later request to ask, as when AppKit ignored the
+        toggle and nothing began."""
+        leaving = self._leaving
+        if self._phase != "full" or leaving is request or (leaving is not None and (
+                leaving is self._hiding or getattr(leaving, "state", None) == "pending")):
+            return
+        self._leaving = request
+        self._window.native.toggleFullScreen_(None)
+
+    def hide_when_windowed(self, later: Callable[[], None]) -> bool:
+        """A background close (``launcher_background``): True when the caller hides the window now, as before (off macOS,
+        not observed, or out of full screen by AppKit's last word and the live mask). Else False: ``later`` hides it on the
+        main thread at the DidExit that ends full screen, asked once and only in a turn after DidEnter; off the main
+        thread it is taken at once and judged in a main-thread turn. A real failed exit, a new entry or ``keep`` drops it with one
+        line in launcher.log, the window stays open and a new close, or a handoff, asks again.
+        No timer: unconfirmed, a window is never hidden in full screen."""
+        if self._phase is None or self._closed:
+            return True
+        main = threading.current_thread() is threading.main_thread()
+        if main and self._phase == "windowed":
+            return self._out()
+        with self._hiding_lock:
+            if self._hiding is not None:
+                return False  # a close already waits: one exit, one toggle
+            self._hiding = later  # armed before any turn: a reopen from now on drops it (``keep``)
+        if not main:  # the consent question's thread: the phase and the toggle are the main thread's
+            self._queue_close(later, reraise=True)
+        elif self._phase == "full":
+            self._ask_to_hide()
+        return False
+
+    def _queue_close(self, later: Callable[[], None], *, reraise: bool = False) -> None:
+        """The close's own later main-thread turn (``_close_turn``): from another thread, or from inside DidEnter, where
+        AppKit ignored the toggle (4 of 4 native runs). A reopen, failure, entry or closed window before it leaves it
+        nothing to do."""
+        try:
+            from PyObjCTools import AppHelper
+
+            AppHelper.callAfter(self._close_turn, later)
+        except Exception:
+            self._drop_hiding("The main thread cannot take the close; the window stays open.", logging.WARNING)
+            if reraise:
+                raise
+            log.debug("callAfter refused the close's turn.", exc_info=True)
+
+    @property
+    def hiding(self) -> bool:
+        """A background close waits: the window is leaving, so an alert treats it as backgrounded."""
+        return self._hiding is not None
+
+    def _out(self) -> bool:
+        try:
+            out = not self._window.native.styleMask() & _FULL_SCREEN
+        except Exception:
+            out = False
+        if not out:
+            log.warning("The closed window's style mask does not confirm it out of full screen; it stays open.")
+        return out
+
+    def keep(self) -> None:
+        """The window is opened again (any thread): a close waiting for DidExit hides nothing."""
+        self._drop_hiding("The closed window was opened again before it left full screen; it stays open.")
+
+    def _close_turn(self, later: Callable[[], None]) -> None:
+        """Main thread: the consent thread's close, unless a reopen, entry, failure or DidExit settled it meanwhile."""
+        if self._hiding is not later or self._closed:
+            return
+        if self._phase == "windowed":
+            with self._hiding_lock:
+                if self._hiding is not later:
+                    return
+                self._hiding = None
+            if self._out():
+                self._run(later)
+        elif self._phase == "full":
+            self._ask_to_hide()
+
+    def _ask_to_hide(self) -> None:
+        later = self._hiding
+        if later is None:  # a reopen on another thread dropped it just now
+            return
+        try:
+            self.leave(later)
+        except Exception:
+            log.debug("toggleFullScreen: refused.", exc_info=True)
+            self._leaving = None
+            self._drop_hiding("macOS refused to take the closed window out of full screen; it stays open.",
+                              logging.WARNING)
+
+    def _hide_now(self) -> None:
+        with self._hiding_lock:
+            later, self._hiding = self._hiding, None
+        if later is not None:
+            self._run(later)
+
+    def _drop_hiding(self, line: str, level: int = logging.INFO) -> None:
+        with self._hiding_lock:
+            waiting, self._hiding = self._hiding, None
+        if waiting is not None:
+            log.log(level, line)
+
+    @staticmethod
+    def _run(later: Callable[[], None]) -> None:
+        try:
+            later()
+        except Exception:
+            log.warning("The closed window could not be hidden; it stays open.", exc_info=True)
 
     def _show_toolbar(self, visible: bool) -> None:
         toolbar = self._native.toolbar() if self._integrated else None
@@ -556,8 +867,21 @@ class WindowChrome:
             log.warning("The window's appearance could not follow the page.", exc_info=True)
 
     def _close(self) -> None:
-        """pywebview ``closed``: no further writes, and the notification center lets go of this window."""
+        """pywebview ``closed`` (its own thread): no further writes, the notification center lets go of this window, the
+        main thread gives the previous delegate back, and a waiting handoff looks again at the windows left."""
         self._closed = True
+        self._hiding = None
+        if self in _tracked:
+            _tracked.remove(self)
+        installed, self._delegate = self._delegate, None
+        try:
+            if installed is not None:
+                from PyObjCTools import AppHelper
+
+                AppHelper.callAfter(_give_back_delegate, *installed)
+            _resume()
+        except Exception:
+            log.debug("The closed window's delegate or waiting handoff was not reached.", exc_info=True)
         observers, self._observers = self._observers, []
         if not observers:
             return
@@ -569,3 +893,105 @@ class WindowChrome:
                 center.removeObserver_(token)
         except Exception:
             log.debug("Full-screen observers not released.", exc_info=True)
+
+
+class _Transfer:
+    """One warm source handoff: pending until the main thread claims it to run ``final``, refuses it, or its worker's
+    deadline abandons it. The lock guards only that one transition, never animation, I/O or ``final``."""
+
+    def __init__(self, final: Callable[[], None], cancelled: Callable[[], bool]) -> None:
+        self.final, self.cancelled, self.state, self.error = final, cancelled, "pending", None
+        self.lock, self.done = threading.Lock(), threading.Event()
+
+    def settle(self, state: str) -> bool:
+        with self.lock:
+            if self.state != "pending":
+                return False
+            self.state = state
+        if state != "claimed":
+            self.done.set()
+        return True
+
+
+def transfer_when_windowed(final: Callable[[], None], cancelled: Callable[[], bool] = lambda: False) -> bool:
+    """A warm macOS source handoff, from its worker thread: ``final`` (teardown and exec) runs on the main thread in
+    the very turn that found every window of this process out of full screen, so no window input comes between.
+
+    False: refused, ``final`` never ran (at once, before anything is queued, while no window exists or one is not
+    observed: not yet shown, or the setup window; one hidden in full screen or kept by a failed exit;
+    ``cancelled`` in a turn, so a Stop asks no window to leave; no main-thread turn or AppKit confirmation within
+    ``MACOS_HANDOFF_FULLSCREEN_WAIT_SEC``). True: ``final`` returned; its exception is raised on the worker, where
+    the caller's recovery may wait. The deadline abandons only an attempt the main thread has not claimed; a later
+    turn of an abandoned one does nothing."""
+    global _transfer
+    observers = _observers()
+    if not observers or None in observers:  # an exit 42 before the setup or main window exists or is observed
+        log.warning("No window is observed yet, so none can be confirmed out of full screen; this shell keeps running.")
+        return False
+    transfer = _transfer = _Transfer(final, cancelled)
+    try:
+        from PyObjCTools import AppHelper
+
+        AppHelper.callAfter(_step, transfer)
+    except Exception:
+        transfer.settle("refused")
+        log.warning("The main thread cannot take the source handoff; this shell keeps running.", exc_info=True)
+        return False
+    if not transfer.done.wait(MACOS_HANDOFF_FULLSCREEN_WAIT_SEC) and transfer.settle("abandoned"):
+        log.warning("No main-thread turn found the windows out of full screen within %.0fs; this shell keeps running.",
+                    MACOS_HANDOFF_FULLSCREEN_WAIT_SEC)
+        return False
+    transfer.done.wait()  # refused at once, or claimed: ``final`` ends in exec or reports back
+    if transfer.error is not None:
+        raise transfer.error
+    return transfer.state == "claimed"
+
+
+def _observers() -> list:
+    """Each pywebview window's observing WindowChrome, None where no ``before_show`` registered one; empty without a
+    window. Python state only, no native read: the main thread's turn judges again, and natively."""
+    tracked = list(_tracked)  # pywebview runs ``closed`` handlers on their own thread
+    return [next((chrome for chrome in tracked if chrome._window is window), None)
+            for window in list(getattr(sys.modules.get("webview"), "windows", None) or ())]
+
+
+def _resume() -> None:
+    """A full-screen phase changed (main thread): a waiting handoff looks again in the next turn."""
+    transfer = _transfer
+    if transfer is not None and transfer.state == "pending":
+        from PyObjCTools import AppHelper
+
+        AppHelper.callAfter(_step, transfer)
+
+
+def _step(transfer: _Transfer) -> None:
+    """One main-thread turn of a handoff: refuse, wait for a notification, or claim and run ``final``; never block.
+    Every window is judged before any is asked to leave full screen, so one refusing leaves the others as they are."""
+    if transfer.state != "pending":
+        return
+    try:
+        if transfer.cancelled():  # a Stop came first: no window is asked to leave
+            if transfer.settle("refused"):
+                log.warning("A Stop came before the windows agreed; nothing was torn down.")
+            return
+        chromes = _observers()
+        # An unobserved window, or none left at all, refuses before any other is asked to leave full screen.
+        states = [False] if None in chromes or not chromes else [chrome.windowed() for chrome in chromes]
+        if False not in states:
+            for chrome in chromes:
+                chrome.leave(transfer)
+    except Exception:
+        log.warning("A window's full-screen state is unreadable.", exc_info=True)
+        states = [False]
+    if False in states:
+        if transfer.settle("refused"):
+            log.warning("A window cannot be confirmed out of full screen; this shell keeps running.")
+        return
+    if None in states or not transfer.settle("claimed"):
+        return  # a notification of the moving window looks again
+    try:
+        transfer.final()
+    except BaseException as error:  # reported to the worker: the main thread never runs recovery that may wait
+        transfer.error = error
+    finally:
+        transfer.done.set()

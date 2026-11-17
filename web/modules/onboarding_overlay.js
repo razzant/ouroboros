@@ -129,8 +129,8 @@ function showReadinessFailure(overlay, detail, onRetry) {
     return setOverlayContent(overlay, card);
 }
 
-function showRestartRequiredOverlay(runtimeMode) {
-    const mode = escapeHtml(runtimeMode || 'advanced');
+function showRestartRequiredOverlay(runtimeLabel) {
+    const level = escapeHtml(runtimeLabel || 'The chosen');
     const overlay = document.getElementById(OVERLAY_ID) || document.createElement('div');
     overlay.id = OVERLAY_ID;
     overlay.className = 'onboarding-overlay';
@@ -141,8 +141,8 @@ function showRestartRequiredOverlay(runtimeMode) {
         <div class="onboarding-overlay-backdrop"></div>
         <section class="onboarding-restart-card">
             <h2>Restart Required</h2>
-            <p>Runtime mode was saved as <code>${mode}</code> for the next boot. Restart Ouroboros to apply it before continuing in that mode.</p>
-            <button type="button" class="btn btn-primary" data-onboarding-continue>Continue in current mode</button>
+            <p>${level} access applies from the next start. Until you restart Ouroboros, it keeps the access level it started with.</p>
+            <button type="button" class="btn btn-primary" data-onboarding-continue>Open Ouroboros now</button>
         </section>
     `;
     if (!overlay.parentElement) document.body.appendChild(overlay);
@@ -160,7 +160,7 @@ export async function initOnboardingOverlay() {
         if (event.origin !== window.location.origin) return;
         if (event?.data?.type !== 'ouroboros:onboarding-complete') return;
         if (event.data.restart_required) {
-            showRestartRequiredOverlay(event.data.runtime_mode);
+            showRestartRequiredOverlay(event.data.runtime_label);
             return;
         }
         removeOverlay();

@@ -155,6 +155,30 @@ def test_boundary_rechecks_pool_and_custody(tmp_path, monkeypatch):
     assert ctx._model_sleep is None and "service late" in limit.messages[-1]["content"]
 
 
+def test_the_final_census_withdraws_a_handoff_awake_where_it_holds_a_sleep(tmp_path, monkeypatch):
+    """Work first found by the final census (``budget_pause._exact_continuation_row``): a background handoff
+    abandons its seed and stays awake; an ordinary cold sleep holds there until that work settles."""
+    from ouroboros import budget_pause, model_sleep
+
+    _install_queue(tmp_path, monkeypatch)
+    ctx, limit, result = _arm(tmp_path, monkeypatch)
+    assert result["ok"]
+    _fast_hold(monkeypatch, budget_pause)
+    _quiet_external(monkeypatch, budget_pause)
+    censuses = []  # the round boundary's census finds nothing; the final one finds a late service
+    monkeypatch.setattr(model_sleep, "cold_blockers", lambda *_a, **_k: [] if censuses.append(1) or len(censuses) == 1
+                        else [{"kind": "service", "name": "late"}])
+    budget_pause.enter_cold_sleep(limit)
+    assert budget_pause.budget_pause_row(tmp_path, "head")["abandon_reason"] == "cold_detach_blocked"
+    assert ctx._model_sleep is None and ctx._budget_pausing is False
+    notice = limit.messages[-1]["content"]
+    assert "background handoff was not taken" in notice and "'service'" in notice and "'late'" in notice
+    ctx._model_sleep = {"sleep_id": "s1", "mode": "cold"}
+    with pytest.raises(budget_pause.ColdSleepWritersUnsettled, match="'late'"):
+        budget_pause._exact_continuation_row(limit, ctx, pause_id="p2", rail=budget_pause.RAIL_MODEL_SLEEP,
+                                             scope="task", reason_text="", root_task_id="head", local={})
+
+
 def test_frozen_profile_survives_carrier_change_but_not_subagent_ceiling():
     from ouroboros.tool_access_roots import active_tool_profile, freeze_tool_profile
 
@@ -193,7 +217,8 @@ def test_owner_question_stays_warm_in_either_tool_order(tmp_path, monkeypatch):
 
 def test_raise_after_saved_pause_is_no_error_terminal_and_death_returns_to_the_pause(tmp_path, monkeypatch):
     """The carrier's body raises after its pause was saved: no exception terminal is written and nothing
-    is emitted; the saved pause of this attempt is what the crash recovery parks again (#1196, F4)."""
+    but the start phase it reported is emitted; the saved pause of this attempt is what the crash recovery
+    parks again (#1196, F4)."""
     from ouroboros import budget_pause
     from ouroboros.task_results import load_task_result
     from supervisor import message_bus, worker_process
@@ -221,7 +246,7 @@ def test_raise_after_saved_pause_is_no_error_terminal_and_death_returns_to_the_p
                                            repo_dir=str(tmp_path), drive_root=str(tmp_path))
     finally:
         budget_pause.end_dispatch_fence("head")  # the dying carrier's process-local fence goes with it
-    assert not emitted
+    assert [row["type"] for row in emitted] == ["direct_turn_phase"]
     assert budget_pause.death_returns_to_pause(budget_pause.budget_pause_row(tmp_path, "head"), 1)
     assert (load_task_result(tmp_path, "head") or {}).get("status") != "failed"
 

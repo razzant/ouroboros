@@ -65,11 +65,14 @@ def env(tmp_path, monkeypatch, caplog):
     from ouroboros import config as cfg
     from ouroboros.gateway import secret_decision as sd
     from ouroboros.gateway import task_decision as td
+    from ouroboros.tools import skill_exec
 
     root = tmp_path
     monkeypatch.setattr(cfg, "DATA_DIR", root)
     monkeypatch.setattr(cfg, "SETTINGS_PATH", root / "settings.json")
+    # Import the consumer before patching config: its from-import must not retain this fixture's lambda.
     monkeypatch.setattr(cfg, "get_skills_repo_path", lambda: "")
+    monkeypatch.setattr(skill_exec, "get_skills_repo_path", lambda: "")
     cfg.reset_runtime_mode_baseline_for_tests()
     _write_skill(root)
     write_task_result(root, TASK, "running", chat_id=1)
@@ -220,10 +223,11 @@ def test_secret_fields_is_appended_so_positional_manifest_construction_keeps_eve
 
     from ouroboros.contracts.skill_manifest import SkillManifest
 
-    assert [item.name for item in dataclasses.fields(SkillManifest)][-1] == "secret_fields"
+    # Later additions append after it (mcp_servers), never before it.
+    assert [item.name for item in dataclasses.fields(SkillManifest)][-2:] == ["secret_fields", "mcp_servers"]
     positional = SkillManifest("n", "d", "1", "script", "", [], "any", "python3", 30, ["K"], [{"name": "run.py"}])
     assert positional.env_from_settings == ["K"] and positional.scripts == [{"name": "run.py"}]
-    assert positional.secret_fields == {}
+    assert positional.secret_fields == {} and positional.mcp_servers == []
 
 
 # ------------------------------------------------------------------ the tool
@@ -987,3 +991,97 @@ def test_a_paused_asker_keeps_the_saved_outcome_owed_until_it_reads_again(env):
     assert "saved it to Settings (FAKEPLUG_TOKEN)" in mail["text"]
     assert _block(env, quiz_id)["delivery"]["recipient_task_id"] == TASK
     _assert_absent(env, CANARY, texts=[response.text, mail["text"]])
+
+
+@pytest.mark.parametrize("outcome", ["save", "cancel", "refusal", "write_failure", "completion_failure"])
+def test_secret_form_settles_mcp_catalog_only_after_committed_save(env, monkeypatch, outcome):
+    """The real form and writer wake the server-owned lister; passive card/status reads do not heal it."""
+    import shutil
+    from ouroboros import config, mcp_catalog, mcp_client, skill_mcp
+    from ouroboros.gateway import owner_settings, mcp as gateway_mcp
+    from ouroboros.gateway.extensions import _skill_mcp_card_facts
+    from ouroboros.skill_loader import load_skill, save_review_state, save_skill_grants, save_enabled, SkillReviewState
+
+    node = shutil.which("node")
+    assert node, "this bounded stdio check requires the provided Node runtime"
+    monkeypatch.setattr("ouroboros.tools.skill_exec._resolve_runtime_binary", lambda _: (node, ""))
+    folder = env.root / "skills" / "external" / "fakeplug"
+    manifest = folder / "SKILL.md"
+    manifest.write_text(manifest.read_text().replace("runtime: python3", "runtime: node").replace(
+        "run.py", "server.mjs").replace("secret_fields:",
+        'mcp_servers: [{"id": "fakeplug", "entry": "scripts/server.mjs"}]\nsecret_fields:'))
+    starts = env.root / "mcp-starts.jsonl"
+    (folder / "scripts" / "server.mjs").write_text("const LOG = " + json.dumps(str(starts)) + ";\n" + r"""
+import {appendFileSync} from 'node:fs';
+import {createInterface} from 'node:readline';
+const key = process.env.FAKEPLUG_TOKEN;
+appendFileSync(LOG, JSON.stringify({key}) + '\n');
+createInterface({input: process.stdin}).on('line', line => {
+  const msg = JSON.parse(line);
+  if (msg.id === undefined) return;
+  const result = msg.method === 'initialize'
+    ? {protocolVersion: msg.params.protocolVersion, capabilities: {tools: {}}, serverInfo: {name: 'form', version: '1'}}
+    : {tools: [{name: key === 'key-one' ? 'before' : 'after', description: 'Key ' + key,
+       inputSchema: {type: 'object', properties: {}}}]};
+  process.stdout.write(JSON.stringify({jsonrpc: '2.0', id: msg.id, result}) + '\n');
+});
+""")
+    config.SETTINGS_PATH.write_text(json.dumps({"MCP_ENABLED": True, "MCP_SERVERS": [
+        {"id": "fakeplug", "skill": "fakeplug", "transport": "stdio", "enabled": True}],
+        "FAKEPLUG_TOKEN": "key-one"}))
+    skill = load_skill(folder, env.root)
+    save_review_state(env.root, skill.name, SkillReviewState(status="clean", content_hash=skill.content_hash))
+    save_skill_grants(env.root, skill.name, ["FAKEPLUG_TOKEN"], content_hash=skill.content_hash,
+                      requested_keys=["FAKEPLUG_TOKEN"])
+    save_enabled(env.root, skill.name, True, actor="owner_ui")
+    manager = mcp_client.MCPManager()
+    manager.become_lister()
+    monkeypatch.setattr(mcp_client, "get_manager", lambda: manager)
+    manager.configuration_changed(config.load_settings(), reason="startup")
+    assert manager.discovery.wait(10)
+    catalog = mcp_catalog.catalog_path("fakeplug")
+    before = json.loads(catalog.read_text())
+    assert before["items"][0]["name"] == "before"
+    notifications, settle = [], skill_mcp.lifecycle_settled
+
+    def observed_settle(*args, **kwargs):
+        notifications.append(kwargs.get("reason"))
+        return settle(*args, **kwargs)
+
+    monkeypatch.setattr(skill_mcp, "lifecycle_settled", observed_settle)
+    quiz_id = _ask(env)
+    observed = _observed(env, quiz_id)
+    if outcome == "write_failure":
+        def fail_write(*_args, **_kwargs):
+            raise owner_settings.SettingsLockUnavailable("synthetic lock failure")
+        monkeypatch.setattr(owner_settings, "_owner_update_settings", fail_write)
+    elif outcome == "completion_failure":
+        monkeypatch.setattr(sr, "finalize_save", lambda *_args, **_kwargs: {})
+    try:
+        response = (_cancel(env, quiz_id) if outcome == "cancel" else
+                    _save(env, quiz_id, {"botToken": "key-two"},
+                          observed={"botToken": False} if outcome == "refusal" else observed))
+        committed = outcome in ("save", "completion_failure")
+        assert response.json()["saved"] is committed, response.text
+        assert response.status_code == {"save": 200, "cancel": 200, "refusal": 409,
+                                        "write_failure": 503, "completion_failure": 500}[outcome]
+        assert manager.discovery.wait(10)
+        # Only the normal passive readers follow the form; no Refresh or worker dispatch.
+        facts = _skill_mcp_card_facts([skill])(skill)
+        gateway_mcp._ensure_configured()
+        assert manager.discovery.wait(10)
+        after = json.loads(catalog.read_text())
+        assert [json.loads(line)["key"] for line in starts.read_text().splitlines()] == (
+            ["key-one", "key-two"] if committed else ["key-one"])
+        assert notifications == (["secret_saved"] if committed else [])
+        assert (after["identity"] != before["identity"]) is committed
+        assert after["items"][0]["name"] == ("after" if committed else "before")
+        assert facts[0]["configured"] and facts[0]["listed"]
+        assert "key-two" not in catalog.read_text() + response.text
+        if outcome == "save":
+            duplicate = _save(env, quiz_id, {"botToken": "key-two"}, observed=observed)
+            assert duplicate.json()["duplicate"] and duplicate.json()["saved"]
+            assert manager.discovery.wait(10) and notifications == ["secret_saved"]
+            assert len(starts.read_text().splitlines()) == 2
+    finally:
+        assert manager.discovery.wait(10)

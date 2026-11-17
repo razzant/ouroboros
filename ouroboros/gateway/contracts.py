@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 from ouroboros.cost_projection import CostPresentation
+from ouroboros.physical_attempt_context import ContextAttemptFact  # noqa: F401 -- public re-export
 from ouroboros.delegate_custody_usage import CostCustody
 from ouroboros.gateway.reference_contracts import ChatReferenceFields, SharedRowFrame
 from ouroboros.storage import (  # noqa: F401 -- public re-exports
@@ -13,6 +14,9 @@ from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageVolume, StorageRemover,
 )
 from ouroboros.owner_keep import OwnerKeepRequest, OwnerKeepResponse  # noqa: F401 -- public re-exports
+from ouroboros.launch_custody import (  # noqa: F401 -- public re-exports
+    KeptService, KeptServiceStopRequest, KeptServiceStopResponse, KeptServicesResponse,
+)
 from ouroboros.storage_deleted import (  # noqa: F401 -- public re-exports
     StorageActiveProject, StorageDeletedFolder, StorageDeletedProject, StorageDeletedProjects, StorageFolderPart,
 )
@@ -24,7 +28,8 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
     ClaudexorReadState, ClaudexorStatusReads, ClaudexorPassiveReadError, ClaudexorQuotaResponse,
     ClaudexorStatusResponse,
 )
-from ouroboros.gateway.work_contracts import WorkStateFields
+from ouroboros.gateway.work_contracts import ProcessingTiers, WorkLeadFields, WorkStateFields
+from ouroboros.gateway.project_folder_contracts import FsDirsEntry, FsDirsResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
@@ -47,14 +52,12 @@ from ouroboros.gateway.update_contracts import (  # noqa: F401 -- public re-expo
     UpdatePreflightRequest, UpdatePreflightResponse, UpdateProgressChangedOutbound, UpdateStatusReadyOutbound,
 )
 from ouroboros.gateway.management_contracts import (  # noqa: F401 -- public re-exports
+    ClaudexorLoginJobProblem,
     ExtensionsIndexResponse, LocalModelStatusResponse, MarketplaceInstalledResponse, MarketplaceSearchResponse,
     McpStatusResponse, ModelCatalogResponse, SkillLifecycleQueueResponse,
 )
 from ouroboros.gateway.schedule_contracts import (  # noqa: F401 -- public re-exports
-    ScheduleActionResponse,
-    ScheduledTasksResponse,
-    ScheduleDeleteResponse,
-    ScheduleUpsertResponse,
+    ScheduleActionResponse, ScheduledTasksResponse, ScheduleDeleteResponse, ScheduleUpsertResponse,
 )
 
 try:  # Python 3.11+
@@ -97,11 +100,13 @@ class TaskConstraintInbound(TypedDict, total=False):
 
 
 class CommandInbound(TypedDict):
-    """Inbound WS command message."""
+    """Inbound WS command message. ``ui_control`` (``{name, owner_text?}``) marks a command a host-drawn
+    control composed: the press is the owner's, its words are not, so no owner row is written for it."""
 
     type: Literal["command"]
     cmd: str
     client_surface: NotRequired[dict]
+    ui_control: NotRequired[dict]
 
 
 class PanicAcceptedOutbound(TypedDict):
@@ -254,6 +259,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     reasoning: NotRequired[bool]  # true only on narration that is the model's display reasoning: details, never title/line
     spoken: NotRequired[Dict[str, Any]]  # call_id, item_id, played_ms, status: played/generated/interrupted
     initiator: NotRequired[str]  # origin label: "consciousness" on a wake-up's frames/rows (and its roots); absent on an owner's turn
+    continue_requester: NotRequired[str]  # who asked for this Continue, read from its admission: owner|ouroboros|unknown; absent elsewhere
     # Monetary projections are nullable when the physical-attempt ledger cannot be read: ``None`` is distinct from a
     # confirmed $0. The honest names (accounted upper bounds, not settled receipts), the only outbound spellings since
     # ABI 7.0 dropped the ``cost_usd[_with_children]`` aliases; cost_projection.py is the one author.
@@ -285,6 +291,8 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     task_contract: NotRequired[Dict[str, Any]]
     reason_code: NotRequired[str]
     cancel_origin: NotRequired[Dict[str, Any]]  # the typed stop an owner-stopped turn's final carries
+    finalization_recovery: NotRequired[Dict[str, Any]]  # an adopted answer's custody (cause, answer, delivery_id), read by the status fold
+    terminal_origin: NotRequired[str]  # who authored the terminal text: model_final or a host origin
     delegated_runs_unreconciled: NotRequired[List[str]]  # the row's current custody debt beside its cause (#1583)
     review_status: NotRequired[Dict[str, Any]]
     # panels retain subject/goal/revision/wave; actors separate requested/observed models,
@@ -292,6 +300,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     # review_records_omitted is 0|"1+"|"unknown", never proof of a review by itself.
     review_projection: NotRequired[Dict[str, Any]]
     body_adoptions: NotRequired[List[Dict[str, Any]]]  # the task's settled adoptions (TaskDetailResponse), on its summary
+    review_overrides: NotRequired[Dict[str, Any]]  # the work's review-gate field (TaskDetailResponse), on its summary
     worker_saturation_warning: NotRequired[bool]
     source: NotRequired[str]
     sender_label: NotRequired[str]
@@ -532,6 +541,14 @@ class ProjectsChangedOutbound(TypedDict):
     chat_id: NotRequired[int]
 
 
+class UiPreferencesChangedOutbound(TypedDict):
+    """Outbound notice that ``POST /api/ui/preferences`` committed a change of the named groups
+    (``contributions``, ``model_pins``); every window reads the named state again."""
+
+    type: Literal["ui_preferences_changed"]
+    keys: List[str]
+
+
 class MessageAnnotationOutbound(TypedDict):
     """Bubble-free presentation update for one owner message; ``cause``: the host's sentence for a refused act."""
 
@@ -556,7 +573,7 @@ class MessageAnnotationOutbound(TypedDict):
     routing_token: NotRequired[str]
     cause: NotRequired[str]
     reasoning_effort: NotRequired[str]  # #1539: the explicit start a New task picked from this card requests
-    # #966: this ACK is the SELECTED carrier of the act's owner notice (never delivery proof), answering reply_to.
+    # #966: the notice's SELECTED carrier (never delivery proof): this ACK, answering reply_to, or the System row.
     routing_notice_carrier: NotRequired[Literal["routing_ack", "system"]]
     reply_to: NotRequired[Dict[str, Any]]
     ts: NotRequired[str]
@@ -575,6 +592,7 @@ class ProjectCreateRequest(TypedDict, total=False):
     init_git: bool
     git_url: str
     with_workspace: bool
+    no_folder: bool  # records the choice to keep none; absent, a file-less room's first promoted task provisions one
 
 
 class ProjectClosure(TypedDict):
@@ -595,14 +613,18 @@ class ProjectEntry(TypedDict, total=False):
     name: str
     chat_id: int
     working_dir: str
+    no_folder: Dict[str, str]  # {at, by}: the recorded choice to keep no folder, until one is chosen
     pinned: bool  # absent on legacy rows means unpinned; no routing/activity effect
     cognition: ProjectCognition
+    model_choice: ChatModelChoice  # the room's own model for new owner work; never copied from Main
+    processing_choice: Literal["", "standard", "fast", "economy", "ultrafast"]  # the room's own tier for new owner work; '' = Default
     provenance: str
     clone_url: str
     trusted_at: str
     origin: str
     created_at: str
-    last_active_at: str
+    last_active_at: str  # technical activity: any row, journal, binding (the agent's list order)
+    last_message_at: str  # the order a client lists by: newest message, else created_at; absent while undated
     lifecycle: Literal["active", "deleting", "tombstoned"]
     closed: ProjectClosure  # independent of lifecycle; room, history and routing stay available
     routing_generation: int
@@ -622,25 +644,6 @@ class ProjectDeleteResponse(TypedDict):
     ok: bool
     project_id: str
     folder_untouched: bool
-
-
-class FsDirsEntry(TypedDict):
-    name: str
-    path: str
-    is_git: bool
-
-
-class FsDirsResponse(TypedDict):
-    """GET /api/fs/dirs — owner-facing directory browser for the New Project attach
-    picker (server-side; works in web/Docker). Directories only, confined to the
-    home tree, never file contents. ``truncated`` is True when the directory holds
-    more children than the 500-entry cap (no silent truncation)."""
-
-    path: str
-    parent: str
-    home: str
-    dirs: List[FsDirsEntry]
-    truncated: bool
 
 
 class TaskNamedOutbound(TypedDict):
@@ -687,7 +690,7 @@ class EvolutionStateSnapshot(TypedDict):
     campaign: NotRequired[Dict[str, Any]]
 
 
-class ActiveDirectTurn(TypedDict):
+class ActiveDirectTurn(WorkLeadFields):
     """An active owner turn: a conversation-lane row or an inline executor's actor.
 
     Rows of ``StateResponse.active_direct_turns`` (``conversation_lane.lane_turn_rows`` and
@@ -705,10 +708,11 @@ class ActiveDirectTurn(TypedDict):
     started_at: float
     model_waits: NotRequired[Dict[str, Any]]
     model_activity: NotRequired[Dict[str, Any]]  # content-free observation bound to the active Main call
+    context_attempt: NotRequired[ContextAttemptFact]  # latest observation; released retracts its send, previous survives
     task_attempt: NotRequired[int]
     turn_phase: NotRequired[str]  # the last start fact its execution passed (TURN_PHASES); display only
     executor: NotRequired[str]  # where the turn runs: worker, inline_call or inline_degraded (task_carrier.EXECUTORS)
-    carrier: NotRequired[str]  # a lane row: awaiting (no carrier holds it yet) or worker
+    carrier: NotRequired[str]  # a lane row: awaiting (no carrier holds it yet) or worker; a worker-held running root: worker
 
 
 class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also presence); phase and control facts keep their own authority
@@ -721,6 +725,8 @@ class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also pre
     outcome_axes: NotRequired[Dict[str, Any]]
     reason_code: NotRequired[str]
     cancel_origin: NotRequired[Dict[str, Any]]  # the stored result's stop origin, read by the same status fold
+    finalization_recovery: NotRequired[Dict[str, Any]]  # the stored result's adopted answer, read by that fold
+    terminal_origin: NotRequired[str]
     delegated_runs_unreconciled: NotRequired[List[str]]  # the stored result's current custody debt, read by that fold
     root_phase_checkpoint: NotRequired[Dict[str, Any]]
     timeout_retry_from: NotRequired[str]
@@ -791,19 +797,23 @@ class StateResponse(WorkStateFields):
     subagents_availability: Literal["available", "disabled", "unsaved"]
     context_mode_auto_low: bool  # frozen compatibility field, always False (persistent auto-Low is retired)
     effort_range: EffortRange  # the owner's effort range (POST /api/owner/effort-range), the tolerant read
+    main_route: ChatModelRoute  # Main itself, written by POST /api/owner/chat-model without project_id
+    processing_tiers: ProcessingTiers  # Main's own tier and the default one; POST /api/owner/chat-processing
     safety_mode: str
     skills_repo_configured: bool
     github_token_configured: bool
     accounting: Dict[str, Any]
-    # Multi-project sidebar feed: compact registered projects [{id, name, chat_id, working_dir, last_active_at, ...}].
+    # Multi-project sidebar feed: the pins and the 50 newest others by last_message_at (ProjectEntry rows).
     projects: list
-    project_listable_count: Optional[int]  # active/deleting Projects the sidebar can list; null when unavailable
-    project_chat_ids: list  # COMPLETE (uncapped) registered chat_ids; the live WS fan-out isolation SSOT
+    project_messages_revision: Optional[str]  # moves with any Project's last_message_at; null until history is dated
+    project_listable_count: Optional[int]  # Projects the sidebar can list; null when unavailable or rooms unknown
+    project_chat_ids: Optional[list]  # COMPLETE (uncapped) registered chat_ids, the live WS fan-out isolation SSOT; null: unknown
     # Main's room revision (its standalone messages, the kind a Project's visible_revision counts); null while unreadable.
     main_visible_revision: NotRequired[Optional[int]]
-    # Task->project bindings ({task_id: {project_id, chat_id, project_name}}): a bound card hides the stray
-    # "turn into project" button (v6.33.0 P2) and opens its project (v6.33.0 F4). Null only when
-    # ``?bindings_since`` named the current opaque ``task_bindings_revision`` ("" after a failed read).
+    # Task->project bindings ({task_id: {project_id, chat_id}}; a Project's name is in the census rows and
+    # ``projects``): a bound card hides the stray "turn into project" button (v6.33.0 P2) and opens its project
+    # (v6.33.0 F4). Null only when ``?bindings_since`` named the current opaque ``task_bindings_revision`` (the
+    # map's digest; "" after a failed read).
     task_bindings: Optional[dict]
     task_bindings_revision: str
     task_bindings_unchanged: bool
@@ -821,9 +831,10 @@ class StateResponse(WorkStateFields):
     served_ui: NotRequired[ServedUiState]  # this generation's main interface; absent on older cores
 
 
-class SettingsNetworkMeta(TypedDict):
-    """Network fields inside the ``GET /api/settings`` ``_meta`` block."""
+from ouroboros.gateway.client_contracts import SettingsReceipt, SettingsTiming, SettingsRestartState
 
+
+class SettingsNetworkMeta(TypedDict):
     bind_host: str
     bind_port: int
     lan_ip: str
@@ -857,30 +868,24 @@ class SettingsPolicyAxis(TypedDict, total=False):
     applies: Literal["restart", "next_task"]
 
 
-class SettingsPolicyState(TypedDict):
-    access: SettingsPolicyAxis
-    supervisor: SettingsPolicyAxis
-    review: SettingsPolicyAxis
-    running_task_snapshot: bool
-
-
-class SettingsMeta(SettingsNetworkMeta, total=False):
-    """Complete ``GET /api/settings`` ``_meta`` block."""
-
+class SettingsMeta(SettingsNetworkMeta, SettingsTiming, total=False):
     custom_secret_keys: list[str]
     setup_contract: Dict[str, Any]
     available_subagents: AvailableSubagentsSettingsMeta
     policy_state: SettingsPolicyState
-    restart_state: Dict[str, Any]
+    restart_state: SettingsRestartState
     connections: list[Dict[str, Any]]  # every API connection as the picker shows it (provider_connections.connections_meta)
+    main_connection_choice: list[str]  # the connections an unauthored Main waits to be chosen among (server_runtime)
+    known_spend_gaps: list[str]  # what spends money the limits cannot count: no known price (pricing.spend_coverage)
+    partly_counted_spend: list[Dict[str, str]]  # {name, condition}: counted only under a price condition (the same)
 
 
-class SettingsSaveResponse(TypedDict, total=False):
+class SettingsSaveResponse(SettingsReceipt, total=False):
     status: str
     no_changes: bool
     restart_required: bool
     restart_keys: list[str]
-    restart_state: Dict[str, Any]
+    restart_state: SettingsRestartState
     immediate_changed: bool
     next_task_changed: bool
     warnings: list[str]
@@ -891,25 +896,25 @@ class SettingsSaveResponse(TypedDict, total=False):
     connection_references: list[Dict[str, str]]  # rows naming a connection that cannot serve them (they refuse)
 
 
-class OwnerRuntimeModeResponse(TypedDict):
+class OwnerRuntimeModeResponse(SettingsReceipt):
     ok: bool
     runtime_mode: str
     restart_required: bool
 
 
-class OwnerAutoGrantResponse(TypedDict):
+class OwnerAutoGrantResponse(SettingsReceipt):
     ok: bool
     enabled: bool
 
 
-class OwnerContextModeResponse(TypedDict):
+class OwnerContextModeResponse(SettingsReceipt):
     ok: bool
     context_mode: str
     project_id: str
     cognition: ProjectCognition
 
 
-class OwnerSafetyModeResponse(TypedDict):
+class OwnerSafetyModeResponse(SettingsReceipt):
     ok: bool
     safety_mode: str  # full | light | off (v6.54.3)
 
@@ -1096,6 +1101,8 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     # v6.60.0: "" | "final_answer_line" — adapter-declared machine-extractable answer
     # protocol; flows into task_contract.answer_protocol and inherits to subagents.
     answer_protocol: str
+    # true: task review Required reviews the whole final answer even without files (task_contract.review_answer).
+    review_answer: bool
     allowed_resources: Dict[str, Any]
     resource_policy: Dict[str, Any]
     disabled_tools: list[str]
@@ -1163,8 +1170,7 @@ class TaskDetailResponse(TypedDict, total=False):
     history_retention: HistoryRetentionProjection
     model_waits: Dict[str, Any]
     question_rooms: Dict[str, QuestionRoom]
-    # Open cancel intent/teardown: "pending" drives "Cancelling…", not lifecycle status.
-    # Absent for settled or unrequested cancellation; running/scheduled status stays truthful.
+    # "pending" means "Cancelling…"; running/scheduled stays truthful. Absent when settled or unrequested.
     cancel_state: str
     # Pending intent's recorded reason (owner text or subtree cause); absent if none (GR2-11).
     cancel_reason: str
@@ -1179,6 +1185,7 @@ class TaskDetailResponse(TypedDict, total=False):
     # Every adoption this task authorized, as boot settled them: {adoption_id, outcome, commit_sha, previous_sha, branch,
     # note, settled_at, revision, commits?, commits_complete?, commits_omitted?}; commits (newest first) only when adopted.
     body_adoptions: List[Dict[str, Any]]
+    review_overrides: Dict[str, Any]  # a root's review trace: {count?, latest?, continued?, landed?, skills?} (review_overrides.py)
     error: str
 
 
@@ -1221,17 +1228,6 @@ class ClaudexorCredentialProfileDeleteResponse(TypedDict):
     credentialCleanup: Literal["config_dir_removed", "secret_deleted", "none"]
     cleanupWarning: NotRequired[str]
     vendorCredentialDisposition: NotRequired[ClaudexorVendorCredentialDisposition]
-
-
-class ClaudexorLoginJobProblem(TypedDict, total=False):
-    """Typed job errors preserve engine prose/status/code and bounded actions
-    (16 strings, 512 chars each). Covers absent jobs, input/reconcile conflicts,
-    setup 400/409 and marked retryable terminal-probe 503. Other daemon 5xx and
-    unmarked transport/discovery failures use the generic proxy 503."""
-
-    error: Required[str]
-    code: str
-    required_actions: List[str]
 
 
 class TaskEventCursor(TypedDict):
@@ -1407,6 +1403,8 @@ class OnboardingSubagentsPreviewResponse(TypedDict):
     ok: bool
     model_settings: Dict[str, Any]  # the model setting keys the draft would save
     available_subagents: Dict[str, Any]
+    known_spend_gaps: List[str]  # what the draft's limits cannot count, as GET /api/settings names it after a save
+    partly_counted_spend: List[Dict[str, str]]  # what they count only under a price condition, the same way
     source: str
     diagnostics: list[Dict[str, Any]]
 
@@ -1450,7 +1448,7 @@ class OnboardingAttemptResponse(TypedDict):
     post_commit_failed: NotRequired[str]
 
 
-class SettingsPostCommitFailureResponse(TypedDict):
+class SettingsPostCommitFailureResponse(SettingsReceipt):
     """500 after settings bytes landed; post_commit_failed names the later step.
     Retry that step, never re-save. Shared by settings and onboarding writes."""
 
@@ -1474,7 +1472,9 @@ class OnboardingPresetFailureResponse(TypedDict):
 
 # Human/test-visible contract index; routers own executable Route objects.
 from ouroboros.gateway.endpoint_index import HTTP_ENDPOINTS
-from ouroboros.gateway.client_contracts import FileBrowserListResponse, ServedUiState  # noqa: E402,F401
+from ouroboros.gateway.client_contracts import (  # noqa: E402,F401
+    ChatModelChoice, ChatModelRoute, FileBrowserListResponse, ServedUiState, SettingsPolicyState,
+)
 
 WS_MESSAGE_TYPES: tuple[str, ...] = (
     "conversation_finished", "chat", "command",
@@ -1488,6 +1488,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
     "extension_lifecycle",
     "message_annotation",
     "projects_changed",
+    "ui_preferences_changed",
     "task_named",
     "update_status_ready",
     "update_progress_changed",
@@ -1508,7 +1509,7 @@ __all__ = [
     "SecretConsumer", "SecretDecisionRequest", "SecretDecisionResponse", "SecretEvent", "SecretKeyState",
     "SecretOutcome", "SecretRequestField", "SecretRequestMeta",
     "TypingOutbound", "LogOutbound", "HeartbeatOutbound", "ExtensionLifecycleOutbound",
-    "ProjectsChangedOutbound", "MessageAnnotationOutbound",
+    "ProjectsChangedOutbound", "UiPreferencesChangedOutbound", "MessageAnnotationOutbound",
     "UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",
     "UpdateApplySuccessResponse", "UpdateApplyErrorResponse",
     "UpdateDescriptionRequest", "UpdateDescriptionResponse", "UpdateDescriptionErrorResponse",
@@ -1577,6 +1578,7 @@ __all__ = [
     "StorageActiveProject", "StorageDeletedFolder", "StorageDeletedProject", "StorageDeletedProjects", "StorageFolderPart",
     "StorageFree", "StorageFreeEntry", "StorageFreeGroup", "StorageFreeItem", "StorageFreeItemsResponse", "StorageFreeKept",
     "StorageFreePool", "StorageFreeRequest", "StorageFreeRun", "OwnerKeepRequest", "OwnerKeepResponse",
+    "KeptService", "KeptServicesResponse", "KeptServiceStopRequest", "KeptServiceStopResponse",
     "HTTP_ENDPOINTS",
     "WS_MESSAGE_TYPES",
 ]

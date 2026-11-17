@@ -47,7 +47,7 @@ def request_drain() -> None:
 def retain(root, stream, row, *, feed=False, **shown) -> None:
     """Take immutable bytes without waiting for IO; disclose each overflow burst. ``shown`` keeps the
     append's appearance facts (``dialogue_store.append``: ``also_feed``, ``room_revisions``,
-    ``appearances``) for the retry, so a retried row is unread and found where it is shown."""
+    ``appearances``, ``shown_in``) for the retry, so a retried row is unread, found and dated where it is shown."""
     from ouroboros.chat_chain import row_address
 
     global _bytes, _eviction_burst

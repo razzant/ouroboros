@@ -142,6 +142,7 @@ def _check_budget_limits(
     # producer allowance stops when known spend reaches it, never one call early.
     authority = task_pacing.COST_STOP_EXPLICIT if tool_ctx is None else task_pacing.cost_stop_authority(tool_ctx)
     explicit = authority == task_pacing.COST_STOP_EXPLICIT
+    continuation_view = None  # populated only when pricing temporarily replaces the pending ordinary fit
     if explicit and prompt_estimate > 0 and (
             global_remaining is not None or (cost_ceiling.root_cap_usd is not None and deciding is not None)):
         finish_reason = task_pacing.wrapup_last_fit_text(deciding, cost_ceiling, global_remaining)
@@ -160,22 +161,21 @@ def _check_budget_limits(
             # Pre-screen only: every proxy stop, and every image prompt the proxy
             # understates, is priced exactly on a COPY of the transcript (no
             # service finalization) before anything destructive happens.
+            from ouroboros.loop_forced_finalization import _bind_forced_route
+
             probe_messages = [dict(message) for message in ctx.messages]
             _loop()._append_or_merge_user_message(probe_messages, forced_prompt)
-            from ouroboros.loop_forced_finalization import _forced_physical_context
-            from ouroboros.usage_accounting import bind_physical_attempt_context
-
-            # Priced under the probe's own Main measurement: a rendered Nano reserves the reply
-            # the window leaves, not the whole ceiling (which over-reserved a wrap-up that fits).
-            with bind_physical_attempt_context(_forced_physical_context(ctx, probe_messages)):
-                probe = task_pacing.prospective_wrapup_attempt_request(
-                    llm=ctx.llm, messages=probe_messages, model=ctx.active_model,
-                    reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
-                    allow_server_web_search=server_web, prompt_tokens=prompt_estimate,
-                )
-            wrapup_args = dict(request=probe, **balances)
-            wrapup_fits = task_pacing.wrapup_reservation_fits(**wrapup_args)
-            two_fit = _second_reservation_fits(ctx, wrapup_args, wrapup_fits, relaxed=last_fit_relaxed)
+            wrapup_fits, two_fit = _exact_reservations(ctx, probe_messages, balances, prompt_estimate,
+                                                       last_fit_relaxed, server_web)
+            pending_view = (getattr(tool_ctx, "context_fit_plan", None), getattr(tool_ctx, "active_context_mode", None))
+            if (wrapup_fits is False or two_fit is False) and _bind_forced_route(ctx):
+                continuation_view = pending_view
+                # A cold tail's plan for the next ordinary round's route left that price unmeasured (a rendered
+                # Nano's whole reply): the stop is priced again on the acting route's own fit; the switch stays.
+                probe_messages = [dict(message) for message in ctx.messages]
+                _loop()._append_or_merge_user_message(probe_messages, forced_prompt)
+                wrapup_fits, two_fit = _exact_reservations(ctx, probe_messages, balances, prompt_estimate,
+                                                           last_fit_relaxed, server_web)
         if wrapup_fits is False or two_fit is False:
             # The exact probe confirmed a stop: finalize services and prepare the
             # candidate that will be dispatched (forced augmentations included).
@@ -199,7 +199,8 @@ def _check_budget_limits(
                 accumulated_usage["cost_stop_rail"] = "wrapup_reservation_last_fit"
                 budget_pause.request_pause(
                     ctx, rail=budget_pause.RAIL_WRAPUP_LAST_FIT, scope=pause_scope,
-                    reason_text=task_pacing.wrapup_unaffordable_text(deciding, cost_ceiling, global_remaining))
+                    reason_text=task_pacing.wrapup_unaffordable_text(deciding, cost_ceiling, global_remaining),
+                    context_view=continuation_view)
                 return _loop()._forced_fallback_result(
                     ctx, trace, task_pacing.wrapup_unaffordable_text(deciding, cost_ceiling, global_remaining),
                     "budget_exhausted", source="budget_wrapup_unaffordable",
@@ -210,7 +211,7 @@ def _check_budget_limits(
                 accumulated_usage["cost_stop_spend_basis"] = spend_basis
                 accumulated_usage["cost_stop_rail"] = "wrapup_reservation_last_fit"
                 budget_pause.request_pause(ctx, rail=budget_pause.RAIL_WRAPUP_LAST_FIT,
-                                           scope=pause_scope, reason_text=finish_reason)
+                                           scope=pause_scope, reason_text=finish_reason, context_view=continuation_view)
                 return _loop()._forced_final_answer(
                     ctx, prompt=priced_prompt, _prompt_prepared=True,
                     fallback_text=finish_reason, reason_code="budget_exhausted",
@@ -221,11 +222,7 @@ def _check_budget_limits(
             # Presence arm the prepared prompt set is withdrawn: it would silence the ordinary reply.
             if tools_ctx is not None:
                 tools_ctx._presence_forced_declaration, tools_ctx._presence_forced_pending = presence_arm
-    # A producer allowance is spent once known spend REACHES it, like every ledger
-    # limit; an explicit profile keeps its authored edge (strictly over its point).
-    reached = deciding is not None and ceiling_usd is not None and (
-        deciding >= ceiling_usd if authority == task_pacing.COST_STOP_PRODUCER else deciding > ceiling_usd)
-    if reached:
+    if _ceiling_reached(deciding, ceiling_usd, authority):
         if spend_basis == task_pacing.SPEND_BASIS_TREE:
             spent_text = (
                 f"Task tree spent ${deciding:.3f} (known spend, subagents included; "
@@ -251,7 +248,7 @@ def _check_budget_limits(
         )
         accumulated_usage["cost_stop_spend_basis"] = spend_basis
         budget_pause.request_pause(ctx, rail=budget_pause.RAIL_GRACEFUL_CEILING,
-                                   scope=pause_scope, reason_text=finish_reason)
+                                   scope=pause_scope, reason_text=finish_reason, context_view=continuation_view)
         if not explicit:
             # Only an explicit profile authored room for a final answer. The fence checks the
             # wider tree cap and wallet, never a producer allowance (or an inherited number
@@ -269,6 +266,26 @@ def _check_budget_limits(
             reason_code="budget_exhausted",
         )
     return None
+
+
+def _exact_reservations(ctx: "_RoundLimitContext", probe_messages: list, balances: Dict[str, Any],
+                        prompt_estimate: int, relaxed: bool, server_web: bool) -> Tuple[Optional[bool], Optional[bool]]:
+    """``(fits, two_fit)``: the exact price of the request ``probe_messages`` (a copy) would send, against
+    ``balances``, for one reservation and for two (``_second_reservation_fits``). Nothing is finalized or sent."""
+    from ouroboros.loop_forced_finalization import _forced_physical_context
+    from ouroboros.usage_accounting import bind_physical_attempt_context
+
+    # Priced under the probe's own Main measurement: a rendered Nano reserves the reply
+    # the window leaves, not the whole ceiling (which over-reserved a wrap-up that fits).
+    with bind_physical_attempt_context(_forced_physical_context(ctx, probe_messages)):
+        probe = task_pacing.prospective_wrapup_attempt_request(
+            llm=ctx.llm, messages=probe_messages, model=ctx.active_model,
+            reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
+            allow_server_web_search=server_web, prompt_tokens=prompt_estimate,
+        )
+    wrapup_args = dict(request=probe, **balances)
+    fits = task_pacing.wrapup_reservation_fits(**wrapup_args)
+    return fits, _second_reservation_fits(ctx, wrapup_args, fits, relaxed=relaxed)
 
 
 def _second_reservation_fits(ctx: "_RoundLimitContext", wrapup_args: Dict[str, Any],
@@ -913,12 +930,6 @@ def _prepare_post_tool_budget_context(
             if candidate.finalization_control in _loop()._DELIVERY_HOLD_CONTROLS
             else ""
         )
-        # The absorption gate stays open while undispositioned children remain:
-        # arming JSON there would recreate the conflicting-instruction round.
-        absorption_gate_open = (
-            hold_control == _loop()._CHILD_ABSORPTION_HOLD_CONTROL
-            and bool(_loop()._undispositioned_children(limit_ctx))
-        )
         evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(
             tools, limit_ctx, llm_trace,
         )
@@ -926,17 +937,12 @@ def _prepare_post_tool_budget_context(
             candidate.evidence_revision != evidence_revision
             or candidate.evidence_fingerprint != evidence_fingerprint
         ):
-            if absorption_gate_open:
-                _loop()._hold_delivery_for_skill_action(
-                    tools, llm_trace, control=_loop()._CHILD_ABSORPTION_HOLD_CONTROL,
-                )
-            else:
-                _loop()._arm_delivery_control(
-                    tools,
-                    limit_ctx,
-                    llm_trace,
-                    control="effect_revision_required",
-                )
+            _loop()._arm_delivery_control(
+                tools,
+                limit_ctx,
+                llm_trace,
+                control="effect_revision_required",
+            )
         elif hold_control == _loop()._SKILL_ACTION_HOLD_CONTROL:
             _loop()._arm_delivery_control(
                 tools,
@@ -944,12 +950,17 @@ def _prepare_post_tool_budget_context(
                 llm_trace,
                 control="skill_revision_required",
             )
-        # An absorption hold with unchanged evidence keeps holding: only
-        # dispositions close the gate, and a disposition changes evidence.
     # Cross-model fallback can adopt a different route during this round.
     limit_ctx.active_model = active_model
     limit_ctx.active_use_local = active_use_local
     limit_ctx.active_effort = active_effort
+
+
+def _ceiling_reached(deciding: Optional[float], ceiling_usd: Optional[float], authority: str) -> bool:
+    """A producer allowance is spent once known spend REACHES it, like every ledger limit; an explicit profile keeps
+    its authored edge (strictly over its point). Unknown spend reaches nothing."""
+    return deciding is not None and ceiling_usd is not None and (
+        deciding >= ceiling_usd if authority == task_pacing.COST_STOP_PRODUCER else deciding > ceiling_usd)
 
 
 def authored_completion_budget_exhausted(ctx: Any, budget_remaining: float | None, ceiling: Any) -> bool:

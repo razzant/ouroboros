@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { afterUpdateRows, bindPreflightDescription, preflightDescription, preflightEvidenceRows } from '../modules/update_status.js';
-import { updateLetterView } from '../modules/updates.js';
+import { afterUpdateRows, bindPreflightDescription, preflightDescription, preflightEvidenceRows, updateOverReview } from '../modules/update_status.js';
+import { factValueHtml, initUpdates, updateLetterView } from '../modules/updates.js';
+import { setup } from './dashboard_dom_fixture.js';
 
 const plan = { base_sha: 'aaaa', target_sha: 'bbbb' };
 const letter = { key: plan, text: '## Exact range\n\n- one change', description_current: true, state: 'ready', relation: 'pending' };
@@ -53,11 +54,45 @@ test('confirmation details name failed, absent and green evidence without conver
         assert.ok(text.includes(part), part);
     }
     assert.doesNotMatch(text, /Exact range/, 'the description never repeats inside the evidence');
+    // This install's own commits the range brings back over a review outcome lead the rows; the host's one line counts
+    // them and the merges whose receipt observed a FAIL or no verdict. A commit that is both counts once.
+    assert.match(text, /Made on this computer: Not read for this range/, 'its rows were not read: unknown, never none');
+    assert.match(text, /Review receipts: 1 of the 2 commits listed here carry one\. Without a receipt the review is unknown\./);
+    assert.equal(updateOverReview(qualification).line, 'Went in over a review FAIL or no verdict: 1 merge.');
+    const outcome = 'review FAIL: critical findings; author continued: accepted — "Read it."';
+    qualification.landed_over_review = [{ sha: 'cccc1111dddd', subject: 'own change', reason: 'critical_findings', outcome },
+        { sha: 'bbbb', subject: '#123', reason: 'review_quorum', outcome: 'no review verdict: review quorum' }];
+    const own = preflightEvidenceRows({ merge_plan: plan, letter, qualification });
+    assert.deepEqual(own[0], { label: 'cccc1111', value: `own change\nOuroboros made it on this computer; ${outcome}` });
+    assert.equal(own[1].value, '#123\nOuroboros made it on this computer; no review verdict: review quorum.');
+    assert.doesNotMatch(rowsText(own), /Not read for this range/);
+    const over = updateOverReview(qualification);
+    assert.equal(over.line, 'Went in over a review FAIL or no verdict: 2 commits Ouroboros made on this computer.');
+    assert.deepEqual(over.names, [`cccc1111 (made on this computer; ${outcome})`,
+        'bbbb (made on this computer; no review verdict: review quorum)']);
+    const at = (sha, review) => ({ sha, subject: sha, receipt: { checks: [], review } });
+    assert.equal(updateOverReview({ ...plan, landed_over_review: [], commits: [
+        at('m1', { observed: 'FAIL', declared: 'PASS' }), at('m2', { observed: 'QUORUM_FAILED' }), at('m3', { observed: 'unknown' }),
+        at('earlier', { observed: 'PASS', relation: 'changes_after_review' }), at('sparse', {}), at('future', { observed: 'LATER' }),
+        { sha: 'bare', subject: 'no receipt' }] }).line, 'Went in over a review FAIL or no verdict: 3 merges.');
+    assert.deepEqual(updateOverReview({ ...plan, commits: [at('m1', { observed: 'FAIL' }), at('m3', { observed: 'unknown' })] }).names,
+        ['m1 (merge; review FAIL)', 'm3 (merge; no review verdict recorded)']);
+    // A range checked before every first-parent receipt was read: the commits behind its body bound are counted as
+    // not read, beside what is named and also when nothing is, in the line and in Details alike.
+    const unread = (sha) => ({ sha, subject: sha, receipt: null, body_read: false });
+    const short = updateOverReview({ ...plan, landed_over_review: [], commits: [at('m1', { observed: 'FAIL' }), unread('o1'), unread('o2'),
+        { sha: 'bare', subject: 'read, no receipt', receipt: null, body_read: true }] });
+    assert.equal(short.line, 'Went in over a review FAIL or no verdict: 1 merge. The review receipts of 2 older commits were not read.');
+    assert.equal(short.detail, 'Went in over a review FAIL or no verdict: m1 (merge; review FAIL). The review receipts of 2 older commits were not read.');
+    assert.equal(updateOverReview({ ...plan, landed_over_review: [], commits: [unread('o1')] }).line,
+        'The review receipts of 1 older commit were not read.');
+    qualification.landed_over_review = [];
     qualification.commits = [{ sha: 'bbbb', subject: 'green', receipt: { checks: [{ name: 'full_battery', status: 'passed', source: 'author_declared' }], review: { observed: 'PASS', declared: 'PASS' } } }];
     qualification.github.runs[0].conclusion = 'success';
     const green = rowsText(preflightEvidenceRows({ merge_plan: plan, letter, qualification }));
     assert.match(green, /full_battery passed/);
-    assert.doesNotMatch(green, /failed|failure|No qualification receipt|FAIL/);
+    assert.doesNotMatch(green, /failed|failure|No qualification receipt|FAIL|Review receipts|this computer/);
+    assert.deepEqual(updateOverReview(qualification), { line: '', detail: '', names: [], landed: [] }, 'nothing named is no line, never "clean"');
     assert.doesNotMatch(green, /also covers/);
     qualification.github.runs[0].covered_shas = ['earlier-merge'];
     assert.match(rowsText(preflightEvidenceRows({ merge_plan: plan, letter, qualification })), /This run also covers: earlier-/);
@@ -141,4 +176,40 @@ test('a zero is a measurement and a missing one stays unobserved; a current RSS 
     // One measured half of the share still says which half is missing.
     const half = sides(afterUpdateRows({ before: { ...missing, cpu_percent: 5 }, after: null }))[0];
     assert.equal(values(half)['CPU share, sample interval'], '5.0 % over unobserved');
+});
+
+test('a long code in a fact offers one break at its middle; words and short codes read as they are', () => {
+    // A full SHA in a narrow column broke before its last character ("…d7e65a" over a lone "c"): its one break is at
+    // its middle, so it reads as two even halves, and copying it still copies it whole.
+    const sha = 'c846227a389ed7ec0dc395d6cf02e1a55d7e65ac';
+    assert.equal(factValueHtml(sha), 'c846227a389ed7ec0dc3<wbr>95d6cf02e1a55d7e65ac');
+    assert.equal(factValueHtml(`source ${sha}`), 'source c846227a389ed7ec0dc3<wbr>95d6cf02e1a55d7e65ac');
+    // Words break between themselves (the sheet balances their lines); a short code never needs a break.
+    const duties = 'custody maintenance ×13, reconcile maintenance ×1';
+    assert.equal(factValueHtml(duties), duties);
+    assert.equal(factValueHtml('c846227a389e'), 'c846227a389e');
+    // Each half is escaped as the whole value was.
+    assert.equal(factValueHtml('<b>&'), '&lt;b&gt;&amp;');
+    assert.equal(factValueHtml('&'.repeat(30)), `${'&amp;'.repeat(15)}<wbr>${'&amp;'.repeat(15)}`);
+});
+
+test('the Updates renderer puts a midpoint break in the served SHA and leaves ordinary facts whole', async (t) => {
+    const { mount, window, ws, routes } = setup(t);
+    const sha = 'c846227a389ed7ec0dc395d6cf02e1a55d7e65ac';
+    const reply = (data) => ({ ok: true, json: async () => data });
+    routes.set('/api/settings', reply({ OUROBOROS_UPDATE_CHANNEL: 'stable' }));
+    routes.set('/api/update/status', reply({ managed: true, check_ok: true, available: false,
+        running_sha: sha, current_sha: sha, checked_target_sha: sha,
+        update_progress: { operation_id: 'sampled', result: 'failed', active: false },
+        after_update: { operation_id: 'sampled', after: { source_sha: sha, rss_bytes: 0, rss_measure: 'current' } } }));
+    routes.set('/api/git/commits', reply({ commits: [] }));
+    initUpdates({ mount, ws, state: { activePage: 'dashboard', dashboardActiveSubtab: 'updates' } });
+    window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'updates' } }));
+    for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+    const facts = mount.querySelector('#updates-attempt-facts');
+    const values = facts.querySelectorAll('dd');
+    const source = values.find(value => value.textContent === sha);
+    assert.ok(source, 'the actual status read reached the rendered facts');
+    assert.deepEqual(source.children.map(node => node.tagName), ['wbr']);
+    assert.ok(values.some(value => value.textContent !== sha && !value.children.length), 'ordinary facts need no break');
 });

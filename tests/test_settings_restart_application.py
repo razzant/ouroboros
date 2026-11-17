@@ -1,5 +1,6 @@
 """Saved settings are compared with actual component startup/health facts."""
 
+from ouroboros.local_model import RUNTIME_PROBE
 import asyncio
 import json
 import subprocess
@@ -24,7 +25,7 @@ def applied(monkeypatch):
     monkeypatch.setattr(local_model, "_manager", manager)
     saved = dict(config.SETTINGS_DEFAULTS)
     server_process.record_applied_restart_settings({key: saved[key] for key in (
-        "OUROBOROS_MAX_WORKERS", "OUROBOROS_SERVER_HOST", "OUROBOROS_HOST_SERVICE_PORT",
+        "OUROBOROS_SERVER_HOST", "OUROBOROS_HOST_SERVICE_PORT",
         "OUROBOROS_SKILLS_REPO_PATH", "OUROBOROS_UI_DIR",  # the last: server_web.ServedUI.apply
     )}, server_host_source="settings")
     return saved, manager
@@ -33,7 +34,7 @@ def applied(monkeypatch):
 def test_server_pending_truth_survives_reload_revert_and_environment_save(applied, monkeypatch):
     saved, _manager = applied
     for key, value in {
-        "OUROBOROS_RUNTIME_MODE": "pro", "OUROBOROS_MAX_WORKERS": 19,
+        "OUROBOROS_RUNTIME_MODE": "pro",
         "OUROBOROS_SERVER_HOST": "0.0.0.0", "OUROBOROS_HOST_SERVICE_PORT": 9123,
         "OUROBOROS_SKILLS_REPO_PATH": "/example/skills", "OUROBOROS_UI_DIR": "none",
     }.items():
@@ -49,8 +50,10 @@ def test_missing_component_facts_stay_unknown(applied, monkeypatch):
     saved, _manager = applied
     monkeypatch.setattr(server_process, "_applied_restart_settings", {})
     state = settings._build_restart_state(saved)
-    assert len(state["unknown_keys"]) == 5
+    assert len(state["unknown_keys"]) == 4  # the owner's worker cap is read live on every pass: never a restart key
     assert "not reported" in state["summary"]
+    changed = {**saved, "OUROBOROS_MAX_WORKERS": 19}
+    assert "OUROBOROS_MAX_WORKERS" not in settings._build_restart_state(changed)["restart_keys"]
 
 
 def test_socket_owners_publish_only_successfully_bound_inputs(tmp_path, monkeypatch):
@@ -128,7 +131,7 @@ def healthy_model_process(tmp_path, monkeypatch):
         return original_popen(command, **kwargs)
 
     def run(command, **kwargs):
-        if command[-1] == "import llama_cpp":
+        if command[-1] == RUNTIME_PROBE:
             return subprocess.CompletedProcess(command, 0, "", "")
         return original_run(command, **kwargs)
 
@@ -163,7 +166,8 @@ def test_actual_local_start_health_and_restart_clear_saved_mismatch(healthy_mode
     assert response.status_code == 200
     assert settled.wait(10)
     assert manager.is_running, manager.status_dict()
-    assert commands[-1][commands[-1].index("--n_ctx") + 1] == "16384"
+    # 0 starts the runtime with the factory window.
+    assert commands[-1][commands[-1].index("--n_ctx") + 1] == str(config.SETTINGS_DEFAULTS["LOCAL_MODEL_CONTEXT_LENGTH"])
     assert manager.settings_application(saved)["pending_keys"] == []
     saved["LOCAL_MODEL_CONTEXT_LENGTH"] = 8192
     assert manager.settings_application(saved)["pending_keys"] == ["LOCAL_MODEL_CONTEXT_LENGTH"]

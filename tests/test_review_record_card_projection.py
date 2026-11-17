@@ -203,7 +203,7 @@ def test_pool_facts_reach_the_card_in_words_while_an_older_record_projects_as_be
 
     shown = _render("t-pool", projection)
     lines = shown["card"].splitlines()
-    assert "Panel: Advisory · chosen by Ouroboros · 2 of 3 ticked reviewers · 1 adviser, not counted" in lines
+    assert "Panel: chosen by Ouroboros · 2 of 3 ticked reviewers · 1 adviser, not counted" in lines
     assert "Why these reviewers: two engines are enough for a docs fix" in lines
     assert "Not reached: critic (engine refused token ***REDACTED***)" in lines
     assert "Wave total: $0.42 for the priced seats · 1 seat on a subscription · 1 seat cost unknown" in lines
@@ -211,7 +211,7 @@ def test_pool_facts_reach_the_card_in_words_while_an_older_record_projects_as_be
     assert any(line.startswith("Reviewer critic: adviser, not counted · cost unknown · role=") for line in lines)
     assert not any(line.startswith("Panel composition:") for line in lines)
     (group,) = [g for g in shown["groups"] if g["surface"] == "review_record"]
-    assert "Panel: Advisory · chosen by Ouroboros · 2 of 3 ticked reviewers" in group["attempts"][0]["detailText"]
+    assert "Panel: chosen by Ouroboros · 2 of 3 ticked reviewers" in group["attempts"][0]["detailText"]
 
 
 def test_malformed_pool_facts_are_dropped_never_guessed(tmp_path):

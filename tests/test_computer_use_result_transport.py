@@ -103,7 +103,8 @@ def decoded(rows, short: str) -> dict:
 def test_every_transport_writes_the_compact_text_of_the_object_it_wrote_before(tmp_path, monkeypatch, backend):
     ctx = _floor_ctx(tmp_path, monkeypatch)
     if backend == "mac":
-        desktop = mac(ctx, tmp_path, monkeypatch, answer=lambda argv, _index: 1 if "t:c" in argv else 0)
+        # cmd+c fails: the Command chord program given "c" (key() of Command and one character) exits 1.
+        desktop = mac(ctx, tmp_path, monkeypatch, answer=lambda argv, _index: int(argv[0] == "osascript" and argv[-1] == "c"))
         native_facts(desktop, monkeypatch)
         seen = serialized(desktop, monkeypatch)
         rows = run(desktop, seen, ("screenshot", {}), ("window_list", {}), ("type_text", {"text": TEXT}),
@@ -171,7 +172,7 @@ def test_the_host_readers_take_the_same_facts_from_the_compact_text(tmp_path, mo
         attached.append((path, capture_source))
         return True, "attached"
     monkeypatch.setattr("ouroboros.tools.vision.attach_local_image_to_context", attach)
-    desktop = mac(ctx, tmp_path, monkeypatch, answer=lambda argv, _index: 1 if "t:c" in argv else 0)
+    desktop = mac(ctx, tmp_path, monkeypatch, answer=lambda argv, _index: int(argv[0] == "osascript" and argv[-1] == "c"))
     native_facts(desktop, monkeypatch)
     seen = serialized(desktop, monkeypatch)
 

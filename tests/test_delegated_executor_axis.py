@@ -355,7 +355,7 @@ def test_dispatch_row_explicit_harness_blocks_and_never_reaches_the_native_path(
 
 
 def test_a_rowless_child_runs_native_and_asks_the_daemon_nothing(monkeypatch):
-    """Row-less children (today only the silence diagnostic) run natively with no daemon
+    """Row-less children (the host mints none today; legacy queued silence-* rows) run natively with no daemon
     probe, whatever the legacy harness key says (owner D23: an ambiguous `auto` never
     host-routes). Before, such a child probed the daemon, resolved a light-lane NANNY,
     was demoted by the visibility preflight, and read a false "METERED API ... your

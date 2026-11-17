@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import pathlib
 import posixpath
-import subprocess
 from typing import List, Optional
 
 from ouroboros.git_observation import host_git_env, numstat_paths
@@ -71,7 +70,9 @@ def _git_display_text(cmd: List[str], repo_dir: pathlib.Path) -> tuple[str, str]
             text, escaped = raw.decode("utf-8", "backslashreplace"), True
         return text.replace("\r\n", "\n").replace("\r", "\n"), escaped
 
-    res = subprocess.run(cmd, cwd=str(repo_dir), capture_output=True, env=host_git_env())
+    from ouroboros import work_domain  # a work repository's filters run in its container, never on the service
+
+    res = work_domain.run(cmd, cwd=str(repo_dir), capture_output=True, env=host_git_env())
     stdout, escaped = decode(res.stdout)
     if res.returncode != 0:
         stderr, stderr_escaped = decode(res.stderr)
@@ -169,15 +170,14 @@ def _git_diff(
         binding = _git()._vcs_binding(ctx, _resolved_binding, root=root, path=path or ".")
         repo_dir = binding.repository_path or binding.base_path
         base, head = str(kwargs.get("base") or ""), str(kwargs.get("head") or "")
-        if head and (not base or staged):
-            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
-                text="⚠️ TOOL_ARG_ERROR (vcs_read diff): head requires base and cannot be combined with staged=true.",
-                meta={"operation_outcome": "completed_no_effect"}))
+        # vcs_read refused head without base, or with staged, among the call's other argument problems.
+        from ouroboros.tools.vcs_read import _object
+
         comparison = {}
         revisions = []
         for name, ref in (("base", base), ("head", head)):
             if ref:
-                tree = _git().run_cmd(["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{tree}}"], cwd=repo_dir).strip()
+                tree = _object(repo_dir, ref, "tree", field=name)  # an unresolved one is named with Git's answer
                 revisions.append(tree)
                 comparison.update({f"{name}_ref": ref, f"{name}_tree": tree})
         cmd = ["git", "diff"]
@@ -472,14 +472,13 @@ def _scope_changes(repo_dir: pathlib.Path, paths: List[str]) -> List[tuple]:
     """The ``git status`` rows of a restore scope as (XY, path): staged and working changes with
     rename sides apart, and each untracked file; ignored files are never listed. ``paths`` resolve
     from ``repo_dir``, while each row names its path from the repository's top level."""
-    import subprocess
-
+    from ouroboros import work_domain
     from ouroboros.git_observation import host_git_env
 
     # --untracked-files=all: a repo-local status.showUntrackedFiles=no would EMPTY the
     # untracked half, and dir-collapsing ("dir/") hides the files a protected judgment needs.
-    res = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames",
-                          "--", *paths], cwd=repo_dir, capture_output=True, timeout=10, env=host_git_env())
+    res = work_domain.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames",
+                           "--", *paths], cwd=repo_dir, capture_output=True, timeout=10, env=host_git_env())
     if res.returncode != 0:
         err = (res.stderr or b"").decode("utf-8", errors="replace").strip()[:200]
         raise RuntimeError(f"git status --porcelain=v1 -z failed (exit {res.returncode}): {err}")
@@ -490,8 +489,15 @@ def _scope_changes(repo_dir: pathlib.Path, paths: List[str]) -> List[tuple]:
 def _occupied(top: pathlib.Path, path: str) -> bool:
     """Whether writing HEAD's file at ``path`` would make Git delete something there: a folder that holds
     anything (ignored files included) at the path, or a file or link where one of its folders belongs."""
+    from ouroboros import work_domain
+
     target = top / path
     try:
+        if work_domain.is_work(target):  # its own metadata through the confined descent, never followed
+            if work_domain.kind(target) == "dir":
+                return bool(work_domain.entries(target))
+            return any(work_domain.kind(top / folder) in ("link", "file")
+                       for folder in pathlib.PurePosixPath(path).parents if str(folder) != ".")
         if target.is_dir() and not target.is_symlink():
             return next(target.iterdir(), None) is not None
         return any((top / folder).is_symlink() or (top / folder).is_file()
@@ -503,12 +509,15 @@ def _occupied(top: pathlib.Path, path: str) -> bool:
 def _prune_emptied(top: pathlib.Path, names: List[str], folder: pathlib.Path) -> None:
     """Remove the folders that removing ``names`` left empty, inside ``folder`` only: rmdir deletes
     no content, so a folder still holding anything, an ignored file included, stays."""
-    root = folder.resolve()
+    from ouroboros import work_domain  # a work folder is settled by its spelling and removed as the work domain
+
+    work = work_domain.is_work(folder)
+    root = work_domain.settle(folder)
     for name in names:
-        parent = (top / name).parent.resolve()
+        parent = work_domain.settle((top / name).parent)
         while parent != root and root in parent.parents:
             try:
-                parent.rmdir()
+                work_domain.remove_empty_dir(parent) if work else parent.rmdir()
             except OSError:
                 break
             parent = parent.parent

@@ -63,6 +63,8 @@ def send_card(bridge: Any, record: Dict[str, Any], chat_id: int, *, task_id: str
                               "fallback_text": fallback, "interactive": bool(interactive),
                               "task_id": task_id, "ts": ts})
     publish_event(CHAT_OUTBOUND, {
+        "message_origin": bus.message_origin(bus.DATA_DIR, chat_id, task_id),
+        **(projection_fields(stored) if stored else {}),
         "chat_id": int(chat_id), "text": fallback + (f"\n\n{INTERACTIVE_NOTE}" if interactive else ""),
         "markdown": False, "is_progress": False, "ts": ts, "task_id": task_id, "transport": transport,
         "card_id": identity["card_id"],

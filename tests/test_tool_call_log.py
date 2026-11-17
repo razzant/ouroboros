@@ -3,45 +3,16 @@ count logical calls — through the real loop wrapper, memory, replay and the ca
 from __future__ import annotations
 
 import json
-import pathlib
 import threading
 import time
-from types import SimpleNamespace
 
 import pytest
 
 import ouroboros.loop_tool_execution as execution
 from ouroboros.observability import read_call_payload
-from ouroboros.tool_call_log import logical_calls, worker_phrase, worker_position
+from ouroboros.tool_call_log import HOST_SETTLED_STATUSES, logical_calls, worker_phrase, worker_position
 from ouroboros.tools.tool_result import ToolResult
-
-
-def _rows(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-
-
-class _Registry:
-    CODE_TOOLS = frozenset()
-
-    def __init__(self, tmp_path, handler, *, round_id="exec:round:1"):
-        self.handler = handler
-        self.frames = []
-        queue = SimpleNamespace(put_nowait=lambda env: self.frames.append(env["data"]), put=None)
-        self._ctx = SimpleNamespace(
-            task_attempt=2, event_queue=queue, task_metadata={"budget_drive_root": str(tmp_path / "canonical")},
-            _current_llm_call_meta={"execution_id": "exec", "round_id": round_id, "llm_call_id": "llm-1"})
-
-    def execute_result(self, name, args):
-        return self.handler(name, args)
-
-
-def _call(registry, tmp_path, call_id="call_0", name="read_file", args=None, timeout=5):
-    logs = tmp_path / "child" / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    tc = {"id": call_id, "function": {"name": name, "arguments": json.dumps(args or {"path": "a.txt"})}}
-    return execution._execute_with_timeout(registry, tc, logs, timeout, "task-1"), logs
+from tests._tool_call_log_shared import _Registry, _call, _rows
 
 
 def test_start_is_durable_before_the_handler_and_the_settlement_shares_its_identity(tmp_path):
@@ -61,6 +32,7 @@ def test_start_is_durable_before_the_handler_and_the_settlement_shares_its_ident
     assert [row["type"] for row in rows] == ["tool_call_started", "tool_call"]
     assert {row["invocation_id"] for row in rows} == {start["invocation_id"]}
     assert rows[1]["elapsed_ms"] >= 0 and "sk-secret-value" not in json.dumps(rows[1])
+    assert rows[1]["result_ref"]["path"] and "args_ref" not in rows[1], "the call's trace is named once, by its ref"
     # The canonical copy survives the execution drive (e.g. its GC).
     canonical = tmp_path / "canonical" / "logs" / "tools.jsonl"
     (logs / "tools.jsonl").unlink()
@@ -155,6 +127,99 @@ def test_early_exits_after_the_start_still_settle(tmp_path):
     calls = logical_calls(_rows(logs / "tools.jsonl"))
     assert [call["state"] for call in calls] == ["settled", "settled"]
     assert calls[1]["settled"]["status"] == "host_error" and calls[1]["settled"]["is_error"] is True
+    assert "control_reason" not in calls[1]["settled"]  # no control ended it: the host's own failure
+    assert calls[0]["settled"]["tool_result_code"] == "TOOL_ARG_ERROR"  # the handler-less refusal is typed too
+
+
+@pytest.mark.parametrize("control", ["owner_pause", "owner_pause_before_review_launch", "cancelled", "deadline",
+                                     "finalize_requested", "owner_model", "the call's end"])
+def test_a_control_that_ends_the_call_settles_as_interrupted_with_its_reason(tmp_path, control):
+    """Pause, Stop, Wrap up, a deadline, a route change or a live call's end is no host failure (audit 08-11.11
+    item 6): the one settlement is ``interrupted`` and names the control. No handler result exists, so the row
+    invents no code."""
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    from ouroboros.model_wait import ModelWaitInterrupted
+
+    def ended_by_control(_name, _args):
+        raise ModelWaitInterrupted(control) if control == "owner_pause" else PhysicalDispatchInterrupted(control)
+
+    registry = _Registry(tmp_path, ended_by_control)
+    with pytest.raises((ModelWaitInterrupted, PhysicalDispatchInterrupted)):
+        _call(registry, tmp_path)
+    [call] = logical_calls(_rows(tmp_path / "child" / "logs" / "tools.jsonl"))
+    row = call["settled"]
+    assert call["state"] == "settled" and (row["status"], row["control_reason"]) == ("interrupted", control)
+    assert row["is_error"] is True and "tool_result_code" not in row
+    assert row["result_preview"].endswith(f"interrupted: {control}")
+
+
+@pytest.mark.parametrize("raised, word", [
+    ("PhysicalDispatchInterrupted", "accounting_wait_expired"),          # _usage_wait: the turn's window passed
+    ("_PhysicalSendNotStarted", "owner_pause_authority_unreadable"),      # usage_accounting: an unreadable Pause fence
+    ("_PhysicalSendNotStarted", "model_sleep_authority_unreadable"),      # owner_pause._validate_launch, wrapped
+    ("_PhysicalSendNotStarted", "owner_launch_authority_unavailable"),    # a launch lock lost for a physical reason
+    ("ModelWaitInterrupted", "owner_launch_authority_unavailable:permission"),  # the loop's form, word and cause
+])
+def test_a_word_for_the_hosts_own_failure_settles_as_host_error(tmp_path, raised, word):
+    """The interruption types also carry words that name no control of the work, only the host's own failure (Carbon
+    on #3211). The row says ``host_error`` and carries no ``control_reason``; the word stays in its preview and on the
+    re-raised exception, which the loop still routes to its technical rails, and replay counts the call as an error."""
+    from ouroboros import llm_attempt
+    from ouroboros.model_wait import ModelWaitInterrupted
+    from ouroboros.tool_call_log import replay_evidence
+
+    kind = ModelWaitInterrupted if raised == "ModelWaitInterrupted" else getattr(llm_attempt, raised)
+
+    def ended(_name, _args):
+        raise kind(word)
+
+    with pytest.raises(kind) as error:
+        _call(_Registry(tmp_path, ended), tmp_path)
+    assert error.value.control_reason == word
+    [call] = logical_calls(_rows(tmp_path / "child" / "logs" / "tools.jsonl"))
+    row = call["settled"]
+    assert (row["status"], row.get("control_reason"), row["is_error"]) == ("host_error", None, True)
+    assert row["result_preview"].endswith(word) and "tool_result_code" not in row
+    [settled] = [item for item in replay_evidence(tmp_path / "child", "task-1")["observations"] if item["fact"] == "settled"]
+    assert (settled["status"], settled["hostError"]) == ("error", True)
+
+
+@pytest.mark.parametrize("fenced, scope, reason", [(True, "pausing", "pausing"), (False, "global", "spend_limit_global"),
+                                                     (False, "root", "spend_limit_root")])
+def test_a_pause_fence_and_a_spend_limit_interrupt_the_call_with_their_own_word(tmp_path, fenced, scope, reason):
+    """A tool whose own model send meets the fence of a pause being written was ended by that pause: the
+    row says ``interrupted`` and ``pausing``, the fence's own word. The owner's spend rail refusing that send
+    (#3215) is no host failure either: ``interrupted``, naming the rail and its scope. Any other accounting
+    failure stays the host's own row (``test_early_exits_after_the_start_still_settle``)."""
+    from ouroboros.usage_accounting import BudgetExceeded, DispatchFenced
+
+    def ended(_name, _args):
+        if fenced:
+            raise DispatchFenced("model dispatch fenced: task t is entering an exact pause", limit_scope=scope)
+        raise BudgetExceeded("known spend reached the limit", limit_scope=scope)
+
+    with pytest.raises(BudgetExceeded):
+        _call(_Registry(tmp_path, ended), tmp_path)
+    [call] = logical_calls(_rows(tmp_path / "child" / "logs" / "tools.jsonl"))
+    row = call["settled"]
+    assert (row["status"], row.get("control_reason"), row["is_error"]) == ("interrupted", reason, True)
+    assert "tool_result_code" not in row
+    assert row["result_preview"].startswith("DispatchFenced: " if fenced else "BudgetExceeded: ")
+
+
+@pytest.mark.parametrize("name", ["BillingAuthorityUnavailable", "ControlAuthorityUnavailable"])
+def test_an_unreadable_money_or_control_authority_stays_the_hosts_failure(tmp_path, name):
+    """Negative control for #3215: only the spend rail's own refusal (``BudgetExceeded``) names a control; an
+    accounting authority that could not be read is the host's failure, with no ``control_reason``."""
+    from ouroboros import usage_ledger
+
+    def raising(_name, _args):
+        raise getattr(usage_ledger, name)("authority unavailable")
+
+    with pytest.raises(getattr(usage_ledger, name)):
+        _call(_Registry(tmp_path, raising), tmp_path)
+    [call] = logical_calls(_rows(tmp_path / "child" / "logs" / "tools.jsonl"))
+    assert (call["settled"]["status"], call["settled"].get("control_reason")) == ("host_error", None)
 
 
 def test_host_error_producer_reaches_memory_as_failure(tmp_path, monkeypatch):
@@ -311,11 +376,18 @@ def test_the_recent_tools_header_counts_calls_not_rows(tmp_path):
     assert tools.count("✓ read_file path=") == 10
 
 
+@pytest.mark.parametrize("stub", sorted(HOST_SETTLED_STATUSES))  # a new host status reaches both readers or fails here
 @pytest.mark.parametrize("real_first", [True, False])
-def test_a_duplicate_host_error_settlement_never_hides_the_real_one(real_first):
-    real, host = _log_row("tool_call", "i", status="ok"), _log_row("tool_call", "i", status="host_error")
-    [call] = logical_calls([_log_row("tool_call_started", "i"), *([real, host] if real_first else [host, real])])
+def test_a_duplicate_host_error_settlement_never_hides_the_real_one(real_first, stub):
+    real, host = _log_row("tool_call", "i", status="ok"), _log_row("tool_call", "i", status=stub)
+    rows = [_log_row("tool_call_started", "i"), *([real, host] if real_first else [host, real])]
+    [call] = logical_calls(rows)
     assert call["state"] == "settled" and call["settled"] is real
+    # The benchmark trace converter reads the same journal by the same rule.
+    from devtools.benchmarks.terminal_bench.atif import _tool_call_steps
+
+    [step] = _tool_call_steps(rows)
+    assert step["status"] == "ok"
 
 
 @pytest.mark.parametrize("exc", [RuntimeError("live emit failed"), SystemExit(3)])
@@ -424,6 +496,33 @@ def test_completion_receipts_replay_host_facts_without_hiding_errors(tmp_path):
     evidence = replay_evidence(tmp_path, "t")
     assert [(row["receipt"], row["status"]) for row in evidence["observations"]] == [
         (True, "unknown"), (True, "ok"), (True, "error"), (False, "ok")]
+
+
+def test_a_replayed_call_safety_held_settles_as_held_as_its_live_row_does(tmp_path):
+    """A call Safety returned or could not read took no effect but is no error: replay settles it as held, like the
+    live step row, so a reloaded block counts no error for it; a real failure still replays as one."""
+    from ouroboros.tool_call_log import replay_evidence
+
+    rows = [_log_row("tool_call", "returned", tool="run_command", is_error=True, status="safety_returned"),
+            _log_row("tool_call", "unread", tool="run_command", is_error=True, status="safety_unavailable"),
+            _log_row("tool_call", "failed", tool="run_command", is_error=True, status="non_zero_exit")]
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "tools.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    assert [row["status"] for row in replay_evidence(tmp_path, "t")["observations"]] == ["held", "held", "error"]
+
+
+def test_a_replayed_call_a_control_ended_settles_as_interrupted_as_its_live_row_does(tmp_path):
+    """#3211: a call Pause, Stop or the spend rail ended replays as ``interrupted``, like the live step
+    row, so a reloaded block counts no error for it; ``hostError`` still means the host's own failure only."""
+    from ouroboros.tool_call_log import replay_evidence
+
+    rows = [_log_row("tool_call", "paused", tool="run_command", is_error=True, status="interrupted",
+                     control_reason="owner_pause"),
+            _log_row("tool_call", "host", tool="run_command", is_error=True, status="host_error")]
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "tools.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    assert [(row["status"], row["hostError"]) for row in replay_evidence(tmp_path, "t")["observations"]] == [
+        ("interrupted", False), ("error", True)]
 
 
 def test_replayed_observations_keep_each_rows_own_host_time_and_invent_none(tmp_path):

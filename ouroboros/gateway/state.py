@@ -8,6 +8,7 @@ import os
 import pathlib
 import time
 from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional
 
 from starlette.requests import Request
@@ -183,6 +184,8 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     from ouroboros.tools.github import github_token_from_env_or_settings
     from ouroboros.config import load_settings
     from ouroboros.composer_cognition import main_cognition
+    from ouroboros.model_slots import processing_tiers
+    from ouroboros.route_choice import configured_references
     from ouroboros.subagent_runtime import subagents_availability
 
     settings = load_settings()
@@ -257,9 +260,6 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         else get_evolution_status_snapshot()
     )
     activity_availability = {"complete": True}
-    from ouroboros.projects_registry import bindings_revision
-
-    revision = bindings_revision(drive_root)  # stamped BEFORE the read: the map is never older than it
     task_bindings = _task_bindings_safe(request, availability=activity_availability)
     bindings_complete = activity_availability["complete"]
     if direct is None:
@@ -273,31 +273,47 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         decision_owners=decision_owners, work_facts=work_facts,
     )
     from ouroboros.gateway.main_decisions import main_decisions_snapshot
+    from ouroboros.gateway.state_publication import map_revision, wire_bindings
+    sent_bindings = wire_bindings(task_bindings)  # what a reader receives; the census below keeps the named map
     decisions = main_decisions_snapshot(drive_root, decision_owners, task_bindings,
                                        activities_complete=activity_availability["complete"],
                                        bindings_complete=bindings_complete)
     from ouroboros.gateway.work_projection import works_snapshot
+    publication_roots = set()
     works = works_snapshot(drive_root, decision_owners, work_facts, complete=activity_availability["complete"],
-                           bindings=task_bindings)
+                           bindings=task_bindings, publication_roots=publication_roots,
+                           questions=decisions["current_questions"])
     # Registered-project facts (never raise): the compact sidebar list, and the
     # COMPLETE (uncapped, all-status) project chat_ids for the live WS fan-out
     # isolation SSOT — distinct from the capped/filtered sidebar list, so
     # isolation never lapses for projects beyond the summary limit or hidden rows.
     try:
         from ouroboros.projects_registry import list_sidebar_projects, projects_summary
+        from ouroboros.room_messages import project_revision
 
         listable = list_sidebar_projects(root := request_drive_root(request))  # one read: the feed and its count
-        projects = projects_summary(root, include_pinned=True, sidebar_rows=listable)
+        messages_revision = project_revision(root, listable)  # read before the feed: a later move reads the list again
+        # A listed room that is the owner's turn always has its row: the amber on Ouroboros's picture stands for a row
+        # the owner can reach, however long ago its work ended (after the recent slice, in the same message order).
+        waiting = {int(chat) for chat, room in (works.get("rooms") or {}).items()
+                   if room.get("amber") and str(chat).isdigit()}
+        projects = projects_summary(root, include_pinned=True, sidebar_rows=listable, by_message=True, keep=waiting)
         project_listable_count = len(listable)
     except Exception:
-        projects = []
+        projects, messages_revision = [], None
         project_listable_count = None
     try:
-        from ouroboros.projects_registry import reserved_project_chat_ids
+        from ouroboros.projects_registry import readable_rooms
 
-        project_chat_ids = sorted(reserved_project_chat_ids(request_drive_root(request)))
-    except Exception:
-        project_chat_ids = []
+        rooms = readable_rooms(request_drive_root(request))
+        project_chat_ids = None if rooms is None else sorted(rooms)
+    except Exception:  # unknown, never "no Projects": a reader keeps the set it holds
+        project_chat_ids = None
+    if project_chat_ids is None:
+        # The same registry counts the feed: while it vouches for no room, the count is unknown too (never "none
+        # listed"). The bindings map a reader receives names no Project, so a registry that reads but vouches for no
+        # room leaves its revision standing; one that cannot be read fails the bindings read too.
+        project_listable_count = None
     from ouroboros.gateway.ui_preferences import main_room_revision
 
     main_visible_revision = main_room_revision(request_drive_root(request))
@@ -308,7 +324,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "jobs": jobs,
         # Other data roots the census read (a task's ledger root): the next revision probe stamps them too.
         "roots": sorted({str(facts["budget_drive_root"]) for facts in work_facts.values()
-                         if isinstance(facts, dict) and facts.get("budget_drive_root")}),
+                         if isinstance(facts, dict) and facts.get("budget_drive_root")} | publication_roots),
         "pending_count": len(PENDING),
         "running_count": len(RUNNING),
         "limit": limit,
@@ -323,12 +339,16 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "github_token_configured": bool(github_token_from_env_or_settings()),
         "subagents_mode": main_cognition(settings)["subagents_mode"],
         "subagents_availability": subagents_availability(settings),
+        "main_route": configured_references()["main"],
+        "processing_tiers": processing_tiers(settings),
         "projects": projects,
+        "project_messages_revision": messages_revision,
         "project_listable_count": project_listable_count,
         "project_chat_ids": project_chat_ids,
         "main_visible_revision": main_visible_revision,
-        "task_bindings": task_bindings,
-        "task_bindings_revision": revision if bindings_complete else "",
+        "task_bindings": sent_bindings,
+        # The map names its own revision (a digest of what a reader receives); a failed read has none.
+        "task_bindings_revision": map_revision(sent_bindings) if bindings_complete else "",
         # A carried Presence turn is a census row of its own kind (CLIENT_CONTRACT), never the owner's direct turn.
         "active_direct_turns": [row for row in direct_turns if row.get("kind") != "presence"],
         "active_chat_activities": activities,
@@ -442,13 +462,16 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
     from ouroboros.outcomes import normalize_outcome_axes
 
     display = {key: data[key] for key in ("status", "reason_code", "timeout_retry_from", "original_task_id",
-                                          "delegated_runs_unreconciled") if key in data}
+                                          "delegated_runs_unreconciled", "terminal_origin") if key in data}
     if isinstance(data.get("model_waits"), dict):
-        display["model_waits"] = data["model_waits"]
+        from ouroboros.deployment_policy import served_waits
+
+        display["model_waits"] = served_waits(data["model_waits"])
     if data.get("status") or data.get("outcome_axes"):
         display["outcome_axes"] = normalize_outcome_axes(data)
-    if isinstance(data.get("cancel_origin"), dict):
-        display["cancel_origin"] = dict(data["cancel_origin"])  # the stop the status fold reads beside the axes
+    for name in ("cancel_origin", "finalization_recovery"):  # the stop and the adopted answer the status fold reads beside the axes
+        if isinstance(data.get(name), dict):
+            display[name] = dict(data[name])
     if synthesis:
         display["root_phase_checkpoint"] = {"post_task_synthesis": synthesis}
     if _answer_stored(synthesis):
@@ -457,9 +480,9 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
         from ouroboros.projects_registry import task_presentation_name
         from ouroboros.terminal_time import terminal_time_fact
 
-        # The executor's own terminal fact or nothing: generic ts is never an answer time.
-        display["late_work"] = {"title": task_presentation_name(data),
-                                "answered_at": terminal_time_fact(data).get("occurred_at") or ""}
+        # The executor's own terminal fact or nothing: neither generic ts nor a cancel is an answer time.
+        answered = terminal_time_fact(data)
+        display["late_work"] = {"title": task_presentation_name(data), "answered_at": (answered["occurred_at"] if answered["source"] == "executor_terminal" else None) or ""}
     facts = {"card": card_facts(data), "display": display, "resume_attempt": data.get("resume_attempt"),
              # An answered root's census row carries only its own routing identity.
              "row": {key: data[key] for key in ("chat_id", "project_id", "_is_direct_chat", "queued_at")
@@ -535,7 +558,7 @@ def _raw_work_facts(row: dict) -> dict:
     continuation = metadata.get("continuation") if isinstance(metadata.get("continuation"), dict) else {}
     facts = {key: row[key] for key in ("_budget_pause_hold", "_budget_pause", "title", "suggested_name", "focus",
                                         "root_task_id", "parent_task_id", "original_task_id", "budget_drive_root", "owner_wait",
-                                        "_presence_turn") if row.get(key)}
+                                        "_presence_turn", "silence_attention") if row.get(key)}
     edges = {key: continuation[key] for key in ("predecessor_task_id", "work_id", "work_name") if continuation.get(key)}
     return {**facts, **({"continuation": edges} if edges else {})}
 
@@ -658,7 +681,13 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                 (str(task_id), {**(meta.get("task") or {}), "_attempt": int(meta.get("attempt")
                     or (meta.get("task") or {}).get("_attempt") or 1),
                     "model_activity": (meta.get("active_llm_call") or {}).get("model_activity"),
+                    "context_attempt": meta.get("context_attempt"), "lead": meta.get("lead"),
+                    "_lead_request_id": meta.get("_lead_request_id"), "processing_last": meta.get("processing_last"),
+                    "turn_phase": meta.get("turn_phase"), "_census_carrier": "worker" if meta.get(
+                        "worker_id") is not None else "",
                     "owner_wait": dict(meta.get("owner_wait") or {}),
+                    # The live silence fact is the RUNNING row's, never its task's (silence_attention.observe).
+                    "silence_attention": dict(meta.get("silence_attention") or {}),
                     "_owner_pause_warm": warm_paused_member(meta)} if isinstance(meta, dict) else {},
                  _epoch_or_zero(meta.get("started_at")) if isinstance(meta, dict) else 0.0)
                 for task_id, meta in queue_mod.RUNNING.items()]
@@ -785,10 +814,10 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
             from ouroboros.project_naming import derived_run_name
             from ouroboros.task_activity_facts import card_facts
             from ouroboros.work_stop import parked_stop_view
+            from ouroboros.lead_fact import lead_processing_fields
 
             if phase == "unknown" and availability is not None:
                 availability["complete"] = False
-            view = view or {}
             if phase in {"budget_paused", "budget_pausing"}:
                 # A queue row's view comes with its control (``queue_control``); an answered root's is read here.
                 view = view or parked_stop_view(drive_root, row, task_id, {} if owner_resumed else fence_rows.get(
@@ -797,6 +826,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                     phase = "budget_paused"
             return {
                 "activity_id": task_id,
+                **(lead_processing_fields(row.get("lead"), row, queued=phase == "queued") if root else {}),
                 "detached": card_facts(row)["detached"],
                 "chat_id": int(row.get("chat_id") or 0),
                 "project_id": str(row.get("project_id") or ""),
@@ -821,11 +851,15 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 **({"model_waits": row["model_waits"]} if row.get("model_waits") else {}),
                 **({"model_activity": row["model_activity"]} if row.get("model_activity")
                    and row["model_activity"].get("task_attempt") == int(row.get("_attempt") or 1) else {}),
+                **({"context_attempt": row["context_attempt"]} if isinstance(row.get("context_attempt"), dict)
+                   and row["context_attempt"].get("task_attempt") == int(row.get("_attempt") or 1) else {}),
+                # A running root a worker holds, and the start step its own frames reached (#2862: the RUNNING
+                # row's ``turn_phase``), as a conversation-lane row says them (``lane_turn_rows``).
+                **({"carrier": row["_census_carrier"]} if root and row.get("_census_carrier") else {}),
+                **({"turn_phase": str(row["turn_phase"])} if root and row.get("turn_phase") else {}),
                 **({"project_admission_hold": project_hold_fact(row)}
                    if row.get("_project_admission_restore_hold") else {}),
             }
-
-        from types import SimpleNamespace
 
         from ouroboros.work_stop import owner_fence_state, queue_control
 
@@ -854,8 +888,10 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
         from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
         from ouroboros.gateway.work_projection import tree_review_reads
         for task_id, row, started_at in running_rows:
-            if task_id in census_ids:
-                continue  # a conversation turn the lane carries is already its own direct row
+            if task_id in census_ids:  # a conversation turn the lane carries is already its own direct row,
+                if work_facts is not None and not owners_only and row.get("silence_attention"):  # its silence: RUNNING's
+                    work_facts.setdefault(task_id, {})["silence_attention"] = row["silence_attention"]
+                continue
             if task_id:
                 root = _is_root(task_id, row)
                 if root:

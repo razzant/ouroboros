@@ -313,6 +313,8 @@ def test_failed_scratch_removal_keeps_its_ownership_record(tmp_path, monkeypatch
 
 
 def test_replaced_short_directory_is_neither_granted_nor_deleted(tmp_path):
+    """A real directory under the recorded name but another inode is never granted or deleted: its record
+    alone moves into a held handoff entry (``identity_unverified``), and the retired drive itself goes."""
     from ouroboros import task_custody
 
     grant = _prepare(tmp_path, _Catalog(GRANTED))
@@ -323,9 +325,16 @@ def test_replaced_short_directory_is_neither_granted_nor_deleted(tmp_path):
     (scratch / "foreign.txt").write_text("not owned\n", encoding="utf-8")
     assert _prepare(tmp_path, _Catalog(GRANTED)).roots == ()
     data = tmp_path / "data"
+    record = data / "task_drives/task-1" / SESSION_SCRATCH_DIRNAME / "snap-1/scratch.json"
+    recorded = record.read_bytes()
     assert task_custody.settle_child_drive(data, "task-1", data / "task_drives/task-1",
                                            live=lambda _tid: False, admission_rollback=True)["status"] == "removed"
-    assert task_custody.remove_custody_trash(data)["stuck"]
+    report = task_custody.remove_custody_trash(data)
+    assert (report["removed"], report["stuck"]) == (1, {})
+    assert [hold["class"] for hold in report["holds"]] == ["identity_unverified"]
+    [entry] = (data / "state/custody_trash").iterdir()
+    assert entry.name.startswith("task-1+scratch-") and list(task_custody.remove_custody_trash(data)["held"]) == [entry.name]
+    assert (entry / SESSION_SCRATCH_DIRNAME / "snap-1/scratch.json").read_bytes() == recorded
     assert (scratch / "foreign.txt").read_text(encoding="utf-8") == "not owned\n"
     assert displaced.is_dir()
 

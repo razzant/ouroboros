@@ -88,7 +88,7 @@ export const TASK_CONTROL_LABELS = Object.freeze({
 const STOPS = new Set([ACTION_STOP_NOW, ACTION_STOP_EARLIER]);
 const STOP_CONFIRMS = Object.freeze({
     [ACTION_STOP_NOW]: { title: 'Stop this work now?', confirmLabel: TASK_CONTROL_LABELS[ACTION_STOP_NOW], danger: true,
-        body: 'It stops at once, with the helpers it started.' },
+        body: 'It stops at once, with the subagents it started.' },
     [ACTION_STOP_EARLIER]: { title: 'Stop the earlier attempt?', confirmLabel: TASK_CONTROL_LABELS[ACTION_STOP_EARLIER],
         danger: true, body: 'What still runs of the earlier attempt stops at once; the Continue itself keeps going.' },
 });
@@ -230,7 +230,10 @@ const HELD_FACTS = {
                 + `${Array.isArray(b.effects) && b.effects.length > 1 ? 'are' : 'is'} not confirmed`,
         })[b.reason] || `a ${tool} call of task ${b.task_id} is held`;
     },
-    merge_operation: (b) => `a merge of task ${b.task_id} is not settled`,
+    merge_operation: (b) => ({
+        merge_effect_unknown: `the outcome of a merge request of task ${b.task_id} is unknown`,
+        merge_queued: `a merge of task ${b.task_id} is queued on GitHub`,
+    })[b.reason] || `a merge of task ${b.task_id} is not settled`,
     workspace_executor: (b) => `a workspace process of task ${b.task_id} is not settled`,
     delegated_run: (b) => (b.state === 'running' ? `delegated run ${b.run_id} is running`
         : b.stop_outcome === 'pending_invocation_unbound'
@@ -312,7 +315,7 @@ export async function resumeTaskAction(taskId, { resume = resumeTask, toast = sh
         // attempt's work still runs waits for it, as its Continue did: it starts by itself once that work settles.
         toast(ack.held ? `Resume accepted; it starts by itself when the earlier attempt's work finishes: ${
             heldWorkFacts(ack.blockers) || 'earlier work is not proven settled'}.`
-            : ack.tree_only ? 'Resumed. Ouroboros or you choose which helpers continue.'
+            : ack.tree_only ? 'Resumed. Ouroboros or you choose which subagents continue.'
             : ack.late_phase ? 'Resuming: the work left after the delivered answer continues.'
             : 'Resuming: the task returns to the queue.', 'info');
         announceMembershipGap(ack.membership_gaps, 'resume', toast);  // read from the Pause's current record
@@ -513,13 +516,21 @@ function positionTaskControlMenu(anchor, menu) {
 
 function watchTaskControlMenu(anchor, menu) {
     const isCurrentMenu = () => openMenu === menu && openTrigger === anchor;
+    const openedAt = anchor.getBoundingClientRect();
     const closeForViewportChange = (event) => {
         // A height-clamped portal is its own scrollport. Scrolling it does not
-        // move the trigger, so keep it open; ancestor/page scroll still closes.
+        // move the trigger, so keep it open; ancestor/page scroll may move it.
         if (event.type === 'scroll' && event.target === menu) return;
         // Nor does a scroller that does not hold the trigger: the chat feed re-anchoring behind a floating list
-        // (a late history page, a refit) cannot have moved it. The page itself (the document) still closes.
+        // (a late history page, a refit) cannot have moved it.
         if (event.type === 'scroll' && event.target?.nodeType === 1 && !event.target.contains(anchor)) return;
+        // A late card fact can grow the feed while its reading-place keeper compensates the scroll. The menu
+        // is still anchored at the same point; a deferred feed scroll from before opening is harmless too.
+        // The document itself keeps its page-level dismissal contract.
+        if (event.type === 'scroll' && event.target?.nodeType === 1 && anchor.isConnected) {
+            const now = anchor.getBoundingClientRect();
+            if (['top', 'right', 'bottom', 'left'].every(edge => Math.abs(now[edge] - openedAt[edge]) < 0.5)) return;
+        }
         if (isCurrentMenu()) closeTaskControlMenu();
     };
     document.addEventListener('scroll', closeForViewportChange, true);

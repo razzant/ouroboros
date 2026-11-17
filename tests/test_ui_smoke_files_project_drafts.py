@@ -5,13 +5,19 @@ from __future__ import annotations
 import base64
 import json
 import os
+import pathlib
 import re
+import shutil
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 import pytest
 
+from ouroboros import projects_registry as registry
+from tests._shared import producer_evidence_dir
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
+from tests.ui_console_errors import record_console_errors, record_failed_loads, unexpected_console_errors
 
 
 pytestmark = [pytest.mark.ui_browser]
@@ -42,6 +48,7 @@ def _files_gateway(page):
         "uploads": 0, "upload_error": "Upload refused.", "directories": [], "deleted": [],
         "hold_navigation": False, "pending_navigation": [],
         "hold_operation": "", "pending_operations": [], "transfers": [], "list_paths": [], "upload_paths": [],
+        "content": {},  # a file's text as another client saved it meanwhile
     }
     root = "/workspace/" + "long-project-name-" * 5
     names = ["sample.txt", "other.txt", "unreadable.txt", "picture.png", "paper.pdf", "archive.bin", "large.txt"]
@@ -71,7 +78,7 @@ def _files_gateway(page):
                 return
             payload = {"path": path, "name": path, "size": 31, "root_path": root,
                        "display_path": f"{root}/{path}", "is_text": True,
-                       "content": "Original file contents\nSecond line\n"}
+                       "content": fixture["content"].get(path, "Original file contents\nSecond line\n")}
             if path in {"picture.png", "paper.pdf", "archive.bin"}:
                 payload.update(is_text=False, content="")
             if path == "picture.png":
@@ -302,8 +309,11 @@ def test_files_retains_document_and_submits_one_write(direct_server_with_data, e
             expect(page.locator("#files-preview-status")).to_contain_text("Directory temporarily unavailable")
             _same_draft(page, "Draft survives list error")
             expect(page.locator("#files-save")).to_be_enabled()
+            # Another page keeps the draft for the return (owner 2026-11-03): no question, the same draft.
             page.locator('[data-nav-page="dashboard"]').click()
-            page.get_by_role("button", name="Stay", exact=True).click()
+            expect(page.locator("#page-dashboard")).to_have_class(re.compile(r"\bactive\b"))
+            expect(page.get_by_role("button", name="Stay", exact=True)).to_have_count(0)
+            page.locator('[data-nav-page="files"]').click()
             expect(page.locator("#page-files")).to_have_class(re.compile(r"\bactive\b"))
             _same_draft(page, "Draft survives list error")
 
@@ -482,7 +492,9 @@ def test_project_sources_keep_selected_target(direct_server_with_data, engine): 
                 page.locator("[data-np-name]").fill("Scoped project")
                 page.locator(f'input[name="np-source"][value="{source}"]').check()
                 expected = {"name": "Scoped project"}
-                if source == "genesis":
+                if source == "fileless":
+                    expected["no_folder"] = True  # the choice the dialog shows is the one it sends, never a default behind it
+                elif source == "genesis":
                     expected["with_workspace"] = True
                 elif source == "attach":
                     page.get_by_role("button", name="Chosen folder", exact=True).click()
@@ -743,6 +755,45 @@ def test_a_narrow_files_page_shows_the_list_first_and_back_keeps_the_draft(direc
             browser.close()
 
 
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_a_files_draft_kept_across_pages_says_when_its_file_changed_meanwhile(direct_server_with_data, engine):  # noqa: F811
+    """Another page keeps the unsaved draft (owner 2026-11-03); its return reads the file again and says when it changed
+    meanwhile, before a Save would replace that change (Opus review, 6 Nov). Unchanged, the return says nothing."""
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import expect, sync_playwright
+
+    with sync_playwright() as pw:
+        browser = _browser(pw, engine)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            fixture = _files_gateway(page)
+            page.goto(direct_server_with_data["url"] + "/#files", wait_until="domcontentloaded")
+            page.locator(".files-entry").filter(has_text="sample.txt").click()
+            editor = page.get_by_role("textbox", name="File contents", exact=True)
+            expect(editor).to_have_value("Original file contents\nSecond line\n")
+            editor.fill("Draft kept across pages")
+            status = page.locator("#files-preview-status")
+
+            def away_and_back():
+                page.evaluate("document.querySelector('[data-nav-page=\"skills\"]').click()")
+                page.wait_for_function("document.querySelector('#page-skills').classList.contains('active')")
+                page.evaluate("document.querySelector('[data-nav-page=\"files\"]').click()")
+                page.wait_for_function("document.querySelector('#page-files').classList.contains('active')")
+
+            away_and_back()
+            page.wait_for_timeout(500)  # the return's read of the file has answered
+            expect(status).not_to_contain_text("changed after this draft began")
+            expect(editor).to_have_value("Draft kept across pages")
+            fixture["content"]["sample.txt"] = "Saved meanwhile by another client\n"
+            away_and_back()
+            expect(status).to_have_text("This file changed after this draft began; Save replaces those changes.")
+            expect(editor).to_have_value("Draft kept across pages")
+            assert fixture["writes"] == [], "said, nothing written"
+            _capture(page, f"files-{engine}-changed-elsewhere")
+        finally:
+            browser.close()
+
+
 _STACKED = """() => {
     const preview = document.querySelector('.files-preview'), drawer = document.getElementById('primary-sidebar');
     const rect = drawer.getBoundingClientRect(), hit = document.elementFromPoint(rect.left + 24, innerHeight / 2);
@@ -801,3 +852,401 @@ def test_a_file_read_landing_behind_the_phone_drawer_stays_under_it(direct_serve
             assert not errors, errors
         finally:
             browser.close()
+
+
+# --- The Project menu's Working folder… and the New Project dialog's No folder ---------------------------------------
+# Over the candidate server: the real menu, route and registry, in Chromium on a desktop window and WebKit on a
+# phone-wide touch screen. Projects come from the real API and New Project dialog; Save tests hold transport or inject
+# one refusal, then read the real registry. A folder is removed from disk. One picture needs
+# queued work no cheap live fixture produces (work moved into the room that has not restarted since): there the server
+# answers the page's read of the folder and only its ``work`` facts are replaced at the route
+# (``tests/test_project_folder.py`` proves those facts from a real queue publication and real bindings).
+
+MENU = "body > .project-row-menu:not([data-leaving])"
+DIALOG = ".project-folder-dialog"
+LONG_NAME = "Core defaults: weekly review of settings, models and limits after every update"[:80]  # the longest a name gets
+
+
+@pytest.fixture(params=[("chromium", 1280, 900, "dark", False), ("webkit", 390, 844, "light", True)],
+                ids=["chromium-1280-dark", "webkit-390-light-touch"])
+def room(request, direct_server_with_data, tmp_path):  # noqa: F811
+    engine, width, height, theme, touch = request.param
+    sync_api = pytest.importorskip("playwright.sync_api")
+    server = direct_server_with_data
+    frames = producer_evidence_dir(tmp_path / "frames", f"project-folder-{request.node.name}")
+    with sync_api.sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        try:  # each handle this fixture opened is closed by its own finally: a failed write or close skips no other
+            context = browser.new_context(viewport={"width": width, "height": height}, has_touch=touch,
+                                          color_scheme=theme)
+            try:
+                page = context.new_page()
+                page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
+                console, failed = record_console_errors(page), record_failed_loads(page)
+                ui = SimpleNamespace(page=page, url=server["url"], data=server["data_dir"], touch=touch, frames=frames,
+                                     home=pathlib.Path(server["env"]["HOME"]), expect=sync_api.expect, console=console,
+                                     failed=failed, tag=f"{engine}-{width}-{theme}",
+                                     facts={"engine": engine, "browser": browser.version, "viewport": [width, height],
+                                            "theme": theme, "candidate": server["candidate_identity"]})
+                try:
+                    yield ui
+                finally:
+                    (frames / "facts.json").write_text(json.dumps(ui.facts, indent=2, default=str), encoding="utf-8")
+            finally:
+                context.close()
+        finally:
+            browser.close()
+
+
+def _created(ui, **body) -> dict:
+    answer = ui.page.request.post(f"{ui.url}/api/projects", data=body)
+    assert answer.ok, answer.text()
+    return answer.json()["project"]
+
+
+def _open(ui) -> None:
+    ui.page.goto(ui.url, wait_until="domcontentloaded")
+    ui.page.wait_for_selector('#chat-messages[data-history-hydrated="true"]', state="attached")
+    if ui.touch:
+        ui.page.locator("#page-chat [data-mobile-nav-toggle]").click()
+        ui.page.locator("#primary-sidebar.open").wait_for()
+    ui.page.locator(".nav-project-item").first.wait_for()
+
+
+def _row(ui, project_id):
+    return ui.page.locator(f'.nav-project-item[data-nav-project-id="{project_id}"]')
+
+
+def _working_folder(ui, project_id):
+    """Open the row's menu as its device does (its ⋯ under a mouse, a long press on touch) and press Working folder…."""
+    row = _row(ui, project_id)
+    row.scroll_into_view_if_needed()
+    if ui.touch:
+        target = row.locator(".nav-project-row")
+        box = target.bounding_box()
+        finger = {"pointerType": "touch", "isPrimary": True, "pointerId": 41,
+                  "clientX": box["x"] + box["width"] / 2, "clientY": box["y"] + box["height"] / 2}
+        target.dispatch_event("pointerdown", finger)
+        ui.page.locator(MENU).wait_for()  # the long press, held still
+        target.dispatch_event("pointerup", finger)
+        ui.page.wait_for_timeout(450)  # the lifting finger's click guard
+    else:
+        row.hover()
+        row.locator(".nav-project-kebab").click()
+    menu = ui.page.locator(MENU)
+    ui.expect(menu).to_be_visible()
+    menu.evaluate("m => Promise.all(m.getAnimations().map((a) => a.finished.catch(() => null)))")
+    items = menu.locator('[role="menuitem"]').all_inner_texts()
+    assert items[-3:] == ["Rename…", "Working folder…", "Delete project…"], items
+    _shot(ui, f"menu-{project_id}")
+    menu.locator('[data-prm="folder"]').click()
+    dialog = ui.page.locator(DIALOG)
+    ui.expect(dialog).to_be_visible()
+    ui.expect(dialog.locator("[data-pf-state]")).not_to_have_text("Reading the folder…")
+    ui.expect(ui.page.locator(".project-row-menu")).to_have_count(0)  # the closed menu's picture has faded
+    assert dialog.evaluate("el => el.contains(document.activeElement)")  # the keyboard is inside the dialog
+    return dialog
+
+
+def _shot(ui, name) -> None:
+    index = len(ui.facts.setdefault("frames", []))
+    path = ui.frames / f"{index:02d}-{ui.tag}-{name}.png"
+    ui.page.screenshot(path=str(path))
+    ui.facts["frames"].append(path.name)
+
+
+def _geometry(ui, dialog) -> dict:
+    """What eyes miss: the dialog inside the window, no sideways scroll anywhere in it, every control reachable."""
+    facts = dialog.evaluate("""(el) => {
+        const box = el.getBoundingClientRect();
+        const body = el.querySelector('.marketplace-modal-body');
+        const wide = [...el.querySelectorAll('*')].filter((node) => node.scrollWidth > node.clientWidth + 1
+            && getComputedStyle(node).overflowX !== 'visible').map((node) => node.className || node.tagName);
+        const buttons = [...el.querySelectorAll('.marketplace-modal-actions button:not([hidden])')].map((button) => {
+            const b = button.getBoundingClientRect();
+            const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+            return {text: button.textContent.trim(), height: b.height, inside: b.left >= box.left - 0.5 && b.right <= box.right + 0.5,
+                    hit: button === hit || button.contains(hit)};
+        });
+        return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, vw: innerWidth, vh: innerHeight,
+                page: document.documentElement.scrollWidth - innerWidth, bodyScroll: body.scrollWidth - body.clientWidth, wide, buttons};
+    }""")
+    assert facts["left"] >= -0.5 and facts["right"] <= facts["vw"] + 0.5, facts
+    assert facts["top"] >= -0.5 and facts["bottom"] <= facts["vh"] + 0.5, facts
+    assert facts["page"] <= 1 and facts["bodyScroll"] <= 1 and not facts["wide"], facts
+    assert all(button["inside"] and button["hit"] for button in facts["buttons"]), facts
+    return facts
+
+
+def _folder_row(ui, project_id) -> dict:
+    return registry.get_project(ui.data, project_id) or {}
+
+
+def _own_refusals(ui, statuses=(409,)) -> list[str]:
+    """Console errors left once the refusals this test asked for are set aside (a stale change answers 409)."""
+    asked = [(path, status) for path, status in ui.failed if path.endswith("/folder") and status in statuses]
+    left = unexpected_console_errors(ui.console, [entry for entry in ui.failed if entry not in asked])
+    for path, status in asked:
+        line = f"Failed to load resource: the server responded with a status of {status} "
+        match = next((text for text in left if text.startswith(line)), None)
+        if match is not None:
+            left.remove(match)
+    return left
+
+
+def test_a_missing_folder_is_shown_removed_and_replaced_through_the_project_menu(room, tmp_path):
+    ui = room
+    gone = tmp_path / "owner-folders" / "weekly-review-working-copy-of-the-october-helper"
+    gone.mkdir(parents=True)
+    project = _created(ui, name=LONG_NAME, path=str(gone))
+    gone = pathlib.Path(project["working_dir"])
+    shutil.rmtree(gone)  # the folder disappears behind the registry's back
+    replacement = ui.home / "Work" / "defaults-review"
+    replacement.mkdir(parents=True)
+    (replacement / "notes.md").write_text("the owner's own file", encoding="utf-8")
+    _open(ui)
+
+    # --- missing: shown with what one look found; nothing is chosen for the owner ---
+    dialog = _working_folder(ui, project["id"])
+    ui.expect(dialog.locator("[data-pf-name]")).to_have_text(LONG_NAME)
+    ui.expect(dialog.locator("[data-pf-path]")).to_have_text(str(gone))
+    state = dialog.locator("[data-pf-state]")
+    ui.expect(state).to_have_text("This folder is no longer on this computer.")
+    assert state.get_attribute("data-tone") == "danger"
+    ui.expect(dialog.locator("[data-pf-reason] pre")).to_contain_text("not a directory")
+    assert dialog.locator('input[name="pf-action"]').evaluate_all("els => els.map((el) => [el.value, el.checked])") == [
+        ["clear", False], ["choose", False]]
+    save = dialog.locator("[data-pf-save]")
+    ui.expect(save).to_be_disabled()
+    ui.expect(dialog.locator("[data-pf-cancel]")).to_have_text("Cancel")
+    ui.facts["missing"] = _geometry(ui, dialog)
+    _shot(ui, "missing")
+
+    # --- No folder: says what stays, saves the recorded choice, creates nothing at the lost address ---
+    dialog.locator('input[name="pf-action"][value="clear"]').check()
+    ui.expect(dialog.locator("[data-pf-help]")).to_contain_text("own temporary area")
+    ui.expect(dialog.locator("[data-pf-effects]")).to_contain_text("Only the link to this folder is removed.")
+    ui.expect(dialog.locator("[data-pf-browser]")).to_be_hidden()
+    ui.expect(save).to_be_enabled()
+    ui.expect(save).to_have_text("Remove folder")
+    _geometry(ui, dialog)
+    _shot(ui, "clear-chosen")
+    with ui.page.expect_response(lambda r: urlsplit(r.url).path.endswith(f"/api/projects/{project['id']}/folder")
+                                 and r.request.method == "POST") as posted:
+        save.click()
+    assert posted.value.status == 200 and posted.value.json()["receipt"]["actor"] == "owner"
+    ui.expect(ui.page.locator(DIALOG)).to_have_count(0)
+    row = _folder_row(ui, project["id"])
+    assert row["working_dir"] == "" and row["no_folder"]["by"] == "owner" and not gone.exists()
+
+    # --- the recorded No folder: one offered change, so the browser shows without a choice ---
+    dialog = _working_folder(ui, project["id"])
+    ui.expect(dialog.locator("[data-pf-state]")).to_have_text("No folder. Tasks in this project work in their own temporary area.")
+    assert re.fullmatch(r"Chosen by you on \d{1,2} [A-Z][a-z]{2} \d{4}\.", dialog.locator("[data-pf-chosen]").inner_text())
+    assert dialog.locator('input[name="pf-action"]').evaluate_all("els => els.map((el) => [el.value, el.checked])") == [
+        ["choose", True]]
+    ui.expect(dialog.locator("[data-pf-path]")).to_be_hidden()
+    browser = dialog.locator("[data-pf-browser]")
+    ui.expect(browser.locator("[data-np-path] strong")).to_have_text(str(ui.home.resolve()))
+    ui.expect(dialog.locator("[data-pf-save]")).to_be_disabled()
+    _shot(ui, "none-browser")
+
+    # Another window changes the choice meanwhile: this dialog's save is refused and shows the folder as it is now.
+    stale = ui.page.request.get(f"{ui.url}/api/projects/{project['id']}/folder").json()["folder"]["expected"]
+    elsewhere = ui.home / "Work" / "elsewhere"
+    elsewhere.mkdir()
+    answer = ui.page.request.post(f"{ui.url}/api/projects/{project['id']}/folder",
+                                  data={"action": "choose", "expected": stale, "path": str(elsewhere)})
+    assert answer.ok, answer.text()
+    browser.get_by_role("button", name="Work", exact=True).click()
+    browser.get_by_role("button", name="defaults-review", exact=True).click()
+    browser.get_by_role("button", name="Select this folder").click()
+    ui.expect(browser.locator("[data-np-selected]")).to_have_text(f"Selected folder: {replacement.resolve()}")
+    ui.expect(dialog.locator("[data-pf-trust]")).to_be_visible()
+    dialog.locator("[data-pf-save]").click()
+    ui.expect(dialog.locator("[data-pf-error]")).to_contain_text("The folder changed meanwhile. This is how it is now.")
+    ui.expect(dialog.locator("[data-pf-state]")).to_have_text("This folder is in place. New tasks in this project start there.")
+    ui.expect(dialog.locator("[data-pf-path]")).to_have_text(str(elsewhere.resolve()))
+    ui.expect(dialog.locator("[data-pf-save]")).to_be_hidden()
+    ui.expect(dialog.locator("[data-pf-cancel]")).to_have_text("Close")
+    assert _folder_row(ui, project["id"])["working_dir"] == str(elsewhere.resolve())
+    _geometry(ui, dialog)
+    _shot(ui, "changed-meanwhile-in-place")
+    ui.page.keyboard.press("Escape")
+    ui.expect(ui.page.locator(DIALOG)).to_have_count(0)
+
+    # --- the folder goes missing again; this time the owner replaces it with an existing folder ---
+    shutil.rmtree(elsewhere)
+    dialog = _working_folder(ui, project["id"])
+    dialog.locator('input[name="pf-action"][value="choose"]').check()
+    browser = dialog.locator("[data-pf-browser]")
+    ui.expect(dialog.locator("[data-pf-save]")).to_be_disabled()  # no folder is selected yet
+    browser.get_by_role("button", name="Work", exact=True).click()
+    browser.get_by_role("button", name="defaults-review", exact=True).click()
+    browser.get_by_role("button", name="Select this folder").click()
+    ui.expect(dialog.locator("[data-pf-save]")).to_be_enabled()
+    ui.expect(dialog.locator("[data-pf-save]")).to_have_text("Use this folder")
+    ui.facts["choose"] = _geometry(ui, dialog)
+    _shot(ui, "choose-selected")
+    dialog.locator("[data-pf-save]").click()
+    ui.expect(ui.page.locator(DIALOG)).to_have_count(0)
+    row = _folder_row(ui, project["id"])
+    assert row["working_dir"] == str(replacement.resolve()) and "no_folder" not in row and row["provenance"] == "attached"
+    assert (replacement / "notes.md").read_text(encoding="utf-8") == "the owner's own file" and not (replacement / ".git").exists()
+    events = [json.loads(line) for line in (ui.data / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [(e["actor"], e["action"]) for e in events if e.get("type") == "project_folder_changed"] == [
+        ("owner", "clear"), ("owner", "choose"), ("owner", "choose")]
+    dialog = _working_folder(ui, project["id"])
+    ui.expect(dialog.locator("[data-pf-path]")).to_have_text(str(replacement.resolve()))
+    assert dialog.locator("[data-pf-state]").get_attribute("data-tone") == "ok"
+    _shot(ui, "in-place")
+    dialog.locator("[data-pf-cancel]").click()
+    assert _own_refusals(ui) == []
+
+
+@pytest.mark.parametrize(("dismiss", "applied"), [("close", True), ("escape", True), ("backdrop", False)])
+def test_stalled_folder_save_can_close_and_reopen_with_a_fresh_read(room, dismiss, applied):
+    """Hold only the POST response (or dispatch), never a timer: close remains live, a fresh GET tells the
+    current registry choice, and the old POST's eventual success cannot close or repaint the new dialog."""
+    ui = room
+    project = _created(ui, name="A stalled folder save")
+    _open(ui)
+    held, reads, writes = [], [], []
+
+    def intercept(route):
+        if route.request.method != "POST":
+            reads.append(route.request.url)
+            route.continue_()
+            return
+        writes.append(route.request.post_data_json)
+        response = route.fetch() if applied else None  # Real commit before the withheld reply, or still unsent.
+        held.append((route, response))
+        ui.page.evaluate("window.__folderWriteHeld = true")
+
+    ui.page.route(f"**/api/projects/{project['id']}/folder", intercept)
+    dialog = _working_folder(ui, project["id"])
+    dialog.locator('input[value="clear"]').check()
+    dialog.locator("[data-pf-save]").click()
+    ui.page.wait_for_function("window.__folderWriteHeld === true")
+    ui.expect(dialog.locator("[data-pf-save]")).to_be_disabled()
+    ui.expect(dialog.locator("[data-pf-cancel]")).to_have_text("Close")
+    ui.expect(dialog.locator("[data-pf-error]")).to_contain_text("closing does not cancel")
+    ui.facts["stalled"] = _geometry(ui, dialog)
+    _shot(ui, "save-stalled-close-available")
+    if dismiss == "close":
+        dialog.locator("[data-pf-cancel]").click()
+    elif dismiss == "escape":
+        ui.page.keyboard.press("Escape")
+    else:
+        ui.page.locator(".new-project-backdrop").click(position={"x": 2, "y": 2})
+    ui.expect(ui.page.locator(DIALOG)).to_have_count(0)
+    ui.expect(ui.page.locator(".toast-words")).to_contain_text("Save has not been confirmed")
+    assert len(writes) == 1 and ("no_folder" in _folder_row(ui, project["id"])) is applied
+
+    reopened = _working_folder(ui, project["id"])
+    assert len(reads) == 2 and len(writes) == 1
+    state = "No folder. Tasks in this project work in their own temporary area." if applied else (
+        "No folder chosen yet. The first task started in this project would create one.")
+    ui.expect(reopened.locator("[data-pf-state]")).to_have_text(state)
+    _shot(ui, "fresh-read-before-late-reply")
+    route, response = held.pop()
+    with ui.page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith(f"/projects/{project['id']}/folder")):
+        route.fulfill(response=response if response is not None else route.fetch())
+    ui.expect(reopened).to_be_visible()
+    ui.expect(reopened.locator("[data-pf-state]")).to_have_text(state)
+    ui.expect(reopened.locator("[data-pf-error]")).to_have_text("")
+    reopened.locator("[data-pf-cancel]").click()
+    final = _working_folder(ui, project["id"])
+    ui.expect(final.locator("[data-pf-state]")).to_have_text(
+        "No folder. Tasks in this project work in their own temporary area.")
+    assert len(reads) == 3 and len(writes) == 1
+    assert _folder_row(ui, project["id"])["no_folder"]["by"] == "owner"
+    final.locator("[data-pf-cancel]").click()
+    assert _own_refusals(ui) == []
+
+
+def test_folder_save_refusal_keeps_the_choice_for_an_explicit_successful_retry(room):
+    ui = room
+    project = _created(ui, name="Folder save refusal")
+    _open(ui)
+    writes = []
+
+    def refuse_once(route):
+        if route.request.method == "POST":
+            writes.append(route.request.post_data_json)
+            if len(writes) == 1:
+                route.fulfill(status=400, json={"error": "Folder change refused by this test", "reason_code": "invalid_folder"})
+                return
+        route.continue_()
+
+    ui.page.route(f"**/api/projects/{project['id']}/folder", refuse_once)
+    dialog = _working_folder(ui, project["id"])
+    dialog.locator('input[value="clear"]').check()
+    dialog.locator("[data-pf-save]").click()
+    ui.expect(dialog.locator("[data-pf-error]")).to_contain_text("Folder change refused by this test")
+    ui.expect(dialog.locator("[data-pf-save]")).to_be_enabled()
+    assert "no_folder" not in _folder_row(ui, project["id"]) and len(writes) == 1
+    _shot(ui, "save-refused")
+    dialog.locator("[data-pf-save]").click()  # The owner chooses to retry; the client never did it automatically.
+    ui.expect(ui.page.locator(DIALOG)).to_have_count(0)
+    assert len(writes) == 2 and writes[0] == writes[1]
+    assert _folder_row(ui, project["id"])["no_folder"]["by"] == "owner"
+    assert _own_refusals(ui, (400,)) == []
+
+
+def test_new_project_records_the_no_folder_it_shows_and_the_dialog_names_moved_work(room):
+    ui = room
+    legacy = _created(ui, name="Made by an older client")  # no flag: a room that made no choice
+    _open(ui)
+    ui.page.locator("#nav-projects-add").click()
+    creating = ui.page.locator(".new-project-dialog")
+    ui.expect(creating.locator('input[name="np-source"][value="fileless"]')).to_be_checked()
+    ui.expect(creating.locator("[data-np-help]")).to_contain_text("tasks work in their own temporary area")
+    creating.locator("[data-np-name]").fill("Reading notes")
+    _shot(ui, "new-project-no-folder")
+    with ui.page.expect_response(lambda r: urlsplit(r.url).path == "/api/projects" and r.request.method == "POST") as posted:
+        creating.locator("[data-np-create]").click()
+    assert posted.value.request.post_data_json == {"name": "Reading notes", "no_folder": True}
+    created = posted.value.json()["project"]
+    assert created["no_folder"]["by"] == "owner" and _folder_row(ui, created["id"])["no_folder"]["by"] == "owner"
+    assert "no_folder" not in _folder_row(ui, legacy["id"])
+    ui.expect(ui.page.locator(".new-project-backdrop")).to_have_count(0)
+    if ui.touch and not ui.page.locator("#primary-sidebar.open").count():  # the new room opened over the list
+        ui.page.locator("[data-mobile-nav-toggle]:visible").first.click()
+        ui.page.locator("#primary-sidebar.open").wait_for()
+
+    # A room that made no choice: both changes are offered, with the queue's work told apart by what the change means.
+    def with_moved_work(route):
+        answer = route.fetch()
+        body = answer.json()
+        body["folder"]["work"] = {"observed": True, "kept": 2, "moved_total": 2, "moved": [
+            {"task_id": "weekly", "name": "Weekly review of core defaults and model routes", "system_repo": True},
+            {"task_id": "notes", "name": "Reading notes for the next sprint", "system_repo": False}]}
+        route.fulfill(response=answer, json=body)
+
+    ui.page.route(f"**/api/projects/{legacy['id']}/folder", with_moved_work)
+    dialog = _working_folder(ui, legacy["id"])
+    ui.expect(dialog.locator("[data-pf-state]")).to_have_text(
+        "No folder chosen yet. The first task started in this project would create one.")
+    assert dialog.locator("[data-pf-state]").get_attribute("data-tone") == "muted"
+    dialog.locator('input[name="pf-action"][value="clear"]').check()
+    effects = dialog.locator("[data-pf-effects]")
+    ui.expect(effects).to_contain_text("2 tasks already running or waiting keep their folders. They are not moved.")
+    ui.expect(effects).to_contain_text("Moved here and not restarted yet: Weekly review of core defaults and model routes. "
+                                       "The next start stays on Ouroboros's own repository.")
+    ui.expect(effects).to_contain_text("Moved here and not restarted yet: Reading notes for the next sprint. "
+                                       "The next start gets no folder from this project")
+    ui.expect(effects).not_to_contain_text("Only the link")  # there is no folder to unlink
+    ui.expect(dialog.locator("[data-pf-save]")).to_have_text("Keep no folder")
+    ui.facts["moved"] = _geometry(ui, dialog)
+    _shot(ui, "unset-clear-with-moved-work")
+    dialog.locator('input[name="pf-action"][value="choose"]').check()
+    ui.expect(effects).to_contain_text("The next start works in the folder you choose, even if it already ran elsewhere.")
+    ui.expect(effects).to_contain_text("The next start would work in the folder you choose, not on Ouroboros's own "
+                                       "repository where it ran. No folder keeps it there.")
+    _geometry(ui, dialog)
+    _shot(ui, "unset-choose-with-moved-work")
+    ui.page.keyboard.press("Escape")
+    ui.expect(ui.page.locator(DIALOG)).to_have_count(0)
+    assert "no_folder" not in _folder_row(ui, legacy["id"])  # looking changed nothing
+    assert _own_refusals(ui) == []

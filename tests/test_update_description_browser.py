@@ -8,13 +8,15 @@ model starts. Screens land in the test-evidence directory for inspection.
 
 Covered: an update on offer with nothing written offers Write beside Check; Write posts the exact range
 once and the request's task shows as writing, with the owner's fixed request time and a door that opens
-that task's card in Main (kept through a passive refresh, gone once it saved; where it lands is the last
-test, through app.js and the real router); Apply opened meanwhile pins only its own prose, so the
-worker's ``update_progress_changed`` and the task's ``task_done`` behind it still read the status and
-Cancel shows the large structured description rendered as Markdown; Check never authors and keeps the
-read text's DOM; the Apply confirmation renders a large and a small description in a bounded region,
-keeps the consequences in its body at the prose's size and ink (ordinary dialogs keep theirs) and every
-per-commit receipt inside collapsed Details, and cancels by Escape and by Cancel without applying.
+that task's card in Main (kept through a passive refresh, gone once it saved; where it lands is the
+writing note's own test, through app.js and the real router); Apply opened meanwhile pins only its own
+prose, so the worker's ``update_progress_changed`` and the task's ``task_done`` behind it still read the
+status and Cancel shows the large structured description rendered as Markdown; Check never authors and
+keeps the read text's DOM; the Apply confirmation renders a large and a small description in a bounded
+region that scrolls to the text's last paragraph, keeps the consequences in its body at the prose's size
+and ink (ordinary dialogs keep theirs) and every per-commit receipt inside collapsed Details, and cancels
+by Escape and by Cancel without applying. The last test loads the whole SPA (app.js and its sidebar): the
+panel's Read all follows a description saved while the Dashboard is away and a window that narrows (#2934).
 """
 import copy
 import json
@@ -28,6 +30,7 @@ from urllib.parse import parse_qsl, urlparse
 import pytest
 
 from ouroboros.test_evidence import diagnostic_directory
+from tests.test_subscription_setup_browser import subscription_ui as subscription_ui  # pytest fixture: the real SPA
 from tests.test_update_letter_browser import WEB
 from tests.test_update_description import BASE, TARGET, _key, _offer
 from tests.test_update_description import _no_git_for_versions as _no_git_for_versions  # autouse pytest fixture
@@ -50,6 +53,8 @@ dashboard.activateTab('updates');
 </script>"""
 TASK = "d3adb33f"
 INK = "el => [getComputedStyle(el).fontSize, getComputedStyle(el).color]"
+# The host's own line for the large range: two of its merges carry a receipt that observed no bound review.
+OVER_LINE = "Went in over a review FAIL or no verdict: 2 merges."
 PIN = {"action": "keep", "direction": "forward", "serving": {"version": "4.8.0"}, "target": {"version": "4.8.0"}}
 EFFECTS = {"engine": PIN, "replacement_engine": PIN, "active_work": {"status": "known", "model": 0, "non_model": 1},
            "runtime": {"installed": {"python": "3.10.19", "sqlite": "3.50.4"},
@@ -102,7 +107,7 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
         pytest.skip("Set OUROBOROS_RUN_UI_SMOKE=1")
     playwright = pytest.importorskip("playwright.sync_api")
-    output = diagnostic_directory(tmp_path, "update-description")
+    output = diagnostic_directory(tmp_path, "update-description", publish=True)
     large, small = FIXTURE["large"], FIXTURE["small"]
     current = {"status": _status(large, _letter(large, "none")), "preflight": _preflight(large)}
     calls = []
@@ -180,6 +185,10 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 assert write.is_visible() and write.inner_text() == "Write description" and write.is_enabled()
                 assert page.locator("#updates-letter-refresh-label").inner_text() == "Check"
                 assert page.locator("#btn-update-primary").inner_text() == "Update to 7.8.1"
+                # The host's line about the range stands with no description too, as a warn status sentence.
+                over = page.locator("#updates-letter-over")
+                assert over.is_visible() and over.inner_text() == OVER_LINE
+                assert over.get_attribute("data-tone") == "warn" and "ui-status" in over.get_attribute("class").split()
                 shot(page, "01-empty")
 
                 # 2. Write posts the exact offered range once; the request's own task shows as writing.
@@ -232,6 +241,8 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 dialog = page.get_by_role("dialog")
                 dialog.wait_for()
                 assert "No description is available for this exact preflight range." in dialog.inner_text()
+                assert dialog.locator("[data-confirm-content] .updates-letter-over").inner_text() == OVER_LINE, (
+                    "the confirmation carries the line with no description")
                 current["status"] = _status(large, _letter(large, "ready"))
                 for frame in ("window.__wsHandlers.get('update_progress_changed')()",
                               f"window.__wsHandlers.get('log')({{data: {{type: 'task_done', task_id: '{TASK}'}}}})"):
@@ -247,6 +258,8 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 assert "Что будет заметно сразу" in rendered and "Telegram." in rendered
                 assert "##" not in rendered and "**" not in rendered, "Markdown renders, never shows raw"
                 assert body.locator("li").count() >= 12
+                assert over.is_visible() and over.inner_text() == OVER_LINE
+                assert over.bounding_box()["y"] < body.bounding_box()["y"], "the line stands above the description"
                 assert page.locator("#updates-letter-label").inner_text() == "What's new"
                 # The range the text covers is its provenance, in the letter's Details (the heading keeps its date).
                 covers = page.locator("#updates-letter-provenance").text_content()
@@ -264,6 +277,9 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 page.locator("#updates-letter-details summary").click()
                 provenance = page.locator("#updates-letter-provenance").inner_text()
                 assert f"in task {TASK}" in provenance and "at your request" in provenance
+                named = page.locator("#updates-letter-over-names").inner_text()  # Details name what the line counts
+                assert named.startswith("Went in over a review FAIL or no verdict: ") and named.count("(merge; no review verdict recorded)") == 2
+                assert "Made on this computer: Not read for this range" in named, "rows that were not read are unknown, never none"
                 page.locator("#updates-letter-details summary").click()
 
                 # 4. Check is facts only: a refreshed run leaves the read text's very DOM node in place.
@@ -287,6 +303,9 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 region_text = region.inner_text()
                 assert "Что будет заметно сразу" in region_text and "##" not in region_text and "**" not in region_text
                 assert region.locator("li").count() >= 12
+                line = region.locator(".updates-letter-over")
+                assert line.inner_text() == OVER_LINE and line.get_attribute("data-tone") == "warn"
+                assert line.bounding_box()["y"] < region.locator(".updates-letter-body").bounding_box()["y"]
                 plain = dialog.locator(".marketplace-modal-body > p").inner_text()
                 for fact in ("Git applies this update directly", "Claudexor: 4.8.0 → 4.8.0", "forward-only"):
                     assert fact in plain, fact
@@ -305,14 +324,22 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 shot(page, "04-apply-large")
                 details.locator("summary").click()
                 rows = details.locator(".confirm-dialog-detail-row")
-                assert rows.count() == len(large["qualification"]["commits"]) + 1 + len(large["qualification"]["github"]["runs"]) + 1
+                # Two rows lead them for this range: its own landed rows were not read, and 7 of its 17 commits carry a receipt.
+                assert rows.count() == 2 + len(large["qualification"]["commits"]) + 1 + len(large["qualification"]["github"]["runs"]) + 1
+                assert rows.nth(0).inner_text().replace("\n", " ").startswith("Made on this computer Not read for this range")
+                assert "7 of the 17 commits listed here carry one" in rows.nth(1).inner_text()
                 assert "Merge pull request #2384" in details.inner_text() and "No matching run observed" in details.inner_text()
                 rows.nth(3).scroll_into_view_if_needed()
                 shot(page, "05-apply-large-details")
                 # Keyboard: the prose region takes focus and scrolls; Escape cancels without applying.
                 region.focus()
                 assert page.evaluate("document.activeElement.matches('[data-confirm-content]')")
-                page.keyboard.press("End")
+                page.keyboard.press("End")  # it scrolls the whole description to its last paragraph (animated)
+                page.wait_for_function("""el => { const box = el.getBoundingClientRect();
+                    const last = el.querySelector('.updates-letter-body').lastElementChild.getBoundingClientRect();
+                    return el.scrollTop > 0 && last.top >= box.top && last.bottom <= box.bottom + 1; }""",
+                                       arg=region.element_handle(), timeout=5000)
+                shot(page, "05b-apply-large-end")
                 page.keyboard.press("Escape")
                 dialog.wait_for(state="detached")
                 assert posted("/api/update/apply") == []
@@ -336,6 +363,8 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 dialog.wait_for()
                 small_text = dialog.locator("[data-confirm-content]").inner_text()
                 assert "Небольшое исправление Dashboard" in small_text and "**" not in small_text
+                # A range whose receipts all passed has no line, in the panel and in the confirmation alike.
+                assert page.locator("#updates-letter-over").is_hidden() and dialog.locator(".updates-letter-over").count() == 0
                 shot(page, "06-apply-small")
                 dialog.get_by_role("button", name="Cancel", exact=True).click()
                 dialog.wait_for(state="detached")
@@ -443,7 +472,7 @@ def test_the_writing_note_opens_main_s_card_before_its_first_message(door, engin
 
     state.update_state(lambda live: live.update(owner_chat_id=owner_chat))
     _offer(door.root)
-    output = diagnostic_directory(tmp_path, "update-description-door")
+    output = diagnostic_directory(tmp_path, "update-description-door", publish=True)
     case = {"key": _key(), "commits": 1, "version": "6.114.0", "qualification": None}
     history_reads = []
 
@@ -546,3 +575,195 @@ def test_the_writing_note_opens_main_s_card_before_its_first_message(door, engin
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+# The owner's window (macOS pywebview, WebKit, 100%) and the frame the server broadcasts once a description is saved
+# (supervisor/events_worker_reports.py): it carries nothing, the status read brings the text.
+OWNER_WINDOW = {"width": 1282, "height": 747}
+SAVED = json.dumps({"type": "update_progress_changed"})
+# Both status readers (the panel and the sidebar notice) read once per frame. A read counts once the page has parsed
+# its body; the render that follows runs in the same microtask chain, before any frame.
+COUNT_STATUS_READS = """() => {
+    window.statusReads = {started: 0, read: 0};
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+        if (new URL(String(input?.url || input), location.href).pathname !== '/api/update/status') return nativeFetch(input, init);
+        statusReads.started += 1;
+        return nativeFetch(input, init).then((response) => {
+            const json = response.json.bind(response);
+            response.json = () => json().finally(() => { statusReads.read += 1; });
+            return response;
+        });
+    };
+}"""
+QUIET = "statusReads.started === statusReads.read"
+FRAMES = "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+LETTER = """() => {
+    const body = document.querySelector('#updates-letter-body'), more = document.querySelector('#updates-letter-more');
+    const box = body.getBoundingClientRect(), end = body.lastElementChild.getBoundingClientRect();
+    return {height: body.clientHeight, content: body.scrollHeight, open: body.classList.contains('is-open'),
+            more: more.hidden ? null : more.textContent, last: body.lastElementChild.textContent,
+            lastInView: end.top >= 0 && end.bottom <= Math.min(box.bottom + 1, innerHeight)};
+}"""
+SELECT_LAST = """() => {
+    const body = document.querySelector('#updates-letter-body'), range = document.createRange();
+    range.selectNodeContents(body.lastElementChild);
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+    window.kept = {first: body.firstChild, last: body.lastElementChild, text: getSelection().toString()};
+}"""
+KEPT = """() => {
+    const body = document.querySelector('#updates-letter-body'), selection = getSelection();
+    return body.firstChild === kept.first && body.lastElementChild === kept.last && selection.toString() === kept.text
+        && kept.last.contains(selection.anchorNode);
+}"""
+
+
+@pytest.fixture(params=["webkit", "chromium"])
+def letter_ui(request, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", request.param)
+    ui = request.getfixturevalue("subscription_ui")
+    ui["engine"] = request.param
+    return ui
+
+
+def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter_ui, tmp_path):
+    """#2934 through app.js and its sidebar at the owner's window: the owner leaves Updates for Chat, the description
+    saved meanwhile arrives by the server's own frame and renders off-page, and the sidebar brings the Dashboard back
+    on Updates (announcing only the page). Read all is offered and opens the whole text to its last paragraph; a
+    passive refresh of the same text keeps the open DOM and the owner's selection; Show less folds it; the subtabs
+    still switch; a short text, read on entry or saved the same way, offers no button until a narrower window folds
+    some of it; on a phone a long text saved behind the Dashboard's list offers Read all once Updates is opened from
+    the list."""
+    ui, engine = letter_ui, letter_ui["engine"]
+    output = diagnostic_directory(tmp_path, "update-description-away", publish=True)
+    large = FIXTURE["large"]
+    # About four lines in the Updates page's column at the owner's width: with Dashboard's list beside the open page
+    # (PR #3369) that column is narrower than the whole content area the first two paragraphs were sized for.
+    short = FIXTURE["small"]["text"].split("\n\n")[0]
+    current = {"status": _status(large, {**_letter(large, "ready"), "text": short})}
+    sockets = []
+
+    def connect(socket):
+        sockets.append(socket)
+        socket.send(json.dumps({"type": "heartbeat"}))
+
+    page = ui["new_page"](viewport=OWNER_WINDOW, color_scheme="dark")
+    page.route_web_socket("**/ws", connect)
+    page.route("**/api/update/status", lambda route: route.fulfill(content_type="application/json",
+                                                                   body=json.dumps(current["status"])))
+    page.add_init_script(f"({COUNT_STATUS_READS})()")
+
+    def shot(name):
+        path = output / f"{name}-{engine}.png"
+        page.screenshot(path=str(path))
+        print(f"UPDATE_DESCRIPTION_SCREENSHOT={path}")
+
+    def show(where):
+        page.click(f'[data-nav-page="{where}"]')
+        page.wait_for_selector(f"#page-{where}.active")
+        page.evaluate(FRAMES)
+
+    def letter(step):
+        seen = page.evaluate(LETTER)
+        print(f"UPDATE_DESCRIPTION_LETTER {engine} {step} {json.dumps(seen, ensure_ascii=False)}")
+        return seen
+
+    def shows(text):
+        page.wait_for_function("t => document.querySelector('#updates-letter-body').textContent.startsWith(t)",
+                               arg=text[:40])
+
+    def saved_while_away(text):
+        show("chat")
+        current["status"] = _status(large, {**_letter(large, "ready"), "text": text})
+        sockets[-1].send(SAVED)
+        shows(text)
+        assert page.evaluate("document.querySelector('#updates-letter-body').clientHeight") == 0, "rendered off-page"
+        show("dashboard")
+
+    page.goto(ui["url"] + "/")
+    page.wait_for_selector("#page-chat")
+    show("dashboard")
+    page.click('[data-dashboard-tab="updates"]')
+    shows(short)
+    page.evaluate(FRAMES)
+    assert letter("fresh-short")["more"] is None, "a short text read on entry offers no button"
+
+    # 1. The long description is saved while the owner is in Chat; the sidebar brings the Dashboard back on Updates.
+    saved_while_away(large["text"])
+    shot("01-returned")
+    returned = letter("returned")
+    assert returned["more"] == "Read all" and returned["content"] > returned["height"] > 0, returned
+
+    # 2. Read all opens the whole text in place, to its last paragraph.
+    page.locator("#updates-letter-more").click()
+    page.evaluate("document.querySelector('#updates-letter-body').lastElementChild.scrollIntoView({block: 'center'})")
+    page.evaluate(FRAMES)
+    shot("02-read-all-end")
+    opened = letter("read-all")
+    assert opened["open"] and opened["more"] == "Show less" and opened["content"] <= opened["height"] + 1, opened
+    assert opened["last"] == large["text"].split("\n\n")[-1] and opened["lastInView"], opened
+
+    # 3. A passive refresh of the same text keeps the open text's very nodes and the owner's selection in it.
+    page.evaluate(SELECT_LAST)
+    page.wait_for_function(QUIET)
+    read = page.evaluate("statusReads.read")
+    sockets[-1].send(SAVED)
+    page.wait_for_function(f"statusReads.read >= {read + 2} && {QUIET}")
+    page.evaluate(FRAMES)
+    assert page.evaluate(KEPT), "the refresh kept the open DOM and the selection"
+    assert letter("refreshed")["more"] == "Show less"
+
+    # 4. Show less folds it; switching subtabs away and back keeps the offer.
+    page.locator("#updates-letter-more").click()
+    folded = letter("show-less")
+    assert not folded["open"] and folded["more"] == "Read all" and folded["content"] > folded["height"], folded
+    page.click('[data-dashboard-tab="logs"]')
+    assert page.locator("#dashboard-panel-logs").is_visible() and page.locator("#dashboard-panel-updates").is_hidden()
+    page.click('[data-dashboard-tab="updates"]')
+    page.wait_for_function(QUIET)  # the subtab re-reads the status; the same text keeps its nodes
+    page.evaluate(FRAMES)
+    assert letter("subtabs")["more"] == "Read all"
+
+    # 5. A short text saved the same way offers no button.
+    saved_while_away(short)
+    shot("03-short-returned")
+    back = letter("short-returned")
+    assert back["more"] is None and back["content"] <= back["height"] + 1, back
+
+    # 6. A narrower window (or interface size) folds some of it: Read all comes, and goes at the owner's width again.
+    # A phone's column folds it. There a Dashboard brought back by the sidebar may give its page up for its list (each
+    # showing resets the open page, dashboard.js onPageShown; only a row pressed in the visit keeps it); the owner then
+    # opens Updates from the list. Either way the letter is read on Updates.
+    page.set_viewport_size({"width": 320, "height": OWNER_WINDOW["height"]})
+    page.evaluate(FRAMES)
+    if not page.locator("#dashboard-panel-updates").is_visible():
+        page.click('[data-dashboard-tab="updates"]')
+        page.wait_for_selector("#dashboard-panel-updates", state="visible")
+        page.evaluate(FRAMES)
+    shot("04-short-narrow")
+    narrow = letter("short-narrow")
+    assert narrow["more"] == "Read all" and narrow["content"] > narrow["height"], narrow
+    page.set_viewport_size(OWNER_WINDOW)
+    page.evaluate(FRAMES)
+    assert letter("short-owner-width")["more"] is None
+
+    # 7. On a phone the Dashboard's list stands in place of its page. A long description saved while the list shows
+    # is measured once the owner opens Updates from the list: pressing the row that is already chosen changes no tab
+    # (dashboard.js openLevel), so the body's own size is the door, and Read all is offered.
+    page.set_viewport_size({"width": 320, "height": OWNER_WINDOW["height"]})
+    page.evaluate(FRAMES)
+    if page.locator("#dashboard-panel-updates").is_visible():
+        page.click("[data-dashboard-list-back]")
+        page.wait_for_selector("#dashboard-panel-updates", state="hidden")
+    current["status"] = _status(large, {**_letter(large, "ready"), "text": large["text"]})
+    sockets[-1].send(SAVED)
+    shows(large["text"])
+    page.evaluate(FRAMES)
+    assert page.evaluate("document.querySelector('#updates-letter-body').clientHeight") == 0, "rendered behind the list"
+    page.click('[data-dashboard-tab="updates"]')
+    page.wait_for_selector("#dashboard-panel-updates", state="visible")
+    page.evaluate(FRAMES)
+    shot("05-long-from-list")
+    from_list = letter("long-from-list")
+    assert from_list["more"] == "Read all" and from_list["content"] > from_list["height"] > 0, from_list

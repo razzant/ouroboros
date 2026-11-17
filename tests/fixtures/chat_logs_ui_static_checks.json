@@ -15,7 +15,7 @@
     "id": "test_degraded_outcomes_render_with_typed_severity",
     "path": "web/modules/log_events.js",
     "kind": "contains",
-    "value": "((lifecycle === 'failed' || execution === 'failed') && !unanswered)\n        || execution === 'infra_failed'"
+    "value": "((lifecycle === 'failed' && !deliveredAnswerCause(record) || execution === 'failed') && !unanswered)\n        || (execution === 'infra_failed' && !deliveredAnswerCause(record))"
   },
   {
     "id": "test_degraded_outcomes_render_with_typed_severity",
@@ -93,13 +93,13 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "return roomStatusView(workState, { connected: ws.isConnected ? ws.isConnected() : true, ready: hostStart.ready(),"
+    "value": "return roomStatusView(workState, { connected: ws.isConnected ? ws.isConnected() : true,\n            serverAnswers: ws.serverAnswersWhileDown?.() === true, catchingUp: catchUp.active,\n            ready: hostStart.ready(),"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
-    "path": "web/modules/chat.js",
+    "path": "web/app.js",
     "kind": "contains",
-    "value": "state.activePage !== 'chat'"
+    "value": "if (state.activePage === 'chat' && !document.hidden) refreshProjectsNav(false);"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -259,9 +259,15 @@
   },
   {
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
-    "path": "web/modules/log_events.js",
+    "path": "web/modules/task_reason_words.js",
     "kind": "contains",
     "value": "A command returned"
+  },
+  {
+    "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
+    "path": "web/modules/log_events.js",
+    "kind": "contains",
+    "value": "headline: failedStepHeadline(evt),"
   },
   {
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
@@ -439,9 +445,9 @@
   },
   {
     "id": "test_chat_only_polls_state_when_active",
-    "path": "web/modules/chat.js",
+    "path": "web/app.js",
     "kind": "contains",
-    "value": "state.activePage !== 'chat'"
+    "value": "if (state.activePage === 'chat' && !document.hidden) refreshProjectsNav(false);"
   },
   {
     "id": "test_live_card_chip_draws_the_shared_status_mark",
@@ -594,16 +600,10 @@
     "value": "class=\"about-credits\""
   },
   {
-    "id": "test_about_uses_css_classes_not_inline",
-    "path": "web/modules/settings_ui.js",
-    "kind": "contains",
-    "value": "data-settings-panel=\"about\""
-  },
-  {
     "id": "test_costs_uses_css_classes_not_inline",
     "path": "web/modules/costs.js",
     "kind": "contains",
-    "value": "class=\"dashboard-hero\""
+    "value": "class=\"costs-meters\""
   },
   {
     "id": "test_costs_uses_css_classes_not_inline",
@@ -621,7 +621,7 @@
     "id": "test_costs_uses_css_classes_not_inline",
     "path": "web/modules/costs.js",
     "kind": "contains",
-    "value": "cell('cost-cell-name', name"
+    "value": "cell('cost-cell-name', shown"
   },
   {
     "id": "test_costs_uses_css_classes_not_inline",
@@ -775,9 +775,15 @@
   },
   {
     "id": "test_subagents_and_context_dom_present",
+    "path": "web/modules/context_observation.js",
+    "kind": "contains",
+    "value": "export const CONTEXT_MODES = Object.freeze(['nano', 'low', 'max']);"
+  },
+  {
+    "id": "test_subagents_and_context_dom_present",
     "path": "web/modules/composer_owner_controls.js",
     "kind": "contains",
-    "value": "const CONTEXT_MODES = ['nano', 'low', 'max'];"
+    "value": "const modes = CONTEXT_MODES.map((mode) =>"
   },
   {
     "id": "test_subagents_and_context_dom_present",
@@ -960,28 +966,28 @@
     "value": "cardVisible"
   },
   {
-    "id": "test_chat_input_disables_autocorrect",
+    "id": "test_chat_input_enables_writing_assistance",
     "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "id=\"chat-input\""
   },
   {
-    "id": "test_chat_input_disables_autocorrect",
+    "id": "test_chat_input_enables_writing_assistance",
     "path": "web/modules/composer.js",
     "kind": "contains",
-    "value": "autocorrect=\"off\""
+    "value": "autocorrect=\"on\""
   },
   {
-    "id": "test_chat_input_disables_autocorrect",
+    "id": "test_chat_input_enables_writing_assistance",
     "path": "web/modules/composer.js",
     "kind": "contains",
-    "value": "autocapitalize=\"off\""
+    "value": "autocapitalize=\"sentences\""
   },
   {
-    "id": "test_chat_input_disables_autocorrect",
+    "id": "test_chat_input_enables_writing_assistance",
     "path": "web/modules/composer.js",
     "kind": "contains",
-    "value": "spellcheck=\"false\""
+    "value": "spellcheck=\"true\""
   },
   {
     "id": "test_history_replay_preserves_failed_task_summary_phase",
@@ -1203,19 +1209,19 @@
     "id": "test_logs_autoscroll_sticks_only_when_pinned",
     "path": "web/modules/logs.js",
     "kind": "contains",
-    "value": "const pinned = isPinnedToLatest();"
+    "value": "pinned = isPinnedToLatest();"
   },
   {
     "id": "test_logs_autoscroll_sticks_only_when_pinned",
     "path": "web/modules/logs.js",
     "kind": "contains",
-    "value": "if (state.activeFilters[cat] && pinned) scrollToLatest();"
+    "value": "page.scrollTop = pinned ? page.scrollHeight : anchorTop();"
   },
   {
     "id": "test_logs_autoscroll_sticks_only_when_pinned",
     "path": "web/modules/logs.js",
     "kind": "contains",
-    "value": "if (state.activeFilters[category] && pinned) scrollToLatest();"
+    "value": "if (!isLogsVisible() || (ownTop !== null && page.scrollTop === ownTop)) return;"
   },
   {
     "id": "test_logs_autoscroll_sticks_only_when_pinned",
@@ -1233,7 +1239,7 @@
     "id": "test_logs_autoscroll_sticks_only_when_pinned",
     "path": "web/modules/logs.js",
     "kind": "contains",
-    "value": "window.addEventListener('ouro:page-shown', (event) => {"
+    "value": "window.addEventListener('ouro:page-shown', show);"
   },
   {
     "id": "tool-call-signal-death-renders-error",

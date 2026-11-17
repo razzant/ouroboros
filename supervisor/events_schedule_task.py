@@ -840,12 +840,11 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
             progress_meta["queued_behind_active_cap"] = True
     else:
         progress_meta["task_event"] = "scheduled"
-    workers = getattr(view, "WORKERS", {}) or {}
-    from supervisor import workers as pool
-    active = [w for w in workers.values() if getattr(w, "active_capacity", True)]
-    if len(active) >= pool.MAX_WORKERS and all(getattr(w, "busy_task_id", None) for w in active):
-        progress_meta["worker_saturation_warning"] = True
-        suffix = " (all workers are currently busy; it will start when one is free)"
+    from supervisor.worker_pool_lifecycle import acting_room
+
+    if acting_room(getattr(view, "WORKERS", {}) or {}, getattr(view, "RUNNING", {}) or {}) == 0:
+        progress_meta["worker_saturation_warning"] = True  # the owner's cap counts acting tasks, not processes
+        suffix = " (the owner's limit of acting tasks is reached; it will start when one is free)"
     else:
         suffix = ""
     if delegation_role == "subagent" and queued_behind_active_cap:

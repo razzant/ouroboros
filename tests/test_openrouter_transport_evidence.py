@@ -171,6 +171,31 @@ def test_conflicting_error_frame_preserves_binding_conflict(isolated, asynchrono
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
+def test_a_stream_error_frame_keeps_the_upstreams_own_sentence_for_the_one_reader(isolated, asynchronous):
+    """A streamed call meets an upstream's refusal as an SSE error frame: the gateway's wrapper, with the upstream's
+    own error (itself an SSE line) inside ``metadata.raw``. The raised error keeps the whole frame, so the one reader
+    gives every consumer the upstream's sentence with its speaker; an id is no sentence, and the wrapper alone
+    decides nothing."""
+    from ouroboros._usage_response import provider_answer
+    from ouroboros.llm_stream import ProviderStreamError
+    from ouroboros.loop_llm_call import classify_llm_exception
+
+    raw = ('data: {"error":{"code":"invalid_parameter_error","message":"Range of input length should be [1, 983616]",'
+           '"type":"invalid_request_error"},"id":"chatcmpl-x"}\n\n')
+    error_frame = ("data: " + json.dumps({"error": {"code": 400, "message": "Provider returned error", "metadata": {
+        "provider_name": "Alibaba", "raw": raw}}}) + "\n\n").encode()
+    with pytest.raises(ProviderStreamError) as caught:
+        run_driver(Wire([error_frame]), asynchronous=asynchronous)
+    answer = provider_answer(caught.value)
+    assert answer.innermost() == ("Alibaba", "Range of input length should be [1, 983616]")
+    assert [text for _speaker, text, _history in answer.said] == ["Provider returned error", "Range of input length should be [1, 983616]"]
+    classified = classify_llm_exception(caught.value)
+    assert (classified.kind, classified.status_code, classified.untyped, classified.basis) == ("bad_request", 400, True, "")
+    [row] = ledger_rows(isolated)
+    assert row["physical_failure"]["provider_status_code"] == 400
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
 def test_public_chat_without_price_never_fetches_generation(isolated, monkeypatch, asynchronous):
     import requests
 

@@ -23,10 +23,13 @@ BODY_WORKTREE_TOOLS = frozenset({
 })
 
 
+from ouroboros import work_domain  # noqa: E402 — a command in a work folder runs as the work domain
+
+
 def _g(args: List[str], cwd: pathlib.Path,
        env: Optional[dict] = None, timeout: int = 60) -> subprocess.CompletedProcess:
     from ouroboros.git_observation import host_git_env
-    return subprocess.run(
+    return work_domain.run(
         ["git"] + args, cwd=str(cwd),
         capture_output=True, text=True, timeout=timeout,
         env=host_git_env(env),
@@ -35,11 +38,11 @@ def _g(args: List[str], cwd: pathlib.Path,
 
 def _ouroboros_committer_env(repo_dir: pathlib.Path) -> dict:
     env = os.environ.copy()
-    name_r = subprocess.run(
+    name_r = work_domain.run(
         ["git", "config", "--local", "user.name"], cwd=str(repo_dir),
         capture_output=True, text=True, timeout=5,
     )
-    email_r = subprocess.run(
+    email_r = work_domain.run(
         ["git", "config", "--local", "user.email"], cwd=str(repo_dir),
         capture_output=True, text=True, timeout=5,
     )
@@ -507,7 +510,7 @@ def _stage_pr_merge(
         adaptation_patch: bytes = b""
         staged_before = _g(["diff", "--cached", "--name-only"], repo_dir).stdout.strip()
         if staged_before:
-            diff_r = subprocess.run(
+            diff_r = work_domain.run(
                 ["git", "diff", "--cached", "--binary"],
                 cwd=repo_dir, capture_output=True,
             )
@@ -524,7 +527,7 @@ def _stage_pr_merge(
         def _restore_on_error() -> None:
             _g(["checkout", branch], repo_dir)
             if adaptation_patch:
-                subprocess.run(
+                work_domain.run(
                     ["git", "apply", "--index", "-"],
                     cwd=repo_dir, input=adaptation_patch, capture_output=True,
                 )
@@ -532,7 +535,7 @@ def _stage_pr_merge(
         co = _g(["checkout", target_branch], repo_dir)
         if co.returncode != 0:
             if adaptation_patch:
-                subprocess.run(
+                work_domain.run(
                     ["git", "apply", "--index", "-"],
                     cwd=repo_dir, input=adaptation_patch, capture_output=True,
                 )
@@ -569,7 +572,7 @@ def _stage_pr_merge(
             )
 
         if adaptation_patch:
-            apply_r = subprocess.run(
+            apply_r = work_domain.run(
                 ["git", "apply", "--index", "-"],
                 cwd=repo_dir, input=adaptation_patch, capture_output=True,
             )
@@ -706,8 +709,8 @@ def get_tools() -> List[ToolEntry]:
                 "Stage a no-fast-forward merge of an integration branch into the body's working branch "
                 "WITHOUT committing (git merge --no-ff --no-commit). Sets MERGE_HEAD so "
                 "commit_reviewed creates a proper merge commit with both parents. Target is "
-                "branch_dev (the bound candidate branch during self-development; commit_reviewed checks it out before "
-                "committing — any other target would lose MERGE_HEAD). The "
+                "branch_dev (the bound candidate branch during self-development), the branch commit_reviewed commits "
+                "on: it keeps the staged merge there and refuses to switch branches while a merge is pending. The "
                 "integration-branch history (with original author commits) is permanently "
                 "linked. Finalize via commit_reviewed."
             ),

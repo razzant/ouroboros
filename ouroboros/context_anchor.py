@@ -151,16 +151,21 @@ def main_input_anchor(usage: Optional[Mapping[str, Any]], plan: Any, *,
     return anchor, (int(floor) if floor else None)
 
 
-def record_refused_input(usage: Dict[str, Any], plan: Any, estimate_tokens: int, *, measured: bool = False) -> None:
+def record_refused_input(usage: Dict[str, Any], plan: Any, estimate_tokens: int, *, measured: bool = False,
+                         candidate: Any = None) -> None:
     """Remember the smallest input estimate ``plan``'s model refused by size in this task.
 
     ``measured`` (the estimate is anchored on an accepted request) also bounds the refusing account's
-    window when the provider stated no limit; a cold estimate stays task-local."""
+    window when the provider stated no limit; a cold estimate stays task-local. ``candidate``, the refused
+    request, says how that size was known: a local instance's exact count (its ``input_tokens`` with its
+    ``context_window_tokens``) is stored as such, any other as an anchored estimate (``WindowLimit.basis``)."""
     if plan is None or int(estimate_tokens or 0) <= 0:
         return
     from ouroboros.context_window import record_refusal
 
-    record_refusal(usage, plan, refused_input=int(estimate_tokens) if measured else 0)
+    exact = getattr(candidate, "context_window_tokens", None) and getattr(candidate, "input_tokens", None)
+    record_refusal(usage, plan, refused_input=int(estimate_tokens) if measured else 0,
+                   basis="exact_local_count" if exact else "anchored_estimate")
     refused = usage.setdefault(REFUSED_INPUTS_KEY, {})
     key = _anchor_model_key(plan)
     refused[key] = min(int(refused.get(key) or estimate_tokens), int(estimate_tokens))
@@ -194,9 +199,79 @@ def refused_request_density(usage: Optional[Mapping[str, Any]], refused: Any, me
     return stated / estimate if sent and sent == getattr(measurement, "route_fp", None) else None
 
 
+def reservation_refusal(usage: Optional[Mapping[str, Any]], refused: Any, measurement: Any) -> bool:
+    """A provider called the request ``measurement`` sized too large (``request_too_large``), and that request went out
+    inside the reply reservation of a stated total nothing has proved (``probes_reply_reservation``).
+
+    Only the favourable reading admitted it, so the refusal is that total's own, whatever its words (owner, 30 Sep
+    2026: the host sends once and records the provider's answer). ``refused`` is the attempt the provider refused: an
+    attempt of another route (a wait moved the call there) measures nothing here, so its true output cap stays one."""
+    sent = getattr(getattr(refused, "physical_context", None), "route_fp", None)
+    return bool(str((usage or {}).get("_last_llm_error_kind") or "") == "request_too_large" and measurement is not None
+                and measurement.probes_reply_reservation and sent and sent == getattr(measurement, "route_fp", None))
+
+
+def cited_limit_refusal(usage: Dict[str, Any], refused: Any, measurement: Any, plan: Any) -> bool:
+    """A client refusal no typed code explained (``untyped``) cites a number equal to a token limit declared for
+    this route (``context_budget.cited_declared_limit``): recognition by number, stamped on the answer.
+
+    The declarations are the window record's own (``WindowRecord.declared``, never the compatibility capacity),
+    then the endpoint catalogue's for this model id (``pricing.declared_token_limits``). The matched one says what
+    the number limits: an input cap, or a total that holds the reply. It may size this round's pass and teaches
+    nothing (``context_window.UNTAUGHT_BASES``)."""
+    from ouroboros.context_budget import cited_declared_limit
+
+    answer = usage.get("_last_llm_provider_answer") or {}
+    sent = getattr(getattr(refused, "physical_context", None), "route_fp", None)
+    if not answer.get("untyped") or measurement is None or not sent or sent != getattr(measurement, "route_fp", None):
+        return False
+    from ouroboros.pricing import declared_token_limits
+
+    record = getattr(plan, "window_record", None)
+    cited = cited_declared_limit(  # every layer of the same attempt, earlier upstream attempts included
+        answer.get("said") or (), int(getattr(refused, "max_completion_tokens", 0) or measurement.reply_allowance_tokens or 0),
+        {limit.tokens: (limit.kind, f"the window record ({limit.source})") for limit in (record.declared if record else ())},
+        lambda: declared_token_limits(str(getattr(plan, "provider", "") or ""), str(getattr(plan, "model", "") or "")))
+    if cited is None:
+        return False
+    number, (kind, source), speaker, sentence = cited
+    usage["_last_llm_provider_message"] = sentence
+    usage["_last_llm_provider_answer"] = {**answer, "speaker": speaker, "sentence": sentence, "untyped": False,
+                                          "basis": "number_equals_declared", "limit": number, "limit_kind": kind,
+                                          "declaration": source}
+    return True
+
+
 def measured_units(refused_density: Optional[float], measurement: Any,
                    *tokens: Optional[int]) -> Tuple[Optional[int], ...]:
     """``tokens`` the refused request's own density counts, in the units ``measurement`` counts; None stays unknown."""
     scale = measurement.measurement_density / refused_density if refused_density else 1.0
     return tuple(None if value is None else math.ceil(value * scale) if refused_density else int(value)
                  for value in tokens)
+
+
+CONTEXT_REFUSAL_ROUND_KEY = "_context_refusal_round"
+
+
+def _route_fit_key(key: str) -> bool:
+    """Route-fit state a failed candidate's walk must not leave behind. The conversation's per-model
+    facts (anchors, accepted floors, refused sizes) and this round's own size refusal (its round, its whole facts)
+    are not route state: a candidate's refusal keeps the round's renewal (review r2, 18.10) and its own facts."""
+    from ouroboros.context_view_facts import SIZE_REFUSAL_KEY
+
+    return key.startswith("_context_") and key not in {
+        INPUT_ANCHOR_KEY, ACCEPTED_INPUTS_KEY, REFUSED_INPUTS_KEY, CONTEXT_REFUSAL_ROUND_KEY, SIZE_REFUSAL_KEY}
+
+
+def _snapshot_context_fit_usage(usage: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in usage.items() if _route_fit_key(key)}
+
+
+def _restore_context_fit_usage(
+    usage: Dict[str, Any],
+    snapshot: Dict[str, Any],
+) -> None:
+    for key in tuple(usage):
+        if _route_fit_key(key):
+            usage.pop(key, None)
+    usage.update(snapshot)

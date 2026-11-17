@@ -250,6 +250,25 @@ test('a failed latest read leaves the old chain available and retries the same r
     assert.equal(h.pager.getState().firstPage.requestCursor, 'replay:B:0');
 });
 
+test('suspension aborts a page without losing the chain, and an old answer cannot replace a new visit', async () => {
+    const answers = [];
+    const h = harness({ fetch: () => new Promise(resolve => answers.push(resolve)) });
+    h.pager.acceptRecent(page(0));
+    const old = h.pager.older();
+    await Promise.resolve();
+    h.pager.suspend();
+    assert.equal(h.calls[0].signal.aborted, true);
+    assert.equal(h.pager.getState().cachedPages.length, 1);
+    assert.equal(h.released.length, 0);
+    const next = h.pager.older();
+    await Promise.resolve();
+    answers[0](page(1, { chain: 'obsolete' }));
+    assert.equal((await old).status, 'disposed');
+    answers[1](page(1));
+    assert.equal((await next).status, 'applied');
+    assert.deepEqual(h.applied.map(p => p.messages[0].text), ['Page A-0', 'Page A-1']);
+});
+
 test('destroy aborts the read, releases cached pages once, and rejects late applies', async () => {
     let resolve;
     const h = harness({ fetch: () => new Promise(done => { resolve = done; }) });

@@ -339,17 +339,65 @@ def test_a_candidate_priced_on_another_turn_is_still_refused_before_dispatch(act
     assert not acting.gateway.creates
 
 
-def test_the_budget_soft_landing_wraps_up_with_the_model_not_the_host_text(acting, turn_engine):
-    """loop_budget's exhausted-ceiling rail reaches synthesis with a turn armed."""
+@pytest.mark.parametrize("pending", [None, "actor", "fallback", "auto"])
+def test_the_budget_soft_landing_wraps_up_with_the_model_not_the_host_text(acting, turn_engine, monkeypatch, pending):
+    """The legacy money rail prices and sends the acting route, with its turn and account intact.
+    A restored plan for a pending model is fitted to this send without consuming the pending choice."""
     from ouroboros import loop as loop_module
 
     acting.ctx.messages = [{"role": "user", "content": "Please finish"}]
     acting.ctx.llm_trace = {}
-    acting.tools._ctx.model_turn_state = ModelTurnState(deepcopy(TURN))
+    slot = acting.tools._ctx
+    slot.task_id, slot.task_attempt = acting.ctx.task_id, 1
+    slot.model_turn_state = ModelTurnState(deepcopy(TURN))
+    measured = []
+    if pending:
+        from ouroboros import capability_evidence as ce, context, context_fit as cf
+
+        if pending == "auto":
+            slot.task_metadata["configured_subagent"]["route"]["credential_profile_id"] = ""
+        role = "fallback:0" if pending == "fallback" else "subagent:visual-actor"
+        pin = {"actor": "actor-only", "fallback": "fallback-only", "auto": ""}[pending]
+        other = "claudexor::codex=pending-model"
+        monkeypatch.setattr(ce, "canonical_evidence_root", lambda: acting.root)
+        monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+
+        def route(task, **_kw):
+            chosen, _ = cf._context_route(task)
+            chosen["options"]["account_fingerprint"] = "fingerprint-a"
+            chosen["window_observation_fp"] = chosen["model"] + ":fingerprint-a"
+            return chosen, ce.CapabilityEvidence(100_000 if chosen["model"] == MODEL else 500_000,
+                "confirmed", "metadata", chosen["model"], source_id="codex",
+                credential_profile_id=pin or "account-a", account_fingerprint="fingerprint-a")
+
+        monkeypatch.setattr(context, "_context_fit_route", route)
+        core = cf.ContextCore("Own SYSTEM", "BIBLE", "", "", "Identity", "Facts", '"Please finish"', False)
+        slot.context_fit_plan = cf.build_context_fit_plan(None, core,
+            {"model": other, "model_role": role, "task_metadata": slot.task_metadata}, preferred_mode="max",
+            tool_schemas=[], reasoning_effort="none", route_resolver=route)
+        slot.active_context_mode, slot.active_effort = "max", "high"
+        slot.active_model_override, slot.active_effort_override = other, "none"
+        call = loop_module.call_llm_with_retry
+
+        def send(*args, **kwargs):
+            measured.append(kwargs.get("physical_context"))
+            return call(*args, **kwargs)
+
+        monkeypatch.setattr(loop_module, "call_llm_with_retry", send)
     ceiling = task_pacing.resolve_cost_ceiling(100.0, normalize_budget_profile({"cost_hard_stop_pct": 50}), root_cap_usd=0.5)
-    text, _usage, _trace = loop_module._soft_land_exhausted_ceiling(acting.ctx, ceiling)
+    with task_model_wait_scope(task={"id": slot.task_id, "_attempt": 1}, drive_root=acting.root,
+                               event_queue=None, worker_slot_held=True) as wait:
+        wait.tool_context, slot.model_wait_context = slot, wait
+        text, _usage, _trace = loop_module._soft_land_exhausted_ceiling(acting.ctx, ceiling)
     assert "Ответ 🐍" in text and "no working room" not in text
     assert acting.gateway.uploads[0][0]["nativeContinuation"] == TURN
+    if pending:
+        plan, payload = slot.context_fit_plan, acting.gateway.uploads[0][0]
+        assert len(measured) == len(acting.gateway.creates) == 1 and measured[0] is not None
+        assert (plan.model, plan.model_role, plan.window_tokens, plan.start_reasoning_effort) == (MODEL, role, 100_000, "high")
+        assert (slot.active_model_override, slot.active_effort_override) == (other, "none")
+        assert payload["account"] == ({"mode": "pin", "profileId": pin} if pin else {
+            "mode": "auto", "preferredProfileId": "account-a"})
 
 
 def test_a_failed_probe_between_the_candidate_and_the_send_keeps_the_priced_bytes(acting, monkeypatch):
@@ -470,3 +518,171 @@ def test_a_resumed_task_keeps_one_change_and_its_origin(acting, stage):
     loop._record_transcript_prefix(restored, messages, resumed + 1, usage, None, ctx.task_id,
                                    slot.drive_root / "logs", ctx.tool_schemas)
     assert usage["prompt_prefix_breaks"] == 2
+
+
+@pytest.mark.parametrize("primary_kind", ["different_model", "same_model", "no_return", "fit_unavailable",
+    "owner_return", "owner_return_same_model", "owner_lead", "owner_lead_same_model"])
+def test_cold_return_prices_and_sends_the_acting_role_until_ordinary_handover(acting, monkeypatch, primary_kind):
+    import time
+    from ouroboros import capability_evidence as ce, context, context_fit as cf, owner_wait
+    from ouroboros.loop_routes import bind_round_route
+    from ouroboros.owner_model import primary_action
+    from ouroboros.task_results import write_task_result
+
+    primary = MODEL if primary_kind.endswith("same_model") else "claudexor::codex=primary-model"
+    returning = primary_kind != "no_return"
+    owner_act, lead = primary_kind.startswith("owner_"), primary_kind.startswith("owner_lead")
+    saved_role = "main" if lead else "fallback:0"
+    forced_role = ("lead" if lead else "main") if owner_act else saved_role
+    forced_model = primary if owner_act else MODEL
+    forced_account = ({"mode": "auto"} if lead else
+                      {"mode": "pin", "profileId": "main-only" if owner_act else "fallback-only"})
+    monkeypatch.setenv("OUROBOROS_MODEL", primary)
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: acting.root)
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    monkeypatch.setattr(llm_claudexor, "model_gateway", lambda factory: factory())
+
+    def route(task, **_kw):
+        selected, _ = cf._context_route(task)
+        selected["options"]["account_fingerprint"] = "fingerprint-a"
+        selected["window_observation_fp"] = selected["model"] + ":fingerprint-a"
+        return selected, ce.CapabilityEvidence(500_000, "confirmed", "metadata", selected["model"],
+            source_id="codex", credential_profile_id=selected.get("account_pin") or "account-a",
+            account_fingerprint="fingerprint-a")
+
+    monkeypatch.setattr(context, "_context_fit_route", route)
+    core = cf.ContextCore("SYSTEM", "BIBLE", "", "", "Identity", "Facts", '"finish"', False)
+    def plan(model, role):
+        return cf.build_context_fit_plan(None, core, {"model": model, "model_role": role},
+            preferred_mode="max", tool_schemas=[], reasoning_effort="high", route_resolver=route)
+
+    old = acting.tools._ctx
+    old.task_metadata = {}
+    old.task_id, old.task_attempt, old.task_started_at = acting.ctx.task_id, 1, time.time()
+    old.active_model, old.active_use_local, old.active_effort = MODEL, False, "high"
+    old.active_context_mode, old.context_fit_plan = "max", plan(MODEL, saved_role)
+    old.primary_route = {"model": primary, "use_local": False, "role": "main"}
+    old.route_choice, old._lead_role = {"kind": "explicit", "source": "fallback"}, "fallback:0"
+    if returning and not owner_act:
+        primary_action(old, "return")
+    state = json.loads(json.dumps(owner_wait.continuation_state(
+        old, old.context_fit_plan.messages_for("max"), {}, {}, 2, [], set())))
+    assert state["context_model_role"] == saved_role
+    if owner_act:  # A durable card act during the park, not a pending tool choice.
+        write_task_result(acting.root, old.task_id, "running", root_task_id=old.task_id, _attempt=1,
+            metadata={"lead": {"source": "owner", "model": primary, "use_local": False}} if lead else {},
+            owner_model={"request_id": "parked-owner-act", "action": "set" if lead else "return"})
+    restored = ToolRegistry(repo_dir=acting.root.parent, drive_root=acting.root)
+    slot = restored._ctx
+    slot.task_metadata, slot.task_id, slot.task_attempt = {}, acting.ctx.task_id, 1
+    slot.context_fit_plan = plan(primary, "main")
+    messages = []
+    owner_wait.restore_continuation_state(restored, state, messages, {}, {}, set())
+    pending_plan, pending_mode = owner_wait.rebind_restored_route(restored, state, messages)
+    assert (slot.active_model, pending_plan.model, pending_plan.model_role) == (
+        forced_model, primary if returning else MODEL, "lead" if lead else "main" if returning else saved_role)
+    assert bind_round_route(restored, messages, (slot.active_model, False, "high"), pending_plan,
+        pending_mode, "max", [], pending_tool_budget=True) == (forced_model, False, "high", pending_plan, pending_mode)
+    acting.ctx.tools, acting.ctx.messages = restored, messages
+    acting.ctx.active_model = slot.active_model
+    with monkeypatch.context() as fit_patch:
+        if primary_kind == "fit_unavailable":
+            def unavailable(*_a, **_kw):
+                raise RuntimeError("fixture: acting fit unavailable")
+            fit_patch.setattr("ouroboros.loop._rebind_context_fit_plan", unavailable)
+        rebound = forced._bind_forced_route(acting.ctx)
+        request, prepared = task_pacing.prepared_wrapup_candidate(
+            acting.ctx, deepcopy(messages), allow_server_web_search=False)
+        assert forced._call_forced_model_once(acting.ctx, initial_messages=prepared, admitted_request=request) == "Ответ 🐍"
+    payload = acting.gateway.uploads[-1][0]
+    assert payload["model"] == forced_model.split("=", 1)[1]
+    assert payload["account"] == forced_account
+    assert rebound is (returning and not owner_act and primary_kind != "fit_unavailable")
+    assert slot.context_fit_plan.model_role == ("main" if primary_kind == "fit_unavailable" else forced_role)
+    assert slot.active_role_override == ("lead" if lead else "main" if returning else None)
+    # An unsent budget-price view and a second cold park carry the acting role, even while the plan previews Main.
+    parked = owner_wait.continuation_state(slot, messages, {}, {}, 2, [], set(),
+                                           context_view=(pending_plan, pending_mode))
+    assert parked["context_model_role"] == forced_role
+    assert owner_wait.continuation_state(slot, messages, {}, {}, 2, [], set())["context_model_role"] == forced_role
+    # A second process can resume the unsent-price view without confusing it with the saved actor.
+    restored = ToolRegistry(repo_dir=acting.root.parent, drive_root=acting.root)
+    slot = restored._ctx
+    slot.task_metadata, slot.task_id, slot.task_attempt = {}, acting.ctx.task_id, 1
+    slot.context_fit_plan = plan(primary, "main")
+    owner_wait.restore_continuation_state(restored, json.loads(json.dumps(parked)), messages, {}, {}, set())
+    pending_plan, pending_mode = owner_wait.rebind_restored_route(restored, parked, messages)
+    assert slot.active_model == forced_model and slot._restored_context_model_role == forced_role
+    model, local, effort, ordinary_plan, mode = bind_round_route(restored, messages,
+        (forced_model, False, "high"), pending_plan, pending_mode, "max", [], llm=acting.client)
+    expected = "lead" if lead else "main" if returning else saved_role
+    assert (model, ordinary_plan.model_role, slot.active_role_override) == (
+        primary if returning else MODEL, expected, None)
+    role, account = task_model_binding({"task_metadata": {}}, context_fit_plan=slot.context_fit_plan)
+    call_llm_with_retry(acting.client, messages, model, [], effort, 1, acting.ctx.drive_logs,
+        acting.ctx.task_id, 3, None, {}, model_role=role, model_account_override=account)
+    assert acting.gateway.uploads[-1][0]["account"] == ({"mode": "auto"} if lead else {
+        "mode": "pin", "profileId": "main-only" if returning else "fallback-only"})
+    assert owner_wait.continuation_state(slot, messages, {}, {}, 3, [], set())["context_model_role"] == expected
+    print("COLD_ROLE_HANDOVER", {"case": primary_kind, "forced_account": payload["account"],
+        "ordinary_account": acting.gateway.uploads[-1][0]["account"], "saved_role": parked["context_model_role"]})
+
+
+@pytest.mark.parametrize("provider,fitted,acting,rebind,fit_available", [
+    ("openai", "none", "high", True, True), ("openai", "", "high", True, True),
+    ("openai", "high", "none", False, True), ("openai", "low", "high", False, True),
+    ("openai", "high", "high", False, True), ("openrouter", "none", "high", False, True),
+    ("openai", "none", "high", False, False),
+])
+def test_same_route_forced_effort_fits_only_a_longer_request(tmp_path, monkeypatch, provider, fitted, acting,
+                                                         rebind, fit_available):
+    """A pending effort can price the restored plan, but a forced tail still sends the acting effort."""
+    from ouroboros import capability_evidence as ce, context, context_fit as cf, context_window
+
+    model = "openai::gpt-6-sol" if provider == "openai" else "openai/gpt-6-sol"
+    schemas = [{"type": "function", "function": {"name": f"read_{i}", "description": "Read one local fixture.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "The fixture path."}}, "required": ["path"]}}}
+        for i in range(128)]
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path / "evidence")
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    context_window.record_observation(tmp_path / "evidence", "same-route", refused=100000,
+                                      kind="total", reserve=65536)
+
+    def route(*_a, **_kw):
+        return {"provider": provider, "model": model}, ce.CapabilityEvidence(
+            100000, "confirmed", "metadata", "same-route")
+
+    monkeypatch.setattr(context, "_context_fit_route", route)
+    core = cf.ContextCore("SYSTEM", "BIBLE", "", "", "Identity", "Facts",
+                          '"' + "Task evidence. " * 3000 + '"', False)
+    plan = cf.build_context_fit_plan(None, core, {"model": model}, preferred_mode="max",
+                                    tool_schemas=schemas, reasoning_effort=fitted, route_resolver=route)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    owner = registry._ctx
+    owner.active_model, owner.active_use_local, owner.active_effort = model, False, acting
+    owner.active_effort_override = fitted
+    owner.context_fit_plan, owner.active_context_mode = plan, plan.initial_mode
+    owner._restored_context_model_role, owner.task_metadata = plan.model_role, {}
+    call = SimpleNamespace(tools=registry, active_model=model, active_use_local=False,
+        active_effort=acting, messages=plan.messages_for(plan.initial_mode), tool_schemas=schemas,
+        accumulated_usage={}, round_idx=3, task_id="forced-effort", drive_root=tmp_path, drive_logs=tmp_path / "logs")
+    original_messages = deepcopy(call.messages)
+    if not fit_available:
+        def unavailable(*_a, **_kw):
+            raise RuntimeError("fixture: acting fit unavailable")
+        monkeypatch.setattr("ouroboros.loop._rebind_context_fit_plan", unavailable)
+    rebound = forced._bind_forced_route(call)
+    assert forced._forced_physical_context(call, call.messages) is not None
+    assert call.accumulated_usage["_context_capacity_deficit_tokens"] == (0 if fit_available else 4319)
+    assert rebound is rebind
+    assert owner.active_effort_override == fitted and owner.active_effort == acting
+    assert owner.context_fit_plan.start == plan.start  # repricing never rewrites the task's historical start
+    if rebind:
+        assert owner.context_fit_plan.start_reasoning_effort == acting
+    else:
+        assert owner.context_fit_plan is plan and call.messages == original_messages
+    print("FORCED_EFFORT_FIT", {"provider": provider, "fitted": fitted, "acting": acting, "rebind": rebind,
+        "deficit": call.accumulated_usage["_context_capacity_deficit_tokens"], "mode": owner.active_context_mode})

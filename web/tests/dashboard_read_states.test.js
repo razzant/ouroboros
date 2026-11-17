@@ -15,7 +15,8 @@ const projectedWork = (id, activity = 'working', extra = {}) => ({ work_id: id, 
     controls: activity === 'paused' ? [{ action: 'resume', target: id }] : [], ...extra });
 const backgroundUrl = '/api/state';
 const schedulesUrl = '/api/schedules';
-const logUrl = (name) => `/api/logs/${name}?limit=150`;
+const keptUrl = '/api/services/kept';
+const logUrl = (name) => `/api/logs/${name}?view=compact&limit=150`;
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const section = (mount, name) => mount.querySelector(`[data-activity-section="${name}"]`);
 const message = (node) => node.querySelector('.ui-status').textContent;
@@ -24,6 +25,7 @@ function emptyActivity(routes) {
     routes.set(queueUrl, response({ queue: { running: [], pending: [] } }));
     routes.set(backgroundUrl, response({ bg_consciousness_enabled: false, active_chat_activities: [], active_chat_activities_complete: true }));
     routes.set(schedulesUrl, response({ tasks: [] }));
+    routes.set(keptUrl, response({ services: [], complete: true, note: '' }));
 }
 
 test('Activity task list waits for migration and refreshes itself after publication', async t => {
@@ -431,7 +433,8 @@ test('Activity unites live direct turns with queue identities and preserves queu
     // Stop… is the neutral shared trigger on every row, never a danger button.
     assert.deepEqual(rows.map((row) => row.querySelector('button').className), Array(3).fill('btn btn-sm btn-default'));
     assert.doesNotMatch(queue.textContent, /Nothing running/);
-    assert.deepEqual(calls, [queueUrl, backgroundUrl, schedulesUrl], 'reuse the existing state read');
+    // Kept services are their own read (custody, one census): the state read is still not repeated.
+    assert.deepEqual(calls, [queueUrl, backgroundUrl, schedulesUrl, keptUrl], 'reuse the existing state read');
     // A group the owner folded stays folded through the next refresh.
     paused.open = false;
     await activity.refresh();
@@ -550,8 +553,16 @@ test('Logs reads oldest to newest, says why it is empty, and keeps one quiet ton
     const raw = main.querySelector('.log-raw-toggle');
     assert.equal(raw.className, 'btn btn-ghost btn-sm log-raw-toggle');
     assert.equal(entries.children[0].querySelector('.log-actions'), null);
-    await raw.fire('click');
-    assert.equal(entries.children[0].querySelector('.log-raw').hasAttribute('hidden'), false);
+    // Raw wraps with its headline as one lead, so a narrow pane never leaves it alone on a line under the headline;
+    // the time stays outside the lead, so the lead takes the next line whole when it does not fit beside the time.
+    const lead = raw.parentElement;
+    assert.equal(lead.className, 'log-lead');
+    assert.equal(lead.parentElement, main);
+    assert.equal(lead.querySelector('.log-headline').parentElement, lead);
+    assert.equal(main.querySelector('.log-ts').parentElement, main);
+    // Raw is one delegated component (logs_raw.js): the browser's click reaches the list, which opens the record.
+    entries.dispatchEvent({ type: 'click', target: raw });
+    assert.equal(entries.children[0].querySelector('.log-raw').hidden, false);
     assert.equal(raw.getAttribute('aria-expanded'), 'true');
     // Every filter on narrows nothing: no chip takes the chosen tone; one off, the ones still on do (U031).
     const chips = mount.querySelectorAll('.filter-chip');
@@ -592,6 +603,10 @@ test('Logs prints an event\'s name once and names a task card by its short id wi
     assert.equal(card.querySelector('[data-task-kind]').textContent, 'task 55d18078', 'eight characters, as every row');
     const pills = card.querySelector('[data-task-summary]').querySelectorAll('.log-pill').map((pill) => pill.textContent);
     assert.ok(!pills.some((pill) => pill.startsWith('task=') || pill === 'task'), `no repeated id: ${pills}`);
+    // A Timeline's rows exist while it is open (logs.js): opened the way the browser does, its `toggle` reaching the list.
+    const details = card.querySelector('details');
+    details.open = true;
+    entries.dispatchEvent({ type: 'toggle', target: details });
     const timeline = card.querySelector('[data-task-timeline]').querySelectorAll('.log-pill').map((pill) => pill.textContent);
     assert.ok(timeline.includes('task=55d180783850458f'), 'the timeline keeps the full id');
     // An older frame delivered later (history after the live stream) neither dates the card back nor moves it.
@@ -607,7 +622,7 @@ test('Logs catches unavailable and malformed sources while retaining later live 
     routes.set(logUrl('tools'), new Error('offline'));
     routes.set(logUrl('progress'), response({}, 503));
     routes.set(logUrl('supervisor'), { ok: true, json: async () => { throw new Error('not JSON'); } });
-    initLogs({ mount, ws, state: {} });
+    initLogs({ mount, ws, state: { activePage: 'dashboard', dashboardActiveSubtab: 'logs' } });
     await settle();
     assert.match(mount.querySelector('.logs-history-status').textContent, /events, tools, progress, supervisor/);
     ws.emit('log', { data: { type: 'test_after_failure', ts: '2026-09-09T13:00:00Z' } });
@@ -619,7 +634,7 @@ test('an older failed backfill cannot overwrite a newer complete reconnect resul
     const pending = [];
     routes.set(logUrl('events'), () => new Promise((resolve) => pending.push(resolve)));
     for (const name of ['tools', 'progress', 'supervisor']) routes.set(logUrl(name), response({ entries: [] }));
-    initLogs({ mount, ws, state: {} });
+    initLogs({ mount, ws, state: { activePage: 'dashboard', dashboardActiveSubtab: 'logs' } });
     ws.emit('open');
     pending[1](response({ entries: [{ type: 'new_backfill', ts: '2026-09-09T14:00:00Z' }] }));
     await settle();
@@ -632,26 +647,72 @@ test('an older failed backfill cannot overwrite a newer complete reconnect resul
     assert.equal(mount.querySelector('#log-entries').children.length, 1);
 });
 
-test('Costs numeric inputs have visible associated names and one line of owner help each', (t) => {
-    const { mount } = setup(t);
-    initCosts({ mount, state: {} });
-    for (const [id, label, help] of [['s-budget', 'Total budget ($)', /Paid work stops/],
-        ['s-per-task-cost', 'Per-task cost cap ($)', /A task and its helpers stop/]]) {
-        const field = mount.querySelector(`#${id}`);
-        assert.ok(field);
-        assert.equal(mount.querySelector(`[for="${id}"]`).textContent, label);
-        assert.equal(field.classList.contains('ui-control'), true);
-        const [own, note] = field.getAttribute('aria-describedby').split(' ');
-        const description = mount.querySelector(`#${own}`);
-        assert.match(description.textContent, help);
-        assert.doesNotMatch(description.textContent, /root task tree|auto-resume/, 'the mechanism lives under its disclosure');
-        assert.equal(note, 'costs-budget-help', 'the setup contract\'s one budget note describes both fields too');
-    }
-    // The mechanism is one disclosure away, never under one field only: the setup contract's one budget note (Settings
-    // and onboarding say the same), its fallback until /api/settings answers.
-    const note = mount.querySelector('.costs-budget').querySelector('.ui-disclosure').querySelector('#costs-budget-help');
-    assert.ok(note);
-    assert.match(note.textContent, /root task tree/);
+// The limits card's rows (names, help, saving, drafts across reads) are checked in costs_limits.test.js.
+
+test('Costs reads the allowance from the consciousness snapshot, /api/state when that fails, and opens its doors', async (t) => {
+    const { mount, routes, window } = setup(t);
+    const tabs = [];
+    initCosts({ mount, state: { activePage: 'dashboard' }, openDashboardTab: async (tab) => { tabs.push(tab); } });
+    routes.set('/api/cost-breakdown', response({}, 503));
+    routes.set('/api/settings', response({ TOTAL_BUDGET: 200, OUROBOROS_PER_TASK_COST_USD: 50, OUROBOROS_CONSCIOUSNESS_DAILY_USD: 390 }));
+    routes.set('/api/consciousness', response({ error: 'busy' }, 503));
+    routes.set('/api/state', response({ bg_consciousness_enabled: true, bg_consciousness_state: { status: 'wake_paused',
+        live_wake_task_id: 'wake-1', live_wake_held: true, spent_24h_usd: 301.2, daily_usd: 390, allowance_status: 'available',
+        live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } } }));
+    window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'costs' } }));
+    await settle(); await settle(); await settle();
+    assert.equal(mount.querySelector('#setting-OUROBOROS_CONSCIOUSNESS_DAILY_USD').value, '390');
+    // The 24 hours as a meter in money beside a limit (storage_format.js formatLimitUsd): the spend rounded up, what is
+    // left rounded down, a bar of the share; nothing is left out, so the note under it is empty and hidden.
+    assert.equal(mount.querySelector('#costs-allowance-spent').textContent, '$302');
+    assert.equal(mount.querySelector('#costs-allowance-of').textContent, 'of $390');
+    assert.equal(mount.querySelector('#costs-allowance-left').textContent, '$88 left');
+    const bar = mount.querySelector('#costs-allowance-bar');
+    assert.equal(bar.hidden, false);
+    assert.equal(bar.getAttribute('style'), '--spend-share: 77.2%');
+    const note = mount.querySelector('#costs-allowance-spend');
+    assert.equal(note.textContent, '');
+    assert.equal(note.hidden, true);
+    assert.equal(mount.querySelector('[data-costs-consciousness]').getAttribute('aria-label'), 'Open Consciousness');
+    const state = mount.querySelector('#costs-allowance-state');
+    // The fixture reads a node's own text before its children's: the order in the page is the browser lane's.
+    assert.match(state.textContent, /The consciousness wake-up is paused at the allowance it had left when it started \(\$2\.99\)\./);
+    assert.match(state.querySelector('.costs-allowance-note').textContent, /^Resume keeps that limit, so it pauses again/,
+        'what follows from the fact is quieter than the fact');
+    const door = state.querySelector('[data-open-task]');
+    assert.equal(door.dataset.openTask, 'wake-1', 'the held wake\'s card in Main');
+    const opened = [];
+    window.addEventListener('ouro:open-task', (event) => opened.push(event.detail));
+    const card = mount.querySelector('.costs-meters');
+    await card.fire('click', { target: door });
+    assert.deepEqual(opened, [{ task_id: 'wake-1', chat_id: 1 }]);
+    await card.fire('click', { target: mount.querySelector('[data-costs-consciousness]') });
+    assert.deepEqual(tabs, ['consciousness']);
+});
+
+test('Costs reads the window once more when the room time it gave passes, and only then', async (t) => {
+    const { mount, routes, window } = setup(t);
+    initCosts({ mount, state: { activePage: 'dashboard' } });
+    let reads = 0;
+    routes.set('/api/cost-breakdown', response({}, 503));
+    routes.set('/api/settings', response({ TOTAL_BUDGET: 200, OUROBOROS_PER_TASK_COST_USD: 50, OUROBOROS_CONSCIOUSNESS_DAILY_USD: 10 }));
+    routes.set('/api/consciousness', () => {
+        reads += 1;
+        return reads === 1
+            ? response({ enabled: true, spent_24h_usd: 12.4, daily_usd: 10, allowance_status: 'exhausted',
+                allowance_room_after: new Date(Date.now() + 50).toISOString() })
+            : response({ enabled: true, spent_24h_usd: 4, daily_usd: 10, allowance_status: 'available' });
+    });
+    window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'costs' } }));
+    await settle(); await settle(); await settle();
+    assert.equal(reads, 1);
+    assert.match(mount.querySelector('#costs-allowance-state').textContent, /Consciousness limit reached/);
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+    await settle(); await settle(); await settle();
+    assert.equal(reads, 2, 'one read when the time it gave passed');
+    assert.doesNotMatch(mount.querySelector('#costs-allowance-state').textContent, /limit reached/, 'the old time does not stand');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(reads, 2, 'no polling after it');
 });
 
 test('Dashboard binds stored, keyboard and programmatic selection to the same named panels', async (t) => {
@@ -677,7 +738,8 @@ test('Dashboard binds stored, keyboard and programmatic selection to the same na
     assertSelected('costs');
     assert.deepEqual(changes, ['costs']);
     const costs = dashboard.page.querySelector('#dashboard-tab-costs');
-    await strip.fire('keydown', { target: costs, key: 'ArrowRight', preventDefault() {} });
+    // The pages are a vertical list (aria-orientation="vertical"): the arrow down moves to the next.
+    await strip.fire('keydown', { target: costs, key: 'ArrowDown', preventDefault() {} });
     assertSelected('updates');
     assert.equal(document.activeElement.id, 'dashboard-tab-updates');
     assert.deepEqual(changes, ['costs', 'updates'], 'one key gesture causes one domain load');
@@ -1094,6 +1156,9 @@ function manualTimers(t) {
 function openStorage(t) {
     const fixture = setup(t);
     const timers = manualTimers(t);
+    // The retention row's own settings read is dashboard_settings.test.js's; these flows count Storage's reads.
+    const fetchStorage = globalThis.fetch;
+    globalThis.fetch = async (url, init) => (url === '/api/settings' ? response({ OUROBOROS_GC_RETENTION_DAYS: 7 }) : fetchStorage(url, init));
     const state = { activePage: 'dashboard', dashboardActiveSubtab: 'storage' };
     const show = (tab) => {
         state.dashboardActiveSubtab = tab;

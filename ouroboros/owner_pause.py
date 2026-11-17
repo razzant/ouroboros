@@ -824,7 +824,6 @@ def _validate_launch(source: Any, root_resume=None):
         if member_id not in observations:
             observations[member_id] = _control_projection(root_drive, member_id)
         return observations[member_id]
-    selected_resume_start = actor = False
     if fence:
         from ouroboros.budget_pause import STATE_RESUME_GRANTED
 
@@ -832,7 +831,7 @@ def _validate_launch(source: Any, root_resume=None):
         if root_resume and fence_closed(fence):
             row = controls(task_id).get("budget_pause") or {}
             grant = row.get("grant") or {}
-            actor = root_allowed = root_actor(root_drive, root_id, task_id)
+            root_allowed = root_actor(root_drive, root_id, task_id)
             if not root_allowed and grant.get("selected_by") == "owner":
                 from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
                 root_allowed = controls(root_id).get("status") in _TRULY_TERMINAL_STATUSES
@@ -845,34 +844,24 @@ def _validate_launch(source: Any, root_resume=None):
                 and not grant.get("revoked_at") and not grant.get("consumed_at"))
         if not allowed:
             raise OwnerPauseRefused(str(fence.get("reason") or "owner_pause"))
-        selected_resume_start = not actor
     from ouroboros.budget_pause import STATE_PAUSING, STATE_PAUSED, STATE_RESUME_GRANTED
 
     if root_drive and task_id:
-        for member_id in {root_id, task_id}:
-            try:
-                row = controls(member_id).get("budget_pause") or {}
-            except StoreBusy:
-                raise
-            except Exception as exc:
-                raise OwnerPauseRefused("model_sleep_authority_unreadable") from exc
-            if row.get("reason") != "sleep" or row.get("state") not in {
-                    STATE_PAUSING, STATE_PAUSED, STATE_RESUME_GRANTED}:
-                continue
-            if member_id == root_id and task_id != root_id:
-                selected = read_fence(root_drive, root_id, _observations=observations).get("selected_members") or {}
-                if selected_resume_start or task_id in selected:
-                    # Explicit member Resume outlives its terminal root's
-                    # saved sleep. It does not release any sibling or root.
-                    continue
-            grant = row.get("grant") or {}
-            resume_start = bool(root_resume and member_id == task_id
-                and row.get("state") == STATE_RESUME_GRANTED
-                and row.get("pause_id") == root_resume.get("pause_id")
-                and grant.get("grant_id") == root_resume.get("grant_id")
-                and not grant.get("revoked_at") and not grant.get("consumed_at"))
-            if not resume_start:
-                raise OwnerPauseRefused("model_sleep")
+        # Only a task's own sleep fences its launches, until its own grant starts it. A sleep is its
+        # actor's wait: a sleeping root fences no member (owner Pause, money and Stop keep their gates).
+        try:
+            row = controls(task_id).get("budget_pause") or {}
+        except StoreBusy:
+            raise
+        except Exception as exc:
+            raise OwnerPauseRefused("model_sleep_authority_unreadable") from exc
+        grant = row.get("grant") or {}
+        if (row.get("reason") == "sleep" and row.get("state") in {STATE_PAUSING, STATE_PAUSED, STATE_RESUME_GRANTED}
+                and not (root_resume and row.get("state") == STATE_RESUME_GRANTED
+                         and row.get("pause_id") == root_resume.get("pause_id")
+                         and grant.get("grant_id") == root_resume.get("grant_id")
+                         and not grant.get("revoked_at") and not grant.get("consumed_at"))):
+            raise OwnerPauseRefused("model_sleep")
 
     return observations.get(root_id, {})
 
@@ -932,18 +921,24 @@ def launch_admission(source: Any, *, root_resume: Optional[Dict[str, Any]] = Non
             _REVIEW_ADMISSION.reset(token)
 
 
-def tree_member_results(root_drive: Any, root_task_id: str, *, linked: Iterable[str] = ()) -> Any:
+def tree_member_results(root_drive: Any, root_task_id: str, *, linked: Iterable[str] = (),
+                        known: Optional[Dict[str, tuple]] = None) -> Any:
     """Select complete retained membership, then strictly read its authority.
 
     ``task_store.tree_facts`` selects the tree (``linked``: ids the caller's own queue,
     custody or model-request sources tie to it) and names the rows it could not read. A
     member whose strict read refuses or no longer finds its own record joins them as linked:
     it holds this tree while the others still answer. An unavailable store refuses the census.
-    Selection never supplies live status or custody. Returns a ``TreeCensus``.
+    Selection never supplies live status or custody. ``known``: ``{task_id: (signature, row)}``, rows
+    the caller's earlier census admitted for this tree, each read at or after that store signature
+    (``tree_census``). An offered member is confirmed by its signature read after every strict read
+    of this census: still that one, its row is returned as given (unchecked, in the caller's own
+    projection) as if read last, not decoded again; moved, it is read, and the rest are confirmed
+    again. Returns a ``TreeCensus``.
     """
     from ouroboros.store_hot_facts import lineage_root
     from ouroboros.task_results import load_task_result
-    from ouroboros.task_store import TreeCensus, tree_facts
+    from ouroboros.task_store import TreeCensus, signatures, tree_facts
 
     try:
         census = tree_facts(root_drive, root_task_id, linked=linked)
@@ -952,19 +947,34 @@ def tree_member_results(root_drive: Any, root_task_id: str, *, linked: Iterable[
     except StoreError as exc:
         raise ValueError("tree_membership_unreadable") from exc
     members, unresolved = {}, dict(census.unresolved)
-    for task_id in census.members:
+
+    def strict(task_id: str) -> None:
         try:
             row = load_task_result(root_drive, task_id, strict=True)
         except StoreError:
             raise
         except (ValueError, TypeError, AttributeError, KeyError, RecursionError):
             unresolved[task_id] = {"reason": "record_unreadable", "linked": True}
-            continue
+            return
         if row is None:  # its row without the body that answers for it (or gone since): it alone is unknown
             unresolved[task_id] = {"reason": "body_missing", "linked": True}
-            continue
+            return
         if lineage_root(row) == root_task_id:
             members[task_id] = row
+
+    pending = [task_id for task_id in census.members if known and task_id in known]
+    for task_id in [task_id for task_id in census.members if task_id not in set(pending)]:
+        strict(task_id)
+    while pending:  # each pass confirms the offered rows after every strict read so far, or reads what moved
+        standing = signatures(root_drive, pending)
+        moved = [task_id for task_id in pending if standing.get(task_id) != known[task_id][0]]
+        if not moved:
+            members.update((task_id, known[task_id][1]) for task_id in pending)
+            break
+        for task_id in moved:
+            strict(task_id)
+        pending = [task_id for task_id in pending if task_id not in set(moved)]
+    members = {task_id: members[task_id] for task_id in census.members if task_id in members}
     return TreeCensus(members, dict(sorted(unresolved.items())))
 
 
@@ -979,13 +989,15 @@ def tree_model_requests(root_drive: Any, root_task_id: str) -> list:
 
 
 def trees_model_requests(root_drive: Any, root_task_ids: Iterable[str]) -> Dict[str, list]:
-    """``tree_model_requests`` of many roots in ONE read: a reader over every paused tree pays one
-    transaction, not one per tree. Raises when unreadable: unknown, never none."""
+    """The model requests still awaiting an answer (dispatched, unresolved) of many roots in ONE read: the
+    handoffs a display names over every paused tree, one transaction, not one per tree. Admission's
+    ``tree_model_requests`` keeps the whole open set, whose reserved rows tie damaged members to their
+    tree. Raises when unreadable: unknown, never none."""
     from ouroboros import usage_store
 
     roots = sorted({str(root) for root in root_task_ids})
     with usage_store.read(root_drive) as txn:
-        captured = txn.open_attempt_rows(root_task_ids=roots)
+        captured = txn.handoff_attempt_rows(roots)
     grouped: Dict[str, list] = {root: [] for root in roots}
     for attempt in usage_store.decode_attempts(captured):
         grouped.setdefault(str(attempt.get("root_task_id") or ""), []).append(attempt)

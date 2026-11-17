@@ -200,9 +200,12 @@ def _owner_words_section(task: Mapping[str, Any]) -> str:
     (``work_order_room_words``) follow the field's rows, one row per identity; nothing
     is read from a store here, so the order is a function of the record. The key also
     tells the heading and frame: a record without it keeps the literals it launched with.
+    The schedule text it was scheduled with (``owner_words.SCHEDULE_FIELD``) follows them
+    in its own section; a record without that field renders as it always did.
     """
     from ouroboros.contracts.task_contract import task_input_sources
-    from ouroboros.owner_words import FIELD, _deduped, render_owner_words, task_governing_words
+    from ouroboros.owner_words import (FIELD, _deduped, render_owner_words, render_schedule_text,
+                                       task_governing_words, task_schedule_items)
 
     if task_input_sources(task) == "declared" and not declared_inputs_carry_owner_words(task):
         return ""
@@ -210,8 +213,10 @@ def _owner_words_section(task: Mapping[str, Any]) -> str:
     room = work_order_room_words(task)
     if room is not None:
         rows = _deduped(rows + task_governing_words({FIELD: room})[0])
-    return render_owner_words(rows, absent, audience="session", root_task_id=str(task.get("root_task_id") or ""),
-                              current=room is not None)
+    words = render_owner_words(rows, absent, audience="session", root_task_id=str(task.get("root_task_id") or ""),
+                               current=room is not None)
+    schedule = render_schedule_text(task_schedule_items(task), audience="session")
+    return "\n\n".join(part for part in (words, schedule) if part)
 
 
 def _render_external_work_order(task: Mapping[str, Any]) -> str:

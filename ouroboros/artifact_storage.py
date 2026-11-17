@@ -3,8 +3,11 @@ can give one (macOS APFS ``clonefile(2)``, Linux ``FICLONE`` on Btrfs and reflin
 other platform, filesystem or volume boundary answers ``False`` and the caller streams a copy as before.
 Never a hard link: an in-place write to the source would change the stored result, while a clone
 diverges at the first write to either side. ``clone_or_copy2`` is ``shutil.copy2`` over it, for a folder
-that is read rather than kept: APFS leaves a clone's may-share mark after its peer is gone, so a file meant
-to be compressed later stays a stream. Transparent compression keeps the one floor its callers share
+that is read rather than kept: APFS leaves a clone's may-share mark on the source too, even after its peer
+is gone, so the floor asks a marked file whether a full clone still lives (``_clone_lives``) and the mark
+alone decides only where the system cannot say. Where compression is supported, read-only lineage staging streams
+in-scope records until compressed;
+other copy callers keep their own policy. Transparent compression keeps the one floor its callers share
 (``compression_outcome``: the patch writers and the ``record_compression`` maintenance job). The platform
 calls are function-local under ``sys.platform`` guards (docs/development/10-platform-abstraction-rule.md
 names this module's exception)."""
@@ -25,7 +28,11 @@ from ouroboros.temp_sweep import atomic_temp_path as temporary_sibling, is_atomi
 _FICLONE = 0x40049409  # _IOW(0x94, 9, int), <linux/fs.h>
 FLOOR_BYTES = 64 * 1024  # under it a file gains little and costs one rewrite (decmpfs blocks, FSEvents)
 _BLOCK = 4096  # one allocation block: the least a compression must save
-STAT_SKIPS = ("not_regular", "dataless", "small", "linked", "compressed_already")  # decided by one lstat, no read
+# What one lstat decides for good about a file as it stands: a paced pass neither reads nor counts these.
+STAT_SKIPS = ("not_regular", "dataless", "small", "linked", "compressed_already")
+# What is decided without reading the file (that lstat, or one more question to the volume): a paced pass
+# counts the last three, and none of these is part of what it may read in one run.
+UNREAD_SKIPS = (*STAT_SKIPS, "shared", "share_unknown", "read_only")
 _SIBLING_TAG = "decmpfs"  # the compression sibling's own tag inside the atomic signature
 _SF_DATALESS = 0x40000000  # <sys/stat.h>: an evicted (File Provider) file; reading it would download it
 _UTILITY_DISK = ("/usr/sbin/taskpolicy", "-d", "utility")  # a program run at the utility disk tier (macOS)
@@ -36,12 +43,15 @@ def clone_file(source: pathlib.Path, destination: pathlib.Path) -> bool:
     """Make DESTINATION (which must not exist) a block-sharing clone of SOURCE; ``False`` when this
     platform or filesystem cannot, with nothing left at DESTINATION, so the caller copies instead.
     Only a regular file is cloned: a directory would be cloned whole and a FIFO's open would block,
-    so anything else is left to the streamed copy's own typed refusal. The clone's times are its
+    so anything else is left to the streamed copy's own typed refusal. Nor is one whose flags refuse
+    new times (immutable, append-only): ``clonefile`` carries them, and such a clone also refuses its
+    mode, its rename and its own removal. The clone's times are its
     own: ``clonefile`` copies the source's, and a temporary that looks as old as the result it copies
     would be reaped as a hard kill's orphan by the temp sweep's age guard while the copy is in flight."""
     source, destination = pathlib.Path(source), pathlib.Path(destination)
     try:
-        if not stat.S_ISREG(os.stat(source).st_mode):
+        info = os.stat(source)
+        if not stat.S_ISREG(info.st_mode) or getattr(info, "st_flags", 0) & _REFUSES_TIMES:
             return False
         if sys.platform == "darwin":
             cloned = _clonefile(source, destination)
@@ -61,9 +71,9 @@ def clone_or_copy2(source: Any, destination: Any) -> Any:
     """``shutil.copy2`` (bytes, mode, times; a ``copytree`` copy function) as a clone where ``clone_file`` can
     make one, ``copy2`` itself otherwise, its refusals included. Its ACL is the destination's inherited one,
     as with ``copy2`` (the clone passes no ``CLONE_ACL``). Unlike macOS ``copy2`` it keeps the source's
-    compression and extended attributes, which no reader here looks at. A flag that refuses new times
-    (immutable, append-only) would travel too, so that source is left to ``copy2``."""
-    if not getattr(os.stat(source), "st_flags", 0) & _REFUSES_TIMES and clone_file(source, destination):
+    compression and extended attributes, which no reader here looks at. A source whose flags refuse new
+    times (immutable, append-only) gets no clone (``clone_file``), so ``copy2`` answers for it."""
+    if clone_file(source, destination):
         shutil.copystat(source, destination)
         return destination
     return shutil.copy2(source, destination)
@@ -137,8 +147,8 @@ def compression_outcome(path: pathlib.Path, *, owned: Optional[Callable[[], bool
     """Compress PATH in place, logical size, bytes and sha256 preserved, or say why it stayed: the one
     floor every caller shares. ``unsupported`` off macOS and Windows; one ``lstat`` decides
     ``not_regular``, ``dataless`` (macOS: evicted, a read would download it), ``small`` (under 64 KiB),
-    ``linked`` (another name shares the inode) and ``compressed_already``; macOS keeps a file that may
-    share blocks with a clone (``shared``;
+    ``linked`` (another name shares the inode) and ``compressed_already``; macOS keeps a file a living
+    full clone shares its blocks with (``shared``, ``_clone_lives``;
     ``share_unknown`` when the volume does not say: compressing a shared file would unshare it), Windows
     a read-only one (``read_only``: its file control needs a writable handle); a first 64 KiB block zlib
     cannot shrink by one allocation block is ``incompressible``; free space below the file's size is
@@ -163,6 +173,12 @@ def compression_outcome(path: pathlib.Path, *, owned: Optional[Callable[[], bool
         return "failed"
 
 
+def is_compressed(info: os.stat_result) -> bool:
+    """The file's current transparent-compression flag, from one already obtained stat result."""
+    return bool(getattr(info, "st_flags", 0) & stat.UF_COMPRESSED
+                or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_COMPRESSED)
+
+
 def _floor(path: pathlib.Path, info: os.stat_result) -> str:
     """Why PATH stays as it is before any rewrite, or ``""``."""
     if not stat.S_ISREG(info.st_mode):
@@ -174,10 +190,10 @@ def _floor(path: pathlib.Path, info: os.stat_result) -> str:
     if info.st_nlink != 1:
         return "linked"
     attributes = getattr(info, "st_file_attributes", 0)
-    if getattr(info, "st_flags", 0) & stat.UF_COMPRESSED or attributes & stat.FILE_ATTRIBUTE_COMPRESSED:
+    if is_compressed(info):
         return "compressed_already"
     if sys.platform == "darwin":
-        shared = _may_share(path)
+        shared = _clone_lives(path)
         if shared is not False:
             return "share_unknown" if shared is None else "shared"
     elif attributes & stat.FILE_ATTRIBUTE_READONLY:
@@ -192,8 +208,36 @@ def _floor(path: pathlib.Path, info: os.stat_result) -> str:
 
 
 def _may_share(path: pathlib.Path) -> Optional[bool]:
-    """macOS: whether PATH may share blocks with another file (an APFS clone, which ``nlink`` cannot
-    see): ``EF_MAY_SHARE_BLOCKS`` of the ``getattrlist`` extended flags; None when the volume does not say."""
+    """macOS: whether PATH carries the mark of a clone (``EF_MAY_SHARE_BLOCKS``, which ``nlink`` cannot see);
+    None when the volume does not say. The mark says the file was cloned once: it stays on the survivor
+    after its peer is gone, so it proves a clone was made, never that one lives (``_clone_lives``)."""
+    flags = _extended_attribute(path, 0x200, "Q")  # ATTR_CMNEXT_EXT_FLAGS
+    return None if flags is None else bool(flags & 0x1)
+
+
+def _clone_lives(path: pathlib.Path) -> Optional[bool]:
+    """macOS: whether a clone holds all of PATH's blocks now; None when the volume does not say. A marked
+    file (``_may_share``) is shared while ``EF_SHARES_ALL_BLOCKS`` is set or the volume counts another full
+    clone (``ATTR_CMNEXT_CLONE_REFCNT``, itself included), and unknown where the count is not answered
+    (before macOS 14) or is no such number: the mark then keeps the file as before. A count of one is not
+    shared here: no peer is left, or the two have diverged (one of them written since, a log copied
+    mid-write) and share only what stayed equal, which can be nearly all of it. Compressing such a file
+    loses no byte; the disk then keeps both forms of the common part until the peer goes."""
+    flags = _extended_attribute(path, 0x200, "Q")  # ATTR_CMNEXT_EXT_FLAGS
+    if flags is None:
+        return None
+    if not flags & 0x1:  # EF_MAY_SHARE_BLOCKS, <sys/stat.h>
+        return False
+    if flags & 0x40:  # EF_SHARES_ALL_BLOCKS
+        return True
+    clones = _extended_attribute(path, 0x1000, "I")  # ATTR_CMNEXT_CLONE_REFCNT
+    return None if not clones else clones > 1
+
+
+def _extended_attribute(path: pathlib.Path, attribute: int, layout: str) -> Optional[int]:
+    """One extended common attribute of PATH (``getattrlist`` under ``FSOPT_ATTR_CMN_EXTENDED``, never
+    through a link); None when the call fails or the volume returns no such attribute. Asked one at a
+    time: a system that does not know an attribute may refuse the whole request."""
     import ctypes
     import struct
 
@@ -208,13 +252,13 @@ def _may_share(path: pathlib.Path) -> Optional[bool]:
         return None
     getattrlist.argtypes = (ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32)
     getattrlist.restype = ctypes.c_int
-    # ATTR_CMN_RETURNED_ATTRS, then ATTR_CMNEXT_EXT_FLAGS (forkattr under FSOPT_ATTR_CMN_EXTENDED), FSOPT_NOFOLLOW.
-    request, answer = AttrList(5, 0, 0x80000000, 0, 0, 0, 0x200), ctypes.create_string_buffer(64)
+    # ATTR_CMN_RETURNED_ATTRS, then the attribute (forkattr under FSOPT_ATTR_CMN_EXTENDED), FSOPT_NOFOLLOW.
+    request, answer = AttrList(5, 0, 0x80000000, 0, 0, 0, attribute), ctypes.create_string_buffer(64)
     if getattrlist(os.fsencode(path), ctypes.byref(request), answer, ctypes.sizeof(answer), 0x1 | 0x20) != 0:
         return None
-    if not struct.unpack_from("=5I", answer.raw, 4)[4] & 0x200:  # the volume returned no extended flags
+    if not struct.unpack_from("=5I", answer.raw, 4)[4] & attribute:  # the volume returned no such attribute
         return None
-    return bool(struct.unpack_from("=Q", answer.raw, 24)[0] & 0x1)  # EF_MAY_SHARE_BLOCKS, <sys/stat.h>
+    return struct.unpack_from("=" + layout, answer.raw, 24)[0]
 
 
 def _compress_macos(path: pathlib.Path, before: os.stat_result, owned: Optional[Callable[[], bool]],

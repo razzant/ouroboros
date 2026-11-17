@@ -1,43 +1,43 @@
 {
  "schema_version": 1,
  "release": {
-  "version": "5.0.1",
-  "build_sha": "f10efc2f92a29752f93c611dba1545de400e50ba",
+  "version": "6.1.2",
+  "build_sha": "7a87c337b5b54f28f6038a4a7c5138da7cc87c4a",
   "protocol_major": 3,
-  "archive_url": "https://github.com/razzant/claudexor/releases/download/v5.0.1/claudexor-runtime-5.0.1.tar.gz",
-  "sha256": "22c627f80b3985d3a0abf9fdca38ebbebb18157f986baed3f18c3f9fee0f5827",
-  "size_bytes": 30219414,
-  "node_version": "24.16.0",
+  "archive_url": "https://github.com/razzant/claudexor/releases/download/v6.1.2/claudexor-runtime-6.1.2.tar.gz",
+  "sha256": "9574093893aa1ec857f5d2cfe3ddd6cd9313c2f36a31750ef127a20dac6fcbbc",
+  "size_bytes": 30765890,
+  "node_version": "24.22.3",
   "node_artifacts": {
    "darwin-arm64": {
-    "archive_url": "https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-arm64.tar.gz",
-    "sha256": "39189dab4eeb15706c424af0ac08a3044c9e48f7db12a7d77f6b7aafc7dd5df6",
-    "size_bytes": 51873536,
-    "executable": "node-v24.16.0-darwin-arm64/bin/node"
+    "archive_url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3-darwin-arm64.tar.gz",
+    "sha256": "ff6e17d4874b76d272212b908cc020d6e815fba5a6c7eaaa06add725840307fd",
+    "size_bytes": 53084299,
+    "executable": "node-v24.22.3-darwin-arm64/bin/node"
    },
    "darwin-x64": {
-    "archive_url": "https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-x64.tar.gz",
-    "sha256": "298b4c7b3cb80765c8703e42b90324a4ece3b6634947b89e769c3c980ab55185",
-    "size_bytes": 53063476,
-    "executable": "node-v24.16.0-darwin-x64/bin/node"
+    "archive_url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3-darwin-x64.tar.gz",
+    "sha256": "977614af0504c81045e7fd85596dbca0e5f951b96681516dadafedcca8c447f7",
+    "size_bytes": 54395976,
+    "executable": "node-v24.22.3-darwin-x64/bin/node"
    },
    "linux-arm64": {
-    "archive_url": "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-arm64.tar.gz",
-    "sha256": "589f5b6dd4fcfee4dfda73013903c966abaa8abd93dbc9d436544e472b4f0e74",
-    "size_bytes": 56772294,
-    "executable": "node-v24.16.0-linux-arm64/bin/node"
+    "archive_url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-arm64.tar.gz",
+    "sha256": "261af2af250dfd7e9f25cf151d1b2713a0adf8f10a9ad116c4947f68627affe8",
+    "size_bytes": 58051304,
+    "executable": "node-v24.22.3-linux-arm64/bin/node"
    },
    "linux-x64": {
-    "archive_url": "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-x64.tar.gz",
-    "sha256": "2faf6a387e9b62b888e21c54f01249fb27537ffecf1842f29f4c919d0a59a0ff",
-    "size_bytes": 57023429,
-    "executable": "node-v24.16.0-linux-x64/bin/node"
+    "archive_url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-x64.tar.gz",
+    "sha256": "061ec3e3062115705b56b51fa9cc330ab50d34b6969387d4e4b1a50c6809acc2",
+    "size_bytes": 58330843,
+    "executable": "node-v24.22.3-linux-x64/bin/node"
    },
    "win32-x64": {
-    "archive_url": "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.zip",
-    "sha256": "edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56",
-    "size_bytes": 36946639,
-    "executable": "node-v24.16.0-win-x64/node.exe"
+    "archive_url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3-win-x64.zip",
+    "sha256": "e612af99f626ab415ea225af6bce5c971feb448cb5cae250bb1c3fa50c5f7d9f",
+    "size_bytes": 37762649,
+    "executable": "node-v24.22.3-win-x64/node.exe"
    }
   },
   "entrypoint": "claudexord.bundle.cjs",

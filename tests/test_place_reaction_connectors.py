@@ -61,15 +61,19 @@ def until(predicate, what, seconds=60):
 
 @pytest.fixture
 def chain(tmp_path, monkeypatch):
+    from ouroboros.presence_carrier import set_presence_runner
+    from tests.conversation_carrier_support import host_lane, join_host_lane_carriers
     from tests.test_host_service_api import _seed_token
     from tests.test_presence_continuation_bootstrap import install_bootstrap_harness
 
     monkeypatch.setattr("ouroboros.pricing._fetch_live_rows", lambda *_a, **_kw: {})  # a settling reviewer's price stays off the wire
-    clients = []
+    host_lane(monkeypatch, tmp_path / "data")  # a Host serving alone: no supervisor queue of its own
+    clients, holds = [], []
 
     def start(provider, *, review_mode="off", tools=None):
         spec, data = CHAINS[provider], tmp_path / "data"
         h = install_bootstrap_harness(monkeypatch, data, review_mode=review_mode)
+        holds.append(h.release)
         h.addressed = ""
         _seed_token(data, skill=spec.skill, token=TOKEN, permissions=["presence"], manifest_permissions=["presence"])
         place = places.connect_place(data, connector=spec.skill, provider=provider, account_id=spec.account,
@@ -90,8 +94,17 @@ def chain(tmp_path, monkeypatch):
                                author=lambda: h.agents[-1].tools._ctx)
 
     yield start
-    for client in clients:
-        client.__exit__(None, None, None)
+    try:  # the worlds' turns end and their carriers settle before the Hosts, tables and roots are given back
+        for release in holds:
+            release.set()
+        for client in clients:
+            turns = client.app.state.host_service_context.presence_turns
+            until(lambda: not turns.live(), "the world's Host turns to end")
+        join_host_lane_carriers()
+    finally:
+        for client in clients:
+            client.__exit__(None, None, None)
+        set_presence_runner(tmp_path / "data", None)
 
 
 def post(world, source):
@@ -253,16 +266,21 @@ def test_a_delegate_wait_and_a_transport_backoff_run_over_a_real_reaction(chain,
     seen = {}
 
     def delegate(ctx, **_arguments):
-        reads = []
+        from ouroboros import model_sleep
+        from tests._run_wait_shared import held_run, wake_now
 
-        def wait_once(_ctx, run_id, *_args, **_kwargs):  # the physical observer, as in test_place_arrival_wake
+        reads, chosen = [], supervision._choice({"runs": ["run-1"]})
+        held_run(ctx.drive_root, "run-1", ctx.task_id)
+        post(world, world.spec.heard)  # a real reaction lands while the run works
+        seen["woke_by_reaction"] = model_sleep.wake_reason(ctx, chosen)
+        held_run(ctx.drive_root, "run-1", ctx.task_id, ended="succeeded")  # the body records the terminal
+
+        def wait_once(_ctx, run_id, *_args, **_kwargs):  # the wake's one read, as in test_place_arrival_wake
             reads.append(run_id)
-            if len(reads) == 1:
-                post(world, world.spec.heard)
-            return json.dumps({"status": "no_progress" if len(reads) == 1 else "terminal", "run_id": run_id,
-                               "last_seq": len(reads), **({"state": "succeeded"} if len(reads) > 1 else {})})
+            return json.dumps({"status": "terminal", "run_id": run_id, "last_seq": 2, "state": "succeeded"})
 
-        seen["wake"] = json.loads(supervision.supervised_wait(ctx, "run-1", wait_once=wait_once).text)
+        seen["wake"] = json.loads(wake_now(ctx, "run-1", wait_once=wait_once,
+                                           woke_by=model_sleep.wake_reason(ctx, chosen)).text)
         seen["reads"] = len(reads)
         return "{}"
 
@@ -284,7 +302,8 @@ def test_a_delegate_wait_and_a_transport_backoff_run_over_a_real_reaction(chain,
     world.h.script = [call(("delegate", {}), ("backoff", {})), after]
     post(world, world.spec.first)
     settled(world)
-    assert seen["reads"] == 2 and seen["wake"]["status"] == "terminal"
+    assert seen["woke_by_reaction"] == "", "a context-only reaction never ends the sleep on the run"
+    assert seen["reads"] == 1 and seen["wake"]["status"] == "terminal"
     assert not [row for row in seen["wake"].get("wake_events") or () if row.get("type") == "addressed_message"]
     assert seen["slept"] >= loop_transport.NETWORK_WAIT_BACKOFF_START_SEC - 0.2, "unread context-only mail cut the backoff short"
     assert seen["reaction"]
@@ -383,7 +402,7 @@ def test_every_reader_keeps_real_reactions_as_labelled_context(chain, provider):
     from ouroboros.dialogue_evidence import read_room_source
     from ouroboros.gateway.history import make_chat_history_endpoint
     from ouroboros.memory import Memory
-    from ouroboros.place_arrivals import account_candidates, activity
+    from ouroboros.place_arrivals import account_candidates, place_facts
     from ouroboros.tools.chronicle import check_quotes
     from ouroboros.tools.plan_dialogue import dialogue_view
 
@@ -417,7 +436,7 @@ def test_every_reader_keeps_real_reactions_as_labelled_context(chain, provider):
     assert "[Reaction, not speech:" in conversation and "[Reaction action, not speech:" in conversation
     observed = observe_wake(world.data, boundary=None, since=0.0, now=time.time(), reason="timer").full_text()
     assert "Presence reaction in" in observed and "Reaction, not speech" in observed
-    assert activity(world.data, world.place)["unanswered"] == 0
+    assert place_facts(world.data, [world.place])[world.place.place_id]["unanswered"] == 0
     assert "-77" not in [row["platform_actor_id"] for row in account_candidates(world.data, world.place.place_id)]
     address = chat_chain.format_address(chat_chain.row_address(reaction))
     for speaker in ("human", "ouroboros", "host", "unattributed"):

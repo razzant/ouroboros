@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { bindHeaderControlPlacement, bindPageHeader, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
+import { bindHeaderControlPlacement, bindPageHeader, placePageBack, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
 import { createRoomHeader } from '../modules/chat_header.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
@@ -27,13 +27,14 @@ test('one header: no icon, no caption line, the tabs are written under the row, 
     // On a desk the tabs take the hidden title's place (bindPageHeader): the bar is not empty (owner 19.10, A).
     assert.match(tabbed, /data-sidebar-names>/);
     assert.doesNotMatch(tabbed, /data-empty/);
-    assert.match(tabbed, /<\/h2>\s*<\/div><div class="app-page-lead"><\/div>/, 'the lead slot follows the hidden title');
+    // The Back slot (placePageBack) stands before the lead, both after the hidden title.
+    assert.match(tabbed, /<\/h2>\s*<\/div><div class="app-page-back" data-page-back><\/div><div class="app-page-lead"><\/div>/, 'the Back slot, then the lead slot, follow the hidden title');
     const acting = renderPageHeader({ title: 'Files', actionsHtml: '<button>Refresh</button>' });
     assert.match(acting, /data-sidebar-names>/);
     assert.doesNotMatch(acting, /data-empty/);
     const project = renderPageHeader({ title: '', titleId: 'project-panel-title', named: false, trailingHtml: '<button>×</button>' });
     assert.match(project, /<h2 class="app-page-title" id="project-panel-title"><\/h2>/);
-    assert.doesNotMatch(project, /data-sidebar-names|data-empty|"app-page-lead"/, 'a Project is named by its owner: its name stays');
+    assert.doesNotMatch(project, /data-sidebar-names|data-empty|"app-page-lead"|data-page-back/, 'a Project is named by its owner: its name stays');
     assert.match(project, /app-page-trailing/);
     assert.match(project, /data-mobile-nav-toggle/, 'a header shows ☰ unless its room carries it in the composer');
     assert.match(renderPageHeader({ title: 'x', titleId: '"><i>' }), /id="&quot;&gt;&lt;i&gt;"/);
@@ -41,10 +42,30 @@ test('one header: no icon, no caption line, the tabs are written under the row, 
     // A room's ☰ (owner 19.10, 1A): the composer row's first control, capsule-sized with the finger's hit area.
     assert.match(renderMobileNavToggle({ inComposer: true }), /class="shell-icon-control mobile-nav-toggle composer-menu ui-hit-area"/);
     assert.match(renderMobileNavToggle(), /class="shell-icon-control mobile-nav-toggle"/);
-    // Both placements carry one status mark for what waits behind the ☰, hidden until app.js paints it.
+    // The control is Ouroboros's own picture (press him, and his places open). Both placements carry one status mark
+    // for what waits behind it, hidden until app.js paints it.
     for (const toggle of [renderMobileNavToggle(), renderMobileNavToggle({ inComposer: true })]) {
-        assert.match(toggle, /aria-label="Open navigation"[^>]*><svg[^]*<\/svg><span class="status-mark" aria-hidden="true" data-shape="none" data-hue="ink" hidden><i><\/i><i><\/i><i><\/i><\/span><\/button>/);
+        assert.match(toggle, /aria-label="Open navigation"[^>]*><span class="places-face" aria-hidden="true"><\/span><span class="status-mark" aria-hidden="true" data-shape="none" data-hue="ink" hidden><i><\/i><i><\/i><i><\/i><\/span><\/button>/);
+        assert.doesNotMatch(toggle, /<svg|places-menu|places-back/, 'no prototype variant of the control remains');
     }
+});
+
+test('a section keeps one header row with two panes and with a page alone', () => {
+    const ui = readFileSync(new URL('../ui.css', import.meta.url), 'utf8');
+    const settings = readFileSync(new URL('../settings.css', import.meta.url), 'utf8');
+    const header = 'html[data-layout="stack"] .section-place > .app-page-header';
+    const two = ui.slice(ui.indexOf('@container sectionplace (min-width: 40rem) {'));
+    assert.ok(two.includes(`${header} { grid-template-areas: "leading lead lead"; }`), 'Places and both column leads share a row');
+    assert.ok(two.includes(`${header} .app-page-title-row { position: absolute;`), 'the section name stays available to readers without another row');
+    assert.match(two, /grid-template-columns: calc\(var\(--section-rail-w\) - var\(--section-rail-end\) - var\(--space-3\) - 44px - var\(--space-2\)\) minmax\(0, 1fr\)/,
+        'the page lead stays over its column after the places control takes room from the rail lead');
+    const alone = settings.slice(settings.indexOf('@container sectionplace (max-width: calc(40rem - 0.02px)) {'));
+    assert.match(alone, /\[data-section-view="home"\].*grid-template-areas: "leading title toolbar"/,
+        'a list alone keeps Places and its section name');
+    assert.match(alone, /\[data-section-view="page"\].*grid-template-areas: "lead lead lead"/,
+        'a page alone puts Back and its own name in that row');
+    for (const css of [ui, settings]) assert.doesNotMatch(css, /grid-template-areas:\s*"leading title toolbar"\s*"lead lead lead"/,
+        'neither shared nor Settings rules can restore the retired second row');
 });
 
 test('Restart and the budget are the same nodes, placed by layout: the row on a desk, the status Shade on a phone', () => {
@@ -229,6 +250,24 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         // A header with nothing of its own to place (Widgets) binds nothing.
         assert.equal(typeof bindPageHeader(el('app-page-header', el('app-page-title-block', el('app-page-lead')))), 'function');
         assert.equal(listeners.size, 0);
+        // A bar whose one action is already in it (Circles): nothing moves, yet on a desk it lays out as the band of
+        // every named page, and goes back to the base header in the stack layout.
+        const barOnly = el('app-page-header', el('app-page-title-block', el('app-page-lead')), el('app-page-toolbar', el('new')));
+        barOnly.clientWidth = 900;
+        let barReleased = false;
+        doc.defaultView = { ResizeObserver: class {
+            observe(target) { assert.equal(target, barOnly); }
+            disconnect() { barReleased = true; }
+        }, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {} };
+        const offBar = bindPageHeader(barOnly);
+        assert.ok(barOnly.attrs.has('data-lead'), 'a desk: the desk band');
+        layout('stack');
+        assert.ok(!barOnly.attrs.has('data-lead'), 'the stack layout: the base header');
+        layout('docked');
+        assert.ok(barOnly.attrs.has('data-lead'));
+        offBar();
+        assert.ok(barReleased, 'its disposer releases the observer it took');
+        assert.equal(listeners.size, 0);
     } finally { delete globalThis.window; delete globalThis.document; }
 });
 
@@ -238,4 +277,33 @@ test('the optional toolbar class cannot create an HTML attribute or node', () =>
     assert.doesNotMatch(html, /<img/);
     assert.match(html, /&quot;/);
     assert.match(html, /&lt;img/);
+});
+
+test('a page that leads back keeps Back in its header\'s slot in every layout: one leading control, its tabs as they were', () => {
+    const listeners = new Map();
+    const before = { window: globalThis.window, document: globalThis.document };
+    globalThis.window = { ouroLayout: { layout: 'stack' }, addEventListener: (type, fn) => listeners.set(type, fn),
+        removeEventListener: (type) => listeners.delete(type) };
+    globalThis.document = { documentElement: { dataset: { layout: 'stack' } } };
+    try {
+        // Skills opened from Settings on a phone: its header (☰, the name, the Back slot before the lead) and its tabs under it.
+        const attrs = new Set();
+        const lead = { name: 'lead' };
+        const block = { querySelector: () => lead, insertBefore() {} };
+        const slot = { parentElement: block, children: [], replaceChildren(...nodes) { this.children = nodes; } };
+        const tabs = { prepended: [], marks: new Set(), classList: { contains: (name) => name === 'app-page-tabs' },
+            prepend(node) { this.prepended.push(node); }, toggleAttribute(name, on) { if (on) this.marks.add(name); else this.marks.delete(name); },
+            removeAttribute(name) { this.marks.delete(name); } };
+        const header = { nextElementSibling: tabs, querySelector: (selector) => (selector === '[data-page-back]' ? slot : null),
+            setAttribute: (name) => attrs.add(name), removeAttribute: (name) => attrs.delete(name) };
+        const control = { name: 'Back to Settings' };
+        const dispose = placePageBack(header, control);
+        // The sheet puts a header's Back where ☰ stood and hides ☰ (style.css `.app-page-header[data-back]`): Back stays.
+        assert.deepEqual([slot.children, attrs.has('data-back'), tabs.prepended, [...tabs.marks]], [[control], true, [], []],
+            'the stack layout: Back in the header\'s slot, never a second leading control in the tabs row');
+        dispose();
+        assert.deepEqual([slot.children, attrs.has('data-back'), listeners.size], [[], false, 0]);
+    } finally {
+        Object.assign(globalThis, before);
+    }
 });

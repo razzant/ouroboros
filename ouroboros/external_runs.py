@@ -159,20 +159,24 @@ def observe_task_runs(root: Any, task_id: str, *, reason: str = "budget_resume_u
         except Exception as exc:
             log.warning("Budget pause cannot reach the harness gateway to request stops: %s", exc)
             gateway = None
+    from ouroboros.execution_domain import EngineClients
+
+    engines = EngineClients(lambda: gateway)  # each run's stop goes to the engine it runs on (``execution_domain``)
     try:
         from ouroboros import delegate_custody as custody
 
         for run in stopping:
             row = _row(run, stop_policy="request_stop", review_owned=False)
             run_id = row["run_id"]
-            if gateway is None:
+            engine = engines.reach(run)
+            if engine is None:
                 row.update(state=EXTERNAL_STOP_UNKNOWN, stop_outcome=(
                     "requested_unverified_gateway_unavailable" if run_id in issued
                     else "not_issued_gateway_unavailable"))
             else:
                 try:
-                    result = (_reread_requested_stop(root, gateway, run) if run_id in issued
-                              else custody.cancel_and_verify(pathlib.Path(root), gateway, run, reason))
+                    result = (_reread_requested_stop(root, engine, run) if run_id in issued
+                              else custody.cancel_and_verify(pathlib.Path(root), engine, run, reason))
                     outcome = str(result.get("outcome") or "")
                     row.update(stop_outcome=outcome, detail=str(result.get("detail") or ""))
                     if outcome == custody.CANCEL_CONFIRMED:
@@ -186,6 +190,7 @@ def observe_task_runs(root: Any, task_id: str, *, reason: str = "budget_resume_u
                                detail=str(exc)[:300])
             rows.append(row)
     finally:
+        engines.drop()
         if gateway is not None:
             try:
                 gateway.close()
@@ -210,7 +215,7 @@ def _reread_requested_stop(root: Any, gateway: Any, run: Any) -> Dict[str, Any]:
         detail = gateway.get_run(run.run_id)
     except ClaudexorUnavailable as exc:
         if custody.daemon_says_absent(exc, gateway=gateway, run=run):
-            custody.close_absent_run(pathlib.Path(root), gateway, run, "get_run_absent")
+            custody.close_absent_run(pathlib.Path(root), gateway, run, "get_run_absent", absence=exc)
             return {"outcome": custody.CANCEL_CONFIRMED, "detail": "absent"}
         return {"outcome": "unverified", "detail": f"{exc.code}: {exc}"}
     if custody.is_terminal(detail):
@@ -422,6 +427,26 @@ def episode_disclosure(root: Any, task_id: str, participants: Any, *, reader: st
 
 def _name(row: Dict[str, Any]) -> str:
     return f"run {row['run_id']}" if row.get("run_id") else f"start {row.get('invocation_id') or '?'}"
+
+
+def passed_reviews_notice(observation: Any) -> str:
+    """What a sleep's return names of the independent reviews its Resume did not wait for
+    (``budget_resume._resume_custody_refusal``): open when the Resume was granted, never a writer of this work.
+    ``""`` for none. The words speak of that grant's observation, which this return does not read again; a row
+    the observation tried to stop carries that attempt's recorded outcome word, sent or not."""
+    rows = [row for row in (observation or {}).get("runs") or [] if isinstance(row, dict)
+            and row.get("independent_review") is True and str(row.get("state") or "") != EXTERNAL_STOP_CONFIRMED]
+    named = ", ".join(_name(row) + (f" (stop outcome: {row.get('stop_outcome') or 'unrecorded'})"
+                                    if row.get("stop_policy") == "request_stop" else "") for row in rows)
+    return (f"[SYSTEM NOTICE]\nThis return was granted without waiting for {named}: independent review that cannot "
+            "change this work. Its outcome and cost were unresolved at that grant.") if rows else ""
+
+
+def held_run_line(row: Dict[str, Any]) -> str:
+    """One run of a Resume's "delegated runs this task holds" list: a start without a run id by its invocation,
+    and a review that cannot change the work said as that (no writer to keep clear of)."""
+    return (f"\n- {_name(row)}: {row.get('state')} (stop outcome: {row.get('stop_outcome') or 'n/a'})"
+            + ("; independent review that cannot change this work" if row.get("independent_review") is True else ""))
 
 
 def _participant_line(root: Any, task_id: str, row: Dict[str, Any], runs: Dict[str, Any], pending: set,

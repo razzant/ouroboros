@@ -26,8 +26,8 @@ from ouroboros.deadline_utils import deadline_clamped_timeout_sec
 from ouroboros.late_tool_results import late_watch_fields, record_call_id
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_call_log import (
-    CALL_STARTED, CALL_SETTLED, CALL_WAIT_ENDED, append_call_row, append_failed, claim_settlement,
-    elapsed_ms, invocation_fields, new_invocation, start_log_field, persist_dispatch_source, worker_phrase,
+    CALL_STARTED, CALL_SETTLED, CALL_WAIT_ENDED, append_call_row, append_failed, claim_settlement, elapsed_ms,
+    host_settlement, invocation_fields, new_invocation, start_log_field, persist_dispatch_source, worker_phrase,
     worker_position,
 )
 from ouroboros.tool_capabilities import (
@@ -116,15 +116,16 @@ def _publish_settlement(tools, drive_logs, row):
 
 
 def _settle_host_error(tools, drive_logs, live, invocation, outcome):
-    """Record a submission failure or a failed future through one settlement guard."""
+    """Record a submission failure or a failed future through one settlement guard: ``interrupted`` when a control
+    ended the call, else the host's own failure (``tool_call_log.host_settlement``)."""
     try:
         exc = outcome if isinstance(outcome, BaseException) else outcome.exception()
     except BaseException as failure:
         exc = failure
     if exc is not None and claim_settlement(invocation):
         _publish_settlement(tools, drive_logs, {
-            **live, "ts": utc_now_iso(), "type": CALL_SETTLED, "is_error": True,
-            "status": "host_error", "elapsed_ms": elapsed_ms(invocation),
+            **live, "ts": utc_now_iso(), "type": CALL_SETTLED, "is_error": True, **host_settlement(exc),
+            "elapsed_ms": elapsed_ms(invocation),
             "result_preview": f"{type(exc).__name__}: {sanitize_tool_result_for_log(str(exc))[:500]}",
             **start_log_field(invocation),
         })
@@ -253,7 +254,7 @@ def _tc_args(tc: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(raw, str) and raw.strip():
             parsed = json.loads(raw)
             return parsed if isinstance(parsed, dict) else {}
-    except (ValueError, TypeError, AttributeError):
+    except (ValueError, TypeError, AttributeError, RecursionError):
         pass
     return {}
 
@@ -447,7 +448,7 @@ def _typed_result_metadata(
 
     The rules below are deliberately NOT text classification and stay here: the
     untruncated artifact-registration fallback, the plan-review metadata, the
-    process facts with the ``run_command`` exit-0 override, and the
+    process facts, and the
     skill-publish projection — all keyed on the tool name and on trusted meta.
     """
     text = str(result or "")
@@ -477,9 +478,9 @@ def _typed_result_metadata(
         meta["artifact_registered"] = True
     if fn_name == "plan_task" and not is_error and isinstance(tool_result, ToolResult):
         # The planning organ's typed facts: which effect the call had and the record's
-        # open objections / holds / pending asks after it (never read from the text).
+        # open objections / pending asks after it (never read from the text).
         effect = tool_result.meta.get("plan_effect")
-        counts = {key: tool_result.meta.get(key) for key in ("plan_revision", "plan_open_objections", "plan_holding", "plan_pending_asks")}
+        counts = {key: tool_result.meta.get(key) for key in ("plan_revision", "plan_open_objections", "plan_pending_asks")}
         if effect in {"write", "ask", "write+ask", "read"} and all(
             type(value) is int and value >= 0 for value in counts.values()
         ):
@@ -507,8 +508,6 @@ def _typed_result_metadata(
         # undeclared outputs) keeps that code; only an otherwise-plain success is
         # relabelled, which is what the retired text scan did for every shape.
         meta["status"] = "ok_autocorrected"
-    if fn_name == "run_command" and not is_error and meta.get("exit_code") == 0 and meta["status"] != "ok_autocorrected":
-        meta["status"] = "ok"
     if fn_name == "submit_skill_to_hub":
         from ouroboros.skill_publish_result import extract_skill_publish_result_metadata
 
@@ -599,7 +598,7 @@ def _execute_single_tool(
 
     try:
         args = json.loads(tc["function"]["arguments"] or "{}")
-    except (json.JSONDecodeError, ValueError) as e:
+    except (json.JSONDecodeError, ValueError, RecursionError) as e:
         result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{requested_fn_name}': {e}"
         tool_result = ToolResult(status="error", code="TOOL_ARG_ERROR", text=result)
         result_meta = _typed_result_metadata(fn_name, result, True, tool_result)
@@ -628,7 +627,7 @@ def _execute_single_tool(
         claim_settlement(invocation)
         _publish_settlement(tools, drive_logs, _with_correlation({
             "ts": utc_now_iso(), **settlement, "args": {}, "result_preview": result, "is_error": True,
-            "status": result_meta.get("status"), "elapsed_ms": elapsed_ms(invocation),
+            "status": result_meta.get("status"), "tool_result_code": tool_result.code, "elapsed_ms": elapsed_ms(invocation),
             "result_ref": trace_ref.get("manifest_ref") if trace_ref else None,
         }, correlation, tool_call_id=tool_call_id))
         return {
@@ -653,7 +652,7 @@ def _execute_single_tool(
 
     consume_last_process_facts()
 
-    tool_ok = True
+    tool_ok, ran_with = True, None
     try:
         from ouroboros.delegate_output import staged_read_delivery_scope
 
@@ -662,6 +661,12 @@ def _execute_single_tool(
         if tc.get("via"):  # a gateway call's typed error carries its MCP tool's catalog schema
             from ouroboros.tools.tool_discovery import with_gateway_schema
             tool_result = with_gateway_schema(tools, fn_name, tool_result)
+        from ouroboros.place_guard import with_destination_facts  # a send into another place: its notes beside the act
+        from ouroboros.tools.extension_dispatch import dispatched_descriptor  # read with the publication it ran
+        tool_ctx = getattr(tools, "_ctx", None)
+        ran_with = dispatched_descriptor(tool_ctx, fn_name)
+        tool_result = tool_result if host_refusal else with_destination_facts(
+            tool_ctx, fn_name, args, tool_result, ext_tool=ran_with)
         result = tool_result.text
     except (UsageAccountingError, ModelWaitInterrupted):
         raise
@@ -680,6 +685,9 @@ def _execute_single_tool(
     # the loop holds the dispatcher's typed result and reads it directly).
     is_error = _typed_execution_failure(tool_ok, tool_result)
     result_meta = _typed_result_metadata(fn_name, result, is_error, tool_result)
+    from ouroboros.tool_effects import RETAINED_DECLARATION, retained_declaration
+    if (kept := retained_declaration(ran_with)) is not None:  # readers after the call judge what it ran with
+        result_meta[RETAINED_DECLARATION] = kept
     # R5 (node-runtime sprint): merge the handler's TYPED process facts into
     # the call's result_meta. When a typed publication exists it owns the WHOLE
     # fact family — including the ABSENCE of a member (a typed publication
@@ -731,7 +739,9 @@ def _execute_single_tool(
         "args": args_for_log,
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result, 2000)),
         "is_error": is_error,
-        "status": result_meta.get("status"),
+        # `status` is the code's coarse outcome bucket; the exact published code rides beside
+        # it, so the row answers "how did this call end" without opening the trace.
+        "status": result_meta.get("status"), "tool_result_code": tool_result.code,
         # The typed process facts of THIS call ride the direct tools.jsonl row
         # too: the row is the surface an operator greps, and a killed or
         # never-started child must be readable there without the trace.
@@ -741,7 +751,6 @@ def _execute_single_tool(
         # provenance facts — the ABI-9 extension_generation digest included —
         # survive even when persist_call fails.
         "tool_result_meta": result_meta.get("tool_result_meta") or {},
-        "args_ref": (trace_ref.get("manifest_ref") or {}).get("path") if trace_ref else None,
         "result_ref": trace_ref.get("manifest_ref") if trace_ref else None,
     }, correlation, tool_call_id=tool_call_id)
     _publish_settlement(tools, drive_logs, settled_row)
@@ -761,7 +770,7 @@ def _execute_single_tool(
 
 
 class StatefulToolExecutor:
-    """Thread-sticky executor for Playwright/greenlet stateful tools."""
+    """One sticky worker that serializes a task's browser calls in their caller context."""
     def __init__(self):
         self._executor: Optional[ThreadPoolExecutor] = None
 
@@ -989,9 +998,12 @@ def _execute_with_timeout(
     correlation = _tool_correlation(tools)
     tool_ctx = getattr(tools, "_ctx", None)
     invocation = new_invocation(tool_call_id, correlation, getattr(tool_ctx, "task_attempt", None))
+    issued = getattr(tool_ctx, "_issued_views", None) or {}
+    view = issued[tool_call_id] if tool_call_id in issued else getattr(tool_ctx, "_last_context_observation", None)
+    invocation["chronicle_lead_rule"] = (view or {}).get("chronicle_lead_rule")
     try:
         arguments = json.loads(tc.get("function", {}).get("arguments") or "{}")
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         arguments = {"raw_arguments": tc.get("function", {}).get("arguments")}
     persist_dispatch_source(_tool_task_metadata(tools), drive_logs, task_id, invocation, fn_name, arguments)
     args_for_log = sanitize_tool_args_for_log(fn_name, _tc_args(tc))
@@ -1098,18 +1110,13 @@ def _retire_stateful_tool(stateful_executor, tool_ctx, future):
             cleanup_browser_handles,
         )
 
-        # CROSS-THREAD INVARIANT (#409): Playwright objects are bound
-        # to the worker thread that created them. This main-thread
-        # path may only DETACH (retire) the generation — never call
-        # close()/stop() here (a cross-thread stop() kills the driver
-        # under the hung worker and turns its dispatcher wait into a
-        # CPU busy-loop). The close is QUEUED on the retiring
-        # executor behind the hung call, so it runs on the owning
-        # worker thread whenever that call settles — including the
-        # already-settled race, where the queued task runs at once on
-        # that same thread (a done-callback would have run HERE, on
-        # the main thread, exactly the cross-thread close this path
-        # exists to prevent).
+        # SETTLEMENT ORDER (#409): this path only DETACHES (retires)
+        # the generation — it never closes here, so a timeout never
+        # preempts the call. The close is QUEUED on the retiring
+        # executor behind the hung call and runs once that call
+        # settles (at once in the already-settled race); it closes on
+        # the generation's own event loop, from whichever thread runs
+        # it. The task's end closes what a call never settled.
         retired_generation, _fresh = _detach_browser(tool_ctx)
         try:
             settlement_target = stateful_executor.submit(
@@ -1258,19 +1265,13 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
                 "result_meta": _extract_result_metadata(fn_name, result, True),
             }
         from ouroboros.presence_context import confirmed_delivery_receipts
+        from ouroboros.tools.extension_dispatch import extension_call_scope
         before = confirmed_delivery_receipts(tools._ctx)
-        result = _execute_with_timeout(
-            tools,
-            tc,
-            drive_logs,
-            _get_tool_timeout(
-                tools,
-                str(tc["function"]["name"] or "").strip(),
-                _tc_args(tc),
-            ),
-            task_id,
-            stateful_executor,
-        )
+        with extension_call_scope():  # the descriptor the timeout was chosen from is the one dispatched
+            timeout = _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip(), _tc_args(tc))
+            from ouroboros.place_reply import note_dispatch
+            note_dispatch(tools._ctx, llm_trace, tc, bound=True)
+            result = _execute_with_timeout(tools, tc, drive_logs, timeout, task_id, stateful_executor)
         confirmed = confirmed_delivery_receipts(tools._ctx) - before
         if confirmed and not result.get("is_error"):
             result.setdefault("result_meta", {})["presence_delivery_confirmed"] = sorted(confirmed)
@@ -1521,17 +1522,12 @@ def process_tool_results(
         if ctx is not None and published.get("review_delivery") and not result_partial:
             from ouroboros.review_waiting import acknowledge_delivery
             acknowledge_delivery(ctx, published["review_delivery"])
-        # Keyed on the wake the RESULT published, not on a tool name: a call that published none has nothing to ack.
-        # A delivered refusal wake too: ``acknowledge_pending_wake`` itself verifies what the text carried.
-        if ctx is not None and published.get("supervision_wake_id"):
-            try:
-                from ouroboros.delegate_supervision import acknowledge_pending_wake, stage_pending_wake_exposure
-                from ouroboros.working_checkpoint import defer_content_ack
-
-                stage_pending_wake_exposure(ctx, truncated_result)
-                defer_content_ack(ctx, lambda delivered=truncated_result: acknowledge_pending_wake(ctx, delivered))
-            except Exception:
-                log.debug("Failed to acknowledge injected delegate wake", exc_info=True)
+        # Keyed on the wake the RESULT published, not on a tool name, refusal wakes included: exposure and the ACK
+        # follow only a complete delivery of it, inline or its exact source read whole (``deliver_wake``).
+        if ctx is not None and (published.get("supervision_wake_id") or (
+                published.get("read_view") and getattr(ctx, "_wake_sources", None))):
+            from ouroboros.delegate_supervision import deliver_wake
+            deliver_wake(ctx, exec_result, view, truncated_result)
 
         # Keep the call-ID map for diagnostic callers. Compaction takes exact
         # provenance from the occurrence-bound record on the canonical row.

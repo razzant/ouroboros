@@ -16,10 +16,12 @@ from contextlib import contextmanager, nullcontext
 from typing import Any, Dict, Iterator, List, Optional
 
 from ouroboros.contracts.chat_id_policy import project_chat_id
-from ouroboros.composer_cognition import ensure_project_cognition, main_cognition, project_cognition
+from ouroboros.composer_cognition import (ensure_project_cognition, main_cognition, project_cognition, project_model_choice,
+                                          project_processing_choice)
 from ouroboros.contracts.schema_versions import with_schema_version
 from ouroboros.project_facts import project_display_name, sanitize_project_id
 from ouroboros.project_closure import apply_closed, select_projects
+from ouroboros.project_sources import apply_folder, require_durable_folder
 from ouroboros.store import StoreBusy, open_store
 from ouroboros.store_capture import capture
 from ouroboros.store_hot_facts import CHAT_VERSION
@@ -299,28 +301,32 @@ def bind_task_to_project(
         with _file_write_lock(_bindings_path(drive_root)):
             data = _load_bindings(drive_root, fresh=True)
             existing = data["bindings"].get(tid)
-            if isinstance(existing, dict):
+            enriching = isinstance(existing, dict)
+            if enriching:
                 existing_pid = str(existing.get("project_id") or "")
-                if existing_pid == pid:
-                    if not isinstance(existing.get("source_ref"), dict) and "source_ref" in origin_fields:
-                        enriched = {
-                            key: value for key, value in existing.items() if key != "origin_absent"
-                        }
-                        enriched.update(origin_fields)
-                        data["bindings"][tid] = enriched
-                        _save_bindings(drive_root, data)
-                        return dict(enriched)
+                if existing_pid != pid:
+                    raise ValueError(
+                        f"task {tid!r} is already bound to project {existing_pid!r}; "
+                        "project binding is immutable"
+                    )
+                if isinstance(existing.get("source_ref"), dict) or "source_ref" not in origin_fields:
                     return dict(existing)
-                raise ValueError(
-                    f"task {tid!r} is already bound to project {existing_pid!r}; "
-                    "project binding is immutable"
-                )
+                # The ref-less row gains its origin and keeps its binding time and room.
+                row = {key: value for key, value in existing.items() if key != "origin_absent"}
+                row.update(origin_fields)
+            from ouroboros.room_messages import bindings_identity, bound
+
             data["bindings"][tid] = row
+            start = bindings_identity(drive_root)  # under the lock: this save's own step of the file
             _save_bindings(drive_root, data)
-            if "closed" in project:
+            end = bindings_identity(drive_root)
+            if not enriching and "closed" in project:
                 apply_closed(project, None)
                 _save(drive_root, registry_data)
-    touch_project(drive_root, pid)
+    if not enriching:
+        touch_project(drive_root, pid)
+    # Its task's rows and origin now show there (never raises).
+    bound(drive_root, row, start, end)
     return dict(row)
 
 
@@ -368,9 +374,13 @@ _PROCESS_STAMP = uuid.uuid4().hex[:8]  # this process's code shapes the map it a
 
 
 def bindings_revision(drive_root: Any) -> str:
-    """An opaque stamp of what ``all_task_project_bindings`` answers in this process: the file
-    identities of the bindings and of the registry naming their projects. ``""`` when no stamp can
-    prove the bytes unchanged: unreadable, or changed within a clock tick (``utils._RACY_NS``)."""
+    """An opaque stamp of the files ``all_task_project_bindings`` reads in this process: the identities of the
+    bindings and of the registry naming their projects, and whether the registry's commit witness exists (it tells
+    a lost registry from one never written, so it decides ``project_chat_ids``; reconcile touches it each tick, so
+    its times are no part of the stamp). ``""`` when no stamp can prove the bytes unchanged:
+    unreadable, or changed within a clock tick (``utils._RACY_NS``). It keys the state publication (a touched
+    registry is a new production); the revision a reader holds the map by is the map's own digest
+    (``gateway.state_publication.map_revision``)."""
     started, stamps = time.time_ns(), [_PROCESS_STAMP]
     for path in (_bindings_path(drive_root), _registry_path(drive_root)):
         try:
@@ -383,6 +393,7 @@ def bindings_revision(drive_root: Any) -> str:
         if max(info.st_mtime_ns, info.st_ctime_ns) >= started - utils._RACY_NS:
             return ""
         stamps.append(utils.file_identity(info))
+    stamps.append(_registry_witness_path(drive_root).exists())
     return hashlib.sha256(repr(stamps).encode("utf-8")).hexdigest()[:16]
 
 
@@ -595,7 +606,8 @@ _TASK_LINEAGE_LIMIT = 50_000  # a memory bound, not a policy: the facts are re-r
 _ROOM_ANSWERS: Dict[str, tuple] = {}
 # One capture (``store_capture``). ``chat_id`` is the column its writer derived (``store_hot_facts.admitted_chat``);
 # only a row an older writer left underived, and every row of a store before that column, reads its body for it:
-# text or, from a JSON real, its integer part (what ``int()`` gave). A derived row's body is never read.
+# text or, from a JSON real, its integer part (what ``int()`` gave). A derived row's body is never read
+# (a legacy metadata role is message dating's own read: ``room_messages.classified``).
 _BODY_CHAT = ("(SELECT CASE json_type(b.body, '$.chat_id') WHEN 'real' THEN CAST(json_extract(b.body, '$.chat_id') "
               "AS INTEGER) ELSE '' || json_extract(b.body, '$.chat_id') END FROM task_bodies b WHERE b.task_id = t.task_id)")
 _LINEAGE_SELECT = ("SELECT t.task_id, t.parent_task_id, t.root_task_id, t.delegation_role, {chat} AS chat_id "
@@ -735,7 +747,7 @@ class RoomResolver:
         while wanted:
             seen |= wanted
             unseen = {tid for tid in wanted if (str(self.root), tid) not in _TASK_LINEAGE} - self.misses
-            read = _read_lineage(self.root, unseen) if unseen else {}
+            read = _read_lineage(self.root, unseen, strict=self.strict) if unseen else {}
             if read is None:
                 return False
             self.misses.update(unseen - read.keys())
@@ -811,15 +823,33 @@ def reserved_project_chat_ids(drive_root: Any, *, strict: bool = False) -> set:
     sections shows the task its own thread). ``strict=True`` RAISES on an
     unreadable registry instead of answering "no Projects".
     """
+    if not strict:
+        return readable_rooms(drive_root) or set()
+    projects = _strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)[0]["projects"]
+    return {project["chat_id"] for project in projects} - {0}
+
+
+_UNREADABLE_SAID: set = set()  # the causes of an unknown room set this process has logged
+
+
+def readable_rooms(drive_root: Any) -> Optional[set]:
+    """The chat ids the registry's readable rows reserve (a healthy row survives an invalid neighbour). ``None``
+    when the registry names no room it can vouch for: it cannot be read, is lost beside its commit witness, or
+    holds rows none of which is readable. That is an unknown set, never "no Projects"."""
     try:
-        projects = (_strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)[0]["projects"]
-                    if strict else list_reserved_projects(drive_root))
-        return {project["chat_id"] for project in projects} - {0}
-    except Exception:
-        if strict:
-            raise
-        log.debug("reserved_project_chat_ids failed", exc_info=True)
-    return set()
+        rooms = {project["chat_id"] for project in list_reserved_projects(drive_root)} - {0}
+        if not rooms:  # empty is "no Projects" only where the strict reader agrees
+            _strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)
+        return rooms
+    except Exception as error:
+        # Main's saved history and the room set wait on this answer, and a broken registry can outlast a restart:
+        # its cause is named once a process and cause, where a person reading the log looks.
+        if (said := f"{type(error).__name__}: {error}") not in _UNREADABLE_SAID:
+            _UNREADABLE_SAID.add(said)
+            log.warning("The Project registry vouches for no room; Main's saved history is withheld while it lasts: %s",
+                        said)
+        log.debug("readable_rooms failed", exc_info=True)
+        return None
 
 
 _THREAD_LENS_CACHE: Dict[str, tuple] = {}
@@ -940,7 +970,9 @@ def task_presentation_name(*sources: Any, fallback: str = "Task") -> str:
 
 
 def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = None,
-                               result: Any = None, project_id: str = "", strict: bool = False) -> Dict[str, Any]:
+                               result: Any = None, project_id: str = "", strict: bool = False,
+                               fallback: str = "Task") -> Dict[str, Any]:
+    """``fallback``: a nameless work's name outside a Project ("" leaves it unnamed, its label empty)."""
     tid = str(task_id or "").strip()
     sources = [row for row in (task, result) if isinstance(row, dict)]
     if tid and not strict:
@@ -985,7 +1017,7 @@ def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = Non
     if pid and not pname:
         pname = "Project"
     # Nameless work of a Project is called by its Project: never a bare "Project › Task".
-    task_name = task_presentation_name(*sources, fallback=pname or "Task")
+    task_name = task_presentation_name(*sources, fallback=pname or fallback)
     label = f"{pname} › {task_name}" if pname else task_name
     # One name, said once: a task whose own name IS the project name renders
     # "Launch › Launch", which reads as two different things. Exact equality
@@ -1032,7 +1064,8 @@ def create_project(
     origin: str = "owner",
     admission_basis: Optional[dict] = None,
 ) -> Dict[str, Any]:
-    """Register an active room with deterministic chat id and an optional folder.
+    """Register an active room with deterministic chat id and an optional folder; a NEW row never
+    names a host-managed temporary copy (``TemporaryCopyRefused``), a replay returns its row as it is.
     The unpersisted ``created`` flag distinguishes this registration from replay."""
     pid = sanitize_project_id(project_id)
     if not pid:
@@ -1050,6 +1083,7 @@ def create_project(
                         f"{existing.get('lifecycle')} project"
                     )
                 return {**existing, "created": False}
+        require_durable_folder(working_dir, drive_root=drive_root)  # a new row only, before _save
         entry = {
             "id": pid,
             "name": _validated_name(name, pid),
@@ -1078,12 +1112,14 @@ def update_project(
 ) -> Optional[Dict[str, Any] | tuple[Dict[str, Any], bool]]:
     """Update metadata, including ``closed={at, by, note}`` or None to reopen.
     Provenance/clone_url/trusted_at are historical attach facts, not live Git data.
-    ``only_if_empty`` compares under the writer lock; ``return_changed`` also returns whether it wrote."""
+    ``only_if_empty`` compares under the writer lock (a recorded ``no_folder`` is a set folder choice);
+    ``return_changed`` also returns whether it wrote. The folder's own rules (a temporary copy, an
+    unchosen folder over ``no_folder``) raise from ``apply_folder``, writing nothing."""
     pid = sanitize_project_id(project_id)
     if not pid:
         return None
     allowed = {
-        "name", "pinned", "closed", "working_dir", "last_active_at", "provenance", "clone_url", "trusted_at",
+        "name", "pinned", "closed", "working_dir", "no_folder", "last_active_at", "provenance", "clone_url", "trusted_at",
         # Retained legacy activity fact; current activity comes from dialogue rooms.
         "thread_activity_seen",
         # Durable pointer to the project's newest finalized task result
@@ -1101,15 +1137,16 @@ def update_project(
                 continue
             original = dict(entry)
             for key, value in updates.items():
-                if key not in allowed or (key in only_if_empty and str(entry.get(key) or "").strip()):
+                if key not in allowed or key in only_if_empty and (
+                        str(entry.get(key) or "").strip() or key == "working_dir" and "no_folder" in entry):
                     continue
                 if key == "name":
                     value = _validated_name(value, str(entry.get("id") or ""))
                 if key == "pinned" and type(value) is not bool:
                     raise ValueError("pinned must be a boolean")
-                if key == "working_dir" and value != entry.get(key):
-                    entry["routing_generation"] = int(entry.get("routing_generation") or 0) + 1
-                if key == "closed":
+                if key in ("working_dir", "no_folder"):  # before _save: a refusal writes nothing
+                    apply_folder(entry, key, value, chosen="no_folder" in updates, drive_root=drive_root)
+                elif key == "closed":
                     apply_closed(entry, value)
                 else:
                     entry[key] = value
@@ -1360,13 +1397,13 @@ def reconcile_projects(drive_root: Any) -> int:
 
 def ensure_project_workspace(drive_root: Any, project_id: str, repo_dir: Any,
                              *, return_project: bool = False, admission_basis: Optional[dict] = None) -> Any:
-    """Choose the existing folder or provision only while the folder is empty.
+    """Choose the existing folder, or provision one only while the row names none and no ``no_folder``.
 
     Preparation callers can consume the exact chosen row with return_project;
     reading again after provisioning would lose an intervening rebind/ABA.
     """
     entry = create_project(drive_root, project_id, admission_basis=admission_basis)
-    if not str(entry.get("working_dir") or "").strip():
+    if not str(entry.get("working_dir") or "").strip() and "no_folder" not in entry:
         try:
             from ouroboros.genesis_project import provision_genesis_project
 
@@ -1385,24 +1422,33 @@ def ensure_project_workspace(drive_root: Any, project_id: str, repo_dir: Any,
     return str((entry or {}).get("working_dir") or "")
 
 
-def _with_dialogue_facts(project: Dict[str, Any], room: Optional[dict]) -> Dict[str, Any]:
+def _with_dialogue_facts(project: Dict[str, Any], room: Optional[dict],
+                         messages: Optional[Dict[int, str]] = None) -> Dict[str, Any]:
+    """Room facts over the registry row; with dated ``messages`` (``room_messages.read``) also its newest
+    message's time, or its creation while it has none (a registry row made again today keeps its old time)."""
     facts = room or {}
-    return {**project, "visible_revision": int(facts.get("revision") or 0),
+    dated = {} if messages is None else {"last_message_at": messages.get(int(project.get("chat_id") or 0))
+                                         or str(project.get("created_at") or "")}
+    return {**project, "visible_revision": int(facts.get("revision") or 0), **dated,
             "last_active_at": max(str(project.get("last_active_at") or ""), str(facts.get("activity_at") or ""))}
 
 
 def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any = None,
                      project_id: Any = None, include_pinned: bool = False, closed: Optional[bool] = None,
                      oldest_first: bool = False, start: int = 0,
-                     sidebar_rows: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+                     sidebar_rows: Optional[List[Dict[str, Any]]] = None, by_message: bool = False,
+                     keep: Any = ()) -> List[Dict[str, Any]]:
     """Sidebar, its whole list (``limit=None``) or a strict addressed room, with unread/activity from room facts.
 
     ``chat_id`` addresses an active room, ``project_id`` an active or deleting one; registry reads retain lifecycle
     and binding authority. An unproved inactive room requires complete import; a pending, failed or invalid
     interval is never inactivity. ``sidebar_rows``, for the unaddressed list only, is the caller's own
     ``list_sidebar_projects`` read: this list and what the caller counts of it are then one registry observation.
+    ``by_message`` (the owner's clients) orders and selects by ``last_message_at`` once the history is dated
+    (``room_messages``); until then the rows carry none and keep the activity order. ``keep`` names chat ids whose
+    rows the pinned-and-recent list holds beyond its recent slice, after it, in the same order.
     """
-    from ouroboros import dialogue_store as ds
+    from ouroboros import dialogue_store as ds, room_messages
 
     out: List[Dict[str, Any]] = []
     cognition = main_cognition()
@@ -1425,12 +1471,15 @@ def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any
         projects = [p for p in (list_sidebar_projects(drive_root) if sidebar_rows is None else sidebar_rows)
                     if closed is None or p.get("lifecycle") == PROJECT_ACTIVE]
         facts = {room["chat_id"]: room for room in ds.rooms(drive_root)} if projects else {}
-    projects = [_with_dialogue_facts(project, facts.get(project["chat_id"])) for project in projects]
-    projects = select_projects(projects, closed=closed, oldest_first=oldest_first)
+    messages = room_messages.read(drive_root)[0] if by_message and projects else None
+    projects = [_with_dialogue_facts(project, facts.get(project["chat_id"]), messages) for project in projects]
+    projects = select_projects(projects, closed=closed, oldest_first=oldest_first,
+                               by="last_active_at" if messages is None else "last_message_at")
     if not addressed and limit is not None and include_pinned:
         # Pins remain reachable without starving the ordinary recent-room slice.
-        projects = ([p for p in projects if p.get("pinned") is True]
-                    + [p for p in projects if p.get("pinned") is not True][:max(1, int(limit))])
+        recent, cut = [p for p in projects if p.get("pinned") is not True], max(1, int(limit))
+        projects = ([p for p in projects if p.get("pinned") is True] + recent[:cut]
+                    + [p for p in recent[cut:] if p["chat_id"] in keep])
     elif not addressed and limit is not None:
         start = max(0, int(start))
         projects = projects[start:start + max(1, int(limit))]
@@ -1464,8 +1513,10 @@ def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any
             "chat_id": project.get("chat_id"),
             "working_dir": project.get("working_dir") or "",
             "cognition": project_cognition(project, cognition),
+            "model_choice": project_model_choice(project), "processing_choice": project_processing_choice(project),
             "provenance": project.get("provenance") or "",
             "last_active_at": project.get("last_active_at") or "",
+            **({"last_message_at": project["last_message_at"]} if "last_message_at" in project else {}),
             **({"closed": dict(project["closed"])} if "closed" in project else {}),
             "lifecycle": project.get("lifecycle") or PROJECT_ACTIVE,
             "routing_generation": int(project.get("routing_generation") or 0),

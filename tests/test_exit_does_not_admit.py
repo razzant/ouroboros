@@ -147,10 +147,10 @@ def test_replay_admission_is_rechecked_before_each_re_post(tmp_path):
     dc = _pending(tmp_path, invocation_id="inv-first")
     _pending(tmp_path, task_id="t-other", invocation_id="inv-second")
     ensured = _Recorder()
-    answers = iter([True, True, False])  # the gate, the first dispatch, a stop before the second
-
+    # Admitted until the first re-POST lands (its gate, dispatch and submission each ask);
+    # a stop then arrives before the second.
     outcomes = dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: ensured,
-                                          replay_pending=lambda: next(answers))
+                                          replay_pending=lambda: not ensured.started)
 
     assert [key for _request, key in ensured.started] == ["inv-first"]
     retained = [row for row in outcomes if row["action"] == "invocation_retained"]

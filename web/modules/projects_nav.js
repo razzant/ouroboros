@@ -1,12 +1,13 @@
 /**
- * The sidebar's Projects list (docs/DESIGN.md "Shell"): its keyed rows, their marks and names, the collapse, and the
+ * The sidebar's Projects list (docs/DESIGN.md "Shell"): its keyed rows, their marks and names, the pin group, and the
  * way to every Project older than the recent feed.
  *
- * `/api/state` carries a compact feed, the pins and the most recent other Projects; app.js decides what it says
+ * `/api/state` carries a compact feed, the pins and the Projects with the newest messages; app.js decides what it says
  * (unread, the open room, the read cursors) and hands its rows over with that read's request order. Older
  * Projects are reached by name in Find a project or by Show more, from the registry's complete list
  * (`GET /api/projects?all=1`): read as a find or a browse starts and again, while one is open, when the registry
- * announces a change (`refresh`); never on a timer. Nothing here acknowledges a read. A row opens through app.js: one
+ * announces a change (`refresh`) or, for a browse, when a room's newest message moved (`messagesRevision`, also beyond
+ * the feed); never on a timer. Nothing here acknowledges a read. A row opens through app.js: one
  * the feed carries at once, as it shows; one older than the feed names its id and app.js reads its room first. The
  * unread app.js shows for the Projects is what this list shows: the feed's rooms, hidden or not, and the older rooms
  * an open find or browse lists, never one only a held list names (`unreadRows`; `onShown` and `onListRead` say when it
@@ -19,15 +20,16 @@
  * row with its request order: a feed row replaces an older one and stays after it leaves the feed, a complete
  * list drops what it omits unless something newer named it, and a feed older than that list adds nothing back (a
  * capped feed proves no absence). A failed read keeps the list, says so with its time and offers to try again; while
- * a read is unanswered or failed, nothing is said to be missing. The list owns its order: pins, then unread, then
- * recency at rest; beyond the feed the order the owner's last action gave, pins still leading, so activity changes
- * rows in place and rooms that come or go never move the row in view (the focused one, else the first visible).
- * Collapsing the Projects ends the find or the browse.
+ * a read is unanswered or failed, nothing is said to be missing. The list owns its order, at rest and in a browse
+ * alike: pins, then the newest message (`last_message_at`; unread is a mark, never a rank); a browse keeps every row
+ * it showed. A repaint away from the list's top keeps the first row in view whose place did not change where it was,
+ * and the keyboard on its row wherever it moved; a find keeps its rows where they stand while words are in the
+ * field.
  */
 import { fmt, fmtInto, tr } from './i18n.js';
 import { SHELL_ICONS, controlIcon } from './page_icons.js';
 import { IDLE_SUMMARY, markWords } from './project_activity.js';
-import { repositionProjectRowMenu } from './project_create.js';
+import { pinWords, repositionProjectRowMenu } from './project_create.js';
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
 
 const PAGE = 50;  // Show more adds a page; Show all projects (after a find with no match) opens the rest
@@ -43,33 +45,61 @@ function foldName(text) {
 }
 
 /** A mark's words go into its place's name (its tooltip and accessible name): the hue is never the only way it is
- *  told. The Projects header's toggle (app.js) and every row here name themselves this way. */
-export function setActivityOwnerName(owner, baseName, words) {
+ *  told. Every row here names itself this way. */
+function setActivityOwnerName(owner, baseName, words) {
     if (!owner) return;
     const name = words ? `${baseName} · ${words}` : baseName;
     owner.setAttribute('aria-label', name);
     owner.title = name;
 }
 
-const recency = (row) => String(row.last_active_at || row.updated_at || row.created_at || '');
-// The registry's own order (project_closure.select_projects): latest activity, then id, newest first.
+/** When a room's newest message came, the way a messenger says it: the clock while it is recent, then the weekday,
+ *  then the date. */
+export function whenOf(at, now = Date.now()) {
+    const t = at ? new Date(at) : null;
+    if (!t || Number.isNaN(t.getTime())) return '';
+    const hours = (now - t.getTime()) / 36e5;
+    if (hours < 20) return t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    if (hours < 24 * 6) return t.toLocaleDateString('en-US', { weekday: 'short' });
+    return t.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
+
+/** The one line a row says under its name: what waits for the owner (the waiting question's own opening words when the
+ *  room has them, else the sentence that says what waits), else what its work is doing, else nothing. */
+export function rowLine(summary = IDLE_SUMMARY) {
+    if (summary.owner) return { kind: 'ask', text: summary.ask?.words || summary.note || summary.word || '' };
+    if (!['moving', 'still', 'pause'].includes(summary.mark)) return { kind: 'rest', text: '' };
+    const doing = summary.focus || summary.name || summary.line || '';
+    if (summary.mark === 'pause') return { kind: 'rest', text: [summary.word, doing].filter(Boolean).join(' · ') };
+    return { kind: 'live', text: doing || summary.word || '' };
+}
+
+// The server's order (projects_summary): the newest message, else the activity of a store still dating its history.
+const recency = (row) => String(row.last_message_at || row.last_active_at || row.updated_at || row.created_at || '');
+// The registry's own order (project_closure.select_projects): that time, then id, newest first.
 const newestFirst = (a, b) => {
     const [x, y] = [recency(a), recency(b)];
     if (x !== y) return x < y ? 1 : -1;
     return String(a.id) < String(b.id) ? 1 : String(a.id) > String(b.id) ? -1 : 0;
 };
+// The list's order: pins first, then the server's (equal times, empty ones too, by id, newest first).
+export const listOrder = (a, b) => ((a.pinned === true) !== (b.pinned === true) ? (a.pinned === true ? -1 : 1)
+    : newestFirst(a, b));
+// A row keeps its place while this key does.
+const placeKey = (row) => `${row?.pinned === true}|${row ? recency(row) : ''}`;
 
-export function createProjectsNav({ section, header, list, toggle, feed, feedOrder, nextOrder, reserved, listableCount, activeId,
-    expanded, isUnread, readList, onListRead, onShown, open, openMenu }) {
-    // `browse`: the ids a browse shows and the rows Show more still owes; `found`: the ids a find shows (null: the
-    // owner's new words, laid out anew) and how many rows besides the pins it may show.
-    const state = { query: '', browse: null, found: null, budget: PAGE, resume: null, collapsed: null, handoff: null };
+export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, reserved, listableCount, activeId,
+    isUnread, readList, onListRead, onShown, open, openMenu, pin, isPinPending, messagesRevision = () => null }) {
+    // `browse`: the ids a browse shows (sorted with the list) and the rows Show more still owes; `found`: the ids a
+    // find shows (null: the owner's new words, laid out anew) and how many rows besides the pins it may show.
+    const state = { query: '', browse: null, found: null, budget: PAGE, resume: null, handoff: null };
     // Once a complete list was read: each Project's newest observed row and its read's request order (`at`).
-    let held = null;       // { rows: Map id → { row, at }, at: the list's order, time: its clock time, folded }
+    let held = null;       // { rows: Map id → { row, at }, at: the list's order, time: its clock time, folded, revision }
     let reading = null;    // the read in flight: { controller }
     let failure = '';      // why the last read failed; '' once one answered
     let listed = new Set();  // the rooms an open find or browse showed at the last paint; none at rest
     let activity = { byChat: new Map() };  // the census index the last patch painted from
+    let pressedPin = null;  // the drawn Pin a pointer's last press in the list began on; null after any other press
     let destroyed = false;
     const folded = new Map();  // name → its folded form
 
@@ -79,11 +109,6 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     const failed = () => Boolean(failure) && !reading;
     // A feed row carries its unread from app.js; a listed row's is read from the shared cursors the same way.
     const unreadOf = (row) => (typeof row._unread === 'boolean' ? row._unread : !isDeleting(row) && isUnread(row));
-    const listOrder = (a, b) => {
-        if ((a.pinned === true) !== (b.pinned === true)) return a.pinned === true ? -1 : 1;
-        if (unreadOf(a) !== unreadOf(b)) return unreadOf(a) ? -1 : 1;  // unread to the top
-        return recency(b).localeCompare(recency(a));
-    };
     const foldOf = (row) => {
         const name = String(row.name || row.id || '');
         if (!folded.has(name)) folded.set(name, foldName(name));
@@ -111,14 +136,14 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
             }
         }
     }
-    function observeList(rows, at, time) {
+    function observeList(rows, at, time, revision) {
         const next = new Map();
         for (const row of rows) {
             const seen = held?.rows.get(row.id);
             next.set(row.id, seen && seen.at > at ? seen : { row, at });
         }
         for (const [id, seen] of held?.rows || []) if (!next.has(id) && seen.at > at) next.set(id, seen);
-        held = { rows: next, at, time, folded: held?.folded || 0 };
+        held = { rows: next, at, time, folded: held?.folded || 0, revision };
     }
     // Every Project's newest row: the held list's, or the feed's before one is read.
     function facts() {
@@ -126,14 +151,14 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         observeFeed();
         return new Map([...held.rows].map(([id, seen]) => [id, seen.row]));
     }
-    // What this sidebar shows unread: the feed's rooms, hidden or not (collapsed, the header speaks for them), and the
+    // What this sidebar shows unread: the feed's rooms, hidden or not (a find shows only its matches), and the
     // rooms an open find or browse lists. A room only the held list names is shown nowhere here, so it counts nowhere.
     const unreadRows = () => {
         const rows = facts();
         return [...new Set([...feedRows().map((row) => row.id), ...listed])].map((id) => rows.get(id))
             .filter((row) => listable(row) && unreadOf(row));
     };
-    // The resting list: the feed's rooms, each as its newest observation tells it, pins, unread, then recency.
+    // The resting list: the feed's rooms, each as its newest observation tells it, in the list's order.
     const resting = (rows) => feedRows().map((row) => rows.get(row.id)).filter(listable).sort(listOrder);
     // Pins lead any order: a row pinned meanwhile ends the pins, one unpinned starts the rest.
     const pinsFirst = (ids, rows) => [...ids.filter((id) => rows.get(id).pinned === true),
@@ -141,17 +166,19 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     // What a press hands app.js: a row the feed carries opens as it shows, at once; an older row may be as old as the
     // list it came from, so it names only its id and name and its room is read first.
     const pressed = (row) => (feedRows().some(({ id }) => id === row.id) ? row : { id: row.id, name: row.name });
-    // Before the complete list is read: does the state know a Project room the feed does not show?
+    // Before the complete list is read: how many Project rooms the state knows beyond the feed's (the count of the
+    // listable ones it states), or, where it states none, whether its Project rooms name one the feed does not show
+    // (true: some, how many unknown, since a deleted room keeps its place there).
     const roomsBeyond = () => {
         const total = listableCount?.();
         if (Number.isSafeInteger(total) && total >= 0) {
-            return total > feedRows().filter(listable).length;
+            return Math.max(0, total - feedRows().filter(listable).length);
         }
         const shown = new Set(feedRows().map((row) => Number(row.chat_id)));
         return [...(reserved() || [])].some((chat) => !shown.has(Number(chat)));
     };
 
-    // ---- the find field, between the header and the list (A1: always there while the list is open) -------------
+    // ---- the find field, the list's first control, always there: "+" (New project) ends its row ------------------
     const find = document.createElement('div');
     find.className = 'nav-projects-find';
     find.setAttribute('role', 'search');
@@ -181,7 +208,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     status.setAttribute('aria-live', 'polite');
     status.dataset.i18nSkip = '';
     find.append(glyph, input, clear, status);
-    header.after(find);
+    header.prepend(find);  // owner 13.11: the list starts with its search; "+" ends the same row
 
     // ---- the list's own commands: Project-row geometry in the meta ink, so none reads as one more Project --------
     const command = (className) => {
@@ -200,8 +227,12 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         button.replaceChildren();
         const words = document.createElement('span');
         fmtInto(words, key, params);
-        if (button === more) {
-            button.insertAdjacentHTML('afterbegin', controlIcon('chevron', 18));
+        // Each command shows what it does in the icon column: Show more and Show all projects open the list further
+        // (the chevron), Clear search empties the field and returns to the resting list (the field's own ×).
+        const glyph = button === clearCommand ? SHELL_ICONS.close
+            : button === more || button === showAll ? controlIcon('chevron', 18) : '';
+        if (glyph) {
+            button.insertAdjacentHTML('afterbegin', glyph);
             button.firstElementChild.setAttribute('aria-hidden', 'true');
         }
         button.append(words);
@@ -215,28 +246,27 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     function view() {
         const rows = facts();
         const rest = resting(rows);
-        if (state.collapsed) return { shown: rest, after: [] };
         const all = [...rows.values()].filter(listable);
         if (searching()) return found(rows, all);
         if (state.browse) return browsed(rows, rest, all);
         const ids = new Set(rest.map((row) => row.id));
-        const left = held ? all.filter((row) => !ids.has(row.id)).length : 0;
-        return { shown: rest, after: left ? [moreOf(left)] : !held && roomsBeyond() ? [labelled(more, 'Show more')] : [] };
+        // Show more says how many it adds whenever that is known (owner's sweep 14.11: one control, one wording); only
+        // a state that counts no rooms leaves it unsaid.
+        const left = held ? all.filter((row) => !ids.has(row.id)).length : roomsBeyond();
+        return { shown: rest, after: left === true ? [labelled(more, 'Show more')] : left ? [moreOf(left)] : [] };
     }
 
-    // A browse keeps its rows where they stand: a room the feed brings (a new one) joins after the leading pins, the
-    // rows Show more owes join at the end once the complete list is read, and a room the registry no longer lists goes.
+    // A browse shows every room it has shown, sorted with the list: the feed's rooms (a new one too), the rows Show more
+    // brought and, once the complete list is read, the next ones it owes; a room the registry no longer lists goes.
     function browsed(rows, rest, all) {
-        const kept = state.browse.order.filter((id) => listable(rows.get(id)));
-        const known = new Set(kept);
-        const order = pinsFirst([...rest.map((row) => row.id).filter((id) => !known.has(id)), ...kept], rows);
-        const shownIds = new Set(order);
-        const beyond = held ? all.filter((row) => !shownIds.has(row.id)).sort(newestFirst) : [];
+        const shown = new Set([...state.browse.shown, ...rest.map((row) => row.id)].filter((id) => listable(rows.get(id))));
         if (held && state.browse.owed) {
-            order.push(...beyond.splice(0, state.browse.owed).map((row) => row.id));
+            for (const row of all.filter((item) => !shown.has(item.id)).sort(newestFirst).slice(0, state.browse.owed)) {
+                shown.add(row.id);
+            }
             state.browse.owed = 0;
         }
-        state.browse.order = order;
+        state.browse.shown = shown;
         const after = [];
         if (!held) {
             after.push(...(failed() ? [said(fmt('Could not load more projects: {error}', { error: failure })),
@@ -246,9 +276,11 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
                 after.push(said(fmt('Could not read all projects again: {error}. Older rows are as read at {time}.',
                     { error: failure, time: readTime() })), labelled(retry, 'Try again'));
             }
-            if (beyond.length) after.push(moreOf(beyond.length));
+            const left = all.length - shown.size;
+            if (left > 0) after.push(moreOf(left));
         }
-        return { shown: order.map((id) => rows.get(id)), after, waiting: Boolean(state.browse.owed) && !failed() };
+        return { shown: [...shown].map((id) => rows.get(id)).sort(listOrder), after,
+            waiting: Boolean(state.browse.owed) && !failed() };
     }
 
     // A find keeps the rows it shows where they stand while their names still match; a match it does not show yet
@@ -304,9 +336,26 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
             btn.className = 'nav-row nav-project-row';
             btn.type = 'button';
             btn.dataset.projectId = project.id;
+            // Two lines (owner 12.11, the fifth round): the name and the time of the newest message; under them the
+            // one line that matters (what waits for the owner, else what the work is doing) and the row's mark.
+            const line1 = document.createElement('span');
+            line1.className = 'nav-project-line1';
             const label = document.createElement('span');
             label.className = 'nav-row-label';
-            btn.append(label, createStatusMark(document, 'nav-mark'));
+            label.dir = 'auto';
+            const time = document.createElement('span');
+            time.className = 'nav-project-time';
+            line1.append(label, time);
+            const line2 = document.createElement('span');
+            line2.className = 'nav-project-line2';
+            const says = document.createElement('span');
+            says.className = 'nav-project-says';
+            says.dir = 'auto';
+            const slot = document.createElement('span');
+            slot.className = 'nav-mark-slot';
+            slot.append(createStatusMark(document, 'nav-mark'));
+            line2.append(says, slot);
+            btn.append(line1, line2);
             item.appendChild(btn);
             if (deleting) {
                 const deletingStatus = document.createElement('span');
@@ -315,8 +364,22 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
                 item.appendChild(deletingStatus);
             } else {
                 // Pressing a row opens its Project; pressing the open one again keeps it open (like every reference).
-                btn.addEventListener('click', (event) => open(pressed(item.project), { pointer: event.detail > 0 }));
-                // The action control is a sibling button, never nested interactive UI.
+                const openRow = (pointer) => open(pressed(item.project), { pointer });
+                btn.addEventListener('click', (event) => openRow(event.detail > 0));
+                // Sibling actions, never nested buttons: Pin over the row's icon column, ⋯ after its name.
+                // Semantic activation of the focused glyph or a single press begun on it asks for its painted state.
+                // On a hybrid screen a finger can begin on the row, then hover draws the glyph under its click:
+                // that click opens the row. A double click's second press may hit a moved neighbour; it pins nothing.
+                const pinControl = document.createElement('button');
+                pinControl.type = 'button';
+                pinControl.className = 'nav-project-pin';
+                pinControl.addEventListener('click', (event) => {
+                    if (event.detail === 0 || (event.detail === 1
+                        && (pressedPin === pinControl || pinControl.matches(':focus-visible')))) {
+                        pin(item.project, pinControl.dataset.action === 'pin');
+                    } else if (pressedPin !== pinControl) openRow(true);
+                });
+                item.prepend(pinControl);
                 const kebab = document.createElement('button');
                 kebab.type = 'button';
                 kebab.className = 'nav-project-kebab';
@@ -330,29 +393,57 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
             }
         }
         item.project = project;
+        item.paintedPlaceKey = placeKey(project);  // the shared project may change before the next repaint
         item.toggleAttribute('data-pinned', project.pinned === true);
         const btn = item.querySelector('.nav-project-row');
         btn.disabled = deleting;
         const label = btn.querySelector('.nav-row-label');
         if (label.textContent !== (project.name || project.id)) label.textContent = project.name || project.id;
+        const time = btn.querySelector('.nav-project-time');
+        const when = whenOf(project.last_message_at);
+        if (time && time.textContent !== when) time.textContent = when;
         const active = project.id === activeId();
         btn.classList.toggle('active', active);
         if (active) btn.setAttribute('aria-current', 'page');
         else btn.removeAttribute('aria-current');
+        const pinControl = item.querySelector('.nav-project-pin');
+        if (pinControl) {
+            const action = project.pinned === true ? 'unpin' : 'pin';
+            if (pinControl.dataset.action !== action) {
+                pinControl.dataset.action = action;
+                pinControl.innerHTML = SHELL_ICONS[action];  // the pin, or the slashed pin of Unpin (page_icons.js)
+            }
+            const pending = isPinPending(project.id);
+            const words = pinWords(action === 'unpin', pending);
+            if (pending) pinControl.setAttribute('aria-disabled', 'true');
+            else pinControl.removeAttribute('aria-disabled');
+            pinControl.title = fmt(words);
+            pinControl.setAttribute('aria-label', fmt(`${words} {name}`, { name: project.name || project.id }));
+        }
         const kebab = item.querySelector('.nav-project-kebab');
         if (kebab) kebab.setAttribute('aria-label', fmt('Actions for {name}', { name: project.name || project.id }));
         else item.querySelector('.nav-project-deleting-status').title = project.delete_error || 'Cancellation and cleanup are in progress';
         return item;
     }
 
-    // The row a repaint keeps in place on screen beyond the feed: the focused one, else the first one in view.
     const firstInView = () => {
         const top = Math.max(list.getBoundingClientRect().top, 0);
         return [...list.children].find((el) => el.dataset.navProjectId && el.getBoundingClientRect().bottom > top) || null;
     };
-    function anchorRow() {
-        const item = document.activeElement?.closest?.('.nav-project-item');
-        return item?.parentElement === list ? item : firstInView();
+    // The rows in view and their tops, measured before a repaint moves anything; none while the list's first row is
+    // in view, so what a new message brings to the top shows there.
+    function rowsInView() {
+        const top = Math.max(list.getBoundingClientRect().top, 0);
+        const rows = [...list.children].filter((el) => el.dataset.navProjectId);
+        if (!rows.length || rows[0].getBoundingClientRect().top >= top - 0.5) return [];
+        const bottom = Math.min(list.getBoundingClientRect().bottom, window.innerHeight);
+        const seen = [];
+        for (const el of rows) {
+            const box = el.getBoundingClientRect();
+            if (box.top >= bottom) break;
+            if (box.bottom > top) seen.push([el, box.top]);
+        }
+        return seen;
     }
     // Scroll whatever scrolls (the list, or the whole column in a short window) by what the anchor moved.
     function keepOnScreen(anchor, top) {
@@ -368,26 +459,15 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     // Keyed: a row keeps its node (and so its focus, its menu's anchor and its mark's phase) however the list moves.
     function paintRows() {
         if (destroyed) return;
-        const collapsed = !expanded();
-        if (collapsed && state.collapsed === false) {  // a collapse ends the find and the browse with the list
-            // What has the keyboard hides or goes with them, only a pinned row stays: the toggle takes it first, also
-            // from a press that let go of it on the way (a pointer focuses no button in WebKit).
-            const at = document.activeElement;
-            const letGo = beyondFeed() && (!at || at === document.body);
-            if (letGo || find.contains(at) || (list.contains(at) && !at.closest('[data-pinned]'))) {
-                toggle?.focus({ preventScroll: true });
-            }
-            Object.assign(state, { query: '', browse: null, found: null, handoff: null, resume: null });
-            input.value = '';
-            clear.hidden = true;
-        }
-        state.collapsed = collapsed;
         more.removeAttribute('aria-busy');
-        const beyond = beyondFeed() && !collapsed;
-        list.toggleAttribute('data-beyond', beyond);  // its own anchoring below, never the engine's
-        const anchor = beyond ? anchorRow() : null;
-        const anchorTop = anchor?.getBoundingClientRect().top;
+        const beyond = beyondFeed();
+        const measured = rowsInView();
         const { shown, after, waiting } = view();
+        // The place being read is held by the first row in view whose place in the order holds (its pin and time):
+        // a row a new message moves never takes the view with it (style.css turns the engine's anchoring off).
+        const next = new Map(shown.map((row) => [row.id, row]));
+        const [anchor, anchorTop] = measured.find(([el]) => next.has(el.dataset.navProjectId)
+            && el.paintedPlaceKey === placeKey(next.get(el.dataset.navProjectId))) || [];
         // The rooms an open find or browse lists count toward the unread app.js shows, so a change of them is said.
         const showing = new Set(beyond ? shown.map((row) => row.id) : []);
         const relisted = showing.size !== listed.size || [...showing].some((id) => !listed.has(id));
@@ -395,19 +475,31 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         const keyed = new Map([...list.children].filter((el) => el.dataset.navProjectId)
             .map((el) => [el.dataset.navProjectId, el]));
         const focused = document.activeElement;
+        const ownedFocus = focused && list.contains(focused);
         const nodes = [...shown.map((project) => itemFor(project, keyed)), ...after];
         nodes.forEach((node, index) => {
             if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null);
         });
         const keep = new Set(nodes);
         for (const el of [...list.children]) if (!keep.has(el)) el.remove();
-        list.toggleAttribute('data-finding', searching() && !collapsed);
+        list.toggleAttribute('data-finding', searching());
         if (!searching() && status.textContent) status.textContent = '';
+        markPinGroup();  // the pin group's gap belongs to the geometry we restore
         if (anchor?.isConnected) keepOnScreen(anchor, anchorTop);
         // Moving an existing node can blur it even though its identity survives.
         if (focused?.isConnected && list.contains(focused) && focused !== document.activeElement) focused.focus({ preventScroll: true });
+        // A removed row hands its lost keyboard to Find; a control that already took it keeps it, and a key's Show more
+        // whose read failed hands it on below (to Try again).
+        else if (ownedFocus && !focused.isConnected && !(state.handoff && !waiting && state.handoff.from === focused) &&
+            (!document.activeElement || document.activeElement === document.body || document.activeElement === focused)) {
+            keyboardHome()?.focus({ preventScroll: true });
+        }
         if (state.handoff && !waiting) handOff(state.handoff, nodes);
-        if (relisted) onShown();  // app.js says its number, header and ☰ again, marks in place: no read, no render
+        repositionProjectRowMenu();  // anchoring may have scrolled its row after visibility settled
+        if (relisted) onShown();  // app.js says its marks and ☰ again, in place: no read, no render
+        // A browse reads the complete list again once a room's newest message moved since that list was asked for,
+        // beyond the feed too; a read in flight or a failed one waits (its answer, or Try again, repaints).
+        if (state.browse && held && !reading && !failure && messagesRevision() !== held.revision) load();
     }
 
     // A key's Show more or Show all hands the keyboard on once, when its rows have settled (read, or the read
@@ -436,46 +528,47 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
             // A deleting row draws only `Deleting…`; its census fact stays in its name.
             paintStatusMark(button.querySelector('.nav-mark'),
                 deleting ? markView() : markView({ mark: summary.mark, owner: summary.owner, unread: unreadRow }));
-            // The pin is said in the row's full name (its tooltip and accessible name), never drawn in the row.
+            const said = deleting ? null : rowLine(summary);
+            const says = button.querySelector('.nav-project-says');
+            if (says && says.textContent !== (said?.text || '')) says.textContent = said?.text || '';
+            if (says) says.dataset.kind = said?.kind || '';
+            // With nothing to say under it, a long name takes both lines.
+            button.toggleAttribute('data-solo', !said?.text);
+            // The pin is said in the row's full name (its tooltip and accessible name); at rest nothing draws it.
             const name = `${row.name || row.id}${row.pinned === true ? ' · Pinned' : ''}`;
+            // A waiting question's words follow the state's in the row's name, as they stand in its line.
+            const asked = !deleting && summary.owner ? summary.ask?.words || '' : '';
             setActivityOwnerName(button, deleting ? `${name} — Deleting…${row.delete_error ? ` ${row.delete_error}` : ''}` : name,
-                markWords(summary, unreadRow));
+                [markWords(summary, unreadRow), asked].filter(Boolean).join(' · '));
         }
     }
 
-    // Collapse is all or nothing (owner 19.10, 2A): collapsed, the Projects keep only the pinned ones, and the
-    // header's mark and unread count speak for the rest (docs/DESIGN.md "Shell"); expanded, every row shows. A row
-    // that hides gives the keyboard to the Projects toggle first, and an open menu of a hidden row closes.
-    function syncCollapse() {
+    // Pins lead the list; air before the first row after them is the group's one boundary, no caption (style.css
+    // `[data-after-pins]`). An open row menu follows its anchor once the rows have settled, or closes with a row gone.
+    function markPinGroup() {
         if (destroyed) return;
-        const collapsed = !expanded();
-        if (collapsed !== state.collapsed) { render(); return; }
-        section?.toggleAttribute('data-collapsed', collapsed);
-        find.hidden = collapsed;
-        let shown = 0;
         let pinsShown = false;
         let afterPins = null;
         for (const item of list.children) {
             if (!item.classList.contains('nav-project-item')) continue;
-            const keep = !collapsed || item.hasAttribute('data-pinned');
-            if (!keep && item.contains(document.activeElement)) toggle?.focus({ preventScroll: true });
-            item.hidden = !keep;
-            if (keep) shown += 1;
-            // Pins lead the list; air before the first shown row after them is the group's one boundary, no caption.
-            if (keep && item.hasAttribute('data-pinned')) pinsShown = true;
-            else if (keep && pinsShown) afterPins ||= item;
+            if (item.hasAttribute('data-pinned')) pinsShown = true;
+            else if (pinsShown) afterPins ||= item;
         }
         for (const item of list.children) item.toggleAttribute('data-after-pins', item === afterPins);
-        list.hidden = collapsed && shown === 0;
-        // An open row menu follows its anchor once row visibility has settled, or closes with its hidden row.
         repositionProjectRowMenu();
+    }
+
+    // Where the keyboard goes when what held it inside the list is gone (a row deleted, archived or no longer found):
+    // the list's first control, Find a project, or New project when the field is not shown.
+    function keyboardHome() {
+        const shown = input.isConnected && !input.closest?.('[hidden]') && input.getClientRects?.().length > 0;
+        return shown ? input : header.querySelector('#nav-projects-add');
     }
 
     function render() {
         if (destroyed) return;
         paintRows();
         patch();
-        syncCollapse();
     }
 
     // ---- the registry's complete list ---------------------------------------------------------------------------
@@ -489,11 +582,12 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         }, PROJECT_LIST_TIMEOUT_MS);
         const at = nextOrder();  // after every state read requested so far, before every later one
         const time = Date.now();  // only for saying when the list shown was read
+        const revision = messagesRevision();  // the rooms' message times this read answers at least
         reading = { controller };
         Promise.resolve().then(() => readList({ signal: controller.signal })).then((data) => {
             if (!Array.isArray(data?.projects)) throw new Error(fmt('the answer could not be read'));
             if (reading?.controller !== controller) return;
-            observeList(data.projects.filter(listable), at, time);
+            observeList(data.projects.filter(listable), at, time, revision);
             failure = '';
         }).catch((err) => {
             // The last complete list stays and the failure is said beside it; without one, never "no match".
@@ -558,10 +652,10 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     }
 
     // A browse starts from the resting rows as they stand; Show all projects owes every other room.
-    const browseFrom = (owed) => ({ order: resting(facts()).map((row) => row.id), owed });
+    const browseFrom = (owed) => ({ shown: new Set(resting(facts()).map((row) => row.id)), owed });
 
     // ---- the owner's keys and presses ---------------------------------------------------------------------------
-    const rowStops = () => [...list.querySelectorAll(':scope > .nav-project-item:not([hidden]) > .nav-project-row:not(:disabled), :scope > .nav-projects-more')];
+    const rowStops = () => [...list.querySelectorAll(':scope > .nav-project-item > .nav-project-row:not(:disabled), :scope > .nav-projects-more')];
     const onInput = () => setQuery(input.value, { typed: true });
     const onFieldKey = (event) => {
         if (event.isComposing) return;
@@ -569,7 +663,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
             const first = rowStops()[0];
             if (first) { event.preventDefault(); first.focus(); }
         } else if (event.key === 'Enter' && searching()) {
-            const first = list.querySelector(':scope > .nav-project-item:not([hidden]) > .nav-project-row:not(:disabled)');
+            const first = list.querySelector(':scope > .nav-project-item > .nav-project-row:not(:disabled)');
             event.preventDefault();
             if (first) first.click();
         } else if (event.key === 'Escape' && input.value) {
@@ -585,7 +679,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         event.preventDefault();
         const next = stops[at + (event.key === 'ArrowDown' ? 1 : -1)];
         if (next) next.focus();
-        else if (event.key === 'ArrowUp' && !find.hidden) input.focus();
+        else if (event.key === 'ArrowUp') input.focus();
     };
     const onMore = (event) => {
         if (more.getAttribute('aria-busy') === 'true') return;
@@ -614,16 +708,18 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         load();
         render();
     };
+    const onListPress = (event) => { pressedPin = event.target.closest?.('.nav-project-pin') || null; };
     const bindings = [[input, 'input', onInput], [input, 'keydown', onFieldKey], [clear, 'click', onClearCommand],
-        [list, 'keydown', onListKey], [more, 'click', onMore], [clearCommand, 'click', onClearCommand],
-        [showAll, 'click', onShowAll], [retry, 'click', onRetry]];
+        [list, 'keydown', onListKey], [list, 'pointerdown', onListPress], [more, 'click', onMore],
+        [clearCommand, 'click', onClearCommand], [showAll, 'click', onShowAll], [retry, 'click', onRetry]];
     for (const [node, type, handler] of bindings) node.addEventListener(type, handler);
 
     return {
         /** The feed changed (app.js renderProjectsNav, a cursor move, a pin): repaint the rows from it. */
         paint: paintRows,
         patch,
-        syncCollapse,
+        markPinGroup,
+        keyboardHome,
         refresh,
         /** A change the server just confirmed for a Project (a pin, a deletion begun): newest for that row, so a read
          *  requested before it cannot undo it. Before a complete list is held, the feed row app.js changed speaks. */
@@ -632,7 +728,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
             if (seen) held.rows.set(id, { row: { ...seen.row, ...fields }, at: nextOrder() });
         },
         /** Every Project this list shows unread, the feed's hidden or not and those an open find or browse lists: what
-         *  the header's number, ☰ and the re-read of the shared cursors go by. */
+         *  ☰ and the re-read of the shared cursors go by. */
         unreadRows,
         /** The row shown for an id as its freshest read tells it, with its unread said; null when no read names it. */
         row(id) {

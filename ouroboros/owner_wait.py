@@ -31,6 +31,7 @@ from dataclasses import asdict
 from typing import Any
 
 from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+from ouroboros.delegate_output import read_coverage, restore_read_coverage
 from ouroboros.native_task_wait import cursors_json
 from ouroboros.transcript_prefix import OBSERVER_STATE_ATTRS as _SEND_OBSERVER_KEYS  # a resumed task keeps the send observer's state
 from ouroboros.transcript_prefix import sanction_rewrite
@@ -42,7 +43,8 @@ from ouroboros.task_store import patch_document
 
 # ``tools.review_result``'s facts of what its delivery step already showed (findings, a changed request asked
 # about, a refusal), each JSON at its owner; carried by value, never decided here.
-_RESULT_REVIEW_SHOWN = ("_result_review_shown", "_result_review_request_asked", "_result_review_refused")
+_RESULT_REVIEW_SHOWN = ("_result_review_shown", "_result_review_request_asked", "_result_review_refused",
+                        "_result_review_revision_asked")
 
 log = logging.getLogger(__name__)
 
@@ -60,9 +62,10 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
     """
     from ouroboros.owner_mailbox import (
         KIND_CARD_INPUT, KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER,
-        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, place_arrival_wake,
+        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, KIND_OWNER_MODEL, place_arrival_wake, tier_only,
     )
 
+    entries = [row for row in entries if not tier_only(row)]  # a tier act is applied by the drain, never a wake
     kinds = [str(row.get("kind") or KIND_OWNER_TEXT) for row in entries]
     if KIND_FINALIZE_NOW in kinds:
         return "control:finalize_now"
@@ -80,6 +83,8 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
         return "owner_text"
     if KIND_HURRY in kinds:
         return "hurry"
+    if KIND_OWNER_MODEL in kinds:
+        return "model"
     for kind, row in zip(kinds, entries):
         if kind == KIND_TASK_MESSAGE and place_arrival_wake(row) is not False:  # the first waking mail
             source = str(row.get("source_task_id") or "").strip()
@@ -170,7 +175,7 @@ def _wait_bound_fields(ctx: Any) -> dict:
 
 
 def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
-                       round_idx: int, tool_schemas: list, seen: set) -> dict:
+                       round_idx: int, tool_schemas: list, seen: set, *, context_view: tuple | None = None) -> dict:
     """The loop's exact continuation values, never Python handles.
 
     ONE serializer for every same-ID continuation (owner wait, review park,
@@ -178,11 +183,21 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
     trace, usage, route, delivery candidate, admission-seal and owner-source
     identities, owner directives — so a second serializer could only drift from this one.
     """
+    if context_view is not None:
+        # Pricing a forced call that never sent must not become the next ordinary call's view.
+        # Keep current dialogue/tool results, projected from the pre-price plan's retained sources;
+        # only this saved copy changes. The live forced call (legacy soft landing) keeps its own fit.
+        from copy import copy
+
+        ctx = copy(ctx)
+        ctx.context_fit_plan, ctx.active_context_mode = context_view
+        messages = ctx.context_fit_plan.reproject_transcript(messages, ctx.active_context_mode)
     candidate = getattr(ctx, "_delivery_candidate", None)
     cost_ceiling = getattr(ctx, "_cost_ceiling", None)
     model_wait = getattr(ctx, "model_wait_context", None)
     model_state = model_wait.continuation_state() if model_wait is not None else {}
     from ouroboros.settings_integrity import captured_cognition
+    from ouroboros.model_slots import acting_model_role
 
     return {
         "task_id": ctx.task_id, "task_attempt": int(getattr(ctx, "task_attempt", None) or 1),
@@ -199,11 +214,14 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "nanny_activity": {key: getattr(ctx, key, None) for key in (
             "_nanny_metered_progress", "_nanny_delegate_baseline",
         )},
-        "context_model_role": getattr(getattr(ctx, "context_fit_plan", None), "model_role", ""),
-        # Exposure facts gate automatic compaction; a resumed task keeps them.
+        "context_model_role": acting_model_role(ctx),
+        # The task's own start (mode, cause): a restore's new fit is not it (``context_fit.restored_start``).
+        "context_start": list(getattr(getattr(ctx, "context_fit_plan", None), "start", None) or ("", "")),
+        # Exposure facts gate automatic compaction; a resumed task keeps them, and the journal boundary of its first
+        # memory capture, from which mark changes are read again after a new capture (``mark_anchors``).
         "context_observations": {key: getattr(ctx, key) for key in (
             "_last_context_observation", "_inspected_context_view", "_pending_compaction",
-            "_historical_author_inputs", "_pending_owner_dialogue", *_SEND_OBSERVER_KEYS,
+            "_historical_author_inputs", "_pending_owner_dialogue", "_mark_changes_since", *_SEND_OBSERVER_KEYS,
         ) if getattr(ctx, key, None) is not None},
         "round_idx": round_idx, "tool_schemas": tool_schemas,
         **({"actor_loaded_tool_names": sorted(ctx._actor_loaded_tool_names)}
@@ -213,6 +231,8 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "held_dependencies_seen": dict(getattr(ctx, "_held_dependencies_seen", None) or {}),
         "held_dependencies_order": dict(getattr(ctx, "_held_dependencies_order", None) or {}),
         "held_dependency_sources": dict(getattr(ctx, "_held_dependency_sources", None) or {}),
+        "wake_sources": dict(getattr(ctx, "_wake_sources", None) or {}),
+        "read_coverage": read_coverage(str(ctx.task_id)),  # what of those sources was already delivered
         # An armed or woken native task wait owes its result to the next request (``native_task_wait``),
         # read against the beacon cursors the actor was shown.
         "pending_task_wait": getattr(ctx, "_pending_task_wait", None) or None,
@@ -231,6 +251,9 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "active_model_override", "active_effort_override", "active_use_local_override",
             "active_role_override", "route_wait_on_primary", "primary_route", "_route_facts_pending",
             "route_choice",  # following its role, or the task's own (route_choice)
+            "_lead_episode", "_lead_cause", "_lead_return_from", "_lead_role",  # one departure fact, including an unaccepted return
+            "_owner_model_applied_id",  # only a completed handover survives a checkpoint
+            "_owner_processing_applied_id",  # a tier act the mind was already told of
         )},
         "delivery_candidate": asdict(candidate) if candidate is not None else None,
         "delivery": {key: getattr(ctx, key, None) for key in (
@@ -243,7 +266,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_presence_forced_declaration", "_presence_forced_pending", "_presence_completion_accepted",
             "_presence_selection_seq", "_presence_released", "_presence_delivered", "_presence_covered",
             "_swarm_handoff_attempt", "_task_acceptance_sealed_fence_token", "_task_acceptance_sealed_fence_generation",
-            "_owner_reply_revision", "_owner_message_sent",
+            "_owner_reply_revision", "_owner_message_sent", "_pre_delivery_noticed", "_red_check_noticed", "_subagent_handoff_shown",
         ) if getattr(ctx, key, None) is not None},
         # The block keeps its stored name; the task-acceptance flags it once carried are gone
         # (a pre-fold continuation still has them: ``restore_continuation_state`` ignores them).
@@ -955,15 +978,12 @@ def owner_wait_ended_notice(ctx: Any, checkpoint: dict, reason: str = "timeout",
         f"{stance} — or finish and say what is unresolved.")}
 
 
-def owner_wait_timeout_notice(ctx: Any, checkpoint: dict) -> dict:
-    """The bound's notice under its original name."""
-    return owner_wait_ended_notice(ctx, checkpoint, "timeout")
-
-
 def _wake_description(outcome: str, entries: list[dict]) -> str:
     """What woke the task, for the notice: a hurry is named as what it is."""
     if outcome == "hurry":
         return "an owner hurry request (a request to finish sooner, not an answer)"
+    if outcome == "model":
+        return "my human's change of this work's primary route"
     sources = sorted({str(row.get("source_task_id") or row.get("kind") or "mail") for row in entries})
     return f"task mail from {', '.join(sources)}" if sources else "unconfirmed input"
 
@@ -974,9 +994,9 @@ def _rendered_owner_authority(entries: list[dict]) -> bool:
     the wake by itself. A hurry is owner authority too, but it is applied
     structurally and never rendered — the notice must name it."""
     from ouroboros.loop_messages import owner_authority_kinds
-    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, KIND_HURRY
+    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_MODEL
 
-    return any(kind not in {KIND_FINALIZE_NOW, KIND_HURRY} for kind in owner_authority_kinds(entries))
+    return any(kind not in {KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_MODEL} for kind in owner_authority_kinds(entries))
 
 
 def append_wake_notice(ctx: Any, checkpoint: dict, outcome: Any, messages: list) -> None:
@@ -1050,6 +1070,9 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
         return  # a stop begun since arming reaches the mind before the park; the same request then sleeps
     checkpoint = checkpoint_owner_wait(ctx, messages, trace, usage, round_idx, tool_schemas, seen,
                                        review_binding=review_binding)
+    from ouroboros.working_checkpoint import flush_content_acks
+
+    flush_content_acks(ctx)  # its stored source holds what they acknowledge, as a cold park's does
     if not callable(callback):
         outcome = review_callback(ctx, checkpoint, messages)
         append_wake_notice(ctx, checkpoint, outcome, messages)
@@ -1133,8 +1156,8 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     """Rebind the saved cognition onto the live loop objects (shared by every
     same-ID continuation). Python handles (browser, executors, services) are
     NOT restored: they died with the previous process and stay invalidated."""
-    from ouroboros.loop_delivery import DeliveryCandidate
-
+    from ouroboros.loop_delivery import FRESH_ANSWER_CONTROLS, DeliveryCandidate
+    from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY  # a round's refusal record: this process's only
     from ouroboros.model_wait import adopt_handoff_clock, budget_paused_seconds
     from ouroboros.settings_integrity import restore_cognition
 
@@ -1145,7 +1168,8 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     for key in ("_nanny_metered_progress", "_nanny_delegate_baseline"):
         setattr(ctx, key, (state.get("nanny_activity") or {}).get(key, {}))
     for key, value in (state.get("context_observations") or {}).items():
-        if key in {"_last_context_observation", "_inspected_context_view", "_pending_compaction", "_historical_author_inputs", "_pending_owner_dialogue", *_SEND_OBSERVER_KEYS}:
+        if key in {"_last_context_observation", "_inspected_context_view", "_pending_compaction", "_historical_author_inputs",
+                   "_pending_owner_dialogue", "_mark_changes_since", *_SEND_OBSERVER_KEYS}:
             setattr(ctx, key, value)
     messages[:] = state["messages"]
     # This set is also bound into enable_tools; never replace the closure's object.
@@ -1153,7 +1177,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     if loaded is not None:
         loaded.update(state.get("actor_loaded_tool_names") or ())
     trace.update(state["trace"])
-    usage.update(state["usage"])
+    usage.update({key: value for key, value in state["usage"].items() if key != ROUND_REFUSALS_KEY})
     seen.update(state["seen"])
     ctx._loop_mailbox_seen_ids = seen
     ctx._sleep_interaction_seen = dict(state.get("sleep_interaction_seen") or {})
@@ -1163,6 +1187,8 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     ctx._held_dependencies_order = dict(state.get("held_dependencies_order") or {})
     # A shortened hold view's exact source stays readable to completion (``model_sleep.credit_hold_source``).
     ctx._held_dependency_sources = dict(state.get("held_dependency_sources") or {})
+    ctx._wake_sources = dict(state.get("wake_sources") or {})  # refs survive, with what of them was delivered
+    restore_read_coverage(str(ctx.task_id), state.get("read_coverage"))
     ctx._pending_task_wait = dict(state.get("pending_task_wait") or {}) or None  # a legacy state owes none
     ctx._wait_attention_cursors = cursors_json(state.get("wait_attention_cursors"))
     ctx._owner_directives = state["owner_directives"]
@@ -1194,43 +1220,120 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
 
     ctx.route_choice = restored_choice(ctx, state)  # a saved choice, else the legacy classification (D5)
     ctx._route_binding = None  # the first round compares to the restored acting route (route_choice.round_route)
+    from ouroboros.owner_model import restore_current
+
+    applied = restore_current(ctx, messages)
+    # Only a newer durable owner act moves the saved actor; pending tool choices belong to the next ordinary call.
+    ctx._restored_context_model_role = (ctx.active_role_override if applied else state.get("context_model_role")) or ""
     candidate = state.get("delivery_candidate")
     ctx._delivery_candidate = DeliveryCandidate(**{key: value for key, value in candidate.items()
         if key != "repair_attempted"}) if candidate else None
     if ctx._delivery_candidate is not None:
         value = ctx._delivery_candidate
-        if value.control_episode_seen or value.finalization_control not in {"candidate", "owner_revision_required"}:
+        if value.control_episode_seen or value.finalization_control not in {"candidate", *FRESH_ANSWER_CONTROLS}:
             ctx._delivery_control_required = True
             value.control_episode_seen = True
+
+
+def _conversation_account(ctx: Any, messages: list, role: str, account: Any) -> dict:
+    """The exact account a resumed turn's next send names (``llm_substitution.send_account``): the last answer of this
+    model in the restored messages, else the account its plan was built on; ``{}`` on another transport or none."""
+    from ouroboros.provider_models import parse_claudexor_model, provider_for_model
+
+    model = str(getattr(ctx, "active_model", "") or "")
+    try:
+        if getattr(ctx, "active_use_local", False) or provider_for_model(model) != "claudexor":
+            return {}
+        source, native = parse_claudexor_model(model)
+    except ValueError:
+        return {}
+    from ouroboros.llm_claudexor import cache_key_for_model
+    from ouroboros.llm_substitution import send_account
+
+    return send_account({"source": source, "resolved_model": native}, messages, {
+        "model_role": role, "model_account_override": account, "cache_affinity": cache_key_for_model(model)},
+        plan=getattr(ctx, "context_fit_plan", None))[1]
+
+
+def _continuation_fit_route(ctx: Any, state: dict, messages: list, *, initial_effort: str | None = None) -> tuple:
+    """Preview the next ordinary send through the existing route owners, on private copies.
+
+    Start restores the saved choice; rebind already has it. Both read newer owner acts
+    and following slots as the loop does, then pending tool choices. Nothing acknowledges
+    an act, consumes an override, changes an account pin or moves the saved budget tail.
+    """
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from ouroboros import owner_model, route_choice
+    from ouroboros.loop_routes import pending_runtime_route
+    from ouroboros.model_slots import task_model_binding
+
+    preview = SimpleNamespace(**vars(ctx))
+    if initial_effort is not None:
+        preview.__dict__.update(deepcopy(state.get("route") or {}))
+    preview.task_metadata = deepcopy(getattr(ctx, "task_metadata", {}) or {})
+    preview.primary_route = deepcopy(getattr(preview, "primary_route", None))
+    waiter = getattr(ctx, "model_wait_context", None)
+    preview.model_wait_context = SimpleNamespace(overrides=deepcopy(getattr(waiter, "overrides", {}) or {}))
+    if initial_effort is not None:
+        preview.route_choice = route_choice.restored_choice(preview, state)
+        preview._route_binding = None
+    owner_model.restore_current(preview)
+    acting = preview.active_model, preview.active_use_local
+    if current := route_choice.round_route(preview, None, acting):
+        preview.active_model_override, preview.active_use_local_override = current
+    preview.active_model, preview.active_use_local, effort = pending_runtime_route(preview, *acting,
+        str(getattr(preview, "active_effort", None) or initial_effort or ""))
+    role, account = task_model_binding(
+        {"model_role": getattr(preview, "active_role_override", None) or state.get("context_model_role"),
+         "task_metadata": preview.task_metadata}, context_fit_plan=getattr(preview, "context_fit_plan", None),
+        overrides=preview.model_wait_context.overrides)
+    return {"model": preview.active_model, "use_local_model": preview.active_use_local,
+            "model_role": role, "task_metadata": preview.task_metadata, "credential_profile_id": account,
+            "model_route": _conversation_account(preview, messages, role, account), "model_route_preferred": True}, effort
+
+
+def context_start_route(ctx: Any, task: dict, state: dict, initial_effort: str, *, resolver: Any = None) -> tuple:
+    """The first fit asks about the route the restored loop will send, without changing its task."""
+    from ouroboros.context_fit import RouteQuestion
+
+    if resolver is not None:  # realtime owns its route question and forbids cold recovery
+        return resolver, initial_effort
+    if not state:
+        return RouteQuestion(task), initial_effort
+    route, effort = _continuation_fit_route(ctx, state, state["messages"], initial_effort=initial_effort)
+    return RouteQuestion(task, route_fields=route), effort
 
 
 def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     """Rebind the restored route's context-fit plan; returns ``(plan, mode)``.
 
     The actor's captured owner choice survives restart, separately from the physically
-    achieved mode. Legacy sources without that choice keep the previous fallback."""
+    achieved mode. Legacy sources without that choice keep the previous fallback.
+    The plan binds the conversation's account (``_conversation_account``): its fresh record answers without a question
+    to the engine; without one the route's own question is asked once, and the rebind after tool reconciliation reuses
+    that answer. Dates are read anew; an account the conversation names without a usable record is asked about."""
     from ouroboros.loop import _rebind_context_fit_plan, get_context_mode
     from ouroboros.memory_floor import MODES
-    from ouroboros.model_slots import task_model_binding
     from ouroboros.continuation_tools import reconcile_restored_tools
+    from ouroboros.context_fit import restored_start
+    from ouroboros.context_timing import timed
 
     ctx = tools._ctx
-    model_wait = getattr(ctx, "model_wait_context", None)
-    role, account = task_model_binding(
-        {"model_role": state.get("context_model_role"), "task_metadata": ctx.task_metadata},
-        context_fit_plan=ctx.context_fit_plan,
-        overrides=model_wait.overrides if model_wait is not None else None,
-    )
+    ctx.context_fit_plan = restored_start(ctx.context_fit_plan, state.get("context_start"))  # before every rebind
+    selected, effort = _continuation_fit_route(ctx, state, messages)
     owner, ran = get_context_mode(), getattr(ctx, "active_context_mode", None)
-    route = dict(model=ctx.active_model,
-        use_local=ctx.active_use_local, preferred_mode=owner,
+    route = dict(model=selected["model"],
+        use_local=selected["use_local_model"], preferred_mode=owner, reasoning_effort=effort,
         tool_schemas=state["tool_schemas"],
-        model_role=role, model_route={}, credential_profile_id=account,
+        model_role=selected["model_role"], model_route=selected["model_route"], credential_profile_id=selected["credential_profile_id"],
+        route_is_preference=True,
     )
     plan, mode = _rebind_context_fit_plan(ctx.context_fit_plan, tools, messages, **route,
         start_mode=ran if owner in MODES and ran in MODES[MODES.index(owner):] else None)
-    if reconcile_restored_tools(tools, state, messages, mode):
-        plan, mode = _rebind_context_fit_plan(plan, tools, messages, **route, start_mode=mode)
+    if timed("restore.tools", reconcile_restored_tools, tools, state, messages, mode):
+        plan, mode = _rebind_context_fit_plan(plan, tools, messages, start_mode=mode,  # the first answer, never a second question
+                                              **{**route, "model_route": getattr(plan, "model_route", {})})
         sanction_rewrite(ctx, "continuation_restored", scope="tools")
     # This process captured its context again: the restored system row names that, not a route change.
     sanction_rewrite(ctx, "continuation_restored", scope="system")

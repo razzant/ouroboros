@@ -15,21 +15,18 @@ def _apply(evt: dict) -> dict:
     action, nonce = evt.get("action"), str(evt.get("action_nonce") or "")
     if not actor or not nonce:
         return {"ok": False, "error": "control_call_identity_missing"}
-    from supervisor import queue
-    from ouroboros.work_diagnostics import control_actor_reason
-
-    def current_source(source_id):
-        import copy
-        with queue._queue_lock:
-            meta = queue.RUNNING.get(source_id)
-            if meta is None:
-                task = next((t for t in queue.PENDING if t.get("id") == source_id), None)
-                meta = {"task": task, "attempt": task.get("_attempt")} if task else None
-            return copy.deepcopy(meta)
-    if refusal := control_actor_reason(queue.DRIVE_ROOT, actor, task_id, current_source=current_source):
-        return {"ok": False, "error": refusal}
     if action == "pause_task" and actor == task_id:
         return {"ok": False, "error": "self_pause_refused"}
+    if action == "switch_model":
+        from ouroboros.owner_model import request, ModelActRefused
+
+        if actor != task_id:
+            return {"ok": False, "error": "model_actor_mismatch"}
+        try:
+            return request(task_id, {"request_id": nonce, "action": "set", "model": evt["model"],
+                                     "use_local": bool(evt.get("use_local")), "cited": evt["cited"]}, source="owner_words")
+        except ModelActRefused as exc:
+            return {"ok": False, "error": exc.code}
     reason = str(evt.get("reason") or "")
     named = evt.get("accept_unknown") if action == "resume_task" and isinstance(evt.get("accept_unknown"), list) else ()
     with mind_control(actor, reason), accepting_unknown(named, reason):

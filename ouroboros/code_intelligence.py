@@ -1,11 +1,7 @@
-"""Internal deterministic code inventory v5.
-
-No embeddings, no LSP, no SQLite, and no raw source cache. This is a compact
-structural projection used by digest/review context builders and read-only
-code-query tools. The persisted JSON contains local structural facts only.
-Cross-file import candidates and name occurrences are joined against current
-source at query time; no cached name match is a semantic binding. Full source
-buffers are never cached.
+"""Deterministic code inventory v5 for digest/review context and read-only queries.
+Persisted JSON holds local structural facts, never source buffers; no embeddings, LSP or SQLite.
+Cross-file import candidates and occurrences join against current source at query time;
+a cached name match is never a semantic binding.
 """
 
 from __future__ import annotations
@@ -24,6 +20,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Dict, Iterable, List
 
+from ouroboros import work_domain
 from ouroboros.code_import_candidates import import_specs, is_import_node
 from ouroboros.utils import atomic_write_json, utc_now_iso
 
@@ -51,8 +48,7 @@ _SENSITIVE_EXTENSIONS = {".json", ".env", ".key", ".pem", ".p12", ".pfx", ".crt"
 _MAX_INDEX_FILE_BYTES = 2_000_000
 _MAX_ENUMERATION_PATHS = 20_000
 _MAX_ENUMERATION_SECONDS = 45.0
-# Bound optional local import evidence independently of source/file limits.
-# Overflow requests a source parse, never a silently truncated import answer.
+# Bound optional imports separately from source/files; overflow requests a source parse, never a truncated answer.
 _MAX_LOCAL_IMPORT_FACTS = 2000
 _MAX_LOCAL_IMPORT_CHARS = 128_000
 
@@ -136,7 +132,7 @@ class CodeInventory:
 
 
 def inventory_cache_path(repo_root: pathlib.Path, drive_root: pathlib.Path) -> pathlib.Path:
-    root = pathlib.Path(repo_root).resolve(strict=False)
+    root = work_domain.settle(repo_root)
     repo_key = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
     return pathlib.Path(drive_root) / "state" / "code_intel" / repo_key / "inventory.json"
 
@@ -252,7 +248,7 @@ def load_cached_inventory(repo_root: pathlib.Path, drive_root: pathlib.Path) -> 
                 else dict(Counter(file.disposition for file in files)))
     return CodeInventory(
         schema_version=CODE_INTELLIGENCE_SCHEMA_VERSION,
-        repo_root=str(raw.get("repo_root") or pathlib.Path(repo_root).resolve(strict=False)),
+        repo_root=str(raw.get("repo_root") or work_domain.settle(repo_root)),
         git_head=str(raw.get("git_head") or ""),
         created_at=str(raw.get("created_at") or ""),
         files=files,
@@ -264,7 +260,7 @@ def load_cached_inventory(repo_root: pathlib.Path, drive_root: pathlib.Path) -> 
 
 def _git_head(repo_root: pathlib.Path) -> str:
     try:
-        proc = subprocess.run(
+        proc = work_domain.run(
             ["git", "rev-parse", "HEAD"],
             cwd=str(repo_root),
             capture_output=True,
@@ -272,6 +268,8 @@ def _git_head(repo_root: pathlib.Path) -> str:
             timeout=5,
         )
         return proc.stdout.strip() if proc.returncode == 0 else ""
+    except work_domain.WorkDomainUnsettled:
+        raise
     except Exception:
         return ""
 
@@ -284,13 +282,11 @@ def _enumerate_files(
 ) -> tuple[List[pathlib.Path], List[str], List[str]]:
     """Enumerate Git-visible files, expanding embedded repositories on demand.
 
-    Each nested Git root supplies its own ignore rules. Visibility is checked
-    before entering it; directory symlinks are never followed. The fallback
-    filesystem walk has no Git ignore semantics and reports that limitation.
-    Limits bound visited entries/time, not the number of operation matches.
-    A scope changes the initial walk root so unrelated entries spend no budget.
+    Nested roots supply their own ignores, with visibility checked before entry and no directory-link traversal.
+    Filesystem fallback discloses its missing ignores. Bounds count visited entries/time, not matches;
+    scope selects the initial root so unrelated entries spend no budget.
     """
-    root = pathlib.Path(repo_root).resolve(strict=False)
+    root = work_domain.settle(repo_root)
     selected = root / pathlib.PurePosixPath(str(scope or "").replace("\\", "/"))
     try:
         selected_parts = selected.relative_to(root).parts
@@ -332,14 +328,14 @@ def _enumerate_files(
     def add(path: pathlib.Path) -> None:
         if not visible(path):
             return
-        if path.is_symlink():
+        if (work_domain.kind(path) == "link"):
             # File symlinks are classified by _file_fact before any source read.
             # In particular, no traversal may escape through a directory link.
-            if path.is_dir():
+            if work_domain.is_dir(path):
                 limits.add("directory_symlinks_not_followed")
             else:
                 paths.add(path)
-        elif path.is_dir():
+        elif work_domain.is_dir(path):
             pending.append((path, ""))
         else:
             paths.add(path)
@@ -355,13 +351,13 @@ def _enumerate_files(
             directory /= part
             if not permitted(directory):
                 return [], [], []
-            if directory.is_symlink() and (directory != selected or directory.is_dir()):
+            if (work_domain.kind(directory) == "link") and (directory != selected or work_domain.is_dir(directory)):
                 return [], [], ["directory_symlinks_not_followed"]
-            if directory.is_dir() and (directory / ".git").exists():
+            if work_domain.is_dir(directory) and work_domain.exists(directory / ".git"):
                 nested.add(directory.relative_to(root).as_posix())
-    if selected.is_dir():
+    if work_domain.is_dir(selected):
         pending.append((selected, ""))
-    elif selected.is_file() or selected.is_symlink():
+    elif work_domain.is_file(selected) or work_domain.kind(selected) == "link":
         pending.append((selected.parent, selected.name))
     else:
         return [], sorted(nested), []
@@ -371,17 +367,19 @@ def _enumerate_files(
         if directory in seen:
             continue
         seen.add(directory)
-        if directory != root and (directory / ".git").exists():
+        if directory != root and work_domain.exists(directory / ".git"):
             nested.add(directory.relative_to(root).as_posix())
         try:
             command = ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
             if filename:
                 command.extend(["--", ":(literal)" + filename])
-            proc = subprocess.run(
+            proc = work_domain.run(
                 command,
                 cwd=str(directory), capture_output=True,
                 timeout=max(0.01, min(10.0, deadline - time.monotonic())),
             )
+        except work_domain.WorkDomainUnsettled:
+            raise
         except (OSError, subprocess.TimeoutExpired):
             proc = None
         if proc is not None and proc.returncode == 0:
@@ -398,7 +396,8 @@ def _enumerate_files(
             continue
         # os.walk does not follow directory symlinks. Prune before descending,
         # including caller-invisible roots and nested repos with their own rules.
-        for dirpath, dirnames, filenames in os.walk(directory, followlinks=False):
+        for dirpath, dirnames, filenames in (work_domain.walk(directory) if work_domain.is_work(directory)
+                                           else os.walk(directory, followlinks=False)):
             if not budget():
                 break
             current = pathlib.Path(dirpath)
@@ -409,9 +408,9 @@ def _enumerate_files(
                 child = current / name
                 if not visible(child):
                     continue
-                if child.is_symlink():
+                if work_domain.kind(child) == "link":
                     limits.add("directory_symlinks_not_followed")
-                elif (child / ".git").exists():
+                elif work_domain.exists(child / ".git"):
                     pending.append((child, ""))
                 else:
                     descend.append(name)
@@ -682,17 +681,17 @@ def _path_fact(repo_root: pathlib.Path, path: pathlib.Path) -> FileFact:
         rel = path.relative_to(repo_root).as_posix()
     except ValueError:
         try:
-            rel = path.resolve(strict=False).relative_to(repo_root).as_posix()
+            rel = work_domain.settle(path).relative_to(repo_root).as_posix()
         except ValueError:
             return FileFact(str(path), "", 0, _language(path), 0, disposition="path_escape")
     try:
-        path.resolve(strict=False).relative_to(repo_root.resolve(strict=False))
+        work_domain.settle(path).relative_to(work_domain.settle(repo_root))
     except (OSError, ValueError):
         return FileFact(rel, "", 0, _language(path), 0, disposition="path_escape")
     if _is_sensitive_inventory_path(rel):
         return FileFact(rel, "", 0, _language(path), 0, disposition="sensitive")
     try:
-        stat_size = path.stat().st_size
+        stat_size = (work_domain.lstat(path) if work_domain.is_work(path) else path.stat()).st_size
     except OSError as exc:
         return FileFact(rel, "", 0, _language(path), 0, disposition=f"read_error:{exc}")
     disposition = "oversized" if stat_size > _MAX_INDEX_FILE_BYTES else "not_parsed"
@@ -705,8 +704,9 @@ def _file_fact(repo_root: pathlib.Path, path: pathlib.Path) -> FileFact:
         return admitted
     rel = admitted.path
     try:
-        with path.open("rb") as source:
-            raw = source.read(_MAX_INDEX_FILE_BYTES + 1)
+        raw = work_domain.read_bytes(path, limit=_MAX_INDEX_FILE_BYTES + 1)
+    except work_domain.WorkDomainUnsettled:
+        raise
     except OSError as exc:
         return FileFact(rel, "", 0, _language(path), 0, disposition=f"read_error:{exc}")
     if len(raw) > _MAX_INDEX_FILE_BYTES:
@@ -787,14 +787,14 @@ def _is_sensitive_inventory_path(rel_path: str) -> bool:
 
 def _is_excluded_inventory_path(path: pathlib.Path, excluded_paths: list[pathlib.Path]) -> bool:
     try:
-        resolved = pathlib.Path(path).resolve(strict=False)
+        resolved = work_domain.settle(path)
     except Exception:
         return False
     for excluded in excluded_paths:
         if resolved == excluded:
             return True
         try:
-            if excluded.is_dir():
+            if work_domain.is_dir(excluded):
                 resolved.relative_to(excluded)
                 return True
         except Exception:
@@ -815,12 +815,12 @@ def build_code_inventory(
 ) -> CodeInventory:
     """Current inventory facts; ``parse=False`` lists admitted paths only, never cached. ``name`` leaves
     files whose current bytes cannot hold that outline name unparsed (``name_absent``), likewise uncached."""
-    root = pathlib.Path(repo_root).resolve(strict=False)
+    root = work_domain.settle(repo_root)
     deadline = time.monotonic() + _MAX_ENUMERATION_SECONDS
     cached = load_cached_inventory(root, drive_root) if drive_root is not None and parse else None
     cached_by_path = {file.path: file for file in (cached.files if cached else [])}
     excluded_paths = [
-        pathlib.Path(path).expanduser().resolve(strict=False)
+        work_domain.settle(pathlib.Path(path).expanduser())
         for path in (exclude_paths or [])
     ]
     filtered = pathlib.PurePosixPath(str(scope or "").replace("\\", "/")) != pathlib.PurePosixPath(".")
@@ -840,17 +840,17 @@ def build_code_inventory(
         if time.monotonic() >= deadline:
             enumeration_limits.append(f"inventory_time_limit:{_MAX_ENUMERATION_SECONDS:g}s")
             break
-        if not path.is_file() and not path.is_symlink():
+        if not work_domain.is_file(path) and not (work_domain.kind(path) == "link"):
             continue
         rel = path.relative_to(root).as_posix()
-        # The admission rule (containment, name, size) precedes cache validation:
-        # an oversized cached file must never trigger an unbounded hash read.
+        # Admit containment/name/size before cache validation, so an oversized cache entry never forces a hash read.
         raw, cached_file = None, cached_by_path.get(rel)
         admitted = _path_fact(root, path) if cached_file is not None or (parse and name) else None
         if admitted is not None and admitted.disposition == "not_parsed":
             try:
-                with path.open("rb") as source:
-                    raw = source.read(_MAX_INDEX_FILE_BYTES + 1)
+                raw = work_domain.read_bytes(path, limit=_MAX_INDEX_FILE_BYTES + 1)
+            except work_domain.WorkDomainUnsettled:
+                raise
             except OSError:
                 pass
         if (cached_file is not None and raw is not None

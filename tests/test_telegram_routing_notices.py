@@ -3,7 +3,8 @@
 The real producers (the steer handler, the promote publication boundary, both receipt writers)
 publish through the real message bus into the real Telegram outbound handler; only the Bot API
 wire is a recording fake. The ACK is the normal carrier and replies to the owner's own message
-through the exact message map; a refusal's paired System row stays in the web and is skipped
+through the exact message map; an ACK that answers no chat row never carries the notice, its
+System row does; a host act's System row beside a carrier ACK stays in the web and is skipped
 here only when it says the ACK carried it; nothing is deduplicated by text or by id.
 """
 from __future__ import annotations
@@ -184,43 +185,37 @@ def test_a_refused_steer_of_an_owner_message_is_one_line_replying_to_that_messag
     assert "reply_to_message_id" not in phone.sent()[-1]
 
 
-@pytest.mark.parametrize("reason", ["subagent_target", "cancel_pending", "cancel_in_transaction"])
-def test_an_unlabelled_owner_act_is_told_once_while_the_web_keeps_its_system_row(phone, monkeypatch, reason):
-    """A synthetic receipt id annotates no message: the ACK still carries the cause to the phone and the
-    paired System row, which says so, stays for the web. That row replies to no owner row, never to the
-    target task's own origin."""
-    from ouroboros import dialogue_store
-    from ouroboros.chat_references import origin_reply
-    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX, build_owner_message_ref
+@pytest.mark.parametrize("reason", _EVERY_REFUSAL)
+def test_a_note_only_act_of_the_mind_tells_the_owner_nothing_while_an_owner_quote_is_told(phone, monkeypatch, reason):
+    """A ``tell_task`` note without an owner quote wears a synthetic receipt id: its words are the teller's own
+    (D7), so its refusal reaches the teller's tool result and the durable receipt, and nothing else: no phone line,
+    no ACK, no System row for the web, early or late, whatever turn spoke it (05–08.11: seven such rows stood in
+    the owner's rooms as "Task · Not delivered" for notes of the mind to works that had finished). The same
+    refusal of an act carrying my human's quoted words is told once, as a reply to that message."""
+    from ouroboros.chat_references import origin_reply, reference_from_row
+    from ouroboros.owner_relay import owner_quote
+    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX, build_owner_message_ref, latest_chat_annotations
     from ouroboros.task_results import write_task_result
 
     old = phone.owner(40, "Почини парсер")
-    write_task_result(phone.data, "t1", "running", origin_message_ref=build_owner_message_ref(
-        chat_id=42, client_message_id=old["client_message_id"], ts=old["ts"], text=old["text"]))
-    assert origin_reply(phone.data, "t1")["address"]  # what a task-keyed row would otherwise borrow
+    if reason != "target_finished":
+        write_task_result(phone.data, "t1", "running", origin_message_ref=build_owner_message_ref(
+            chat_id=42, client_message_id=old["client_message_id"], ts=old["ts"], text=old["text"]))
+        assert origin_reply(phone.data, "t1")["address"]  # what a task-keyed row would otherwise borrow
     stated = _refuse(reason, phone, monkeypatch)
     _steer(phone, AGENT_RECEIPT_ID_PREFIX + "relay-1")
+    assert phone.sent() == [] and phone.acks() == [] and phone.rows() == []
+    annotation = latest_chat_annotations(phone.data).get(AGENT_RECEIPT_ID_PREFIX + "relay-1")
+    assert annotation and annotation["reason"] == stated  # the receipt rail keeps the refusal for the teller
+
+    row = phone.owner(50)
+    stated = _refuse(reason, phone, monkeypatch)
+    _steer(phone, row["client_message_id"], token="tok-2", quotes=[owner_quote(phone.data, row)])
     [sent] = phone.sent()
-    assert sent["text"] == f"Parser · {_cause(stated)}" and "reply_to_message_id" not in sent
+    assert sent["text"] == f"{'Task' if reason == 'target_unknown' else 'Parser'} · {_cause(stated)}"
+    assert sent["reply_to_message_id"] == 50
     [ack] = phone.acks()
-    assert ack["routing_notice_carrier"] == "routing_ack" and "reply_to" not in ack
-    [paired] = phone.rows()
-    assert (paired["system_type"], paired["routing_notice_carrier"], paired["reply_to"]) == (
-        "steer_not_delivered", "routing_ack", {})
-    stored = [entry.row for entry in dialogue_store.newest(phone.data, "chat", limit=5)
-              if entry.row.get("type") == "steer_not_delivered"]
-    assert len(stored) == 1 and "reply_to" not in stored[0]
-
-
-@pytest.mark.parametrize("reason", ["target_closed", "acceptance_fence_sealed", "mailbox_write_failed"])
-def test_a_late_refusal_of_an_unlabelled_act_still_reaches_the_phone(phone, monkeypatch, reason):
-    """A refusal found inside the delivery transaction writes no System row while its ACK is handed over:
-    that ACK is the only carrier."""
-    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
-
-    _refuse(reason, phone, monkeypatch)
-    _steer(phone, AGENT_RECEIPT_ID_PREFIX + "relay-2")
-    assert [data["text"] for data in phone.sent()] == [f"Parser · {_cause(reason)}"]
+    assert ack["reply_to"] == reference_from_row(row) and ack["routing_notice_carrier"] == "routing_ack"
     assert phone.rows() == []
 
 
@@ -236,21 +231,6 @@ def _no_ack(failure, phone, monkeypatch):
         def refuse(*_a, **_k):
             raise RuntimeError("bus closed")
         monkeypatch.setattr(phone.bridge, "send_routing_ack", refuse)
-
-
-@pytest.mark.parametrize("failure", ["append_false", "append_raises", "ack_raises"])
-def test_without_a_handed_over_ack_the_paired_system_row_carries_the_notice(phone, monkeypatch, failure):
-    """Fail closed for the ACK, never for the owner: no ACK goes out without its durable row, so the
-    paired System row selects itself as carrier and the phone shows it. Nothing claims the ACK said it."""
-    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
-
-    _refuse("subagent_target", phone, monkeypatch)
-    _no_ack(failure, phone, monkeypatch)
-    _steer(phone, AGENT_RECEIPT_ID_PREFIX + "relay-3")
-    assert phone.acks() == []
-    [paired] = phone.rows()
-    assert paired["routing_notice_carrier"] == "system"
-    assert [data["text"] for data in phone.sent()] == [f"Parser · {_cause('subagent_target')}"]
 
 
 def _free(lock) -> bool:
@@ -270,15 +250,15 @@ def _free(lock) -> bool:
 
 @pytest.mark.parametrize("failure", ["append_false", "append_raises", "ack_raises"])
 @pytest.mark.parametrize("reason", _EVERY_REFUSAL)
-@pytest.mark.parametrize("act", ["owner_message", "synthetic"])
-def test_every_refusal_without_a_handed_over_ack_is_told_once_by_its_system_row(phone, monkeypatch, act, reason, failure):
-    """Without a handed-over ACK the receipt selects the System row, and every owner refusal publishes it: early
-    or found inside the delivery transaction, labelled or not, once, after the admission locks are released.
-    It answers the act's own owner message, or explicitly none, never the target task's origin; the durable
-    receipt stays as its writer left it."""
+def test_every_refusal_without_a_handed_over_ack_is_told_once_by_its_system_row(phone, monkeypatch, reason, failure):
+    """Fail closed for the ACK, never for the owner: without a handed-over ACK the receipt selects the System row,
+    and every refusal of an act carrying my human's message publishes it, early or found inside the delivery
+    transaction, once, after the admission locks are released. It answers the act's own owner message, never the
+    target task's origin; the durable receipt stays as its writer left it. A note of the mind with its synthetic id
+    is told nothing (the note-only test)."""
     from ouroboros import dialogue_store
     from ouroboros.chat_references import origin_reply, reference_from_row
-    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX, build_owner_message_ref, latest_chat_annotations
+    from ouroboros.project_dialogue import build_owner_message_ref, latest_chat_annotations
     from ouroboros.task_results import write_task_result
     from supervisor import queue
 
@@ -295,15 +275,15 @@ def test_every_refusal_without_a_handed_over_ack_is_told_once_by_its_system_row(
         locks.append(get_direct_chat_agent("t1")._owner_message_admission_lock)
     send, free = phone.ctx.send_with_budget, []
     phone.ctx.send_with_budget = lambda *args, **kwargs: free.append(all(map(_free, locks))) or send(*args, **kwargs)
-    client_message_id = row["client_message_id"] if act == "owner_message" else AGENT_RECEIPT_ID_PREFIX + "relay-5"
+    client_message_id = row["client_message_id"]
     _steer(phone, client_message_id)
     assert phone.acks() == [] and free == [True]
     [notice] = phone.rows()
     assert (notice["system_type"], notice["routing_notice_carrier"]) == ("steer_not_delivered", "system")
-    assert notice["reply_to"] == (reference_from_row(row) if act == "owner_message" else {})
+    assert notice["reply_to"] == reference_from_row(row)
     [sent] = phone.sent()
     assert sent["text"] == notice["content"] == f"{'Task' if reason == 'target_unknown' else 'Parser'} · {_cause(stated)}"
-    assert sent.get("reply_to_message_id") == (50 if act == "owner_message" else None)
+    assert sent.get("reply_to_message_id") == 50
     [stored] = [entry.row for entry in dialogue_store.newest(phone.data, "chat", limit=5)
                 if entry.row.get("type") == "steer_not_delivered"]
     assert stored.get("reply_to", {}).get("address") == notice["reply_to"].get("address")
@@ -353,17 +333,35 @@ def test_an_accepted_act_stays_quiet_with_or_without_its_ack(phone, monkeypatch,
     assert [frame for frame in phone.rows() if frame.get("system_type") == "steer_not_delivered"] == []
 
 
-def test_a_paired_row_that_cannot_be_written_leaves_the_cause_with_the_ack(phone, monkeypatch):
-    """The ACK is handed over before its paired row: a row lost on the way never takes the cause with it."""
+@pytest.mark.parametrize("reason", _EVERY_REFUSAL)
+def test_an_ack_that_answers_no_chat_row_never_carries_the_notice(phone, monkeypatch, reason):
+    """My human's words quoted from a row the host holds without a client id ride a synthetic receipt id
+    (``control_relay._tell_task``): their ACK annotates no chat row, so the web would show it nowhere. Such an ACK
+    names the System row the carrier: every refusal, early or found inside the delivery transaction, is ONE row the
+    web shows and the phone sends once, and the ACK adds no line (a late refusal used to leave the web with nothing).
+    The same refusal of a quote whose row has its id is the ACK's own line, replying to that message, and no row."""
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.owner_relay import owner_quote
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
 
-    def lost(*_a, **_k):
-        raise RuntimeError("chat store unavailable")
+    label = "Task" if reason == "target_unknown" else "Parser"
+    quote = owner_quote(phone.data, phone.owner(40, "Почини парсер"))
+    quote["source"]["client_message_id"] = ""  # an owner row the host holds without a client id
+    stated = _refuse(reason, phone, monkeypatch)
+    _steer(phone, AGENT_RECEIPT_ID_PREFIX + "relay-4", quotes=[quote])
+    [ack] = phone.acks()
+    assert ack["routing_notice_carrier"] == "system" and "reply_to" not in ack
+    [row] = phone.rows()
+    assert (row["system_type"], row["routing_notice_carrier"]) == ("steer_not_delivered", "system")
+    assert [data["text"] for data in phone.sent()] == [row["content"]] == [f"{label} · {_cause(stated)}"]
 
-    phone.ctx.send_with_budget = lost
-    _refuse("target_unknown", phone, monkeypatch)
-    _steer(phone, AGENT_RECEIPT_ID_PREFIX + "relay-4")
-    assert [data["text"] for data in phone.sent()] == [f"Task · {_cause('target_unknown')}"]
+    labelled = phone.owner(50)
+    stated = _refuse(reason, phone, monkeypatch)
+    _steer(phone, labelled["client_message_id"], token="tok-2", quotes=[owner_quote(phone.data, labelled)])
+    ack = phone.acks()[-1]
+    assert (ack["routing_notice_carrier"], ack["reply_to"]) == ("routing_ack", reference_from_row(labelled))
+    assert len(phone.rows()) == 1 and len(phone.sent()) == 2
+    assert (phone.sent()[-1]["text"], phone.sent()[-1]["reply_to_message_id"]) == (f"{label} · {_cause(stated)}", 50)
 
 
 def test_two_refused_acts_of_one_owner_message_are_two_notices(phone, monkeypatch):
@@ -447,31 +445,36 @@ def _host_promote(row, *, token="tok-pdf"):
                 chat_id=42, client_message_id=row["client_message_id"], ts=row["ts"], text=row["text"])}
 
 
-@pytest.mark.parametrize("failure", [None, "append_false", "ack_raises"])
+@pytest.mark.parametrize("failure", [None, "append_false", "ack_raises", "no_message_id"])
 def test_a_refused_host_promote_is_told_once_and_a_replay_tells_nothing(phone, monkeypatch, failure):
     """A Swarm, skill-card or picker promote has its typed System row in the owner's chat. The phone gets
-    the ACK's line, replying to his message, and skips that row; without a handed-over ACK the row is the
-    line. The same event again is a replay: the existing guard publishes nothing a second time."""
+    the ACK's line, replying to his message, and skips that row; without a handed-over ACK, or with one that
+    answers no chat row (an act wearing no message id), the row is the line. The same event again is a replay:
+    the existing guard publishes nothing a second time."""
     from supervisor.events_project_routing import _handle_promote_chat_to_task
 
     monkeypatch.setattr("supervisor.workers._worker_pool_execution_state",
                         lambda *_a, **_k: {"available": False, "disabled_reason": "paused"})
     row = phone.owner(50, "Запусти «Экспорт PDF» отдельным проектом и начни с шаблона страницы")
-    if failure:
+    evt = _host_promote(row)
+    if failure == "no_message_id":
+        evt["client_message_id"] = ""  # its source reference still names his message
+    elif failure:
         _no_ack(failure, phone, monkeypatch)
-    outcome = _handle_promote_chat_to_task(_host_promote(row), phone.ctx)
+    outcome = _handle_promote_chat_to_task(evt, phone.ctx)
     assert outcome["reason"] == "worker_pool_unavailable" and "_routing_notice_carrier" not in outcome
-    [paired] = phone.rows()
-    assert paired["system_type"] == "task_not_started" and paired["reply_to"]["address"]
+    [notice] = phone.rows()
+    assert notice["system_type"] == "task_not_started" and notice["reply_to"]["address"]
     [sent] = phone.sent()
     assert sent["text"].endswith(" · Not started: no worker is available right now")
+    assert sent["reply_to_message_id"] == 50
     if failure is None:
-        assert paired["routing_notice_carrier"] == "routing_ack" and len(phone.acks()) == 1
-        assert sent["reply_to_message_id"] == 50
+        assert notice["routing_notice_carrier"] == "routing_ack" and len(phone.acks()) == 1
     else:
-        assert paired["routing_notice_carrier"] == "system" and phone.acks() == []
-        assert sent["text"] == paired["content"] and sent["reply_to_message_id"] == 50
-    replay = _handle_promote_chat_to_task(_host_promote(row), phone.ctx)
+        assert notice["routing_notice_carrier"] == "system" and sent["text"] == notice["content"]
+        named = ["system"] if failure == "no_message_id" else []  # the ACK that answers no chat row names the row
+        assert [ack["routing_notice_carrier"] for ack in phone.acks()] == named
+    replay = _handle_promote_chat_to_task(evt, phone.ctx)
     assert replay.get("replayed") is True and len(phone.sent()) == 1 and len(phone.rows()) == 1
 
 

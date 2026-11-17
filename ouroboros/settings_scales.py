@@ -193,8 +193,9 @@ def resolve_effort(task_type: str) -> str:
 PROMPT_CACHE_TTL_SCALE: tuple[str, ...] = ("default", "5m", "1h")
 
 
-def resolve_prompt_cache_ttl() -> str:
-    """The owner-configured global prompt-cache TTL ('default' | '5m' | '1h').
+def resolve_prompt_cache_ttl(stored: Any = None) -> str:
+    """The owner-configured global prompt-cache TTL ('default' | '5m' | '1h'); ``stored`` is a settings document's
+    own value, read by the same rule where a document and not the runtime is asked (the model catalog).
 
     Validated like ``resolve_effort``: an unknown value falls back to the shipped default.
     Consumed ONLY by the finalizer (``llm.LLMClient._normalize_payload_cache_ttl``), by
@@ -204,12 +205,11 @@ def resolve_prompt_cache_ttl() -> str:
     (payload-carrying sites use the finalizer's applied TTL) — never by per-builder marking
     sites (docs/DEVELOPMENT.md cache-friendliness invariant)."""
     default = str(SETTINGS_DEFAULTS["OUROBOROS_PROMPT_CACHE_TTL"])
-    raw = str(runtime_setting("OUROBOROS_PROMPT_CACHE_TTL", default) or "").strip().lower()
+    raw = str((runtime_setting("OUROBOROS_PROMPT_CACHE_TTL", default) if stored is None else stored) or "").strip().lower()
     return raw if raw in PROMPT_CACHE_TTL_SCALE else default
 
 
-# Runtime mode and review enforcement are separate axes.  ``cyber_pro`` is the
-# owner-selected high-power access level; it remains an ordinary member of the
+# ``cyber_pro`` is the owner-selected high-power access level; it remains an ordinary member of the
 # same closed scale so every consumer shares one vocabulary and rank.
 VALID_RUNTIME_MODES = ("light", "advanced", "pro", "cyber_pro")
 
@@ -260,6 +260,8 @@ IMMEDIATE_SETTINGS = frozenset({
     # model_concurrency._cap() reads the settings document at every physical call in every
     # process, so a saved cap reaches running work at its next call, not at the next task.
     "OUROBOROS_MODEL_MAX_CONCURRENCY",
+    # The owner's cap on acting tasks: the supervisor reads it on every assignment pass.
+    "OUROBOROS_MAX_WORKERS",
     "GITHUB_TOKEN",
     "GITHUB_REPO",
     "OUROBOROS_UPDATE_CHANNEL",
@@ -273,7 +275,6 @@ IMMEDIATE_SETTINGS = frozenset({
 })
 
 RESTART_REQUIRED_SETTINGS = frozenset({
-    "OUROBOROS_MAX_WORKERS",
     "OUROBOROS_SERVER_HOST",
     # The host-service port is bound once at server startup.
     "OUROBOROS_HOST_SERVICE_PORT",
@@ -292,6 +293,36 @@ RESTART_REQUIRED_SETTINGS = frozenset({
     # deliberately NOT here: the alarm clock reads them at each decision
     # (consciousness.tick / set_next_wakeup), so a save applies without a restart.
 })
+
+
+# Presentation only: these getters run in the clock, outside an actor snapshot. A launched
+# wake keeps its admission facts; bounds apply when scheduling again, not to an existing alarm.
+CONSCIOUSNESS_CLOCK_SETTINGS = frozenset({
+    "OUROBOROS_CONSCIOUSNESS_AUTONOMY", "OUROBOROS_CONSCIOUSNESS_DAILY_USD",
+    "OUROBOROS_CONSCIOUSNESS_MAX_TASKS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
+})
+
+
+def setting_effect(key: str) -> str:
+    """When an owner choice is consumed; never changes the actor's snapshot policy."""
+    from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY
+    from ouroboros.route_choice import ROUTE_SETTING_KEYS
+
+    if key in RESTART_REQUIRED_SETTINGS:
+        return "local_model" if key.startswith("LOCAL_MODEL_") else "restart"
+    if key == "OUROBOROS_RUNTIME_MODE":
+        return "restart"
+    if key in CONSCIOUSNESS_CLOCK_SETTINGS:
+        return "next_wake"
+    if key in IMMEDIATE_SETTINGS or key in {
+        "OUROBOROS_NETWORK_PASSWORD",  # server_auth.NetworkAuthGate: every request
+        "OUROBOROS_FINALIZATION_GRACE_SEC",  # queue.refresh_timeouts_from_settings -> queue_timeouts
+        "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",  # config._settings_flag_enabled: disk on every read
+    }:
+        return "now"
+    if key in ROUTE_SETTING_KEYS and key != MODEL_CONTEXT_WINDOWS_KEY:
+        return "next_call"
+    return "next_task"
 
 
 # Optional positive bounds: a positive integer, or the literal "unlimited" for no bound. ONE
@@ -335,21 +366,25 @@ _WARNED_OPTIONAL_BOUNDS: set = set()
 
 
 def optional_bound_value(key: str, raw: Any) -> Optional[int]:
-    """One read of an ``OPTIONAL_BOUND_LEGACY`` key: ``None`` = no bound, else a positive int.
+    """One read of an optional bound or the owner cap: ``None`` = no bound, else a positive int.
 
-    An integral float is its integer (a harness may write ``10800.0``). Whatever the strict
-    parser refuses — blank, null, zero, negative, a fraction, a word — is a typo, never "no
-    bound": it takes the key's finite legacy value, reported once per process and value."""
+    An integral float is its integer (a harness may write ``10800.0``). Blank or null means
+    no cap only for the owner cap. Everything else the strict parser refuses — including
+    blank/null for other bounds — is a typo, never "no bound": it takes the key's finite
+    legacy value, reported once per process and value."""
+    owner_cap = key == OWNER_CAP_KEY
+    if owner_cap and (raw is None or isinstance(raw, str) and not raw.strip()):
+        return None
     value = int(raw) if isinstance(raw, float) and raw.is_integer() else raw
     try:
         return parse_positive_or_unlimited(value)
     except (TypeError, ValueError):
-        fallback = OPTIONAL_BOUND_LEGACY[key]
+        fallback = OWNER_CAP_LEGACY if owner_cap else OPTIONAL_BOUND_LEGACY[key]
         if (key, repr(raw)) not in _WARNED_OPTIONAL_BOUNDS:
             _WARNED_OPTIONAL_BOUNDS.add((key, repr(raw)))
             logging.getLogger(__name__).warning(
-                "%s=%r is not a positive integer or %r; using the finite fallback %s",
-                key, raw, UNLIMITED, fallback)
+                "%s=%r is not a positive integer or %s; using the finite fallback %s",
+                key, raw, "blank" if owner_cap else repr(UNLIMITED), fallback)
         return fallback
 
 
@@ -358,8 +393,75 @@ def defaults_for_settings_document(document_present: bool) -> dict:
     optional bound's finite legacy value while a document exists (``OPTIONAL_BOUND_LEGACY``).
     Every writer that creates a document persists a defaults-merged one (the context-mode
     compatibility pass only rewrites an existing document), so only a document an earlier
-    release or a harness wrote without the key falls to the legacy value."""
-    defaults = dict(SETTINGS_DEFAULTS)
+    release or a harness wrote without the key falls to the legacy value. Every view carries
+    the owner cap's format marker, so the first save of a fresh install keeps a cap it sets."""
+    defaults = {**SETTINGS_DEFAULTS, OWNER_CAP_FORMAT_KEY: 1, MODEL_CAP_FORMAT_KEY: 1}
     if document_present:
         defaults.update(OPTIONAL_BOUND_LEGACY)
     return defaults
+
+
+# The owner's optional cap on acting project tasks (pool-capacity Q1 = D): blank, the shipped default, is no number
+# (the machine's memory is the limit, ``supervisor.pool_admission``), a positive integer the cap ("unlimited" reads
+# blank), anything else a typo that reads finite, never "no cap" (the ``OPTIONAL_BOUND_LEGACY`` rule). A document
+# without the format marker was written while the settings form saved 10 on every save: its 10 reads once as blank
+# (owner decision 09.11, migration A; Colab's first-launch 1 likewise, ``colab_bootstrap``); 40, say, stays the cap.
+OWNER_CAP_KEY = "OUROBOROS_MAX_WORKERS"
+OWNER_CAP_LEGACY = 10
+OWNER_CAP_FORMAT_KEY = "_owner_cap_format"  # disk format, never an environment setting or owner knob
+
+
+# «Requests at once per model» (owner, 13.11.2026, 5A and 6A): blank, the shipped default, is no number of the
+# owner's. A route to a provider's API then has no limit of the host's (the provider keeps its own); a model served on
+# this computer keeps ``MODEL_CAP_LOCAL`` (its server computes only what its slots allow). A whole number is the limit
+# for both, zero or less none for either, as before; anything else is a typo that reads finite. A document without
+# the format marker was written while every shipped default was saved: its 3 reads once as blank; 5, say, stays.
+MODEL_CAP_KEY = "OUROBOROS_MODEL_MAX_CONCURRENCY"
+MODEL_CAP_LOCAL = 3  # also the value every install saved before the owner's choice became optional
+MODEL_CAP_FORMAT_KEY = "_model_cap_format"  # disk format, never an environment setting or owner knob
+# An optional number whose earlier shipped value every document carries: (key, that value, the marker that ends it).
+_UNCHOSEN_SAVED = ((OWNER_CAP_KEY, OWNER_CAP_LEGACY, OWNER_CAP_FORMAT_KEY), (MODEL_CAP_KEY, MODEL_CAP_LOCAL, MODEL_CAP_FORMAT_KEY))
+
+
+def unchosen_saved_document(raw: Any) -> Any:
+    """The read seam's migration of a document from before an optional number (no format marker): the value the
+    shipped default saved for it (the owner cap's 10, the model limit's 3) reads as blank. A read stays a read; every
+    view carries the markers (``defaults_for_settings_document``), so the next whole-document save ends the migration,
+    and a partial save writes the blank the migration read."""
+    if not isinstance(raw, Mapping):
+        return raw
+    blank = {key: "" for key, saved, marker in _UNCHOSEN_SAVED
+             if raw.get(marker) != 1 and raw.get(key) in (saved, str(saved))}
+    return {**raw, **blank} if blank else raw
+
+
+def model_cap_value(raw: Any) -> Optional[int]:
+    """One read of the model limit: ``None`` = not chosen, else a whole number (zero or less: no limit). An
+    unlimited alias reads blank; a typo takes the finite ``MODEL_CAP_LOCAL``, reported once per process and value."""
+    if raw is None or isinstance(raw, str) and (not raw.strip() or raw.strip().lower() in UNLIMITED_ALIASES):
+        return None
+    try:
+        if isinstance(raw, bool) or isinstance(raw, float) and not raw.is_integer():
+            raise ValueError(raw)
+        return int(raw)
+    except (TypeError, ValueError):
+        if (MODEL_CAP_KEY, repr(raw)) not in _WARNED_OPTIONAL_BOUNDS:
+            _WARNED_OPTIONAL_BOUNDS.add((MODEL_CAP_KEY, repr(raw)))
+            logging.getLogger(__name__).warning(
+                "%s=%r is not a whole number or blank; using the finite fallback %s", MODEL_CAP_KEY, raw, MODEL_CAP_LOCAL)
+        return MODEL_CAP_LOCAL
+
+
+OPTIONAL_VALUE_KEYS = frozenset({*OPTIONAL_BOUND_LEGACY, OWNER_CAP_KEY, MODEL_CAP_KEY})  # what the next function spells
+
+
+def document_optional_value(key: str, value: Any) -> Any:
+    """The document spelling of an optional bound or cap: its number, else "unlimited" (a bound) or blank (the
+    owner cap, the model limit); a typo reads finite."""
+    if key == MODEL_CAP_KEY:
+        cap = model_cap_value(value)
+        return "" if cap is None else cap
+    bound = optional_bound_value(key, value)
+    if bound is not None:
+        return bound
+    return "" if key == OWNER_CAP_KEY else UNLIMITED

@@ -23,7 +23,7 @@
         "stale": false,
         "executable_review": true,
         "blocking_reason": "trusted_source",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -109,7 +109,7 @@
         "stale": false,
         "executable_review": true,
         "blocking_reason": "trusted_source",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -185,7 +185,7 @@
         "stale": false,
         "executable_review": true,
         "blocking_reason": "trusted_source",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -261,7 +261,7 @@
         "stale": false,
         "executable_review": true,
         "blocking_reason": "trusted_source",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -337,7 +337,7 @@
         "stale": false,
         "executable_review": true,
         "blocking_reason": "trusted_source",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
         "preflight_failed": false,
         "preflight_failed_stale": false

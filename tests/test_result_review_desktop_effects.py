@@ -217,8 +217,8 @@ def test_reads_refusals_failures_and_timeouts_produce_nothing_and_force_no_revie
     assert json.loads(rows[-1]["result"])["ok"] is True, "the remote shell ran; it still declares no effect"
 
     calls_before = len(desktop.transport.calls)
-    blocked = desktop.call("click", allowed=False, warning="⚠️ SAFETY_VIOLATION: blocked.", x=1, y=1, raw=True)
-    assert blocked["tool_result_code"] == "SAFETY_VIOLATION" and len(desktop.transport.calls) == calls_before
+    blocked = desktop.call("click", allowed=False, warning="⚠️ SAFETY_RETURNED: not run.", x=1, y=1, raw=True)
+    assert blocked["tool_result_code"] == "SAFETY_RETURNED" and len(desktop.transport.calls) == calls_before
 
     def raises(**_kwargs):
         raise RuntimeError("the handler crashed after an unknown amount of work")
@@ -360,6 +360,8 @@ def test_an_unavailable_producer_source_is_a_named_gap_never_a_guess(tmp_path, m
 
 
 def test_the_same_receipt_is_reviewed_once_and_a_new_receipt_is_a_new_subject(tmp_path, monkeypatch):
+    """A new receipt is new material, a new subject. The author who received the earlier PASS decides on it
+    (owner, 8 Nov 2026): no wave is bought, the PASS stays the earlier version's."""
     ctx = _floor_ctx(tmp_path, monkeypatch)
     sends: list[dict] = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
@@ -373,13 +375,12 @@ def test_the_same_receipt_is_reviewed_once_and_a_new_receipt_is_a_new_subject(tm
     assert len(sends) == 3 and subject_text(ctx) == first, "the same receipt is the same subject: reused at $0"
 
     desktop.call("key", keys="cmd+s")
-    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is True  # the new PASS
-    assert len(sends) == 6, "a new receipt is new material: a new review"
     clicked, saved = (effect["receipt"] for effect in rr.produced_material(ctx)["effects"])
-    second = subject_text(ctx)
-    assert clicked in first and saved not in first and clicked in second and saved in second
-    current = [run for run in trace_of(ctx)["review_runs"] if not run.get("superseded_by_revision")]
-    assert [run["aggregate_signal"] for run in current] == ["PASS"]
+    assert clicked in first and saved not in first
+    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
+    assert len(sends) == 3, "the revised result is the author's to accept: nothing is bought"
+    [run] = trace_of(ctx)["review_runs"]
+    assert run["earlier_revision"] is True and run["aggregate_signal"] == "PASS"
 
 
 # --- Modes and roles are unchanged ----------------------------------------------------------------
@@ -395,15 +396,16 @@ def test_auto_off_and_a_child_are_never_forced_by_a_desktop_input(tmp_path, monk
     assert sends == [] and not trace_of(ctx).get("review_runs")
 
 
-def test_blocking_holds_a_failed_desktop_result_and_presence_is_never_held(tmp_path, monkeypatch):
-    ctx = _floor_ctx(tmp_path / "blocking", monkeypatch, enforcement="blocking")
+def test_a_failed_desktop_result_is_shown_once_then_delivered_and_presence_is_never_held(tmp_path, monkeypatch):
+    ctx = _floor_ctx(tmp_path / "root", monkeypatch)
     sends: list[dict] = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, {"t1": CRITICAL}))
-    mac(ctx, tmp_path / "blocking", monkeypatch).call("click", x=1, y=2, raw=True)
+    mac(ctx, tmp_path / "root", monkeypatch).call("click", x=1, y=2, raw=True)
     shown: list[str] = []
     assert rr.result_review_at_delivery(ctx, "Clicked.", trace_of(ctx), shown.append) is True
-    assert rr.result_review_at_delivery(ctx, "Clicked.", trace_of(ctx), shown.append) is True
-    assert "not delivered until a review passes it" in shown[-1] and len(sends) == 3
+    assert "You decide" in shown[-1] and len(shown) == 1 and len(sends) == 3
+    assert rr.result_review_at_delivery(ctx, "Clicked.", trace_of(ctx), shown.append) is False, "the author decided"
+    assert len(shown) == 1 and len(sends) == 3
 
     ctx = _floor_ctx(tmp_path / "presence", monkeypatch)
     # The host stamps a Presence turn before any review (``presence_runner._build_task``).

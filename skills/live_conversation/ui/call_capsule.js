@@ -45,17 +45,18 @@ const RECONNECT_WORDS = {
     go_away: 'The voice service is moving the session',
     transport_lost: 'The voice connection dropped',
 };
-// Feature configuration lives in the ordinary extension settings.
-// Engine keys are the secrets the call skills request (Settings → Secrets), not provider accounts.
-const KEY = { tab: 'secrets', focus: 'skill-requested-secrets' };
-const MODEL = { tab: 'advanced', focus: 'extension-settings-sections' };
-const BUDGET = { tab: 'behavior', focus: '' };
+// Feature configuration lives in this skill's own Settings page (its extension settings).
+// Engine keys are the secrets the call skills request (Settings › Accounts and keys), not provider accounts.
+// The spending limit is a Dashboard tab: a Settings path may name it (`dashboard:costs`).
+const KEY = { path: 'accounts' };
+const MODEL = { path: 'skill/live_conversation' };
+const BUDGET = { path: 'dashboard:costs' };
 const SWITCH = MODEL;
 const SPENDING_LIMIT = { words: 'The spending limit is reached', action: 'settings', settings: BUDGET };
 const REFUSED = { words: 'The voice service refused the call: “{detail}”', bare: 'The voice service refused the call', action: 'retry' };
 const UNREACHABLE = { words: 'Can’t reach the selected voice service', action: 'retry' };
 const NOT_STARTED = { words: 'The call could not start; the room has the details', action: 'retry' };
-const NO_KEY = { words: 'Calls need the selected engine’s API key — add it in Settings → Secrets', action: 'settings', settings: KEY };
+const NO_KEY = { words: 'Calls need the selected engine’s API key. Add it in Settings › Accounts and keys', action: 'settings', settings: KEY };
 // How a call ends, in the owner's words. For Google's own closes and errors the server's `detail`
 // is Google's sentence, quoted as Google's; for the host's own refusals it is the host's sentence,
 // never framed as Google's. `bare` is the sentence when there is nothing to say, `action` the one

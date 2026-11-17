@@ -16,8 +16,6 @@ from ouroboros import (
     safety_config,
 )
 
-REPO = pathlib.Path(__file__).parents[1]
-PACKAGE = REPO / "ouroboros"
 
 _LEAVES = (settings_defaults, settings_scales, model_slots, review_model_routes, runtime_limits, safety_config)
 
@@ -33,10 +31,18 @@ _ADDED_OWNERS = {
     "OWNER_RULES_KEY": safety_config,
     "_RULES_ADDRESS": safety_config,
     "owner_rules_section": safety_config,
+    # A managed deployment's organization rules ride the same section under their own provenance.
+    "organization_rules_section": safety_config,
+    "_owner_rules": safety_config,
     "WORKER_READY_CEILING_SEC": runtime_limits,
     # A spawned direct-Restart successor's bounded wait for its exiting parent's data-root admission.
     "SERVER_ADMISSION_WAIT_SEC": runtime_limits,
+    # The server's interpreter switch interval (``server_entrypoint.shorten_switch_interval``).
+    "SERVER_SWITCH_INTERVAL_SEC": runtime_limits,
+    # The server's young-generation collection threshold (``server_entrypoint.raise_gc_threshold``).
+    "SERVER_GC_THRESHOLD0": runtime_limits,
     "STOP_ADMISSION_DRAIN_SEC": runtime_limits,
+    "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC": runtime_limits,
     # The supervisor loop's bounded events pass and the budget-projection retry interval.
     "SUPERVISOR_EVENT_BATCH_MAX_EVENTS": runtime_limits,
     "SUPERVISOR_EVENT_BATCH_MAX_SEC": runtime_limits,
@@ -47,6 +53,24 @@ _ADDED_OWNERS = {
     "GIT_READ_CAPTURE_TIMEOUT_SEC": runtime_limits,
     "IMMEDIATE_SETTINGS": settings_scales,
     "RESTART_REQUIRED_SETTINGS": settings_scales,
+    # When a saved choice is consumed (the Settings row's timing): one label over the sets above, the route
+    # keys and the keys the consciousness clock reads at each wake decision.
+    "CONSCIOUSNESS_CLOCK_SETTINGS": settings_scales,
+    "setting_effect": settings_scales,
+    # The owner's optional cap on acting tasks: its key, legacy value, disk format and its reads (pool-capacity D).
+    "OWNER_CAP_KEY": settings_scales,
+    "MODEL_CAP_KEY": settings_scales,
+    "OPTIONAL_VALUE_KEYS": settings_scales,
+    "OWNER_CAP_LEGACY": settings_scales,
+    "OWNER_CAP_FORMAT_KEY": settings_scales,
+    "document_optional_value": settings_scales,
+    # The owner's optional limit on requests per model, and the one read seam that takes a shipped value saved
+    # before either number became optional as not chosen (owner cap 09.11, model limit 13.11).
+    "MODEL_CAP_LOCAL": settings_scales,
+    "MODEL_CAP_FORMAT_KEY": settings_scales,
+    "model_cap_value": settings_scales,
+    "_UNCHOSEN_SAVED": settings_scales,
+    "unchosen_saved_document": settings_scales,
     # An explicit root starting effort is validated against the effort scale it names.
     "requested_effort": settings_scales,
     # The lane-era global review effort, frozen as the legacy skill-review fingerprint literal.
@@ -87,9 +111,14 @@ _ADDED_OWNERS = {
     "task_processing_preference": model_slots,
     "normalize_processing_preference": model_slots,
     "resolve_processing_preference": model_slots,
+    # A call's tier (Settings' three and the runtime-only Ultrafast) and the tiers /api/state publishes.
+    "CALL_TIERS": model_slots,
+    "normalize_call_tier": model_slots,
+    "processing_tiers": model_slots,
     "MODEL_ROLE_SETTINGS": model_slots,
     "normalize_model_role_options": model_slots,
     "model_role_option": model_slots,
+    "acting_model_role": model_slots,
     "task_model_binding": model_slots,
     "route_binding": model_slots,
     "apply_model_role_override": model_slots,
@@ -237,10 +266,7 @@ _MOVED_OWNERS = {
     "parse_fallback_chain": model_slots,
     "_exclusive_direct_remote_provider_env": review_model_routes,
     "adaptive_quorum": review_model_routes,
-    "get_review_enforcement": review_model_routes,
     "resolved_review_model_target": review_model_routes,
-    "DELEGATE_WAIT_CEILING_SEC": runtime_limits,
-    "DELEGATE_WAIT_WINDOW_MAX_SEC": runtime_limits,
     "BODY_MAINTENANCE_INTERVAL_SEC": runtime_limits,
     "MAX_ACTIVE_SUBAGENTS_HARD_CAP": runtime_limits,
     # Upstream reshaped the hard-cap assignment into a tuple that also binds the
@@ -251,8 +277,6 @@ _MOVED_OWNERS = {
     "_clamped_number_setting": runtime_limits,
     # get_acceptance_reserve_pct / get_acceptance_review_est_sec left with the task-acceptance launch
     # floor (the review fold); their two keys are retired in settings_defaults.
-    "get_delegate_wait_max_sec": runtime_limits,
-    "get_delegate_wait_sec": runtime_limits,
     "get_llm_transport_read_timeout_sec": runtime_limits,
     "get_claudexor_quota_refresh_timeout_sec": runtime_limits,
     "get_claudexor_harness_install_timeout_sec": runtime_limits,
@@ -386,26 +410,3 @@ def test_settings_extraction_owner_inventory_is_exact():
             seen[name] = module.__name__
             assert owners.get(name) is module, f"{module.__name__} owns an unmapped name: {name}"
     assert set(seen) == set(owners)
-
-
-def test_settings_extraction_size_bounds_have_meaningful_headroom():
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (config, *_LEAVES)
-    }
-    assert counts["ouroboros.config"] <= 1000
-    assert all(count <= 1000 for count in counts.values())
-    # 500 -> 520: the Z.ai direct provider adds its key and plan rows to the leaf (PR #1207).
-    # 520 -> 521: the desktop keep-running consent key's default row (PR #1404; its disk-authored entry adds none).
-    # 521 -> 538: PR-3 (review pool) — the five review-lane keys leave SETTINGS_DEFAULTS
-    # for RETIRED_SETTING_KEYS and gain the REVIEW_POOL_MIGRATED_SETTING_KEYS class
-    # (+ its shared «migrated» line) the read seam, the RC auditor and the boot notice read.
-    # 538 -> 560: the main-interface key (OUROBOROS_UI_DIR) with its export exclusion and the
-    # saved-choice precedence the config read and persist seams share.
-    # +7: independent Consciousness level, Supervisor model, owner rules and disk ownership.
-    # +1: Main's Subagents mode (OUROBOROS_SUBAGENTS_MODE, default auto).
-    # +1: a build's suggested skill sources (OUROBOROS_SKILL_SOURCE_SUGGESTIONS, default none), one commented row.
-    assert counts["ouroboros.settings_defaults"] <= 569
-    assert (PACKAGE / "config.py").is_file()

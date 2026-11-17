@@ -85,6 +85,22 @@ def test_note_restoration_honours_explicit_fit_callback_verdict(tmp_path, monkey
         assert result == messages
 
 
+def test_a_selection_declares_whether_the_story_it_shows_is_whole():
+    """``select_view`` writes B's declaration from the level it selected (``llm_messages.SHARED_HEAD_KEY``): a folded
+    page narrows my story for this work alone, a folded room note leaves the story every work shares. The declared
+    head ends exactly where the selected story begins."""
+    from ouroboros.llm_messages import SHARED_HEAD_KEY
+
+    p, snap = note_plan()
+    for address, whole in (('F5:page-000', False), ('F8:' + snap.room['notes'][0]['id'], True)):
+        selected = floor.select_view(p, 'max', [address])
+        block = json.loads(selected.max_projection.system_content_json)[-2]
+        declared = block[SHARED_HEAD_KEY]
+        assert declared['story_whole'] is whole, address
+        story = mv.render_story(snap, floor.kept_level(snap, selected.max_projection.memory_facts))
+        assert block['text'][declared['chars']:] == story and (story == mv.render_story(snap)) is whole, address
+
+
 def test_aggregate_lever_preserves_element_addresses_and_requires_uncovered_note():
     p, snap = plan()
     owner = 'F7:' + snap.room['lane1'][0]['address']
@@ -137,6 +153,22 @@ def test_addresses_refuse_core_and_governing_words_and_keep_prior_choices():
         with pytest.raises(ValueError, match="protected"):
             floor.select_view(p, "max", [address])
     assert p.core.memory_view_json == second.core.memory_view_json
+
+
+def test_a_selection_over_a_fact_of_other_forms_starts_from_the_whole_view_never_from_its_runs_or_counts():
+    """A projection whose floor fact names other forms (a later or an earlier body wrote it) keeps no choice it named:
+    the next selection is read anew, so the page it showed by address is whole again and no other page takes its
+    place by position or count."""
+    p, snap = plan()
+    newer = floor.select_view(p, "max", ["F5:page-001"])
+    facts = newer.max_projection.memory_facts
+    for other in ({"forms_version": floor.FORMS_VERSION + 1}, {"element_order": "another order"}):
+        held = replace(newer, max_projection=replace(newer.max_projection, memory_facts={
+            **facts, "floor": {**facts["floor"], **other}}))
+        again = floor.select_view(held, "max", ["F7:" + snap.room["lane1"][0]["address"]], owner_note=True)
+        assert dict(floor.kept_level(snap, again.max_projection.memory_facts).addressed) == {
+            "F7": (snap.room["lane1"][0]["address"],)}
+        assert "Page 1." in again.max_projection.system_content_json
 
 
 @pytest.mark.parametrize("accept", [True, False])

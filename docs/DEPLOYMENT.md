@@ -13,7 +13,8 @@ then environment, then the data root's basis (`state/state.initialized.json`):
 `<APP_ROOT>/<folder>` for data first initialized by this release or later,
 `~/Ouroboros/<folder>` for older data. An unreadable basis makes a default work root
 refuse until its key is set; nothing is moved, copied or deleted. Compose/systemd/shell
-may load an env file; Ouroboros does not. A direct server uses its checkout and
+may load an env file; Ouroboros does not. A direct server uses its checkout (Restart keeps it as is, or
+refuses before the stop if dependencies or the import fail) and
 `<APP_ROOT>/data`; while DATA_DIR is unset and `~/Ouroboros/data` holds memory (or cannot
 be examined), it exits 2 naming both choices: that data with the old
 `<APP_ROOT>/data/settings.json`, or `<APP_ROOT>/data` (ARCHITECTURE §7).
@@ -45,6 +46,45 @@ into the destination's task layout, then call
 updated `budget_drive_root`, `drive_root`/`child_drive_root` as applicable, and
 cleared `reason_code`/`reason_detail`. Keep sources through adoption.
 Copying the directory alone never rewrites those pointers.
+
+## First Run Without the Wizard
+
+The setup wizard opens while no model access is configured. A server that finds
+access in its environment (a provider key, a subscription Main or a local route)
+starts working at once and does not open it; the wizard stays reachable at
+`/onboarding`. The check is that access is configured, not that it works: a wrong
+key shows at the first request. That is the usual first run of a container or a
+service unit configured by variables alone, and of a Colab notebook, whose launch
+writes the whole factory settings document with the budget and the Access level it
+was given. No wizard choice is saved then, and what the wizard would have asked
+keeps its factory value:
+
+| | Factory value | After completing the wizard on fresh data |
+|---|---|---|
+| Safety coverage | `full`: commands are read first too | `light`: outgoing actions are read first (background consciousness keeps `full`) |
+| Access level | `advanced` | the level chosen |
+| Limits | $200 in total, $50 for one task and its helpers, of known spend | the limits entered |
+| Consciousness | off; $20 over 24 hours once started | off unless ticked |
+
+Reviewers and helpers are proposed from the reachable Main at each read (none while
+the keys present do not settle which provider serves Main) until they are edited on
+the Agents page or saved by the wizard; other saves, the Models page's among them,
+leave them proposed. A Colab launch saves the ones it proposes from the key it was
+given. Subscription sessions join them through Settings or the wizard.
+
+A setting the file does not hold is read from the environment variable of its name
+(a Colab launch writes the ones named here into its file: `TOTAL_BUDGET` and
+`OUROBOROS_RUNTIME_MODE` from the notebook's variables at each launch that sets them,
+the rest as the file held them, or at factory values on a first launch), for example
+`TOTAL_BUDGET`, `OUROBOROS_PER_TASK_COST_USD`, `OUROBOROS_CONSCIOUSNESS_DAILY_USD` and
+`OUROBOROS_RUNTIME_MODE` (read at a start). The exceptions are the choices only the
+owner's controls author, Safety coverage and the Context mode among them: Settings
+shows their saved or factory value whatever the environment says. Neither is
+consistent there today: while none is saved, the Safety Supervisor still reads a
+forwarded `OUROBOROS_SAFETY_MODE`, and a task still starts in a forwarded
+`OUROBOROS_CONTEXT_MODE` (#3202), so choose both in Settings to have one answer. A
+deployment policy file (below) can cap the Access level and raise the minimum
+coverage.
 
 ## Unknown model role at startup
 
@@ -105,7 +145,7 @@ profile per volume set; never point two containers at one data volume.
 | | Immutable image (`ouroboros-web`) | Managed body (`ouroboros-managed`) |
 |---|---|---|
 | Code and packages | the image's `/app` | a checkout and runtime venv on a volume |
-| Update | build and deploy a new image | Settings → Update, as on the desktop |
+| Update | build and deploy a new image | Dashboard → Updates, as on the desktop |
 | Entry | `python server.py` | the common launcher, `--no-ui` |
 | Volumes | data, work, `HOME` | one parent volume, or body/data/work/home |
 
@@ -114,7 +154,7 @@ CPython 3.10.22 and SQLite 3.53.1, the same assets
 `scripts/download_python_standalone.sh` and `scripts/download_python_standalone.ps1`
 pin for the desktop packages. It is not Debian's `python:3.10-slim` (SQLite 3.46.1).
 Desktop installs receive that interpreter only by installing the app again.
-Settings → Update replaces the repository and its packages; it does not replace
+Dashboard → Updates replaces the repository and its packages; it does not replace
 the bundled interpreter. A managed container keeps its runtime venv on a volume.
 A venv whose interpreter no longer matches this image is left untouched, and the
 log names the recovery step: stop, move that directory aside, start again. Code
@@ -227,7 +267,7 @@ directory with its own `index.html`, laid out like `web/`. It applies when the
 server starts, so a saved change waits for a restart. A saved value, an empty one
 included, beats the environment variable; the environment counts only while the
 setting was never saved, and Ouroboros never copies it into `settings.json`. To
-return to the builtin interface, clear the setting (in Settings → Advanced, or in
+return to the builtin interface, clear the setting (in Settings → This computer → Advanced, or in
 `settings.json` while Ouroboros is stopped), restart and reopen the address.
 `GET /api/state` reports what is actually served as `served_ui`.
 
@@ -270,17 +310,23 @@ the last `X-Forwarded-For` entry that is not such a proxy:
   is loopback by design.
 - A proxy on another machine must be listed in `FORWARDED_ALLOW_IPS`; otherwise
   the core treats the proxy itself as the client and does not see TLS, so the
-  session cookie is not marked `Secure`.
-- The core accepts a browser's requests and WebSocket handshakes by the
-  browser's `Sec-Fetch-Site: same-origin`, so the proxy may rewrite `Host` or
-  terminate TLS. A browser that sends no Fetch Metadata is accepted only when
-  its `Origin` equals the scheme and host the core sees: pass `Host` through,
-  plus `X-Forwarded-Proto` from a proxy in `FORWARDED_ALLOW_IPS`.
+  session cookie is not marked `Secure` and Chromium's WebSocket is refused.
+- The proxy passes the browser's `Host` unchanged, port included, and its TLS as
+  `X-Forwarded-Proto: https`; the core never reads `X-Forwarded-Host`. The
+  browser's `Sec-Fetch-Site: same-origin` passes a request's origin check even
+  with a rewritten `Host` (a malformed or `null` `Origin` is still refused, and
+  the password gate still applies), but Chromium (151 and 157 tested; Firefox
+  153 and WebKit 26.5 add the header) opens the WebSocket with `Origin` alone,
+  accepted only when it equals the scheme and host the core sees. A proxy that
+  breaks this serves a working page whose live updates never connect
+  (`Reconnecting… · server answers`); the core logs each refused `origin=`
+  beside the `expected=` origin it saw.
 - Visitors who are not loopback need `OUROBOROS_FILE_BROWSER_DEFAULT` for Files;
   without it the path-addressed `/api/files/*` operations refuse them.
 
 With or without a password, on loopback too, the core answers another site's
-page with 403 (a WebSocket closes with 4403). Pages and files any page may load
+page with HTTP 403, including at the WebSocket handshake (browsers usually report
+1006, not the server's internal 4403). Pages and files any page may load
 (the interface, setup and login pages, their static files, extensions' reviewed
 widget files) pass this check; the password gate above still applies. A request with neither
 `Origin` nor `Sec-Fetch-Site` counts as a native client (the CLI, sidecars,
@@ -303,17 +349,243 @@ a path that cannot be read fails the call loudly instead of silently falling
 back to the defaults. In Docker, mount the file and pass the setting:
 
 ```bash
-docker run --rm -p 8765:8765 \
+docker run --rm -p 127.0.0.1:8765:8765 \
   -v "$PWD/extra-ca.pem:/certs/extra-ca.pem:ro" \
   -e OUROBOROS_EXTRA_CA_BUNDLE=/certs/extra-ca.pem \
   ouroboros-web
 ```
 
-On a desktop install the same key lives in Settings → Advanced. It covers the
+On a desktop install the same key lives in Settings → This computer → Advanced. It covers the
 provider calls: model requests, model catalogs, Provider Test, pricing and
 capability probes. Everything else keeps its own trust store: `git`, `uv`,
 `pip`, the Claudexor engine and its runtime downloads, the Telegram skill, MCP
 servers, the web-search scraper and the browsers.
+
+## Deployment Policy File
+
+A deployment can fix choices its employees and their Ouroboros may not change. Its launch
+(compose, systemd, the container runtime) names one strict JSON file in
+`OUROBOROS_DEPLOYMENT_POLICY`: an absolute path outside the data root and the checkout,
+which are refused. Without the variable nothing changes. A named file that is missing,
+unreadable, malformed or of another version stops `server.py` with exit 2 before it serves,
+and any other process that reads settings under it refuses: a bad file never reads as
+unmanaged.
+
+```json
+{
+  "version": 1,
+  "access": {"max": "advanced"},
+  "safety": {
+    "min_coverage": "full",
+    "checker": {"model": "anthropic@safety::<model>", "fallbacks": ["openai@safety::<model>"]},
+    "allowed_exits": []
+  },
+  "rules": "Customer records stay inside the corporate network.",
+  "extensions": {
+    "when_unmet": "hold",
+    "required": [{
+      "name": "error_tracker",
+      "path": "/ouroboros/data/skills/external/error_tracker",
+      "content_hash": "<the 64-hex content_hash GET /api/extensions reports for it>",
+      "settings": {"SENTRY_DSN": "https://<key>@errors.example.internal/<project>"}
+    }]
+  }
+}
+```
+
+`version` (1) is required; every other field is optional and constrains only what it names.
+An unknown or repeated field or a wrong type refuses the whole file. Safety is mandatory, at
+full coverage, on the organization's checker only when the file names all three of
+`access.max` at most `pro`, `safety.min_coverage: full` and `safety.checker`: without the cap an
+employee may still choose Cyber Pro, where Safety findings are advice; without the floor
+coverage may be lowered to Outgoing or Off; without `safety.checker` the employee's own
+Supervisor route checks.
+
+- `access.max` (`light`, `advanced` or `pro`) caps effective Access, keeping Cyber Pro out of reach.
+- `safety.min_coverage` (`light` or `full`) floors both Supervisor coverage levels; the
+  new-install Light default yields to it.
+- `safety.checker` is the Supervisor's route: `model` (any model route), `account` (a
+  subscription profile, for `claudexor::` routes only; empty rotates) and up to eight
+  `fallbacks`, the only routes its walk tries, in order; a route whose connection lacks its
+  credential is skipped unsent. Settings slots, role options, wait-card switches and
+  second-check rows never move it. When none of its routes answers, the action that needs
+  the check is held, typed `SAFETY_UNAVAILABLE`, until a check answers or the work is
+  cancelled (unless `release_unjudged` is named); reads, Stop and Panic stay available. A save
+  after which a checker route would reach another endpoint, key or local model server, judged as
+  a send reads settings (defaults, the legacy compatible pair and launch variables included), is
+  refused, so give the checker connections of its own; such a field carried back as shown keeps
+  the document's own value. A local checker's server starts only with the model, template and
+  port its saved settings name; Stop stays available.
+- `safety.allowed_exits` lists the exits left open, each once; `[]` closes these three at every
+  Access level. `repeat_after_dangerous`: the agent's identical call from a later step lets a
+  returned DANGEROUS call of any tool through in Cyber Pro. `release_after_dangerous`: an employee's
+  answered card holding the exact words and destination (any other call: the exact call) releases
+  a returned DANGEROUS call, which outside that Cyber exit waits for it. `release_unjudged`: the
+  same card releases a call without a verdict. A card may precede the send; it proves no
+  assessment. Closed exits leave a returned call refused, or an unjudged call waiting for a check.
+  Under every list, a later message or card answer of the employee in the same work earns a waiting
+  DANGEROUS call one new reading on new evidence, not a release.
+  Unretained verdicts still prevent unchecked release in the same context; losing all state
+  requires a fresh check unless unchecked release is enabled. An explicit list never gains another
+  exit implicitly. Omitted, the ordinary exits remain except `release_unjudged` under `safety.checker`,
+  where naming it weakens mandatory checking. A SUSPICIOUS call passes on a later identical call.
+- `rules` (at most 64,000 UTF-8 bytes) reach every acting mind, delegated session and Safety
+  check as the organization's rules, beside the employee's own, which cannot relax them.
+- `extensions.required` names up to 16 installed extensions that must run, each by `name` (its
+  folder name), `path` (the package directory, absolute) and `content_hash`, the digest the loader
+  computes for the files it runs; a source's or release's digest is provenance, not this pin.
+  Exactly that package reads as on over the employee's saved Off, which stays saved. Nothing else
+  is granted: until its review (or the employee's skipped review), grants and dependencies admit
+  it, and while another package shares its name, other bytes sit at the path or it is missing, the
+  requirement is unmet, named in Skills with its reason and the process that saw it. Being
+  required makes an extension run; it does not make it more trusted than its review and grants,
+  and it does not isolate it. With `execution` it must also be trusted (Execution domain).
+- `extensions.when_unmet` is required with any row. `hold` (the sample): queued work stays queued
+  while the server's own copy does not run a requirement, and each process that starts work (a
+  pool worker or the server) checks the extensions it has loaded itself; a turn it cannot serve
+  ends before any model call with a typed notice (`deployment_requirement_unmet`). Stop, Panic,
+  Settings and Skills stay available. `warn`: work goes on and the gap is shown. Either way each
+  process logs a change of its gap once (`deployment_requirement_unmet`, `deployment_requirement_met`
+  in `logs/events.jsonl`); nothing polls, retries or repairs.
+- `settings` fixes custom settings (`A_KEY`, never a built-in or `OUROBOROS_` one) for that
+  extension. They are read like any custom setting: listed in its manifest's `env_from_settings`
+  (else the requirement is unmet) and granted by the employee for these bytes, so a fixed value is
+  no permission to read it. Through that grant they reach the extension in process, in an
+  out-of-process child (which receives the policy's path and pin after its environment is
+  scrubbed) and in its companions' environment (which their manifest `env` cannot override), never
+  the agent's shell or other environments. Settings shows them as set with no part of the value;
+  no reveal or host error exposes one: load and runtime exceptions are told by type without their
+  words/tracebacks. Successful plugin content is unchanged; trusted code must not disclose values itself.
+  A save that changes a fixed value is refused.
+
+Supported doors refuse, before any unload or write, to turn a required package off, delete or
+uninstall it, update it (Replace or Merge), roll a kept update back, replace it or add a second
+package of its name, hand it to a repair task, or edit its files with the agent's file tools or
+the Files page (`managed_by_deployment`). A kept update stays pending and its review still decides
+whether it runs. A missing required name may still be installed; it meets the
+requirement only with the pinned bytes at the pinned path. Ordinary unload, shutdown, Stop and
+Panic unload it as before. Its administrator changes the package and `content_hash`, then
+restarts.
+
+The policy is a view over settings, never their content. `settings.json` keeps the
+employee's own choices. Readers apply the policy last, over task snapshots, rooms, live route
+views and the environment. A save that carries a managed value back as Settings showed it
+keeps the employee's saved choice; any other change to a managed choice is refused before
+anything is written (HTTP 403, typed `managed_by_deployment`), on every Settings, owner, wizard
+and launcher path, and the rest of Settings stays editable. `GET /api/settings` names what
+the file fixes in `_meta.policy_state.deployment`, without secrets; Settings, the setup wizard
+and model-wait cards offer only what it allows and show what it fixes (a level, the checker, its
+connections or the fields its built-in routes read, a local checker's server, closed Safety exits,
+the update channel) as set by the organization.
+
+The serving program enforces the file, so within a managed deployment only its administrator
+replaces it and its packages, outside Ouroboros (a new image, package or checkout). In-app Update
+and its channel, Restore, recovery points, body adoption (evolution's included), agent edits that
+resolve to the serving checkout and package installs into the serving interpreter (the local
+runtime, the browser tools' Playwright package) refuse with `managed_by_deployment` before any
+effect. Restart starts the same program: no checkout, reset, clean, dependency sync (server or
+launcher) or recovery-point fallback runs, and a failed import is reported, not repaired. Update
+and switch records from before wait untouched (one left mid-merge defers Restart); an adoption
+armed before closes at the next start with the tree untouched, its candidate kept and the owner
+told, while an interrupted one stops the start (exit 3) until the administrator decides the
+tree. A first boot still prepares the seed's runtime venv. Body candidates, other workspaces,
+installed or downloaded browsers, Stop and Panic stay.
+
+A server reads the file once at its start and pins the digest of those bytes
+(`OUROBOROS_DEPLOYMENT_POLICY_SHA256`) for every process it starts. A changed file applies at
+the next start; until then a process started under the old pin refuses. Nothing polls the
+file or copies it.
+
+### Execution domain
+
+`execution` names where employees' work runs, apart from the service that enforces the policy. It
+needs a POSIX service host (proven on Linux): on Windows a host path is never the path the work sees,
+so a policy naming `execution`, and with it `extensions.trusted`, stops `server.py` with exit 2; run
+the service in WSL2 or a Linux container there, or leave the section out. The reference shape is the
+service on a trusted Linux host and the work in containers of its own:
+
+```json
+"execution": {
+  "executor": {"type": "docker_exec", "container_name": "work", "network": "host",
+               "path_mappings": [{"host_path": "/srv/work", "backend_path": "/srv/work"}]},
+  "engine": {"descriptor": "/etc/ouroboros/work-engine.json"},
+  "dedicated_containers": ["work", "work-engine"],
+  "skill_state_root": "/srv/work/skill-state",
+  "staging_root": "/srv/work/staging"
+}
+```
+
+- `executor` is the only executor: commands, scripts, checks and services run in that container
+  whatever a task names, and so do stdio MCP servers, skill scripts and dependency installs, their
+  streams carried by the service's Docker CLI. One whose folder, or a path-valued variable it is
+  given, lies outside the mappings is refused before anything starts, never run on the service. A
+  mapping may not overlap the data root, the checkout, this file, the engine descriptor or the
+  service's import path. Commands are read in the container: each interpreter must exist there at
+  the path the service names, or on the container's PATH. The container needs `setsid` (usually util-linux);
+  without group isolation no command or service is started. An unconfirmed group end keeps its custody record
+  and is reported to the caller even after a successful script or MCP response. `network` is the executor's word:
+  `none` is checked before every command the service starts there, a skill's folder preparation
+  included, and refused while the container has a network; `host` only allows networking and checks
+  nothing. Neither puts the work in the service's network namespace.
+- `engine` is the Claudexor engine that owns native, tool-running sessions, reached through a
+  descriptor the administrator writes on the service (`{"host", "port", "tokenPath"}`, loopback
+  only, outside the data root and the checkout): forward the engine's control port there, and keep
+  the work containers out of the service's network namespace. Raw model calls, the Safety checker's
+  included, keep the service's own engine and accounts; native sessions use this engine's accounts.
+  Each native run records this engine and its store before it is sent, and every later step of it
+  (wait, cancel, answers, messages, continuation, retry, recovery, collection, cleanup) reaches that
+  engine only: another engine's answer never settles it, and a policy naming another engine later
+  leaves it refused, not moved. Its sessions read work paths as the service names them: map them at
+  the same address, or the start is refused. Without `engine`, native sessions are refused.
+- `skill_state_root` is a persistent work folder, mapped at the same address, where each skill's own
+  processes keep their state (`<root>/<skill>`, made there as the container's user): its
+  `OUROBOROS_SKILL_STATE_DIR`, Deno's write permission and Go's cache and builds. The service keeps
+  a skill's review, grants and enablement in its own state folder and copies none of them there;
+  nothing an earlier run left there moves. Without it, skill scripts are refused.
+- `staging_root` is a work folder, mapped at the same address, where the service prepares what the
+  work needs: private copies of work repositories and a native skill-payload run's copy (`copies`), a
+  native run's read-only inputs (a session scratch its task owns and retires with it), session scratch
+  and package download caches, private Git indexes (`tmp`), and each installed script skill's reviewed
+  payload (`skills/<name>/<content hash>`, verified against the service's digests before every run and
+  replaced if changed) with its dependencies built there. Without it, these are refused; nothing falls
+  back to the service.
+- `dedicated_containers` belong to this installation alone. Panic sends one `docker kill` to the
+  identities this server measured at its start (at Panic itself, when it had none) and never waits
+  for it: what Docker answers before the exit is logged, anything else stays unconfirmed. Nothing
+  restarts them, so give them no restart policy that would.
+- `extensions.trusted` (only with `execution`, up to 64) lists the extensions whose code the service
+  runs, each by `name`, `path` and `content_hash` as a required one; every required package is one
+  of them, and none lies in or holds a folder the work domain writes (a mapping,
+  `skill_state_root`, `staging_root`).
+  Any other extension, built-ins included (unlisted, elsewhere, other bytes), is never imported,
+  cataloged, registered or launched: Skills says it doesn't run here (`deployment_untrusted`) and it
+  cannot be turned on. A
+  trusted one keeps the whole PluginAPI and every other gate (its switch, review, grants), and its
+  staged copy must hash to the pin before anything is imported from it. Its files, its
+  `.ouroboros_env` dependencies (never installed or rebound here) and the staged imports are its
+  administrator's: doors that would change, remove or replace them refuse (`managed_by_deployment`),
+  turning it off excepted. A new extension or version arrives with the next pins and start. Trust
+  does not apply to instruction or script skills, MCP servers or native sessions: they follow the
+  work domain's rules above.
+
+A path belongs to the work by its spelling inside a mapping, whatever a link there resolves to now.
+Every effect on it runs in the work container under the executor's custody (`work_domain`): file
+writes, renames and removals, and every Git command the tools run over a work tree, including private
+copies, capture, apply, `restore`, `revert` and network Git, so the repository's hooks, filters,
+fsmonitor, credentials and ssh act as the work domain with each action's usual semantics. The service
+reads work bytes it shows, searches or captures only through descriptor-held opens from the mapping's
+root that follow no link (it needs read access to the work volume; a link or a permission on the way
+makes it the container's read), and folders cross as tar streams it checks member by member. A
+native run receives its inputs as bytes under `staging_root`; its outputs return as patches and
+checked bytes; a skill-payload draft returns to the service's own apply, so installing it stays
+behind the usual review and, for a trusted extension, the administrator. Copies and inputs need an
+identical mapping. Only trusted extensions run on the service. Map no folder whose code the service
+itself runs, such as an extension's skill or its dependencies, and mount the work volume
+`nodev,nosuid`.
+The file protects neither itself nor what enforces it: keep it, the checkout, the data root, the
+engine descriptor and token, extension packages, dependencies and staged imports, and the
+server's environment where employee and agent processes
+cannot write.
 
 ## Logs and External Monitoring
 
@@ -353,5 +625,8 @@ deployment connects a destination of its own.
   `ouroboros.observability.redact_projection` before they leave;
   `docs/examples/error_tracker/` is a verified extension that does this and
   says what still leaves (messages and exception text can quote task text).
+  A deployment can require it and fix its `SENTRY_DSN` (Deployment Policy File);
+  its widget shows what each process's transport observed, and a receiver that
+  refuses or cannot be reached is shown there while work and the local logs go on.
   Failures that happen before the extension loads stay in the local logs only,
   as do the launcher's and the Claudexor daemon's.

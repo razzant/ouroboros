@@ -77,6 +77,11 @@ HOT_CODE_PATHS = frozenset({
     "ouroboros/loop_model_call.py",
     "ouroboros/loop_nudges.py",
     "ouroboros/loop_round_limits.py",
+    # Initial routing, the round handover and primary return/wait moved from
+    # the loop/control owners; their conflict labels follow those bodies.
+    "ouroboros/route_choice.py",
+    "ouroboros/loop_routes.py",
+    "ouroboros/owner_model.py",
     # join_ledger received the direct-child reads of the hot forced-finalization
     # leaf: the label follows the moved body.
     "ouroboros/tools/join_ledger.py",

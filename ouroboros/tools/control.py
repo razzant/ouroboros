@@ -22,6 +22,7 @@ from ouroboros.config import (
     save_settings,  # noqa: F401
 )
 from ouroboros.depth_evidence import parse_task_depth  # noqa: F401
+from ouroboros.memory_texts import edit_properties
 from ouroboros.headless import prepare_task_drive, task_state_dir  # noqa: F401
 from ouroboros.contracts.task_contract import (
     build_task_contract,  # noqa: F401
@@ -62,6 +63,15 @@ from ouroboros.tools.registry import ToolContext, ToolEntry  # noqa: F401
 from ouroboros.utils import append_jsonl, atomic_write_json, truncate_review_artifact, utc_now_iso, run_cmd  # noqa: F401
 
 log = logging.getLogger(__name__)
+
+GIST_RULE = (
+    "On a root task or self-started run, `summary` is my gist of the run for my human and my later self, "
+    "in my human's language; in a tight window it stands for this work's replies. "
+    "Its first sentence says what the run did, found or decided: a clean finish shows it on the card, "
+    "room row and portal, and that sentence represents this work in my other conversations. "
+    "Further sentences, when the work needs them, keep what a later reader needs without the rows: "
+    "numbers, paths, decisions, promises, what remains and whose step it is."
+)
 
 
 # Guards parent-side shared ctx state mutated during (possibly parallel)
@@ -157,8 +167,8 @@ _START_CHOICE_PARAMS = {
 }
 
 
-# The direct-OpenAI custom projection drops parameter prose and keeps this lead only as far as it fits
-# beside the compact schema; tests/test_openai_chat_custom_contract.py holds every actual profile whole.
+# Too large for the direct-OpenAI custom description bound, this tool goes there as its lead beside the bare
+# structure of its schema; tests/test_openai_chat_custom_contract.py holds the lead whole on every actual profile.
 _SCHEDULE_SUBAGENT_DESCRIPTION = (
     # SYSTEM also says start_task is separate work, an evidence-only copy owes no apply, and shared-tree work is
     # verified, not reapplied (integrate_subagent_patch's lead too): this lead pays the typed input_files schema.
@@ -172,7 +182,7 @@ _SCHEDULE_SUBAGENT_DESCRIPTION = (
     "the selected/inherited workspace_root, else one new Git tree for such descendants); genesis gives EACH an empty "
     "Git repo in the durable projects root that IS the deliverable; acting harness work uses a private snapshot and "
     "integrate_delegated_patch. "
-    # Custom-tool projection strips parameter prose; this choice must survive in the tool lead.
+    # Where the custom projection sends this tool without parameter prose, this choice must survive in the tool lead.
     "A non-acting Agent session keeps configured access in an evidence-only private checking copy; "
     "access='readonly' selects read-only session execution. Runtime data (installed skill payloads too) is "
     "never a write_surface. Cyber-effective children inherit "
@@ -215,6 +225,30 @@ def _project_tool_entries() -> List[ToolEntry]:
                 "oldest_first": {"type": "boolean", "default": False, "description": "List by last_active_at from oldest to newest."},
             }},
         }, _list_projects),
+        ToolEntry("manage_project_folder", {
+            "name": "manage_project_folder",
+            "description": (
+                "Read or repair a Project's working folder, where its new work starts; the owner's Project menu has "
+                "the same door (Working folder…). action='view' (default) is read-only: the registered folder, what "
+                "one look found (usable; missing; unusable; unset: no choice made, the first started task would "
+                "provision one; none: the recorded No folder), the changes that state offers with what each means "
+                "for the room's queued work, and expected. A change needs that expected and a reason. 'clear' records "
+                "No folder: new work uses its own temporary area and nothing provisions a folder until one is chosen. "
+                "'choose' attaches path, an existing folder that outlasts its tasks. Offered only where the room has "
+                "no usable default (missing, unusable, unset; choose also over No folder): a folder in place is not "
+                "moved here. Nothing is created, copied, restored or deleted. Admitted work keeps the folder it was "
+                "admitted with, through Resume and Continue; only work moved into the room that has not restarted "
+                "since takes the new default at its next start. The host tells nobody of a change: say what you "
+                "changed and why."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "project_id": {"type": "string"},
+                "action": {"type": "string", "enum": ["view", "clear", "choose"], "default": "view"},
+                "path": {"type": "string", "default": "", "description": "choose: absolute path of an existing folder; never a host working copy, Ouroboros's own repository or data."},
+                "expected": {"type": "string", "default": "", "description": "A change: view.expected as last read; a choice that moved since refuses as stale."},
+                "reason": {"type": "string", "default": "", "description": "A change: why, kept on its receipt."},
+            }, "required": ["project_id"], "additionalProperties": False},
+        }, _manage_project_folder, safety_policy="skip"),  # view reads; changes: safety.CHECKED_ACTIONS
     ]
 
 
@@ -229,6 +263,33 @@ def _sibling_tool_entries() -> List[ToolEntry]:
 
     return [*maintenance_tool_entries(), *storage_tool_entries(), *mind_tool_entries(), *ui_translation_tool_entries(),
             *update_description_tool_entries()]
+
+
+_UPDATE_IDENTITY_DESCRIPTION = (
+    "Revise my identity manifest, who I am and who I want to become, after substantive reflection: one "
+    "file in every room; never write memory/identity.md through file tools. Change parts with "
+    "mode='edit': edits=[{old_str, new_str}, ...] (or one old_str with content), each old_str exact text "
+    "found once in the revision I read, all applied or none, an empty new_str deleting; mode='overwrite' "
+    "(default) replaces the whole text with content; mode='revert' puts back version=<revision> exactly. "
+    "expected_revision (the revision under my resident identity) is required; a stale one writes nothing "
+    "and returns what changed since. The result is never empty; reason is kept in history, not in the "
+    "text. The receipt names the version replaced, who wrote it and what left, with the calls that read "
+    "it (memory_read(source='identity', version=...)) and put it back."
+)
+_UPDATE_WORLD_DESCRIPTION = (
+    "Update my map of my world (memory/WORLD.md): what lives in my environment (agents, services, "
+    "hosts, devices), how I reach each, what worked, what is held or refused; compact, detail in "
+    "knowledge; one file in every room and drive, never written through write_file/edit_text. Change "
+    "parts with mode='edit': edits=[{old_str, new_str}, ...] (or one old_str with content), each old_str "
+    "exact text found once in the revision I read, all or none; mode='overwrite' (default) replaces the "
+    "whole map with content; mode='revert' puts back version=<revision>. The measured block (system, "
+    "roots, tools found at startup) is the host's: an overwrite keeps or restores it, an edit must leave "
+    "it byte for byte and add no marker line, a revert takes that version's own part with the current "
+    "block (a new revision when the block changed since). expected_revision (the revision under my "
+    "resident map) is required; a stale one writes nothing and returns what changed since. The result "
+    "is never empty; reason is kept in history. The receipt names what it replaced and the calls that "
+    "read it (memory_read(source='world', version=...)) and put it back."
+)
 
 
 def get_tools() -> List[ToolEntry]:
@@ -246,21 +307,22 @@ def get_tools() -> List[ToolEntry]:
             }, "required": ["subagent_id"], "additionalProperties": False},
         }, inspect_subagent_tool),
         ToolEntry("finish_task", {"name": "finish_task",
-            "description": "Select the complete answer after considering the work. Use finish when nothing of this work is left for you; use stop, with a rationale naming what remains or why you are stopping, while a step of it is still yours, including when a limit ends this turn first. "
+            "description": GIST_RULE + "\n\n" + "Select the complete answer after considering the work. Use finish when nothing of this work is left for you. If you end while a step of it is still yours (a deadline, a budget or a round limit can end a turn first), use stop, with a rationale naming what remains and why you end. "
+                "A full window is not such a limit: after a real size refusal the host can renew this same task's view from its exact record, keeping its custody and budget; an irreducible or non-shrinking view, or an excess a directly required handbook alone causes, can still refuse. "
                 "A root's stop records unfinished work for explicit Continue under the same limits (a reached deadline or money limit refuses it): your human's Continue or a later focus's continue_task starts a new root that reads this one, with a root's work room, also when this is a chat turn; continue_in_background keeps this same turn and its work room. Continue does not reopen an ordinary finish or a final reply without this tool, even when its text calls it partial. "
                 "Ending closes this task's browser, task-session connections and services not kept alive, and any link they serve; when your work can go on only after your human's act or choice, a live root asks with escalate (wait_for_answer=true) before ending. "
                 "Select exactly one of answer or a host-offered answer_sha256. Successful page, note, mark and addressed-message writes may ride in the same response; any other result is read before the finish. On a self-started run (a consciousness wake's own turn, or a schedule-born root without a Presence binding) or a root answering its place, silent=true sends no message (any answer stays your internal note), refused while your human awaits a reply. No answer is needed. The run records no message unless a host notice is owed. This grants no success, cancels no children, and retains all configured review and owner controls.",
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["finish", "stop"]}, "answer": {"type": "string", "description": "The complete answer, including a short correction; a child's parent reads it as your report, a root's goes where that root answers (its owner's chat, or the conversation a Presence root answers, as your context names)."},
                 "answer_sha256": {"type": "string", "description": "Exact offered retained or whole held response hash."},
-                "rationale": {"type": "string", "description": "For stop, what remains unfinished, whose step it is and why you end now; the owner reads it as the stop's cause on the task row. Optional for finish."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
+                "rationale": {"type": "string", "description": "For stop, what remains unfinished, whose step it is and why you end now; for a finish with pending_review=finish (required there) or over reviewers' findings, why you accept it now. The owner reads it on the task row."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
                     "effective_criteria": {"type": "string"}, "material_tool_indices": {"type": "array", "items": {"type": "integer"}},
                 }, "required": ["owner_source_sha256"]},
-                "pending_review": {"type": "string", "enum": ["wait", "finish"], "default": "wait"},
+                "pending_review": {"type": "string", "enum": ["wait", "finish"], "description": "For a finish while your result's review still runs: wait (the default) for its verdict, or, where offered, finish now with a rationale saying why; the result then shows Done with warnings and the reviewers' late verdict is kept for you. A stop waits for nothing and this has no effect on it: to wait for a review of yours that still runs, do not end; collect it with its review_reference, a $0 call that waits for seats still running in this process; after a restart it returns what is recorded, possibly still pending."},
                 "swarm_comparison": {"type": "string", "description": "Optional solo-versus-swarm comparison in your own words, attributed to you separately from measured tree facts."},
                 "silent": {"type": "boolean", "default": False, "description": "Finish without a message where allowed above and no human reply is owed; any answer stays internal (wake_silent)."},
-                "summary": {"type": "string", "default": "", "description": "On a root task or self-started run: one short plain sentence for your human, in their language, saying what this run did, found or decided. A clean finish shows it on the card, room row and portal; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take it as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it, and my other foci read it beside this room until a page seals its rows. Your full answer stays as written. A child's sentence is dropped and named in its result (ignored: summary)."},
-                "fold_read": {"type": "boolean", "default": False, "description": "With summary, when this run read words here and owes nothing: my other conversations read this room's words up to this finish as this sentence with their address, until a page seals them. My human's words stay whole; nothing is sealed."},
+                "summary": {"type": "string", "default": "", "description": "The gist, as this tool's description says; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take its first sentence as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it, and my other foci read it beside this room until a page seals its rows. Your full answer stays as written. A child's sentence is dropped and named in its result (ignored: summary)."},
+                "fold_read": {"type": "boolean", "default": False, "description": "With summary, when this run read words here and owes nothing: my other conversations read this room's words up to this finish as this gist with their address, until a page seals them. My human's words stay whole; nothing is sealed."},
             }, "required": ["action"]}}, _finish_task),
         ToolEntry("set_tool_timeout", {
             "name": "set_tool_timeout",
@@ -296,8 +358,11 @@ def get_tools() -> List[ToolEntry]:
                     "workspace": {"type": "string", "description": "'none' opts out of the Project's default folder; empty otherwise.", "default": ""},
                     "context_requires_self_body_docs": {"type": "boolean", "description": "True for work on Ouroboros code, including copies elsewhere: this task gets the full development handbook in Max. Low/Nano and helpers keep their usual book maps.", "default": False},
                     "context_requires_development": {"type": "boolean", "description": "true: all of docs/DEVELOPMENT.md in every mode; false: its chapter map."},
+                    "review_answer": {"type": "boolean", "default": False, "description": "true when your human asks that this work's answer itself be checked: under task review Required the host reviews its whole final answer before delivery even when no file was made."},
                     "source": {"type": "string", "description": "Attach an existing folder or clone a git URL (https://... or git@host:path) server-side into the projects root; private auth failures are typed auth_required. Registers the folder with provenance + trusted_at as the Project/task workspace. Use for work on a supplied repo/folder.", "default": ""},
                     **_START_CHOICE_PARAMS,
+                    "model": {"type": "string", "description": "Model for this new work, with your human's verbatim owner_words. An uncited choice is your own only in Cyber Pro; an owner choice still binds.", "default": ""},
+                    "model_as_typed": {"type": "boolean", "default": False, "description": "Use the exact typed id despite similar catalog suggestions. The route is unverified; this confirms your choice, not availability."},
                     "owner_words": {"type": "string", "description": _OWNER_WORDS_PARAM, "default": ""},
                 },
                 "required": ["objective", "title"],
@@ -398,14 +463,14 @@ def get_tools() -> List[ToolEntry]:
         }, _update_scratchpad),
         ToolEntry("send_user_message", {
             "name": "send_user_message",
-            "description": "Send a separate reply to the owner while work continues: the first line of longer work (what "
-                           "I am about to do and why), a question the work does not wait on, an invitation to "
-                           "collaborate, or anything else that needs the owner now; a decision this work needs from "
-                           "the owner is an escalate card, which shows its options, stays listed as waiting and brings "
-                           "the answer back here. It appears in this work's room as a normal reply, calls the owner back "
-                           "and leaves the work running; work news goes on update_focus, later progress stays in the "
-                           "card. For Presence-bound work that room is local, not the place conversation: a connector "
-                           "tool reaches that, and your final answer only where your context names that route.",
+            "description": "Reach the owner while work continues: an opening that says what I will check and why, "
+                           "a substantial interim result they need now, a non-blocking question or an invitation to "
+                           "collaborate. Do not pre-send a duplicate of the final answer: it already reaches this work's "
+                           "answer room. A needed owner decision uses escalate: its card shows options, stays listed "
+                           "as waiting and brings the answer here. This tool sends a normal reply in this work's room, "
+                           "calls the owner back and leaves work running; routine news goes on update_focus, later "
+                           "progress stays in the card. For Presence work that room is local, not the place conversation: "
+                           "a connector reaches that, and the final answer only where context names that route.",
             "parameters": {"type": "object", "properties": {
                 "text": {"type": "string", "description": "Message text"},
                 "reason": {"type": "string", "description": "Why you're reaching out (logged, not sent)"},
@@ -417,29 +482,17 @@ def get_tools() -> List[ToolEntry]:
         }, _send_user_message),
         ToolEntry("update_identity", {
             "name": "update_identity",
-            "description": (
-                'Replace your persistent identity manifest with the full supplied text after substantive reflection. '
-                'Read it first and preserve continuity. This is the identity-writing tool in every project room; do not '
-                'edit memory/identity.md through file tools.'
-            ),
-            "parameters": {"type": "object", "properties": {
-                "content": {"type": "string", "description": "Full identity content (prefer evolving over rewriting from scratch)"},
-                "expected_revision": {"type": "string", "description": "Required for an existing identity: source_revision (SHA-256 of bytes) from read_file. A stale revision refuses with the current revision."},
-            }, "required": ["content"]},
+            "description": _UPDATE_IDENTITY_DESCRIPTION,
+            "parameters": {"type": "object", "properties": edit_properties(
+                "identity", "The current revision (under the resident identity, or a receipt's or refusal's)."),
+                "required": []},
         }, _update_identity),
         ToolEntry("update_world", {
             "name": "update_world",
-            "description": "Update my map of my world (memory/WORLD.md): what lives in my environment — "
-                           "agents, services, hosts, devices — how I reach each, what worked, what is held "
-                           "or refused. The host owns the measured block (system, roots, tools found at "
-                           "startup) and keeps it; I send the whole file with the rest revised. Read it "
-                           "first and keep it compact (detail belongs in knowledge). The same continuous "
-                           "file in every room and drive; this is the only correct way to write it — never "
-                           "write memory/WORLD.md through write_file/edit_text.",
-            "parameters": {"type": "object", "properties": {
-                "content": {"type": "string", "description": "Full file content; the host keeps or restores its measured block"},
-                "expected_revision": {"type": "string", "description": "Required for an existing file: source_revision (SHA-256 of bytes) from read_file. A stale revision refuses with the current revision."},
-            }, "required": ["content"]},
+            "description": _UPDATE_WORLD_DESCRIPTION,
+            "parameters": {"type": "object", "properties": edit_properties(
+                "map", "The current revision (under the resident map, or a receipt's or refusal's)."),
+                "required": []},
         }, _update_world),
         ToolEntry("toggle_evolution", {
             "name": "toggle_evolution",
@@ -451,9 +504,9 @@ def get_tools() -> List[ToolEntry]:
         }, _toggle_evolution),
         ToolEntry("toggle_consciousness", {
             "name": "toggle_consciousness",
-            "description": ("Control background consciousness: 'start' or 'stop' (the owner is told), or "
-                            "'status' (answered to you only: the persisted state with its source, never posted to "
-                            "the owner's chat)."),
+            "description": ("Control background consciousness: 'start' or 'stop' (the owner is told; a start does "
+                            "not lift a stop the owner or Panic placed), or 'status' (answered to you only: the "
+                            "persisted state with its source, never posted to the owner's chat)."),
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["start", "stop", "status"], "description": "Action to perform"},
             }, "required": ["action"]},
@@ -473,10 +526,16 @@ def get_tools() -> List[ToolEntry]:
             "name": "switch_model",
             "description": (
                 'Switch model or reasoning effort on the next round. No arguments lists available models. After a host '
-                "fallback, primary='return' or 'wait' returns to this turn's primary route."
+                "fallback, primary='return' or 'wait' returns to this turn's primary route. "
+                "A model beyond Main and Light needs your human's cited words (owner_words, scope)."
             ),
             "parameters": {"type": "object", "properties": {
-                "model": {"type": "string", "description": "Model name (e.g. anthropic/claude-sonnet-4). Leave empty to keep current."},
+                "model": {"type": "string", "description": "Exact model route. Cited work/Main choices require it; cited scope room accepts empty or main to follow Main. An uncited empty work switch keeps its acting route."},
+                "model_as_typed": {"type": "boolean", "default": False, "description": "With owner_words, use the exact typed id despite similar catalog suggestions. It remains unverified; this grants no additional model authority."},
+                "owner_words": {"type": "string", "description": "Your human's verbatim words choosing the model; the host checks provenance by bytes, you read their meaning."},
+                "scope": {"type": "string", "enum": ["work", "room", "main"], "default": "work",
+                          "description": "With owner_words: work sets this work's primary; room saves its room's model; main changes Main itself. Without a cite, work keeps the existing Main/Light acting switch; in Cyber Pro use the settings writer for your own room or Main changes."},
+                "project_id": {"type": "string", "description": "For scope room: existing room id; omitted uses this work's room."},
                 "effort": {"type": "string", "enum": list(EFFORT_SCALE),
                            "description": "Reasoning effort for the next round, inside my human's effort range. Main keeps its level outside Cyber Pro (delegate deeper thinking: schedule_subagent(effort=…)); a child, an evolution task or a wake moves inside the range; a pinned or model-named focus keeps its level. Leave empty to keep current."},
                 "primary": {"type": "string", "enum": ["return", "wait"],
@@ -484,32 +543,33 @@ def get_tools() -> List[ToolEntry]:
                                             "(Auto stays Auto) plus the owner's wait-card choice; effort stays. 'return': "
                                             "if the primary refuses, configured routes are tried again. 'wait': if it "
                                             "refuses or is unreachable, wait for it where this turn may wait instead of "
-                                            "paid alternatives. The next real request tests it; no timer or probe does. "
+                                            "paid alternatives; after its content filter's stop nothing is there to wait for, "
+                                            "so this run ends as interrupted, without them. The next real request tests it; no timer or probe does. "
                                             "Not with model.")},
             }, "required": []},
         }, _switch_model),
         get_task_result_entry(),
         ToolEntry("wait_task", {
             "name": "wait_task",
-            "description": "Wait for ONE subtask to reach a terminal status and return its effective result: the full single-child handoff once it settled (or when your known_result_sha256 no longer matches); a return BEFORE it settled carries the compact wait_tasks projection plus delegated_runs (its open delegated runs with dated observation facts, no liveness verdict). May return EARLY (before terminal) if the child raises a tree_note blocker/question/interface_contract/review_requested/delegation_constraint beacon — the result then carries a [CHILD_BEACONS] block so you can steer, review, or override it. Unread mailbox messages return early for the ordinary loop to deliver and acknowledge; host-marked context-only place arrivals stay unread until a genuine wake. The child keeps running. A child held by a current stop you have not yet been shown returns once with [HELD_DEPENDENCY] (its current_stop: cause, who releases it, the request door if yours); waiting again keeps waiting. sleep_mode=warm/cold sleeps instead of holding your slot; the same result reaches your next request when you wake. With SEVERAL children in flight, prefer wait_tasks(any_terminal) to absorb whichever finishes first rather than blocking serially on one id at a time.",
+            "description": "Wait for ONE subtask to reach a terminal status and return its effective result: the full single-child handoff once it settled (or when your known_result_sha256 no longer matches); a return BEFORE it settled carries the compact wait_tasks projection plus delegated_runs (its open delegated runs: the observation the host records when a run's state or the engine's answer changes, dated by when that began, never per read, so no date proves a recent read; no liveness verdict). May return EARLY (before terminal) if the child raises a tree_note blocker/question/interface_contract/review_requested/delegation_constraint beacon — the result then carries a [CHILD_BEACONS] block so you can steer, review, or override it. Unread mailbox messages return early for the ordinary loop to deliver and acknowledge; host-marked context-only place arrivals stay unread until a genuine wake. The child keeps running. A child held by a current stop you have not yet been shown returns once with [HELD_DEPENDENCY] (its current_stop: cause, who releases it, the request door if yours); waiting again keeps waiting. Omitting sleep_mode sleeps even with timeout_sec (the wake time); saved state/obligations release your process unless live custody keeps it warm, named in the receipt. The result reaches your first request after wake. Explicit in_slot keeps the process and same-call result while yielding acting capacity; warm/cold choose the sleep mode. With SEVERAL children in flight, prefer wait_tasks(any_terminal) to absorb whichever finishes first rather than blocking serially on one id at a time.",
             "parameters": {"type": "object", "required": ["task_id"], "properties": {
                 "task_id": {"type": "string", "description": "Task ID to check"},
                 "view": {"type": "string", "enum": ["answer", "summary", "evidence", "full"], "description": "Settled result view; omitted/full preserves the existing handoff. Early returns remain compact wait observations, not a result or full read."},
                 "known_result_sha256": {"type": "string", "description": "Prior child_result_sha256 in every view; current facts still refresh. This does not change when the wait ends."},
                 "timeout_sec": {"type": "integer", "description":
-                                "In-slot only: maximum seconds to wait (default 180); a larger value is clamped to "
+                                "With no sleep_mode: the sleep's wake time, in seconds. With sleep_mode=in_slot: maximum seconds to wait (default 180); a larger value is clamped to "
                                 f"{_WAIT_TASK_CLAMP_SEC}, and a deadline narrows it (named in the result). Size the window to the child's expected life."},
                 **SLEEP_PARAMS,
             }},
         }, _wait_for_task, timeout_sec=7200),
         ToolEntry("wait_tasks", {
             "name": "wait_tasks",
-            "description": "Wait for MULTIPLE subtasks at once: the right tool to ABSORB a batch of independent children you scheduled in one burst. With mode=any_terminal it returns as soon as the FIRST child finishes (handle it, then call again for the rest) instead of blocking serially. Each child gets a compact structural projection, its cost as accounted_upper_bound_usd with cost_final; the full per-child envelope stays in the task store (child_result_sha256 pins the exact result you saw; get_task_result returns the full result text plus trace/outcome summaries). The wait may early_return (before all terminal) on a child tree_note blocker/question/interface_contract/review_requested/delegation_constraint beacon so you can steer, review, or override mid-flight, or on unread mailbox messages (reason=owner_mailbox_pending); host-marked context-only place arrivals stay unread until a genuine wake. The ordinary loop handles delivery and acknowledgement. A child held by a current stop you have not yet been shown returns once (reason=dependency_held); waiting again keeps waiting. An id no surface of this tree ever minted (no task result, queue row or tree-ledger row) is flagged unknown_task_id ('not yet registered or never scheduled'), with unknown_task_ids and a compact children_roster of your ACTUAL direct children so you can repair the wait set instead of re-polling phantoms. sleep_mode=warm/cold sleeps instead of holding your slot (an unminted id is then refused); the same result reaches your next request when you wake.",
+            "description": "Wait for MULTIPLE subtasks at once: the right tool to ABSORB a batch of independent children you scheduled in one burst. With mode=any_terminal it returns as soon as the FIRST child finishes (handle it, then call again for the rest) instead of blocking serially. Each child gets a compact structural projection, its cost as accounted_upper_bound_usd with cost_final; the full per-child envelope stays in the task store (child_result_sha256 pins the exact result you saw; get_task_result returns the full result text plus trace/outcome summaries). The wait may early_return (before all terminal) on a child tree_note blocker/question/interface_contract/review_requested/delegation_constraint beacon so you can steer, review, or override mid-flight, or on unread mailbox messages (reason=owner_mailbox_pending); host-marked context-only place arrivals stay unread until a genuine wake. The ordinary loop handles delivery and acknowledgement. A child held by a current stop you have not yet been shown returns once (reason=dependency_held); waiting again keeps waiting. An id no surface of this tree ever minted (no task result, queue row or tree-ledger row) is flagged unknown_task_id ('not yet registered or never scheduled'), with unknown_task_ids and a compact children_roster of your ACTUAL direct children so you can repair the wait set instead of re-polling phantoms. Omitting sleep_mode sleeps even with timeout_sec (the wake time); unminted ids are then refused. Saved state/obligations release your process unless named live custody keeps it warm; the result reaches your first request after wake. Explicit in_slot keeps the process and same-call result while yielding acting capacity; warm/cold choose the sleep mode.",
             "parameters": {"type": "object", "required": ["task_ids"], "properties": {
                 "task_ids": {"type": "array", "items": {"type": "string"}, "description": "Task IDs returned by schedule_subagent."},
                 "known_result_sha256_by_task": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Optional task_id to previously obtained child_result_sha256 map. Matching children omit only result/trace and return result_unchanged plus a full-read reference. Missing or different hashes return the usual complete body/trace. Current status/cost/outcome/capability facts remain; wait timing is unchanged."},
                 "timeout_sec": {"type": "integer", "description":
-                                "In-slot only: maximum seconds to wait (default 600); a larger value is clamped to "
+                                "With no sleep_mode: the sleep's wake time, in seconds. With sleep_mode=in_slot: maximum seconds to wait (default 600); a larger value is clamped to "
                                 f"{_WAIT_TASKS_CLAMP_SEC}. Size the window to the children's expected life; "
                                 "an expired wait returns the still-live ids and this ceiling; a deadline narrows it (window_bound)."},
                 "mode": {"type": "string", "enum": ["all_terminal", "any_terminal"], "default": "all_terminal"},
@@ -540,6 +600,7 @@ from ouroboros.tools.control_routing import (  # noqa: E402, F401 -- intentional
     _finish_swarm_handoff,
     _close_project,
     _list_projects,
+    _manage_project_folder,
     _start_task,
 )
 from ouroboros.tools.control_runtime import (  # noqa: E402, F401 -- intentional public re-exports

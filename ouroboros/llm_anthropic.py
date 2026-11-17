@@ -452,6 +452,8 @@ class _AnthropicLaneMixin:
         stop_reason = resp_dict.get("stop_reason")
         if stop_reason:
             message["stop_reason"] = str(stop_reason)
+        if isinstance(details := resp_dict.get("stop_details"), dict):  # a refusal's category and explanation: a call fact
+            usage["stop_details"] = {key: details.get(key) for key in ("category", "explanation")}
         message = retain_native_assistant_content(message, content_blocks, target)
         if tool_calls or str(message.get("content") or "").strip():
             message = mark_replayed_receipts_consumed(message)
@@ -470,6 +472,7 @@ class _AnthropicLaneMixin:
                 temperature, tools, **remote_kwargs,
             )
         target["requested_reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
+        source_messages = messages
         system, messages = self._build_anthropic_messages(messages, target)
         payload: Dict[str, Any] = {
             "model": str(target.get("resolved_model") or ""),
@@ -497,6 +500,7 @@ class _AnthropicLaneMixin:
         if remote_kwargs.get("stream"):
             payload["stream"] = True
         apply_processing_preference(target, payload)
+        self._cache_declared_system_context(source_messages, payload)
         return payload
 
     @request_wire_scoped

@@ -48,6 +48,12 @@ def test_shell_sheets_key_structure_off_the_layout_attribute_not_width_queries()
     assert 'html[data-layout="stack"] #app' in css
     assert 'html[data-layout="stack"] #primary-sidebar' in css
     assert 'html[data-layout="stack"] .project-panel' in css
+    # The docked sidebar keeps its hairline beside the room; the stack drawer lies under the room card, whose curved
+    # edge is its edge, so it has none (owner 12.11: a straight line doubled the card's edge).
+    desk = css.split("\n#primary-sidebar {", 1)[1].split("}", 1)[0]
+    assert "border-right: 1px solid" in desk, desk
+    drawer = css.split('\nhtml[data-layout="stack"] #primary-sidebar {', 1)[1].split("}", 1)[0]
+    assert "border-right: 0;" in drawer, drawer
     # Docked, the Project panel keeps its own width beside Main and never covers the sidebar (owner 18.10, 4A): it
     # is placed in the columns after the sidebar's, and its cap is that area.
     placed = css.split('html[data-layout="docked"] .project-panel-backdrop,\nhtml[data-layout="docked"] .project-panel {', 1)[1]
@@ -90,3 +96,81 @@ def test_mains_count_and_read_follow_one_predicate():
     badge = app.split("function updateUnreadBadge()", 1)[1].split("\n}\n", 1)[0]
     assert "mainOnScreen() ? 0 : mainUnreadCount()" in badge, badge
     assert "(!mainOnScreen() && mainUnreadCount() > 0)" in app
+
+
+SECTION_PAGE_ALONE = "@container sectionplace (max-width: calc(40rem - 0.02px)) {"
+
+
+def _block(css: str, head: str) -> str:
+    """The body of the one block that starts with `head` (balanced braces)."""
+    assert css.count(head) == 1, (head, css.count(head))
+    start = css.index(head) + len(head)
+    depth, pos = 1, start
+    while depth and pos < len(css):
+        depth += {"{": 1, "}": -1}.get(css[pos], 0)
+        pos += 1
+    return css[start:pos - 1]
+
+
+def test_folded_rings_leave_each_others_touch_reach():
+    css = _read("web/style.css")
+    rings = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] {')
+    assert "--composer-glyph-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));" in rings
+    assert "column-gap: var(--composer-glyph-gap);" in rings
+    # Only a measured tight line gives up the extra reach; both states share the chips' matching give-back below.
+    tight = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"][data-owner-tight] {')
+    assert "--composer-glyph-gap: var(--composer-row-gap);" in tight
+    # The chips slot gives back that same wider gap, or a folded row with chips would wrap onto a second line.
+    chips = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips {')
+    assert "margin-inline-start: calc(-1 * var(--composer-glyph-gap));" in chips
+    lead = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips::before {')
+    assert "width: calc(var(--composer-glyph-gap) - 6px);" in lead
+
+
+def test_logs_use_the_space_below_clear_for_the_long_filter_word():
+    css = _read("web/style.css")
+    logs = _block(css, "@container dashboard (max-width: 27.75rem) {")
+    assert "grid-column: 4; grid-row: 1;" in _block(logs, ".logs-filters > .logs-inline-clear {")
+    assert "grid-column: 3 / -1;" in _block(logs, ".logs-filters > .filter-chip:nth-child(6) {")
+
+
+def test_an_automatic_section_page_keeps_its_list_when_the_container_narrows_before_javascript():
+    css = _read("web/ui.css")
+    two = _block(css, "@container sectionplace (min-width: 40rem) {")
+    assert '.section-shell[data-section-view="auto"] > .section-pane { display: grid; }' in two
+    assert '.section-place[data-section-view="auto"] .section-lead-page { display: flex; }' in two
+    # Only an explicit page hides the rail; auto shows the list immediately below the two-pane query.
+    assert '.section-shell[data-section-view="page"] > .section-rail,\n.section-shell:is([data-section-view="home"], [data-section-view="auto"]) > .section-pane { display: none; }' in css.replace(two, "")
+    phone = _block(_read("web/style.css"), SECTION_PAGE_ALONE)
+    assert '#page-dashboard[data-section-view="auto"] > .app-page-header .app-page-lead { display: none; }' in phone
+
+
+def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_list():
+    """In the stack layout a section's page is one row, Back and its name, where the places control stood. From 40rem
+    a section holds its list beside the page and the first-level page has no Back: there the places control is the
+    only way to another destination. So the rule that hides it lives inside the query that is true only below 40rem
+    (the complement of the two-pane query) and nowhere else: outside it a person at 640 to 719 px is shut in."""
+    for rel, page in (("web/style.css", "#page-dashboard"), ("web/settings.css", "#page-settings")):
+        css = _read(rel)
+        hide = f'html[data-layout="stack"] {page}[data-section-view="page"] > .app-page-header > .app-page-leading'
+        inside = _block(css, SECTION_PAGE_ALONE)
+        assert hide in inside, f"{rel}: a page that replaced the list keeps one leading control, its Back"
+        assert hide not in css.replace(inside, ""), f"{rel}: outside the below-40rem query this hides the places control beside the list"
+    assert "@container sectionplace (min-width: 40rem) {" in _read("web/ui.css"), "the two panes start where the query above ends"
+
+
+def test_a_touch_window_names_a_sections_two_columns_in_its_one_header_row():
+    """DESIGN:3293,3345,3468: two panes from 40rem still have one header row. Places takes room from the rail's lead;
+    Search stays over the list and the page's name over its cards. The section name remains available to readers."""
+    two = _block(_read("web/ui.css"), "@container sectionplace (min-width: 40rem) {")
+    header = 'html[data-layout="stack"] .section-place > .app-page-header'
+    assert f'{header} {{ grid-template-areas: "leading lead lead"; }}' in two
+    assert f"{header} > .app-page-title-block {{ display: contents; }}" in two
+    title = _block(two, f"{header} .app-page-title-row {{")
+    assert "position: absolute;" in title and "clip-path: inset(50%);" in title
+    assert f"{header} .app-page-lead {{ grid-area: lead; min-height: var(--touch-target-min); }}" in two
+    lead = _block(two, 'html[data-layout="stack"] .section-place:is([data-section-view="page"], [data-section-view="auto"]) .section-lead {')
+    assert "margin-inline-start: 0;" in lead
+    assert ("grid-template-columns: calc(var(--section-rail-w) - var(--section-rail-end) - var(--space-3) - 44px - var(--space-2)) minmax(0, 1fr);") in lead
+    assert '"leading title toolbar" "lead lead lead"' not in _read("web/settings.css")
+    assert "padding: var(--chrome-inset) var(--space-3);" in _read("web/style.css"), "the stack header's inset the lead counts"

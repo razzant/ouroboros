@@ -18,6 +18,9 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 SELECTION_KEY = "_resume_selection"
+# The accepted selection an application stop interrupted (``declare_stop``), kept in that stop's recovery custody
+# and bound to its source: evidence that the work was resumed, never a dispatch carrier.
+INTERRUPTED_SELECTION = "interrupted_selection"
 SELECTION_BINDING = (
     "root_task_id", "root_resume_basis", "root_grant_id", "root_resume_generation",
     "fence_id", "root_fence_id", "grant_id", "grant_generation",
@@ -50,6 +53,7 @@ STOP_TEXT = {
     "spending_limit": "Spending limit reached", "technical_pause": "After a technical problem",
     "awaiting_selection": "Waiting for Ouroboros or you to resume it",
     "restore_failed": "Its saved state could not be restored", "held": "Held",
+    "start_unconfirmed": "Its last start is unconfirmed, or its saved work could not be read",
     "sleeping": "Sleeping until it is woken",
     "earlier_work_unconfirmed": "Continue starts when the earlier attempt's work is confirmed finished",
 }
@@ -168,8 +172,9 @@ def stop_presentation(task: dict, fences: dict | None = None) -> dict:
     wait = record_policy(hold_fact(task)) if not stop else {}
     sleeping = not stop and record_policy(pause_marker(task) or task.get("budget_pause")).get("cause") == "wait"
     if not stop:
-        code = ("earlier_work_unconfirmed" if wait.get("wait_for") else "restore_failed" if refusal
-                else "sleeping" if sleeping else "held")
+        unknown_start = refusal and reason_policy(str(refusal.get("reason") or "")).get("dispatch_unknown")
+        code = ("earlier_work_unconfirmed" if wait.get("wait_for") else "start_unconfirmed" if unknown_start
+                else "restore_failed" if refusal else "sleeping" if sleeping else "held")
     # An interrupted, consumed handoff can still need addressed Resume even
     # though its stop was already released; the census names that existing door.
     needs_resume = refusal or task.get("can_resume")
@@ -325,6 +330,43 @@ def queue_control(drive_root: Any, row: dict, fences: dict, *, running: bool = F
     return {"phase": phase, "view": view, "owner_resumed": interrupted is True}
 
 
+def restored_row_class(drive_root: Any, row: dict, fences: dict) -> str:
+    """What a restored queue row needs, read as the work projection reads it (``queue_control``): ``paused`` (an
+    owner, money or authority pause stands), ``resume`` (another stop or a refusal holds it until a Resume),
+    ``continues`` (only admission or a wait stands before it) or ``unknown`` (a fact it needs is unreadable)."""
+    control = queue_control(drive_root, row, fences)
+    if control["phase"] == "unknown":
+        return "unknown"
+    if control["phase"] == "queued" or control["view"].get("waiting"):
+        return "continues"
+    cause = (control["view"].get("stop") or {}).get("cause")
+    return "paused" if cause in {"pause", "money", "authority"} else "resume"
+
+
+def restored_rows_text(drive_root: Any, pending: Any, fences: dict) -> str:
+    """What the rows of a restored queue need now, for the startup notice: ``Continuing by themselves: 2; waiting for
+    Resume: 19; still paused: 5.`` Empty when there is no row, a row is ``unknown`` or the reading fails: the notice
+    then keeps its count alone, never a guessed class. The rows' control facts are read as the work projection reads
+    them, in one short transaction per store (``store_hot_facts.snapshot``): a store that cannot answer leaves its
+    rows unknown without a wait per row, on the thread that starts the supervisor."""
+    from ouroboros.store_hot_facts import snapshot
+
+    try:
+        rows, fences, requests = [row for row in list(pending or ()) if isinstance(row, dict)], dict(fences), []
+        for row in rows:
+            root, task_id = row.get("budget_drive_root") or drive_root, str(row.get("id") or "")
+            root_id = str(row.get("root_task_id") or task_id)
+            requests.extend(((drive_root, task_id), (root, task_id), (root, root_id)))
+        with snapshot(requests):
+            classes = [restored_row_class(drive_root, row, fences) for row in rows]
+    except Exception:
+        log.warning("Restored queue rows were not classified; the startup notice keeps its count alone", exc_info=True)
+        return ""
+    words = {"continues": "continuing by themselves", "resume": "waiting for Resume", "paused": "still paused"}
+    parts = "; ".join(f"{text}: {classes.count(key)}" for key, text in words.items() if key in classes)
+    return f"{parts[0].upper()}{parts[1:]}." if parts and "unknown" not in classes else ""
+
+
 # What makes a stop the same stop: its own records, never an amount, a result or a time read now. A stop declared anew
 # records its occurrence, so two restarts with a release between them are two stops in the same words: a fence or pause
 # its id, a saved or restart hold ``held_at`` (the door matrix keeps a standing hold's, ``declare_stop``), and a member's
@@ -466,6 +508,13 @@ def writer_wait(task: dict | None) -> bool:
     return record_policy(hold_fact(task)).get("wait_for") == "continuation_writers"
 
 
+def held_for_release(task: dict | None) -> bool:
+    """Its own explicit stop that only a Resume or the owner releases; never a wait or a refusal."""
+    hold = hold_fact(task)
+    policy = record_policy(hold)
+    return bool(hold) and policy["cause"] != "wait" and policy["release"] in {"resume", "owner"}
+
+
 _POINTS = ("_budget_pause", "_owner_wait_resume", "_working_recovery", "_budget_pause_resume", SELECTION_KEY)
 
 
@@ -530,6 +579,8 @@ def declare_stop(task: dict, record: dict) -> dict:
 
     Explicit Pause releases its authorized prior decision under the queue lock.
     Other producers cannot silently erase it while publishing custody facts.
+    An application stop keeps the selection it replaces in the recovery custody it
+    holds (``interrupted_selection``); every other stop supersedes the one kept there.
     """
     policy = record_policy(record)
     if policy["cause"] == "refusal":
@@ -539,9 +590,27 @@ def declare_stop(task: dict, record: dict) -> dict:
     if door and not door_can_replace(task, record["reason"]) or prior and not door:
         return prior or current_stop(task)
     task.pop("_budget_pause_resume", None)
-    task.pop(SELECTION_KEY, None)
+    selection, recovery = task.pop(SELECTION_KEY, None), task.get("_working_recovery")
+    if isinstance(recovery, dict) and policy["cause"] == "app_stop":
+        if isinstance(selection, dict) and recovery.get("source_task_id") == task.get("id"):
+            task["_working_recovery"] = {**recovery, INTERRUPTED_SELECTION: {
+                **selection, "source_task_id": recovery["source_task_id"], "from_attempt": recovery.get("from_attempt")}}
+    elif isinstance(recovery, dict) and INTERRUPTED_SELECTION in recovery:
+        task["_working_recovery"] = {key: value for key, value in recovery.items() if key != INTERRUPTED_SELECTION}
     task["_budget_pause_hold"] = record
     return record
+
+
+def interrupted_selection(task: dict | None) -> dict:
+    """The selection an application stop interrupted (``declare_stop``) while the row's recovery custody still holds
+    that same source, task and attempt; ``{}`` otherwise. History of a Resume, never a door or a dispatch carrier."""
+    task = task if isinstance(task, dict) else {}
+    recovery = task.get("_working_recovery") if isinstance(task.get("_working_recovery"), dict) else {}
+    kept = recovery.get(INTERRUPTED_SELECTION)
+    if not (isinstance(kept, dict) and kept.get("source_task_id") == recovery.get("source_task_id") == task.get("id")
+            and kept.get("from_attempt") == recovery.get("from_attempt")):
+        return {}
+    return kept
 
 
 def stop_record(reason: str, *, held_at: str, detail: str = "", by: dict | None = None,
@@ -618,12 +687,13 @@ def model_handoff_words(block: dict) -> str:
 
 def acceptable_unknown(blockers) -> list:
     """The ids a caller may name to go on past (``control_actor.accepting_unknown``): every
-    blocker is a held call whose outcome is unknown, else none (``[]``)."""
+    blocker is a held call or merge request whose outcome is unknown, else none (``[]``)."""
     from ouroboros.local_custody_repair import ACCEPTABLE_UNKNOWN
 
     rows = [b for b in blockers or () if isinstance(b, dict)]
-    ids = [str(b.get("operation_id") or b.get("attempt_id") or "") for b in rows
-           if b.get("kind") in {"tool_handoff", "model_handoff"} and b.get("reason") in ACCEPTABLE_UNKNOWN]
+    ids = [str(b.get("operation_id") or b.get("attempt_id") or b.get("receipt_id") or "") for b in rows
+           if b.get("kind") in {"tool_handoff", "model_handoff", "merge_operation"}
+           and b.get("reason") in ACCEPTABLE_UNKNOWN]
     return ids if rows and len(ids) == len(rows) and all(ids) else []
 
 
@@ -659,10 +729,14 @@ def resume_outcome(outcome: dict) -> dict:
         if kind in {"tool_handoff", "model_handoff"}:
             words.append(tool_handoff_words(block) if kind == "tool_handoff" else model_handoff_words(block))
             continue
+        if kind == "merge_operation":  # ``merge_receipts.held_receipts``; the web mirrors these words
+            words.append({"merge_effect_unknown": f"the outcome of a merge request of task {tid} is unknown",
+                          "merge_queued": f"a merge of task {tid} is queued on GitHub"}.get(
+                              str(block.get("reason") or ""), f"a merge of task {tid} is not settled"))
+            continue
         words.append({"running_member": f"task {tid} is still running",
                       "dispatchable_member": f"task {tid} is queued to run",
                       "owned_process": f"a process of task {tid} is still alive",
-                      "merge_operation": f"a merge of task {tid} is not settled",
                       "workspace_executor": f"a workspace process of task {tid} is not settled"}.get(
                           kind, str(kind or "unknown").replace("_", " ")))
     accept = acceptable_unknown(outcome.get("blockers"))

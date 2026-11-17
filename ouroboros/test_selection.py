@@ -17,7 +17,8 @@ import subprocess
 from typing import Iterable
 
 
-# Minimal witnesses of the contracts verification and every install rely on.
+# Minimal witnesses of the contracts verification and every install rely on, and the inventory
+# pin: book chapters, runtime text, tracked paths and UI modules reach it as data no import traces (#3188).
 # Replacing a witness is a verifier change and requires full qualification.
 # The whole Node lane is unconditional in both runners, outside this Python list.
 FLOOR_TESTS = {
@@ -29,9 +30,17 @@ FLOOR_TESTS = {
     "tests/test_preflight_process_containment.py": "a leaked test process cannot pass the gate",
     "tests/test_smoke.py": "the shipped Python modules import",
     "tests/test_safety_policy.py": "every built-in tool has an explicit safety policy",
+    "tests/test_generated_inventories.py": "docs/inventories/ match their regeneration from books, code, paths and UI",
 }
 
-SELECTION_RULE = "floor + changed tests + direct importers of changed code, tests and test helpers + authored widening"
+SELECTION_RULE = ("floor + changed tests + direct importers of changed code, tests and test helpers "
+                  "+ the interface's static witnesses when web/ changes + authored widening")
+# The interface's static witnesses read web/ as data, which no import traces: a stylesheet edited alone ran none
+# of them and left the target red (#3308, #3311). By name, with no dependency analysis: web/tests/ counts too,
+# since a witness runs a fixture from there in Node, and so does a numbered release, whose version carrier
+# web/modules/api_types.js is such a file (the eighteen take ten seconds).
+_INTERFACE_SOURCES = (".css", ".js", ".html")
+_STATIC_WITNESS = re.compile(r"tests/test_\w+_static\.py")
 # Bind the policy this process loaded, even if its source changes later on disk.
 _POLICY_SOURCE = Path(__file__).read_bytes()
 _APPARATUS = frozenset({
@@ -45,7 +54,7 @@ _APPARATUS = frozenset({
     "ouroboros/preflight_qualification.py", "scripts/run_tests.py", "scripts/safe_test.py",
     "ouroboros/test_environment.py", ".github/workflows/ci.yml",
     "ouroboros/process_containment.py", "ouroboros/process_lifeline.py",
-    "ouroboros/process_overload.py", "ouroboros/test_parallelism.py",
+    "ouroboros/process_overload.py", "ouroboros/test_parallelism.py", "ouroboros/host_memory.py",
     "tests/default_lane.py", "tests/browser_lane.py", "tests/ci_evidence.py", "tests/ci_verdicts.py",
     "tests/ci_accepted.py", "tests/stack_samples.py", "tests/_test_folders.py",
 })
@@ -297,6 +306,10 @@ def select_from_paths(repo: Path, paths: Iterable[str], *, base: str,
                 reasons.append((path, "direct import: " + ", ".join(bound)))
     if not full:
         full = [(p, apparatus) for p, reached in helpers.items() if not {_module(r) for r in reached} & imported]
+    if not full and any(p.startswith("web/") and p.endswith(_INTERFACE_SOURCES) for p in changed):
+        witnesses = [path for path in files if _STATIC_WITNESS.fullmatch(path)]
+        selected.update(witnesses)
+        reasons.extend((path, "static witness of the interface: web/ changed") for path in witnesses)
     reasons.extend((p, "author widening: " + test_reason.strip()) for p in extra)
     selected.update(extra)
     return TestSelection("full" if full else "selected", base, files if full else tuple(sorted(selected)),

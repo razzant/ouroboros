@@ -363,6 +363,9 @@ def admit_owner_turn(
 
     client_msg_id = _client_message_id(task_metadata)
     task = _seed_task(chat_id, text, image_data, task_constraint, task_metadata)
+    root = pathlib.Path(str(task.get("drive_root") or "") or _pool().DRIVE_ROOT)
+    intake = open_owner_intake(task, root)  # before its row exists: a carrier only ever replaces the fact
+    meta = None
     try:
         with queue._queue_lock, _pool()._repo_writer_gate_lock:
             if not owner_conversation_admitted(chat_id, client_msg_id):
@@ -390,6 +393,47 @@ def admit_owner_turn(
         _report_direct_chat_error({"task": task, "chat_id": chat_id, "client_msg_id": client_msg_id,
                                    "task_metadata": task_metadata}, e)
         return None
+    finally:
+        if intake and meta is None:  # no admitted row names the fact
+            close_owner_intake(task, root)
+
+
+def open_owner_intake(task: Dict[str, Any], root: Any) -> str:
+    """My human's next words in this chat reach this owner turn from here on
+    (``conversation_lease.owner_conversation_key``): the host's fact at admission, its carrier's from the moment it
+    takes the turn. The key; else "" with no fact of this attempt left standing (a failed take retires the host's,
+    ``conversation_lease.retire_author_intake``), so the words start their own turn."""
+    from ouroboros.conversation_lease import (
+        open_author_intake,
+        owner_conversation_key,
+        retire_author_intake,
+        task_attempt,
+    )
+
+    key, attempt = owner_conversation_key(task), task_attempt(task)
+    if not key:
+        return ""
+    try:
+        if open_author_intake(root, str(task["id"]), key, attempt=attempt):
+            return key
+    except Exception:
+        log.warning("Owner turn %s reads no follow-up: its intake fact was not written", task.get("id"), exc_info=True)
+    try:
+        retire_author_intake(root, str(task["id"]), key, attempt=attempt)
+    except Exception:
+        log.warning("Owner turn %s: an intake fact it could not take may still stand", task.get("id"), exc_info=True)
+    return ""
+
+
+def close_owner_intake(task: Dict[str, Any], root: Any) -> None:
+    """The writer's own fact for this attempt goes (``close_author_intake(own=True)``): an arrival starts its own
+    turn."""
+    from ouroboros.conversation_lease import close_author_intake, task_attempt
+
+    try:
+        close_author_intake(root, str(task["id"]), own=True, attempt=task_attempt(task))
+    except Exception:
+        log.debug("owner intake of %s not closed", task.get("id"), exc_info=True)
 
 
 def handle_wake_direct(
@@ -624,6 +668,16 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
     apply_consciousness_authority(task)
     from ouroboros.settings_integrity import record_subagents_admission
     record_subagents_admission(task, root)
+    from ouroboros.route_choice import PROCESSING_KEY, capture_lead  # the admitted primary and tier (route_choice)
+    carried = PROCESSING_KEY in (task.get("metadata") if isinstance(task.get("metadata"), dict) else {})
+    capture_lead(task, root)
+    tier = (task.get("metadata") or {}).get(PROCESSING_KEY) if isinstance(task.get("metadata"), dict) else None
+    if broadcast is not None and not carried and isinstance(tier, dict) and (tier.get("tier") or pid):
+        # The tier admitted now reaches the row by frame as a room's basis does: the turn's card says it, and a room
+        # turn rebuilt from its row keeps even its decided Default rather than reading the room's newer tier. A Main
+        # turn has no room tier to drift to; a resumed step admits nothing new.
+        broadcast({"type": "direct_turn_bound", "task_id": str(task["id"]), "task_attempt": int(task.get("_attempt") or 1),
+                   "facts": {PROCESSING_KEY: tier}})
     attach_task_contract(task)
     from ouroboros.tool_access_roots import freeze_tool_profile
     freeze_tool_profile(task)
@@ -658,11 +712,17 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
     control = str(getattr(exc, "control_reason", "") or "")
     stopped = before_start and control in {"cancelled", "finalize_requested"}
     exhausted = before_start and control == "budget_exhausted"
+    from ouroboros.deployment_extensions import HOLD_REASON, hold_text, record_held_task
+
+    held = before_start and control == HOLD_REASON  # a required extension this carrier does not run
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     correlation = _host_operation_failure(metadata).get("progress_meta", {})
     origin = {"origin_message_ref": correlation["origin_message_ref"]} if "origin_message_ref" in correlation else {}
     try:
-        if stopped or exhausted:
+        if held:
+            text = hold_text()
+            record_held_task(agent.env.drive_root, task, text, **origin)
+        elif stopped or exhausted:
             from ouroboros.outcomes import infra_failed_axes
             from ouroboros.subagents import effort_result_fields
             from ouroboros.task_results import STATUS_CANCELLED, STATUS_FAILED, _TRULY_TERMINAL_STATUSES, write_task_result
@@ -695,7 +755,7 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
     try:  # the owner reads the failure once, keyed to the turn: the carrier's frame, the supervisor's send
         event_queue.put({"type": "send_message", "task_id": task_id, "chat_id": int(task.get("chat_id") or 0),
                          "text": text, "progress_meta": progress_meta, "role": "system",
-                         "system_type": "task_not_started" if stopped or exhausted else "task_error"})
+                         "system_type": "task_not_started" if stopped or exhausted or held else "task_error"})
     except Exception:
         log.debug("keyed final of turn %s failed", task_id, exc_info=True)
 
@@ -714,13 +774,70 @@ def refusal_terminal(agent: Any, task: Dict[str, Any], refusal: ConversationRefu
     return events
 
 
+class TurnPhaseFrames:
+    """The one producer of a task's start phases for the census: its execution (``TurnExecution``) observes the
+    task's own frames, and each phase it newly passes leaves as a ``direct_turn_phase`` frame naming its attempt and
+    execution, and the worker slot carrying it, which ``conversation_lane.handle_direct_turn_phase`` lands on the
+    RUNNING row that slot holds. A conversation turn's carrier (``CarrierTurn``) and a pooled task's endpoint
+    (``pooled_turn_phases``) both publish through it."""
+
+    def __init__(self, task_id: str, attempt: int, execution: Any, out_q: Any, worker_id: Any = None,
+                 phase_generation: str = "") -> None:
+        self.task_id, self.attempt, self.execution, self._out_q = task_id, attempt, execution, out_q
+        self.worker_id = worker_id
+        self.phase_generation = str(phase_generation or "")
+
+    def observe(self, kind: str, data: Dict[str, Any]) -> None:
+        before = self.execution.phase
+        self.execution.observe(kind, data)
+        if self.execution.phase != before:
+            self.publish()
+
+    def publish(self) -> None:
+        """The execution's current phase as one frame (each new phase, and a pooled task's first fact)."""
+        frame = {"type": "direct_turn_phase", "task_id": self.task_id, "task_attempt": self.attempt,
+                 "execution_id": self.execution.execution_id, "phase": self.execution.phase}
+        if self.worker_id is not None:
+            frame["worker_id"] = self.worker_id
+        if self.phase_generation:
+            frame["phase_generation"] = self.phase_generation
+        try:
+            self._out_q.put(frame)
+        except Exception:
+            log.debug("direct_turn_phase frame failed for %s", self.task_id, exc_info=True)
+
+
+def pooled_turn_phases(task: Dict[str, Any], out_q: Any, worker_id: Any = None) -> TurnPhaseFrames:
+    """A pooled task's start phases (#2862), so its Project card says Preparing with its step until its first Main
+    call starts, as a carried turn's does. An inline executor's entry keeps its one execution (as ``CarrierTurn``);
+    any other gets one that only observes, never a direct turn's receipt, liveness entry or dispatch fact. Its
+    first frame (``started``) leaves at once: the slot's row says Preparing from its start, and this execution,
+    not a late frame of an earlier one, owns the row before any other frame of its own. A body the Presence carrier
+    runs (``worker_process._run_task_body``) has no such frame: it re-admits from durable facts before any agent
+    exists, so a refused or unreadable turn claims no phase and its first frame is its own first context or model
+    fact (its phase generation, not that frame, fences an earlier execution)."""
+    from supervisor.active_activity import TurnExecution, get_direct_activity_registry
+
+    task_id = str(task.get("id") or "")
+    entry = get_direct_activity_registry().get(task_id)
+    execution = entry.execution if entry is not None and entry.execution is not None else None
+    if execution is None:
+        execution = TurnExecution(int(task.get("chat_id") or 0), task_id=task_id)
+        execution.advance("started")
+    frames = TurnPhaseFrames(task_id, int(task.get("_attempt") or 1), execution, out_q, worker_id,
+                             task.get("_phase_generation", ""))
+    if not (task.get("_presence_run") or task.get("_presence_turn")):
+        frames.publish()
+    return frames
+
+
 class CarrierTurn:
     """A conversation turn's execution facts inside its carrier: the receipt (``TurnExecution``)
     seeded from the admission's wall clock, the endpoint hooks (the Stop marker, the namer, the
-    frame observer that also publishes each start phase as a ``direct_turn_phase`` frame) and the
-    thread's store meter."""
+    frame observer whose start phases ``TurnPhaseFrames`` publishes), the thread's store meter and
+    an owner turn's intake fact, held from the take to the end."""
 
-    def __init__(self, task: Dict[str, Any], drive_root: Any, out_q: Any) -> None:
+    def __init__(self, task: Dict[str, Any], drive_root: Any, out_q: Any, worker_id: Any = None) -> None:
         from supervisor.active_activity import TurnExecution, get_direct_activity_registry
         from supervisor.conversation_lane import PREPARE_KEY
 
@@ -735,6 +852,7 @@ class CarrierTurn:
             self.execution = entry.execution  # one execution per turn; the liveness read sees the body's phases
         self.execution.accepted_at = str((task.get("origin_message_ref") or {}).get("ts") or "")
         self.execution.census = dict(facts.get("census") or {})
+        self.execution.worker_id = worker_id
         admitted_at = float(facts.get("admitted_at") or 0.0)
         if admitted_at:
             # The owner's wait is measured from the admission's wall clock: the dispatch wait
@@ -747,8 +865,11 @@ class CarrierTurn:
         from supervisor.active_activity import carry_turn_execution
 
         carry_turn_execution(self.task_id, self.execution)  # the turn's own wait fact reads it in this carrier
+        self._phases = TurnPhaseFrames(self.task_id, self.attempt, self.execution, out_q, worker_id,
+                                       task.get("_phase_generation", ""))
         self.quiet = bool(facts.get("quiet"))
         self.initiator = str(metadata.get("initiator") or "")
+        self.intake = open_owner_intake(task, drive_root)  # the host's fact becomes this carrier's, whatever follows
         self._namer = None
         if not task.get("project_id") and not wake_cause(metadata) and not task.get("_presence_turn"):
             from ouroboros.project_naming import spawn_turn_namer
@@ -761,18 +882,7 @@ class CarrierTurn:
                 )
 
     def observe(self, kind: str, data: Dict[str, Any]) -> None:
-        if kind == "task_heartbeat":  # this carrier's own size rides its turn's beat (the lane's vitals)
-            from supervisor.conversation_lane import carrier_rss
-
-            data["_carrier_rss"] = carrier_rss()
-        before = self.execution.phase
-        self.execution.observe(kind, data)
-        if self.execution.phase != before:
-            try:
-                self._out_q.put({"type": "direct_turn_phase", "task_id": self.task_id,
-                                 "task_attempt": self.attempt, "phase": self.execution.phase})
-            except Exception:
-                log.debug("direct_turn_phase frame failed for %s", self.task_id, exc_info=True)
+        self._phases.observe(kind, data)
 
     def hooks(self) -> Dict[str, Any]:
         return {"initiator": self.initiator, "on_first_work": self._namer, "on_frame": self.observe}
@@ -782,6 +892,8 @@ class CarrierTurn:
         from supervisor.active_activity import carry_turn_execution, record_direct_turn
 
         carry_turn_execution(self.task_id, None)
+        if self.intake:  # however the body ended, no later arrival is accepted for it
+            close_owner_intake({"id": self.task_id, "_attempt": self.attempt}, self.drive_root)
         self._namer = None  # the namer's closure holds the whole task: nothing of the turn's input stays reachable
         self.execution.ended_at = time.monotonic()
         if self.execution.owner_turn and self.execution.phase != "dispatched":
