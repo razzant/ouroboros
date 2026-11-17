@@ -190,11 +190,15 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
 }
 
 // The feed the reader can see: its viewport less the chrome drawn over it, the
-// header above and the composer below; chrome covering it all leaves an empty
-// band, where nothing is on screen. Eviction keeps the whole viewport.
+// header above (with its frosted edge, style.css "A room's edges") and the composer
+// below; chrome covering it all leaves an empty band, where nothing is on screen.
+// Eviction keeps the whole viewport.
 export function readBand(viewport, header, composer) {
     let { top, bottom } = viewport.getBoundingClientRect();
-    if (header?.getClientRects?.().length) top = Math.max(top, header.getBoundingClientRect().bottom);
+    if (header?.getClientRects?.().length) {
+        const edge = parseFloat(header.ownerDocument?.defaultView?.getComputedStyle?.(header)?.getPropertyValue?.('--edge-reach'));
+        top = Math.max(top, header.getBoundingClientRect().bottom + (edge || 0));
+    }
     if (composer?.getClientRects?.().length) bottom = Math.min(bottom, composer.getBoundingClientRect().top);
     return { top, bottom };
 }

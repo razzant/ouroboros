@@ -74,7 +74,10 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     const headerClearance = () => {
         const header = feed.closest('.project-panel')?.querySelector('.project-panel-bar')
             || feed.closest('.page, .chat-instance-panel')?.querySelector('.chat-page-header, .chat-panel-statusbar');
-        const bottom = Math.max(header?.getBoundingClientRect().bottom || 0, search?.cover()?.getBoundingClientRect().bottom || 0);
+        // The bar's frosted edge reaches below it (style.css "A room's edges"): a placed row lands below that too.
+        const edge = header ? parseFloat(globalThis.getComputedStyle?.(header)?.getPropertyValue?.('--edge-reach')) || 0 : 0;
+        const bottom = Math.max((header?.getBoundingClientRect().bottom || 0) + edge,
+            search?.cover()?.getBoundingClientRect().bottom || 0);
         return Math.max(HEADER_CLEARANCE, bottom - feed.getBoundingClientRect().top + 12);
     };
     /** While the room's search is open the feed's top clears its sheet as it clears the room's bar (style.css

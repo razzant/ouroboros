@@ -151,7 +151,8 @@ FIT = """id => {
         barUnreached: barControls.filter(el => !reached(el)).map(name),
         folded: 'folded' in wrap.dataset, focused: document.activeElement === field,
         capsules: [...wrap.querySelectorAll('.chat-toolbar-row .chat-capsule-head')].filter(shown).length,
-        keyboard: document.body.classList.contains('keyboard-open'), sideways: document.scrollingElement.scrollWidth - innerWidth};
+        keyboard: document.body.classList.contains('keyboard-open'), sideways: document.scrollingElement.scrollWidth - innerWidth,
+        edge: Math.round(parseFloat(getComputedStyle(bar, '::before').height) - box(bar).height)};
 }"""
 
 
@@ -281,8 +282,9 @@ def test_a_short_keyboard_under_telegrams_fullscreen_band_keeps_history_the_comp
         # capsules stand in the row under the status bar (47), never above it.
         assert fit['controls'] >= (4 if fullscreen else (7 if project_room else 6)), (state, fit)
         assert fit['barTop'] >= (47 if fullscreen else 0), f'the bar stands under the status bar: {state} {fit}'
-        # A line of the newest message's words in view (its text's line boxes), and its foot.
-        assert fit['foot'] and fit['words'] >= 1, (state, fit)
+        # A line of the newest message's words in view (its text's line boxes), and its foot; the bar stands in the
+        # page's flow and nothing passes under it, so its frosted edge ends with it (DESIGN "A room's edges").
+        assert fit['foot'] and fit['words'] >= 1 and fit['edge'] == 0, (state, fit)
         assert 33 <= fit['field'] <= fit['cap'] + 1 and fit['sideways'] <= 0, (state, fit)
     assert measured['again'] == measured['typed'], 'the same room composes the same way again'
     assert measured['shrunk'] == measured['again'], 'and again once it has grown and shrunk'
@@ -290,6 +292,7 @@ def test_a_short_keyboard_under_telegrams_fullscreen_band_keeps_history_the_comp
     rested = measured['rested']
     assert not rested['keyboard'] and rested['cap'] == 140 and rested['field'] == 140, rested
     assert not rested['folded'] and rested['capsules'] == 4, f'the keyboard down brings the row back: {rested}'
+    assert rested['edge'] == 32, f'and the edge under the bar: {rested}'
     assert field.input_value() == draft + ' and more', 'the draft stays whole'
     if not fullscreen:
         assert measured['keyboard']['cap'] == 62 and measured['keyboard']['feed'] == 60, \

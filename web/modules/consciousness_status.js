@@ -311,6 +311,10 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         target.addEventListener(type, fn, options);
         disposers.push(() => target.removeEventListener(type, fn, options));
     };
+    // The row's name is translated here, so a language change says it again.
+    if (globalThis.window) listen(globalThis.window, 'ouro:language-changed', () => {
+        label.textContent = tr('consciousness.row', 'Consciousness');
+    });
     // A click with detail 0 is Enter or Space on the focused chip: a keyboard open lands in the Shade.
     listen(chip, 'click', (event) => (open ? close() : openShade(event.detail === 0)));
     listen(chip, 'keydown', (event) => {

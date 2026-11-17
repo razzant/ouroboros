@@ -3524,20 +3524,18 @@ up the bar stays in the row, in the page's flow as every keyboard room's bar is.
 
 ### A room's edges
 
-The transcript runs to the room's top under the bar and to its bottom under the composer; while reading nothing masks
-it (with the keyboard up its bottom fades, below). At both
+The transcript runs to the room's top under the bar and to its bottom under the composer; nothing masks it. At both
 ends it is darkened and blurred under what floats over it, one material top and bottom (owner 15.11 «прозрачную шапку…
 градиент затемнения по нашей библии… и в десктопе», his choice 17.11 1A, 3A): the composer's darkening (the room's
 colour at 72 % at the edge, 36 % at 48 %, 10 % at 78 %, none at the far end), mirrored at the top over the bar's height
 and 24 px more; and under it an 18 px blur, full under the bar's capsules and a phone's clock and fading out over the
 32 px below them (on the desk 48 px of 64, so a card's own buttons just under the bar never read as its second row;
-the transcript's first row and a landing clear that reach),
+the transcript's first row and every landing clear that reach, and a row under it is not read yet),
 and under the composer fading out over its top 32 px; at the top both are one layer of the bar, so the desktop window's
-title-band strip keeps its own. A note or the search sheet standing right under the bar is the next floating layer
-there, and the edge ends with the bar. The blur belongs to the edge, not to a chip, so it applies in both themes. With the
-keyboard up the composer stands in the page's flow and the transcript's bottom fades over 12 px instead of ending on
-a line over the chips; the newest row keeps that edge clear below it, so only what scrolls away fades, and a short
-keyboard room keeps a line of the newest message and its foot. On a dark room a room bar's capsules are the composer
+title-band strip keeps its own. A note or the search sheet right under the bar floats over the edge as the capsules
+do (a Project's status note, in its flow, stands below it). The blur belongs to the edge, not to a chip, so it applies in
+both themes. With the keyboard up the bar and the composer stand in the page's flow and nothing passes under either: the
+room draws neither edge, and a short keyboard room keeps a line of the newest message and its foot. On a dark room a room bar's capsules are the composer
 chips' glass (the capsule's veil over a blur of what passes under it), on the desk as on a phone; light keeps white
 capsules at the top as at the bottom. Panic keeps its ink above 4.5:1 on that glass over the reddest card: a lighter
 ink over a light veil, still glass beside its neighbours.

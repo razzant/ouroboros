@@ -12392,10 +12392,13 @@ html[data-layout="docked"] :is(.chat-page-header, .project-panel-bar) {
     --edge-reach: 64px;
     --edge-fade: 48px;
 }
-/* A note or the search sheet standing right under the bar (Main's history note, a Project's status note, Search in a
-   chat) is the next floating layer there: the edge ends with the bar, so the note's words are never darkened or blurred. */
-#page-chat:is(:has(> .chat-page-note > :not([hidden])), :has(.chat-find:not([hidden]))) .chat-page-header,
-.project-panel:has(.chat-panel-statusbar:not(:empty)) .project-panel-bar {
+/* What floats right under the bar lies over its edge, as its capsules do: Main's history note and a room's search sheet
+   come after the bar at its own level, so they paint over it, never blurred. A Project's status note stands in its flow
+   below the edge (the room's reserve counts the edge, chat.js). With the keyboard up the bar stands in the page's flow
+   and nothing passes under it: the edge ends with the bar, so a short keyboard room's newest line, a note or Search
+   under the bar keep their words sharp. */
+body.keyboard-open #page-chat.active .chat-page-header,
+body.keyboard-open .project-panel .project-panel-bar {
     --edge-reach: 0px;
 }
 /* One layer: the darkening over the bar's height and 24 px (its stops at 48 %, 78 % and 100 % of that length), and the
@@ -12421,9 +12424,9 @@ html[data-layout="docked"] :is(.chat-page-header, .project-panel-bar) {
     mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - var(--edge-fade)), transparent 100%);
 }
 /* The bottom: what passes under the composer is blurred over its darkening, less and less over the composer's top 32 px.
-   With the keyboard up the composer stands in the page's flow, nothing passes under it, and the transcript's own bottom
-   fades over 12 px instead of ending on a line over the chips; the newest row keeps that edge clear below it, so only
-   what scrolls away fades, and a short keyboard room keeps a line of the newest message and its foot. */
+   With the keyboard up the composer stands in the page's flow and nothing passes under it, so the room draws no edge
+   there either: the transcript ends over the composer as it always has, and a short keyboard room keeps a line of the
+   newest message and its foot. */
 body:not(.keyboard-open) :is(#chat-input-area, .chat-input-area)::before {
     content: "";
     position: absolute;
@@ -12434,12 +12437,6 @@ body:not(.keyboard-open) :is(#chat-input-area, .chat-input-area)::before {
     backdrop-filter: blur(18px);
     -webkit-mask-image: linear-gradient(0deg, #000 0%, #000 calc(100% - 32px), transparent 100%);
     mask-image: linear-gradient(0deg, #000 0%, #000 calc(100% - 32px), transparent 100%);
-}
-body.keyboard-open #page-chat.active #chat-messages,
-body.keyboard-open .chat-instance-panel .chat-messages {
-    padding-bottom: var(--space-3);
-    -webkit-mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - var(--space-3)), transparent 100%);
-    mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - var(--space-3)), transparent 100%);
 }
 /* A room bar's capsules are the composer chips' glass in the dark theme (the capsule's veil over a blur of what passes
    under it), on the desk as on a phone; light keeps white capsules at the top as at the bottom. Panic keeps its ink
@@ -12518,9 +12515,9 @@ html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-head
     left: var(--space-3); right: var(--space-3);
     width: auto;
 }
-/* Main's sheets stand in the viewport, so they keep Telegram's side insets as the room does; a Project panel's transform
-   makes it their box, already inside them. */
+/* Main's sheets stand in the viewport, so they keep the room's side insets; a Project panel's transform makes it their
+   box, already inside them. */
 html[data-telegram-fullscreen="active"][data-layout="stack"] .chat-page-header .rw-shade-anchor > .rw-surface {
-    left: calc(var(--space-3) + var(--tg-safe-area-inset-left, 0px));
-    right: calc(var(--space-3) + var(--tg-safe-area-inset-right, 0px));
+    left: calc(var(--space-3) + var(--inset-left));
+    right: calc(var(--space-3) + var(--inset-right));
 }

@@ -960,9 +960,11 @@ export function createRoomWork({
 
     function scrollToNode(node) {
         reading.cancel();
-        // Main's measured reserve includes its error note; Project's in-flow bars already clear the feed.
+        // Main's measured reserve includes its error note and the bar's frosted edge; a Project's row lands below its bar
+        // and that edge (style.css "A room's edges"), and its in-flow status bar already clears the feed.
+        const edge = bar ? parseFloat(globalThis.getComputedStyle?.(bar)?.getPropertyValue?.('--edge-reach')) || 0 : 0;
         const reserve = asPanel
-            ? Math.max(0, (bar?.getBoundingClientRect().bottom || 0) - messagesDiv.getBoundingClientRect().top)
+            ? Math.max(0, (bar?.getBoundingClientRect().bottom || 0) + edge - messagesDiv.getBoundingClientRect().top)
             : parseFloat(page.style?.getPropertyValue?.('--chat-header-reserve')) || 0;
         messagesDiv.scrollTop += node.getBoundingClientRect().top - messagesDiv.getBoundingClientRect().top - reserve;
         reading.stick = false;
