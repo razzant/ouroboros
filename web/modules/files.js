@@ -490,7 +490,8 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     function syncLayer(open) {
         if (!layers) return;
         if (open) layers.push({ id: FILE_LAYER, el: previewEl, page: true, modal: false, focus: false, opener: null,
-            back: { label: state.path === '.' ? 'Files' : state.path.split('/').filter(Boolean).at(-1) || 'Files', title: `Files › ${state.path}` }, onClose: closeFile });
+            back: { label: state.path === '.' ? 'Files' : state.path.split('/').filter(Boolean).at(-1) || 'Files',
+                title: state.path === '.' ? 'Files' : `Files › ${state.path}` }, onClose: closeFile });
         else layers.remove(FILE_LAYER);
     }
 

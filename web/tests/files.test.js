@@ -41,6 +41,7 @@ test('a file shown alone names its folder in the shell layer; beside the list it
     vm.runInContext(source.match(/    function syncLayer\(open\) \{[\s\S]+?\n    \}/)[0], context);
     context.syncLayer(true);
     assert.equal(layers.page().back.label, 'Files');
+    assert.equal(layers.page().back.title, 'Files', 'the root is "Back to Files", never "Files › ."');
     layers.back(); assert.equal(closed, 1); assert.equal(layers.size(), 0);
     state.path = 'notes/work';
     context.syncLayer(true);
