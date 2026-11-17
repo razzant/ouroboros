@@ -101,9 +101,11 @@ def attempt_fact(capture: Any, round_id: str = "") -> Optional[ContextAttemptFac
         if (not isinstance(context, PhysicalAttemptContext) or getattr(capture, "state", "") not in OBSERVED | {"released"}
                 or (round_id and context.round_id != round_id)):
             return None
+        from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES  # a delegated child or nanny reads compact books
+
         applied, books = shown_mode(context.rendered_mode,  # task-local Low is the owner's Max with chapter maps
                                     "max" if context.profile == "task_local_low" else context.preferred_mode,
-                                    compact=context.view_kind == "child")
+                                    compact=context.view_kind in DELEGATED_FOCUS_ROLES)
         return {"attempt_id": str(capture.attempt_id), "ledger_state": str(capture.state), "round_id": context.round_id,
                 "preferred_at_send": context.preferred_mode, "applied": applied, "books": books,
                 "profile": context.profile, "cause": context.mode_cause,

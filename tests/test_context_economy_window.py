@@ -814,11 +814,13 @@ def _shown_low(main_call, monkeypatch, tmp_path, cut, holds_reply=True):
 
     width = 1_000_000 if cut != "window" else next(
         (width for width in range(150_000, OWNER_LOW_TARGET_TOKENS, 10_000) if (shown := plan(width)).initial_mode
-         == "low" and shown.low_projection.memory_facts["floor"]["by_budget"] > 0), None)
+         == "low" and set(shown.low_projection.memory_facts["floor"]["steps"]) - {"F1"}), None)
     assert width is not None, "no window below the Low target holds a cut Low view: the window case would test the target"
     windows.update({"account-a": width, "account-b": 100_000})
     built = plan(windows["account-a"])
-    assert built.initial_mode == "low" and built.low_projection.memory_facts["floor"]["by_budget"] > 0
+    shown_floor = built.low_projection.memory_facts["floor"]
+    assert built.initial_mode == "low" and set(shown_floor["steps"]) - {"F1"}
+    assert (shown_floor["by_budget"] > 0) is (cut == "budget")  # a window below Low's target owns its cut (3A)
     ctx.tools, ctx.context_fit_plan, ctx.active_context_mode = tools, built, "low"
     ctx.tool_schemas = initial_tool_schemas(tools, context_mode="low")
     ctx.messages[:] = [*built.messages_for("low"), result()["message"],  # the shown Low view, then the round's tail
@@ -852,7 +854,8 @@ def _reprepare_onto(ctx, account):
 def test_an_account_reprepare_that_selects_nano_narrows_the_shown_low_view_and_keeps_its_provenance(
         main_call, monkeypatch, tmp_path, cut):
     """#1728 across modes, on the production reprepare of a waiting Main call. The owner's Low view was cut for
-    one account's window -- by that window alone, or by the Low budget too. The call moves to another account
+    one account's window -- by that window alone, or by the Low budget too (a window below Low's target owns its
+    cut, 3A). The call moves to another account
     whose window cannot hold Low even with my shortest memory, so Nano is selected: it narrows the view the
     task showed by that window alone, never the Nano view prepared at startup and never sent. Every address
     stays an address, the budget that took some of them is still the Low budget, and the tail is untouched."""
@@ -875,10 +878,11 @@ def test_an_account_reprepare_that_selects_nano_narrows_the_shown_low_view_and_k
     floor = after.projection("nano").memory_facts["floor"]
     assert floor["mode_switch"] == {"from": "low", "to": "nano"} and floor["budget_allowance_tokens"] is None
     # Provenance: what the Low budget took stays the Low budget's, never a Nano budget's; no budget, no target.
+    # A window below Low's target took its cut alone: no budget names it before or after (3A).
     assert floor["by_budget"] == shown_floor["by_budget"]
-    assert floor["target_tokens"] == OWNER_LOW_TARGET_TOKENS
+    assert floor["target_tokens"] == (OWNER_LOW_TARGET_TOKENS if cut == "budget" else None)
     sent = json.dumps(ctx.messages[0], ensure_ascii=False)
-    assert "the Low mode budget (250000 tokens)." in sent and "Nano mode budget" not in sent
+    assert ("the Low mode budget (250000 tokens)." in sent) is (cut == "budget") and "Nano mode budget" not in sent
     assert "for the window (100000 tokens)" in sent
     assert "cannot hold Low with even the shortest view of my memory; this task runs in Nano." in sent  # began in Low
     rebound = [row for row in _drained(events) if row.get("checkpoint_kind") == "context_fit_route_rebound"]

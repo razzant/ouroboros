@@ -291,7 +291,7 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
 @pytest.mark.parametrize('window,probes,hosts', [
     # This boundary crosses the receipt's owner-only clause after host reduction:
     # the longer receipt needs another walk, then the index must outline too.
-    (11_398, ['walk', 're-price', 'walk', 're-price', 'walk'],
+    (11_394, ['walk', 're-price', 'walk', 're-price', 'walk'],
      [('runtime', False), ('installed_skills', False), ('knowledge_index', False)]),
     # With this larger window the second re-price fits and the index stays whole.
     (11_444, ['walk', 're-price', 're-price'], [('runtime', False), ('installed_skills', True)]),

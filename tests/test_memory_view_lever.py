@@ -101,6 +101,18 @@ def test_a_selection_declares_whether_the_story_it_shows_is_whole():
         assert block['text'][declared['chars']:] == story and (story == mv.render_story(snap)) is whole, address
 
 
+def test_a_selection_keeps_what_the_starts_request_took_with_no_memory():
+    """3A: Low's missed target at the start names what the request took with no memory (``floor.no_memory_tokens``),
+    the start's fact. A selection the mind makes keeps it, so the mode chooser's warning lasts until a new start
+    measures again (``context_measurement._no_memory_tokens``); a start that met its target adds none."""
+    p, _snap = plan()
+    shown = p.projection("max")
+    missed = replace(p, max_projection=replace(shown, memory_facts={
+        **shown.memory_facts, "floor": {**shown.memory_facts["floor"], "no_memory_tokens": 315_536}}))
+    assert floor.select_view(missed, "max", []).projection("max").memory_facts["floor"]["no_memory_tokens"] == 315_536
+    assert "no_memory_tokens" not in floor.select_view(p, "max", []).projection("max").memory_facts["floor"]
+
+
 def test_aggregate_lever_preserves_element_addresses_and_requires_uncovered_note():
     p, snap = plan()
     owner = 'F7:' + snap.room['lane1'][0]['address']

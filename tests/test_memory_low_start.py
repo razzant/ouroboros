@@ -44,6 +44,10 @@ def test_a_start_memory_lowered_to_low_says_so_without_numbers_or_advice():
                     "beside the whole books.")
     assert not any(char.isdigit() for char in line) and len(line.splitlines()) == 1  # numbers stay in the task's facts
     assert not any(word in line for word in ("may bring", "should", "must", "fold", "episode", "again"))
+    # A start that protected words took past the maps frame to Nano is named Nano, never Max (``context_fit``)
+    assert low_start_line(_plan(_room()), "nano", "rootA") == (
+        "Task rootA started in Nano: my memory, even in its shortest tellings, did not fit beside the books, even as "
+        "chapter maps.")
 
 
 @pytest.mark.parametrize("plan", [

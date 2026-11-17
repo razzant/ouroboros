@@ -76,6 +76,15 @@ def test_a_max_start_with_chapter_maps_is_named_max_with_maps():
     assert shown_mode("low", "max") == ("max", "maps")
     assert shown_mode("low", "low") == ("low", "maps") and shown_mode("nano", "max") == ("nano", "maps")
     assert shown_mode("max", "max") == ("max", "whole") and shown_mode("max", "max", compact=True) == ("max", "maps")
+    from ouroboros.physical_attempt_context import PhysicalAttemptContext
+
+    def books(kind):  # a delegated child and a nanny read compact books (``context.py``); an owner's turn whole ones
+        context = PhysicalAttemptContext(profile="owner_max", rendered_mode="max", measurement_basis="cold_estimate",
+                                         route_fp="", round_id="r", target_total_tokens=None, capacity_total_tokens=None,
+                                         context_target_miss=False, automatic_pass_used=False, view_kind=kind,
+                                         preferred_mode="max")
+        return attempt_fact(SimpleNamespace(physical_context=context, state="dispatched", attempt_id="a"))["books"]
+    assert [books(kind) for kind in ("child", "nanny", "owner_turn")] == ["maps", "maps", "whole"]
 
 
 @pytest.mark.parametrize("detail", [

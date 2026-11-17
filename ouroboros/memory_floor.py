@@ -181,8 +181,11 @@ def floor_allowances(*, window_tokens: Optional[int], output_reserve_tokens: Opt
                  calibration_ratio=calibration_ratio, margin_count=work_room_levels, boundary_tokens=boundary_tokens)
     physical = context_budget.request_context_budget(window_tokens=window_tokens, **frame)
     start = context_budget.request_context_budget(window_tokens=window_tokens, target_tokens=target_tokens, **frame)
-    return {"margin": start["with_margin_tokens"], "physical": physical["without_margin_tokens"],
-            "window": physical["with_margin_tokens"], "budget": start["with_margin_tokens"] if target_tokens else None}
+    # A target names its cuts only where it is tighter than the window's own start bound, never the window's cut
+    window = physical["with_margin_tokens"]  # None: an unknown window, the target alone bounds the start
+    budget = start["with_margin_tokens"] if target_tokens and (window is None or start["with_margin_tokens"] < window) else None
+    return {"margin": start["with_margin_tokens"], "physical": physical["without_margin_tokens"], "window": window,
+            "budget": budget}
 
 
 def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: Iterable[str], *, story: int, fixed: int,
@@ -442,6 +445,11 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
             counted_groups.add(ident)
     current = measure(level(taken))
     current = restore(snapshot, table, taken, added, target, current, level, measure, view_tokens)
+    if forced and floor_bound is not None and target is not None and floor_bound > target:
+        # What only the window took past the target's floor comes back while the window's own start bound holds it:
+        # a target the rest of the request already exceeds never keeps the window's cut (3A)
+        current = restore(snapshot, table, taken, [item for item in added if item[0] in forced and item[0] in taken],
+                          floor_bound, current, level, measure, view_tokens)
     # A Max view floored at my tellings keeps my human's words while its books are whole: when the window cannot
     # hold it, the books go to chapter maps first (the next frame), and only there may the window take them (4A).
     physical = None if floor is not None and floor_bound is None else allowances.get("physical")
@@ -579,6 +587,8 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
                                    "budget": old.get("budget_allowance_tokens")},
                        target_tokens=old.get("target_tokens"), lowered_from=switched.get("from"))
     facts.update({"max_room": max_room} if max_room else {})
+    # Low's missed target was the start's: what its request took with no memory stays its fact (3A)
+    facts["floor"].update({"no_memory_tokens": old["no_memory_tokens"]} if "no_memory_tokens" in old else {})
     governance = _governance_blocks(None, plan.core, mode="low" if mode == "nano" else mode)
     sections = (*plan.core.semi_stable_sections, *plan.core.dynamic_head_sections, *plan.core.dynamic_sections,
                 *(governance[0] if not isinstance(governance[0], str) else ()))
@@ -1043,13 +1053,14 @@ def counterfactual_lines(fit: Mapping[str, Any]) -> List[str]:
     if not fit.get("measured"):
         return ["", head, "not measured: this task's plan does not hold " + "; ".join(fit.get("missing") or ()) + "."]
     f = fit["frame"]
+    started = "Max with chapter maps" if f["started"] == "low" and f["preferred"] == "max" else f["started"]
     lines = ["", head, (
         f"frame: core {f['core']}, owner mode {f['preferred']}, window {f['window']:,}"
         f"{'' if f['known'] else ' (not known: no window bound applies)'}, reply reserve {f['reserve']:,}, density "
         f"{f['ratio']:.3f}, {f['schemas']} tool schemas as this task's start priced them; my story, its status and this "
         "room's retold records read now, everything else as this task captured it. "
         + ("This task's original start is not known: its continuation did not carry it."
-           if f["started"] == "unknown" else f"This task started in {f['started']} (its start projection, a separate "
+           if f["started"] == "unknown" else f"This task started in {started} (its start projection, a separate "
            "fact: my chronicle may have changed since)."))]
     for name, arm in fit["arms"].items():
         if "refused" in arm or "unmeasured" in arm:
