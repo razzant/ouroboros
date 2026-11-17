@@ -83,14 +83,13 @@ export function placeRoomsHtml({ rooms = null, coverage = null, error = '' } = {
 }
 
 export function placeHistoryState(place) {
-    // While consciousness is off a place that is not Paused only hears (the host's `only_hears`): nothing wakes it.
+    // Why it is quiet now, by its one cause, in the host's words (owner 15.11, 5A).
+    if (place.quiet?.note) return place.quiet.note;
     // With no kind checked under "What calls it here" no event starts a new conversation at once, while an ongoing one
     // can still wake its author: the card says the setting and promises neither a wake nor silence.
-    const quiet = place.onlyHears ? { silent: 'Silent, consciousness off: it only hears here.',
-        active: 'Active, consciousness off: it only hears here.' }
-        : noKindChecked(place) ? { silent: 'Silent now, no wake kinds checked: it hears here, and an ongoing conversation can still wake it; what it would say or change here is held.',
-            active: 'Active now, no wake kinds checked: it hears, speaks and acts here; an ongoing conversation can still wake it.' } : {};
-    return quiet[place.state] || { silent: 'Silent now: it still hears and wakes here; what it would say or change here is held.',
+    const unchecked = noKindChecked(place) ? { silent: 'Silent now, no wake kinds checked: it hears here, and an ongoing conversation can still wake it; what it would say or change here is held.',
+        active: 'Active now, no wake kinds checked: it hears, speaks and acts here; an ongoing conversation can still wake it.' } : {};
+    return unchecked[place.state] || { silent: 'Silent now: it still hears and wakes here; what it would say or change here is held.',
         paused: 'Paused now: it does not wake or act here; what the connector still reports is saved.',
         active: 'Active now: it hears, wakes, speaks and acts here.' }[place.state] || 'The current Place state is unavailable.';
 }

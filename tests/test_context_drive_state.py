@@ -361,3 +361,43 @@ def test_a_stored_obligation_clears_where_the_retired_layer_cleared_it_in_view_a
     assert shown == everywhere == open_ids
     assert held is bool(open_ids)
 
+
+
+def test_the_switch_fact_rides_both_forms_of_the_section_only_while_places_only_hear(tmp_path, monkeypatch):
+    """The seam of the mind's switch fact (owner 15.11, 5A): with consciousness off and a hearing place, the one
+    sentence is in the section's full text and in its operative view; with it on there is none, and the place store
+    is not even read (an install with consciousness on pays nothing for it)."""
+    import json
+    from types import SimpleNamespace
+
+    import ouroboros.places as places_module
+    from ouroboros.context import _drive_state_section
+
+    class FakeEnv:
+        def drive_path(self, p):
+            return tmp_path / p
+
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "state.initialized.json").write_text(
+        json.dumps({"initialization_id": "init-1", "phase": "complete"}), encoding="utf-8")
+    reads = []
+
+    def places(root):
+        reads.append(root)
+        return [SimpleNamespace(place_id="p1", label="Slack · Ops", state="active", provider="slack")]
+
+    monkeypatch.setattr(places_module, "load_places", places)
+    for enabled in (False, True):
+        (tmp_path / "state" / "state.json").write_text(json.dumps({
+            "initialization_id": "init-1", "bg_consciousness_enabled": enabled,
+            "bg_consciousness_stop_source": "owner"}), encoding="utf-8")
+        reads.clear()
+        section = _drive_state_section(FakeEnv())
+        fact = "Consciousness is off (my human turned it off): my own wakes"
+        if enabled:
+            assert fact not in section.full_text and fact not in section.operative_view
+            assert reads == [], "consciousness on: the place store is not read for the fact"
+        else:
+            assert fact in section.full_text and fact in section.operative_view
+            assert "In my 1 connected place what arrives is recorded and wakes nothing until it is on." in section
+            assert len(reads) == 1

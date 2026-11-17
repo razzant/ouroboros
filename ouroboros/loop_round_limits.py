@@ -1296,7 +1296,8 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     return receipt
 
 
-def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, slack: int = 0) -> bool:
+def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, slack: int = 0,
+                         telling_floor: bool = False) -> bool:
     """Narrow memory beside the actual transcript without inventing a smaller route window.
 
     The view saves the measured ``saving`` (else the capacity
@@ -1317,6 +1318,7 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
         output_reserve=int(plan.output_reserve_tokens), tool_schemas=ctx.tool_schemas, start_mode=mode,
         current_messages=ctx.messages, measured_input_tokens=measurement.reprojection_input_tokens,
         reasoning_effort=str(getattr(ctx, "active_effort", "") or ""),  # the shape the round measured
+        telling_floor=telling_floor,
         refused_tokens=(int(saving) if saving or (saving == 0 and slack)  # a slack-only ask states no excess
                         else max(1, int(measurement.capacity_deficit_tokens or 0))),
         **({"slack_tokens": int(slack)} if slack else {}),
@@ -1331,12 +1333,12 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
     ctx.messages[:] = rebound.reproject_transcript(ctx.messages, mode)
     rewrite_view(ctx.tools._ctx, ctx.task_id, "memory_coarsened")
     ctx.tools._ctx.messages = ctx.messages
-    from ouroboros.loop_model_call import _adopt_view_facts
+    from ouroboros.loop_model_call import _adopt_view_facts, _shown
 
     _adopt_view_facts(ctx.tools._ctx, rebound, mode)  # the narrowed view's fact, read back as a memory shortage
     _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
         "checkpoint_kind": "context_memory_coarsened", "round": ctx.round_idx,
-        "route_fp": measurement.route_fp, "effective_mode": mode,
+        "route_fp": measurement.route_fp, **_shown(rebound, mode),
         "window_tokens": rebound.window_tokens,
         "input_tokens_estimate": measurement.estimated_input_tokens,
     })

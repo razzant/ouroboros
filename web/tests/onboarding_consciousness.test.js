@@ -39,18 +39,22 @@ test('the offer: an older bootstrap offers nothing; values keep unknown as unkno
     assert.equal(normalizeOffer(undefined).offered, false);
     assert.equal(offerRowHtml(normalizeOffer({})), '');
     assert.deepEqual(normalizeOffer({ offered: true, enabled: 'yes', autonomy: 'act', dailyUsd: '', maxTasks: 'x' }),
-        { offered: true, enabled: null, autonomy: 'act', dailyUsd: null, maxTasks: null });
+        { offered: true, enabled: null, autonomy: 'act', dailyUsd: null, maxTasks: null, words: null });
 });
 
 test('the row names the effective limits in Settings and Costs words, unticked, and where each is changed', () => {
-    const html = offerRowHtml(normalizeOffer(DEFAULTS));
+    // The switch's words are the host's (consciousness_view.FIRST_RUN, owner 15.11, 5A): the row shows what it is given.
+    const words = { gloss: 'When it acts.', choice: 'Also on its own', meaning: 'Off: only when asked. On: also on its own.' };
+    const html = offerRowHtml(normalizeOffer({ ...DEFAULTS, words }));
     assert.match(html, /<input type="checkbox" class="ui-checkbox" data-consciousness-start>/);
     assert.doesNotMatch(html, /checked/);
-    assert.equal(text(html), 'Consciousness Start consciousness with Ouroboros '
-        + 'Between your requests it continues topics that interest it and you, notices opportunities and brings you suggestions. '
-        + 'Autonomy: Acts. Also acts on its own: starts work, runs commands, speaks and acts in places. It does not change itself. '
+    const limits = 'Autonomy: Acts. Also acts on its own: starts work, runs commands, speaks and acts in places. It does not change itself. '
         + 'Up to $20.00 a day in recorded spending. Subscription quota is separate. At most 2 of its own tasks at once. '
-        + 'Change the allowance in Dashboard › Costs. Its other settings, and Stop and Start, are in Dashboard › Consciousness.');
+        + 'Change the allowance in Dashboard › Costs. Its other settings, and its switch, are in Dashboard › Consciousness.';
+    assert.equal(text(html), `Consciousness When it acts. Also on its own Off: only when asked. On: also on its own. ${limits}`);
+    assert.match(html, /Dashboard\u00a0› Consciousness/, 'the path never breaks before its «›» on a phone');
+    // An older bootstrap without the words keeps the plain choice and claims no meaning.
+    assert.equal(text(offerRowHtml(normalizeOffer(DEFAULTS))), `Consciousness Start consciousness with Ouroboros ${limits}`);
     assert.deepEqual(limitPhrases(normalizeOffer({ ...DEFAULTS, autonomy: 'observe', dailyUsd: 5, maxTasks: 0 })), [
         'Autonomy: Advises. On its own it studies, keeps its memory and tells you; it changes nothing outside.',
         'Up to $5.00 a day in recorded spending. Subscription quota is separate.', 'It starts no tasks of its own.']);
@@ -186,7 +190,7 @@ test('afterSave: an observed "on" hands off; a Start that did not happen waits f
     assert.equal(announced, 1, 'the result is shown before the hand-off');
     assert.equal(text(screens.at(-1)), 'Setup saved Your settings are on disk. Consciousness was not started '
         + 'Ouroboros stopped answering before the Start could be sent, so nothing was sent. '
-        + 'Dashboard › Consciousness shows whether it is on; its Start is there. Open Ouroboros');
+        + 'Dashboard › Consciousness shows whether it is on; its switch is there. Open Ouroboros');
     clickOpen(off);
     await settled;
     assert.equal(announced, 2);
@@ -379,7 +383,7 @@ test('a page left during the wait never sends its Start, even shown again from t
     assert.equal(calls.filter((url) => url === '/api/command').length, 0, 'no Start after leaving');
     assert.equal(text(offer.screenHtml()), 'Setup saved Your settings are on disk. Consciousness was not started '
         + 'You left this page before the Start could be sent, so nothing was sent. '
-        + 'Dashboard › Consciousness shows whether it is on; its Start is there. Open Ouroboros');
+        + 'Dashboard › Consciousness shows whether it is on; its switch is there. Open Ouroboros');
     assert.equal(announced, 0, 'shown again, it waits for the owner instead of handing off by itself');
     clickOpen(offer);
     await settled;

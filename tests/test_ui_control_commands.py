@@ -177,9 +177,11 @@ def test_the_telegram_buttons_mark_their_command_as_a_press():
 
 
 @pytest.mark.parametrize(("path", "frame"), [
-    ("web/modules/activity.js", "cmd: `/bg ${on ? 'stop' : 'start'}`, ui_control: { name: 'consciousness_toggle' }"),
-    ("web/modules/consciousness_dashboard.js", "cmd: `/bg ${toggling}`, ui_control: { name: 'consciousness_toggle' }"),
-    ("web/modules/consciousness_status.js", "cmd: `/bg ${pending}`, ui_control: { name: 'consciousness_toggle' }"),
+    # The one switch (owner 15.11, 5A): the Dashboard, the chip's Shade and Activity send it through one part.
+    ("web/modules/consciousness_switch.js", "cmd: `/bg ${to === 'off' ? 'stop' : 'start'}`, ui_control: { name: 'consciousness_toggle' }"),
+    ("web/modules/activity.js", "turnConsciousness("),
+    ("web/modules/consciousness_dashboard.js", "turnConsciousness("),
+    ("web/modules/consciousness_status.js", "turn = turnConsciousness"),
     ("web/modules/onboarding_consciousness.js", "ui_control: { name: 'setup_consciousness' }"),
     ("web/modules/chat_activity.js", "cmd: '/restart', ui_control: { name: 'restart' }"),
     ("web/modules/updates.js", "cmd: '/restart', ui_control: { name: 'restart' }"),

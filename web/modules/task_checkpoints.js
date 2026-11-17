@@ -1,4 +1,4 @@
-import { causeOf } from './context_observation.js';
+import { causeOf, mapsOf } from './context_observation.js';
 import { fmt } from './i18n.js';
 import { statusMarkHtml } from './status_mark.js';
 
@@ -164,6 +164,11 @@ export function taskCheckpointLabel(evt = {}) {
     }
     if (kind === 'context_reclaim_emergency' && evt.cause === 'output_exhaustion') {
         return 'Source-address recovery after empty length-limited replies (no model)';
+    }
+    if (kind === 'context_fit_physical_mode' && evt.books === 'maps' && evt.effective_mode === 'max') {
+        // The owner's Max whose books went to chapter maps stays Max (4A): the capsule's maps sentence.
+        return evt.cause === 'after_start' ? mapsOf(evt.cause)
+            : `${fmt('Context starts in Max with chapter maps')}. ${mapsOf(evt.cause)}`;
     }
     if (kind === 'context_fit_physical_mode') {  // the start's recorded reason, in the Context capsule's words
         const why = causeOf({ preferred_at_send: evt.preferred_mode, applied: evt.effective_mode, cause: evt.cause },

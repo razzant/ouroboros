@@ -1,6 +1,6 @@
 # Ouroboros
 
-> Ouroboros is an open-source AI agent with a continuing identity, durable memory, agent swarms, autonomous evolution, and an implementation it can rewrite.
+> Ouroboros is an open-source AI agent that runs on your own computer: a continuing identity and durable memory, swarms of coding agents (Codex, Claude Code, Cursor, Antigravity) as helpers, voice calls, places in Telegram, Slack, email and GitHub, autonomous evolution, and an implementation it can rewrite under review.
 
 Canonical site: https://ouroboros-agent.ai/
 Source: https://github.com/razzant/ouroboros

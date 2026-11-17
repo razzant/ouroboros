@@ -258,6 +258,26 @@ def _long_tail(plan):
         {"role": "tool", "tool_call_id": "big", "content": _LONG_TAIL_CONTENT}]  # ~150K: past the Low target
 
 
+def test_a_rebind_that_narrows_a_shown_view_keeps_the_telling_floor(tmp_path, monkeypatch):
+    """The one order (owner 15.11.2026, 4A; consilium 17.11): a rebind that narrows a shown Max view for a smaller
+    window keeps the floor of a refusal's first pass, memory to my tellings, then the books to chapter maps, then
+    memory's rest (that walk: ``test_memory_pays_down_to_its_tellings_and_the_books_go_before_anything_below``)."""
+    from ouroboros import context_fit
+    from tests.test_memory_view_modes import _built
+
+    seen, real = [], context_fit.ContextFitPlan.reproject_for_route
+
+    def spy(self, **kwargs):
+        seen.append(kwargs.get("telling_floor", False))
+        return real(self, **kwargs)
+
+    monkeypatch.setattr(context_fit.ContextFitPlan, "reproject_for_route", spy)
+    _core, plan = _built(tmp_path / "w", monkeypatch)
+    low = plan(1_000_000, preferred="low", tool_schemas=[])
+    _rebind(monkeypatch, tmp_path / "a", low, _long_tail(low), window=400_000, ratio=1.2)
+    assert seen and seen[-1] is True
+
+
 def test_a_rebind_keeps_the_sent_view_on_a_smaller_fitting_window_and_unfolds_nothing(tmp_path, monkeypatch):
     from tests.test_memory_view_modes import _built
 
@@ -418,7 +438,10 @@ def test_a_route_handover_fits_the_view_in_the_effort_its_next_send_carries(tmp_
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path / "evidence")
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     monkeypatch.setattr(route_choice, "round_route", lambda *_a, **_kw: None)  # no Settings follow
-    snap = syn.snapshot(room_facts=syn.room("1"), conversations=[], story=syn.pages(10, 2_000))
+    # Memory with detail above my tellings (other conversations): a narrowing pays there and Max keeps its books;
+    # below a telling the books would go first (owner 15.11.2026, 4A), which this case does not test.
+    snap = syn.snapshot(room_facts=syn.room("1"), conversations=[syn.conversation(i, words=10) for i in range(12)],
+                        story=syn.pages(10, 2_000))
     core = cf.ContextCore("Core", "BIBLE", "# Architecture\n\n" + "Whole source book. " * 2_000, "", "Identity", "Facts",
                           json.dumps("Assignment. " + "Retained evidence. " * 14_000), False,
                           memory_view_json=mv.snapshot_json(snap))
@@ -969,8 +992,9 @@ def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_f
     assert text == "Primary answered after return." and len(payloads) == 3
     rebound = [row for row in _drained(events) if row.get("checkpoint_kind") == "context_fit_route_rebound"]
     mode = {"roomy": "low", "tight": "nano"}[fallback]
-    assert [(row["preferred_mode"], row["effective_mode"], row["view_kept"]) for row in rebound] == [
-        ("max", mode, fallback == "roomy"), ("max", mode, True)]
+    named = {"roomy": "max", "tight": "nano"}[fallback]  # Max with chapter maps is named Max (4A)
+    assert [(row["preferred_mode"], row["effective_mode"], row["books"], row["view_kept"]) for row in rebound] == [
+        ("max", named, "maps", fallback == "roomy"), ("max", named, "maps", True)]
     assert tools._ctx.active_context_mode == mode and tools._ctx.context_fit_plan.preferred_mode == "max"
     assert tools._ctx.messages[0] == tools._ctx.context_fit_plan.projection(mode).system_message()
     assert ("cannot hold Max with even the shortest view of my memory; this task runs in Nano."  # kept by the return
@@ -1051,10 +1075,13 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
     assert tool_ctx.memory_view_facts is kept and trace[VIEW_TRACE_KEY] == kept
 
 
-def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(main_call, monkeypatch, tmp_path):
-    """06.11, the other side of the low fold below: when memory's detail can pay what the owner's words passed the
-    window's send ceiling by (20,000 past the stated number less the reply floor), memory alone narrows and Max
-    keeps its whole books (29.10)."""
+@pytest.mark.parametrize("past,books", [(500, "whole"), (20_000, "maps")])
+def test_memory_pays_down_to_its_tellings_and_the_books_go_before_anything_below(main_call, monkeypatch, tmp_path,
+                                                                                past, books):
+    """06.11 and the one order of 15.11 (4A; consilium 17.11): when memory's detail down to its tellings can pay
+    what the owner's words passed the window's send ceiling by (`past` the stated number less the reply floor),
+    memory alone narrows and Max keeps its whole books (29.10); when only memory below a telling could, the books
+    go to chapter maps first, in the same first pass, and the work stays Max with chapter maps."""
     from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
     from ouroboros import memory_floor as mf
     from ouroboros.memory_view import snapshot_json
@@ -1072,15 +1099,17 @@ def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(ma
     windows["account-a"] = window = math.ceil((full + roomy.output_reserve_tokens) * 4 / 3) + 4_000
     built = plan(window)
     words = "Owner, while you worked: keep the old API alive. "
-    owner = {"role": "user", "content": words * math.ceil((window - full - NANO_MIN_HEADROOM_TOKENS + 20_000) * 4 / len(words))}
+    owner = {"role": "user", "content": words * math.ceil((window - full - NANO_MIN_HEADROOM_TOKENS + past) * 4 / len(words))}
     ctx.messages[:] = [*built.messages_for("max"), owner]
     gateway.results = [_answer(ROUTE, {"role": "assistant", "content": "Kept."})]
     gateway.dispatch = ["response_received"]
     tools._ctx.memory_view_facts = mf.trace_facts(built.projection("max").memory_facts)
     text, _usage, _trace = _run(ctx, tools, events, built)
     rows = _drained(events)
-    assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "max"
-    assert [row.get("effective_mode") for row in rows if row.get("checkpoint_kind") == "context_memory_coarsened"] == ["max"]
+    assert text == "Kept." and len(gateway.creates) == 1
+    assert tools._ctx.active_context_mode == ("max" if books == "whole" else "low")  # "low": Max's chapter-map frame
+    assert [(row.get("effective_mode"), row.get("books")) for row in rows
+            if row.get("checkpoint_kind") == "context_memory_coarsened"] == [("max", books)]
     assert "context_fit_low_retry" not in [row.get("checkpoint_kind") for row in rows]
 
 
@@ -1122,7 +1151,8 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     kinds = [row.get("checkpoint_kind") for row in rows]
     assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "low"
     # Memory folded first and, unable to make room, its own floor lowered the books in that same pass.
-    assert [row.get("effective_mode") for row in rows if row.get("checkpoint_kind") == "context_memory_coarsened"] == ["low"]
+    assert [(row.get("effective_mode"), row.get("books")) for row in rows  # Max with chapter maps is named Max (4A)
+            if row.get("checkpoint_kind") == "context_memory_coarsened"] == [("max", "maps")]
     assert "context_fit_low_retry" not in kinds
 
     def shows(sent, whole):
@@ -1143,7 +1173,7 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     from ouroboros.transcript_prefix import message_digest
     assert {message_digest(first[1]), message_digest(owner)} <= {message_digest(row) for row in low}
     note = low[2]["content"]
-    assert f"Low cuts for the window ({window} tokens)." in note
+    assert f"Max cuts for the window ({window} tokens)." in note  # the owner's Max with chapter maps (owner 15.11, 4A)
     assert "does not hold all of my memory" not in note and "cannot hold" not in note
     # The task's trace keeps the fact of the Low view sent, not the whole Max view of its start: a writer reads
     # what the request actually showed only by address.

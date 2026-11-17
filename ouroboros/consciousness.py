@@ -662,12 +662,19 @@ class BackgroundConsciousness:
             if refusal:
                 return refusal
             if self._enabled:
-                return "Background consciousness is already enabled." + note
+                return "Consciousness is already on." + note
             self._stopped, self._enabled, self._stop_source = False, True, ""
             # The clock did not advance while disabled: never announce a wake in the past.
             self._set_next_wake(max(self._next_wake_at, time.time()), appointment=True)
             at = time.strftime('%H:%M', time.localtime(self._next_wake_at))
-            return f"Background consciousness enabled; next wake-up at {at}." + note
+        from ouroboros.consciousness_view import on_sentence
+        try:  # where it may speak now: one read that never holds the start (the words 15.11, 5A)
+            from ouroboros.places import load_places
+            places = load_places(self._drive_root)
+        except Exception:
+            log.debug("consciousness: places unreadable for the start sentence", exc_info=True)
+            places = None
+        return on_sentence(at, places, get_consciousness_autonomy()) + note
 
     def stop(self, source: str = "") -> str:
         """Stop this process first, then save the stop with ``source`` (``OWNER_STOP`` or ``AGENT_STOP``); Panic names
@@ -702,7 +709,7 @@ class BackgroundConsciousness:
         kept += "".join(f"\nKept firing on your words (schedule {sid}): «{quote}»"
                         for sid, quote in cited_owner_schedules(self._drive_root))
         if not wakes and not was_enabled:
-            return "Background consciousness is already disabled." + saved + kept
+            return "Consciousness is already off." + saved + kept
         for task_id in wakes:
             threading.Thread(target=self._stop_live_wake, args=(task_id,), name="wake-stop", daemon=True).start()
         # What Off leaves and what it ends, in the same row (owner 09.11, variant A). The stops are already on their
@@ -753,6 +760,8 @@ class BackgroundConsciousness:
                 # What holds it, proven from its records; the current window's own verdict stays beside it.
                 "live_wake_hold": held_wake_cause(self._drive_root, wake) if held else None,
                 "allowance_status": str(window.get("status") or ""),
+                # Who turned it off (owner, panic, agent_tool): the switch's state line names a Panic (5A).
+                **({"stop_source": self._stop_source} if not self._enabled and self._stop_source else {}),
                 "allowance_open_rows": window.get("accounting_open_rows"),
                 "allowance_room_after": str(window.get("room_after") or ""),
                 "model_route": model_route(),

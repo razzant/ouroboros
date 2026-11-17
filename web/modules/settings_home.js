@@ -207,7 +207,10 @@ export function homeAnswers(facts = {}) {
     say('agents', settings, agentsWords);
     say('dashboard:consciousness', state, (s) => {
         const snapshot = normalizeConsciousness(s.bg_consciousness_state || {}, { enabled: s.bg_consciousness_enabled });
-        return { text: headlineView(snapshot).text, owner: consciousnessMark(snapshot).hue === 'owner' };
+        // Its position by meaning (owner 15.11, 5A); the host's line while the next move is the owner's.
+        const headline = headlineView(snapshot);
+        const owner = consciousnessMark(snapshot).hue === 'owner';
+        return { text: owner || !headline.position ? headline.text : headline.position, owner };
     });
     say('dashboard:evolution', state, (s) => fmt(s.evolution_enabled === true ? 'On' : s.evolution_enabled === false ? 'Off' : 'State unknown'));
     say('page:circles', places, (p) => (Array.isArray(p.places) ? count(p.places.length, '{n} place', '{n} places') : fmt(NOT_CHECKED)));

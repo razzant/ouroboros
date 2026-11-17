@@ -17,7 +17,7 @@ export const CONFIRM_WAIT_MS = 120_000;
 export const POLL_MS = 1000;
 const STARTED_HOLD_MS = 1200;
 const START_COMMAND = '/bg start';
-const DOOR = 'Dashboard › Consciousness shows whether it is on; its Start is there.';
+const DOOR = 'Dashboard › Consciousness shows whether it is on; its switch is there.';
 
 /** The bootstrap's offer as the row reads it; an older server's bootstrap without one offers nothing. */
 export function normalizeOffer(offer) {
@@ -29,6 +29,10 @@ export function normalizeOffer(offer) {
         autonomy: String(value.autonomy || ''),
         dailyUsd: number(value.dailyUsd),
         maxTasks: number(value.maxTasks),
+        // The switch's words for a first run, in the host's words (consciousness_view.FIRST_RUN, owner 15.11, 5A).
+        words: value.words && typeof value.words === 'object' ? {
+            gloss: String(value.words.gloss || ''), choice: String(value.words.choice || ''), meaning: String(value.words.meaning || ''),
+        } : null,
     };
 }
 
@@ -49,13 +53,15 @@ export function limitPhrases(facts) {
 export function offerRowHtml(facts, ticked = false) {
     if (!facts.offered) return '';
     const limits = `<span class="consciousness-offer-sub">${limitPhrases(facts).map(escapeHtml).join(' ')}</span>`;
-    const where = '<span class="consciousness-offer-sub">Change the allowance in Dashboard › Costs. Its other settings, and Stop and Start, are in Dashboard › Consciousness.</span>';
+    const where = '<span class="consciousness-offer-sub">Change the allowance in Dashboard › Costs. Its other settings, and its switch, are in Dashboard\u00a0› Consciousness.</span>';
+    const words = facts.words || {};
+    const meaning = words.meaning ? `<span class="consciousness-offer-sub">${escapeHtml(words.meaning)}</span>` : '';
     const value = facts.enabled === true
         ? '<span class="consciousness-offer-value">On already</span>'
         : `<label class="consciousness-offer-choice"><input type="checkbox" class="ui-checkbox" data-consciousness-start${ticked ? ' checked' : ''}>
-            <span>Start consciousness with Ouroboros</span></label>
-            <span class="consciousness-offer-sub">Between your requests it continues topics that interest it and you, notices opportunities and brings you suggestions.</span>`;
-    return `<div class="summary-kv consciousness-offer-row"><strong>Consciousness</strong><span class="consciousness-offer">${value}${limits}${where}</span></div>`;
+            <span>${escapeHtml(words.choice || 'Start consciousness with Ouroboros')}</span></label>`;
+    const gloss = words.gloss ? `<span class="consciousness-offer-sub">${escapeHtml(words.gloss)}</span>` : '';
+    return `<div class="summary-kv consciousness-offer-row"><strong>Consciousness</strong><span class="consciousness-offer">${gloss}${value}${meaning}${limits}${where}</span></div>`;
 }
 
 async function readJson(fetchImpl, url, signal, lifetimeMs) {
