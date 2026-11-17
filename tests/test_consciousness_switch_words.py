@@ -174,13 +174,11 @@ def test_recent_people_counts_each_person_once_across_places_and_skips_bots(tmp_
 def test_a_turn_off_says_what_it_ends_at_once_only_when_something_runs():
     running = {"live_wake_task_id": "w1", "live_wake_held": False, "tasks_running": 2}
     lines = V.switch_preview("off", PLACES, running=running)["lines"]
-    # A stop is graceful: each saves what it has first, so nothing promises an instant end (review r3).
-    assert "The wake running now and its 2 own tasks are asked to stop now; each saves what it has first." in lines
-    assert ("The wake running now is asked to stop now; it saves what it has first." in
-            V.switch_preview("off", PLACES, running={**running, "tasks_running": 0})["lines"])
-    assert ("Its 1 own task is asked to stop now; it saves what it has first." in
-            V.switch_preview("off", PLACES, running={"tasks_running": 1})["lines"])
-    assert not any("at once" in line for line in lines)
+    # The stop asks: no instant end and no saved result is promised (review r3).
+    assert "The wake running now and its 2 own tasks are asked to stop now." in lines
+    assert "The wake running now is asked to stop now." in V.switch_preview("off", PLACES, running={**running, "tasks_running": 0})["lines"]
+    assert "Its 1 own task is asked to stop now." in V.switch_preview("off", PLACES, running={"tasks_running": 1})["lines"]
+    assert not any("at once" in line or "saves" in line for line in lines)
     held = {"live_wake_task_id": "w1", "live_wake_held": True}
     assert not any("stop" in line for line in V.switch_preview("off", PLACES, running=held)["lines"])  # a held wake is not running
 
@@ -383,8 +381,24 @@ def test_a_saved_panic_stays_named_after_a_restart(tmp_path, monkeypatch):
 
     clock = object.__new__(BackgroundConsciousness)
     clock._drive_root, clock._stop_source = tmp_path, ""
-    monkeypatch.setattr(state_module, "read_state", lambda _root: SimpleNamespace(
-        projection=lambda: {"bg_consciousness_enabled": False, "bg_consciousness_stop_source": "panic"}))
+    saved = {"bg_consciousness_enabled": False, "bg_consciousness_stop_source": "panic"}
+    monkeypatch.setattr(state_module, "read_state", lambda _root: SimpleNamespace(projection=lambda: dict(saved)))
     assert clock._saved_stop_source() == "panic"
-    clock._stop_source = "owner"
-    assert clock._saved_stop_source() == "owner"
+    clock._stop_source = "agent_tool"  # the agent stops an already stopped clock: the saved Panic keeps its name
+    assert clock._saved_stop_source() == "panic"
+    saved.pop("bg_consciousness_stop_source")
+    assert clock._saved_stop_source() == "agent_tool"
+
+
+def test_the_receipt_names_no_wake_while_the_window_is_spent():
+    stored = [SimpleNamespace(place_id="a", label="Lab", state="active", provider="slack")]
+    spent = V.on_sentence("15:14", stored, "act", 3.0, "exhausted")
+    assert spent.startswith("Consciousness on, but its allowance for the last 24 hours is spent: it wakes once there is "
+                            "room in it again; Costs shows when.") and "next wake" not in spent
+
+
+def test_the_endpoint_index_names_the_switch_query():
+    from ouroboros.gateway.endpoint_index import HTTP_SHAPES
+
+    assert HTTP_SHAPES["GET /api/consciousness"].query == "switch"
+

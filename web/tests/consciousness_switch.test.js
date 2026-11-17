@@ -29,6 +29,8 @@ test('the dialog names what changes, one sentence a line, every place behind its
         { label: '1 person', value: 'Home · Silent', authored: true }, { label: '—', value: 'Team', authored: true }]);
     assert.equal(switchDialog('off', { ...PREVIEW, places: [{ id: 'big', label: 'Big', state: 'active', people: 2000, atLeast: true }] })
         .details.rows[0].label, 'at least 2000 people', 'a capped place says at least');
+    assert.equal(switchDialog('off', { ...PREVIEW, places: [{ id: 'one', label: 'One', state: 'active', people: 1, atLeast: true }] })
+        .details.rows[0].label, 'at least 1 person');
     assert.deepEqual([switchDialog('on', PREVIEW).confirmLabel, switchDialog('on', PREVIEW).cancelLabel], ['Turn on', 'Keep off']);
     // Nothing to name: no dialog. A preview that could not be read still asks, and says so.
     assert.equal(switchDialog('off', { lines: ['Ouroboros will act only when you write to it.'], places: [] }), null);
@@ -88,6 +90,14 @@ test('an answer the preview cannot read, or one that never ends, is never «no p
         }
         globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ lines: ['x'], places: [{ place_id: 'b', label: 'Big', state: 'active', people: 2000, people_capped: true }] }) });
         assert.equal((await readSwitchPreview('off')).places[0].atLeast, true);
+        // Rows the client cannot identify are an unreadable list, never «no place» (review r3).
+        globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ lines: ['x'], places: [{ label: 'Lab', state: 'active' }] }) });
+        await assert.rejects(readSwitchPreview('off'));
+        // A preview that never answers ends at its lifetime (here shortened), so the switch is never held.
+        globalThis.fetch = (_url, init) => new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+        });
+        await assert.rejects(readSwitchPreview('off', { lifetimeMs: 20 }));
     } finally {
         globalThis.fetch = previous;
     }

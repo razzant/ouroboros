@@ -212,10 +212,10 @@ def _running_line(running) -> str:
     said = " and ".join((["the wake running now"] if wake else []) + ([f"its {_count(tasks, 'own task')}"] if tasks else []))
     if not said:
         return ""
-    # A stop is graceful (each saves what it has first), so the words promise no instant end (review r3).
-    if (wake and not tasks) or (tasks == 1 and not wake):
-        return f"{said[0].upper()}{said[1:]} is asked to stop now; it saves what it has first."
-    return f"{said[0].upper()}{said[1:]} are asked to stop now; each saves what it has first."
+    # The stop asks (a graceful end where there is room for one), so the words promise neither an instant end nor a
+    # saved result (review r3).
+    one = (wake and not tasks) or (tasks == 1 and not wake)
+    return f"{said[0].upper()}{said[1:]} {'is' if one else 'are'} asked to stop now."
 
 
 def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str = "", daily_usd=None,
@@ -285,13 +285,18 @@ def read_switch_preview(drive_root, to: str, running=None) -> dict:
                           daily_usd=get_consciousness_daily_usd(), running=running)
 
 
-def on_sentence(at: str, places, autonomy: str = "", daily_usd: Any = None) -> str:
+def on_sentence(at: str, places, autonomy: str = "", daily_usd: Any = None, allowance: str = "") -> str:
     """The switch's first words as it turns consciousness on (every surface's /bg start): when it wakes next, then the
-    sentences the app's dialog said before the turn (``switch_preview``), so Telegram and the CLI hear the same; a $0
-    allowance names no wake."""
+    sentences the app's dialog said before the turn (``switch_preview``), so Telegram and the CLI hear the same. A $0
+    allowance, or one spent for the last 24 hours (``allowance``: the window's status), names no wake."""
     rest = switch_preview("on", places, autonomy=autonomy, daily_usd=daily_usd)["lines"][1:]
-    head = ("Consciousness on, but its allowance is $0.00: it cannot wake until you raise it in Costs." if daily_usd == 0
-            else f"Consciousness on: Ouroboros also acts on its own; next wake at {at}.")
+    if daily_usd == 0:
+        head = "Consciousness on, but its allowance is $0.00: it cannot wake until you raise it in Costs."
+    elif allowance == "exhausted":
+        head = ("Consciousness on, but its allowance for the last 24 hours is spent: it wakes once there is room in it "
+                "again; Costs shows when.")
+    else:
+        head = f"Consciousness on: Ouroboros also acts on its own; next wake at {at}."
     return " ".join([head, *rest])
 
 

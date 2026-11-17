@@ -23,7 +23,7 @@ export const switchActionWords = (enabled) => tr(`consciousness.switch.${enabled
 /** «87 people» for a place's row in the dialog's details (the week the host's sentence names), «at least 2000 people»
  *  when the place's read was capped; '' when not read. */
 const peopleWords = (n, atLeast = false) => (n === null || n === undefined ? ''
-    : atLeast ? fmt('at least {n} people', { n }) : fmt(n === 1 ? '{n} person' : '{n} people', { n }));
+    : fmt(atLeast ? (n === 1 ? 'at least {n} person' : 'at least {n} people') : (n === 1 ? '{n} person' : '{n} people'), { n }));
 
 /** The dialog for a preview, or null when there is nothing to name (no place concerns the turn). */
 export function switchDialog(to, preview) {

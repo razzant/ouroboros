@@ -987,6 +987,17 @@ def test_start_and_stop_flip_the_flag_and_stop_arms_a_graceful_stop_of_a_live_wa
     assert clock.clock.stop() == "Consciousness is already off."
     assert clock.clock.start().startswith("Consciousness on: Ouroboros also acts on its own; next wake at ")
     assert clock.clock.enabled is True
+    # A spent window and a $0 allowance name no wake in the receipt (review r3): start reads both.
+    import ouroboros.consciousness as consciousness_module
+    view, daily = clock.clock._allowance_view, consciousness_module.get_consciousness_daily_usd
+    clock.clock.stop()
+    monkeypatch.setattr(clock.clock, "_allowance_view", lambda *_a, **_k: {"status": "exhausted"})
+    assert clock.clock.start().startswith("Consciousness on, but its allowance for the last 24 hours is spent")
+    clock.clock.stop()
+    monkeypatch.setattr(consciousness_module, "get_consciousness_daily_usd", lambda: 0.0)
+    assert clock.clock.start().startswith("Consciousness on, but its allowance is $0.00")
+    monkeypatch.setattr(consciousness_module, "get_consciousness_daily_usd", daily)
+    monkeypatch.setattr(clock.clock, "_allowance_view", view)
     _launched(clock)
     stopped: list = []
     done = threading.Event()

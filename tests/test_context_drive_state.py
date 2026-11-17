@@ -404,3 +404,28 @@ def test_the_switch_fact_rides_both_forms_of_the_section_only_while_places_only_
             assert fact in section.full_text and fact in section.operative_view
             assert "In my 1 connected place what arrives is recorded and wakes nothing until it is on." in section
             assert len(reads) == 1
+
+
+def test_the_switch_fact_reads_no_unimported_places_and_names_no_unconfirmed_stopper(tmp_path, monkeypatch):
+    """Building context never runs the legacy place import, and a stop source awaiting confirmation names nobody
+    (review r3)."""
+    import json
+    from types import SimpleNamespace
+
+    import ouroboros.places as places_module
+    from ouroboros.context_sections import _switch_fact
+
+    reads = []
+    monkeypatch.setattr(places_module, "load_places", lambda root: reads.append(root) or [
+        SimpleNamespace(place_id="p1", label="Slack · Ops", state="active", provider="slack")])
+    monkeypatch.setattr("ouroboros.consciousness.panic_blocks_wake", lambda _root: False)
+    observed = SimpleNamespace(values={"bg_consciousness_stop_source": "panic"})
+    authority = {"bg_consciousness_enabled": False, "bg_consciousness_stop_source": "panic",
+                 "_state_read": {"quality": "current", "unconfirmed": ["bg_consciousness_stop_source"]}}
+    assert _switch_fact(tmp_path, observed, authority) == "" and reads == [], "no import from building context"
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "places.json").write_text(json.dumps(
+        {"schema_version": 1, "places": {}, "migration": {"presence_bindings_v1": True}}), encoding="utf-8")
+    fact = _switch_fact(tmp_path, observed, authority)
+    assert fact.startswith("\n\nConsciousness is off: my own wakes") and "Panic" not in fact
+

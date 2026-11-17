@@ -674,7 +674,11 @@ class BackgroundConsciousness:
         except Exception:
             log.debug("consciousness: places unreadable for the start sentence", exc_info=True)
             places = None
-        return on_sentence(at, places, get_consciousness_autonomy(), get_consciousness_daily_usd()) + note
+        try:  # a spent window names no wake (review r3); a read that fails says the ordinary next wake
+            allowance = str(self._allowance_view(time.time()).get("status") or "")
+        except Exception:
+            allowance = ""
+        return on_sentence(at, places, get_consciousness_autonomy(), get_consciousness_daily_usd(), allowance) + note
 
     def stop(self, source: str = "") -> str:
         """Stop this process first, then save the stop with ``source`` (``OWNER_STOP`` or ``AGENT_STOP``); Panic names
@@ -741,15 +745,16 @@ class BackgroundConsciousness:
             log.debug("consciousness: graceful stop of wake %s failed", task_id, exc_info=True)
 
     def _saved_stop_source(self) -> str:
-        """Who stopped it: this process's own stop, else the confirmed saved one (a Panic stays named after a restart)."""
-        if self._stop_source:
-            return self._stop_source
+        """Who stopped it: the confirmed saved source (a Panic stays named after a restart, and a later stop of an
+        already stopped clock does not rename it), else this process's own stop."""
         try:
             from supervisor.state import control_value, read_state
             known, source = control_value(read_state(self._drive_root).projection(), STOP_SOURCE_KEY)
-            return str(source or "") if known else ""
+            if known and source:
+                return str(source)
         except Exception:
-            return ""
+            pass
+        return self._stop_source
 
     def status_snapshot(self) -> Dict[str, Any]:
         from supervisor.consciousness_carriers import queued_wakes
