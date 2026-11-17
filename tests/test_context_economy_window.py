@@ -438,7 +438,10 @@ def test_a_route_handover_fits_the_view_in_the_effort_its_next_send_carries(tmp_
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path / "evidence")
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     monkeypatch.setattr(route_choice, "round_route", lambda *_a, **_kw: None)  # no Settings follow
-    snap = syn.snapshot(room_facts=syn.room("1"), conversations=[], story=syn.pages(10, 2_000))
+    # Memory with detail above my tellings (other conversations): a narrowing pays there and Max keeps its books;
+    # below a telling the books would go first (owner 15.11.2026, 4A), which this case does not test.
+    snap = syn.snapshot(room_facts=syn.room("1"), conversations=[syn.conversation(i, words=10) for i in range(12)],
+                        story=syn.pages(10, 2_000))
     core = cf.ContextCore("Core", "BIBLE", "# Architecture\n\n" + "Whole source book. " * 2_000, "", "Identity", "Facts",
                           json.dumps("Assignment. " + "Retained evidence. " * 14_000), False,
                           memory_view_json=mv.snapshot_json(snap))
