@@ -610,9 +610,11 @@ def test_project_room_reader_survives_reload_and_closes_with_its_room(direct_ser
             assert page.evaluate(LEFT_BEHIND, feed) == {
                 "readers": 0, "open_dialogs": 0, "room_kept_away": True, "focus_connected": True}
             _release(page, held)
-            # On a phone the other room covers Main's menu: close it, then reopen the room.
+            # The other room was opened by a reference from this one, a jump: closing it returns here (the jump's
+            # return, docs/DESIGN.md "Layers and dismissal"), and the room reopens its reader.
             page.locator("#project-panel-close").click()
-            feed = _enter_room(page, room)
+            page.locator(feed).wait_for(state="visible", timeout=30_000)
+            assert page.evaluate("() => window.__ouroLayers.ids()") == ["project"]
             state = _open(page, "room-notes.txt", ready=".document-reader-source", feed=feed)
             assert state["source"] == NOTES
             _close_with_escape(page)
