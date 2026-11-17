@@ -536,9 +536,10 @@ def test_link_facts_ride_a_read_from_the_start_and_survive_odd_spellings_and_unr
     target.path.write_text("Target with an ampersand.\n", encoding="utf-8")
     address(tmp_path, "entity").path.write_text("[x](<a&amp;b.md>)\n", encoding="utf-8")
     address(tmp_path, "escaped").path.write_text("[y](a\\&b.md)\n", encoding="utf-8")
+    address(tmp_path, "mixed").path.write_text("[z](<a&amp;%62.md>)\n", encoding="utf-8")  # entity plus percent
     whole = tools._knowledge_read(ctx, "a&b")
     assert "[Knowledge backlinks (readable shelves now)] " in whole
-    assert '"topic": "entity"' in whole and '"topic": "escaped"' in whole
+    assert '"topic": "entity"' in whole and '"topic": "escaped"' in whole and '"topic": "mixed"' in whole
     assert "[Knowledge backlinks" not in tools._knowledge_read(ctx, "a&b", start_char=3)
     assert "[Knowledge backlinks" in tools._knowledge_read(ctx, "a&b", start_char=0)
     long_name = address(tmp_path, "long-link")

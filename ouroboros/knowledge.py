@@ -620,7 +620,7 @@ def knowledge_backlinks(note: KnowledgeNote, shelves: tuple[KnowledgeAddress, ..
             address = replace(shelf, topic=row["topic"])
             try:
                 raw = address.path.read_bytes()
-                spelled = html.unescape(raw.decode("utf-8", "replace")).replace("\\", "").encode("utf-8")
+                spelled = unquote(html.unescape(raw.decode("utf-8", "replace")).replace("\\", "")).encode("utf-8")
                 if filename not in raw and filename not in unquote_to_bytes(raw) and filename not in spelled:
                     continue  # also entity- or backslash-spelled names, as the Markdown parser reads them
                 source = _note(address, raw)
