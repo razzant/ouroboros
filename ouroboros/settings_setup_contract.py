@@ -9,7 +9,9 @@ from typing import Any, Dict, Optional, Tuple
 
 from ouroboros.config import SETTINGS_DEFAULTS, VALID_RUNTIME_MODES
 from ouroboros.review_run_isolation import run_cap_from_env
-from ouroboros.provider_models import DIRECT_PROVIDER_DEFAULTS, MINIMAX_REGION_ENDPOINTS
+from ouroboros.provider_models import (
+    DIRECT_PROVIDER_DEFAULTS, MINIMAX_REGION_ENDPOINTS, OPENAI_RESPONSES_DIRECT_DEFAULTS, choice_error,
+)
 from ouroboros.secret_masking import (
     CONFIGURED_SECRET_PLACEHOLDER,
     MASKED_SECRET_SETTING_KEYS as SECRET_SETTING_KEYS,
@@ -124,9 +126,10 @@ _MODEL_DEFAULTS = {
         "consciousness": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_CONSCIOUSNESS"]),
         "fallback": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"]),
     },
-    # Every direct provider's own defaults (provider_models.DIRECT_PROVIDER_DEFAULTS), never a second list.
+    # Every direct provider's own defaults (provider_models.DIRECT_PROVIDER_DEFAULTS), never a second list;
+    # an OpenAI connection on Responses has its own (``direct_provider_defaults``).
     **{kind: {key: value for key, value in defaults.items() if key != "heavy"}
-       for kind, defaults in DIRECT_PROVIDER_DEFAULTS.items()},
+       for kind, defaults in {**DIRECT_PROVIDER_DEFAULTS, "openai-responses": OPENAI_RESPONSES_DIRECT_DEFAULTS}.items()},
     # No defaults: model names are server-specific; user must fill all slots.
     "openai-compatible": {"main": "", "light": "", "vision": "", "fallback": ""},
     # Several direct providers and no router: the owner chooses Main; no provider is guessed.
@@ -155,6 +158,8 @@ _STEP_ORDER = [step["id"] for step in _STEPS]
 _PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "label", "placeholder", "note", "inputType", "group"), (
     ("openrouter-key", "openrouterKey", "OPENROUTER_API_KEY", "s-openrouter", "OpenRouter API Key", "sk-or-v1-...", "Best when you want one router for OpenAI, Anthropic, Google, and more.", "password", "primary"),
     ("openai-key", "openaiKey", "OPENAI_API_KEY", "s-openai", "OpenAI API Key", "sk-...", "", "password", "primary"),
+    # Drawn as the key card's API strip under the key, never as a text field: only its label names it, in a refusal.
+    ("openai-api-surface", "openaiApiSurface", "OPENAI_API_SURFACE", "s-openai-api-surface", "OpenAI API", "", "", "text", "more"),
     ("cloudru-key", "cloudruKey", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "s-cloudru-key", "Cloud.ru Foundation Models API Key", "Cloud.ru API key", "", "password", "more"),
     # GigaChat is ready with an authorization key, or a user and password (provider_models.PROVIDER_KINDS).
     ("gigachat-credentials", "gigachatCredentials", "GIGACHAT_CREDENTIALS", "s-gigachat-credentials", "GigaChat Authorization Key", "Base64 client_id:secret", "", "password", "more"),
@@ -291,7 +296,7 @@ _SUBSCRIPTION_FIELDS = _rows(("id", "payloadKey", "label", "note"), (
     ("skip-subscription-presets", SKIP_SUBSCRIPTION_PRESETS_FIELD, "Finish without agent defaults", "Completes onboarding without moving reviewers and subagents onto the connected subscriptions. Everything stays editable in Settings afterwards."),
 ))
 
-_MODEL_SUGGESTIONS = list(dict.fromkeys(("google/gemini-4-hydrogen", "google/gemini-3.8-flash", "x-ai/grok-4.6", "openai/gpt-6.1-sol", "openai/gpt-6-luna", "openai/gpt-6.1-terra", "anthropic/claude-opus-5.5", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", "openai::gpt-5.6-terra", "openai::gpt-5.6-sol", "openai::gpt-5.6-luna", "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "anthropic::claude-sonnet-5-5", "anthropic::claude-sonnet-5", "anthropic::claude-opus-5-5", "anthropic::claude-opus-5", "anthropic::claude-opus-4-6", "deepseek/deepseek-v4-pro", "deepseek::deepseek-v4-pro", "deepseek::deepseek-flash", "deepseek::deepseek-v4-flash", "zai::glm-5.3", "zai::glm-5.3-flash", "openai-compatible::meta-llama/compatible", "cloudru::zai-org/GLM-4.7", "minimax::MiniMax-M3", "minimax::MiniMax-M3.1-Flash")))
+_MODEL_SUGGESTIONS = list(dict.fromkeys(("google/gemini-4-hydrogen", "google/gemini-3.8-flash", "x-ai/grok-4.6", "openai/gpt-6.1-sol", "openai/gpt-6-luna", "openai/gpt-6.1-terra", "anthropic/claude-opus-5.5", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", "openai::gpt-6.1-terra", "openai::gpt-6.1-sol", "openai::gpt-6-luna", "openai::gpt-5.6-terra", "openai::gpt-5.6-sol", "openai::gpt-5.6-luna", "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "anthropic::claude-sonnet-5-5", "anthropic::claude-sonnet-5", "anthropic::claude-opus-5-5", "anthropic::claude-opus-5", "anthropic::claude-opus-4-6", "deepseek/deepseek-v4-pro", "deepseek::deepseek-v4-pro", "deepseek::deepseek-flash", "deepseek::deepseek-v4-flash", "zai::glm-5.3", "zai::glm-5.3-flash", "openai-compatible::meta-llama/compatible", "cloudru::zai-org/GLM-4.7", "minimax::MiniMax-M3", "minimax::MiniMax-M3.1-Flash")))
 
 
 def _string(value: Any) -> str:
@@ -374,6 +379,10 @@ def derive_provider_profile(settings: dict) -> str:
     configured = [name for key, name in direct if flags[key]]
     if len(configured) > 1:
         return "direct-multi"
+    from ouroboros.provider_connections import direct_provider_defaults
+
+    if configured == ["openai"] and direct_provider_defaults("openai", settings) is OPENAI_RESPONSES_DIRECT_DEFAULTS:
+        return "openai-responses"
     return configured[0] if configured else ("local" if _string(settings.get("LOCAL_MODEL_SOURCE")) else "openrouter")
 
 
@@ -669,7 +678,8 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     has_remote = any(
         value
         for setting_key, value in keys.items()
-        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN", "GIGACHAT_USER", "GIGACHAT_PASSWORD"}
+        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN", "OPENAI_API_SURFACE",
+                               "GIGACHAT_USER", "GIGACHAT_PASSWORD"}
     )
     has_remote = has_remote or bool(configured_connections({**keys, "OUROBOROS_CONNECTIONS": connections}))
     has_local = bool(local_source)
@@ -679,6 +689,11 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     if minimax_region and minimax_region not in MINIMAX_REGION_ENDPOINTS:
         return {}, "MiniMax Region must be global_en or cn_zh."
     keys["MINIMAX_REGION"] = minimax_region
+    if not keys.get("OPENAI_API_SURFACE"):  # no choice sent (or an older client) never clears a saved one
+        keys["OPENAI_API_SURFACE"] = _string(current_settings.get("OPENAI_API_SURFACE"))
+    if surface_error := choice_error("openai", "api_surface", keys.get("OPENAI_API_SURFACE")):
+        return {}, f"OpenAI API {surface_error}."
+    keys["OPENAI_API_SURFACE"] = keys.get("OPENAI_API_SURFACE", "").lower()
     if has_local and "/" in local_source and not local_source.startswith(("/", "~")) and not local_filename:
         return {}, "Local HuggingFace sources need a GGUF filename."
     if runtime_mode not in VALID_RUNTIME_MODES:
@@ -726,6 +741,9 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
             return {}, str(exc)
     prepared.update(models)
     prepared.update(keys)
+    from ouroboros.provider_connections import seed_new_api_surfaces
+
+    seed_new_api_surfaces(prepared, current_settings)  # a key new to this install starts on Responses
     prepared.update(parsed_budget)
     prepared.update({
         "OUROBOROS_RUNTIME_MODE": runtime_mode,

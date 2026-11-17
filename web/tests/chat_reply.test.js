@@ -70,6 +70,37 @@ test('an explicit quote landing replaces the old-width anchor before reflow; lat
     assert.equal(feed.scrollTop, 408, 'a later resize preserves the reader’s gesture, not the quote landing');
 });
 
+test('a quote landing clears the bar and its frosted edge; without an edge it clears the bar alone', async t => {
+    const land = async (edge) => {
+        const env = installDomDouble(), view = env.doc.defaultView, prior = view.getComputedStyle;
+        view.getComputedStyle = (node) => ({ ...prior(node), getPropertyValue: (name) => (name === '--edge-reach'
+            && String(node.className || '').split(/\s+/).includes('chat-page-header') ? edge : '') });
+        const page = env.el('div', { className: 'page' }), header = env.el('div', { className: 'chat-page-header' });
+        const feed = env.el('div'), input = env.el('textarea');
+        const row = env.el('div', { dataset: { rowAddress: 'row:1@then#123456789abc' } });
+        env.doc.body.append(page, input); page.append(header, feed); feed.append(row);
+        Object.assign(feed, { clientWidth: 0, clientHeight: 300, scrollHeight: 1200, scrollTop: 0 });
+        feed.getBoundingClientRect = () => ({ top: 0 });
+        header.getBoundingClientRect = () => ({ top: 0, bottom: 80 });
+        row.getBoundingClientRect = () => ({ top: 600 - feed.scrollTop });
+        const reading = createChatReadingPosition({ feed, visible: () => true, alive: () => true, ready: () => true,
+            anchors: { capture: () => ({ top: feed.scrollTop }), restore: anchor => { feed.scrollTop = anchor.top; return true; } },
+            changed() {}, afterWrite() {}, activity() {}, updateButton() {} });
+        const replies = createChatReplies({ feed, input, reading: () => reading, history: () => ({ exact: () => row }) });
+        try {
+            assert.deepEqual(await replies.reveal(row.dataset.rowAddress), { state: 'found', target: row });
+            return feed.scrollTop;
+        } finally {
+            replies.destroy();
+            view.getComputedStyle = prior;
+            env.restore();
+        }
+    };
+    // The bar ends at 80 px: a row lands 12 px below its 32 px edge (style.css "A room's edges"), or below the bar alone.
+    assert.equal(await land('32px'), 600 - (80 + 32 + 12));
+    assert.equal(await land('0px'), 600 - (80 + 12));
+});
+
 test('a drawn row is a destination app needs no read for; a portal or a row not drawn is not', t => {
     const env = installDomDouble();
     t.after(() => env.restore());

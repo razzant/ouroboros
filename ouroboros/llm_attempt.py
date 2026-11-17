@@ -165,7 +165,8 @@ class ProviderPolicyRefusal(RuntimeError):
 class ConnectionUnavailable(ProviderPolicyRefusal):
     """The route names an API connection that cannot serve it: ``missing`` (no such
     row, or it lacks its credential/endpoint), ``disabled``, ``kind_mismatch`` (the
-    name belongs to another kind) or ``invalid`` (a malformed spelling). Raised while
+    name belongs to another kind), ``invalid`` (a malformed spelling) or
+    ``invalid_api_surface`` (an OpenAI API choice outside its closed set). Raised while
     the target is resolved, so nothing is dispatched ($0); never re-sent on another
     connection's key (``provider_connections.connection_values``)."""
 
@@ -556,6 +557,11 @@ def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]
     )
 
 
+# A candidate's context: what the model reads (Chat/Messages ``system``/``messages``, Responses
+# ``instructions``/``input``) and its tool schemas; the full raw digest covers every other key too.
+CANDIDATE_CONTEXT_KEYS = ("system", "messages", "tools", "functions", "instructions", "input")
+
+
 def _attempt_request(
     target: Dict[str, Any],
     payload: Dict[str, Any],
@@ -567,7 +573,7 @@ def _attempt_request(
         key: value
         for key, value in payload.items()
         if key not in {
-            "model", "max_tokens", "max_completion_tokens", "temperature",
+            "model", "max_tokens", "max_completion_tokens", "max_output_tokens", "temperature",
             "top_p", "top_k", "timeout", "stream",
         }
     }
@@ -588,7 +594,7 @@ def _attempt_request(
         )
     raw = _canonical_candidate_bytes(payload)
     context = _canonical_candidate_bytes({
-        key: payload[key] for key in ("system", "messages", "tools", "functions") if key in payload
+        key: payload[key] for key in CANDIDATE_CONTEXT_KEYS if key in payload
     })
     from ouroboros.send_clock import record_candidate, split_clock_note
     from ouroboros.vision_routing import note_candidate_images
@@ -605,7 +611,8 @@ def _attempt_request(
         model=str(target.get("usage_model") or target.get("resolved_model") or payload.get("model") or ""),
         provider=str(target.get("provider") or "unknown"),
         prompt_tokens_estimate=max(0, prompt_chars // 4),
-        max_completion_tokens=int(payload.get("max_completion_tokens") or payload.get("max_tokens") or 0),
+        max_completion_tokens=int(payload.get("max_completion_tokens") or payload.get("max_tokens")
+                                  or payload.get("max_output_tokens") or 0),
         source=str(request_source or ""),
         prompt_cache_ttl=_applied_payload_cache_ttl(payload) or "",
         candidate_raw_sha256=raw_sha256,
@@ -678,7 +685,7 @@ def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Di
     """Apply the exact-route output maximum, then Nano's window-room policy.
 
     ``context_budget.reply_allowance_tokens`` on THIS candidate: its own bounded count
-    (system, messages, tools) times the density Main measured with, against the bound
+    (rows and tools, Chat or Responses) times the density Main measured with, against the bound
     capacity (the local lane: its confirmed serving window); the local server's exact
     count replaces the estimate and needs no slack. Low and Max retain the caller's
     allowance up to the separate known output maximum (no window-room shrink). A
@@ -725,7 +732,7 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
     def _persist(reservation):
         raw = _canonical_candidate_bytes(candidate)
         context = _canonical_candidate_bytes({
-            key: candidate[key] for key in ("system", "messages", "tools", "functions") if key in candidate
+            key: candidate[key] for key in CANDIDATE_CONTEXT_KEYS if key in candidate
         })
         identity = (
             hashlib.sha256(raw).hexdigest(), len(raw),

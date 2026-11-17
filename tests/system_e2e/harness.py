@@ -455,12 +455,12 @@ def retained_answer_selection(body: dict) -> dict | None:
     """The author's selection of its held answer, when the host has just returned a final at the finish door.
 
     Since #3280 the one pre-delivery notice also fires on a turn whose only effect is a written file (a write no
-    longer counts as its own check), and the notice arms delivery control: the next tool-less answer is held
-    (``selection_required``) until the author selects complete bytes or the retained ``answer_sha256`` with
-    ``finish_task`` (``loop_delivery._resolve_delivery_control``). A scripted model that answers prose again is
-    returned forever. This is what a model obeying the control prompt does: it delivers the answer it already
-    gave. ``None`` unless the rows after the last assistant row name a retained answer and ``finish_task`` is
-    offered, so an ordinary round still reads its script."""
+    longer counts as its own check). That notice leaves the next tool-less answer fresh
+    (``loop_delivery._note_delivery_facts``): prose answered again is delivered as written. A hold that arms
+    delivery control (a result review, a refused selection) still holds prose (``selection_required``) until the
+    author selects complete bytes or the retained ``answer_sha256`` with ``finish_task``, as a model obeying the
+    control prompt does. ``None`` unless the rows after the last assistant row name a retained answer and
+    ``finish_task`` is offered, so an ordinary round still reads its script."""
     if not any((row.get("function") or {}).get("name") == "finish_task" for row in body.get("tools") or []
                if isinstance(row, dict)):
         return None

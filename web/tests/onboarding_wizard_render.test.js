@@ -995,6 +995,81 @@ test('an account that connects while a key is being typed never sends that key; 
     }, { fetch });
 });
 
+// The built-in OpenAI key's API (settings_provider_cards.js createFlatKeyChoices). A key typed where the install had
+// none is a key being created: the draft the Models step reads with stores Responses with it and proposes the
+// profile that option names, where the server offers one. A key the bootstrap reports as configured keeps what it
+// stored: its untouched choice sends no word and its saved models are left as they were. The bootstraps here add or
+// drop that profile themselves, so the case reads the same before and after the fixture is regenerated.
+test('a key typed on a fresh install carries Responses and its profile in the draft; a configured key keeps its API and its models', async () => {
+    const reads = [];
+    const fetch = async (url, init = {}) => {
+        const catalog = String(url) === '/api/onboarding/model-catalog';
+        if (catalog) reads.push(JSON.parse(init.body));
+        const body = catalog ? { items: [], model_sources: [], errors: [] } : {};
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    const strip = (html) => html.match(/<div data-flat-key-choice="OPENAI_API_SURFACE"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/)?.[0] || '';
+    const current = { ...BOOTSTRAP.modelDefaults.openai, main: 'openai::test-current-main', light: 'openai::test-current-light', fallback: 'openai::test-current-fallback' };
+    const { 'openai-responses': _dropped, ...earlierOnly } = BOOTSTRAP.modelDefaults;
+    const offered = { ...BOOTSTRAP, modelDefaults: { ...earlierOnly, 'openai-responses': current } };
+    const typeAndRead = async (doc) => {
+        const key = doc.getElementById('openai-key');
+        key.value = 'sk-openai-typed-not-a-secret';
+        key.fire('input');
+        doc.getElementById('next-btn').fire('click');   // Accounts → Models: the draft is read
+        await settle();
+        return reads.at(-1);
+    };
+    await withWizard(offered, 'openai-api-fresh', async ({ doc }) => {
+        await settle();
+        const html = () => doc.getElementById('root').innerHTML;
+        assert.match(strip(html()), /^<div data-flat-key-choice="OPENAI_API_SURFACE" hidden>/, 'no key in the draft: the strip is not shown');
+        assert.equal((html().match(/data-flat-key-choice=/g) || []).length, 1, 'only the kind that has the choice draws it');
+        assert.doesNotMatch(html(), /id="openai-api-surface"/, 'the contract\'s field of the stored word is this strip, never a text field');
+        const draft = await typeAndRead(doc);
+        assert.deepEqual([draft.OPENAI_API_KEY, draft.OPENAI_API_SURFACE], ['sk-openai-typed-not-a-secret', 'responses']);
+        assert.deepEqual([draft.OUROBOROS_MODEL, draft.OUROBOROS_MODEL_LIGHT, draft.OUROBOROS_MODEL_FALLBACKS],
+            [current.main, current.light, current.fallback], 'the proposals are the profile the option names');
+        doc.getElementById('back-btn').fire('click');   // the step is drawn again from the draft
+        await settle();
+        assert.match(strip(html()), /^<div data-flat-key-choice="OPENAI_API_SURFACE">/);
+        assert.match(strip(html()), /class="ui-segment active" data-connection-choice-value="responses" aria-pressed="true"/);
+        assert.match(strip(html()), /OpenAI’s current API\. Some newer models call tools only through it\./);
+    }, { fetch });
+    // A server that offers no such profile: the kind's own defaults, on Responses all the same.
+    await withWizard({ ...BOOTSTRAP, modelDefaults: earlierOnly }, 'openai-api-fresh-earlier-profile', async ({ doc }) => {
+        await settle();
+        const draft = await typeAndRead(doc);
+        assert.deepEqual([draft.OPENAI_API_SURFACE, draft.OUROBOROS_MODEL], ['responses', BOOTSTRAP.modelDefaults.openai.main]);
+    }, { fetch });
+    const kept = { ...BOOTSTRAP.initialState, openaiKey: BOOTSTRAP.secretPlaceholder, mainModel: 'openai::gpt-kept', automaticModels: [] };
+    await withWizard({ ...offered, initialState: kept }, 'openai-api-configured', async ({ doc }) => {
+        await settle();
+        const drawn = strip(doc.getElementById('root').innerHTML);
+        assert.match(drawn, /^<div data-flat-key-choice="OPENAI_API_SURFACE">/, 'a configured key shows its choice');
+        assert.match(drawn, /class="ui-segment active" data-connection-choice-value="chat_completions" aria-pressed="true"/);
+        assert.match(drawn, /class="ui-segment" data-connection-choice-value="responses" aria-pressed="false"/);
+        doc.getElementById('next-btn').fire('click');
+        await settle();
+        assert.ok(!reads.at(-1).OPENAI_API_SURFACE, 'an untouched choice of a key the install holds sends no word');
+        assert.equal(reads.at(-1).OUROBOROS_MODEL, 'openai::gpt-kept', 'and the saved model is left as it was');
+    }, { fetch });
+    // A key the install holds on Responses: shown so, and its saved model is still the owner's.
+    await withWizard({ ...offered, initialState: { ...kept, openaiApiSurface: 'responses' } }, 'openai-api-configured-responses', async ({ doc }) => {
+        await settle();
+        assert.match(strip(doc.getElementById('root').innerHTML), /class="ui-segment active" data-connection-choice-value="responses" aria-pressed="true"/);
+        doc.getElementById('next-btn').fire('click');
+        await settle();
+        assert.equal(reads.at(-1).OUROBOROS_MODEL, 'openai::gpt-kept');
+    }, { fetch });
+    // Summary says the key's API beside it.
+    const summary = { ...BOOTSTRAP, stepOrder: ['summary', ...BOOTSTRAP.stepOrder.filter((step) => step !== 'summary')], initialState: kept };
+    await withWizard(summary, 'openai-api-summary', async ({ doc }) => {
+        assert.match(doc.getElementById('root').innerHTML, /<strong>OpenAI<\/strong>\s*<span>configured · Chat Completions API<\/span>/);
+    }, { fetch });
+});
+
 // Review R1 (C3): a model the local runtime serves is named Local in Summary, never by the cloud source its stored id implies.
 test('Summary names a model the local runtime serves as Local, and a cloud one by its source', async () => {
     const summary = async (query, localRoutingMode) => {

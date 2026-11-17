@@ -86,14 +86,14 @@ test('the built-in compatible row keeps its facts only while its draft reaches t
     assert.equal(reachesAnotherPair(both, { ...both, OPENAI_COMPATIBLE_BASE_URL: '' }), true);
 });
 
-test('every provider test button warns that one charged request is sent', () => {
+test('every provider test button warns that a short, bounded and charged test runs', () => {
     const html = renderSettingsPage();
     const buttons = [...html.matchAll(/data-provider-test="[^"]+"[^>]*>/g)];
     assert.equal(buttons.length, 9);
     for (const [button] of buttons) {
         assert.match(
             button,
-            /title="Sends one short model request\. Provider charges may apply\."/,
+            /title="Runs a short, bounded test\. Provider charges may apply\."/,
         );
     }
 });

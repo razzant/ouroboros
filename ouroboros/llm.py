@@ -14,6 +14,7 @@ import time  # noqa: F401  (prior import surface)
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ouroboros.model_wait import dispatch_deadline_remaining_sec, model_waitable
+from ouroboros._usage_response import UnusableReplyError, usage_reply_unfinished, usage_reply_usability
 from ouroboros.deadline_utils import caller_deadline_scoped
 
 from ouroboros.anthropic_native_custody import (  # noqa: F401  (prior import surface)
@@ -94,6 +95,7 @@ from ouroboros.llm_routing import (
     _ProviderRoutingMixin,  # noqa: F401
     _resolve_or_provider,  # noqa: F401
 )
+from ouroboros.llm_routing import _create_fn, _reply_dict
 from ouroboros.provider_models import (  # noqa: F401  (prior import surface)
     DEEPSEEK_BASE_URL,
     OPENROUTER_DEFAULTS,
@@ -231,6 +233,18 @@ def _parse_tool_call_block(body: str, tool_schemas: Optional[Dict[str, Any]]) ->
                   for key, value in parameter.findall(function.group(2))}
 
 
+def _one_shot_result(result: Tuple[Dict[str, Any], Dict[str, Any]],
+                     tools: Optional[List[Dict[str, Any]]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """A tool-less call has no loop to continue an intermediate or unfinished reply in: it and a provider-stated
+    non-result (``reply_usability``) reach the caller as ``UnusableReplyError`` before any text or JSON is parsed."""
+    usability = usage_reply_usability(result[1], result[0])
+    if not tools and usability == "usable" and usage_reply_unfinished(result[1]):
+        usability = "unfinished"
+    if not tools and usability != "usable":
+        raise UnusableReplyError(usability, result[0], result[1])
+    return result
+
+
 class LLMClient(
     _PayloadCachePolicyMixin,
     _CapabilityPolicyMixin,
@@ -350,7 +364,7 @@ class LLMClient(
                     **({"stream": True} if stream else {}),
                 )
             usage["ledger_attempt_ids"] = list(attempt_ids)
-            return message, usage
+            return _one_shot_result((message, usage), tools)
 
     @request_wire_scoped
     @caller_deadline_scoped
@@ -468,16 +482,16 @@ class LLMClient(
                 prompt_cache_ttl = self._normalize_payload_cache_ttl(target, kwargs)
                 with capture_attempt_ids() as attempt_ids:
                     resp = await self._create_chat_completion_with_retries_async(
-                        _oa_client.chat.completions.create, kwargs, target,
+                        _create_fn(_oa_client, target), kwargs, target,
                     )
                 result = self._normalize_remote_response(
-                    resp.model_dump(),
+                    _reply_dict(resp, target),
                     target,
                     skip_cost_fetch=True,
                     prompt_cache_ttl=prompt_cache_ttl,
                 )
                 result[1]["ledger_attempt_ids"] = list(attempt_ids)
-                return result
+                return _one_shot_result(result, tools)
             finally:
                 try:
                     from ouroboros._usage_wait import aclose_after_model_send
@@ -500,15 +514,15 @@ class LLMClient(
         prompt_cache_ttl = self._normalize_payload_cache_ttl(target, kwargs)
         with capture_attempt_ids() as attempt_ids:
             resp = await self._create_chat_completion_with_retries_async(
-                client.chat.completions.create, kwargs, target,
+                _create_fn(client, target), kwargs, target,
             )
         result = self._normalize_remote_response(
-            resp.model_dump(),
+            _reply_dict(resp, target),
             target,
             prompt_cache_ttl=prompt_cache_ttl,
         )
         result[1]["ledger_attempt_ids"] = list(attempt_ids)
-        return result
+        return _one_shot_result(result, tools)
 
     @staticmethod
     def _strip_reasoning_wrappers(text: str):
@@ -595,8 +609,11 @@ class LLMClient(
 
         msg = dict(msg)
         msg["tool_calls"] = tool_calls
-        # Preserve reasoning text for loop progress; None/empty remains falsy.
-        msg["content"] = reasoning or None
+        # The calls are the reply; its reasoning is the model's, kept for progress in the portable ``reasoning`` that
+        # the outbound scrubber drops.
+        msg["content"] = None
+        if reasoning:
+            msg["reasoning"] = reasoning
         log.info("Parsed %d local tool call(s) from text output", len(tool_calls))
         return msg
 

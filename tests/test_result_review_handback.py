@@ -877,3 +877,90 @@ def test_a_collected_review_that_changed_after_its_collection_rendered_is_handed
     [handback] = _handed_back(requests[-1])
     assert text == ANSWER and LATE in handback, "the later answer was handed back before delivery"
     assert [row[2:4] for row in _holds(ctx)] == [("result_review", "pass")]
+
+
+# Prose completion after one-shot delivery facts (Nano regression).
+def _repeating(text, times=6):
+    return [{"role": "assistant", "content": text} for _ in range(times)]
+
+
+def test_a_required_review_pass_shown_once_ends_a_prose_only_turn(tmp_path, monkeypatch):
+    """The real Required floor: the host's review PASSes, the outcome is handed back once, then prose delivers."""
+    import ouroboros.review_substrate as substrate
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    _produced_answer_protocol(monkeypatch)
+    sends = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, {}))
+    text, _trace, requests = _main(ctx, monkeypatch, _repeating(ANSWER))
+    assert text == ANSWER and len(requests) == 2 and len(sends) == 3  # one host wave
+    assert _holds(ctx) == [(1, "prose", "result_review", "pass", _sha(ANSWER))]
+
+
+@pytest.mark.parametrize("cap", [1, 3])
+def test_rephrasing_after_failed_review_ends_at_the_existing_review_limit(tmp_path, monkeypatch, cap):
+    import ouroboros.review_substrate as substrate
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    _produced_answer_protocol(monkeypatch)
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", str(cap))
+    monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "unlimited")
+    sends = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, {"t1": CRITICAL}))
+    answers = [f"FINAL ANSWER: result with wording {i}" for i in range(cap + 3)]
+    text, trace, requests = _main(ctx, monkeypatch, [{"content": answer} for answer in answers])
+    assert text == answers[cap + 1] and len(requests) == cap + 2
+    assert len(sends) == 3  # only the original paid wave; the repeated prompts buy no review
+    assert [row[3] for row in _holds(ctx)] == ["findings", *(["revision"] * cap)]
+    [review] = [row for row in trace["review_runs"] if not row.get("superseded_by_revision")]
+    assert review["earlier_revision"] and review["informed_finish"]
+    assert review["aggregate"] == "FAIL"  # the limit is never a reviewer PASS
+
+
+def test_pending_review_then_settlement_needs_no_completion_selection(tmp_path, monkeypatch):
+    import ouroboros.review_substrate as substrate
+    from ouroboros.tools import review_change
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    _produced_answer_protocol(monkeypatch)
+    sends, calls = [], []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    run = review_change.run_review_change
+
+    def first_pending(*args, **kwargs):
+        calls.append(1)
+        return {"state": "pending", "record_id": "pending-fixture"} if len(calls) == 1 else run(*args, **kwargs)
+
+    monkeypatch.setattr(review_change, "run_review_change", first_pending)
+    text, _trace, requests = _main(ctx, monkeypatch, _repeating(ANSWER, 4))
+    assert text == ANSWER and len(requests) == 3
+    assert [row[3] for row in _holds(ctx)] == ["pending", "pass"]
+    assert "Your next answer is delivered as written" in str(requests[1])
+    assert "No completion selection was made" not in str(requests)
+
+
+@pytest.mark.parametrize("kind", ["pending", "rephrasing"])
+def test_review_loops_obey_the_existing_round_limit(tmp_path, monkeypatch, kind):
+    import ouroboros.loop as loop
+    import ouroboros.review_substrate as substrate
+    from ouroboros.tools import review_change
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    _produced_answer_protocol(monkeypatch)
+    monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "4")
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "unlimited")
+    if kind == "pending":
+        monkeypatch.setattr(review_change, "run_review_change", lambda *a, **kw: {
+            "state": "pending", "record_id": "pending-fixture"})
+    else:
+        monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam([], {"t1": CRITICAL}))
+    rails = []
+
+    def forced(context, **kwargs):
+        rails.append((context.round_idx, context.max_rounds, kwargs["reason_code"]))
+        return "Bounded by the round limit", {}, context.llm_trace
+
+    monkeypatch.setattr(loop, "_forced_final_answer", forced)
+    text, _trace, requests = _main(ctx, monkeypatch, [{"content": f"FINAL ANSWER: wording {i}"} for i in range(8)])
+    assert text == "Bounded by the round limit" and len(requests) == 4
+    assert rails == [(5, 4, "round_limit")]

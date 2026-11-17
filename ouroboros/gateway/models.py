@@ -23,7 +23,8 @@ from ouroboros.net_transport import ExtraCaBundleError, extra_ca_bundle, verify_
 from ouroboros.gateway._helpers import json_error, json_exception
 from ouroboros.observability import redact_projection
 from ouroboros.provider_connections import (
-    connection_configured, connection_display, connection_routes, connection_rows, find_row,
+    connection_configured, connection_display, connection_routes, connection_rows, direct_provider_defaults, find_row,
+    seed_new_api_surfaces,
 )
 from ouroboros.provider_models import (
     ACTIVE_MODEL_SETTING_KEYS,
@@ -744,10 +745,14 @@ def _provider_test_model(provider_id: str, settings: dict, connection: str = "")
               for route in map(parse_model_route, str(settings.get(key, "") or "").split(","))
               if route.kind == provider_id and route.valid and route.model.strip()]
     own = [route for route in routes if route.connection == connection]
-    shared = [] if provider_id == "openai-compatible" else routes
+    # Another key's route only where it proposes the same profile as the key under test: an OpenAI key on
+    # Chat Completions never borrows a model its peer runs on Responses (``direct_provider_defaults``).
+    profile = direct_provider_defaults(provider_id, settings, connection)
+    shared = [] if provider_id == "openai-compatible" else [
+        route for route in routes if direct_provider_defaults(provider_id, settings, route.connection) == profile]
     native = next((route.model.strip() for route in own or shared), "")
     if not native:
-        default = (OPENROUTER_DEFAULTS if provider_id == "openrouter" else DIRECT_PROVIDER_DEFAULTS.get(provider_id) or {})
+        default = OPENROUTER_DEFAULTS if provider_id == "openrouter" else profile  # its connection's own profile
         native = parse_model_route(str(default.get("main") or "").strip()).model.strip()
     if not native or (provider_id == "openrouter" and not connection):
         return native
@@ -779,6 +784,7 @@ def _provider_test_log(provider_id: str, model: str, result: dict, duration_ms: 
         "status_code": result.get("status_code"),
         "exception_type": str(result.get("exception_type") or ""),
         "duration_ms": duration_ms,
+        **{key: result[key] for key in ("requested", "applied") if key in result},  # the tool test's forms
     }).value
     logger = log.info if facts.get("ok") else log.warning
     logger("provider_test result=%s", facts)
@@ -819,13 +825,15 @@ def _run_provider_test(provider_id: str, overrides: dict[str, str], connection: 
 
     Test is the owner's explicit request, so a switched-off connection is tested too.
     A named connection's draft fields override its saved row (a row not saved yet is
-    tested from the draft alone); an unchanged secret's placeholder keeps the saved one,
+    tested from the draft alone, on the OpenAI API its save would seed:
+    ``provider_connections.seed_new_api_surfaces``); an unchanged secret's placeholder keeps the saved one,
     on the built-in connection too. ``key_setting`` names the built-in compatible pair
     under test (``_pair_test_settings``). A kept secret reaches only its saved endpoint
     (``_saved_secret_moved``): before discovery and the probe, so nothing is sent."""
     from ouroboros.secret_masking import looks_masked_settings_secret
 
     settings = dict(load_settings())
+    before = dict(settings)  # the read a save of this draft would start from
     saved_rows = connection_rows(settings.get(CONNECTIONS_KEY))
     under_test = (provider_id, connection or BUILTIN_CONNECTION)
     rows = [row for row in saved_rows if (row.get("kind"), row.get("name")) != under_test]
@@ -848,10 +856,12 @@ def _run_provider_test(provider_id: str, overrides: dict[str, str], connection: 
         else:
             settings = _builtin_test_settings(provider_id, settings, draft)
         read = lambda field: settings.get(PROVIDER_KINDS[provider_id].flat_key(field))  # noqa: E731
-    problem = next((field for field in ("region", "plan") if choice_error(provider_id, field, read(field))), "")
+    problem = next((field for field in ("region", "plan", "api_surface") if choice_error(provider_id, field, read(field))), "")
     if problem:
-        return {"error": {"region": "unknown MiniMax region", "plan": "unknown Z.ai plan"}[problem], "_http_status": 400}
+        return {"error": {"region": "unknown MiniMax region", "plan": "unknown Z.ai plan",
+                          "api_surface": "unknown OpenAI API"}[problem], "_http_status": 400}
     settings[CONNECTIONS_KEY] = rows
+    seed_new_api_surfaces(settings, before)  # a draft not saved yet is tested on the API its save would store
     # A named pair is as ready as the runtime reads it: a legacy address without its key sends nothing.
     if key_setting and not compatible_endpoint_configured(lambda key: str(settings.get(key) or "").strip()):
         return {"ok": False, "error": "Provider is not configured"}
@@ -861,7 +871,7 @@ def _run_provider_test(provider_id: str, overrides: dict[str, str], connection: 
 
 
 # Kinds whose endpoint the owner types; the others' endpoints are the vendor's own
-# (a MiniMax region or Z.ai plan picks among its closed set, ``choice_error``).
+# (a MiniMax region, Z.ai plan or OpenAI API picks among its closed set, ``choice_error``).
 _ADDRESSED_KINDS = frozenset(kind for kind, spec in PROVIDER_KINDS.items() if spec.flat_key("base_url"))
 
 

@@ -198,7 +198,7 @@ def test_the_agent_measures_its_context_build(tmp_path, monkeypatch, realtime):
     agent = OuroborosAgent(Env(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=tmp_path),
                            event_queue=queue.Queue())
     if realtime:
-        agent._realtime_turn = SimpleNamespace(resolve_route=route_resolver)
+        agent._realtime_turn = SimpleNamespace(resolve_route=route_resolver, feature={})
     monkeypatch.setattr(agent.llm, "chat", lambda **_kw: pytest.fail("no model call"))
     with pytest.raises(RuntimeError, match="stop after the context build"):
         agent._prepare_task_context({"id": "timed", "type": "task", "chat_id": 1, "text": "hi"})

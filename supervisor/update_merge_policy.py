@@ -70,6 +70,8 @@ HOT_CODE_PATHS = frozenset({
     # v7 D01 split leaves: code that moved out of the hot loop monolith keeps
     # the label (same parity rule as the D04 block above).
     "ouroboros/delivery_seal.py",
+    # delivery_facts received the hot loop_delivery's explicit-selection body (select_answer): the label follows it.
+    "ouroboros/delivery_facts.py",
     "ouroboros/loop_budget.py",
     "ouroboros/loop_delivery.py",
     "ouroboros/loop_forced_finalization.py",

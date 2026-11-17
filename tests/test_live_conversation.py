@@ -194,7 +194,7 @@ def test_real_books_call_uses_ordinary_owner_mode_and_window_ladder(host_world):
                                                 start_mode='low')
     from ouroboros.llm_messages import project_wire_messages
     expected = project_wire_messages(ordinary.reproject_transcript(host.messages, ordinary.initial_mode))[0]
-    expected_tools = initial_tool_schemas(host.tools, context_mode=ordinary.initial_mode)
+    expected_tools = initial_tool_schemas(host.tools, context_mode=ordinary.initial_mode, standing=False)
     expected_tools.extend(schema for schema in host.schemas if schema['function']['name'] in host.call_tools)
 
     async def consume(session):

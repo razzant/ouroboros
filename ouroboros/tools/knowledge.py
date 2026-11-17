@@ -73,7 +73,7 @@ def _argument_notes(notes) -> str:
 
 
 def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = None,
-                 end_char: int | None = None, earlier: dict | None = None, notes=()) -> tuple[str, dict]:
+                 end_char: int | None = None, earlier: dict | None = None, notes=(), shelves=()) -> tuple[str, dict]:
     """One exact character range of the note (``_range``), or of an ``earlier`` version of it."""
     ref = note.source_ref()
     ref["state"] = note.state
@@ -95,6 +95,26 @@ def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = N
         header += "[Metadata unavailable; the complete original Markdown follows.]\n"
     if note.archive_error:
         header += f"[Archive metadata invalid; kept active: {note.archive_error}.]\n"
+    if shelves and not start_char:  # link facts once, on a read from the note's start, not on every range page
+        links = {}
+        try:
+            outgoing = knowledge_store.knowledge_links(note)
+        except (ValueError, OSError) as exc:
+            links["unavailable"] = type(exc).__name__
+            outgoing = ()
+        for link in outgoing:
+            status = link["status"]
+            if status == "external":
+                links[status] = links.get(status, 0) + 1
+            else:
+                target = link.get("address", note.address.as_dict() if status == "same_source" else {})
+                links.setdefault(status, []).append(
+                    {key: target[key] for key in ("scope", "topic")} if target else link["target"])
+        if links:
+            header += "[Knowledge links] " + json.dumps(links, ensure_ascii=False) + "\n"
+        backlinks = knowledge_store.knowledge_backlinks(note, shelves)
+        if backlinks:
+            header += "[Knowledge backlinks (readable shelves now)] " + json.dumps(backlinks, ensure_ascii=False) + "\n"
     header += "\n"
     return header + body, {
         "knowledge_source": ref, "knowledge_body_start": len(header),
@@ -118,7 +138,7 @@ class ListChanged(Exception):
 
 
 def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | None,
-               start_char: int | None, end_char: int | None, notes=(), fingerprint: str = "") -> tuple[str, dict]:
+               start_char: int | None, end_char: int | None, notes=(), fingerprint: str = "", shelves=()) -> tuple[str, dict]:
     if view not in ("note", "outline", "history"):
         raise ValueError(f"view={view!r}: use note (default), outline or history")
     if fingerprint and view != "history":
@@ -131,7 +151,7 @@ def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | No
         shown = knowledge_store._note(note.address, text.encode("utf-8"))
         earlier = {**knowledge_versions.row_facts(row), "revision": version, "current_revision": note.revision}
     if view == "note":
-        return _source_view(shown, start_char, end_char, earlier, notes)
+        return _source_view(shown, start_char, end_char, earlier, notes, shelves)
     facts = {"topic": note.address.topic, "scope": note.address.scope, "revision": shown.revision,
              **({"current_revision": note.revision, "earlier_version": earlier} if earlier else {})}
     if view == "history":  # newest first: a later page continues the list its first page read, by its fingerprint
@@ -166,9 +186,11 @@ def _knowledge_read(ctx: ToolContext, topic: str, scope: str = "",
         note = knowledge_store.read_knowledge_note(address)
         if fingerprint is not None and not isinstance(fingerprint, str):
             raise ValueError("fingerprint is the text a history page's header names")
-        text, meta = (_source_view(note, start_char, end_char, notes=notes)
-                      if view == "note" and version is None and not fingerprint
-                      else _note_view(note, view, version, start_char, end_char, notes, fingerprint or ""))
+        shelves = (address,
+                   knowledge_store.resolve_knowledge_address(address.canonical_root, sanitized, "global"),
+                   knowledge_store.resolve_knowledge_address(address.canonical_root, sanitized,
+                                                             project_id=str(placed_project_id(ctx) or ""))) if view == "note" else ()
+        text, meta = _note_view(note, view, version, start_char, end_char, notes, fingerprint or "", shelves)
     except ListChanged as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_REPORTED_FAILURE", text=f"⚠️ TOOL_ERROR: position_mismatch: {exc}",

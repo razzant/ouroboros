@@ -14,7 +14,8 @@ import { CONFIRMS, bindSettingRows, commitSetting, outcomeLine, readSettings, se
 import { checkerFieldsNote, checkerReads, checkerUses, deploymentOf } from './settings_policy.js';
 import { rowById } from './settings_rows.js';
 import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
-import { PROVIDER_CARDS, connectionFieldsHtml, connectionRowHtml } from './settings_provider_cards.js';
+import { PROVIDER_CARDS, choiceWords, connectionFieldsHtml, connectionRowHtml, paintConnectionChoices, pressConnectionChoice,
+    seedConnectionChoices } from './settings_provider_cards.js';
 import { revealNewRow, setInlineStatus } from './ui_helpers.js';
 import { setResult } from './ui_primitives.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
@@ -209,7 +210,8 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         if (!enabled || 'enabled' in original) value.enabled = enabled;
         for (const field of card.fields) {
             const input = fieldInput(row, field);
-            const text = field.secret ? input?.value || '' : (input?.value || '').trim();
+            if (!input) continue;  // the built-in row draws no choice: its stored word travels as loaded
+            const text = field.secret ? input.value || '' : (input.value || '').trim();
             if (text || field.rowField in original) value[field.rowField] = text;
         }
         return value;
@@ -273,6 +275,7 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
             input.closest('.form-field')?.querySelector('.secret-clear')?.setAttribute('hidden', '');
         }
         if (fixed) { toggle.hidden = true; remove.hidden = true; }
+        paintConnectionChoices(row);  // a held key's choice is shown, never pressed
     }
 
     function paintAll() {
@@ -322,7 +325,7 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
                 originals.set(uid, row);
                 return connectionRowHtml(card, { uid, name: row.name, label: row.label, enabled: row.enabled !== false, values: row });
             }).join(''));
-            addedRows(card.kind).forEach((row) => bindSecretInputs(row));
+            addedRows(card.kind).forEach((row) => { bindSecretInputs(row); paintConnectionChoices(row); });
             if (added.length && !touched.has(card.kind)) setCardOpen(card.kind, true);
         }
         root.querySelectorAll('[data-connection-row]').forEach(expire);
@@ -338,6 +341,7 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         host.insertAdjacentHTML('beforeend', connectionRowHtml(card, { uid: `${card.id}-${serial += 1}`, draft: true }));
         const row = host.lastElementChild;
         bindSecretInputs(row);
+        seedConnectionChoices(row);  // a new key starts on the word the server would seed and stores it
         paintRow(row);
         setCardOpen(kind, true);
         revealNewRow(row, row.querySelector('[data-connection-label]'));
@@ -450,6 +454,8 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         if (add) { addRow(add.dataset.connectionAdd); return; }
         const row = target?.closest('[data-connection-row]');
         if (!row) return;
+        const option = target.closest('[data-connection-choice-value]');
+        if (option) { if (pressConnectionChoice(option)) onInput({ target: option }); return; }
         if (target.closest('[data-connection-test]')) void testRow(row);
         else if (target.closest('[data-connection-toggle]')) toggleRow(row);
         else if (target.closest('[data-connection-remove]')) removeRow(row);
@@ -554,14 +560,16 @@ const usedWords = (users = []) => (users.length ? users.join(', ') : 'No role us
 
 /**
  * The keys of a settings document as the list shows them: `keys`, a head for every key that exists (switched off or
- * not), and `more`, the provider cards that have none yet. A head says who names the key; its chip speaks only of what
- * stands in the way or was just proved: no key, the organization's key, or what the last Test here said.
+ * not), and `more`, the provider cards that have none yet. A head says what the key was set to among its kind's
+ * choices (OpenAI's API) and who names it; its chip speaks only of what stands in the way or was just proved: no key,
+ * the organization's key, or what the last Test here said.
  */
 export function keyHeads(settings = {}, { tests = TESTS } = {}) {
     const deployment = deploymentOf(settings?._meta);
     const usage = connectionUsage(settings, settings?._meta?.setup_contract?.modelSlots || []);
     const legacy = legacyAddressOf(settings);
     adoptConnectionLabels(settings?._meta?.connections);
+    const rows = connectionRows(settings?.[CONNECTIONS_KEY]);
     const keys = [];
     const more = [];
     for (const entry of apiConnections(settings)) {
@@ -572,11 +580,13 @@ export function keyHeads(settings = {}, { tests = TESTS } = {}) {
         const test = tests.get(entry.id);
         const from = entry.source === 'environment' ? 'From the environment'
             : entry.builtin && entry.kind === 'openai-compatible' && legacy ? `Legacy address ${legacy}` : '';
+        const stored = entry.builtin ? settings : rows.find((row) => row.kind === entry.kind && row.name === entry.name);
+        const chosen = choiceWords(card, (field) => stored?.[entry.builtin ? field.settingKey : field.rowField]);
         keys.push({
             id: entry.id, kind: entry.kind, name: entry.builtin ? '' : entry.name, card, enabled: entry.enabled, fixed,
             path: keyPath(entry.kind, entry.builtin ? '' : entry.name),
             title: keyName(entry.kind, entry.builtin ? '' : entry.name),
-            meta: [from, usedWords(usage.get(entry.id))].filter(Boolean).join(' · '),
+            meta: [from, ...chosen, usedWords(usage.get(entry.id))].filter(Boolean).join(' · '),
             chip: fixed ? { text: 'Set by your organization', tone: 'neutral' }
                 : test && test.tone !== 'ok' ? { text: test.text, tone: 'warn' }
                     : !entry.configured ? { text: 'No key', tone: 'neutral' } : test ? { text: test.text, tone: 'ok' } : null,
@@ -678,7 +688,7 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         const fixed = !key.fresh && checkerUses(deployment, id());
         const on = entry()?.enabled !== false;
         const usage = connectionUsage(settings, settings?._meta?.setup_contract?.modelSlots || []);
-        const form = connectionFieldsHtml(card(), builtin ? {} : { uid, name: key.name, label: stored?.label, values: stored || {}, draft: key.fresh });
+        const form = connectionFieldsHtml(card(), builtin ? {} : { uid, name: key.name, label: stored?.label, values: stored || {}, draft: key.fresh }, { choices: true });
         const provider = key.fresh ? `<div class="form-field ui-field"><label for="${uid}-kind">Provider</label><select id="${uid}-kind" class="ui-control" data-key-kind>${
             PROVIDER_CARDS.map((each) => `<option value="${each.kind}"${each.kind === kind ? ' selected' : ''}>${escapeHtml(each.title)}</option>`).join('')}</select></div>` : '';
         const legacy = builtin && kind === 'openai' && rowById('OPENAI_BASE_URL');
@@ -695,7 +705,7 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
                     <button type="button" class="btn btn-default" data-connection-test>Test</button>
                     <span class="ui-result" data-editor-result role="status" aria-live="polite"></span>
                 </div>
-                <p class="settings-card-note">Test sends one short model request. Provider charges may apply.</p>
+                <p class="settings-card-note">${card().testNote || 'Test sends one short model request. Provider charges may apply.'}</p>
                 ${card().note ? `<p class="settings-card-note">${card().note}</p>` : ''}
             </section>
             ${legacy ? `<section class="ui-card settings-card"><details class="ui-disclosure" data-settings-fold><summary>More: legacy base address</summary>
@@ -717,6 +727,10 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         const borrowed = builtin && !fixed ? card().fields.filter((field) => checkerReads(deployment, field.settingKey)) : [];
         Object.assign(find('[data-connection-fixed-fields]'), { textContent: checkerFieldsNote(borrowed.map((field) => field.label)), hidden: !borrowed.length });
         if (fixed) container.querySelectorAll('.accounts-key-form input').forEach((input) => { input.readOnly = true; });
+        // A key that is not saved yet starts each choice as the server would seed it (the built-in key of an older
+        // setup on the earlier word); a saved one shows what it stores.
+        (key.fresh || (builtin && !entry()?.configured) ? seedConnectionChoices : paintConnectionChoices)(container,
+            (field) => (builtin ? settings?.[field.older?.settingKey] : ''));
         // A key with one secret has nothing to clear that Remove does not: its field keeps Show alone.
         if (card().fields.filter((field) => field.secret).length < 2) container.querySelectorAll('.secret-clear').forEach((button) => { button.hidden = true; });
         bindSecretInputs(container);
@@ -796,7 +810,9 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         let outcome;
         let name = key.name;
         if (builtin) {
-            const fields = card().fields.filter(changed);
+            // A choice the form only proposed (a key not saved yet, no option pressed) is stored with the key, never alone.
+            const edits = card().fields.filter(changed);
+            const fields = edits.some((field) => fieldInput(field).dataset.seeded !== '1') ? edits : [];
             const values = fields.map((field) => (fieldInput(field).dataset.forceClear === '1' ? '' : typed(field)));
             outcome = !fields.length ? { state: 'unchanged' } : await commitSetting(flatRow(fields), fields.length > 1 ? values : values[0], { confirmed: true, ask: ctx.ask });
         } else {
@@ -860,20 +876,21 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         if (!gone) draw();
     }
 
+    // An edit ends what the last Test said: the verdict was about the draft it tested.
+    const edited = () => { generation += 1; TESTS.delete(id()); say(null); };
     const onClick = (event) => {
         const hit = (selector) => event.target?.closest?.(selector);
-        if (hit('[data-connection-test]')) void runTest();
+        const option = hit('[data-connection-choice-value]');
+        if (option) { if (pressConnectionChoice(option)) edited(); }
+        else if (hit('[data-connection-test]')) void runTest();
         else if (hit('[data-editor-save]')) void save();
         else if (hit('[data-key-toggle]')) void toggle();
         else if (hit('[data-editor-remove]')) void remove();
     };
-    // An edit ends what the last Test said: the verdict was about the draft it tested.
     const onInput = (event) => {
         if (!event.target?.closest?.('.accounts-key-form')) return;
-        generation += 1;
-        TESTS.delete(id());
         event.target.removeAttribute?.('aria-invalid');
-        say(null);
+        edited();
     };
     const onChange = (event) => {
         if (!event.target?.matches?.('[data-key-kind]')) return;

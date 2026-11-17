@@ -19,10 +19,12 @@ included, and a heading the parser gives no section of its own (a setext heading
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Mapping
 
 from ouroboros import knowledge_rows, text_change
@@ -105,6 +107,91 @@ def _parse(line: bytes) -> Any:
         return json.loads(line)
     except (ValueError, RecursionError):
         return None
+
+
+def _journal_position(handle: Any, offset: int) -> dict:
+    """Check the last 256 bytes at a complete record boundary, without replaying its prefix."""
+    start = max(0, offset - 256)
+    handle.seek(start)
+    ending = handle.read(offset - start)
+    if len(ending) != offset - start or (offset and not ending.endswith(b"\n")):
+        raise ValueError("incomplete journal ending")
+    return {"offset": offset, "check": hashlib.sha256(ending).hexdigest()}
+
+
+def knowledge_changes(root: Any, boundary: Any, gaps: set) -> tuple[list, Any]:
+    """Other foci's captures since accepted byte positions, in each journal's append order.
+
+    The first observation baselines existing journals; an accepted empty map sees new ones from zero.
+    Only a fixed ending check precedes unread bytes; unchanged journals are never opened. Invalid
+    complete rows are disclosed and skipped; missing/shortened journals drop/re-baseline their cursor.
+    Baselines succeed per journal; an unfinished tail waits while its complete prefix advances.
+    Other unreadable positions stay put. This reader writes nothing.
+    """
+    root, previous = Path(root), boundary or {}
+    current, events = dict(previous), []
+    journals = {"global": root / "memory" / JOURNAL_NAME}
+    try:
+        journals.update({f"project:{path.parent.name}": path for path in root.glob(f"projects/*/{JOURNAL_NAME}")})
+    except OSError as exc:
+        gaps.add(f"knowledge journals unreadable: {type(exc).__name__}; accepted positions retained")
+        return [], boundary
+    for scope in previous.keys() - journals.keys():
+        journals[scope] = root / "projects" / scope.removeprefix("project:") / JOURNAL_NAME
+    for scope, journal in sorted(journals.items()):
+        prior = previous.get(scope, {"offset": 0, "check": hashlib.sha256(b"").hexdigest()})
+        source, reset_gap = journal.relative_to(root), ""
+        try:
+            try:
+                end = journal.stat().st_size
+            except FileNotFoundError:
+                if scope in current:
+                    del current[scope]
+                    gaps.add(f"knowledge journal missing ({scope}): {source}; cursor dropped")
+                continue
+            if end == prior["offset"]:
+                continue
+            if end < prior["offset"]:
+                del current[scope]
+                reset_gap = f"knowledge journal shortened ({scope}): {source}, {prior['offset']} → {end} bytes"
+            with journal.open("rb") as handle:
+                if boundary is None or reset_gap:
+                    current[scope] = _journal_position(handle, end)
+                    if reset_gap:
+                        gaps.add(f"{reset_gap}; re-baselined at current end")
+                    continue
+                if _journal_position(handle, prior["offset"]) != prior:
+                    raise ValueError("accepted journal ending changed")
+                changes = []
+                while handle.tell() < end:
+                    start = handle.tell()
+                    line = handle.readline(end - handle.tell())
+                    if not line.endswith(b"\n"):
+                        gaps.add(f"knowledge changes unreadable ({scope}): {source}, bytes {start}..{handle.tell()} "
+                                 f"(end exclusive); incomplete row pending; position stops at {start}")
+                        end = start
+                        break
+                    row = _parse(line)
+                    if not isinstance(row, dict):
+                        gaps.add(f"knowledge journal gap ({scope}): {source}, bytes {start}..{handle.tell()} "
+                                 "(end exclusive); invalid row skipped")
+                        continue
+                    topic, focus = row.get("topic"), row.get("focus")
+                    if not _belongs(row, SimpleNamespace(topic=topic, scope=scope)):
+                        continue
+                    if isinstance(focus, Mapping) and focus.get("role") == "consciousness":
+                        continue
+                    facts = row_facts(row)
+                    changes.append(("knowledge_change", None,
+                        f"- knowledge {scope}/{topic}: {facts['mode']}, {facts['ts']}; by {focus_text(focus)}; "
+                        f"knowledge_read(topic={topic!r}, scope={scope!r}, version={facts['revision']!r})"))
+                current[scope] = _journal_position(handle, end)
+                events.extend(changes)
+        except (OSError, ValueError) as exc:
+            where = reset_gap or f"knowledge changes unreadable ({scope}): {source}"
+            action = "accepted position retained" if scope in current else "journal skipped"
+            gaps.add(f"{where}: {exc}; {action}")
+    return events, current
 
 
 def tail_rows(journal: Path, address: Any, tail_bytes: int) -> Iterator[tuple[int, dict]]:

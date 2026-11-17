@@ -16,7 +16,7 @@ import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { tr, fmt } from './i18n.js';
 import { chipHtml, relativeAge, skillIconHtml } from './skill_presentation.js';
 import { PLACES_CHANGED_EVENT, createCircle, deleteCircle, failureText, readPlaceConnector, readPlaces, updateCircle } from './consciousness_api.js';
-import { placeInstance, placeModelWord, placeService, placeStateWord, placeTitle, sameWords, writtenByWord } from './consciousness_words.js';
+import { noKindChecked, placeInstance, placeModelWord, placeService, placeStateWord, placeTitle, sameWords, writtenByWord } from './consciousness_words.js';
 import { getContributions } from './contributions.js';
 import { bindModelChoosers, modelChooserHtml, updateModelChooser } from './model_chooser.js';
 import { modelCatalog } from './model_catalog_store.js';
@@ -29,7 +29,7 @@ const SEP = ' · ';
 const UNASSIGNED = 'none';
 const OWNER_VOICE = new Set(['owner', 'migration']);
 // The state word's tone: a live place is the ok dot, a silent or paused one the muted dot, and so is a place that only
-// hears because consciousness is off (the host's `only_hears`).
+// hears because consciousness is off (the host's `only_hears`) or that has no wake kind checked (`noKindChecked`).
 const STATE_TONE = { active: 'ok', silent: 'muted', paused: 'muted' };
 
 /** «model glm-5.3»: a model named as a fact of a row or a head. The words name a model, so the overlay leaves them. */
@@ -48,14 +48,18 @@ export function placeRowHtml(place, { title = '', source = '' } = {}) {
     const readiness = place.readiness && place.readiness.tone !== 'ok'
         ? tr(`places.readiness.${place.readiness.text}`, place.readiness.text) : '';
     const word = tr(`places.state.${place.state}`, placeStateWord(place.state));
-    const state = place.onlyHears ? `${word}${SEP}${tr('places.only_hears.consciousness_off', 'consciousness off')}` : word;
+    // A place that is not Paused and has no kind checked says that setting beside its state, promising neither a
+    // wake nor silence: the kinds themselves stay in the sheet's "What calls it here".
+    const unchecked = !place.onlyHears && place.state !== 'paused' && noKindChecked(place);
+    const state = place.onlyHears ? `${word}${SEP}${tr('places.only_hears.consciousness_off', 'consciousness off')}`
+        : unchecked ? `${word}${SEP}${tr('places.unchecked', 'no wake kinds checked')}` : word;
     const when = lastEventText(place);
     const name = title || placeTitle(place);
     // The service as a quiet label, unless the name already is it (a whole account no status has named yet).
     const service = source || placeService(place);
     const where = sameWords(name, service) ? '' : service;
     const description = place.description?.text || '';
-    const tone = place.onlyHears ? 'muted' : STATE_TONE[place.state] || 'muted';
+    const tone = place.onlyHears || unchecked ? 'muted' : STATE_TONE[place.state] || 'muted';
     // Its model is a fact of the row only when the place overrides: an inheriting place says nothing.
     const own = overrides(place) ? place.model || place.modelRoute.value : '';
     const facts = `<span class="ui-status" data-tone="${tone}">${escapeHtml(state)}</span>${readiness

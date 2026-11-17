@@ -1,4 +1,7 @@
-"""Parser-issued validation receipts for exact OpenAI Chat custom calls."""
+"""Parser-issued validation receipts for exact OpenAI Chat custom calls.
+
+A schema resolves in-document and bundled refs only, without I/O; an unresolved ref is ``invalid_schema``.
+"""
 
 from __future__ import annotations
 

@@ -122,7 +122,7 @@ def parse_presence_event(payload: Any, *, vouched_facts: Any = (), staged_files:
     """A connector's live event, checked whole before any admission; malformed is ``PresenceEventInvalid``.
 
     ``vouched_facts``: the declared connector signals admissible beside ``WAKE_FACTS``. A door takes them from
-    the authenticated connector's live publication (``places.declared_wake_signals``); a carrier re-admitting
+    the authenticated connector's live publication (``places.declared_fact_labels``); a carrier re-admitting
     the Host's event takes the facts the Host admitted, by value, never its own process's registry.
     ``staged_files``: the files the event carries (a typed reaction carries none). The transport's claimed
     conversation_key never chooses the host history or concurrency key; it comes from the provider facts,

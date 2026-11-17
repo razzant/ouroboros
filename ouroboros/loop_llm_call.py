@@ -38,8 +38,9 @@ from ouroboros.send_clock import main_send_scope
 from ouroboros.task_pacing import main_loop_wire_options
 from ouroboros.task_custody import canonical_owner_root
 from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death, outcome_unknown_on_chain
-from ouroboros._usage_response import (CONTENT_REFUSAL_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS, TOOL_CALL_FINISH_REASONS,
-                                       output_exhaustion_facts, provider_answer, response_finish_reason, typed_values)
+from ouroboros._usage_response import (CONTENT_REFUSAL_FINISH_REASONS, INTERMEDIATE_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS,
+                                       TOOL_CALL_FINISH_REASONS, output_exhaustion_facts, provider_answer, reply_usability,
+                                       response_finish_reason, typed_values, usage_reply_usability)
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, UsageAccountingError, bind_physical_attempt_context, current_usage_scope, last_physical_attempt_capture, physical_attempt_capture_from_exception
 from ouroboros.physical_attempt_context import observe_dispatch
 from ouroboros.primary_route_observation import note_content_refusal
@@ -254,6 +255,8 @@ def _empty_response_log_msg(usage: Dict[str, Any], is_provider_glitch: bool, exh
     provider_error = usage.get("provider_error") if isinstance(usage, dict) else None
     if isinstance(provider_error, dict):
         return f"Provider returned a body error (code={provider_error.get('code')}): {provider_error.get('message')}"
+    if isinstance(usage, dict) and usage.get("response_status") == "incomplete":
+        return f"LLM reply ended incomplete (finish_reason={usage.get('response_finish_reason')}); its output is no result"
     if is_provider_glitch:
         return "Provider returned incomplete response (finish_reason=null)"
     if exhausted:
@@ -529,7 +532,7 @@ from ouroboros.context_budget import (  # one overflow vocabulary for every seam
     output_or_body_size_message as _output_or_body_size_message, size_refusal,
 )
 _FORCED_INCOMPLETE_FINISH_REASONS = (_STRUCTURED_CONTEXT_OVERFLOW_CODES | OUTPUT_LIMIT_FINISH_REASONS
-                                     | TOOL_CALL_FINISH_REASONS)
+                                     | TOOL_CALL_FINISH_REASONS | INTERMEDIATE_FINISH_REASONS)
 
 
 def forced_response_is_incomplete(response_meta: Optional[Dict[str, Any]], *, completion_request: bool = False) -> bool:
@@ -543,6 +546,8 @@ def forced_response_is_incomplete(response_meta: Optional[Dict[str, Any]], *, co
     finish_reason = response_meta.get("finish_reason")
     reasons = _FORCED_INCOMPLETE_FINISH_REASONS - (
         TOOL_CALL_FINISH_REASONS | OUTPUT_LIMIT_FINISH_REASONS if completion_request else frozenset())
+    if reply_usability(finish_reason, response_meta.get("response_status"), {}) == "unusable":
+        return True
     return int(response_meta.get("tool_call_count") or 0) > int(completion_request) or (
         response_meta.get("finish_reason_present") is True
         and (
@@ -1223,6 +1228,8 @@ def _replace_response_meta(
     finish_present, finish_reason = response_finish_reason(usage, msg)
     target.update(finish_reason_present=finish_present, finish_reason=finish_reason,
                   tool_call_count=len(msg.get("tool_calls") or []))
+    if usage.get("response_status") is not None:  # a provider-stated terminal (Responses); a Chat reply states none
+        target["response_status"] = usage["response_status"]
 
 
 def forced_response_parts(
@@ -1428,7 +1435,8 @@ def call_llm_with_retry(
             content = msg.get("content")
             if task_type == "presence": accumulated_usage["_presence_pre_dispatch_only"] = False  # a response reached the model
             _replace_response_meta(response_meta_out, usage, msg)
-            if not tool_calls and (not content or not content.strip()):
+            # A provider-stated terminal that is no result reads as a reply without usable output (``reply_usability``).
+            if usage_reply_usability(usage, msg) == "unusable" or (not tool_calls and (not content or not content.strip())):
                 event_type, is_provider_glitch, permanent = _record_and_emit_empty_response(
                     usage=usage, msg=msg, accumulated_usage=accumulated_usage,
                     event_queue=event_queue, drive_logs=drive_logs, task_id=task_id,

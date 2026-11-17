@@ -36,16 +36,20 @@ def _helper_attempt_context(target: Dict[str, Any], payload: Dict[str, Any]):
 
     The helper's own usage calibrates the helper view, never Main's memory view.
     A missing/stale window keeps the existing unknown-window behavior. Subscription
-    dispatch and its account binding remain owned by the native lane.
+    dispatch and its account binding remain owned by the native lane. A body is read
+    as every estimator reads it (``context_fit.payload_prompt_rows``: ``messages`` or a
+    Responses ``input``). A connection's API is no part of the capability identity: the
+    window belongs to the model behind the endpoint, and each density witness compares
+    the provider's count with the estimator's count of that same physical body.
     """
     from ouroboros import capability_evidence as ce
-    from ouroboros.context_fit import bounded_prompt_tokens_for_payload
+    from ouroboros.context_fit import bounded_prompt_tokens_for_payload, payload_prompt_rows
     from ouroboros.context_window import resolve_window, route_observation_scope
     from ouroboros.physical_attempt_context import PhysicalAttemptContext
 
     provider = target.get("provider", "")
-    if provider in {"", "claudexor"} or not isinstance(payload.get("messages"), list):
-        return None  # this estimator models chat input, not opaque/Responses bodies
+    if provider in {"", "claudexor"} or payload_prompt_rows(payload) is None:
+        return None  # no inspectable input rows: an engine's opaque body
     # Production targets carry the original route from resolution. Literal legacy
     # targets keep only their own supplied identity; never reconstruct it or read Settings.
     identity = target.get("capability_route") or target
@@ -94,10 +98,9 @@ def window_reply_candidate(payload, field, context, window, measured, *, helper)
     if exact:
         raw = input_tokens = int(measured["input_tokens"])
         window = measured.get("context_window") or window
-    else:
+    else:  # the estimator's own reading: Chat/Messages or Responses rows (payload_prompt_rows) and tool schemas
         source = registered_source_payload(payload) or payload
-        raw = bounded_prompt_tokens_for_payload(
-            {key: source[key] for key in ("system", "messages", "tools", "functions") if key in source}, 0)
+        raw = bounded_prompt_tokens_for_payload(source, 0)
         input_tokens = math.ceil(raw * density)
     frame = dict(caller_max_tokens=int(payload[field]), nano=True, input_tokens=input_tokens, window_tokens=window)
     if helper and not exact and exact_reply_shortfall(**{**frame, "input_tokens": max(input_tokens, raw)}):

@@ -94,22 +94,6 @@ from ouroboros.presence_continuation import (
 log = logging.getLogger(__name__)
 
 
-def _handle_text_response(
-    content: Optional[str],
-    llm_trace: Dict[str, Any],
-    accumulated_usage: Dict[str, Any],
-) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    """Handle LLM response without tool calls (final response).
-
-    The answer is delivered as written; only its trace note, which feeds the stored
-    trace summary, is redacted like the round narration (``_emit_round_progress``)."""
-    content = content or ""
-    if content.strip():
-        llm_trace["reasoning_notes"].append(sanitize_tool_result_for_log(content).strip())
-        accumulated_usage["terminal_origin"] = TERMINAL_ORIGIN_MODEL_FINAL
-    return content, accumulated_usage, llm_trace
-
-
 def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_tools=False, assistant_message=None,
                              resume_candidate=False):
     """One completion request owner, with ordinary first/direct prose compatibility."""
@@ -126,7 +110,8 @@ def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_
             _arm_delivery_control(tools, limit_ctx, limit_ctx.llm_trace, control="owner_revision_required")
         observe_completion_hold(tools, limit_ctx, "resume", "owner_input_changed")
         return None
-    selected = bool(getattr(ctx, "_completion_selected", None)) or consume_completion_request(tools, limit_ctx, limit_ctx.llm_trace, content)
+    selected = bool(getattr(ctx, "_completion_selected", None)) or consume_completion_request(
+        tools, limit_ctx, limit_ctx.llm_trace, content, emit_progress=emit_progress)
     origin = "resume" if resume_candidate else "selection" if selected else "prose"
     # A park records its own hold; after tools nothing was offered (ordinary work, or a refusal already observed).
     if not selected and (after_tools or park_for_left_review(tools, limit_ctx, content, emit_progress, origin)):
@@ -616,7 +601,7 @@ def run_llm_loop(
             limit_ctx = _RoundLimitContext(
                 messages, llm, active_model, active_effort, max_retries, drive_logs,
                 task_id, round_idx, event_queue, accumulated_usage, task_type, active_use_local, MAX_ROUNDS,
-                drive_root=drive_root, llm_trace=llm_trace,
+                drive_root=drive_root, llm_trace=llm_trace, emit_progress=emit_progress,
                 incoming_messages=incoming_messages, owner_msg_seen=_owner_msg_seen, tool_schemas=tool_schemas)
             _finalize_limit_ctx(limit_ctx, tools, llm_trace)
             limit_ctx.budget_tail = "tool" if pending_tool_budget else "no_tool"
@@ -790,16 +775,16 @@ def run_llm_loop(
             tool_calls = msg.get("tool_calls") or []
             tools._ctx._request_wire_custom_receipts = accumulated_usage.pop(CUSTOM_RECEIPTS_USAGE_KEY, ())
             content = msg.get("content")
-            _latch_final_answer_marker(llm_trace, content, current_tool_calls=tool_calls)
+            output_recovery.latch_final_marker(limit_ctx, msg)  # a commentary or a cut is never the answer to fall back on
             # Every metered response counts as nanny progress; its delegate verb requests
             # anchor here, before the batch's saves or a park (a cold tail replays none).
             _note_nanny_delegate_activity(tools._ctx, round_idx, accumulated_usage, tool_calls)
             if not tool_calls:
-                final_result = _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, assistant_message=msg)
+                final_result = (None if output_recovery.intermediate_reply(limit_ctx, msg, emit_progress)
+                                else _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, assistant_message=msg))
                 if final_result is None:
-                    # Unfinished: the loop continues and keeps spending, so it
-                    # rejoins the SAME budget tail a tool round does. A ready
-                    # answer returns above and buys no extra wrap-up.
+                    # Unfinished or intermediate (commentary): the loop keeps spending on the SAME budget tail
+                    # a tool round does. A ready answer returns above and buys no extra wrap-up.
                     pending_no_tool_budget = True
                     continue
                 return final_result
@@ -861,6 +846,7 @@ from ouroboros.loop_messages import (  # noqa: E402, F401 -- intentional public 
 )
 from ouroboros.loop_messages import (  # noqa: E402, F401 -- intentional public re-exports
     _latch_final_answer_marker,
+    _handle_text_response,
     prepare_acceptance_observation,
 )
 from ouroboros.delivery_seal import (  # noqa: E402, F401 -- intentional public re-exports
