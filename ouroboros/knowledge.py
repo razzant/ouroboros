@@ -294,7 +294,7 @@ def _navigation_descriptor(address: KnowledgeAddress, raw: bytes | None = None) 
     error = _archive_error(address.topic, metadata)
     return {**address.as_dict(), "title": title, "type": metadata.get("type"), "summary": metadata.get("summary"),
             "state": "archived" if "archive" in metadata and not error else "active",
-            "archive": metadata.get("archive"), "archive_error": error}
+            "archive": metadata.get("archive"), "archive_error": error, "keys": metadata.get("keys")}
 
 
 # a note's address -> (what proves its bytes unchanged, its navigation row); a listing drops deleted notes
@@ -489,6 +489,40 @@ def knowledge_index_views(address: KnowledgeAddress, *, overview: KnowledgeNote 
     legacy = _legacy_prose(address, "active", overview)
     return (render_knowledge_index(rows, legacy, view="active", scope=address.scope),
             render_knowledge_outline(rows, legacy, scope=address.scope))
+
+
+def speaker_pages(canonical_root: Path | None, provider: str, namespace: str, actor_id: str, *,
+                  unverified: bool = False) -> dict[str, Any]:
+    """A place speaker's exact key and the global notes whose ``keys`` hold it, as host facts of the turn.
+
+    A key is an outside name of a note's subject, ``{provider, namespace, id}`` (an account id in its account scope,
+    an email, a repository), three strings only the mind writes in the note's ``keys`` frontmatter list. It joins by
+    equality alone: case kept, nothing trimmed, an empty namespace meets only an empty one, a display name never.
+    Several notes holding one key are all named, never merged or ranked; archived ones are named apart; a key grants
+    no authority. One pass over the global shelf's navigation, which writes nothing. Without a data root or an
+    actor id there is no key and no fact."""
+    if canonical_root is None or not actor_id:
+        return {}
+    key = {"provider": provider, "namespace": namespace, "id": actor_id}
+    found: dict[str, list[str]] = {"active": [], "archived": []}
+    shelf = resolve_knowledge_address(canonical_root, OVERVIEW_TOPIC, "global")
+    for row in inventory_knowledge(shelf, navigation=True):
+        held = row.get("keys") if isinstance(row.get("keys"), list) else []
+        if any(isinstance(entry, Mapping) and {name: entry.get(name) for name in key} == key for entry in held):
+            found[row["state"]].append(f"knowledge_read(topic={row['topic']!r}, scope='global')")
+    active, archived = found["active"], found["archived"]
+    facts: dict[str, Any] = {"key": key}
+    if len(active) == 1:
+        facts["page"] = active[0]
+    elif active:
+        facts["pages"] = active
+    if archived:
+        facts["archived_pages"] = archived
+    if not active and not archived:
+        facts["page"] = "no global knowledge note lists this key in its keys frontmatter"
+    elif unverified:
+        facts["matched_by"] = "an unverified address"
+    return facts
 
 
 @contextmanager
