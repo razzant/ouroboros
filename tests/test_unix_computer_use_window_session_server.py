@@ -16,6 +16,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 
 import pytest
 
@@ -102,6 +103,49 @@ def test_calls_run_on_the_thread_that_serves_them_in_order(server):
     worker.join(5)
     assert answers == [0, 1, 2] and [index for index, _thread in ran] == [0, 1, 2]
     assert {thread for _index, thread in ran} == {threading.get_ident()}
+
+
+def test_a_jobless_moment_runs_the_idle_look_and_jobs_keep_priority(server):
+    ticks = []
+    main_thread = server.MainThread(idle=lambda: ticks.append(time.monotonic()), idle_s=0.01)
+    answers = []
+
+    def caller():
+        try:
+            for _ in range(3):
+                time.sleep(0.05)  # leave the loop jobless moments between the calls
+                answers.append(main_thread.call(lambda: "served"))
+        finally:
+            main_thread.close()
+
+    worker = threading.Thread(target=caller)
+    worker.start()
+    main_thread.run()
+    worker.join(5)
+    assert answers == ["served"] * 3 and len(ticks) >= 2  # idle ran between jobs; every job was served
+
+
+def test_a_raising_idle_look_is_reported_and_the_loop_keeps_serving(server, capsys):
+    calls = []
+
+    def idle():
+        calls.append(1)
+        raise RuntimeError("the lookup broke")
+
+    main_thread = server.MainThread(idle=idle, idle_s=0.01)
+
+    def caller():
+        try:
+            assert main_thread.call(lambda: "served") == "served"
+            time.sleep(0.05)  # leave the loop at least one jobless moment before the close
+        finally:
+            main_thread.close()
+
+    worker = threading.Thread(target=caller)
+    worker.start()
+    main_thread.run()
+    worker.join(5)
+    assert calls and "the lookup broke" in capsys.readouterr().err  # reported, and the loop did not end
 
 
 def test_a_result_is_one_json_object_and_an_image_only_when_the_facts_say_so(server):
@@ -220,11 +264,16 @@ def test_a_shutdown_that_raises_still_exits_without_interpreter_teardown(tmp_pat
 
 def test_the_manifest_declares_the_server_for_a_task_session():
     """The owner's Connect tools row: one stdio server for the task loop, started by the agent's own Python."""
+    import yaml
+
     from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
     from ouroboros.skill_mcp import entry_problem
 
-    manifest = parse_skill_manifest_text((SKILL / "SKILL.md").read_text(encoding="utf-8"))
-    assert manifest.mcp_servers == [{"id": SERVER_ID, "title": "Mac window session (capture-only)",
+    source = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    frontmatter = yaml.safe_load(source.split("---", 2)[1])
+    assert [server["id"] for server in frontmatter["optional_mcp_servers"]] == [SERVER_ID]
+    manifest = parse_skill_manifest_text(source)
+    assert manifest.mcp_servers == [{"id": SERVER_ID, "title": "Local Mac window capture (requires begin)",
                                      "runtime": "agent_python", "entry": "window_session_server.py",
                                      "task_session": True, "browser_policy": False}]
     assert entry_problem(SKILL, "window_session_server.py") == ""

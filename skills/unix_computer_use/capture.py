@@ -20,6 +20,8 @@ import time
 import uuid
 from typing import Any
 
+from .macos_capture import window_selector
+
 _WINDOW_TIMEOUT_MS = 5000  # both ScreenCaptureKit completion handlers together (macos_capture.SPEC)
 # The helper's hard stop: interpreter start and PyObjC imports, the launch-free resolution (an lsappinfo read up to
 # 8 s), then the capture's own budget.
@@ -93,8 +95,9 @@ class CaptureMixin:
                           f"is {backend}. Use screenshot without window= there.")
         if self._plat() != "macos":
             return refuse("unsupported_platform", f"window= capture is local macOS 14+ only (this is {self._plat()})")
-        if isinstance(window, bool) or not isinstance(window, (int, str)) or (isinstance(window, str) and not window.strip()):
-            return refuse("bad_option", "window must be a window_id (CGWindowID) or an exact title, as window_list prints them")
+        _, why = window_selector(window)
+        if why:
+            return refuse("bad_option", why)
         if not isinstance(app, str) or not app.strip():
             return refuse("app_required", "window= needs app=: the application that owns the window")
         out_dir = pathlib.Path(self.api.skill_job_dir(job_id or uuid.uuid4().hex[:8])) / "output"

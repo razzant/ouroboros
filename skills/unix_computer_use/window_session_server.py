@@ -1,10 +1,13 @@
 """MCP stdio server: one capture-only ScreenCaptureKit session of one exact macOS window, for the calling task.
 
-Declared in SKILL.md (``mcp_servers``, ``task_session: true``, ``runtime: agent_python``) and connected by the owner
+Declared in SKILL.md (``optional_mcp_servers``, ``task_session: true``, ``runtime: agent_python``) and connected by the owner
 through Connect tools. The host starts one process for a task loop's first call, as
 ``<agent python> -I -B window_session_server.py``, keeps it for that loop's later calls and ends it with the loop
-(``ouroboros/mcp_task_session.py``); no other lifetime exists here. Listing tools, starting and idling touch nothing
-native: PyObjC and ScreenCaptureKit are reached by ``begin`` alone, and off macOS 14+ every ``begin`` is a typed refusal.
+(``ouroboros/mcp_task_session.py``); no other lifetime exists here. Listing tools and starting touch nothing
+native: PyObjC and ScreenCaptureKit are reached by ``begin`` alone, and off macOS 14+ every ``begin`` is a typed
+refusal. While a session is held, every jobless moment between calls gives it one bounded window-server look
+(``idle_check``) — and proven destruction its single native stop — so a destroyed window's capture does not
+outlive the last call; with no session held an idle moment does nothing and touches nothing native.
 
 Tools (``macos_stream.WindowSessions`` holds their contract): ``begin`` selects one window once and starts its
 stream, ``frame`` returns the latest complete image as MCP ``ImageContent`` beside one JSON object of facts,
@@ -12,10 +15,12 @@ stream, ``frame`` returns the latest complete image as MCP ``ImageContent`` besi
 capture-only: no observation id, no display mapping, nothing an input tool may use.
 
 Threads. ScreenCaptureKit is used from the process's main thread, the thread the one-shot helper was proved on, so
-the main thread runs the tools one at a time (``MainThread``) and services its run loop while one of them waits. The
-MCP protocol runs on a second thread and hands each call over. When the host closes stdin the protocol ends; the main
-thread then asks the stream to stop within a bound and the process exits without interpreter teardown, also when
-that stop or anything before it raised. A killed process ends its stream too: the stream belongs to the process.
+the main thread runs the tools one at a time (``MainThread``), services its run loop while one of them waits and
+spends its jobless moments on the session's idle look. The MCP protocol runs on a second thread and hands each call
+over. When the host closes stdin the protocol ends; the main thread then asks the stream to stop within a bound and
+the process exits without interpreter teardown, also when that stop or anything before it raised. An idle look
+already under way — bounded by one stop budget — finishes before the close is taken, so the exit can lag by that
+bound; a killed process ends its stream too: the stream belongs to the process.
 """
 
 from __future__ import annotations
@@ -33,16 +38,19 @@ import traceback
 from typing import Any, Callable
 
 SERVER_NAME = "mac_window_session"
+IDLE_CHECK_S = 2.0  # how often the main thread, between jobs, gives a held session one bounded idle look
 INSTRUCTIONS = (
     "Capture-only watching of ONE macOS window for this task (local macOS 14+, Screen Recording granted). begin(app, "
     "window) binds the session to one exact window once; frame() returns its latest complete image with seq and "
     "frame_age_ms; frame(after_seq=<last seq>, wait_ms=...) waits for a newer image and sends none when nothing "
     "changed; release() ends it (the task's end does too). stream.last_report is separate evidence: idle means the "
     "window had not changed at that moment. A stopped stream, a withheld frame or a gone window gives no image and "
-    "nothing restarts by itself; window_gone is final until release. The images carry no input coordinates: act "
-    "through element_act or a mapped screenshot."
+    "nothing restarts by itself. When the window is confirmed gone, this session serves no more images and "
+    "asks macOS to stop capture. The window_gone and stream_stopped refusals carry "
+    "cleanup: confirmed is true only from a native answer or the stream's own end, and an unconfirmed stop is "
+    "release's to retry. The images carry no input coordinates: act through element_act or a mapped screenshot."
 )
-_WINDOW = {"type": ["integer", "string"], "description": "window_id or exact title, as window_list prints them"}
+_WINDOW = {"type": ["integer", "string"], "description": "Positive integer window_id or exact title string, as window_list prints them"}
 TOOLS: tuple[dict[str, Any], ...] = (
     {"name": "begin",
      "description": "Start this task's one window session: resolve app (name, bundle id or pid:<n>; never launched), "
@@ -87,10 +95,16 @@ def dispatch(sessions: Any, name: str, arguments: Any) -> tuple[dict[str, Any], 
 
 
 class MainThread:
-    """Calls handed to the process's main thread, run there one at a time in the order they were handed over."""
+    """Calls handed to the process's main thread, run there one at a time in the order they were handed over.
 
-    def __init__(self) -> None:
+    With ``idle`` set, a moment without jobs longer than ``idle_s`` runs it once on this thread and keeps waiting:
+    that is when a held session whose window was destroyed stops its native stream even though no call is in
+    flight. Jobs always take precedence over the next idle moment, and an ``idle`` that raises is reported on
+    stderr and ends neither the loop nor the process."""
+
+    def __init__(self, idle: Callable[[], None] | None = None, idle_s: float = 0.0) -> None:
         self._jobs: queue.SimpleQueue = queue.SimpleQueue()
+        self._idle, self._idle_s = idle, idle_s
 
     def call(self, work: Callable[[], Any]) -> Any:
         """Run ``work`` on the main thread and return its result (from any other thread)."""
@@ -104,7 +118,7 @@ class MainThread:
     def run(self) -> None:
         """Serve calls until ``close``; a waiting main thread costs nothing."""
         while True:
-            job = self._jobs.get()
+            job = self._next_job()
             if job is None:
                 return
             work, future = job
@@ -114,6 +128,19 @@ class MainThread:
                 future.set_exception(exc)
                 if not isinstance(exc, Exception):
                     raise
+
+    def _next_job(self) -> Any:
+        """The next job, or ``None`` at ``close``; a jobless moment runs the idle look, if one is set."""
+        while True:
+            if self._idle is None or self._idle_s <= 0:
+                return self._jobs.get()
+            try:
+                return self._jobs.get(timeout=self._idle_s)
+            except queue.Empty:
+                try:
+                    self._idle()
+                except Exception:  # noqa: BLE001 - an idle look may never end the server
+                    traceback.print_exc()
 
 
 def build_server(call: Callable[[str, Any], tuple[dict[str, Any], bytes | None]]) -> Any:
@@ -158,7 +185,8 @@ def main() -> int:
     import mcp  # noqa: F401 - a missing SDK is named on stderr before anything starts
 
     sessions = load_stream().WindowSessions()
-    main_thread = MainThread()
+    # getattr: a stand-in stream module without idle_check keeps working, with no idle looks
+    main_thread = MainThread(idle=getattr(sessions, "idle_check", None), idle_s=IDLE_CHECK_S)
     failed: list[bool] = []
 
     def protocol() -> None:

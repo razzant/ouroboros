@@ -211,14 +211,14 @@ def feed(bridge, status="complete", size=(30, 20), **kwargs):
     ({"app": "Editor", "window": 7, "max_width": 4000}, "unknown argument"),
 ])
 def test_begin_arguments_refuse_before_anything_is_resolved(stream, raw, error):
-    spec, problem = stream.parse_begin(raw, stream.capture.load_native())
+    spec, problem = stream.parse_begin(raw)
     assert spec == {} and error in problem
 
 
 def test_begin_names_a_window_as_the_one_shot_capture_does(stream):
-    native = stream.capture.load_native()
-    assert stream.parse_begin({"app": "A", "window": "0042"}, native)[0]["want"] == {"window_id": 42}
-    assert stream.parse_begin({"app": "A", "window": " Notes "}, native)[0]["want"] == {"title": " Notes "}
+    assert stream.parse_begin({"app": "A", "window": 42})[0]["want"] == {"window_id": 42}
+    assert stream.parse_begin({"app": "A", "window": "0042"})[0]["want"] == {"title": "0042"}
+    assert stream.parse_begin({"app": "A", "window": " Notes "})[0]["want"] == {"title": " Notes "}
 
 
 @pytest.mark.parametrize("raw,error", [
@@ -516,15 +516,38 @@ def test_selection_refusals_and_an_empty_window_start_nothing(desk):
     assert ("start", "stream-1") not in bridge.calls and begin(sessions)["reason"] == "capture_failed"  # no slot taken
 
 
-def test_a_start_call_that_raises_started_nothing(desk):
+def test_a_bridge_exception_is_not_a_native_start_completion(desk):
     sessions, bridge, _clock = desk()
     bridge.start = lambda stream_object, handler: (_ for _ in ()).throw(TypeError("block signature"))
     answer = begin(sessions)
     assert (answer["reason"], answer["stage"], answer["error"]) == ("capture_failed", "start", "block signature")
-    assert answer["cleanup"] == {"confirmed": True, "detail": "the stream never started"} and sessions._session is None
+    assert answer["cleanup"] == {"confirmed": True, "detail": "its stop answered"} and sessions._session is None
+    assert _stops(bridge) == [("stop", "stream-1")]
+    bridge.stop_answer = "silent"
+    assert begin(sessions)["cleanup"]["confirmed"] is False and sessions._session is not None
+    assert begin(sessions)["reason"] == "session_exists"
+    bridge.stop_handlers[-1](None)
+    assert sessions.release()[0]["released"] is True
     bridge.load = lambda: (_ for _ in ()).throw(RuntimeError("no such bundle"))
     sessions._loaded = False
     assert begin(sessions)["error"] == "RuntimeError: no such bundle"
+
+
+def test_a_start_call_that_raises_after_answering_keeps_the_delivered_answer(desk):
+    """The framework may deliver the start callback and then fail the call itself: the delivered answer stands,
+    and release must still ask the running stream to stop instead of trusting the raise."""
+    sessions, bridge, _clock = desk()
+
+    def start_then_raise(stream_object, handler):
+        handler(None)  # the start callback is delivered…
+        raise TypeError("block teardown")  # …and the call itself then fails
+
+    bridge.start = start_then_raise
+    answer = begin(sessions)
+    assert answer["ok"] is True and answer["state"] == "live"
+    facts, _png = sessions.release()
+    assert facts["cleanup"] == {"confirmed": True, "detail": "its stop answered"}
+    assert ("stop", "stream-1") in bridge.calls  # the delivered start was not turned into a failed one
 
 
 def test_a_start_error_leaves_no_session_and_asks_for_no_stop(desk):
@@ -589,6 +612,17 @@ def test_not_running_confirms_only_once_the_start_has_answered(desk, stream):
     sessions, bridge, _clock = desk(stop=_Error(-3811, "internal error"))
     assert begin(sessions)["ok"] is True
     assert sessions.release()[0]["cleanup"] == {"confirmed": False, "detail": "internal error"}
+
+
+def test_a_not_running_error_from_another_domain_confirms_nothing(desk, stream):
+    """The bare code -3808 is ScreenCaptureKit's vocabulary only; the same number from another domain proves
+    nothing: one error callback must never turn an unconfirmed end into a confirmed one."""
+    sessions, bridge, _clock = desk(stop=_Error(stream._NOT_STOPPABLE, "not running", domain="com.example.Other"))
+    begin(sessions)
+    facts, _png = sessions.release()
+    assert facts["cleanup"] == {"confirmed": False, "detail": "not running"} and sessions._session is not None
+    facts, _png = sessions.frame({})
+    assert facts["reason"] == "stream_stopped" and facts["cleanup"]["confirmed"] is False
 
 
 # --- frame -------------------------------------------------------------------------------------------------------
@@ -659,6 +693,7 @@ def test_a_stream_the_system_stopped_serves_nothing_and_is_not_restarted(desk):
     facts, png = sessions.frame({"wait_ms": 5000})
     assert png is None and facts["reason"] == "stream_stopped" and facts["waited_ms"] == 0.0
     assert facts["stop"]["reason"] == "user_stopped" and facts["stop"]["by"] == "stream" and "not restarted" in facts["error"]
+    assert facts["cleanup"] == {"confirmed": True, "detail": "the stream reported its own end"}
     assert feed(bridge) is False and sessions.frame({})[1] is None  # a late sample changes nothing
     assert begin(sessions)["reason"] == "session_exists" and bridge.calls.count(("start", "stream-1")) == 1
     facts, _png = sessions.release()
@@ -668,16 +703,22 @@ def test_a_stream_the_system_stopped_serves_nothing_and_is_not_restarted(desk):
 
 
 def test_a_lookup_without_an_answer_is_not_an_absence(desk):
+    """A lookup that stopped answering serves no image for that call — an explicit unknown — and ends nothing."""
     sessions, bridge, _clock = desk()
     begin(sessions)
     feed(bridge)
     bridge.listed = None
     facts, png = sessions.frame({})
-    assert png is not None and facts["state"] == "live"
+    assert png is None and facts["ok"] is False and facts["reason"] == "window_lookup_unavailable"
+    assert facts["state"] == "live" and "stop" not in facts and "cleanup" not in facts and _stops(bridge) == []
+    bridge.listed = True
+    facts, png = sessions.frame({})  # an answered lookup serves again: nothing was ended or restarted
+    assert png is not None and facts["image"] is True and facts["state"] == "live"
 
 
 def test_a_window_the_window_server_no_longer_lists_is_gone_for_good(desk):
-    """One authoritative absence ends delivery: no later lookup, recycled id or new sample brings the image back."""
+    """One authoritative absence ends delivery AND stops the native stream in the same call: no later lookup,
+    recycled id or new sample brings the image back, and nothing is asked a second time per call."""
     sessions, bridge, _clock = desk()
     begin(sessions)
     feed(bridge)
@@ -686,18 +727,23 @@ def test_a_window_the_window_server_no_longer_lists_is_gone_for_good(desk):
     facts, png = sessions.frame({})
     assert png is None and facts["ok"] is False and facts["reason"] == "window_gone" and facts["state"] == "stopped"
     assert facts["stop"]["reason"] == "window_gone" and facts["stop"]["by"] == "session"
+    assert facts["cleanup"] == {"confirmed": True, "detail": "its stop answered"}  # the native stop answered
+    assert _stops(bridge) == [("stop", "stream-1")]
     asked = bridge.calls.count(("listed", 7, 11))
     for later in (None, True):  # the lookup stops answering; another window appears under the same id
         bridge.listed = later
         assert feed(bridge) is False  # and the stream's samples are no longer taken
         facts, png = sessions.frame({"wait_ms": 5000})
         assert png is None and facts["reason"] == "window_gone" and facts["waited_ms"] == 0.0
+        assert facts["cleanup"] == {"confirmed": True, "detail": "an earlier stop answered"}  # witness, no new ask
     assert bridge.calls.count(("listed", 7, 11)) == asked and bridge.written == [bridge.written[0]]  # nothing is asked or written again
-    assert begin(sessions)["reason"] == "session_exists"
-    assert not any(call[0] == "stop" for call in bridge.calls if isinstance(call, tuple))  # the stream still runs
+    assert _stops(bridge) == [("stop", "stream-1")]  # asked exactly once, not per call
+    assert begin(sessions)["reason"] == "session_exists"  # the slot stays held: this refusal is checkable
     facts, _png = sessions.release()
-    assert facts["ok"] is True and facts["stop"]["reason"] == "window_gone" and ("stop", "stream-1") in bridge.calls
-    assert facts["cleanup"] == {"confirmed": True, "detail": "its stop answered"}
+    assert facts["ok"] is True and facts["stop"]["reason"] == "window_gone"
+    assert facts["cleanup"] == {"confirmed": True, "detail": "an earlier stop answered"}  # no second stop ask
+    assert _stops(bridge) == [("stop", "stream-1")] and sessions._session is None
+    assert bridge.calls.count(("remove_output", "stream-1")) == 1
     bridge.listed = True
     assert begin(sessions)["ok"] is True and len(bridge.stores) == 2  # only a new begin watches a window again
     feed(bridge)
@@ -710,6 +756,30 @@ def test_a_window_not_listed_at_begin_is_never_called_gone_by_that_lookup(desk):
     feed(bridge)
     asked = bridge.calls.count(("listed", 7, 11))
     assert sessions.frame({})[1] is not None and bridge.calls.count(("listed", 7, 11)) == asked
+
+
+def test_idle_never_calls_a_window_gone_that_was_not_listed_at_begin(desk):
+    sessions, bridge, _clock = desk(listed=False)
+    begin(sessions)
+    sessions.idle_check()
+    assert bridge.calls.count(("listed", 7, 11)) == 1  # begin's lookup alone; the idle look asked nothing
+    feed(bridge)
+    assert sessions.frame({})[1] is not None
+
+
+def test_a_long_wait_notices_a_destroyed_window_before_its_deadline(desk):
+    """A prolonged pending request re-looks at the target between bounded wait slices: proven destruction ends
+    the wait and the stream early instead of going on blindly until the deadline."""
+    sessions, bridge, clock = desk()
+    begin(sessions)
+    feed(bridge)
+    bridge.on_pump = lambda: setattr(bridge, "listed", False)  # the window dies just after the wait begins
+    before = clock.now
+    facts, png = sessions.frame({"after_seq": 1, "wait_ms": 5000})
+    assert png is None and facts["reason"] == "window_gone" and facts["state"] == "stopped"
+    assert facts["cleanup"] == {"confirmed": True, "detail": "its stop answered"}
+    assert clock.now - before < 2.0  # ended on a mid-wait look, not on the 5 s deadline
+    assert _stops(bridge) == [("stop", "stream-1")]
 
 
 def test_an_end_while_the_image_is_written_withholds_it(desk):
@@ -725,6 +795,29 @@ def test_an_end_while_the_image_is_written_withholds_it(desk):
     bridge.write_png = stopped_meanwhile
     facts, png = sessions.frame({})
     assert png is None and facts["reason"] == "stream_stopped" and facts["stop"]["reason"] == "system_stopped"
+    assert facts["cleanup"] == {"confirmed": True, "detail": "the stream reported its own end"}
+
+
+def test_a_frame_dropped_while_it_is_written_is_not_rescued_by_a_later_image(desk):
+    """A held image dropped while its PNG is written stays dropped for that call: a valid report arriving
+    before the write returns cannot revalidate the frame that was in flight."""
+    sessions, bridge, _clock = desk()
+    begin(sessions)
+    feed(bridge)
+    write = bridge.write_png
+
+    def dropped_meanwhile(buffer, path):
+        size = write(buffer, path)
+        feed(bridge, "blank")  # the held image is dropped while it is being written…
+        feed(bridge)           # …and a later valid report arrives before the write returns
+        return size
+    bridge.write_png = dropped_meanwhile
+    facts, png = sessions.frame({})
+    assert png is None and facts["ok"] is False and facts["reason"] == "frame_withheld"
+    assert "dropped this frame while it was being written" in facts["error"] and facts["state"] == "live"
+    bridge.write_png = write
+    facts, png = sessions.frame({})  # the newer image itself is served on the next call
+    assert png is not None and facts["image"] is True and facts["seq"] == 2
 
 
 def test_a_failed_encoding_keeps_the_session_and_leaves_no_file(desk):
@@ -788,6 +881,57 @@ def _stream_ends(stream, bridge, code, text):
     return lambda: stream._Feed(bridge, bridge.stores[-1]).ended(_Error(code, text))
 
 
+def test_a_gone_window_with_an_unanswered_stop_stays_unconfirmed_until_release(desk):
+    """Proven destruction asks the stop once; an unanswered stop is no freed resource and is retried by no
+    frame or idle call — release is the door that asks again."""
+    sessions, bridge, _clock = desk(stop="silent")
+    begin(sessions)
+    feed(bridge)
+    bridge.listed = False
+    facts, png = sessions.frame({})
+    assert png is None and facts["reason"] == "window_gone"
+    assert facts["cleanup"] == {"confirmed": False, "detail": "no answer to the stop request"}
+    assert sessions._session is not None
+    assert not any(call[0] == "remove_output" for call in bridge.calls if isinstance(call, tuple))
+    facts, _png = sessions.frame({})
+    assert facts["cleanup"]["confirmed"] is False and _stops(bridge) == [("stop", "stream-1")]  # no frantic retry
+    sessions.idle_check()  # a stopped store ends the idle look too: no second ask from there
+    assert _stops(bridge) == [("stop", "stream-1")]
+    facts, _png = sessions.release()
+    assert facts["ok"] is False and facts["reason"] == "stop_unconfirmed"
+    assert _stops(bridge) == [("stop", "stream-1")] * 2  # release asks again
+    bridge.stop_handlers[-1](None)  # the second stop answers late
+    facts, _png = sessions.release()
+    assert facts["ok"] is True and facts["cleanup"] == {"confirmed": True, "detail": "an earlier stop answered"}
+    assert facts["stop"]["reason"] == "window_gone" and sessions._session is None
+
+
+def test_an_idle_moment_stops_a_stream_whose_window_was_destroyed(desk):
+    """The server's jobless moments end a destroyed window's capture even when no further call ever comes."""
+    sessions, bridge, _clock = desk()
+    sessions.idle_check()  # no session held: nothing runs and nothing native is touched
+    assert bridge.calls == []
+    begin(sessions)
+    feed(bridge)
+    sessions.idle_check()  # the window is still listed: the idle look does nothing
+    assert _stops(bridge) == [] and sessions.frame({})[1] is not None
+    bridge.listed = None
+    sessions.idle_check()  # a lookup without an answer is unknown, not absence
+    assert _stops(bridge) == [] and sessions._session["store"].stop is None
+    bridge.listed = False
+    sessions.idle_check()  # proven destruction with no call in flight
+    facts, png = sessions.frame({})
+    assert png is None and facts["reason"] == "window_gone"
+    assert facts["cleanup"] == {"confirmed": True, "detail": "an earlier stop answered"}
+    assert _stops(bridge) == [("stop", "stream-1")]
+    asked = bridge.calls.count(("listed", 7, 11))
+    sessions.idle_check()  # an ended session is left alone: no further look, no second stop
+    assert _stops(bridge) == [("stop", "stream-1")] and bridge.calls.count(("listed", 7, 11)) == asked
+    facts, _png = sessions.release()
+    assert facts["ok"] is True and facts["stop"]["reason"] == "window_gone"
+    assert facts["cleanup"] == {"confirmed": True, "detail": "an earlier stop answered"} and sessions._session is None
+
+
 def test_a_stream_end_queued_for_the_main_thread_keeps_its_reason_over_release(desk, stream):
     """Taken in before the session's reason: the owner's stop stays ``user_stopped`` and is not asked again."""
     sessions, bridge, _clock = desk(stop="silent")
@@ -841,20 +985,24 @@ def test_a_stream_end_after_an_unanswered_stop_confirms_the_next_release_without
     assert facts["stream_end"]["reason"] == "user_stopped" and len(_stops(bridge)) == 1 and sessions._session is None
 
 
-def test_a_stream_that_ends_itself_after_window_gone_is_released_without_a_stop(desk, stream):
-    """The closed window's stream then stops itself; a stop of that dead stream, whatever it answers, is not needed."""
+def test_a_stream_that_ends_itself_after_window_gone_confirms_release_without_a_further_stop(desk, stream):
+    """The gone window's stream is asked to stop once, at the proof; an error answer that proves nothing keeps
+    the stop unconfirmed until the stream's own end — a native event — confirms the release without a new ask."""
     sessions, bridge, _clock = desk(stop=_Error(-3811, "internal error"))
     begin(sessions)
     feed(bridge)
     bridge.listed = False
-    assert sessions.frame({})[0]["reason"] == "window_gone"
+    facts, _png = sessions.frame({})
+    assert facts["reason"] == "window_gone"
+    assert facts["cleanup"] == {"confirmed": False, "detail": "internal error"}  # one error callback confirms nothing
     _stream_ends(stream, bridge, -3815, "no capture source")()
     facts, png = sessions.frame({})
     assert png is None and facts["reason"] == "window_gone" and facts["stream_end"]["reason"] == "no_capture_source"
+    assert facts["cleanup"] == {"confirmed": True, "detail": "the stream reported its own end"}
     facts, _png = sessions.release()
     assert facts["ok"] is True and facts["cleanup"] == {"confirmed": True, "detail": "the stream reported its own end"}
     assert facts["stop"]["reason"] == "window_gone" and facts["stream_end"]["code"] == -3815
-    assert _stops(bridge) == [] and sessions._session is None
+    assert _stops(bridge) == [("stop", "stream-1")] and sessions._session is None  # the proof asked once
 
 
 def test_a_stop_call_that_raises_is_unconfirmed_and_shutdown_still_ends(desk, stream):

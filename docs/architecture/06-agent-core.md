@@ -717,7 +717,7 @@ Owner lifecycle actions share `skill_lifecycle_actions.run_skill_action`: grant/
 
 Calls recheck allowlist/Cyber, grants, Presence, contract, `network=false` (`web=false` permits). Pre-Safety resolution never lists inline (`mcp_catalog.MCPNameResolution`; unready skills: `MCP_SKILL_UNAVAILABLE`). Server text: one untrusted frame per map/tool (secrets: DEVELOPMENT §12). Headers are origin-bound (`mcp_headers.py`, `MCP_REDIRECT_REFUSED`); credentialless Bearer `401` requests owner sign-in (`mcp_oauth.py`). Masks restore identities/headers; legacy pairs stay, nested secrets never migrate. Transport headers override literals; imports replace all, including legacy. Invalid fields: `MCP_CONFIG_ERROR`; unknown: warning. Import/Test never publish.
 
-`mcp_task_session.py`: stdio `task_session` (card/Import; else per call), required by `browser_policy`. `mcp_browser_guard.py`: off-loop policy, task arm `capabilities`, `file_intake` under `read_file`. Connect rows bind launch/flags from accepted manifests; `skill_mcp.work_start` stages verified copies. `agent_python`: validated agent Python with `-I -B`, refused in managed domains; Node uses container runtime.
+`mcp_task_session.py`: stdio `task_session` (card/Import; else per call), required by `browser_policy`. `mcp_browser_guard.py`: off-loop policy, task arm `capabilities`, `file_intake` under `read_file`. Connect binds launch/flags to accepted manifests. `skill_mcp.work_start`: in managed domains, stage verified Node servers; refuse `agent_python` (local agent interpreter, `-I -B`).
 
 `mcp_result_images.py` keeps image/blob responses exactly; an embedded blob becomes a registered artifact (errors too), else a description, never base64; only images attach as pixels; URIs are never fetched (docstring).
 

@@ -1,6 +1,6 @@
 """Skill-declared MCP stdio servers: their derived launch, the Settings binding, and Connect tools.
 
-A skill declares servers in its manifest (``mcp_servers``, parsed by the manifest contract).
+The manifest contract combines a skill's stdio server declarations into ``manifest.mcp_servers``.
 Connecting is one owner decision (the Skills card, or ``skill_owner_action(action="connect_mcp")``
 carrying an owner source): it writes exactly one ``MCP_SERVERS`` row per declaration — id,
 title, ``enabled``, stdio, the declared call-lifetime flags and ``skill`` (the binding) — and

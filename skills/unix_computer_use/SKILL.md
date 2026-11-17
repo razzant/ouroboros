@@ -20,10 +20,10 @@ tools:
     effect: read
   - name: list_connections
     effect: read
-mcp_servers: [{"id": "mac_window_session", "title": "Mac window session (capture-only)", "runtime": "agent_python", "entry": "window_session_server.py", "task_session": true}]
+optional_mcp_servers: [{"id": "mac_window_session", "title": "Local Mac window capture (requires begin)", "runtime": "agent_python", "entry": "window_session_server.py", "task_session": true}]
 when_to_use: The user asks Ouroboros to inspect a desktop, take a screenshot, act in a named application (click/type/press keys there), drag, or operate a local/explicitly configured remote GUI under human or benchmark supervision.
 model_experience:
-  what_model_sees: Desktop tools include bounded AX reads (hierarchy, separate title/description/value/url with a chosen text_limit), local macOS element_act press/set_value without activation or pointer input (optionally followed by a read of the same window in the same call), explicit foreground input, screenshot observation IDs, capture-only images of one exact local macOS window, capabilities and connections. Screenshots auto-attach as images; receipts separate action dispatch, readback, the read after the action and front observations. Once the owner connects its MCP server, `mcp_mac_window_session__begin`/`frame`/`release` keep one capture-only stream of one exact local macOS window for the task, and `frame` returns the latest image as an MCP image with its seq and ages.
+  what_model_sees: Desktop tools include bounded AX reads (hierarchy, separate title/description/value/url with a chosen text_limit), local macOS element_act press/set_value without activation or pointer input (optionally followed by a read of the same window in the same call), explicit foreground input, screenshot observation IDs, capture-only images of one exact local macOS window, capabilities and connections. Screenshots auto-attach as images; receipts separate action dispatch, readback, the read after the action and front observations. After the owner connects the window server, `mcp_mac_window_session__begin(app, window)` starts a capture-only stream of that window on the local Mac for this task. `frame` returns the latest MCP image with its sequence and ages. `release` stops the stream.
   token_effect: When loaded, all 25 tool schemas total about 16K characters; Nano can load tools on demand. Results are compact JSON without dropped fields. Input receipts grow with commands and output; screenshots add an image and capture metadata. Window lists and AX reads grow with returned entries and text (limit, app, max_nodes, text_limit); an element_act observation adds its own tree (default max_nodes 600; ax_tree 150). A receipt marked observed_effect also carries that tree and its window text into result review, increasing the material sent to the selected reviewers. The connected window session adds three MCP tool schemas (about 1.4K characters) and its server instructions; each delivered frame is one image of at most 1280x800 with a small JSON object, and `frame(after_seq=...)` sends no image when nothing newer exists.
 ---
 
@@ -71,7 +71,8 @@ Tools:
   field, so the host attaches the image to the conversation in the same round;
   an engine that cannot take images receives the path instead (host behaviour),
   so the text facts in every other tool are the way to check without a picture.
-  With `window=` (a `window_id` or exact title, as `window_list` prints them)
+  Omit `window` for a display capture. With `window=` (a positive integer `window_id`
+  or a nonblank title string, matched literally even if it is all digits)
   and `app=`, local macOS 14+ captures that one window through ScreenCaptureKit
   in a short-lived helper (`macos_capture.py`), also while other windows cover it,
   without activating anything: the window's own pixels, no cursor, no shadow, at
@@ -119,13 +120,12 @@ Tools:
 
 ## Window session (opt-in MCP tools)
 
-`screenshot(window=)` stays the zero-setup way to see one window once. For a task that
-keeps watching ONE window, the skill also declares an MCP server, `mac_window_session`
-(`window_session_server.py`, `task_session: true`). The owner connects it once with
-**Connect tools** on the Skills card. Discovery may start an idle server, but nothing
-is captured until `begin`. The host then starts one server process for that task loop,
-keeps it for the loop's later calls and ends it with the loop (a Stop, the task's end, a
-restart): no companion, no process that outlives the task, nothing restored afterwards.
+Use `screenshot(app=..., window=...)` for one image; it needs no MCP connection.
+For repeated observations, the owner can connect `mac_window_session` with **Connect tools**
+on the Skills card. It watches a window on the **local Mac**, even if the other desktop tools
+currently target a remote computer. Connecting or listing tools may start an idle server;
+only `begin` starts capture. The host owns one server per task loop. Ending the loop closes
+the server and its capture. The session is not restored after a Stop or restart.
 
 - `mcp_mac_window_session__begin(app, window)` resolves `app` launch-free and selects
   exactly one of its windows as `screenshot(window=)` does (a `window_id` or an exact
@@ -147,31 +147,32 @@ restart): no companion, no process that outlives the task, nothing restored afte
   no-op. `stop_unconfirmed` means the stream did not confirm its stop: call it again,
   since no other session begins until it is confirmed.
 
-No image is served, and nothing restarts by itself, when the stream ended
-(`stream_stopped` with `stop.reason`: `user_stopped` when the owner ended the capture in
-macOS, `system_stopped`, `no_capture_source`, `released`); when its last report was
-not a readable image or `idle`: `blank`, `suspended`, `stopped`, a sample that could
-not be read (`invalid_sample`, `callback_error`) or, on macOS 15.2+, `inactive`, the
-stream's notice that its window closed (`frame_withheld` with `withheld.status`; a
-later image of the same stream is served again); or once the window server no longer
-lists the window for that process (`window_gone`; used only where it listed the window
-at `begin`, which `window_gone_check` says). `window_gone` is final for the session: a
-window that later reuses the id is not shown, and only `release` and a new `begin`
-watch a window again. A native end arriving after delivery closed is kept separately
-as `stream_end`; after `user_stopped` in either `stop.reason` or `stream_end.reason`,
-ask the owner before beginning again.
-`window.on_screen` is ScreenCaptureKit's listing and decides nothing: a hidden window
-reads `false` and can still be watched. An app may retain a window after its Close
-button merely hides it: if macOS still exposes that surface, it is still selectable.
-`window_gone` means disappearance from the window server, not inference about the app's UI.
+Besides `no_frame_yet` and `no_newer_frame`, `frame` can withhold an image for these reasons:
+
+- `frame_withheld`: macOS supplied no usable pixels (`blank`, `suspended`, `stopped`,
+  `invalid_sample`, `callback_error`, or `inactive` on macOS 15.2+). No earlier picture is
+  substituted. A new complete frame from the same stream can still be delivered.
+- `window_lookup_unavailable`: a window lookup that worked at `begin` now gives no answer.
+  No frame is delivered on this call. A later call can check again.
+- `window_gone`: WindowServer no longer lists the selected window for its process. The server
+  checks during frame requests and while idle if the window was listed at `begin` (see
+  `window_gone_check`). It permanently withholds frames from this session and asks macOS to
+  stop capture, even if no one requests another frame. Reuse of the ID does not restart it.
+- `stream_stopped`: the stream ended. See `stop.reason` and, if a native end arrived after
+  delivery closed, `stream_end.reason`. Ask the owner before beginning again after `user_stopped`.
+
+For `window_gone` and `stream_stopped`, `cleanup.confirmed` reports whether macOS confirmed
+that capture is over. A missing window or image is not confirmation. `release` frees the
+session slot, retrying an unconfirmed stop. `window.on_screen: false` by itself means neither
+closure nor destruction. A Close button may only hide a window that macOS can still capture.
 
 The images are capture-only, like `screenshot(window=)`: one window's pixels, no
 `observation_id`, no display mapping (`mapped_input_available: false`), and no input
 tool may use their coordinates; act through `element_act` or a mapped `screenshot`.
-This MCP observer always targets the LOCAL Mac, independently of the selected remote
-computer-use connection; it does not retarget input tools. Local macOS 14+ with the Screen Recording grant (the prompt-free preflight; without it
-nothing is asked); elsewhere `begin` answers `unsupported_platform` or `unsupported_os`,
-and listing the tools runs nothing native. macOS normally marks a running capture
+The observer does not retarget input tools. It requires macOS 14+ and the ordinary Screen
+Recording grant. `begin` checks without prompting; without the grant it returns
+`screen_recording_denied`. Other platforms or older macOS return `unsupported_platform` or
+`unsupported_os`. macOS normally marks a running capture
 with its own indicator; an owner who ends the capture there is reported as
 `user_stopped`. The server holds only the latest frame; each image a task asked for
 is kept by the host with that call's result.

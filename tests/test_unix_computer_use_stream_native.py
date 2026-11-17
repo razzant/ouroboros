@@ -1,29 +1,21 @@
 """Opt-in macOS consumer qualification for the skill-bound window stream.
 
-This test is intentionally inert unless OUROBOROS_MACOS_STREAM_QA=1 is passed
-*after* scripts/safe_test.py's boundary. It creates only two synthetic AppKit
-windows, does not activate an app or send input, and closes every owned process.
-Run with the app's Python (MCP SDK and PyObjC are required), for example::
-
-    PYTHON=/Applications/Ouroboros.app/Contents/Frameworks/python-standalone/bin/python3
-    "$PYTHON" -I -S scripts/safe_test.py --temp-parent /private/var/tmp \
-      --evidence-dir .review-evidence --timeout 900 -- env OUROBOROS_MACOS_STREAM_QA=1 \
-      OUROBOROS_TEST_EVIDENCE_ROOT=.review-evidence "$PYTHON" -m pytest -q \
-      tests/test_unix_computer_use_stream_native.py
-
-Only the parent may run that command after announcing the visible windows. A
-missing permission, no pixels, an unconfirmed release or a closed-window result
-that is unknown fails with its receipts; it is never converted into a pass.
+On a disposable macOS 14+ GUI with an existing Screen Recording grant, pass
+OUROBOROS_MACOS_STREAM_QA=1 after the safe_test boundary. The display oracle
+reads the whole screen. Use a desktop containing only these test windows.
+Images stay in the test's private scratch. The one-run entry point and its
+manifest are in tests/_run_window_capture_acceptance.py. The managed-worker
+scenarios are in tests/system_e2e/test_window_capture_task_native.py.
 """
 
 from __future__ import annotations
 
-import hashlib
+import contextlib
+import io
 import json
 import logging
 import os
 import pathlib
-import shutil
 import subprocess
 import sys
 import time
@@ -32,19 +24,30 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.loop_tool_execution import _execute_with_timeout
+from tests._window_capture_observer import (
+    capture_server,
+    check_permission_result,
+    confirm_idle_window_stop,
+    overlap,
+    pyobjc_mapped,
+    require_capture_grant,
+    wait_for,
+    window_key,
+    window_rows,
+)
 from tests.test_batch4_producer_custody import _registry
 from tests.test_invocation_ownership import owner
-from ouroboros.loop_tool_execution import _execute_with_timeout
 from tests.test_mcp_result_images import _batch, _pixels
-
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SKILL = "unix_computer_use"
+SERVER = "mac_window_session"
+GREEN, BLUE, MAGENTA = (24, 179, 74), (37, 99, 235), (229, 41, 163)
 OPT_IN = sys.platform == "darwin" and os.environ.get("OUROBOROS_MACOS_STREAM_QA") == "1"
 desktop_only = pytest.mark.skipif(not OPT_IN, reason="needs an announced macOS desktop and OUROBOROS_MACOS_STREAM_QA=1")
 
-# These names come from the builder's window_session_server.py TOOLS declaration.
-# Assert them against the installed catalog before starting any window.
+# Names published by window_session_server.py and checked against the installed catalog.
 BEGIN = "begin"
 FRAME = "frame"
 RELEASE = "release"
@@ -96,8 +99,7 @@ final class Fixture: NSObject, NSApplicationDelegate {
         window = ObservedWindow(contentRect: rect, styleMask: [.titled], backing: .buffered, defer: false)
         window.title = title
         window.isReleasedWhenClosed = true // this standalone fixture must release its native surface on close
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .canJoinAllApplications]
-        window.level = .floating // keep only these synthetic windows above a full-screen owner app
+        window.level = .floating
         view.frame = rect
         view.autoresizingMask = [.width, .height]
         window.contentView = view
@@ -163,10 +165,6 @@ app.run()
 '''
 
 
-def _sha(path: pathlib.Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _rows(path: pathlib.Path) -> list[dict]:
     if not path.exists():
         return []
@@ -201,8 +199,7 @@ class OwnedWindow:
             if self.proc.poll() is not None:
                 break
             time.sleep(0.05)
-        raise AssertionError(f"{self.role} did not log {event!r}; exit={self.proc.poll()}; "
-                             f"stderr={self.stderr.read_text()[-800:]!r}; rows={_rows(self.log)[-5:]}")
+        raise AssertionError(f"{self.role} did not log {event!r}; exit={self.proc.poll()}")
 
     def send(self, line: str, *, event: str | None = None) -> dict:
         assert self.proc.poll() is None and self.proc.stdin is not None
@@ -223,11 +220,10 @@ class OwnedWindow:
                 self.proc.wait(timeout=5)
 
 
-def _pixels_near(path: pathlib.Path, rgb: tuple[int, int, int]) -> int:
-    import io
+def _pixels_near(source, rgb: tuple[int, int, int], *, around=None) -> int:
     from PIL import Image, ImageCms
 
-    with Image.open(path) as image:
+    with Image.open(source) as image:
         image.load()
         # The fixture paints explicit sRGB. Display PNGs carry the display's ICC
         # profile: comparing their encoded channels directly is not a color test.
@@ -235,301 +231,367 @@ def _pixels_near(path: pathlib.Path, rgb: tuple[int, int, int]) -> int:
         sample = (ImageCms.profileToProfile(image, ImageCms.ImageCmsProfile(io.BytesIO(profile)),
                                            ImageCms.createProfile("sRGB"), outputMode="RGB")
                   if profile else image.convert("RGB"))
-        sample.thumbnail((1200, 800))
+        if around is not None:
+            x, y = (round(f * size) for f, size in zip(around, sample.size))
+            assert 5 <= x < sample.width - 5 and 5 <= y < sample.height - 5
+            sample = sample.crop((x - 5, y - 5, x + 5, y + 5))
+        else:
+            sample.thumbnail((1200, 800))
         return sum(1 for r, g, b in sample.getdata()
                    if max(abs(r - rgb[0]), abs(g - rgb[1]), abs(b - rgb[2])) < 35)
 
 
-def _answer(result) -> dict:
-    body = result.producer_text or result.text
-    # The MCP host's trust label precedes the server's JSON text part. An image
-    # part may follow it; JSONDecoder consumes only the first complete object.
+def mcp_facts(body):
+    # Decode the text part following the host's trust label.
     body = body.split("\n\n", 1)[-1]
     start = body.find("{")
-    assert start >= 0, body[:1200]
-    return json.JSONDecoder().raw_decode(body[start:])[0]
+    assert start >= 0, "capture MCP result has no JSON object"
+    facts = json.JSONDecoder().raw_decode(body[start:])[0]
+    check_permission_result(facts)
+    return facts
 
 
-def _image_from_mcp(row: dict, dest: pathlib.Path, registry) -> None:
-    result = row["tool_result"]
-    assert result.meta.get("mcp_image_owner") == [registry._ctx.task_id, "1"], result
+def _images(row, registry):
     messages, trace = _batch(SimpleNamespace(registry=registry), [row])
     images = _pixels(messages)
-    assert len(images) == 1 and trace["tool_calls"][0]["image_attachment"]["status"] == "attached", trace
-    assert images[0].startswith(b"\x89PNG\r\n\x1a\n")
-    dest.write_bytes(images[0])
+    if images:
+        assert len(images) == 1 and images[0].startswith(b"\x89PNG\r\n\x1a\n")
+        assert trace["tool_calls"][0]["image_attachment"]["status"] == "attached"
+    return images
 
 
-@desktop_only
-@pytest.mark.parametrize("scene", ["occluded", "independent_lifecycle"])
-def test_owned_occluded_window_through_connect_and_task_session(tmp_path, monkeypatch, scene):
-    from ouroboros import config, extension_loader, mcp_client, mcp_task_session, skill_mcp
+@contextlib.contextmanager
+def owned_windows(root):
+    require_capture_grant()
+    swift, binary = root / "StreamFixture.swift", root / "StreamFixture"
+    swift.write_text(FIXTURE, encoding="utf-8")
+    subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-Onone", "-o", str(binary), str(swift)],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+    with contextlib.ExitStack() as children:
+        target = OwnedWindow(binary, "target", root)
+        children.callback(target.stop)
+        occluder = OwnedWindow(binary, "occluder", root)
+        children.callback(occluder.stop)
+        assert target.pid != occluder.pid and target.title != occluder.title
+        wait_for(lambda: overlap(target, occluder))
+        yield target, occluder
+    assert target.proc.returncode == occluder.proc.returncode == 0
+
+
+@contextlib.contextmanager
+def connected_skill(drive, seed_repo, settings, monkeypatch, record_property):
+    """Use the shipped installer, Connect and MCP catalog in a fresh data root."""
+    from ouroboros import config, extension_loader, mcp_client, skill_mcp
     from ouroboros.skill_builtin import _dependency_pass, install_builtin_skill
     from ouroboros.skill_loader import load_enabled
     from tests._shared import clean_extension_runtime_state
 
-    assert mcp_client._MCP_SDK_AVAILABLE, "real MCP SDK is required"
-    assert shutil.which("xcrun"), "Swift/AppKit fixture needs xcrun; no GUI was started"
-    assert sys.platform == "darwin"
-    monkeypatch.setenv("OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS", "true")
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "inline")
-    monkeypatch.setenv("OUROBOROS_AGENT_PYTHON", sys.executable)
-    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(tmp_path / "no-extra-skills"))
-    drive = tmp_path / "private-data"
-    drive.mkdir()
+    assert mcp_client._MCP_SDK_AVAILABLE
+    drive.mkdir(parents=True, exist_ok=True)
     settings_path = drive / "settings.json"
-    settings_path.write_text("{}\n", encoding="utf-8")
-    monkeypatch.setattr(config, "DATA_DIR", drive)
-    monkeypatch.setattr(config, "SETTINGS_PATH", settings_path)
-    clean_extension_runtime_state()
-    mcp_client.reset_manager_for_tests()
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+    with monkeypatch.context() as local:
+        local.setenv("OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS", "true")
+        local.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+        local.setenv("OUROBOROS_IMAGE_INPUT_MODE", "inline")
+        local.setenv("OUROBOROS_AGENT_PYTHON", sys.executable)
+        local.setenv("OUROBOROS_SKILLS_REPO_PATH", str(drive / "no-extra-skills"))
+        local.setattr(config, "DATA_DIR", drive)
+        local.setattr(config, "SETTINGS_PATH", settings_path)
+        clean_extension_runtime_state()
+        mcp_client.reset_manager_for_tests()
+        try:
+            installed = install_builtin_skill(SKILL, drive_root=drive, seed_dir=seed_repo / "skills",
+                                              turn_on_when_ready=True, installed_by="owner")
+            assert installed["ok"]
+            copied = drive / "skills" / "native" / SKILL
+            entry = copied.resolve() / "window_session_server.py"
+            source = REPO / "skills" / SKILL
+            files = [p.relative_to(source) for p in source.rglob("*")
+                     if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"]
+            assert files and all((copied / p).read_bytes() == (source / p).read_bytes() for p in files)
+            _dependency_pass(drive, [SKILL], logging.getLogger(__name__))
+            assert load_enabled(drive, SKILL)
+            # Count tool invocations through the real SDK across preview, Connect
+            # and discovery. Forward each invocation so a regression is observable.
+            calls, observed = [], []
+            listings = 0
+            original_call = mcp_client.ClientSession.call_tool
+            original_list = mcp_client.ClientSession.list_tools
 
-    evidence = tmp_path / "stream-evidence"
-    evidence.mkdir()
-    started: list[OwnedWindow] = []
-    registry = None
-    receipts = evidence / "receipts.jsonl"
+            async def observe_call(client, name, *args, **kwargs):
+                calls.append(name)
+                return await original_call(client, name, *args, **kwargs)
 
-    def record(label: str, row: dict | None = None, **facts) -> None:
-        result = row.get("tool_result") if row else None
-        item = {"label": label, "at": time.time(), **facts}
-        if result is not None:
-            item.update(status=result.status, code=result.code, text=result.text,
-                        meta=result.meta, host_annotations=result.host_annotations)
-        with receipts.open("a", encoding="utf-8") as out:
-            out.write(json.dumps(item, ensure_ascii=False, default=str) + "\n")
+            async def observe_listing(client, *args, **kwargs):
+                nonlocal listings
+                listings += 1
+                answer = await original_list(client, *args, **kwargs)
+                # The SDK still holds the child here. Its caller sees it only
+                # after the stdio transport has closed and reaped the process.
+                process = capture_server(os.getpid(), entry)
+                assert not pyobjc_mapped(process), "discovery loaded the native capture bridge"
+                observed.append(process)
+                return answer
 
-    try:
-        installed = install_builtin_skill(SKILL, drive_root=drive, seed_dir=REPO / "skills",
-                                          turn_on_when_ready=True, installed_by="owner")
-        assert installed["ok"], installed
-        source_skill, copied_skill = REPO / "skills" / SKILL, drive / "skills" / "native" / SKILL
-        source_files = [path for path in source_skill.rglob("*") if path.is_file()
-                        and "__pycache__" not in path.parts and path.suffix != ".pyc"]
-        assert source_files and all((copied_skill / path.relative_to(source_skill)).read_bytes() == path.read_bytes()
-                                    for path in source_files), "the private install differs from this checkout's skill"
-        _dependency_pass(drive, [SKILL], logging.getLogger(__name__))
-        assert load_enabled(drive, SKILL) is True, "the copied skill did not reach its real enabled state"
-        preview = skill_mcp.preview_connect(drive, SKILL)
-        record("preview", preview=preview)
-        assert preview.get("ready") is True and preview.get("blockers") == [], preview
-        assert len(preview["servers"]) == 1 and preview["servers"][0]["task_session"] is True, preview
-        server_id = preview["servers"][0]["id"]
-        assert server_id == "mac_window_session" and preview["servers"][0]["browser_policy"] is False, preview
-        connected = skill_mcp.connect(drive, SKILL, expected_content_hash=preview["content_hash"],
-                                      settings_digest=preview["settings_digest"])
-        record("connect", connect=connected)
-        assert connected.get("ok") and connected.get("saved"), connected
-        settings = json.loads(settings_path.read_text())
-        assert settings["MCP_ENABLED"] is True and len(settings["MCP_SERVERS"]) == 1
-        saved = settings["MCP_SERVERS"][0]
-        assert saved["skill"] == SKILL and saved["id"] == server_id
-        assert not any(key in saved for key in ("command", "args", "cwd")), saved
-        bound = skill_mcp.bind_config(mcp_client.parse_servers(settings["MCP_SERVERS"], settings=settings)[0], drive)
-        assert bound.skill_error == "" and bound.task_session is True, bound
-        assert bound.command == os.path.abspath(sys.executable) and bound.args[:2] == ["-I", "-B"]
-        assert pathlib.Path(bound.args[2]) == copied_skill / "window_session_server.py" and bound.cwd == str(copied_skill)
-        record("bound", command=bound.command, args=bound.args, revision=bound.skill_revision)
-        manager = mcp_client.get_manager()
-        manager.reconfigure(settings)
-        listed = manager.refresh_server(server_id)
-        record("listed", listing=listed)
-        assert listed.get("ok"), listed
-        for name, required in ((BEGIN, {"app", "window"}), (FRAME, {"after_seq", "wait_ms"}), (RELEASE, set())):
-            qualified = f"mcp_{server_id}__{name}"
-            resolution = manager.resolve_tool_name(qualified)
-            assert resolution.status == "callable", (name, resolution)
-            published = manager.get_tool(qualified)
-            assert published is not None, qualified
-            schema = published["schema"]
-            assert required <= set(schema.get("properties", {})), (name, schema)
-        assert extension_loader.get_tool(extension_loader.extension_surface_name(SKILL, "screenshot")) is not None
+            local.setattr(mcp_client.ClientSession, "call_tool", observe_call)
+            local.setattr(mcp_client.ClientSession, "list_tools", observe_listing)
+            preview = skill_mcp.preview_connect(drive, SKILL)
+            assert preview.get("ready") is True and preview.get("blockers") == []
+            assert len(preview["servers"]) == 1
+            declared = preview["servers"][0]
+            assert declared["id"] == SERVER and declared["task_session"] and not declared["browser_policy"]
+            connected = skill_mcp.connect(drive, SKILL, expected_content_hash=preview["content_hash"],
+                                          settings_digest=preview["settings_digest"])
+            assert connected.get("ok") and connected.get("saved")
+            saved_settings = json.loads(settings_path.read_text())
+            assert saved_settings["MCP_ENABLED"] is True
+            saved, = saved_settings["MCP_SERVERS"]
+            assert saved["skill"] == SKILL and saved["id"] == SERVER
+            assert not {"command", "args", "cwd"} & saved.keys()
+            cfg, = mcp_client.parse_servers([saved], settings=saved_settings)
+            bound = skill_mcp.bind_config(cfg, drive)
+            assert not bound.skill_error and bound.task_session
+            assert bound.command == os.path.abspath(sys.executable) and bound.args == ["-I", "-B", str(entry)]
+            assert pathlib.Path(bound.cwd) == entry.parent
+            manager = mcp_client.get_manager()
+            manager.reconfigure(saved_settings)
+            assert manager.discovery.wait()
+            assert manager.refresh_server(SERVER).get("ok")
+            assert manager.discovery.wait()
+            assert observed and len(observed) == listings and not calls
+            local.setattr(mcp_client.ClientSession, "list_tools", original_list)
+            local.setattr(mcp_client.ClientSession, "call_tool", original_call)
+            for process in observed:
+                wait_for(process.gone)
+            record_property("discovery_processes", len(observed))
+            record_property("discovery_tool_calls", len(calls))
+            for name, required in ((BEGIN, {"app", "window"}), (FRAME, {"after_seq", "wait_ms"}), (RELEASE, set())):
+                qualified = tool(name)
+                assert manager.resolve_tool_name(qualified).status == "callable"
+                assert required <= set(manager.get_tool(qualified)["schema"]["properties"])
+            assert extension_loader.get_tool(extension_loader.extension_surface_name(SKILL, "screenshot"))
+            yield saved_settings, entry
+        finally:
+            clean_extension_runtime_state()
+            mcp_client.reset_manager_for_tests()
 
-        swift = tmp_path / "StreamFixture.swift"
-        swift.write_text(FIXTURE, encoding="utf-8")
-        binary = tmp_path / "StreamFixture"
-        build = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-Onone", "-o", str(binary), str(swift)],
-                               capture_output=True, text=True, timeout=300, check=False)
-        record("fixture_build", returncode=build.returncode, stderr=build.stderr[-3000:])
-        assert build.returncode == 0, build.stderr
-        target = OwnedWindow(binary, "target", evidence)
-        started.append(target)
-        occluder = OwnedWindow(binary, "occluder", evidence)
-        started.append(occluder)
-        assert target.pid != occluder.pid and target.title != occluder.title
-        time.sleep(0.25)  # both AppKit flushes preceded ready; allow WindowServer to composite their new layers
 
+def tool(name):
+    return f"mcp_{SERVER}__{name}"
+
+
+def pixels_of_target(png, target_rgb, record_property, prefix):
+    own = _pixels_near(io.BytesIO(png), target_rgb)
+    front = _pixels_near(io.BytesIO(png), MAGENTA)
+    record_property(prefix + "_target_pixels", own)
+    record_property(prefix + "_occluder_pixels", front)
+    assert own > 5000 and front < 100
+
+
+def capture_only(facts):
+    assert facts.get("mapped_input_available") is False
+    assert not {"observation_id", "coord_transform", "display"} & facts.keys()
+
+
+def _check_mapping(mapper, previous_ring, display, frame):
+    capture_only(frame)
+    with pytest.raises(ValueError, match="observation_id is required"):
+        mapper._map_xy(12, 17, raw=False, observation_id=frame.get("observation_id", ""))
+    assert mapper._load_transform() == previous_ring
+    if display is not None:
+        tf, oid = display["coord_transform"], display["observation_id"]
+        x, y, evidence = mapper._map_xy(12, 17, raw=False, observation_id=oid)
+        assert (x, y) == (round(12 * tf["sx"] + tf["ox"]), round(17 * tf["sy"] + tf["oy"]))
+        assert evidence["observation_id"] == oid and evidence["geometry_verification"] == "live"
+
+
+@desktop_only
+@pytest.mark.parametrize("scene", ["occluded", "independent_lifecycle"])
+def test_owned_occluded_window_through_connect_and_task_session(tmp_path, monkeypatch, scene, record_property):
+    from ouroboros import extension_loader, mcp_task_session
+    from ouroboros.skill_loader import skill_state_dir_path
+    from tests.test_unix_computer_use_skill import _API, _load_plugin
+
+    require_capture_grant()
+    drive = tmp_path / "private-data"
+    with connected_skill(drive, REPO, {}, monkeypatch, record_property) as (_, entry), owned_windows(tmp_path) as (target, occluder):
         registry, _, _ = _registry(drive, monkeypatch)
         registry._ctx.repo_dir = REPO
         registry._ctx.task_metadata = {"work_kind": "owner"}
-        tool = lambda name: f"mcp_{server_id}__{name}"
         shot = extension_loader.extension_surface_name(SKILL, "screenshot")
 
-        with owner(registry):
-            def invoke(label: str, name: str, args: dict, timeout: int = 90) -> tuple[dict, dict]:
-                began = time.monotonic()
-                row = _execute_with_timeout(
-                    registry, {"id": label, "function": {"name": name, "arguments": json.dumps(args)}},
-                    registry._ctx.drive_root / "logs", timeout, task_id=registry._ctx.task_id)
-                record(label, row, elapsed_ms=round((time.monotonic() - began) * 1000, 2))
-                return row, _answer(row["tool_result"]) if name.startswith("mcp_") else json.loads(
-                    row["tool_result"].text.split("\n\n⚠️ ", 1)[0])
+        def invoke(label, name, args):
+            row = _execute_with_timeout(
+                registry, {"id": label, "function": {"name": name, "arguments": json.dumps(args)}},
+                drive / "logs", 90, task_id=registry._ctx.task_id)
+            result = row["tool_result"]
+            facts = (mcp_facts(result.producer_text or result.text) if name.startswith("mcp_")
+                     else json.loads(result.text.split("\n\n⚠️ ", 1)[0]))
+            check_permission_result(facts)
+            return row, facts
 
-            record("scene", scene=scene, occlusion_oracle=scene == "occluded")
-            if scene == "occluded":
-                default_row, default = invoke("display", shot, {"job_id": "stream-display", "max_width": 4096,
-                                                               "max_height": 4096})
-                assert default.get("ok"), default
-                display_file = evidence / "display-with-occluder.png"
-                shutil.copy2(default["path"], display_file)
-                assert _pixels_near(display_file, (229, 41, 163)) > 1200, "display did not show the owned occluder"
-                assert _pixels_near(display_file, (24, 179, 74)) > 1200, "display did not show exposed target pixels"
-                assert default_row["tool_result"].status == "ok"
+        selection = {"app": f"pid:{target.pid}", "window": target.title}
+        try:
+            with owner(registry):
+                idle_row, idle = invoke("after_connect", tool(FRAME), {})
+                assert idle.get("reason") == "no_session" and not _images(idle_row, registry)
+                server = capture_server(os.getpid(), entry)
+                assert not pyobjc_mapped(server)
+                server.record(record_property, "server")
+                area, (x, y), window_spot = wait_for(lambda: overlap(target, occluder))
+                record_property("overlap_points2", area)
+                row, begun = invoke("begin", tool(BEGIN), selection)
+                assert row["tool_result"].status == "ok" and begun.get("ok") and begun["state"] == "live"
+                assert (begun["app"]["pid"], begun["window"]["window_id"]) == window_key(target)
+                capture_only(begun)
+                session = vars(registry._ctx)[mcp_task_session._SLOT].sessions[SERVER]
+                mapper = _load_plugin()._ComputerUse(_API(skill_state_dir_path(drive, SKILL)))
+                display = None
+                if scene == "occluded":
+                    assert mapper._capture_display().get("index"), "ordinary display geometry is unavailable"
+                    row, display = invoke("display", shot, {"job_id": "stream-display",
+                                                            "max_width": 4096, "max_height": 4096})
+                    assert display.get("ok") and row["tool_result"].status == "ok"
+                    path = pathlib.Path(display["path"])
+                    import Quartz
 
-            one_row, one = invoke("one_shot", shot, {"job_id": "stream-one-shot", "app": f"pid:{target.pid}",
-                                                       "window": target.title})
-            assert one.get("ok") and one.get("capture_kind") == "window", one
-            assert one["window"]["window_id"] == target.ready["window_id"] and one["window"]["pid"] == target.pid, one
-            assert one.get("mapped_input_available") is False and not any(
-                key in one for key in ("observation_id", "coord_transform", "display")), one
-            one_file = evidence / "one-shot-covered-target.png"
-            shutil.copy2(one["path"], one_file)
-            one_messages, one_trace = _batch(SimpleNamespace(registry=registry), [one_row])
-            assert _pixels(one_messages) == [one_file.read_bytes()], one_trace
-            assert one_trace["tool_calls"][0]["image_attachment"]["status"] == "attached", one_trace
-            assert _pixels_near(one_file, (24, 179, 74)) > 5000, "PluginAPI one-shot did not capture target pixels"
-            assert _pixels_near(one_file, (229, 41, 163)) < 100, "one-shot included the occluder"
-            assert one_row["tool_result"].status == "ok"
+                    bounds = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
+                    display_spot = ((x - bounds.origin.x) / bounds.size.width,
+                                    (y - bounds.origin.y) / bounds.size.height)
+                    covered = _pixels_near(path, MAGENTA, around=display_spot)
+                    record_property("display_overlap_pixels", covered)
+                    assert covered >= 90
+                    for label, rgb in (("target", GREEN), ("occluder", MAGENTA)):
+                        count = _pixels_near(path, rgb)
+                        record_property("display_" + label + "_pixels", count)
+                        assert count > 1200
+                previous_ring = mapper._load_transform()
+                row, one = invoke("one_shot", shot, {"job_id": "stream-one-shot", **selection})
+                assert row["tool_result"].status == "ok" and one.get("ok") and one["capture_kind"] == "window"
+                assert (one["window"]["pid"], one["window"]["window_id"]) == window_key(target)
+                _check_mapping(mapper, previous_ring, display, one)
+                image, = _images(row, registry)
+                assert image == pathlib.Path(one["path"]).read_bytes()
+                pixels_of_target(image, GREEN, record_property, "one_shot")
+                under_cover = _pixels_near(io.BytesIO(image), GREEN, around=window_spot)
+                record_property("one_shot_overlap_pixels", under_cover)
+                assert under_cover >= 90
 
-            begun_row, begun = invoke("begin", tool(BEGIN), {"app": f"pid:{target.pid}", "window": target.title})
-            assert begun_row["tool_result"].status == "ok" and begun.get("ok") and begun["state"] == "live", begun
-            assert begun["app"]["pid"] == target.pid and begun["window"]["window_id"] == target.ready["window_id"], begun
-            assert begun.get("mapped_input_available") is False and not any(
-                key in begun for key in ("observation_id", "coord_transform")), begun
-            first_session = vars(registry._ctx)[mcp_task_session._SLOT].sessions[server_id]
-            assert first_session.usable()
-            server_entry = str(copied_skill / "window_session_server.py")
-            census = subprocess.check_output(["ps", "-axo", "pid=,ppid=,command="], text=True)
-            rows = [line.strip().split(None, 2) for line in census.splitlines()]
-            processes = {int(row[0]): (int(row[1]), row[2]) for row in rows if len(row) == 3}
-            descendants = {os.getpid()}
-            while True:
-                found = {pid for pid, (parent, _cmd) in processes.items() if parent in descendants}
-                if found <= descendants:
-                    break
-                descendants |= found
-            servers = [pid for pid in descendants if server_entry in processes.get(pid, (0, ""))[1]]
-            assert len(servers) == 1, servers
-            server_pid = servers[0]
-            def server_alive():
-                current = subprocess.run(["ps", "-p", str(server_pid), "-o", "command="],
-                                         capture_output=True, text=True, check=False)
-                assert current.returncode in (0, 1), current.stderr
-                return server_entry in current.stdout
-            record("server_process", pid=server_pid)
-            first_row, first = invoke("frame_green", tool(FRAME), {"wait_ms": 3000})
-            assert first.get("ok") and first.get("image") is True and first["seq"] >= 1, first
-            assert first["window"]["window_id"] == target.ready["window_id"], first
-            first_file = evidence / "stream-covered-target-green.png"
-            _image_from_mcp(first_row, first_file, registry)
-            assert _pixels_near(first_file, (24, 179, 74)) > 5000, "stream frame did not show covered target"
-            assert _pixels_near(first_file, (229, 41, 163)) < 100, "stream frame included occluder"
+                row, first = invoke("frame_green", tool(FRAME), {"wait_ms": 3000})
+                assert first.get("ok") and first.get("image") is True and first["seq"] >= 1
+                assert (first["window"]["pid"], first["window"]["window_id"]) == window_key(target)
+                assert row["tool_result"].meta["mcp_image_owner"] == [registry._ctx.task_id, "1"]
+                image, = _images(row, registry)
+                pixels_of_target(image, GREEN, record_property, "stream")
+                assert _pixels_near(io.BytesIO(image), GREEN, around=window_spot) >= 90
+                _check_mapping(mapper, previous_ring, display, first)
+                if display is not None:
+                    record_property("display_mapping_preserved", 1)
+                assert capture_server(os.getpid(), entry) == server
+                assert pyobjc_mapped(server), "the positive frame must load the observed PyObjC binary"
 
-            target.send("blue")
-            # after_seq means a newer captured frame, not a frame caused by our
-            # action. A previously queued green frame can legitimately arrive first.
-            deadline, cursor, attempt = time.monotonic() + 4, first["seq"], 0
-            second_file = evidence / "stream-covered-target-blue.png"
-            while True:
-                attempt += 1
-                second_row, second = invoke(f"frame_blue_{attempt}", tool(FRAME),
-                                            {"after_seq": cursor, "wait_ms": 500})
-                assert second.get("ok"), second
-                if second.get("image"):
-                    assert second["seq"] > cursor, second
+                target.send("blue")
+                cursor = first["seq"]
+
+                def repaint():
+                    nonlocal cursor
+                    row, second = invoke(f"frame_after_{cursor}", tool(FRAME), {"after_seq": cursor, "wait_ms": 500})
+                    assert second.get("ok")
+                    if not second.get("image"):
+                        return False
+                    assert second["seq"] > cursor
                     cursor = second["seq"]
-                    observed = evidence / f"repaint-observation-{attempt}.png"
-                    _image_from_mcp(second_row, observed, registry)
-                    if _pixels_near(observed, (37, 99, 235)) > 5000:
-                        shutil.copy2(observed, second_file)
-                        break
-                assert time.monotonic() < deadline, "no captured frame showed the target repaint within four seconds"
-            assert _pixels_near(second_file, (24, 179, 74)) < 100, "the earlier green image was still served"
-            assert second.get("mapped_input_available") is False and not any(
-                key in second for key in ("observation_id", "coord_transform")), second
-            session = vars(registry._ctx)[mcp_task_session._SLOT].sessions[server_id]
-            assert session is first_session and session.usable(), "the two frame calls did not share one task session"
+                    image, = _images(row, registry)
+                    if _pixels_near(io.BytesIO(image), BLUE) <= 5000:
+                        return False
+                    assert _pixels_near(io.BytesIO(image), GREEN) < 100
+                    _check_mapping(mapper, previous_ring, display, second)
+                    return True
 
-            released_row, released = invoke("release", tool(RELEASE), {})
-            assert (released_row["tool_result"].status == "ok" and released.get("ok")
-                    and released.get("released") and released.get("cleanup", {}).get("confirmed") is True), released
-            assert target.proc.poll() is None and target.ready["visible"], "foreign-app check needs a live target window"
-            foreign_row, foreign = invoke("foreign", tool(BEGIN), {"app": f"pid:{occluder.pid}",
-                                                                "window": target.title})
-            assert foreign_row["tool_result"].status == "error" and foreign.get("ok") is False, foreign
-            assert foreign.get("reason") in {"window_not_found", "no_window"}, foreign
-            _, live_again = invoke("begin_before_destruction", tool(BEGIN),
-                                   {"app": f"pid:{target.pid}", "window": target.title})
-            assert live_again.get("ok"), live_again
-            closed_mark = target.send("close", event="closed")
-            assert (closed_mark["window_id"] == target.ready["window_id"]
-                    and closed_mark["visible"] is False and target.proc.poll() is None), closed_mark
-            target.wait("deallocated", timeout=4)
-            # AppKit's close acknowledgement precedes WindowServer retiring the
-            # surface. Establish that boundary independently before judging capture.
-            import Quartz
-            deadline = time.monotonic() + 4
-            while True:
-                listed = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionAll, 0)
-                remaining = [dict(row) for row in listed
-                             if int(row.get("kCGWindowNumber", -1)) == closed_mark["window_id"]
-                             and int(row.get("kCGWindowOwnerPID", -1)) == target.pid]
-                if not remaining:
-                    break
-                assert time.monotonic() < deadline, ("fixture surface still exists after close", remaining)
-                time.sleep(0.05)
-            record("window_server_destroyed", pid=target.pid, window_id=closed_mark["window_id"])
-            gone_row, gone = invoke("destroyed_while_live", tool(FRAME), {"wait_ms": 1000})
-            assert gone.get("ok") is False and gone.get("image") is False, gone
-            assert gone.get("reason") in {"window_gone", "stream_stopped", "frame_withheld"}, gone
-            _, ended = invoke("release_destroyed", tool(RELEASE), {})
-            assert ended.get("ok") and ended.get("cleanup", {}).get("confirmed"), ended
-            closed_row, closed = invoke("closed", tool(BEGIN), {"app": f"pid:{target.pid}",
-                                                              "window": target.title})
-            assert closed_row["tool_result"].status == "error" and closed.get("ok") is False, closed
-            assert closed.get("reason") in {"window_not_found", "no_window"}, closed
-            assert target.proc.poll() is None, "the closed-window check needs a live target process"
-            assert session.usable(), "a refused begin unexpectedly ended the task session"
-            _, still_capturing = invoke("begin_before_task_end", tool(BEGIN),
-                                        {"app": f"pid:{occluder.pid}", "window": occluder.title})
-            assert still_capturing.get("ok"), still_capturing
-            _, last_frame = invoke("frame_before_task_end", tool(FRAME), {"wait_ms": 3000})
-            assert last_frame.get("ok") and last_frame.get("image"), last_frame
-            assert server_alive(), "the task-end witness needs a live server"
+                wait_for(repaint)
+                record_property("repaint_seq_delta", cursor - first["seq"])
+                assert session is vars(registry._ctx)[mcp_task_session._SLOT].sessions[SERVER] and session.usable()
+                row, released = invoke("release", tool(RELEASE), {})
+                assert row["tool_result"].status == "ok" and released.get("released") is True
+                assert released["cleanup"]["confirmed"] is True
+                record_property("release_confirmed", 1)
+                idle_row, idle = invoke("after_release", tool(FRAME), {})
+                assert idle.get("reason") == "no_session" and not _images(idle_row, registry)
+                row, foreign = invoke("foreign", tool(BEGIN), {"app": f"pid:{occluder.pid}", "window": target.title})
+                assert row["tool_result"].status == "error" and foreign.get("reason") in {"window_not_found", "no_window"}
 
-        mcp_task_session.close_context_sessions(registry._ctx, reason="native stream QA ended")
-        # TaskSession sets _transport_closed only after the SDK stdio context has
-        # closed its pipes and joined the child. It does not expose that child's PID.
-        session._thread.join(timeout=5)  # transport close may precede its worker thread's final return
-        assert session.closure == "closed" and session._transport_closed and not session._thread.is_alive(), (
-            session.closure, session._transport_closed)
-        assert not server_alive(), "task-session close left its capture process alive"
-        record("teardown", server_pid=server_pid, server_exit_confirmed=True,
-               active_stream_at_task_end=True, session_closure=session.closure, sdk_stdio_transport_closed=session._transport_closed,
-               images={path.name: _sha(path) for path in evidence.glob("*.png")})
-    finally:
-        if registry is not None:
-            mcp_task_session.close_context_sessions(registry._ctx, reason="native stream QA cleanup")
-        for child in reversed(started):
-            child.stop()
-        record("owned_processes_exit", children=[{"role": child.role, "pid": child.pid,
-                                                   "returncode": child.proc.poll()} for child in started])
-        assert all(child.proc.poll() is not None for child in started)
-        clean_extension_runtime_state()
-        mcp_client.reset_manager_for_tests()
-        root = os.environ.get("OUROBOROS_TEST_EVIDENCE_ROOT")
-        if root:
-            destination = pathlib.Path(root).resolve() / "macos-stream" / uuid.uuid4().hex
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(evidence, destination)
+                _, begun = invoke("begin_before_destruction", tool(BEGIN), selection)
+                assert begun.get("ok")
+                row, live = invoke("frame_before_destruction", tool(FRAME), {"wait_ms": 3000})
+                assert live.get("image") is True and live["state"] == "live"
+                assert (live["window"]["pid"], live["window"]["window_id"]) == window_key(target)
+                image, = _images(row, registry)
+                pixels_of_target(image, BLUE, record_property, "before_close")
+
+                def first_terminal_frame():
+                    row, gone = invoke("destroyed_while_idle", tool(FRAME), {})
+                    return gone, _images(row, registry)
+
+                confirm_idle_window_stop(target, occluder, first_terminal_frame, record_property)
+                assert session.usable() and capture_server(os.getpid(), entry) == server
+                _, ended = invoke("release_destroyed", tool(RELEASE), {})
+                assert ended.get("ok")
+                for name, args in ((tool(BEGIN), selection), (shot, {"job_id": "closed", **selection})):
+                    row, closed = invoke("closed_" + name, name, args)
+                    assert closed.get("ok") is False and closed.get("reason") in {"window_not_found", "no_window"}
+                    assert not _images(row, registry) and "path" not in closed
+
+                _, begun = invoke("begin_before_transport_close", tool(BEGIN),
+                                  {"app": f"pid:{occluder.pid}", "window": occluder.title})
+                assert begun.get("ok")
+                row, last = invoke("frame_before_transport_close", tool(FRAME), {"wait_ms": 3000})
+                image, = _images(row, registry)
+                assert last.get("image") is True and _pixels_near(io.BytesIO(image), MAGENTA) > 1200
+                assert capture_server(os.getpid(), entry) == server
+
+            mcp_task_session.close_context_sessions(registry._ctx, reason="native QA transport close")
+            session._thread.join(timeout=5)
+            assert session.closure == "closed" and session._transport_closed and not session._thread.is_alive()
+            wait_for(server.gone)
+            assert window_key(occluder) in window_rows()
+            record_property("transport_server_gone", 1)
+        finally:
+            mcp_task_session.close_context_sessions(registry._ctx, reason="native QA fixture cleanup")
+
+
+@desktop_only
+def test_active_capture_loses_stdin(tmp_path, record_property):
+    """Physical EOF while a stream is delivering, without calling release or stopping a task."""
+    from base64 import b64decode
+
+    from tests.test_unix_computer_use_window_session_server import _Process
+
+    with owned_windows(tmp_path) as (target, occluder):
+        server = _Process()
+        try:
+            server.send("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                       "clientInfo": {"name": "window-qa", "version": "1"}})
+            server.send("notifications/initialized", notify=True)
+            assert [row["name"] for row in server.send("tools/list")["tools"]] == [BEGIN, FRAME, RELEASE]
+            producer = capture_server(os.getpid(), REPO / "skills" / SKILL / "window_session_server.py")
+            assert producer.pid == server.proc.pid and not pyobjc_mapped(producer)
+            _, started = server.tool(BEGIN, {"app": f"pid:{target.pid}", "window": target.title})
+            check_permission_result(started)
+            assert started.get("ok") and started["state"] == "live"
+            result, frame = server.tool(FRAME, {"wait_ms": 3000})
+            assert frame.get("image") is True and (frame["window"]["pid"], frame["window"]["window_id"]) == window_key(target)
+            text, image = result["content"]
+            assert text["type"] == "text" and image["type"] == "image" and image["mimeType"] == "image/png"
+            pixels_of_target(b64decode(image["data"], validate=True), GREEN, record_property, "stream")
+            assert pyobjc_mapped(producer)
+            producer.record(record_property, "server")
+            server.proc.stdin.close()
+            assert server.proc.wait(timeout=20) == 0
+            wait_for(producer.gone)
+            assert {window_key(target), window_key(occluder)} <= window_rows(on_screen=True).keys()
+            record_property("eof_exit", server.proc.returncode)
+        finally:
+            if server.proc.poll() is None:
+                server.proc.kill()  # only this Popen child, after the outcome was measured
+                server.proc.wait(timeout=10)

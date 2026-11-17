@@ -34,6 +34,45 @@ def test_agent_python_is_only_an_explicit_mcp_runtime_and_node_still_inherits():
     assert inherited.mcp_servers[0]["runtime"] == "node"
 
 
+def test_optional_servers_append_to_legacy_servers_using_the_same_contract():
+    node = {"id": "existing", "entry": "server.mjs"}
+    python = {"id": "extra", "runtime": "agent_python", "entry": "server.py", "task_session": True}
+    manifest = parse_skill_manifest_text(json.dumps({
+        "runtime": "node", "optional_mcp_servers": [python], "mcp_servers": [node],
+    }))
+    single_list = parse_skill_manifest_text(json.dumps({"runtime": "node", "mcp_servers": [node, python]}))
+    assert manifest.mcp_servers == single_list.mcp_servers
+    assert [(row["id"], row["runtime"]) for row in manifest.mcp_servers] == [
+        ("existing", "node"), ("extra", "agent_python"),
+    ]
+    assert "optional_mcp_servers" not in manifest.raw_extra
+
+
+@pytest.mark.parametrize("empty", [None, "", []])
+def test_legacy_empty_declarations_still_allow_an_optional_server(empty):
+    manifest = parse_skill_manifest_text(json.dumps({
+        "mcp_servers": empty, "optional_mcp_servers": [{"id": "extra", "entry": "server.py", "runtime": "agent_python"}],
+    }))
+    assert [row["id"] for row in manifest.mcp_servers] == ["extra"]
+
+
+@pytest.mark.parametrize("extra,problem", [
+    (None, "must be a list"), ("", "must be a list"), ({}, "must be a list"),
+    (["other"], "must be a mapping"),
+    ([{"id": "other", "entry": "../server.py"}], "relative path"),
+    ([{"id": "other", "entry": "server.py", "command": "python"}], "unknown keys"),
+    ([{"id": "other", "entry": "server.py", "runtime": "python3"}], "supports only"),
+    ([{"id": "other", "entry": "server.mjs", "browser_policy": True}], "without task_session"),
+    ([{"id": "other", "entry": "one.mjs"}, {"id": "other", "entry": "two.mjs"}], "declared twice"),
+    ([{"id": "existing", "entry": "replacement.py", "runtime": "agent_python"}], "declared twice"),
+])
+def test_invalid_optional_declaration_rejects_the_manifest(extra, problem):
+    text = json.dumps({"runtime": "node", "mcp_servers": [{"id": "existing", "entry": "server.mjs"}],
+                       "optional_mcp_servers": extra})
+    with pytest.raises(SkillManifestError, match=f"optional_mcp_servers.*{problem}"):
+        parse_skill_manifest_text(text)
+
+
 @pytest.mark.parametrize("runtime", ["[python]", "{name: python}"])
 def test_mcp_runtime_wrong_shape_has_typed_manifest_error(runtime):
     text = ('---\nname: demo\ndescription: d\nversion: 1.0.0\ntype: script\n'

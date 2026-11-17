@@ -4,9 +4,9 @@
 after the PNG at ``output`` is complete; any other ending is a failure the plugin never reads as a capture. Like
 ``macos_native.py`` it is its own process, so a stuck framework call can be killed and never takes the host down.
 
-The application is resolved launch-free by ``macos_native.resolve_target`` and the window is named as
-``macos_native.window_want`` names it (digits are a CGWindowID, the ``window_id`` of ``window_list``; anything else
-an exact title). ``macos_native.py`` is loaded from this folder by its path: ``-I`` keeps the script's folder off
+The application is resolved launch-free by ``macos_native.resolve_target``. A positive integer names a CGWindowID;
+a nonblank string names an exact title, including a title consisting of digits.
+``macos_native.py`` is loaded from this folder by its path: ``-I`` keeps the script's folder off
 ``sys.path``. Only windows ScreenCaptureKit lists for that application's process qualify; none or several is a
 refusal, never another window and never a display.
 
@@ -63,7 +63,7 @@ HANDLERS: dict[tuple[str, str], dict[str, Any]] = {
 
 
 def load_native() -> Any:
-    """``macos_native.py`` beside this file, by its path (the launch-free resolver and the window naming rule)."""
+    """Load the launch-free application resolver beside this file by path."""
     path = pathlib.Path(__file__).resolve().with_name("macos_native.py")
     spec = importlib.util.spec_from_file_location("_unix_computer_use_macos_native", path)
     if spec is None or spec.loader is None:
@@ -221,7 +221,18 @@ def mac_major() -> int | None:
     return int(head) if head.isdigit() else None
 
 
-def parse_spec(raw: Any, native: Any) -> tuple[dict[str, Any], str]:
+def window_selector(window: Any) -> tuple[dict[str, Any], str]:
+    """The two capture APIs use the JSON type to distinguish an id from an exact title."""
+    if isinstance(window, str) and window.strip():
+        return {"title": window}, ""
+    if type(window) is int and window > 0:
+        return {"window_id": window}, ""
+    if window is None or isinstance(window, str):
+        return {}, "window is required: a positive integer window_id or a nonblank exact title"
+    return {}, "window must be a window_id or an exact title; use a positive integer for an ID"
+
+
+def parse_spec(raw: Any) -> tuple[dict[str, Any], str]:
     """The options -> ({app, want, output, timeout_ms}, error); nothing is resolved or captured here."""
     try:
         data = json.loads(raw) if isinstance(raw, str) else raw
@@ -235,10 +246,7 @@ def parse_spec(raw: Any, native: Any) -> tuple[dict[str, Any], str]:
     app = data.get("app")
     if not isinstance(app, str) or not app.strip():
         return {}, "app is required: the application that owns the window"
-    window = data.get("window")
-    if window is None or (isinstance(window, str) and not window.strip()):
-        return {}, "window is required: a window_id or an exact title"
-    want, error = native.window_want(window)
+    want, error = window_selector(data.get("window"))
     if error:
         return {}, error
     output = data.get("output")
@@ -306,7 +314,7 @@ def _error_facts(error: Any) -> dict[str, Any]:
 def capture(raw: Any, *, native: Any, bridge_factory: Callable[[], Any] = Bridge,
             clock: Callable[[], float] = time.monotonic, mac_version: Callable[[], int | None] = mac_major) -> dict[str, Any]:
     """The one capture the options ask for -> the helper's answer (``ok`` only with the PNG complete at ``output``)."""
-    spec, error = parse_spec(raw, native)
+    spec, error = parse_spec(raw)
     if error:
         return {"ok": False, "reason": "bad_option", "error": error}
     major = mac_version()

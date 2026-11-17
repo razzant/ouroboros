@@ -16,9 +16,9 @@ Input receipt semantics and partial-failure limits: see SKILL.md, "Input receipt
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-import hashlib
 import os
 import pathlib
 import platform
@@ -35,8 +35,17 @@ from typing import Any
 from .capture import CaptureMixin
 from .place import PlaceMixin
 from .remote import (  # noqa: F401 - re-exported names the tests and the key/hold_key remote branches use
-    _MAX_REMOTE_SHOT_BYTES, _OSWORLD_PKGS_PREFIX, _PYAUTOGUI_BASE_ALIASES, _PYAUTOGUI_MODS, PASTE_CHORD_ARGV,
-    RemoteBackends, _osworld_result_ok, cliclick_point, cliclick_keys, command_chord_argv, PBCOPY_LOCALE,
+    _MAX_REMOTE_SHOT_BYTES,
+    _OSWORLD_PKGS_PREFIX,
+    _PYAUTOGUI_BASE_ALIASES,
+    _PYAUTOGUI_MODS,
+    PASTE_CHORD_ARGV,
+    PBCOPY_LOCALE,
+    RemoteBackends,
+    _osworld_result_ok,
+    cliclick_keys,
+    cliclick_point,
+    command_chord_argv,
 )
 
 _TIMEOUT_SEC = 10
@@ -49,6 +58,7 @@ _TRANSFORM_FILE = "coord_transform.json"
 _CONNECTIONS_FILE = "connections.json"
 _ACTIVE_CONNECTION_FILE = "active_connection.txt"
 _REMOTE_BACKENDS = {"osworld_http", "ssh_macos"}
+_DISPLAY_CAPTURE = object()  # Only an omitted window selects the display. A malformed target never widens capture.
 
 
 def _png_dimensions(path: pathlib.Path) -> tuple[int, int]:
@@ -751,12 +761,12 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
         return dest, (got_w or new_w), (got_h or new_h)
 
     def screenshot(self, *, job_id: str = "manual", max_width: int = _MAX_IMAGE_W,
-                   max_height: int = _MAX_IMAGE_H, app: str = "", window: Any = "") -> str:
+                   max_height: int = _MAX_IMAGE_H, app: str = "", window: Any = _DISPLAY_CAPTURE) -> str:
         connection = self._connection_snapshot()
         _conn_name, conn = connection
         if conn.get("disabled"):
             return self._disabled_connection_error(_conn_name, conn)
-        if window is not None and window != "":  # one exact local window, capture-only: before any remote or display path
+        if window is not _DISPLAY_CAPTURE:  # before any remote or display path
             return self._window_screenshot(connection=connection, job_id=job_id, app=app, window=window,
                                            max_width=max_width, max_height=max_height)
         backend = str(conn.get("backend") or "local").lower()
@@ -1543,7 +1553,7 @@ def register(api: Any) -> None:
     api.register_tool("activate_connection", impl.activate_connection, description="Select a configured connection as the active target for screenshot/input tools.", schema={"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}, timeout_sec=5)
     api.register_tool("use_local", lambda: impl.use_local(), description="Return computer-use tools to the local desktop backend.", schema={"type": "object", "properties": {}}, timeout_sec=5)
     api.register_tool("capabilities", lambda: impl.capabilities(), description="Who is in front, which OS grants this process holds (prompt-free preflights on macOS), whether app= targeting works here, and the installed backends.", schema={"type": "object", "properties": {}}, timeout_sec=45)
-    api.register_tool("screenshot", impl.screenshot, description="Capture the main display (or, with app=, the display holding that app's window on macOS; display.selected_by says which was captured), downscale to <=WXGA. mapped_input_available=true supplies an observation_id for coordinate input; otherwise capture-only, without a mapping. window= with app= (local macOS 14+) captures that one window even when covered, capture-only, never a display. The image is attached automatically; an engine without vision gets its path.", schema={"type": "object", "properties": {"job_id": {"type": "string", "default": "manual"}, "max_width": {"type": "integer", "default": _MAX_IMAGE_W}, "max_height": {"type": "integer", "default": _MAX_IMAGE_H}, **_app, "window": {"type": ["integer", "string"], "default": ""}}}, timeout_sec=90)
+    api.register_tool("screenshot", impl.screenshot, description="Capture the main display (or, with app=, the display holding that app's window on macOS; display.selected_by says which was captured), downscale to <=WXGA. mapped_input_available=true supplies an observation_id for coordinate input; otherwise capture-only, without a mapping. window= with app= (local macOS 14+) captures that one window even when covered, capture-only, never a display. The image is attached automatically; an engine without vision gets its path.", schema={"type": "object", "properties": {"job_id": {"type": "string", "default": "manual"}, "max_width": {"type": "integer", "default": _MAX_IMAGE_W}, "max_height": {"type": "integer", "default": _MAX_IMAGE_H}, **_app, "window": {"type": ["integer", "string"], "description": "Positive integer window ID or exact title string. Omit for a display capture."}}}, timeout_sec=90)
     # y is deliberately NOT in `required` for click/move: models recurringly emit the
     # whole point inside x ("663, 500") with y omitted, and a required-field rejection
     # then fires BEFORE the handler's _coerce_point can recover the pair.

@@ -17,22 +17,32 @@ at that moment. Everything else that is not a readable image drops the held fram
 window's content: ``blank``, ``suspended``, ``stopped``, an image or sample this code cannot read, a callback that
 failed (``callback_error``) and the stream's notice that its window closed (``inactive``:
 ``streamDidBecomeInactive:``, macOS 15.2+). A stream that ended, by ``release`` or by the system
-(``stream:didStopWithError:``), gives no image again and is never restarted here. Where the window server listed the
-window at ``begin``, the first time it no longer lists it for that process ends the session's delivery for good
-(``window_gone``): a later lookup without an answer, or a window that reuses the id, restores nothing, and only
-``release`` and a new ``begin`` watch a window again. ``SCWindow.isOnScreen`` is passed on as listed and decides
-nothing: a hidden window reads false too.
+(``stream:didStopWithError:``), gives no image again and is never restarted here. A frame dropped while its PNG was
+being written stays dropped for that call: a later valid report cannot revalidate the image that was in flight.
+Where the window server listed the window at ``begin``, the first time it no longer lists it for that process ends
+the session's delivery for good (``window_gone``) and asks the native stream to stop once — in that same call, or in
+a jobless moment of the server between calls (``idle_check``). The stop outcome is reported separately. A later
+lookup without an answer, or a window that reuses the id, restores nothing,
+and only ``release`` and a new ``begin`` watch a window again; while the session lives, a lookup that stops
+answering serves no image for that call (``window_lookup_unavailable``) and is an explicit unknown, never proof of
+destruction — as little as a missing image is. ``SCWindow.isOnScreen`` is passed on as listed and decides nothing:
+a hidden window reads false too.
 
 Ending is confirmed, not assumed. The store closes first, so a callback that arrives later changes nothing (each
 session has its own store and sink; none is reopened). The stream's own end is the one exception: it is kept as
 ``stream_end``, with its own reason, even when the session had closed the store first, and it reopens nothing. The
 session leaves its slot, and its native objects are let go, only once the stream is known not to run: it reported its
-own end, its start answered with an error, or its stop answered. A stop call that raises proves nothing. Until then
-``begin`` refuses and ``release`` can be asked again; answers that arrive after their wait ended are still recorded
-for that.
+own end, its start answered with an error, or its stop answered. A stop call that raises proves nothing, and a
+"not running" stop error confirms only inside ScreenCaptureKit's own error domain. Until then ``begin`` refuses and
+``release`` can be asked again; answers that arrive after their wait ended are still recorded for that. A session
+whose window is proven gone keeps its slot, its ``window_gone`` answer and the ``cleanup`` witness of what its
+native stop is known to have done until ``release``: confirmed speaks only from a native answer or event, an
+unconfirmed stop is never a freed resource, and nothing retries it frantically — ``release`` is the door that asks
+again.
 
-Every method runs on the process's main thread, which services its run loop on entering ``frame`` and ``release`` and
-while it waits, not while it idles between calls; sample callbacks arrive on a serial queue of their own. Which queue
+Every method runs on the process's main thread — including ``idle_check``, which the server runs in a jobless
+moment between calls — which services its run loop on entering ``frame`` and ``release`` and while one of them
+waits, not while it idles; sample callbacks arrive on a serial queue of their own. Which queue
 ScreenCaptureKit uses for the delegate's calls is not known here: were it the main queue, a system stop would be
 taken in at the next call, before that call decides anything, and its ``stop.age_ms`` would count from then.
 ``StreamBridge`` is the PyObjC boundary (tests replace it): CoreMedia functions, the
@@ -78,6 +88,7 @@ _BGRA = 0x42475241  # kCVPixelFormatType_32BGRA
 _FRAME_KEYS = ("SCStreamFrameInfoStatus", "SCStreamFrameInfoDisplayTime", "SCStreamFrameInfoContentRect",
                "SCStreamFrameInfoContentScale", "SCStreamFrameInfoScaleFactor")
 _SLICE_S = 0.05
+_LOOKUP_SLICE_S = 0.5  # a long wait re-looks at the window server at most this often
 _NOTE = ("Capture-only: one window's pixels, not display coordinates. No observation_id is supplied and no input "
          "tool may use this image's coordinates.")
 
@@ -105,6 +116,9 @@ def load_capture() -> Any:
 
 
 capture = load_capture()  # standard library only at import; its Bridge imports PyObjC when constructed
+# SCStreamError codes — including _NOT_STOPPABLE — prove something only inside ScreenCaptureKit's own error domain;
+# the same number from any other domain is an unrelated error.
+_SCSTREAM_DOMAIN = capture._TCC_DECLINED[0]  # "com.apple.ScreenCaptureKit.SCStreamErrorDomain"
 
 
 def stream_size(width: int, height: int, max_width: int = MAX_WIDTH, max_height: int = MAX_HEIGHT) -> tuple[int, int]:
@@ -115,7 +129,7 @@ def stream_size(width: int, height: int, max_width: int = MAX_WIDTH, max_height:
     return max(1, round(width * shrink)), max(1, round(height * shrink))
 
 
-def parse_begin(raw: Any, native: Any) -> tuple[dict[str, Any], str]:
+def parse_begin(raw: Any) -> tuple[dict[str, Any], str]:
     """``begin``'s arguments -> ({app, want}, error); nothing is resolved here."""
     if not isinstance(raw, dict):
         return {}, "arguments must be an object"
@@ -125,10 +139,7 @@ def parse_begin(raw: Any, native: Any) -> tuple[dict[str, Any], str]:
     app = raw.get("app")
     if not isinstance(app, str) or not app.strip():
         return {}, "app is required: the application that owns the window"
-    window = raw.get("window")
-    if window is None or (isinstance(window, str) and not window.strip()):
-        return {}, "window is required: a window_id or an exact title, as window_list prints them"
-    want, error = native.window_want(window)
+    want, error = capture.window_selector(raw.get("window"))
     if error:
         return {}, error
     return {"app": app, "want": want}, ""
@@ -165,6 +176,7 @@ class FrameStore:
         self.seq = 0
         self.frame: dict[str, Any] | None = None  # the last sample that carried an image, with its buffer
         self.withheld: dict[str, Any] | None = None  # the report that dropped the held frame
+        self.discards = 0  # monotonic count of held-image drops; a later valid frame does not undo a drop
         self.report: dict[str, Any] | None = None  # the stream's latest report of any kind
         self.counts: dict[str, int] = {}
         self.stop: dict[str, Any] | None = None
@@ -191,6 +203,7 @@ class FrameStore:
             elif status != "idle":  # the window's content is no longer the held image
                 self.frame = None
                 self.withheld = {"status": rejected or status, **at}
+                self.discards += 1
             self.cond.notify_all()
             return True
 
@@ -220,6 +233,7 @@ class FrameStore:
             self.report = {"status": "callback_error", **at}
             self.frame = None
             self.withheld = {"status": "callback_error", **at}
+            self.discards += 1
             self.cond.notify_all()
 
     def note_error(self, exc: BaseException) -> None:
@@ -538,7 +552,9 @@ def _refusal(reason: str, error: str, **extra: Any) -> dict[str, Any]:
 class WindowSessions:
     """``begin`` / ``frame`` / ``release`` for at most one window stream at a time (the module docstring's contract).
 
-    Each answer is ``(facts, png)``: ``png`` is the image's bytes only when the facts say ``image: true``."""
+    Each answer is ``(facts, png)``: ``png`` is the image's bytes only when the facts say ``image: true``. The
+    server's jobless moments may call ``idle_check``, which ends a session whose window is proven destroyed — the
+    same proof, and the same single bounded stop, a ``frame`` call would apply."""
 
     def __init__(self, *, native: Any = None, bridge_factory: Callable[[], Any] = StreamBridge,
                  clock: Callable[[], float] = time.monotonic, mac_version: Callable[[], int | None] = capture.mac_major,
@@ -562,7 +578,7 @@ class WindowSessions:
             return _refusal("unsupported_os", f"a window session needs macOS {capture.MIN_MACOS} or later"), None
         if self._native is None:
             self._native = capture.load_native()
-        spec, error = parse_begin(raw, self._native)
+        spec, error = parse_begin(raw)
         if error:
             return _refusal("bad_option", error), None
         if self._session is not None:
@@ -642,8 +658,8 @@ class WindowSessions:
                 handler(None, error)
             try:
                 bridge.start(stream, answered)
-            except Exception as exc:  # noqa: BLE001 - the call itself failed: nothing was started
-                answered(exc)
+            except Exception as exc:  # noqa: BLE001 - report the bridge failure, not a native start completion
+                handler(None, exc)
 
         arrived, _value, err = capture.await_handler(start, deadline, pump=bridge.pump, clock=clock)
         if not arrived or err is not None:
@@ -671,13 +687,42 @@ class WindowSessions:
             return _refusal("no_session", "no window session is held; begin one first"), None
         bridge, store, clock = self._bridge, session["store"], self._clock
         waited = clock()
-        store.wait(spec["after_seq"] or 0, waited + spec["wait_ms"] / 1000, pump=bridge.pump, clock=clock)
-        if store.stop is None and session["listed_at_begin"] and self._listed(session) is False:
-            # The window server's "no such window for this process" ends delivery for good: a later lookup without
-            # an answer, or another window under the same id, restores nothing. The stream itself is stopped by
-            # release, as for every session.
-            store.end("window_gone", by="session")
-        held, state = store.snapshot()
+        floor = spec["after_seq"] or 0
+        deadline = waited + spec["wait_ms"] / 1000
+        watchable = session["listed_at_begin"]  # the begin lookup answered: its absence is evidence
+        gone: dict[str, Any] | None = None  # this call's own window_gone proof, with its native-stop witness
+        lookup_unknown = False
+
+        def settled() -> bool:
+            with store.cond:
+                return store.stop is not None or (store.frame is not None and store.frame["seq"] > floor)
+
+        while watchable:
+            # A long pending request must not stay blind to a destroyed target: every bounded slice of the wait
+            # is followed by one window-server look, and proven destruction ends the wait and the stream early.
+            store.wait(floor, min(deadline, clock() + _LOOKUP_SLICE_S), pump=bridge.pump, clock=clock)
+            if settled() or clock() >= deadline:
+                break
+            if self._listed(session) is False:
+                gone = self._gone(session)
+                break
+            # a mid-wait look without an answer is unknown, not absence: keep waiting, the final look decides
+        if not watchable:
+            store.wait(floor, deadline, pump=bridge.pump, clock=clock)
+        if gone is None and watchable and store.stop is None:
+            listed = self._listed(session)
+            if listed is False:
+                # The window server's "no such window for this process" is the one destruction proof used here, and
+                # it is independent of the stream's delivery: a hidden, occluded, blank or inactive window stays
+                # listed, and a missing image proves nothing either way. Delivery ends for good — a later lookup
+                # without an answer, or another window under the same id, restores nothing — and the native stream
+                # gets one stop request now, while the task and server live; its answer is separate evidence.
+                gone = self._gone(session)
+            elif listed is None:
+                lookup_unknown = True  # an authoritative lookup that stopped answering: unknown, not absence
+        with store.cond:  # the held frame and its discard count from one critical section
+            held, state = store.snapshot()
+            discards = store.discards
         facts = {**state, **self._identity(session), "waited_ms": round((clock() - waited) * 1000, 1),
                  "mapped_input_available": False}
 
@@ -685,11 +730,18 @@ class WindowSessions:
             return {"ok": False, "reason": reason, "error": error, "image": False, **facts}, None
 
         if state["state"] != "live":
+            # The native stream's fate stays answerable until release: the same witness release/_end confirm by,
+            # from the answers and events already recorded — nothing is asked again and nothing is retried here.
+            facts["cleanup"] = gone if gone is not None else self._stop_witness(session)
             if state["stop"]["reason"] == "window_gone":
                 return withhold("window_gone", "the window server stopped listing this window for the application; "
                                 "this session serves nothing again: release it")
             return withhold("stream_stopped", f"the stream ended ({state['stop']['reason']}); it is not restarted: "
                             "release this session, then begin again if the window should still be watched")
+        if lookup_unknown:
+            return withhold("window_lookup_unavailable", "the window server gave no answer about this window for "
+                            "this call, so its existence is unknown and no image is served; this is not evidence "
+                            "that the window is gone: ask again")
         if held is None:
             if state.get("withheld"):
                 return withhold("frame_withheld", f"the stream last reported {state['withheld']['status']}: the earlier "
@@ -704,8 +756,13 @@ class WindowSessions:
             return withhold("encode_failed", f"{type(exc).__name__}: {exc}")
         bridge.pump(0)
         _again, after = store.snapshot()  # what the stream said while the image was written
-        if after["state"] != "live" or after.get("withheld"):
-            facts.update({key: after[key] for key in ("state", "stop", "withheld", "stream") if key in after})
+        if after["state"] != "live" or after.get("withheld") or store.discards != discards:
+            # A drop of the held image while its PNG was being written invalidates that image for this call even
+            # when a later valid report already cleared ``withheld``: the drop happened to the frame in flight.
+            # The unlocked monotonic read can only see more discards, which withholds too much, never too little.
+            facts.update({key: after[key] for key in ("state", "stop", "stream_end", "withheld", "stream") if key in after})
+            if after["state"] != "live":
+                facts["cleanup"] = self._stop_witness(session)
             return withhold("stream_stopped" if after["state"] != "live" else "frame_withheld",
                             "the stream ended or dropped this frame while it was being written")
         return {"ok": True, "image": True, "frame_at_utc": at.isoformat(timespec="milliseconds"), **facts,
@@ -755,19 +812,57 @@ class WindowSessions:
                 shutil.rmtree(self._scratch, ignore_errors=True)
                 self._scratch = None
 
-    def _end(self, session: dict[str, Any], reason: str, timeout_ms: int) -> dict[str, Any]:
-        """Close the store, then learn that the stream does not run; only then does the session leave its slot."""
+    def idle_check(self) -> None:
+        """One bounded look at the held session, for a jobless moment of the server's main thread.
+
+        A session whose window the window server no longer lists is ended exactly as the ``frame`` call that would
+        prove it ends it: delivery closes and the native stream is asked to stop once, so proven destruction does
+        not keep capturing between calls or after the last one. Nothing runs — and nothing native is touched — when
+        no session is held, when its delivery already ended, or when its window was not listed at ``begin`` (that
+        lookup is then not authoritative). A lookup without an answer is unknown, not absence: the session is left
+        alone and a later moment looks again. An unconfirmed stop is not retried here; ``release`` is that door."""
+        session = self._session
+        if session is None or session["store"].stop is not None or not session["listed_at_begin"]:
+            return
+        if self._listed(session) is False:
+            self._gone(session)
+
+    def _gone(self, session: dict[str, Any]) -> dict[str, Any]:
+        """Proven destruction: end delivery and stop the native stream once, keeping the session's slot.
+
+        The session keeps answering ``window_gone`` — with the ``cleanup`` witness of what the stop is known to
+        have done — until ``release`` frees the slot; ``release`` also retries a stop that was not confirmed."""
+        return self._end(session, "window_gone", STOP_TIMEOUT_MS, keep_slot=True)
+
+    def _stop_witness(self, session: dict[str, Any]) -> dict[str, Any]:
+        """``{confirmed, detail}`` for the native stream's running, from the answers and events already recorded —
+        the very grounds ``_end``/``release`` confirm by, asked nothing again. ``confirmed`` speaks only from a
+        native answer or event (the stream's own end, a failed start, an answering stop); the absence of a window,
+        of an image or of an answer is never confirmation."""
+        if session["store"].stream_end is not None:
+            return {"confirmed": True, "detail": "the stream reported its own end"}
+        if session["start"] is not None and session["start"][0] == "error":
+            return {"confirmed": True, "detail": "the stream never started"}
+        answer = session["stopped"]
+        if answer is not None and self._stop_confirms(session):
+            return {"confirmed": True, "detail": "an earlier stop answered"}
+        if answer is None:
+            return {"confirmed": False, "detail": "no answer to the stop request"}
+        if answer[0] == "raised":
+            return {"confirmed": False, "detail": f"the stop request raised {type(answer[1]).__name__}: {answer[1]}"}
+        return {"confirmed": False, "detail": str(capture._error_facts(answer[1]).get("error"))}
+
+    def _end(self, session: dict[str, Any], reason: str, timeout_ms: int, *, keep_slot: bool = False) -> dict[str, Any]:
+        """Close the store, then learn that the stream does not run; only then does the session leave its slot.
+
+        ``keep_slot`` keeps the session — its refusal, its recorded answers and its native objects — after a
+        confirmed end: a destroyed window's stream is stopped at once, while only ``release`` frees the slot."""
         bridge, store, clock = self._bridge, session["store"], self._clock
         bridge.pump(0)  # a stream's own end already queued for this thread is taken in before the session's reason
         store.end(reason, by="session")  # from here no callback changes anything; an earlier end keeps its reason
-        how = ""
-        if store.stream_end is not None:
-            how = "the stream reported its own end"
-        elif session["start"] is not None and session["start"][0] == "error":
-            how = "the stream never started"
-        elif session["stopped"] is not None and self._stop_confirms(session):
-            how = "an earlier stop answered"
-        else:
+        witness = self._stop_witness(session)
+        how = witness["detail"] if witness["confirmed"] else ""
+        if not how:
             def stop(handler: Callable[[Any, Any], None]) -> None:
                 started = session["start"] is not None  # whether the start had answered when this stop was asked
                 before = session["stopped"]
@@ -785,33 +880,32 @@ class WindowSessions:
             capture.await_handler(stop, clock() + timeout_ms / 1000, pump=bridge.pump, clock=clock)
             if session["stopped"] is not None and self._stop_confirms(session):
                 how = "its stop answered"
-            elif store.stream_end is not None:  # the stream's own end came while its stop was awaited
-                how = "the stream reported its own end"
+            else:  # the stream's own end may have come while its stop was awaited
+                witness = self._stop_witness(session)
+                how = witness["detail"] if witness["confirmed"] else ""
         if not how:
-            answer = session["stopped"]
-            if answer is None:
-                detail = "no answer to the stop request"
-            elif answer[0] == "raised":
-                detail = f"the stop request raised {type(answer[1]).__name__}: {answer[1]}"
-            else:
-                detail = str(capture._error_facts(answer[1]).get("error"))
-            return {"confirmed": False, "detail": detail}
-        try:
-            bridge.remove_output(session["stream"], session["native"][0])
-        except Exception:  # noqa: BLE001 - the stream is over either way
-            pass
-        self._session = None  # the stream, its sink and the window object are let go here
+            return {"confirmed": False, "detail": witness["detail"]}
+        if not keep_slot:
+            try:
+                bridge.remove_output(session["stream"], session["native"][0])
+            except Exception:  # noqa: BLE001 - the stream is over either way
+                pass
+            self._session = None  # the stream, its sink and the window object are let go here
         return {"confirmed": True, "detail": how}
 
     @staticmethod
     def _stop_confirms(session: dict[str, Any]) -> bool:
         """A stop answer proves the stream is not running: no error, or "not running" when the start had answered
         before that stop was asked (asked earlier, the same error may only mean the start was still under way, and
-        the stream may have started since). A stop call that raised is no answer."""
+        the stream may have started since). A stop call that raised is no answer, and a matching code from any
+        other error domain proves nothing."""
         kind, error, started = session["stopped"]
         if kind == "ok":
             return True
-        return kind == "error" and started and capture._error_facts(error).get("error_code") == _NOT_STOPPABLE
+        if kind != "error" or not started:
+            return False
+        facts = capture._error_facts(error)
+        return (facts.get("error_domain"), facts.get("error_code")) == (_SCSTREAM_DOMAIN, _NOT_STOPPABLE)
 
     @staticmethod
     def _ids(session: dict[str, Any]) -> tuple[int, int]:

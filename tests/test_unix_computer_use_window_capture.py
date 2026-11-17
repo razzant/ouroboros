@@ -61,14 +61,14 @@ def _run_helper(*args: str) -> subprocess.CompletedProcess:
 
 
 def test_helper_runs_isolated_and_loads_its_native_resolver_by_path(tmp_path):
-    """Under -I the script's folder is off sys.path: the window naming rule still comes from macos_native.py."""
+    """Under -I the helper can load its sibling resolver and refuse a malformed target without any capture."""
     spec = {"app": "Editor", "window": True, "output": str(tmp_path / "w.png")}
     done = _run_helper(json.dumps(spec))
     lines = done.stdout.strip().splitlines()
     assert done.returncode == 1 and len(lines) == 1, (done.stdout, done.stderr)
     answer = json.loads(lines[0])
     assert answer["ok"] is False and answer["reason"] == "bad_option"
-    assert "window must be a window_id or an exact title" in answer["error"], answer  # macos_native.window_want's words
+    assert "window must be a window_id or an exact title" in answer["error"], answer
     assert not (tmp_path / "w.png").exists()
 
 
@@ -90,22 +90,20 @@ def test_helper_usage_is_one_refusal_line():
     ({"timeout_ms": "5"}, "timeout_ms must be an integer"),
     ({"extra": 1}, "unknown option"),
 ])
-def test_options_refuse_before_anything_is_resolved(helper, native, tmp_path, change, error):
+def test_options_refuse_before_anything_is_resolved(helper, tmp_path, change, error):
     raw = {"app": "Editor", "window": 7, "output": str(tmp_path / "w.png"), **change}
-    spec, problem = helper.parse_spec(json.dumps(raw), native)
+    spec, problem = helper.parse_spec(json.dumps(raw))
     assert spec == {} and error in problem
 
 
-def test_options_refuse_an_existing_or_folderless_output_and_clamp_the_budget(helper, native, tmp_path):
+def test_options_refuse_an_existing_or_folderless_output_and_clamp_the_budget(helper, tmp_path):
     taken = tmp_path / "taken.png"
     taken.write_bytes(b"x")
     for output in (str(taken), str(tmp_path / "missing" / "w.png")):
-        assert "new file in an existing folder" in helper.parse_spec({"app": "A", "window": 1, "output": output}, native)[1]
-    spec, problem = helper.parse_spec({"app": "A", "window": "0042", "output": str(tmp_path / "w.png"), "timeout_ms": 10},
-                                      native)
-    assert problem == "" and spec["want"] == {"window_id": 42} and spec["timeout_ms"] == helper.TIMEOUT_MS["min"]
-    spec, _ = helper.parse_spec({"app": "A", "window": " Notes ", "output": str(tmp_path / "w.png"), "timeout_ms": 10 ** 9},
-                                native)
+        assert "new file in an existing folder" in helper.parse_spec({"app": "A", "window": 1, "output": output})[1]
+    spec, problem = helper.parse_spec({"app": "A", "window": "0042", "output": str(tmp_path / "w.png"), "timeout_ms": 10})
+    assert problem == "" and spec["want"] == {"title": "0042"} and spec["timeout_ms"] == helper.TIMEOUT_MS["min"]
+    spec, _ = helper.parse_spec({"app": "A", "window": " Notes ", "output": str(tmp_path / "w.png"), "timeout_ms": 10 ** 9})
     assert spec["want"] == {"title": " Notes "} and spec["timeout_ms"] == helper.TIMEOUT_MS["max"]
 
 
@@ -132,6 +130,14 @@ def test_pixel_size_keeps_the_aspect_ratio(helper):
     assert helper.pixel_size(10000, 2500, 2.0) == (helper.MAX_SIDE_PX, helper.MAX_SIDE_PX // 4)
     assert helper.pixel_size(0, 500, 2.0) == (0, 0)
     assert helper.pixel_size(float("nan"), 500, 2.0) == (0, 0)
+
+
+def test_numeric_title_and_window_number_name_different_windows_of_the_same_app(helper, tmp_path):
+    rows = [_row(42, "Inbox", 11), _row(7, "42", 11)]
+    for selector, expected in ((42, 42), ("42", 7)):
+        spec, error = helper.parse_spec({"app": "Editor", "window": selector, "output": str(tmp_path / "w.png")})
+        assert not error
+        assert helper.select_window(rows, 11, spec["want"])[1]["window_id"] == expected
 
 
 def test_write_new_never_replaces_and_leaves_no_partial_file(helper, tmp_path):
@@ -474,7 +480,8 @@ def fake_helper(monkeypatch, *, width=30, height=20, answer=None, rc=0, stdout=N
 
 def test_screenshot_schema_names_the_window_parameter(desk):
     meta = desk.tools["screenshot"]["metadata"]
-    assert meta["schema"]["properties"]["window"] == {"type": ["integer", "string"], "default": ""}
+    selector = meta["schema"]["properties"]["window"]
+    assert selector["type"] == ["integer", "string"] and "default" not in selector
     assert "window= with app= (local macOS 14+)" in meta["description"] and "capture-only" in meta["description"]
 
 
@@ -507,6 +514,10 @@ def test_a_large_window_is_downscaled_with_its_aspect_ratio(desk, monkeypatch):
     ({"window": 7}, "app_required"),
     ({"window": 7, "app": "  "}, "app_required"),
     ({"window": True, "app": "Editor"}, "bad_option"),
+    ({"window": "", "app": "Editor"}, "bad_option"),
+    ({"window": None, "app": "Editor"}, "bad_option"),
+    ({"window": 0, "app": "Editor"}, "bad_option"),
+    ({"window": -1, "app": "Editor"}, "bad_option"),
     ({"window": "   ", "app": "Editor"}, "bad_option"),
     ({"window": [7], "app": "Editor"}, "bad_option"),
 ])
@@ -522,8 +533,9 @@ def test_window_capture_is_local_macos_only(desk, monkeypatch, tmp_path):
     impl = desk.tools["screenshot"]["handler"].__self__
     impl.add_connection(name="guest", backend="osworld_http", target="http://a.invalid", activate=True)
     monkeypatch.setattr(impl, "_osworld_screenshot", lambda *a, **k: pytest.fail("remote capture for window="))
-    result = shot(desk, app="Editor", window=7)
-    assert result["reason"] == "unsupported_backend" and "guest" in result["error"] and desk.jobs == []
+    for selector in (7, "", None):
+        result = shot(desk, app="Editor", window=selector)
+        assert result["reason"] == "unsupported_backend" and "guest" in result["error"] and desk.jobs == []
 
 
 def test_a_disabled_connection_still_fails_closed_first(desk, monkeypatch):
@@ -533,7 +545,7 @@ def test_a_disabled_connection_still_fails_closed_first(desk, monkeypatch):
     assert result["ok"] is False and result["connection"] == "gone" and "unusable" in result["error"] and desk.jobs == []
 
 
-def test_an_empty_window_keeps_the_display_capture(desk, monkeypatch):
+def test_an_omitted_window_keeps_the_display_capture(desk, monkeypatch):
     impl = desk.tools["screenshot"]["handler"].__self__
     monkeypatch.setattr(impl, "_capture_display", lambda app: {"index": 1, "main": True, "x": 0, "y": 0, "width": 30, "height": 20})
 
@@ -542,7 +554,7 @@ def test_an_empty_window_keeps_the_display_capture(desk, monkeypatch):
         pathlib.Path(cmd[-1]).write_bytes(png_bytes(60, 40))
         return 0, "", ""
     monkeypatch.setattr(plugin, "_run", screencapture)
-    result = shot(desk, window="")
+    result = shot(desk)
     assert result["ok"] is True and result["backend"] == "screencapture" and result.get("observation_id")
     assert "capture_kind" not in result
 

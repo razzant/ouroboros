@@ -695,50 +695,47 @@ or non-numeric one is silently dropped.
 
 ### Declaring MCP servers (Connect tools)
 
-A `script` or `extension` skill that ships an MCP stdio server declares it, and the
-owner connects it with one confirmation instead of copying settings by hand:
+A `script` or `extension` skill can ship stdio servers. Keep existing Node servers in
+`mcp_servers`. Put additions such as an `agent_python` server in `optional_mcp_servers`
+so older cores can ignore them and load the rest of the skill. Current cores append
+the second list to the first and validate every entry.
 
 ```yaml
 mcp_servers: [{"id": "chrome_browser", "title": "Chrome (shared tab)", "entry": "scripts/server.mjs", "task_session": true, "browser_policy": true}]
 ```
 
-Each item takes only these keys (anything else is a manifest error):
+Both lists use the same fields. Unknown keys or an ID repeated anywhere reject the manifest.
 
-- `id` (required): the MCP server id, lowercase letters and digits joined by single `_`,
-  at most 24 characters. Every tool is named `mcp_<id>__<tool>`, so keep it stable.
-- `entry` (required): a relative path of a file in the skill (no `..`, absolute path or
-  cache/dependency folder such as `node_modules` or `.ouroboros_env`); it is part of the
-  reviewed, hashed payload, and `skill_preflight` checks it by the rule a start applies.
-- `runtime`: `node` or `agent_python`; defaults to the manifest runtime.
-  `agent_python` uses valid `OUROBOROS_AGENT_PYTHON` or `sys.executable` with
-  `-I -B`. It imports packages installed in that interpreter; `-I` ignores
-  `PYTHONPATH` and user-site, and this runtime does not select the skill's
-  isolated Python environment. Managed domains refuse it; ordinary Python
-  scripts stay PATH-first.
-- `title`: the Settings display name; defaults to `id`.
-- `task_session`, `browser_policy`: the MCP call-lifetime choices (DEVELOPMENT §12);
-  `browser_policy` needs `task_session: true`.
+- `id` (required) names every tool as `mcp_<id>__<tool>`. Use up to 24 lowercase
+  letters and digits joined by single underscores.
+- `entry` (required) is a relative file path within the reviewed, hashed payload.
+  Preflight and launch reject `..`, absolute paths and cache/dependency folders such
+  as `node_modules` or `.ouroboros_env`.
+- `runtime` is `node` or `agent_python` and defaults to the manifest runtime.
+  `agent_python` runs a usable `OUROBOROS_AGENT_PYTHON` or `sys.executable` with
+  `-I -B`. It uses that interpreter's packages, skips the skill's isolated Python
+  environment and ignores `PYTHONPATH` and user-site.
+  Managed domains refuse it. Ordinary Python scripts keep PATH-first resolution.
+- `title` names the server in Settings and defaults to `id`.
+- `task_session` and `browser_policy` control call lifetime (DEVELOPMENT §12).
+  `browser_policy` requires `task_session: true`.
 
-Once the skill is accepted for its current bytes, on, granted and its packages are
-installed, its Skills card offers **Connect tools**. The confirmation names what will run
-and, when MCP is off, every other server that turning MCP on starts. Confirming writes one
-MCP server row (`id`, `name`, `enabled`, `transport: stdio`, `skill`, the two flags) and turns
-MCP on; nothing else in settings changes, an identical state writes nothing, and a row of
-the same id that this skill did not write is never overwritten. An agent carries the same
-step with `skill_owner_action(action="connect_mcp")`: `preview: true` first, then the
+When the skill is accepted for its current bytes, enabled, granted and its packages
+ready, its card offers **Connect tools**. The owner confirms the listed servers and
+any others that turning MCP on would start. Connect sets `MCP_ENABLED` and writes
+one row per declaration (`id`, `name`, `enabled`, `transport: stdio`, `skill`, both flags).
+It preserves other settings, skips identical writes and refuses ID conflicts.
+For `skill_owner_action(action="connect_mcp")`, use `preview: true` first, then the
 owner's answer as `owner_source` with the preview's `settings_digest`.
 
-The row stores no command. Listing, Settings Test and calls derive binary,
-entry, cwd and flags from the installed skill, so moving the app or runtime
-needs no reconnect. Servers receive scripts' granted settings and state folder.
-Managed domains run Node script servers in containers, staging verified
-copies as needed; extensions stay on the service.
-While the skill is off, missing, edited and not re-accepted, short of grants or
-packages, or no longer declares the server, or the domain cannot start it, only that
-server is unavailable (`MCP_SKILL_UNAVAILABLE`) and nothing starts anywhere; the row
-stays. An accepted update or changed granted value is listed anew and running task
-sessions restart; a row the owner switched off stays off. Steps outside Ouroboros (a browser extension, a sign-in) belong
-in its instructions.
+The row stores no command. Listing, Settings Test and calls derive binary, entry, cwd and flags from the installed
+skill. Moving it or the runtime needs no reconnect. Servers receive scripts' granted
+settings and state folder. Managed domains stage verified Node scripts in containers
+and refuse extension servers. An off, missing or unaccepted skill, missing grants or
+packages, an absent declaration or a domain refusal leaves that row saved and inert
+(`MCP_SKILL_UNAVAILABLE`). An accepted update or changed granted value triggers a new
+listing and retires old task sessions. A disabled row stays off. Document any external
+steps such as a browser extension or sign-in in the skill.
 
 ## The `skill_preflight` tool
 

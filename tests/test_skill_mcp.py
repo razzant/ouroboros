@@ -13,7 +13,7 @@ import typing
 
 import pytest
 
-from ouroboros import config, mcp_client, mcp_catalog, skill_mcp
+from ouroboros import config, mcp_catalog, mcp_client, skill_mcp
 from ouroboros.contracts.skill_manifest import SkillManifestError, parse_skill_manifest_text
 from ouroboros.skill_loader import load_skill
 
@@ -741,6 +741,7 @@ def test_accepted_update_relists_and_retires_sessions_while_a_disabled_row_stays
 def test_registry_worker_adopts_published_skill_catalog_before_admission(world, manager, monkeypatch, initial_state):
     """A long-lived worker must admit the lister's new revision without a direct-call rebind."""
     from unittest.mock import Mock
+
     from ouroboros.tools.registry import ToolRegistry
 
     manifest = _manifest('[{"id": "chrome_browser", "entry": "scripts/server.mjs"}]')
@@ -911,6 +912,7 @@ def test_accepted_update_is_discovered_after_passive_skills_get(world, manager, 
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient
+
     from ouroboros.gateway import extensions
 
     manager.become_lister()
