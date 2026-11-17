@@ -197,9 +197,9 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
  * state is not passed as now. `begin(current, read)` arms the bound for `read` (`current()` false: the room left
  * meanwhile). `reading` shares that work and `settled(current)` waits it out, a later reconnect's read too; `owed`
  * separately survives failure and the interval before begin. Leaving, disconnecting and beginning a reconnect record
- * the latest requested history version. Only an admitted newer read that was not cut short (`confirm` takes its
+ * the latest requested history version. Only an admitted newer read that was not cut short (`confirmWindow` takes its
  * answer: a refused source or a projection fault leaves rows out, CLIENT_CONTRACT "Reading history") discharges that
- * absence, however a page bounds it; a late pre-disconnect response cannot. `confirm` returns whether the read was
+ * absence, however a page bounds it; a late pre-disconnect response cannot. `confirmWindow` returns whether the read was
  * whole; a fault owes repair even without an absence. `end` ends only the matching read's
  * feedback; `cancel` records absence. `retry` distinguishes an unconfirmed attempt from absence alone. */
 export function createCatchUp(changed, bound = 300) {
@@ -210,7 +210,7 @@ export function createCatchUp(changed, bound = 300) {
         get reading() { return reading; },
         get owed() { return after !== null; },
         get retry() { return after !== null && failed && !reading; },
-        confirm({ recentVersion, reason_code: refused, window }) {
+        confirmWindow({ recentVersion, reason_code: refused, window }) {
             const cut = refused || window?.truncated_by?.some?.(cause => String(cause).endsWith('_projection_failed'));
             if (cut) after = Math.max(after ?? 0, recentVersion);
             else if (recentVersion > after) after = null;
