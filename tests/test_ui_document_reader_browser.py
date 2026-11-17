@@ -958,11 +958,14 @@ def test_reader_in_a_translated_ui_and_copy_without_async_clipboard(direct_serve
                 big = page.evaluate(COPY_STATE)
                 assert not big["highlighted"] and len(big["code_text"]) > 32768, len(big["code_text"])
                 # Keyboard activation from a scrolled document exercises both
-                # actual focus restoration and a nonzero viewport position.
+                # actual focus restoration and a nonzero viewport position. The
+                # owner scrolls with the focus kept on Copy: focus the keyboard
+                # can see comes clear of the reader's fade when it lands
+                # (scroll_fade.js), so the scroll comes after it.
                 page.evaluate("""() => {
                     const dialog = document.querySelector('dialog.document-reader');
-                    dialog.querySelector('.document-reader-body').scrollTop = 100;
                     dialog.querySelector('.md-code-copy').focus({preventScroll: true});
+                    dialog.querySelector('.document-reader-body').scrollTop = 100;
                 }""")
                 page.keyboard.press("Enter")
                 page.wait_for_function("() => document.querySelector('dialog.document-reader .md-code-copy').textContent === 'Скопировано'")
