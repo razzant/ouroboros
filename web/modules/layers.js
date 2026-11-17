@@ -6,9 +6,8 @@
  * drawer is open (a slow read finishing), it takes its place beneath the drawer, which Escape and Back close first. It
  * is not modal and its focus is the owner's (`focus: false`, no opener): the stack neither moves focus in nor back.
  * Dialogs, menus and the work list keep their own focus traps and Escape. Every way of leaving ends in the same place:
- * Escape, the scrim, × call `pop()`, which closes exactly one layer, the top one, through the layer's own `onClose`;
- * the browser's or Android's Back and Telegram's Back call `back()`, which first gives an open dialog over the layer
- * its Escape (the dialog is what is on top) and otherwise pops. The owner of a layer's
+ * Escape, a close control, browser, system, mouse, keyboard and Telegram Back call `back()`, which first gives a
+ * popup its Escape and otherwise pops one layer through its `onClose`. The owner of a layer's
  * state keeps owning it: it calls `push` when it opens and `remove` when it closes (both idempotent), and `onClose` is
  * where the stack asks the owner to close.
  *
@@ -35,9 +34,19 @@
 
 const LAYER_STATE = { ouroLayers: 1 };
 
+/** Consume boot-only reload hints without changing the current layer's history state or any page address. */
+export function clearReloadParams(win = globalThis.window) {
+    try {
+        const url = new URL(win.location.href);
+        if (!url.searchParams.has('_ouro_reason') && !url.searchParams.has('_ouro_refresh')) return;
+        url.searchParams.delete('_ouro_reason');
+        url.searchParams.delete('_ouro_refresh');
+        win.history.replaceState(win.history.state, '', url);
+    } catch {}
+}
+
 export function createLayerStack({ win = globalThis.window, doc = globalThis.document, history = win?.history } = {}) {
     const stack = [];
-    const closing = new WeakSet();
     const listeners = new Set();
     const inerted = new Set();
     const hist = { armed: false, skip: 0, queued: false };
@@ -47,10 +56,13 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
     let epoch = 0;        // the latest commit; an older pending inert difference applies nothing
     let pendingInert = null;  // that commit's inert difference while it waits for the motion
     let owed = null;          // the focus that waits for it
+    let dismissing = null;    // Escape dispatched to the popup above the stack, never another Back
 
     const top = () => stack[stack.length - 1] || null;
     const has = (id) => stack.some((layer) => layer.id === id);
     const get = (id) => stack.find((layer) => layer.id === id) || null;
+    const page = () => [...stack].reverse().find((layer) => layer.page) || null;
+    const returnPage = () => [...stack].reverse().find((layer) => layer.returnTo) || null;
 
     function emit() {
         const snapshot = { size: stack.length, top: top()?.id || null, ids: stack.map((layer) => layer.id) };
@@ -90,13 +102,14 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         }
     }
 
-    // ---- history: one entry while the stack is not empty, reconciled once per task
+    // ---- history: one entry while the stack is not empty, reconciled once per microtask
     function reconcileHistory() {
         if (hist.queued || !history || typeof history.pushState !== 'function') return;
         hist.queued = true;
         Promise.resolve().then(() => {
             hist.queued = false;
             if (disposed) return;
+            if (hist.skip) return; // finish consuming the old sentinel before arming a newly opened layer
             try {
                 if (stack.length && !hist.armed) {
                     history.pushState(LAYER_STATE, '');
@@ -112,18 +125,23 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         });
     }
     const onPopState = () => {
-        if (hist.skip > 0) { hist.skip -= 1; return; }
+        if (hist.skip > 0) { hist.skip -= 1; reconcileHistory(); return; }
         hist.armed = false;
         if (stack.length) back('history');
+        reconcileHistory();
     };
 
     // ---- Escape closes the top layer unless something inside already took the key (a menu, the work list, a dialog)
     const onKeydown = (event) => {
-        if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || !stack.length) return;
-        if (doc?.querySelector?.('dialog[open]')) return;  // a native modal dialog owns Escape until it adapts
-        event.preventDefault();
-        pop('escape');
+        if (event === dismissing || event.defaultPrevented || event.isComposing) return;
+        const bracket = event.key === '[' && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
+        if (event.key !== 'Escape' && !bracket) return;
+        if (event.key === 'Escape' && doc?.querySelector?.('dialog[open]')) return; // the native dialog takes its own Escape
+        if (back(bracket ? 'shortcut' : 'escape')) event.preventDefault();
     };
+    // A mouse's Back button already consumes browser history. Keep its press out of click-away handlers: closing
+    // a popup on pointerdown would let the following popstate close the page as well. Native history still runs.
+    const onHistoryPointer = (event) => { if (event.button === 3 || event.button === 4) event.stopPropagation(); };
 
     function focusInto(layer) {
         if (layer.focus === false) return;
@@ -195,22 +213,24 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
     const onTab = (event) => { if (event.key === 'Tab') pendingInert?.(); };
 
     /** One commit: `fn` pushes and removes; the stack settles once when the outermost batch ends (also when `fn`
-     * throws). `inertAfter` (the outermost batch's): a promise of the motion's end, after which the inert difference
-     * and the focus that needs it are applied; without it they are applied now. */
-    function batch(fn, { inertAfter = null } = {}) {
-        if (depth++ === 0) change = { pushed: new Set(), removed: [] };
+     * throws). `inertAfter`: a promise of the motion's end, after which the inert difference and the focus that needs
+     * it are applied; without it (or null) they are applied now. The last batch that names it, at any depth, decides:
+     * a page jump wraps the shell's sync in its own batch, and that sync's motion is the commit's. */
+    function batch(fn, { inertAfter } = {}) {
+        if (depth++ === 0) change = { pushed: new Set(), removed: [], inertAfter: null };
+        if (inertAfter !== undefined) change.inertAfter = inertAfter;
         try { return fn(); } finally {
             if (--depth === 0) {
                 const done = change;
                 change = null;
-                if (!disposed) settle(done, inertAfter);
+                if (!disposed) settle(done, done.inertAfter);
             }
         }
     }
 
     /** Open: `{ id, el, modal = true, onClose(reason), opener = activeElement, focus, live, page }` (`live`: elements
      * beside the layer that stay usable under a modal one, its scrim; `page`: a part of the page, placed under every
-     * overlay already open). A known id keeps its
+     * overlay already open; `before` keeps a destination's parent level under its jump). A known id keeps its
      * place in the stack and takes the new facts (an owner that syncs its state calls push on every sync). */
     function push(layer) {
         if (disposed || !layer || !layer.id) return false;
@@ -230,7 +250,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
                 opener = gone.opener;
             }
             const entry = { modal: true, opener, ...layer };
-            const under = entry.page ? stack.findIndex((open) => !open.page) : -1;
+            const under = entry.page ? stack.findIndex((open) => open.id === entry.before || !open.page) : -1;
             if (under < 0) stack.push(entry);
             else stack.splice(under, 0, entry);
             change.pushed.add(entry.id);
@@ -249,36 +269,51 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         });
     }
 
-    /** THE dismiss: exactly one layer, the top one, through its owner's onClose. An asynchronous owner keeps its
+    /** THE dismiss: exactly one layer, the named control's or the top one, through its owner's onClose. An asynchronous owner keeps its
      * layer until it has arrived (or returns false to stay), so a page return can replace it without losing Back. */
-    function pop(reason = 'close') {
-        const layer = top();
+    function pop(reason = 'close', id = top()?.id) {
+        const layer = get(id);
         if (!layer) return false;
-        if (closing.has(layer)) { reconcileHistory(); return true; }
-        let result;
-        try { result = layer.onClose?.(reason); } finally {
-            if (result?.then) {
-                closing.add(layer);
-                reconcileHistory(); // a browser Back consumed the entry; keep it while navigation is pending
-                Promise.resolve(result).then((closed) => {
-                    if (closed !== false && get(layer.id) === layer) remove(layer.id);
-                }, (error) => console.error('layers: close failed', error)).finally(() => closing.delete(layer));
-            } else if (has(layer.id)) remove(layer.id);  // a synchronous owner that did not call remove
+        if (layer.closing) { layer.closing.again = reason; reconcileHistory(); return true; }
+        const finish = (allowed) => {
+            const again = layer.closing?.again;
+            delete layer.closing;
+            if (allowed !== false && get(layer.id) === layer) remove(layer.id);
+            // A second press belongs to the next level after arrival; a refused leave consumes neither level.
+            if (allowed !== false && again && !disposed && !has(layer.id)) back(again);
+            reconcileHistory();
+        };
+        const result = layer.onClose?.(reason);
+        if (result?.then) {
+            layer.closing = { again: null };
+            result.then(finish, (err) => { finish(false); console.error('layers: close failed', err); });
+            reconcileHistory(); // retain the sentinel while an asynchronous return awaits its leave guard
         }
+        else finish(result);
         return true;
     }
 
     /** Back (system, browser, Telegram): a dialog the page opened over the layers is on top, so it takes the press
      * as its Escape (the dialogs close on Escape through ui_interactions.bindDialogFocus; a bare native dialog that
      * nothing answered closes as its own Escape would close it) and the layer stays; otherwise the top layer closes. */
-    function back(reason = 'history') {
-        const dialogs = [...(doc?.querySelectorAll?.('dialog[open], [aria-modal="true"]') || [])]
-            .filter((el) => el.getClientRects?.().length && !stack.some((layer) => layer.el === el));
+    function back(reason = 'history', id) {
+        const dialogs = [...(doc?.querySelectorAll?.('dialog[open], [aria-modal="true"], [role="dialog"], [role="menu"], .ui-popup') || [])]
+            .filter((el) => el.getClientRects?.().length && !el.closest?.('[inert], [hidden], [aria-hidden="true"]')
+                && !stack.some((layer) => layer.el === el));
         const dialog = dialogs[dialogs.length - 1];
-        if (!dialog || !win?.KeyboardEvent) return pop(reason);
+        if (!dialog || !win?.KeyboardEvent) {
+            const field = doc?.activeElement;
+            if (reason === 'escape' && field?.matches?.('input[type="search"], [role="searchbox"]') && field.value) {
+                field.value = '';
+                field.dispatchEvent(new win.Event('input', { bubbles: true }));
+                return true;
+            }
+            return pop(reason, id);
+        }
         const target = dialog.contains(doc.activeElement) ? doc.activeElement : dialog;
         const escape = new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
-        target.dispatchEvent(escape);
+        dismissing = escape;
+        try { target.dispatchEvent(escape); } finally { dismissing = null; }
         if (!escape.defaultPrevented && dialog.tagName === 'DIALOG') dialog.close?.();
         reconcileHistory();
         return true;
@@ -292,6 +327,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
     win?.addEventListener?.('popstate', onPopState);
     win?.addEventListener?.('keydown', onKeydown);
     win?.addEventListener?.('keydown', onTab, true);
+    win?.addEventListener?.('pointerdown', onHistoryPointer, true);
 
     function destroy() {
         disposed = true;
@@ -299,6 +335,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         win?.removeEventListener?.('popstate', onPopState);
         win?.removeEventListener?.('keydown', onKeydown);
         win?.removeEventListener?.('keydown', onTab, true);
+        win?.removeEventListener?.('pointerdown', onHistoryPointer, true);
         pendingInert = null;
         owed = null;
         for (const el of inerted) el.inert = false;
@@ -310,7 +347,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
     return {
         push, remove, batch, pop, back, onChange, destroy,
         top: () => top()?.id || null,
-        has,
+        has, get, page, returnPage,
         size: () => stack.length,
         ids: () => stack.map((layer) => layer.id),
         /** The history sentinel state, for tests and the host adapter. */

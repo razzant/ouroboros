@@ -43,6 +43,7 @@ class NodeStub {
     getAttribute(key) { return this.attrs[key] ?? null; }
     hasAttribute(key) { return key in this.attrs; }
     removeAttribute(key) { delete this.attrs[key]; }
+    getClientRects() { return [{ width: 1, height: 1 }]; }  // drawn: the Logs reader asks whether its panel has a box
     get firstElementChild() { return this.children[0]; }
     get nextElementSibling() { return this.parentElement?.children[this.parentElement.children.indexOf(this) + 1]; }
     get textContent() { return this._text + this.children.map((child) => child.textContent).join(''); }
@@ -128,16 +129,19 @@ function setup(t) {
     const card = () => mount.querySelectorAll('.log-task-card').find((node) => node.dataset.taskGroup === 't');
     return {
         settled,
+        card,
         push: (evt) => ws.emit('log', { data: { ts: '2026-10-15T00:00:00+00:00', task_id: 't', ...evt } }),
-        headline: () => card().querySelector('[data-task-headline]').textContent,
-        phase: () => card().querySelector('[data-task-phase]').textContent,
-        tone: () => card().querySelector('[data-task-phase]').dataset.chipTone,
+        // The card's words (its latest headline, or its newest failure's own words while it holds one) and its failure
+        // chip's word ('' while it holds no failure): the first of each in the card is its own.
+        headline: () => card().querySelector('.log-words').textContent,
+        choose: (kind) => mount.querySelectorAll('.filter-chip').find((chip) => chip.dataset.logKind === kind).dispatchEvent({ type: 'click' }),
+        failure: () => (card().querySelector('.log-failure').hidden ? '' : card().querySelector('.log-failure-word').textContent),
         // A Timeline's rows exist while it is open: opened the way the browser does (its `toggle` reaches the list).
         timelineRows: () => {
-            const details = card().querySelector('details');
+            const details = card();
             details.open = true;
             mount.querySelector('#log-entries').dispatchEvent({ type: 'toggle', target: details });
-            return card().querySelector('[data-task-timeline]').querySelectorAll('.log-task-event').length;
+            return card().querySelector('.log-task-timeline').querySelectorAll('.log-task-event').length;
         },
     };
 }
@@ -147,15 +151,16 @@ test('a finished tool call never settles the card: the next heartbeat keeps it l
     await logs.settled;
     logs.push({ type: 'task_started', task_type: 'task', task_text: 'work' });
     logs.push({ type: 'tool_call_finished', tool: 'read_file', is_error: false, ts: '2026-10-15T00:00:01+00:00' });
-    assert.equal(logs.phase(), 'done');
-    assert.equal(logs.headline(), 'read_file finished');
+    assert.equal(logs.failure(), '', 'a call that did not fail is not coloured');
+    assert.equal(logs.headline(), 'Read file finished');
     logs.push({ type: 'task_heartbeat', phase: 'running', runtime_sec: 12, ts: '2026-10-15T00:00:02+00:00' });
-    assert.equal(logs.phase(), 'running');
+    assert.equal(logs.failure(), '');
     assert.equal(logs.headline(), 'Still working');
     logs.push({ type: 'tool_call_finished', tool: 'run_command', is_error: true, ts: '2026-10-15T00:00:03+00:00' });
-    assert.equal(logs.phase(), 'error', 'a tool error is shown while the task runs');
+    assert.equal(logs.failure(), '1 step failed', 'a tool error is shown while the task runs, never as the task Failed');
     logs.push({ type: 'task_heartbeat', phase: 'running', runtime_sec: 15, ts: '2026-10-15T00:00:04+00:00' });
-    assert.equal(logs.headline(), 'Still working', 'and still does not settle the card');
+    assert.equal(logs.failure(), '1 step failed', 'the next heartbeat does not settle the card, and the failure it holds stays said');
+    assert.equal(logs.headline(), 'Run command failed', 'in its own words');
     assert.equal(logs.timelineRows(), 5);
 });
 
@@ -164,37 +169,58 @@ test('a failed task_done settles the headline; a late tool frame stays a timelin
     await logs.settled;
     logs.push({ type: 'task_started', task_type: 'task', task_text: 'work' });
     logs.push({ type: 'task_done', status: 'failed', reason_code: 'tool_failure', ts: '2026-10-15T00:00:01+00:00' });
-    const settled = logs.headline();
-    assert.equal(logs.phase(), 'error');
-    assert.match(settled, /fail/i);
+    assert.equal(logs.failure(), 'Failed', 'a failed task says the outcome\'s word');
+    assert.equal(logs.headline(), '', 'once: its chip is its name, its line repeats nothing');
     logs.push({ type: 'tool_call_finished', tool: 'read_file', is_error: false, ts: '2026-10-15T00:00:02+00:00' });
-    assert.equal(logs.headline(), settled, 'the late done frame does not rewrite the headline');
-    assert.equal(logs.phase(), 'error');
+    assert.deepEqual([logs.headline(), logs.failure()], ['', 'Failed'], 'the late done frame does not rewrite the card');
     logs.push({ type: 'task_heartbeat', phase: 'running', runtime_sec: 20, ts: '2026-10-15T00:00:03+00:00' });
-    assert.equal(logs.headline(), settled, 'nor does a late heartbeat reopen it');
+    assert.deepEqual([logs.headline(), logs.failure()], ['', 'Failed'], 'nor does a late heartbeat reopen it');
     assert.equal(logs.timelineRows(), 4, 'late frames remain in the detail list');
     // A later typed terminal frame may still settle it again (a retry's own outcome).
     logs.push({ type: 'task_done', status: 'completed', ts: '2026-10-15T00:00:04+00:00' });
-    assert.notEqual(logs.headline(), settled);
-    assert.equal(logs.phase(), 'done');
+    assert.deepEqual([logs.headline(), logs.failure()], ['Done', ''], 'its own later outcome takes the failure back');
 });
 
-// A settled headline is the task's outcome and takes the cards' tone (Stopped neutral, Done with warnings green,
-// Failed red); before it settles the headline is the latest event, and a warn-level event keeps its own amber.
-test('a settled headline takes the cards\' outcome tone; a warning before it keeps its level', async (t) => {
+// Only a failure is coloured (Logs, owner 14.11): a settled task says its outcome in words, and only Failed takes the
+// shared failure chip; a warning worth reading before it is its words, never a hue of its own.
+test('a settled task says its outcome in words; only a failed one takes the failure chip', async (t) => {
     const logs = setup(t);
     await logs.settled;
     logs.push({ type: 'task_started', task_type: 'task', task_text: 'work' });
     logs.push({ type: 'task_checkpoint', checkpoint_kind: 'context_fit_low_retry', ts: '2026-10-15T00:00:01+00:00' });
-    assert.equal(logs.phase(), 'warn');
-    assert.equal(logs.tone(), undefined, 'a warning worth reading is no outcome');
-    for (const [second, done, phase, tone] of [
-        [2, { status: 'cancelled' }, 'cancelled', 'neutral'],
-        [3, { status: 'completed', outcome_axes: { execution: { status: 'degraded' } } }, 'warn', 'ok'],
-        [4, { status: 'failed' }, 'error', 'failed'],
-        [5, { status: 'completed' }, 'done', 'ok'],
+    assert.equal(logs.failure(), '', 'a warning is said in its words');
+    for (const [second, done, words, failure] of [
+        [2, { status: 'cancelled' }, 'Stopped', ''],
+        [3, { status: 'completed', outcome_axes: { execution: { status: 'degraded' } } }, 'Done with warnings', ''],
+        [4, { status: 'failed' }, '', 'Failed'],  // said once, by the chip
+        [5, { status: 'completed' }, 'Done', ''],
     ]) {
         logs.push({ type: 'task_done', ...done, ts: `2026-10-15T00:00:0${second}+00:00` });
-        assert.deepEqual([logs.phase(), logs.tone()], [phase, tone], JSON.stringify(done));
+        assert.deepEqual([logs.headline(), logs.failure()], [words, failure], JSON.stringify(done));
     }
+});
+
+// A card that holds a failure says it in the failure's own words whatever the strip shows (owner 14.11 sheets): its
+// error, not its latest step, under All as under Errors, and still after the failure's row leaves the 30 rows the card
+// keeps; nothing apologises for a row the card's words already hold.
+test('a card holding a failure shows the failure\'s own words under every filter, after its row has left the timeline', async (t) => {
+    const logs = setup(t);
+    await logs.settled;
+    logs.push({ type: 'task_started', task_type: 'task', task_text: 'work' });
+    logs.push({ type: 'task_heartbeat', phase: 'running', runtime_sec: 1, ts: '2026-10-15T00:00:01+00:00' });
+    assert.deepEqual([logs.headline(), logs.failure()], ['Still working', ''], 'before a failure: its latest step');
+    logs.push({ type: 'tool_call_finished', tool: 'run_command', is_error: true, result_preview: 'TOOL_ERROR (run_command): exit 2',
+        ts: '2026-10-15T00:00:02+00:00' });
+    const said = ['TOOL_ERROR (run_command): exit 2', '1 step failed'];
+    assert.deepEqual([logs.headline(), logs.failure()], said, 'its error, under All');
+    for (let second = 3; second < 40; second += 1) {
+        logs.push({ type: 'task_heartbeat', phase: 'running', runtime_sec: second, ts: `2026-10-15T00:00:${String(second).padStart(2, '0')}+00:00` });
+    }
+    assert.deepEqual([logs.headline(), logs.failure()], said, 'still, when 37 later steps came after it');
+    assert.equal(logs.timelineRows(), 30, 'the failure\'s row has left the rows the card keeps');
+    assert.doesNotMatch(logs.card().textContent, /older than|is not below/, 'and nothing apologises for it');
+    await logs.choose('errors');
+    assert.deepEqual([logs.headline(), logs.failure()], said, 'the same words under Errors');
+    await logs.choose('');
+    assert.deepEqual([logs.headline(), logs.failure()], said);
 });

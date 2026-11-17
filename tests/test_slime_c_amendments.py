@@ -543,11 +543,36 @@ class TestProjectLastResultPointer:
 
         record_task_finalization(
             "slime", {"id": "task42"},
-            objective="finish the game", kind="done", exec_status="ok",
+            kind="done", exec_status="ok",
             drive_root=tmp_path,
         )
 
         assert get_project(tmp_path, "slime")["last_task_result_id"] == "task42"
+
+    def test_letters_home_row_names_the_task_reader_and_never_copies_the_assignment(self, tmp_path, monkeypatch):
+        """The assignment is the owner's or the mind's words in the room and stays whole in the task result;
+        the journal milestone carries the outcome status and the exact reader, so the tail never repeats it."""
+        import ouroboros.agent_task_pipeline as atp
+        import ouroboros.config as cfg
+        from ouroboros.projects_registry import create_project
+        from ouroboros.tools.project_journal import journal_tail_digest
+
+        monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "data")
+        create_project(tmp_path, "slime", name="Slime")
+        words = "Rewrite the level editor in Rust\n\nKeep the save format byte-compatible with the old files."
+        for tid, status in (("task42", "ok"), ("task43", "failed")):
+            pending: list = []
+            atp._record_project_letters_home(
+                SimpleNamespace(drive_root=tmp_path),
+                {"id": tid, "project_id": "slime", "objective": words, "text": words, "budget_drive_root": str(tmp_path)},
+                {"execution": {"status": status}}, pending)
+            assert [event["type"] for event in pending] == ["project_digest"]
+        tail = journal_tail_digest("slime")
+        for kind, tid, status in (("done", "task42", "ok"), ("blocked", "task43", "failed")):
+            assert (f"{kind}: Task finished ({status}): Rewrite the level editor in Rust. Result: "
+                    f"get_task_result(task_id='{tid}'); assignment: "
+                    f"get_task_result(task_id='{tid}', authority_fields=['objective'])." in tail)
+        assert "save format" not in tail  # the work's name is its first line; the assignment stays in its result
 
     def test_project_room_direct_chat_root_stamps_the_pointer(self, tmp_path, monkeypatch):
         """I29: a project ROOM's direct-chat root writes a durable result carrying

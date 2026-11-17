@@ -643,14 +643,19 @@ def test_the_main_chat_a_finger_and_the_keyboard(direct_server_with_data, monkey
             active = [row for group in sheet["groups"] for row in group["rows"] if row["active"]]
             if [(row["row"], row["cell"]) for row in active] != [(target["row"], "1")]:
                 problems.append(("the active Pin follows the model it pinned", target["row"], active))
-            # Back with the room's sheet open on the desk: the room leaves and takes its sheet with it, nothing stays
-            # over Main.
+            # Back with the room's sheet open on the desk: one Back for every input, a popup first (layers.js; RULING
+            # §1, as on the phone above), so the sheet closes and the room stays; the next Back closes the room and
+            # nothing stays over Main.
             page.evaluate("() => history.back()")
-            page.wait_for_function("() => !document.querySelector('#project-panel-backdrop').classList.contains('open')", timeout=20_000)
             page.wait_for_function("() => !document.querySelector('.ui-popup.model-sheet') && !document.querySelector('.model-sheet-scrim')",
                                    timeout=10_000)
+            page.wait_for_timeout(400)
+            if not page.evaluate("() => document.querySelector('#project-panel-backdrop').classList.contains('open')"):
+                problems.append(("Back closed the sheet over the room, not the room under it", "desk"))
             if page.evaluate(_CAPSULE, capsule)["expanded"] != "false":
                 problems.append(("the room's capsule says its sheet is closed", page.evaluate(_CAPSULE, capsule)))
+            page.evaluate("() => history.back()")
+            page.wait_for_function("() => !document.querySelector('#project-panel-backdrop').classList.contains('open')", timeout=20_000)
             assert not problems, problems
         finally:
             (evidence / f"keys-seen-{engine}.json").write_text(json.dumps(seen, indent=1, default=str), encoding="utf-8")

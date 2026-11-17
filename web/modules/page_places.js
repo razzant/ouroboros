@@ -21,7 +21,14 @@
  *     (another folder, a filtered list) is its page's to place.
  * A page that moves a remembered box itself (`scrollTop`, `scrollTo`, `scroll`, `scrollBy`, `scrollIntoView`: a new
  * circle's form at the top) has moved the place with it, so a repaint in the same moment never undoes that move. */
+import { revealPastFade } from './scroll_fade.js';
+
 export const OWN_PLACE = '.chat-messages, #chat-messages, #page-logs';
+// The row of a section's list that names the page open beside it (Settings' rail, the Dashboard's list): the chosen
+// row, while its shell draws the page's column too. The sheets decide that (the Dashboard's automatic view), and a list
+// that stands alone names nothing.
+const NAMING_ROW = '.section-shell > .section-rail :is([aria-current="page"], [aria-orientation="vertical"] [aria-selected="true"])';
+const drawn = (node) => node?.getClientRects?.().length > 0;
 
 // Whether this engine drops a box's scroll when what it holds is drawn again: the plain case, off screen.
 export function dropsOnRedraw(doc = document) {
@@ -148,6 +155,79 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
     // The room owner releases its boxes at disposal, even when no later page restore occurs.
     restore.forget = (root) => {
         for (const box of places.keys()) if (!box.isConnected || root?.contains(box)) places.delete(box);
+    };
+    // A forward jump starts the visible destination anew; its captured return still owns the old reading place.
+    restore.land = (root) => {
+        for (const box of [root, ...(root?.querySelectorAll('*') || [])]) {
+            if (!box || box.matches(OWN_PLACE) || !box.getClientRects().length) continue;
+            if (!box.scrollTop && !box.scrollLeft) continue;
+            box.scrollTop = box.scrollLeft = 0;
+            remember(box);
+        }
+    };
+    // A return owns a snapshot of the retained place, not a second navigation stack. The room's feed and Logs
+    // still restore through their reading owners. Keep nearby anchors too: a row may disappear while away. A box left
+    // within its fade's depth returns to its top, and a list beside its open page shows the row naming that page.
+    restore.capture = (root, opener) => {
+        const boxes = [root, ...(root?.querySelectorAll('*') || [])].filter((box) => box && !box.matches(OWN_PLACE)
+            && (box.scrollHeight > box.clientHeight || box.scrollWidth > box.clientWidth));
+        const saved = boxes.map((box) => [box, box.scrollTop, box.scrollLeft]);
+        const anchors = [];
+        const popup = opener?.closest?.('[role="dialog"], [role="menu"], .ui-popup');
+        if (popup?.id) anchors.push(...Array.from(doc.querySelectorAll('[aria-controls]'))
+            .filter((node) => node.getAttribute('aria-controls').split(' ').includes(popup.id)));
+        if (opener) anchors.unshift(opener);
+        for (let at = root?.contains(opener) ? opener : null; at && at !== root; at = at.parentElement) {
+            anchors.push(at, at.nextElementSibling, at.previousElementSibling);
+        }
+        // Within its fade's depth the top is the place: a few pixels, left by the owner or by the returned row's own
+        // reveal past the lower fade, would only dim the first row under the upper one.
+        const settle = () => {
+            for (const [box] of saved) {
+                if (!box.isConnected || !(box.scrollTop > 0) || !box.matches('.scroll-fade-y')) continue;
+                const fade = parseFloat(win.getComputedStyle?.(box)?.getPropertyValue?.('--scroll-fade-edge')) || 0;
+                if (box.scrollTop < fade) { box.scrollTop = 0; remember(box); }
+            }
+        };
+        return ({ keyboard = false } = {}) => {
+            for (const [box, top, left] of saved) {
+                if (!box.isConnected) continue;
+                box.scrollTop = top;
+                box.scrollLeft = left;
+                remember(box);
+            }
+            const anchor = anchors.find((el) => el?.isConnected && el.getClientRects().length && !el.closest('[hidden], [inert]')) || root;
+            // A list brings the row that names the page beside it in, past its fade, as the list's own reveal does when
+            // the row is chosen, so a return does not leave the open page unnamed. The pressed row keeps its view: when
+            // both cannot share it, the list stays where it was left.
+            const scrolls = (box) => box.scrollHeight > box.clientHeight && /auto|scroll/.test(win.getComputedStyle?.(box)?.overflowY);
+            for (const row of root?.querySelectorAll?.(NAMING_ROW) || []) {
+                if (!drawn(row) || !drawn(row.closest?.('.section-shell')?.querySelector?.(':scope > .section-pane'))) continue;
+                let box = row.parentElement;
+                while (box && !scrolls(box)) box = box === root ? null : box.parentElement;
+                if (!box) continue;
+                const left = box.scrollTop;
+                revealPastFade(box, row);
+                const shown = box.scrollTop;
+                if (anchor !== root && box.contains?.(anchor)) {
+                    revealPastFade(box, anchor);
+                    if (Math.abs(box.scrollTop - shown) > 1) box.scrollTop = left;  // a row's sub-pixel height is no move
+                }
+                remember(box);
+            }
+            if (!anchor || !anchor.isConnected) { settle(); return; }
+            if (!anchor.matches('button, a, input, select, textarea, [tabindex]')) anchor.tabIndex = -1;
+            anchor.setAttribute?.('data-return-focus', keyboard ? 'keyboard' : 'pointer');
+            const clear = () => {
+                anchor.removeAttribute?.('data-return-focus');
+                anchor.removeEventListener?.('blur', clear);
+                anchor.removeEventListener?.('keydown', clear);
+            };
+            anchor.addEventListener?.('blur', clear);
+            anchor.addEventListener?.('keydown', clear);
+            anchor.focus?.({ preventScroll: true });
+            settle();
+        };
     };
     return restore;
 }

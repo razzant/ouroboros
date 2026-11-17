@@ -1546,7 +1546,7 @@
 /**
  * The update description in `/api/update/status` and `/api/update/check`, written by Ouroboros as ordinary
  * work (an owner request from Updates, or its own initiative) and never by a check. The additive `letter` is
- * absent/null without a stored record, or with neither a description, an offered range nor a request.
+ * absent/null without a stored record, or with neither a description, a checked or retained range nor a request.
  * It outlives its update; `relation` compares startup source to the description's own range so the panel can
  * relabel it instead of deleting it.
  *

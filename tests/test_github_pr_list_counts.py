@@ -116,13 +116,14 @@ def test_the_count_read_follows_the_returned_url_not_ambient_targets(tmp_path, g
 
     assert [i["commits"] for i in _items(text)] == [2, 5], text
     (list_argv, list_kw), (count_argv, count_kw) = gh.calls
-    assert list_kw["cwd"] == str(expected_cwd) and "--repo" not in list_argv
+    scratch = ctx.task_drive_root() if repo else None  # A read naming its repository needs no checkout.
+    assert list_kw["cwd"] == str(scratch or expected_cwd) and "--repo" not in list_argv
     # One destination either way: an explicit repository's, or the one resolved for the selected repository.
     assert list_argv[3].startswith("repos/owner/selected/pulls?") and list_argv[-2:] == ["--hostname", "github.example"]
     assert ("GH_REPO" in list_kw["env"]) is (kind == "system")
-    # The generic transport: host from GitHub's own URL, never --repo, GH_REPO or GH_HOST;
-    # it runs in the host's own repository directory (ctx.repo_dir).
-    assert count_argv == COUNT_ARGV and count_kw["cwd"] == str(ctx.repo_dir)
+    # The generic transport: host from GitHub's own URL, never --repo, GH_REPO or GH_HOST; it runs in the host's
+    # own repository directory (ctx.repo_dir), or, for a read naming its repository, in the task's own task_drive.
+    assert count_argv == COUNT_ARGV and count_kw["cwd"] == str(scratch or ctx.repo_dir)
     assert count_kw["env"]["GH_TOKEN"] == list_kw["env"]["GH_TOKEN"] == "fixture-token"
 
 
@@ -130,17 +131,25 @@ def test_an_unusable_host_repository_directory_is_a_visible_count_error(tmp_path
     ctx, _cwd = _context(tmp_path, "queued")
     ctx.repo_dir = tmp_path / "missing-system"
     gh.rows = _rows(1)
+    counted = []
 
     def run(argv, **kwargs):  # the real launcher refuses the missing cwd before gh could start
         if argv[2] == "graphql":
-            assert kwargs["cwd"] == str(ctx.repo_dir)
-            return _REAL_RUN(argv, **kwargs)
+            counted.append(kwargs["cwd"])
+            if kwargs["cwd"] == str(ctx.repo_dir):
+                return _REAL_RUN(argv, **kwargs)
+            return SimpleNamespace(returncode=0, stdout=json.dumps(_answer(_nodes(gh.rows, [3]))), stderr="")
         return SimpleNamespace(returncode=0, stdout=VIEW if argv[1:3] == ["repo", "view"] else json.dumps(gh.rows), stderr="")
 
     monkeypatch.setattr(subprocess, "run", run)
     text = _list(ctx)
 
     assert text.startswith("⚠️ GH_ERROR") and "PR 0" not in text, text
+    # A read naming its repository counts in the task's own task_drive: the missing directory is never its cwd.
+    entry = next(item for item in github.get_tools() if item.name == "github_read")
+    named = entry.handler(ctx, method="list", kind="pr", repo="github.example/owner/selected")
+    assert [i["commits"] for i in _items(named)] == [3], named
+    assert counted == [str(ctx.repo_dir), str(ctx.task_drive_root())]
 
 
 def _malformed(rows):

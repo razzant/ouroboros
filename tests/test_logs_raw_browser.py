@@ -134,7 +134,7 @@ def test_raw_byte_pages_stay_bounded_and_full_download_keeps_exact_bytes(raw_ser
                     assert query["limit"] == ["65536"]
                     offset = int(query["offset"][0]); offsets.append(offset)
             page.on("request", requested)
-            page.get_by_role("button", name="Raw", exact=True).click()
+            page.locator(".log-entry:not(.log-task-card) > summary").click()
             status = page.locator(".log-raw-status")
             expect(status).to_contain_text("Source SHA-256")
             page.screenshot(path=str(evidence / f"raw-page-{engine}.png"))
@@ -176,14 +176,15 @@ def test_raw_refusals_identity_and_cancelled_continuations_never_substitute_rows
             }''')
             raw = page.locator(".log-raw")
             status = page.locator(".log-raw-status")
+            record = page.locator('.log-entry[data-category="system"]:not(.log-task-card) > summary')
             for code, reason in [(404, "log_source_unavailable"), (409, "log_source_changed"), (416, "raw_range_invalid"), (503, "log_source_unavailable")]:
-                page.get_by_role("button", name="Raw", exact=True).click()
+                record.click()
                 page.wait_for_function("() => gates.length === 1")
                 page.evaluate("answer", {"status": code, "body": {"error": "Exact source refused", "reason_code": reason}})
                 expect(status).to_contain_text(f"HTTP {code}, {reason}")
                 assert raw.inner_text() == ""
-                page.get_by_role("button", name="Hide raw").click()
-            page.get_by_role("button", name="Raw", exact=True).click()
+                record.click()
+            record.click()
             page.wait_for_function("() => gates.length === 1")
             page.evaluate("answer", {"status": 200, "body": _chunk(payload, 0)})
             expect(status).to_contain_text("Source SHA-256")
@@ -202,31 +203,34 @@ def test_raw_refusals_identity_and_cancelled_continuations_never_substitute_rows
             assert raw.inner_text() == first
             page.get_by_role("button", name="Retry", exact=True).click()
             page.wait_for_function("() => gates.length === 1")
-            page.get_by_role("button", name="Hide raw").click()
-            assert page.evaluate("() => gates[0].signal.aborted")
+            record.click()  # the record folds on its own toggle event, which a browser fires after the press
+            page.wait_for_function("() => gates[0].signal.aborted")
             page.evaluate("answer", {"status": 200, "body": _chunk(payload, 65536)})
             assert raw.inner_text() == ""
-            page.get_by_role("button", name="Raw", exact=True).click()
+            # Logs' chips name a kind with its count ("Tools 1") and hide a kind with nothing held, so a Tools row
+            # gives the open record a chip that hides it: choosing it cancels the read, All brings it back to read.
+            page.evaluate("emit", {"type": "tool_call", "tool": "query_data", "ts": "2026-11-04T01:00:01Z"})
+            record.click()
             page.wait_for_function("() => gates.length === 1")
-            page.get_by_role("button", name="System", exact=True).click()
+            page.locator('#log-filters [data-log-kind="tools"]').click()
             assert page.evaluate("() => gates[0].signal.aborted")
             page.evaluate("answer", {"status": 200, "body": _chunk(payload, 0)})
-            page.get_by_role("button", name="System", exact=True).click()
+            page.locator('#log-filters [data-log-kind=""]').click()
             page.wait_for_function("() => gates.length === 1")
-            page.get_by_role("button", name="Clear", exact=True).click()
+            page.locator("#btn-clear-logs").click()
             assert page.evaluate("() => gates[0].signal.aborted")
             page.evaluate("answer", {"status": 200, "body": _chunk(payload, 0)})
             assert page.locator(".log-entry").count() == 0
             page.evaluate("emit", {**row, "type": "task_started", "task_id": "collapse"})
-            page.locator("summary").click()
-            page.get_by_role("button", name="Raw", exact=True).click()
+            page.locator(".log-task-card > summary").click()
+            page.locator(".log-task-event summary").click()
             page.wait_for_function("() => gates.length === 1")
-            page.locator("summary").click()
+            page.locator(".log-task-card > summary").click()
             page.wait_for_function("() => gates[0].signal.aborted")
             page.evaluate("answer", {"status": 200, "body": _chunk(payload, 0)})
             assert page.locator(".log-task-event").count() == 0
             page.evaluate("emit", {**row, "type": "trim_raw"})
-            page.get_by_role("button", name="Raw", exact=True).click()
+            record.click()
             page.wait_for_function("() => gates.length === 1")
             page.evaluate("() => {for (let i=0;i<501;i++) emit({type:'trim_'+i, ts:'2026-11-04T03:00:00Z'});}")
             assert page.evaluate("() => gates[0].signal.aborted")
@@ -252,8 +256,8 @@ def test_large_received_raw_uses_worker_and_repeat_keeps_selected_text(raw_serve
                     terminate() { if (!this.ended) {this.ended=true; workerCount--;} super.terminate();} };
                 emit({type:'worker_sha_verify', is_progress:true, task_id:'large', ts:'2026-11-04T01:00:00Z', payload:'x'.repeat(17500000), sentinel:'RECEIVED-END'});
             }''')
-            page.locator("summary").click()
-            elapsed = page.locator(".log-raw-toggle").evaluate("b => {const at=performance.now(); b.click(); return performance.now()-at;}")
+            page.locator(".log-task-card > summary").click()
+            elapsed = page.locator(".log-task-event summary").evaluate("b => {const at=performance.now(); b.click(); return performance.now()-at;}")
             expect(page.locator(".log-raw-status")).to_contain_text("Received event")
             assert page.evaluate("workerCount") == 0
             assert len(page.locator(".log-raw").inner_text()) <= 65536
@@ -263,14 +267,14 @@ def test_large_received_raw_uses_worker_and_repeat_keeps_selected_text(raw_serve
             pending.value.save_as(path)
             data = json.loads(path.read_bytes())
             assert len(data["payload"]) == 17500000 and data["sentinel"] == "RECEIVED-END"
-            selected = page.locator(".log-task-event .log-headline").evaluate('''node => {
+            selected = page.locator(".log-task-event .log-words").evaluate('''node => {
                 window.keptHeadline = node.firstChild;
                 const range=document.createRange(); range.selectNodeContents(node);
                 getSelection().removeAllRanges(); getSelection().addRange(range); return getSelection().toString();
             }''')
             page.evaluate("() => emit({type:'worker_sha_verify', is_progress:true, task_id:'large', ts:'2026-11-04T01:00:01Z'})")
             assert page.evaluate("() => getSelection().toString()") == selected
-            assert page.locator(".log-task-event .log-headline").evaluate("n => n.firstChild === keptHeadline")
+            assert page.locator(".log-task-event .log-words").evaluate("n => n.firstChild === keptHeadline")
             expect(page.locator(".log-raw-status")).to_contain_text("entry changed")
             page.screenshot(path=str(evidence / f"raw-repeat-{engine}.png"))
             (evidence / f"received-raw-{engine}.json").write_text(json.dumps({"contract_stub": True,
@@ -297,7 +301,7 @@ def test_raw_desktop_bytes_bridge_verifies_download_and_cancels_late_save(raw_se
                     download_file_to_downloads:()=>{throw Error('Raw URL must not enter the old launcher allowlist');}}};
                 (await import('/static/modules/ui_helpers.js')).installDesktopShellLinkInterceptor();
             }""")
-            page.get_by_role("button", name="Raw", exact=True).click()
+            page.locator(".log-entry:not(.log-task-card) > summary").click()
             expect(page.locator(".log-raw-status")).to_contain_text("Source SHA-256")
             page.get_by_role("link", name="Download full").click()
             expect(page.locator(".log-raw-status")).to_have_text("Full Raw saved.")
@@ -342,7 +346,7 @@ def test_backfill_keeps_an_open_timeline_in_time_order_and_discloses_skipped_rec
             page, _calls = _mount(browser, raw_server.url)
             page.evaluate("row => emit(row)", row(30, "third_tool"))
             card = page.locator('[data-task-group="ordered"]')
-            card.locator("summary").click()
+            card.locator(":scope > summary").click()
             card.locator(".log-task-event").first.evaluate("node => { window.thirdRow = node; }")
 
             def history(route):
@@ -356,11 +360,11 @@ def test_backfill_keeps_an_open_timeline_in_time_order_and_discloses_skipped_rec
             page.evaluate("() => reopen()")
             status = page.locator(".logs-history-status")
             expect(status).to_have_text("Damaged records skipped in the recent history read: events 1 (malformed line).")
-            headlines = card.locator(".log-task-event .log-headline")
-            expect(headlines).to_have_text(["first_tool finished", "second_tool finished", "third_tool finished"])
+            headlines = card.locator(".log-task-event .log-name")
+            expect(headlines).to_have_text(["First tool finished", "Second tool finished", "Third tool finished"])
             assert card.locator(".log-task-event").nth(2).evaluate("node => node === window.thirdRow"), "the shown row keeps its node"
             note = page.locator(".log-entry:not(.log-task-card) [data-log-omitted]")
-            expect(note).to_have_text("Left out of this view: error. Raw reads the whole row.")
+            expect(note).to_have_text("Left out of this view: error. The record below reads the whole row.")
             page.screenshot(path=str(evidence / f"logs-order-gaps-omitted-{engine}.png"), full_page=True)
         finally:
             browser.close()

@@ -101,15 +101,29 @@ def test_mains_count_and_read_follow_one_predicate():
 SECTION_PAGE_ALONE = "@container sectionplace (max-width: calc(40rem - 0.02px)) {"
 
 
+def test_layers_is_the_only_browser_history_entry_writer():
+    modules = {path.name: path.read_text(encoding='utf8') for path in (REPO / 'web/modules').glob('*.js')}
+    assert sorted(name for name, source in modules.items() if re.search(r'\bhistory\.pushState\(', source)) == ['layers.js']
+    replacements = sorted(name for name, source in modules.items() if re.search(r'\bhistory\.replaceState\(', source))
+    assert replacements == ['layers.js', 'read_ahead.js']
+    # The residual observer-mode handoff only consumes its boot parameter, preserving the current sentinel state.
+    assert "history.replaceState(history.state, '', address)" in modules['read_ahead.js']
+    assert not re.search(r'\bhistory\.(?:pushState|back|go)\(', modules['read_ahead.js'])
+    assert not re.search(r'\bhistory\.(?:pushState|replaceState)\(', _read('web/app.js'))
+
+
 def _block(css: str, head: str) -> str:
-    """The body of the one block that starts with `head` (balanced braces)."""
-    assert css.count(head) == 1, (head, css.count(head))
-    start = css.index(head) + len(head)
-    depth, pos = 1, start
-    while depth and pos < len(css):
-        depth += {"{": 1, "}": -1}.get(css[pos], 0)
-        pos += 1
-    return css[start:pos - 1]
+    """Bodies governed by this query, including rules beside their component (balanced braces)."""
+    assert head in css, head
+    bodies, end = [], 0
+    while (index := css.find(head, end)) >= 0:
+        start = index + len(head)
+        depth, end = 1, start
+        while depth and end < len(css):
+            depth += {"{": 1, "}": -1}.get(css[end], 0)
+            end += 1
+        bodies.append(css[start:end - 1])
+    return "\n".join(bodies)
 
 
 def test_folded_rings_leave_each_others_touch_reach():
@@ -127,11 +141,19 @@ def test_folded_rings_leave_each_others_touch_reach():
     assert "width: calc(var(--composer-glyph-gap) - 6px);" in lead
 
 
-def test_logs_use_the_space_below_clear_for_the_long_filter_word():
+def test_logs_long_filter_word_never_crowds_its_neighbours_or_clear():
+    """The longest filter (Consciousness, wider in some system faces) widens no neighbour and never pushes Clear: the
+    filters are one sideways rail that scrolls beside a Clear that never shrinks, and on a page alone the rail takes
+    its own full row under Clear. (This guard once read the two-row chip grid the band's rail replaced.)"""
     css = _read("web/style.css")
-    logs = _block(css, "@container dashboard (max-width: 27.75rem) {")
-    assert "grid-column: 4; grid-row: 1;" in _block(logs, ".logs-filters > .logs-inline-clear {")
-    assert "grid-column: 3 / -1;" in _block(logs, ".logs-filters > .filter-chip:nth-child(6) {")
+    assert "flex: none;" in _block(css, ".logs-clear-list {")
+    assert "flex: 1;" in _block(css, ".logs-kinds {")
+    strip = _block(css, ".app-tab-strip {")
+    assert "flex-wrap: nowrap;" in strip and "overflow-x: auto;" in strip and "min-width: 0;" in strip
+    assert 'class="logs-kinds app-tab-strip"' in _read("web/modules/logs.js")
+    alone = _block(css, SECTION_PAGE_ALONE)
+    assert 'html[data-layout="stack"] #page-dashboard .logs-kinds { grid-area: 2 / 1 / auto / -1;' in alone
+    assert 'html[data-layout="stack"] #page-dashboard .logs-clear-list { grid-area: 1 / 3; }' in alone
 
 
 def test_an_automatic_section_page_keeps_its_list_when_the_container_narrows_before_javascript():
@@ -146,22 +168,23 @@ def test_an_automatic_section_page_keeps_its_list_when_the_container_narrows_bef
 
 
 def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_list():
-    """In the stack layout a section's page is one row, Back and its name, where the places control stood. From 40rem
-    a section holds its list beside the page and the first-level page has no Back: there the places control is the
-    only way to another destination. So the rule that hides it lives inside the query that is true only below 40rem
-    (the complement of the two-pane query) and nowhere else: outside it a person at 640 to 719 px is shut in."""
+    """A level's Back replaces the picture only when its page replaced the list. A jump independently owes a
+    return in either layout; its writer marks the header, so its single capsule also replaces the picture."""
     for rel, page in (("web/style.css", "#page-dashboard"), ("web/settings.css", "#page-settings")):
         css = _read(rel)
         hide = f'html[data-layout="stack"] {page}[data-section-view="page"] > .app-page-header > .app-page-leading'
         inside = _block(css, SECTION_PAGE_ALONE)
         assert hide in inside, f"{rel}: a page that replaced the list keeps one leading control, its Back"
-        assert hide not in css.replace(inside, ""), f"{rel}: outside the below-40rem query this hides the places control beside the list"
+        assert css.count(hide) == inside.count(hide), f"{rel}: the level rule belongs below 40rem"
+    css = _read("web/style.css")
+    assert 'html[data-layout="stack"] .app-page-header[data-return] > .app-page-leading { display: none; }' in css
     assert "@container sectionplace (min-width: 40rem) {" in _read("web/ui.css"), "the two panes start where the query above ends"
 
 
-def test_a_touch_window_names_a_sections_two_columns_in_its_one_header_row():
+def test_a_touch_window_keeps_a_sections_two_columns_in_one_header_row_and_an_empty_lead_draws_nothing():
     """DESIGN:3293,3345,3468: two panes from 40rem still have one header row. Places takes room from the rail's lead;
-    Search stays over the list and the page's name over its cards. The section name remains available to readers."""
+    the section name remains available to readers. Empty captions cannot keep a second row alive; Settings puts
+    Search in its list, with its one round Back and level in the header when owed."""
     two = _block(_read("web/ui.css"), "@container sectionplace (min-width: 40rem) {")
     header = 'html[data-layout="stack"] .section-place > .app-page-header'
     assert f'{header} {{ grid-template-areas: "leading lead lead"; }}' in two
@@ -174,3 +197,14 @@ def test_a_touch_window_names_a_sections_two_columns_in_its_one_header_row():
     assert ("grid-template-columns: calc(var(--section-rail-w) - var(--section-rail-end) - var(--space-3) - 44px - var(--space-2)) minmax(0, 1fr);") in lead
     assert '"leading title toolbar" "lead lead lead"' not in _read("web/settings.css")
     assert "padding: var(--chrome-inset) var(--space-3);" in _read("web/style.css"), "the stack header's inset the lead counts"
+    css = _read('web/style.css')
+    for selector in ['html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {',
+                     'html[data-layout="stack"] #page-settings > .app-page-header:not([data-return]) .app-page-lead {']:
+        hidden = _block(css, selector)
+        assert 'display: none' not in hidden and 'visibility: hidden' not in hidden
+        assert 'position: absolute;' in hidden and 'clip-path: inset(50%);' in hidden, 'the heading remains accessible'
+    dashboard = _block(_block(css, ".dashboard-row-mark[hidden] { display: none; }\n@container sectionplace (min-width: 40rem) {"),
+                       'html[data-layout="stack"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) .app-page-lead {')
+    assert 'display: none' not in dashboard and 'position: absolute;' in dashboard and 'clip-path: inset(50%);' in dashboard, \
+        "an empty two-pane band keeps the page's heading for readers"
+    assert '#page-settings > .app-page-header .app-page-lead { display: flex;' in _read('web/settings.css')

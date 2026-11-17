@@ -128,7 +128,7 @@ def test_a_repaint_keeps_every_scrolled_box_where_the_owner_left_it(gate_ui, tmp
                 tab = 'page'
                 if tabs:
                     if name == 'dashboard' and not tabs[index].is_visible():
-                        page.locator('#page-dashboard [data-dashboard-list-back]').click()
+                        page.locator('#page-dashboard [data-shell-back]').click()
                         rest(page)
                     tabs[index].click()
                     tab = tabs[index].get_attribute('data-dashboard-tab') if name == 'dashboard' else tabs[index].inner_text().strip()
@@ -201,7 +201,7 @@ def test_files_draws_the_same_folder_in_place_and_reads_another_from_its_first_r
         page.goto(gate_ui['url'] + '/')
         page.wait_for_selector('#chat-input', state='attached')
         open_nav(page, 'files')
-        box = page.locator('#files-list')
+        box = page.locator('#page-files .files-sidebar')  # the filter and the list scroll as one (DESIGN "Page header")
         box.locator('.files-entry').nth(59).wait_for(state='attached')
         box.evaluate('box => { box.scrollTop = 300; }')
         rest(page)

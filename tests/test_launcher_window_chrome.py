@@ -38,6 +38,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DOC_A = 1_791_100_000_000.25
 DOC_B = DOC_A + 5_250.5  # the next document of the same window
 TITLE_BAR, TOOLBAR_BAND = 28.0, 52.0  # the stand-in AppKit's bar heights (a native run measures real ones)
+WINDOW_NUMBER = 42  # the stand-in window's number; another window's presses carry another
 
 
 class Hook:
@@ -158,6 +159,9 @@ class NSWindow:
         self.buttons = [Button(self.fill if fill_holds_buttons else View(), x, self.title_bar) for x in (19, 39, 59)]
         self.fail_on = None
         self._delegate = PywebviewDelegate()
+
+    def windowNumber(self):
+        return WINDOW_NUMBER
 
     def delegate(self):
         return self._delegate
@@ -329,8 +333,8 @@ class MainThread:
 @pytest.fixture
 def mac(monkeypatch):
     """The macOS path with AppKit, WebKit, Foundation, PyObjC's AppHelper and pywebview's window list replaced."""
-    state = types.SimpleNamespace(observers={}, removed=[], event=None, webview=WebView(), defaults={},
-                                  main=MainThread(), pywebview=types.ModuleType("webview"))
+    state = types.SimpleNamespace(observers={}, removed=[], webview=WebView(), defaults={}, main=MainThread(),
+                                  pywebview=types.ModuleType("webview"), monitors=[], buttons=0)
     state.pywebview.windows = []
     monkeypatch.setattr(wc, "_MACOS", True)
     monkeypatch.setattr(wc, "_WINDOWS", False)  # a Windows runner: the fit's own before_show is test_on_windows_...
@@ -403,9 +407,13 @@ def mac(monkeypatch):
     appkit.NSNotificationCenter = types.SimpleNamespace(defaultCenter=lambda: center)
     # A value no hand-typed number equals: the style must be the binding's own name.
     appkit.NSWindowToolbarStyleUnified = ("toolbar-style", "NSWindowToolbarStyleUnified")
-    # No setAppearance_ on the application: a global override would raise here.
-    appkit.NSApplication = types.SimpleNamespace(
-        sharedApplication=lambda: types.SimpleNamespace(currentEvent=lambda: state.event))
+    # No setAppearance_ on the application: a global override would raise here. No currentEvent either: a band
+    # report acts on the mouse-down the local monitor kept, never on whatever AppKit dequeued after it.
+    appkit.NSApplication = types.SimpleNamespace(sharedApplication=lambda: types.SimpleNamespace())
+    appkit.NSEventMaskLeftMouseDown = 1 << 40  # no hand-typed AppKit number equals it: the binding's own name
+    appkit.NSEvent = types.SimpleNamespace(pressedMouseButtons=lambda: state.buttons,
+                                           addLocalMonitorForEventsMatchingMask_handler_=lambda mask, handler: (
+                                               state.monitors.append((mask, handler)) or ("monitor", mask)))
     appkit.NSAppearance = types.SimpleNamespace(appearanceNamed_=lambda name: ("appearance", name))
     appkit.NSAppearanceNameAqua, appkit.NSAppearanceNameDarkAqua = "Aqua", "DarkAqua"
     pyobjc_tools = types.ModuleType("PyObjCTools")
@@ -526,10 +534,10 @@ def test_an_older_documents_late_messages_never_undo_a_newer_one(mac):
     declare(chrome, DOC_B)
     declare(chrome, DOC_A, integrated=False, choice="light")
     chrome.receive({"type": "appearance", "doc": DOC_A, "choice": "dark", "theme": "dark"})
-    mac.event = types.SimpleNamespace(type=lambda: wc._LEFT_MOUSE_DOWN)
+    held = pressed(mac, press(native))
     chrome.receive({"type": "drag", "doc": DOC_A})
     assert native.mask & wc._FULL_SIZE_CONTENT and native.appearances == []
-    assert ("drag", mac.event) not in native.calls
+    assert ("drag", held) not in native.calls
     for malformed in ({"type": "declare"}, {"type": "declare", "doc": "nan"}, "not a message"):
         chrome.receive(malformed)
     assert native.mask & wc._FULL_SIZE_CONTENT
@@ -602,28 +610,63 @@ def test_a_fill_that_does_not_hold_the_traffic_lights_is_never_cleared(mac):
     assert native.appearances == [("appearance", "DarkAqua")], "the palette still follows the page"
 
 
-def test_a_press_drags_with_appkits_own_window_drag_only_while_it_is_live(mac):
+def press(native, clicks=1, above=10.0, window=WINDOW_NUMBER):
+    """A left mouse-down as AppKit dispatches it, ``above`` points over the content layout rect's top (the band)."""
+    edge = native.contentLayoutRect().origin.y + native.contentLayoutRect().size.height
+    return types.SimpleNamespace(clickCount=lambda: clicks, windowNumber=lambda: window,
+                                 locationInWindow=lambda: types.SimpleNamespace(x=300.0, y=edge + above))
+
+
+def pressed(mac, event, held=True):
+    """AppKit dispatches ``event`` through every local monitor; the left button stays down while ``held``."""
+    for _mask, monitor in mac.monitors:
+        assert monitor(event) is event, "a monitored event goes on unchanged"
+    mac.buttons = 1 if held else 0
+    return event
+
+
+def test_a_band_press_drags_from_the_kept_mouse_down_while_the_button_is_down(mac):
+    """The page reports a press after it happened, when a Force Touch trackpad's pressure events (owner's probe
+    17.11) or a move are AppKit's current event: the mouse-down the local monitor kept is the one that drags."""
     chrome, _window, native = shown()
-    press = types.SimpleNamespace(type=lambda: wc._LEFT_MOUSE_DOWN)
-    mac.event = press
+    assert mac.monitors == [(mac.appkit.NSEventMaskLeftMouseDown, chrome._keep)]
+    held = pressed(mac, press(native))
     chrome.receive({"type": "drag", "doc": DOC_A})  # no document has declared: not the window's page
     declare(chrome, DOC_A, integrated=False)
+    held = pressed(mac, press(native))  # in the ordinary bar's own band: the guard that refuses is the bar's
     chrome.receive({"type": "drag", "doc": DOC_A})
-    assert ("drag", press) not in native.calls, "an ordinary title bar drags itself"
+    assert ("drag", held) not in native.calls, "an ordinary title bar drags itself"
     declare(chrome, DOC_B)
+    assert len(mac.monitors) == 1, "documents come and go, the monitor stays"
+    held = pressed(mac, press(native))
     chrome.receive({"type": "drag", "doc": DOC_B})
-    assert native.calls[-1] == ("drag", press)
-    mac.event = types.SimpleNamespace(type=lambda: 2)  # the button is already up
+    assert native.calls[-1] == ("drag", held)
+    mac.buttons = 0  # released before the report came: nothing is left to drag
     chrome.receive({"type": "drag", "doc": DOC_B})
-    assert native.calls[-1] == ("drag", press)
-    mac.event = press
+    for late in (press(native, window=WINDOW_NUMBER + 1), press(native, above=0.0), press(native, above=-10.0)):
+        pressed(mac, late)  # another window's newer press (first: the kept band press is still this window's), or
+        chrome.receive({"type": "drag", "doc": DOC_B})  # one on the band's edge or under it, the page's content
+    assert native.calls.count(("drag", held)) == 1 and native.calls[-1] == ("drag", held)
     mac.observers["NSWindowWillEnterFullScreenNotification"](None)
+    held = pressed(mac, press(native))  # built after the switch: only the full-screen guard refuses it
     chrome.receive({"type": "drag", "doc": DOC_B})
-    assert native.calls.count(("drag", press)) == 1
+    assert ("drag", held) not in native.calls
 
 
-def press(kind=wc._LEFT_MOUSE_DOWN, clicks=1):
-    return types.SimpleNamespace(type=lambda: kind, clickCount=lambda: clicks)
+@pytest.mark.parametrize("answer", ["raises", "nothing"])
+def test_a_refused_press_monitor_keeps_the_ordinary_bar(mac, answer):
+    """A transparent bar the band cannot drag is never offered: no monitor (AppKit's answer is nullable), no
+    integration."""
+    def refuse(mask, handler):
+        if answer == "raises":
+            raise RuntimeError("no monitor")
+        return None
+
+    mac.appkit.NSEvent.addLocalMonitorForEventsMatchingMask_handler_ = refuse
+    chrome, _window, native = shown()
+    declare(chrome, DOC_A)
+    assert_ordinary(native)
+    assert chrome._native is None and mac.webview.evaluated == []
 
 
 @pytest.mark.parametrize("setting, action", [
@@ -641,7 +684,7 @@ def test_a_double_click_in_the_band_does_what_the_macs_title_bar_setting_says(ma
     if setting is not None:
         mac.defaults["AppleActionOnDoubleClick"] = setting
     before = len(native.calls)
-    mac.event = press(clicks=2)
+    pressed(mac, press(native, clicks=2))
     chrome.receive({"type": "double-click", "doc": DOC_A})
     assert native.calls[before:] == ([action] if action else [])
     assert native.title_bar.presses == [], "a press handed to the title bar view comes back to the page"
@@ -651,7 +694,7 @@ def test_missing_native_fill_never_substitutes_zoom(mac, caplog):
     chrome, _window, native = shown()
     declare(chrome, DOC_A)
     mac.defaults[wc._DOUBLE_CLICK_SETTING] = "Fill"
-    mac.event = press(clicks=2)
+    pressed(mac, press(native, clicks=2))
     native.respondsToSelector_ = lambda selector: False
     before = list(native.calls)
     with caplog.at_level("INFO", logger="launcher.window_chrome"):
@@ -661,29 +704,38 @@ def test_missing_native_fill_never_substitutes_zoom(mac, caplog):
     assert native.title_bar.presses == []
 
 
-def test_only_a_live_double_click_of_an_integrated_window_acts_once(mac):
+def test_a_double_click_needs_the_second_band_press_of_this_integrated_window(mac):
     chrome, _window, native = shown()
-    mac.event = press(clicks=2)
-    chrome.receive({"type": "double-click", "doc": DOC_A})  # no document has declared
     declare(chrome, DOC_A)
-    for gone in (press(clicks=1), press(clicks=3), press(kind=wc._LEFT_MOUSE_DRAGGED, clicks=2),
-                 press(kind=5, clicks=0), None):
-        mac.event = gone  # a single press, a triple, a drag, a later mouse move, no event: no double-click
+    before = list(native.calls)
+    for kind in ("drag", "double-click"):
+        chrome.receive({"type": kind, "doc": DOC_A})  # no press kept yet: nothing to act on
+    assert native.calls == before
+    for gone in (press(native, clicks=1), press(native, clicks=3), press(native, clicks=2, above=-10.0),
+                 press(native, clicks=2, window=WINDOW_NUMBER + 1)):
+        pressed(mac, gone)  # a single press, a triple, a double-click under the band or in another window
         chrome.receive({"type": "double-click", "doc": DOC_A})
     assert "zoom" not in native.calls
-    mac.event = press(kind=wc._LEFT_MOUSE_UP, clicks=2)  # the message came after the release
+    pressed(mac, press(native, clicks=2), held=False)  # the report came after the release
     chrome.receive({"type": "double-click", "doc": DOC_A})
     assert native.calls.count("zoom") == 1
+    pressed(mac, press(native), held=False)  # a first click whose report comes late, after the second press
+    pressed(mac, press(native, clicks=2))
+    for kind in ("drag", "double-click"):  # acting on a press does not use it up: the second press still zooms
+        chrome.receive({"type": kind, "doc": DOC_A})
+    assert native.calls[-1] == "zoom"
     mac.defaults["AppleActionOnDoubleClick"] = "Minimize"  # changed in System Settings meanwhile
-    mac.event = press(clicks=2)
+    pressed(mac, press(native, clicks=2))
     chrome.receive({"type": "double-click", "doc": DOC_A})
     assert native.calls[-1] == "miniaturize"
     mac.observers["NSWindowWillEnterFullScreenNotification"](None)
+    pressed(mac, press(native, clicks=2))
     chrome.receive({"type": "double-click", "doc": DOC_A})
     declare(chrome, DOC_B, integrated=False)
     leave_full_screen(mac, native)
+    pressed(mac, press(native, clicks=2))
     chrome.receive({"type": "double-click", "doc": DOC_B})  # the ordinary bar handles its own clicks
-    assert (native.calls.count("zoom"), native.calls.count("miniaturize")) == (1, 1)
+    assert (native.calls.count("zoom"), native.calls.count("miniaturize")) == (2, 1)
     assert native.title_bar.presses == []
 
 
@@ -1257,9 +1309,9 @@ def test_a_failed_entry_restores_the_windowed_title_bar_and_the_waiting_handoff_
     native.delegate().windowDidFailToEnterFullScreen_(native)
     assert chrome._phase == "windowed" and native.toolbar().visible
     assert mac.webview.evaluated[-1]["top"] == TOOLBAR_BAND, "the band is reserved again"
-    mac.event = press()
+    held = pressed(mac, press(native))
     chrome.receive({"type": "drag", "doc": DOC_A})
-    assert native.calls[-1] == ("drag", mac.event), "the title bar drags again"
+    assert native.calls[-1] == ("drag", held), "the title bar drags again"
     mac.main.run()
     assert seen == [True] and released(worker, outcome) == {"ran": True}
     assert "toggle full screen" not in native.calls

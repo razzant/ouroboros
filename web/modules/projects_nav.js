@@ -189,6 +189,8 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
     const input = document.createElement('input');
     input.type = 'search';
     input.className = 'ui-control nav-find-input';
+    input.addEventListener('focus', () => find.setAttribute('data-focused', ''));
+    input.addEventListener('blur', () => find.removeAttribute('data-focused'));
     input.placeholder = 'Find a project';
     input.setAttribute('aria-label', 'Find a project by name');
     input.setAttribute('aria-controls', list.id);
@@ -385,6 +387,8 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
                 kebab.className = 'nav-project-kebab';
                 kebab.innerHTML = SHELL_ICONS.more;  // the shell's one ⋯ (page_icons.js)
                 kebab.title = tr('project.kebab_title', 'Project actions');
+                kebab.addEventListener('focus', () => kebab.setAttribute('data-focused', ''));
+                kebab.addEventListener('blur', () => kebab.removeAttribute('data-focused'));
                 kebab.addEventListener('click', (event) => {
                     event.stopPropagation();
                     openMenu(item, { anchor: kebab });

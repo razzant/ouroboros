@@ -74,7 +74,7 @@ export function renderPageHeader({
             <div class="app-page-title-block">
                 <div class="app-page-title-row">
                     <h2 class="app-page-title"${id}>${escapeHtml(words)}</h2>
-                </div>${named || leadHtml ? `<div class="app-page-back" data-page-back></div><div class="app-page-lead">${leadHtml}</div>` : ''}
+                </div>${!leadHtml ? '<span class="app-page-return" data-page-return></span>' : ''}${named || leadHtml ? `<div class="app-page-lead">${leadHtml}</div>` : ''}
             </div>
             ${toolbar}
             ${trailing}
@@ -84,48 +84,60 @@ export function renderPageHeader({
 }
 
 /**
- * Back (docs/DESIGN.md "Page header", the Back control): one recipe for the whole app. A header control like ☰ and ×
- * (style.css .shell-icon-control: a neutral capsule at the chrome height, the touch minimum in the stack layout)
- * holding the chevron-left glyph at 20 px, named for where it leads in its tooltip and accessible name. `attrs` are
- * the caller's hooks (a data attribute its handler finds it by).
+ * Back (docs/DESIGN.md "Page header", the Back control): one recipe for the whole app, a jump's return and a level's
+ * Back alike. The shell's round icon control, as ☰ and × are (style.css .shell-icon-control: the chrome height on a
+ * desk, the touch minimum in the stack layout), holding the chevron-left alone at 20 px; where it leads is its tooltip
+ * and accessible name, never drawn. `attrs` are the caller's hooks (a data attribute its handler finds it by).
  */
-export function renderBackControl({ to = '', attrs = '' } = {}) {
-    const name = to ? `Back to ${to}` : 'Back';
+export function renderBackControl({ to = '', title = to, attrs = '' } = {}) {
+    const name = title ? `Back to ${title}` : 'Back';
     return `<button type="button" class="shell-icon-control shell-back" ${attrs} aria-label="${escapeHtml(name)}" title="${escapeHtml(name)}">${SHELL_ICONS.back}</button>`;
 }
 
-/**
- * The header's Back slot (renderPageHeader writes it before the lead): `control` stands there, so it never scrolls
- * away with a lead that is a scroller (Dashboard's tabs, Files' location). On a desk the slot stands before the lead;
- * in the stack layout it is the header's one leading control where ☰ stood (style.css, `.app-page-header[data-back]`),
- * so a page that leads back (Skills opened from Settings) has one leading control in one row, its tabs under it as
- * they were. Returns the disposer, which takes the control away.
- */
-export function placePageBack(header, control) {
-    const slot = header?.querySelector?.('[data-page-back]');
-    if (!slot || !control) return () => {};
-    slot.replaceChildren(control);
-    header.setAttribute('data-back', '');
-    return () => {
-        slot.replaceChildren();
-        header.removeAttribute('data-back');
-    };
-}
-
-/** Point an existing Back control somewhere else: its tooltip and accessible name follow. */
-export function setBackControlTarget(button, to = '') {
-    if (!button) return;
-    const name = to ? `Back to ${to}` : 'Back';
-    button.setAttribute('aria-label', name);
-    button.title = name;
+/** An owed jump occupies the level's one Back slot until spent. Placement is a writer fact;
+ * late children never decide layout through :has(:empty). */
+export function bindPageBack({ layers, currentHeader, doc = document, win = window }) {
+    let previous = null;
+    function paint() {
+        const header = currentHeader();
+        if (previous && previous !== header) {
+            previous.removeAttribute('data-return');
+            previous.querySelector('[data-page-return]')?.replaceChildren();
+        }
+        previous = header;
+        if (!header) return;
+        const slot = header.querySelector('[data-page-return]');
+        const column = slot?.closest('.section-lead-page');
+        const primary = layers.page();  // the top page layer: a level opened after a jump peels before the jump
+        if (primary?.back) header.setAttribute('data-return', column ? 'column' : 'leading');
+        else header.removeAttribute('data-return');
+        if (!slot) return;
+        let button = slot.querySelector('[data-shell-back]');
+        const back = primary?.back;
+        if (!back) { button?.remove(); return; }
+        if (!button) {
+            const holder = doc.createElement('span');
+            holder.innerHTML = renderBackControl({ attrs: 'data-shell-back' });
+            button = holder.firstElementChild;
+            slot.append(button);
+            button.addEventListener('click', event => layers.back(event.detail ? 'pointer' : 'keyboard', button.dataset.pageLayer));
+        }
+        button.dataset.pageLayer = primary.id;
+        const title = `Back to ${back.title || back.label}`;
+        button.setAttribute('aria-label', title);
+        button.title = title;
+    }
+    const off = layers.onChange(paint);
+    win.addEventListener('ouro:page-shown', paint);
+    paint();
+    return () => { off(); win.removeEventListener('ouro:page-shown', paint); };
 }
 
 /**
  * A page's own navigation in its bar (docs/DESIGN.md "Page header", owner 19.10 A): on a desk the bar of a page the
  * sidebar names starts with the page's tabs or location, where the hidden title stood, and ends with its actions, so
  * it has two ends as Main's bar has; in the stack layout the same nodes return under the row, where a phone keeps
- * them. Navigation sharing a toolbar also returns there when the content column is too narrow (including a
- * sidebar drag). `lead` defaults to what renderPageHeader wrote under the row (the tab strip); `actions` join the toolbar's
+ * them. `lead` defaults to what renderPageHeader wrote under the row (the tab strip); `actions` join the toolbar's
  * start. Nodes move and are never re-rendered, so their listeners, selection and focus stay theirs; the selected
  * tab is revealed again by its strip's own observer. Returns the disposer.
  */
@@ -147,33 +159,25 @@ export function bindPageHeader(header, { lead = null, actions = null } = {}) {
     if (!moves.length && !toolbar) return () => {};
     let docked = null;
     const place = (layout) => {
-        // Navigation competes with both moved actions (Files) and actions already in the bar (Skills).
-        // A tab-only bar can scroll at any column width; a toolbar needs its own row in a narrow column.
-        const narrow = toolbar && header.clientWidth > 0 && header.clientWidth < 440;
-        const desk = (typeof layout === 'string' ? layout : currentLayout()) === 'docked';
-        header.toggleAttribute('data-narrow', desk && narrow);
-        const next = desk && !narrow;
+        const active = doc.activeElement;
+        const next = (typeof layout === 'string' ? layout : currentLayout()) === 'docked'
+            || doc.documentElement?.dataset.telegramFullscreen === 'active';
         if (next === docked) return;
         docked = next;
-        const active = doc.activeElement;
         for (const { node, bar, how, home } of moves) {
             if (docked) bar[how](node); else home.after(node);
         }
+        if (under) under.hidden = docked;
         header.toggleAttribute('data-lead', docked);  // the bar's two ends: style.css lays them on one line
+        header.toggleAttribute('data-scroll-x', docked); // this band owns overflow, like its tab and folder rails
         // An engine drops focus from a node it moves: the owner's place in the page stays where it was.
         if (active?.isConnected && doc.activeElement !== active) active.focus?.({ preventScroll: true });
     };
     place();
+    const disposeFade = bindScrollFade(header, { axis: 'x' });
     const offLayout = onLayoutChange(place);
-    const view = doc.defaultView;
-    let frame = 0;
-    // Moving the nodes can change the bar's height. Do that in the next frame, outside observer delivery.
-    const observer = view?.ResizeObserver && toolbar ? new view.ResizeObserver(() => {
-        view.cancelAnimationFrame(frame);
-        frame = view.requestAnimationFrame(place);
-    }) : null;
-    observer?.observe(header);
-    return () => { offLayout(); observer?.disconnect(); if (frame) view.cancelAnimationFrame(frame); };
+    doc.defaultView?.addEventListener?.('ouro:host-chrome', place);
+    return () => { disposeFade(); offLayout(); doc.defaultView?.removeEventListener?.('ouro:host-chrome', place); };
 }
 
 /** A bar narrower than this (px) cannot hold the status, the consciousness chip, Restart, Panic and the budget. */
@@ -197,6 +201,8 @@ export function bindHeaderControlPlacement({ headerActions, budgetPill = null, s
         || (Number(bar?.clientWidth) > 0 && bar.clientWidth < HEADER_FULL_ROW_MIN_WIDTH);
     // Called with the layout name by the layout switch, with entries by the observer, with nothing at bind.
     const place = (arg) => {
+        // A retained room out of sight has no width. Keep its controls where the return captured them.
+        if (bar?.clientWidth === 0) return;
         const next = compact(typeof arg === 'string' ? arg : currentLayout()) ? 'shade' : 'row';
         if (next === placed) return;
         placed = next;
@@ -292,6 +298,16 @@ export function renderTabStrip({
  * select(value) synchronizes an external navigation without calling onChange;
  * user activation calls it once, only when the selection actually changes.
  */
+export function revealStripChoice(strip, tab) {
+    if (!tab || !strip.clientWidth) return;
+    const bounds = strip.getBoundingClientRect(), rect = tab.getBoundingClientRect();
+    const style = strip.ownerDocument.defaultView.getComputedStyle(strip);
+    const left = bounds.left + strip.clientLeft + (parseFloat(style.scrollPaddingInlineStart) || 0);
+    const right = bounds.left + strip.clientLeft + strip.clientWidth - (parseFloat(style.scrollPaddingInlineEnd) || 0);
+    if (rect.left < left) strip.scrollLeft += rect.left - left;
+    else if (rect.right > right) strip.scrollLeft += rect.right - right;
+}
+
 export function bindTabStrip(strip, { dataAttr, activeClass = 'active', onChange } = {}) {
     if (!dataAttr) throw new Error('bindTabStrip requires dataAttr');
     let disposed = false;
@@ -324,17 +340,7 @@ export function bindTabStrip(strip, { dataAttr, activeClass = 'active', onChange
         const tab = tabs().find((item) => item.getAttribute(dataAttr) === selected);
         if (!tab) return;
         if (strip.getAttribute('aria-orientation') === 'vertical') { revealInScroller(tab); return; }
-        const bounds = strip.getBoundingClientRect();
-        const rect = tab.getBoundingClientRect();
-        const style = strip.ownerDocument.defaultView.getComputedStyle(strip);
-        const inset = parseFloat(style.scrollPaddingInlineStart) || 0;
-        const endInset = parseFloat(style.scrollPaddingInlineEnd) || 0;
-        const left = bounds.left + strip.clientLeft + inset;
-        const right = bounds.left + strip.clientLeft + strip.clientWidth - endInset;
-        // Scroll only this strip. scrollIntoView can also move the page or its
-        // scroll panel when restoring an inactive page's saved selection.
-        if (rect.left < left) strip.scrollLeft += rect.left - left;
-        else if (rect.right > right) strip.scrollLeft += rect.right - right;
+        revealStripChoice(strip, tab);  // only the strip moves, never its page or scroll panel
     }
     function select(value, { focus = false } = {}) {
         if (disposed) return false;

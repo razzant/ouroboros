@@ -319,19 +319,28 @@ def record_project_last_result(project_id: str, task_id: str, drive_root: Any) -
 
 
 def record_task_finalization(
-    project_id: str, task: dict, *, objective: str, kind: str, exec_status: str,
+    project_id: str, task: dict, *, kind: str, exec_status: str,
     drive_root: Any = None,
 ) -> None:
     """One seam for a project root's durable "letters home" at finalization:
     the task-finished milestone, the off-registry work-location row (Q8), the
     registry last-result pointer, and — for the swarm ROOT (no parent) — the
     ephemeral tree-ledger coordination mirror (see
-    mirror_tree_coordination_to_journal). Fail-soft per row."""
+    mirror_tree_coordination_to_journal). Fail-soft per row.
+
+    The milestone names the execution status, the work's presentation name (its
+    title, else the request's first line, as its card shows it) and the task's
+    exact readers, never the assignment text: the task result keeps that whole
+    with the outcome, and an owner-typed start also stands in the room."""
     tid = str(task.get("id") or "")
     try:
-        append_journal_milestone(
-            project_id, kind, f"Task finished ({exec_status}): {objective}", task_id=tid,
-        )
+        from ouroboros.projects_registry import task_presentation_name
+
+        name = task_presentation_name(task, {"objective": task.get("text")}, fallback="")
+        reader = (f" Result: get_task_result(task_id='{tid}'); assignment: "
+                  f"get_task_result(task_id='{tid}', authority_fields=['objective'])." if tid else "")
+        append_journal_milestone(project_id, kind, f"Task finished ({exec_status}){': ' + name if name else ''}.{reader}",
+                                 task_id=tid)
     except Exception:
         log.debug("project journal task-done entry failed", exc_info=True)
     is_root = not str(task.get("parent_task_id") or "").strip() and str(

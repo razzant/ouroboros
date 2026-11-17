@@ -1113,7 +1113,7 @@ function mountWebSearch(container, { path, ctx }) {
 registerSettingsPage('models', {
     title: (path) => {
         const [, , slot, n] = path.split('/');
-        return !slot ? 'Models' : slot === 'fallback' ? `Fallback ${n || ''}`.trim() : wordsOf(`models:${slot}`).name;
+        return !slot ? 'Models' : slot === 'fallback' ? `Fallback model ${n || ''}`.trim() : `${wordsOf(`models:${slot}`).name.replace(/ model$/, '')} model`;
     },
     mount: (container, page) => {
         const [, , slot, n] = page.path.split('/');

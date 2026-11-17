@@ -301,7 +301,7 @@ def test_duplicate_is_an_unsaved_agent_whose_page_names_its_twin_until_the_engin
     copy.wait_for(state="visible")
     # Its Back, in the section's header, leads to the twin it was copied from, named by its route.
     back = header_back(page)
-    assert back.is_visible() and back.get_attribute("aria-label") == "Back to gpt-test-0"
+    assert back.is_visible() and back.get_attribute("aria-label") == back.get_attribute("title") == "Back to gpt-test-0"
     # Named on the page BEFORE any Save, tinted as an error, in the agents' names (a page has no numbers).
     meta = copy.locator("[data-subagent-meta]")
     assert "gpt-test-0 runs the same engine as gpt-test-0" in meta.text_content()

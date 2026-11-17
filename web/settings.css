@@ -3,7 +3,7 @@
    (`.section-rail`), the levels the page's column (`.section-pane`), and the home's rows are `.section-row`s; the
    class names of Settings stay beside them for what is Settings' own (its card, search, overview row, pages). Each
    column scrolls by itself, keeps its place and fades at an edge where content waits (.scroll-fade-y); the header
-   above is never empty, so the shared header rules give the band. */
+   floats over a first-level page's empty band; named levels keep their header row. */
 .settings-page {
     min-width: 0;
     min-height: 0;
@@ -36,27 +36,36 @@ html[data-layout="stack"] .settings-page { padding-inline: 12px; }
 }
 
 /* The header's lead (settings.js, ui.css .section-lead): never the word `Settings` on a desk. Over the list, and
-   over the home alone, stands its search field; over a page, `(‹) <page>` in the header's one title style. */
+   over the home alone, stands its search field; over a page, `(‹) <page>` in the header's one title style. The band
+   holds no actions (style.css, a section place's band), so the field ends where the cards end. */
 .settings-lead .settings-search { flex: 1 1 auto; min-width: 0; }
 
 /* Two panes: the home is the rail beside the page, and a page is always open (settings.js: the last one opened, Models
    the first time; the list's Ouroboros row opens Ouroboros's card in the page's pane). */
 @container sectionplace (min-width: 40rem) {
+    #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) { position: absolute; inset: 0 0 auto; z-index: 2; }
+    #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) + .settings-shell > .settings-home { margin-top: var(--page-header-row-h); }
+    #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) + .settings-shell .settings-page { padding-top: calc(var(--page-header-row-h) + var(--space-2)); }
     .settings-shell[data-section-view="page"] .settings-page { padding-inline-start: var(--space-4); }
     .settings-shell[data-section-view="page"] > .settings-home .settings-overview { margin-block-end: var(--space-3); }
     .settings-shell[data-section-view="page"] .settings-door-glyph.settings-overview-glyph { width: 20px; height: 20px; margin-inline-end: var(--space-2); }
 }
 
-/* Two panes share the section's single band (ui.css). In one column the home puts Search in its scrolling list,
-   and a page replaces the section's name with Back and its own name. */
+/* A phone keeps Search in the list, including when it holds two panes. Its one header row shows the place,
+   or the round Back and its level; an empty page column adds no caption row. */
+html[data-layout="stack"] #page-settings > .app-page-header {
+    grid-template-areas: "leading title toolbar";
+}
+html[data-layout="stack"] #page-settings > .app-page-header > .app-page-title-block { display: contents; }
+html[data-layout="stack"] #page-settings > .app-page-header .app-page-title-row { grid-area: title; }
+html[data-layout="stack"] #page-settings > .app-page-header .app-page-lead { display: flex; grid-area: lead; min-height: var(--touch-target-min); }
+html[data-layout="stack"] #page-settings > .app-page-header[data-return] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
+html[data-layout="stack"] #page-settings > .app-page-header[data-return] .app-page-title-row { display: none; }
 html[data-layout="stack"] #page-settings .settings-lead-col { gap: var(--space-2); }
 /* A page's or a level's screen is one row: Back and the name, where the places control and "Settings" stood (one
    leading control on a screen). Only a page that replaced the list gives the places control up: with the list beside
    its page (40rem up to the shell's switch) the first-level page has no Back, so the control stays. */
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
-    html[data-layout="stack"] #page-settings > .app-page-header > .app-page-title-block { display: contents; }
-    html[data-layout="stack"] #page-settings > .app-page-header .app-page-title-row { grid-area: title; }
-    html[data-layout="stack"] #page-settings > .app-page-header .app-page-lead { grid-area: lead; min-height: var(--touch-target-min); }
     /* Collapse the empty lead after Search moves, never hide a focused field while its resize frame waits. */
     html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header[data-search-in-home] { grid-template-areas: "leading title toolbar"; }
     html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header[data-search-in-home] .app-page-lead { display: none; }
@@ -64,7 +73,7 @@ html[data-layout="stack"] #page-settings .settings-lead-col { gap: var(--space-2
     html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header[data-search-in-home] + .settings-shell > .settings-home { padding-top: 2px; }
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header > .app-page-leading,
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
-    html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header { grid-template-areas: "lead lead lead"; }
+    html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header { grid-template-areas: "lead"; }
 }
 
 /* The landing (settings.js): from 40rem Settings always shows two panes.

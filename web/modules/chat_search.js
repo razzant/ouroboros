@@ -125,6 +125,8 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
         input.addEventListener('input', (event) => { if (!event.isComposing) clipQuery(input); schedule(); });
         input.addEventListener('compositionend', () => { if (clipQuery(input)) schedule(); });
         input.addEventListener('keydown', onKeydown);
+        input.addEventListener('focus', () => bar.setAttribute('data-focused', ''));
+        input.addEventListener('blur', () => bar.removeAttribute('data-focused'));
         root.addEventListener('keydown', (event) => {
             if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
             event.preventDefault();  // the room's layer keeps its own Escape for after the search

@@ -17,6 +17,7 @@ from ouroboros import platform_layer
 from ouroboros.tools import github as transport
 from ouroboros.tools.github_read import run_read
 from ouroboros.tools.github_write import run_write
+from ouroboros.tools.registry import ToolContext
 
 
 @pytest.fixture(autouse=True)
@@ -118,8 +119,8 @@ ISSUE = {"number": 7, "title": "Issue 7", "state": "open", "user": {"login": "de
 
 
 def _stub_gh(directory: pathlib.Path, copy: str) -> pathlib.Path:
-    """A real ``gh`` executable answering like ``gh api --include``: the copy that ran, its argv and its PATH ride in
-    the body; ``STUB_GH_AUTH=fail`` answers GitHub's 401 instead, echoing the token it was given."""
+    """A real ``gh`` executable answering like ``gh api --include``: the copy that ran, its argv, its working directory
+    and its PATH ride in the body; ``STUB_GH_AUTH=fail`` answers GitHub's 401 instead, echoing the token it was given."""
     directory.mkdir(parents=True, exist_ok=True)
     script = directory / "gh"
     script.write_text(f"""#!{sys.executable}
@@ -127,7 +128,7 @@ import json, os, sys
 if os.environ.get("STUB_GH_AUTH") == "fail":
     sys.stderr.write("gh: " + os.environ.get("GH_TOKEN", "") + " rejected\\nHTTP 401: Bad credentials (https://api.github.com/user)\\n")
     sys.exit(1)
-seen = {{"copy": {copy!r}, "argv": sys.argv[1:], "path": os.environ.get("PATH", "")}}
+seen = {{"copy": {copy!r}, "argv": sys.argv[1:], "cwd": os.getcwd(), "path": os.environ.get("PATH", "")}}
 sys.stdout.write("HTTP/2.0 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n"
                  + json.dumps({{"total_count": 1, "incomplete_results": False, "items": [{{**{ISSUE!r}, "title": json.dumps(seen)}}]}}))
 """, encoding="utf-8")
@@ -145,10 +146,17 @@ def gui_path(tmp_path, monkeypatch):
     return types.SimpleNamespace(inherited=inherited, common=common)
 
 
-def _search(tmp_path):
-    from tests.test_github_project_target import _context
+def _queued_context(tmp_path):
+    system, project = tmp_path / "system", tmp_path / "project"
+    system.mkdir(exist_ok=True)
+    project.mkdir(exist_ok=True)
+    ctx = ToolContext(repo_dir=system, drive_root=tmp_path / "data", task_id="task-fixture")
+    ctx.workspace_root, ctx.workspace_mode, ctx.project_id = project, "external", "project-fixture"
+    return ctx, project
 
-    ctx, _project = _context(tmp_path, "queued")
+
+def _search(tmp_path):
+    ctx, _project = _queued_context(tmp_path)
     ctx._active_builtin_tool_result = None
     handler = next(entry.handler for entry in transport.get_tools() if entry.name == "github_read")
     return handler(ctx, method="search", kind="issue", query="is:open", repo="owner/name")
@@ -171,6 +179,21 @@ def test_github_read_runs_an_installed_gh_from_a_common_tool_folder(gui_path, tm
     assert seen["argv"][2].startswith("search/issues?") and "repo%3Aowner%2Fname" in seen["argv"][2]
     assert seen["path"] == os.pathsep.join([str(gui_path.inherited), str(gui_path.common)])
     assert os.environ["PATH"] == str(gui_path.inherited)
+
+
+@posix_only
+def test_a_read_naming_its_repository_starts_gh_while_the_project_folder_is_gone(gui_path, tmp_path):
+    """#3613 at the process boundary: the Project folder was renamed outside Ouroboros, and a gh started there fails
+    to start at all. A read naming its repository needs no checkout: the real child starts in the task's task_drive."""
+    ctx, project = _queued_context(tmp_path)
+    ctx._active_builtin_tool_result = None
+    project.rename(project.with_name("renamed"))
+    read = next(entry.handler for entry in transport.get_tools() if entry.name == "github_read")
+
+    seen = _seen(read(ctx, method="search", kind="issue", query="is:open", repo="owner/name"))
+
+    assert seen["copy"] == "common folder" and os.path.samefile(seen["cwd"], ctx.task_drive_root())
+    assert not project.exists()
 
 
 @posix_only

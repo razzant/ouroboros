@@ -17,6 +17,7 @@
 import { apiFetch } from './api_client.js';
 import { fmtInto } from './i18n.js';
 import { bindDialogFocus } from './ui_interactions.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 
 // A long report is far below this. Decoding and rendering it run on the main
@@ -561,7 +562,7 @@ const DIALOG_HTML = `
             <button type="button" class="btn btn-default document-reader-close" data-reader-action="close" aria-label="Close document">Close</button>
         </header>
         <div class="document-reader-notice" role="note" hidden></div>
-        <div class="document-reader-body" tabindex="0" role="region" aria-label="Document text" aria-busy="true"></div>
+        <div class="document-reader-body scroll-fade-y" tabindex="0" role="region" aria-label="Document text" aria-busy="true"></div>
     </div>`;
 
 /**
@@ -824,6 +825,7 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         listen(dialog, 'close', () => { if (session === current) close({ restoreFocus: false }); });
         doc.body.appendChild(dialog);
         session = current;
+        current.disposers.push(bindScrollFade(current.body));
         // The engine refocuses what was focused at showModal when the dialog closes; WebKit does
         // not focus a pressed button, so the opener takes focus first, in place.
         if (returnFocus && returnFocus !== doc.activeElement) returnFocus.focus?.({ preventScroll: true });

@@ -39,7 +39,7 @@ def test_update_progress_pending_reopen_and_failure(direct_server, tmp_path, wid
             # A phone's Dashboard shows its list or one of its pages (docs/DESIGN.md "One spine of depth"): the page's
             # Back brings the list, whose row opens the next page. A desk keeps the list beside the page.
             if width < 980:
-                page.click("[data-dashboard-list-back]")
+                page.click("#page-dashboard [data-shell-back]")
             page.click(f'[data-dashboard-tab="{tab}"]')
 
         try:
@@ -170,7 +170,7 @@ def test_successful_recheck_keeps_release_tags_and_the_last_attempt(direct_serve
 def _sidebar(page, width):
     """The sidebar the indicator lives in: always there on a desk, the open drawer on a phone."""
     if width < 720 and not page.evaluate("document.body.classList.contains('nav-drawer-open')"):
-        back = page.locator('.page.active [data-dashboard-list-back]:visible')
+        back = page.locator('.page.active [data-shell-back]:visible')
         if back.count():
             back.click()
         page.locator(".page.active [data-mobile-nav-toggle]:visible").click()
