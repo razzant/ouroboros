@@ -276,7 +276,7 @@ _ROW_PHRASES = {  # the two decisions the owner reads by name; any other key is 
     "OUROBOROS_CONSCIOUSNESS_DAILY_USD": "Consciousness allowance: {old} → {new} USD per rolling 24 hours.",
 }
 # Who changed it, in the owner's words; the surface and the task stay in the event (DESIGN principle 7).
-_ROW_ACTORS = {"ouroboros": "Changed by Ouroboros.", "owner": "Changed by you."}
+_ROW_ACTORS = {"ouroboros": "by Ouroboros", "owner": "by you"}
 
 
 def declared_settings_origin(request: Request) -> Dict[str, str]:
@@ -332,7 +332,8 @@ def settings_change_text(changes: Dict[str, Dict[str, Any]], origin: Dict[str, s
     parts = [f"{key} changed." if "withheld" in change or any("\n" in str(value) for value in change.values())
              else _ROW_PHRASES.get(key, key + ": {old} → {new}.").format(old=_shown(change, "old"), new=_shown(change, "new"))
              for key, change in changes.items()]
-    return " ".join(parts) + " " + _ROW_ACTORS.get(str(origin.get("actor") or ""), "Changed outside the app.")
+    actor = _ROW_ACTORS.get(str(origin.get("actor") or ""), "outside the app")
+    return " ".join([*parts, f"Changed {actor}."])
 
 
 def project_settings_changes(changes: dict, *, tokens: bool = False) -> dict:
@@ -398,12 +399,8 @@ _CONTEXT_MODE_NAMES = {"max": "Max", "low": "Low", "nano": "Nano"}
 
 def record_context_mode_change(request: Request, project_id: str, requested: str, old: str, new: str, *,
                                at: str | None = None) -> None:
-    """Record a committed context-mode save: its ``owner_api_action`` (``action="context_mode"``) and, when the
-    room's mode changed, the owner act's one System receipt in that room (``context_mode_changed``), dated by its
-    commit's time (``at``, taken inside the settings lock, so racing saves keep their order): old → new, which work it
-    reaches and who changed it when the request declared that. The composer's
-    capsule tells the human; the room's history is what tells the mind at its next start there, so the receipt is
-    posted whatever surface declared the save. No change, no row; neither step can unsave the mode."""
+    """Audit each save. A changed mode also reaches the room's history at its commit timestamp,
+    so the mind can read the same change the human sees in the composer."""
     owner_audit(request, "context_mode", {"project_id": project_id, "context_mode": requested, "previous_context_mode": old})
     if not old or not new or old == new:
         return
@@ -420,10 +417,10 @@ def record_context_mode_change(request: Request, project_id: str, requested: str
             chat = owner_chat_id(request_drive_root(request))
         if not chat:
             return
-        actor = _ROW_ACTORS.get(str(declared_settings_origin(request).get("actor") or ""))
-        text = (f"Context mode of this room: {_CONTEXT_MODE_NAMES.get(old, old)} → {_CONTEXT_MODE_NAMES.get(new, new)}. "
-                "Work started from now uses it; work already running keeps the mode it started with."
-                + (f" {actor}" if actor else ""))
+        actor = _ROW_ACTORS.get(declared_settings_origin(request)["actor"])
+        attribution = f", changed {actor}" if actor else ""
+        transition = f"{_CONTEXT_MODE_NAMES.get(old, old)} → {_CONTEXT_MODE_NAMES.get(new, new)}"
+        text = f"New work in this room uses the updated context mode ({transition}{attribution})."
         message_bus.send_with_budget(int(chat), text, ts=at, role="system", system_type="context_mode_changed")
     except Exception:
         log.warning("Context mode saved; its System row failed", exc_info=True)
