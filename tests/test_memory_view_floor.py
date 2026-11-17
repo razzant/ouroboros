@@ -501,6 +501,7 @@ def test_this_rooms_notes_never_yield_to_lows_target_and_the_window_owns_its_cut
     roomy = fit('low', 1_000_000, 250_000)  # the rest of the request alone exceeds Low's 250,000
     assert 'F8' not in roomy.facts['floor']['steps'] and roomy.facts['floor']['target_missed']
     assert "Low's target (250,000 tokens) is not met at this start" in roomy.note
+    assert roomy.facts['floor']['no_memory_tokens'] == 250_000 + 65_536  # what the mode's screen names (3A)
     tight = fit('low', 300_000, 250_000)  # the window's own start bound cannot hold the note
     assert tight.facts['floor']['steps']['F8'] == 1 and tight.facts['floor']['by_budget'] == 0
     assert 'only physical pressure can narrow them' not in tight.room

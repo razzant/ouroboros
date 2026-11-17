@@ -141,6 +141,15 @@ export function causeOf(fact, preferred) {
         ? fmt('Sent before {mode} was chosen.', { mode: said(preferred) }) : '';
 }
 
+// Low's target missed at this room's newest owner-Low start (owner 15.11.2026, 3A: where the mode is chosen, the
+// screen says it before the next start): what the rest of that start's request took, from its own receipt; '' else.
+export function lowMissedOf(fact) {
+    const n = Number(fact?.no_memory_tokens);
+    if (fact?.applied !== 'low' || fact?.profile !== 'owner_low' || !fact?.target_missed || !(n > 0)) return '';
+    return fmt('Low’s 250K target was not met at the last start here: without memory it already needed about {n}; '
+        + 'memory keeps its shortest tellings.', { n: `${Math.round(n / 1000)}K` });
+}
+
 // An explicitly incomplete census: what it listed is kept, but it is not the room's whole current state.
 const incomplete = () => fmt('The current read is incomplete.', {});
 

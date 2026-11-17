@@ -783,6 +783,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     bound, note = allowances["margin"], receipt(level)
     facts["floor"]["ordinary_unfit"] = bound is not None and measure(ordinary_level(snapshot)) > bound
     facts["floor"]["target_missed"] = binds and total(level, note) > target
+    if facts["floor"]["target_missed"]:  # where the mode is chosen it says what the rest of the request took (3A)
+        facts["floor"]["no_memory_tokens"] = math.ceil(non_memory_tokens * ratio) + reserve
     return ViewFit(snapshot, level, note, facts)
 
 

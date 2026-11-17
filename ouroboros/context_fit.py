@@ -1323,5 +1323,5 @@ def _physical_context_for_fit(disposition: Any) -> PhysicalAttemptContext:
         window_witness_bound=getattr(measurement, "window_witness_bound", False),
         window_observation_fp=measurement.window_observation_fp,
         required_book_tokens=measurement.required_book_tokens, preferred_mode=measurement.preferred_mode,
-        mode_cause=measurement.mode_cause,
+        mode_cause=measurement.mode_cause, no_memory_tokens=measurement.no_memory_tokens,
     )

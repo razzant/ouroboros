@@ -7,7 +7,7 @@ import test from 'node:test';
 import { updateLiveTimelineItem } from '../modules/chat_render_batch.js';
 import { mergeHistoricalTimelineItem } from '../modules/chat_history_replay.js';
 import { foldWaitRow, waitEpisode } from '../modules/task_checkpoints.js';
-import { causeOf } from '../modules/context_observation.js';
+import { causeOf, lowMissedOf } from '../modules/context_observation.js';
 
 import {
     summarizeChatLiveEvent,
@@ -75,6 +75,16 @@ test('a lowered start names its recorded reason in the Context capsule\'s own wo
     assert.equal(taskCheckpointLabel(row({ cause: 'after_start' })), moved);
     assert.equal(taskCheckpointLabel(row({})), 'Context starts in a smaller mode', 'a row written before the reason was');
     assert.equal(taskCheckpointLabel(row({ cause: '' })), 'Context starts in a smaller mode', 'an unknown start');
+});
+
+test('where Low is chosen, a room whose last owner-Low start missed the target says what the rest took', () => {
+    // Owner 15.11.2026, 3A: the screen says the target cannot be met; memory keeps its shortest tellings.
+    const fact = { applied: 'low', profile: 'owner_low', target_missed: true, no_memory_tokens: 532_173 };
+    assert.equal(lowMissedOf(fact), 'Low’s 250K target was not met at the last start here: without memory it '
+        + 'already needed about 532K; memory keeps its shortest tellings.');
+    assert.equal(lowMissedOf({ ...fact, target_missed: false }), '', 'a met target keeps the mode\'s own meaning');
+    assert.equal(lowMissedOf({ ...fact, no_memory_tokens: null }), '', 'an older row names no number');
+    assert.equal(lowMissedOf({ ...fact, profile: 'task_local_low' }), '', 'only the owner\'s Low has this target');
 });
 
 test('#931 typed checkpoints are task facts in the expanded card, never narration', () => {

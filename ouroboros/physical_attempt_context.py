@@ -38,6 +38,9 @@ class PhysicalAttemptContext:
     # ``route`` the window cannot hold the books and core, ``window`` the start's window took it otherwise,
     # ``after_start`` a lower mode the task took after its start (``context_measurement.mode_cause``).
     mode_cause: str = ""
+    # Low's missed target at this task's start: the request with no memory at all, reply reserve included
+    # (``memory_floor``'s ``floor.no_memory_tokens``); None when the target was met or none applied, and on older rows.
+    no_memory_tokens: Optional[int] = None
     # What this request did to its route's cached start, read from the host's own earlier sends on that route
     # (``transcript_prefix.attempt_prefix_fact``): never the provider's verdict, which is the row's measured counts.
     # None on rows written before it existed and on sends without a Main candidate.
@@ -61,6 +64,8 @@ class ContextAttemptObservation(TypedDict, total=False):
     applied: Literal["max", "low", "nano"]  # the mode the sent candidate was rendered in
     profile: Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
     cause: Literal["", "memory", "route", "window", "after_start"]  # why lower; "" also when the original start is unknown
+    target_missed: bool  # this send exceeded the owner's mode target (``context_target_miss``)
+    no_memory_tokens: Optional[int]  # Low's missed target: the start's request with no memory at all, else None
     observed_at: str
     task_attempt: int
     llm_call_id: str
@@ -88,6 +93,7 @@ def attempt_fact(capture: Any, round_id: str = "") -> Optional[ContextAttemptFac
         return {"attempt_id": str(capture.attempt_id), "ledger_state": str(capture.state), "round_id": context.round_id,
                 "preferred_at_send": context.preferred_mode, "applied": context.rendered_mode,
                 "profile": context.profile, "cause": context.mode_cause,
+                "target_missed": bool(context.context_target_miss), "no_memory_tokens": context.no_memory_tokens,
                 "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
     except Exception:  # a projection, never the send's authority
         return None

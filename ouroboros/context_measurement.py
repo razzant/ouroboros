@@ -68,6 +68,8 @@ class MainFitMeasurement:
     required_book_tokens: int = 0
     preferred_mode: str = ""  # the plan's owner mode at this measurement
     mode_cause: str = ""  # why ``rendered_mode`` is lower than it (``mode_cause``); "" when it is not
+    # Low's missed target: the start's request with no memory at all, reply reserve included (``floor.no_memory_tokens``).
+    no_memory_tokens: Optional[int] = None
 
     @property
     def probes_reply_reservation(self) -> bool:
@@ -235,6 +237,7 @@ def measure_main_fit(
         window_witness_bound=plan.window_witness_bound,
         window_observation_fp=current.route_fp,
         required_book_tokens=book, preferred_mode=str(plan.preferred_mode or ""), mode_cause=mode_cause(plan, rendered_mode),
+        no_memory_tokens=_no_memory_tokens(plan, rendered_mode),
     )
     action: Literal["send", "send_target_miss"] = (
         "send_target_miss" if target_deficit and target_deficit > 0 else "send")
@@ -244,6 +247,14 @@ def measure_main_fit(
         automatic_pass_used=bool(automatic_pass_used),
         predicted_capacity_miss=bool(capacity_deficit and capacity_deficit > 0),
     )
+
+
+def _no_memory_tokens(plan: Any, rendered_mode: str) -> Optional[int]:
+    """The start's own receipt of a missed Low target: what the request took with no memory (``memory_floor``)."""
+    if not hasattr(plan, "projection"):
+        return None
+    value = ((plan.projection(rendered_mode).memory_facts or {}).get("floor") or {}).get("no_memory_tokens")
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def mode_cause(plan: Any, rendered_mode: str) -> str:
