@@ -122,7 +122,7 @@
         <p>Add it to Slack, Telegram, email or GitHub as a member of its own. A colleague tags it in a thread; you pick the same topic up in Telegram four hours later. One memory, nothing to re-explain.</p>
         <ul class="chips" aria-label="Where it can be a colleague"><li>Slack</li><li>Telegram</li><li>Email</li><li>GitHub</li></ul>
       </div>
-      <div class="convo full reveal" aria-label="One conversation that starts in a Slack thread and continues in Telegram">
+      <div class="convo full reveal" role="group" aria-label="Illustrative conversation on demo data: it starts in a Slack thread and continues in Telegram">
         <article class="pane slack">
           <header><b>#launch</b><span class="where">Slack · Acme workspace</span></header>
           <ol class="msgs">
@@ -143,7 +143,7 @@
           </ol>
         </article>
       </div>
-      <p class="convo-note full reveal">Tagged by a colleague in Slack at 14:02, asked by you in Telegram at 18:40: the same memory, in its own name in both places, and a private report to you when something needs your call.</p>
+      <p class="convo-note full reveal">Illustrative conversation on demo data. Tagged by a colleague in Slack at 14:02, asked by you in Telegram at 18:40: the same memory, in its own name in both places, and a private report to you when something needs your call.</p>
       <div class="pair reveal">
         <figure class="shot f-16x10"><img src="/ui/circles-dark.webp" style="--zoom:1.28;--ox:56%;--oy:18%" alt="The Circles page: Telegram, a Slack workspace, an email inbox, a GitHub repository and a family group, each with its platform icon and state" loading="lazy" width="1800" height="1013"><figcaption><b>Its places.</b> Each with its own notes, people and rules.</figcaption></figure>
         <figure class="shot f-tall"><img src="/ui/phone-places-dark.webp" style="--zoom:1.0" alt="The same app on a phone in Telegram: the list of projects and places" loading="lazy" width="780" height="1688"><figcaption><b>In your pocket.</b> The Telegram Mini App shows the same rooms.</figcaption></figure>
@@ -260,7 +260,7 @@
 brew install --cask razzant/ouroboros/ouroboros</code></div>
         <div class="cmd-card"><span>Headless CLI</span><code>uv tool install "git+https://github.com/razzant/ouroboros.git@ouroboros"</code></div>
         <div class="cmd-card"><span>Docker</span><code>git clone https://github.com/razzant/ouroboros.git &amp;&amp; cd ouroboros
-docker build -t ouroboros-web . &amp;&amp; docker run --rm -p 8765:8765 ouroboros-web</code></div>
+docker build -t ouroboros-web . &amp;&amp; docker run --rm -p 127.0.0.1:8765:8765 ouroboros-web</code></div>
       </div>
       <p class="install-note reveal">Bring your own model access: a Codex account, a provider key or a local GGUF model. <a href="/install/">Every download and the full setup →</a></p>
       <div class="follow reveal">

@@ -201,22 +201,26 @@ def test_rating_publication_is_complete_and_source_bound():
 
 
 def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
-    """Every capture and font the home page names ships in site/public and in docs/, nothing shipped is orphaned,
-    and the social card's cache-busting hash is the card's own content hash."""
+    """Every capture and font the home page or its stylesheet names ships in site/public and in docs/, nothing
+    shipped is orphaned, and the social card's cache-busting hash is the card's own content hash."""
     import hashlib
 
     html = (SITE / "index.html").read_text(encoding="utf-8")
+    css = (SITE / "src" / "home.css").read_text(encoding="utf-8")
     referenced = set(re.findall(r'(?:src|href)="/(ui/[^"]+|fonts/[^"]+)"', html))
+    referenced |= set(re.findall(r"url\(/(fonts/[^)]+)\)", css))
     assert referenced
     for rel in sorted(referenced):
         assert (SITE / "public" / rel).is_file(), rel
         assert (DOCS / rel).is_file(), rel
-    shipped = {str(p.relative_to(SITE / "public")) for p in (SITE / "public" / "ui").glob("*.webp")}
-    assert shipped == {rel for rel in referenced if rel.startswith("ui/")}
+    shipped_captures = {p.relative_to(SITE / "public").as_posix() for p in (SITE / "public" / "ui").glob("*.webp")}
+    assert shipped_captures == {rel for rel in referenced if rel.startswith("ui/")}
+    shipped_fonts = {p.relative_to(SITE / "public").as_posix() for p in (SITE / "public" / "fonts").glob("*.woff2")}
+    assert shipped_fonts == {rel for rel in referenced if rel.startswith("fonts/")}
+    assert "SIL OPEN FONT LICENSE" in (SITE / "public" / "fonts" / "LICENSE-Inter.txt").read_text(encoding="utf-8")
     digest = hashlib.sha256((REPO / "assets" / "og-preview.png").read_bytes()).hexdigest()[:10]
     assert html.count(f"og-preview.png?v={digest}") == 2
     assert "86.74" in html and 'href="/llm-rating/"' in html
-
 
 def test_readme_and_benchmark_page_keep_claim_values_in_sync():
     readme = (REPO / "README.md").read_text(encoding="utf-8")

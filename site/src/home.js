@@ -9,13 +9,22 @@ const motionPaused = () => document.body.classList.contains("motion-paused");
    nothing moves below. Without JS or with reduced motion the line stays on one phrase. */
 function fitPower(host, lines) {
   host.style.fontSize = "";
-  if (window.innerWidth <= 700) return;
+  host.style.minHeight = "";
   const probe = document.createElement("span");
-  probe.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;left:-9999px;top:0";
+  const narrow = window.innerWidth <= 700;
+  probe.style.cssText = narrow
+    ? `position:absolute;visibility:hidden;left:0;top:0;width:${host.clientWidth}px;white-space:normal`
+    : "position:absolute;visibility:hidden;white-space:nowrap;left:-9999px;top:0";
   host.appendChild(probe);
   let widest = 0;
-  lines.forEach((text) => { probe.textContent = text; widest = Math.max(widest, probe.scrollWidth); });
+  let tallest = 0;
+  lines.forEach((text) => {
+    probe.textContent = text;
+    widest = Math.max(widest, probe.scrollWidth);
+    tallest = Math.max(tallest, probe.offsetHeight);
+  });
   probe.remove();
+  if (narrow) { host.style.minHeight = `${tallest}px`; return; }
   const available = host.clientWidth;
   if (widest > available && available > 0) host.style.fontSize = `${Math.max(0.5, available / widest * 0.995)}em`;
 }
@@ -27,9 +36,19 @@ function initHeroPower() {
   if (!lines.length) return;
   fitPower(host, lines);
   window.addEventListener("resize", () => fitPower(host, lines), { passive: true });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => fitPower(host, lines));
   if (reducedMotion.matches || lines.length < 2) return;
   let index = 0;
   let hovered = false;
+  let timer = 0;
+  const settle = () => {
+    window.clearInterval(timer);
+    timer = 0;
+    const spans = [...host.querySelectorAll("span.power")];
+    spans.slice(0, -1).forEach((s) => s.remove());
+    if (spans.length) spans[spans.length - 1].className = "power";
+  };
+  reducedMotion.addEventListener("change", (event) => { if (event.matches) settle(); });
   host.addEventListener("mouseenter", () => { hovered = true; });
   host.addEventListener("mouseleave", () => { hovered = false; });
   const swap = () => {
@@ -47,7 +66,7 @@ function initHeroPower() {
     }
     host.appendChild(next);
   };
-  window.setTimeout(() => window.setInterval(swap, 3000), 2600);
+  window.setTimeout(() => { if (!reducedMotion.matches) timer = window.setInterval(swap, 3000); }, 2600);
 }
 
 /* One control pauses the ticker, the cycling line and the floating windows (WCAG 2.2.2); it appears only when motion runs. */

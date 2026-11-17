@@ -277,7 +277,7 @@ body.motion-paused .ticker-track { animation-play-state: paused; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .hero .line > span, .hero .line.red > span.swap-in, .hero .line.red > span.swap-out { animation: none; opacity: 1; transform: none; }
-  .ticker-track, .win, .places-visual .phone { animation: none; }
+  .ticker-track, .win, .win.w-back, .win.w-front, .win.w-phone { animation: none; }
   .has-js .reveal, .has-js .shot.reveal, .has-js .shot.lean.reveal { opacity: 1; transform: none; transition: none; }
   .has-js .display.words .w { opacity: 1; transform: none; transition: none; }
   .shot.lean { transform: none; }
@@ -292,6 +292,7 @@ body.motion-paused .ticker-track { animation-play-state: paused; }
   .rest { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .install-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .kinds { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .follow { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 900px) {
   .bar { top: 10px; width: calc(100vw - 20px); grid-template-columns: auto 1fr auto; gap: 8px; padding: 6px 6px 6px 12px; }
@@ -311,7 +312,6 @@ body.motion-paused .ticker-track { animation-play-state: paused; }
   .surfaces .term { grid-column: 1 / -1; }
   .term pre { white-space: pre-wrap; word-break: break-word; }
   .surfaces .phone-col { width: 100%; }
-  .follow { grid-template-columns: minmax(0, 1fr); }
   .plugins .display { max-width: none; }
 }
 @media (max-width: 700px) {
@@ -335,12 +335,12 @@ body.motion-paused .ticker-track { animation-play-state: paused; }
 .pane header { display: flex; align-items: baseline; gap: 12px; padding-bottom: 12px; margin-bottom: 14px; border-bottom: 1px solid rgba(11, 11, 12, 0.08); }
 .pane.tg header { border-bottom-color: rgba(255, 255, 255, 0.1); }
 .pane header b { font-size: 16px; font-weight: 800; letter-spacing: -0.02em; }
-.pane .where { font-size: 12px; font-weight: 600; color: rgba(11, 11, 12, 0.5); }
-.pane.tg .where { color: rgba(255, 255, 255, 0.55); }
+.pane .where { font-size: 12px; font-weight: 600; color: rgba(11, 11, 12, 0.64); }
+.pane.tg .where { color: rgba(255, 255, 255, 0.72); }
 .msgs { margin: 0; padding: 0; list-style: none; display: grid; gap: 14px; }
 .m { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; align-items: start; }
 .m b { font-weight: 800; font-size: 14px; }
-.m time { margin-left: 8px; font-size: 12px; color: rgba(11, 11, 12, 0.45); }
+.m time { margin-left: 8px; font-size: 12px; color: rgba(11, 11, 12, 0.64); }
 .frame .pane.slack .m p { margin: 2px 0 0; color: #1d1d1f; }
 .frame .pane.tg .b p { margin: 0; color: #fff; }
 .m mark { background: rgba(224, 38, 60, 0.12); color: var(--red-deep); border-radius: 4px; padding: 0 3px; font-weight: 700; }
@@ -350,7 +350,7 @@ body.motion-paused .ticker-track { animation-play-state: paused; }
 .bubbles { gap: 10px; }
 .b { max-width: 88%; padding: 10px 14px 8px; border-radius: 16px; }
 .b p { margin: 0; }
-.b time { display: block; margin-top: 4px; text-align: right; font-size: 11px; opacity: .55; }
+.b time { display: block; margin-top: 4px; text-align: right; font-size: 12px; opacity: .82; }
 .b.you { justify-self: end; background: #2b6be0; color: #fff; border-bottom-right-radius: 6px; }
 .b.ou { justify-self: start; background: rgba(255, 255, 255, 0.1); color: #fff; border-bottom-left-radius: 6px; }
 .bridge { position: relative; display: grid; place-items: center; }
