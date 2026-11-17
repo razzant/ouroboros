@@ -340,3 +340,80 @@ def test_peer_receipt_follows_public_project_placement_and_real_delivery(runtime
         card = json.loads(receipt)
         assert load_card(root, card["card_id"])["revision"] == card["revision"] == 1
         assert "shown" not in card and ("queued" not in card or move)
+
+
+class TestShowRecord:
+    """A send of produced material records on its receipt what it put up and which reviews on record name those
+    exact bytes: a host fact, never a gate."""
+
+    @staticmethod
+    def _ctx(tmp_path, monkeypatch, review="auto"):
+        from ouroboros import config
+
+        monkeypatch.setattr(config, "get_task_review_mode", lambda: review)
+        root = tmp_path / "data"
+        root.mkdir(parents=True, exist_ok=True)
+        return types.SimpleNamespace(current_chat_id=123, pending_events=[], drive_root=root, budget_drive_root=root,
+                                     task_id="t-show", task_metadata={}, event_queue=_Queue())
+
+    def test_a_shown_file_names_its_bytes_and_each_review_on_record_that_names_them(self, tmp_path, monkeypatch):
+        """Both directions: with no record naming the bytes the line says none; a result review whose retained
+        subject names them and a plan ask that attached them are then named by id, the review with its state."""
+        import hashlib
+        from ouroboros import plan_record, review_ledger as ledger
+        from ouroboros.result_material import answer_text
+        from ouroboros.tools.core import _send_file
+        from ouroboros.tools.review_result import subject_source
+
+        ctx = self._ctx(tmp_path, monkeypatch)
+        doc = tmp_path / "mockup.html"
+        doc.write_bytes(b"<p>dock</p>")
+        digest = hashlib.sha256(b"<p>dock</p>").hexdigest()
+        receipt, show = _send_file(ctx, file_path=str(doc)).split("\n")
+        assert receipt == "OK: file 'mockup.html' accepted for delivery to owner chat."
+        assert show == (f"Host fact: accepted for delivery: mockup.html, sha256 {digest[:12]}, 11 B. "
+                        "Reviews on record naming these bytes: none.")
+
+        subject = "## What was asked\n\nA dock mockup.\n\n" + answer_text(reply="Here it is.", produced={"files": [
+            {"path": str(doc), "kind": "artifact", "sha256": digest, "size": 11, "retained": "a copy"}]},
+            verification="none recorded")
+        subject_source(ctx, subject)
+        record_id = ledger.new_record_id()
+        ledger.write_record(ctx.drive_root, ledger.ReviewLedgerRecord(
+            record_id=record_id, state="settled", task_id="t-show", surface="result",
+            subject={"diff_sha": hashlib.sha256(subject.encode("utf-8")).hexdigest()}, verdict={"aggregate": "PASS"}))
+        plan_record.append_ask(ctx.drive_root, "t-show", {"ask_id": "a1", "revision": None, "participants": [],
+                                                          "attached": [{"locator": "mockup.html", "sha256": digest}]})
+        assert _send_file(ctx, file_path=str(doc)).split("\n")[1].endswith(
+            f"Reviews on record naming these bytes: result review {record_id} (settled, PASS); plan ask a1.")
+        other = tmp_path / "other.html"
+        other.write_bytes(b"<p>other</p>")
+        assert _send_file(ctx, file_path=str(other)).endswith("Reviews on record naming these bytes: none.")
+
+    def test_no_line_without_material_or_under_review_off_and_unknown_when_records_cannot_be_read(
+            self, tmp_path, monkeypatch):
+        """Both directions: links carry no material and an install with task review Off records no show; an app
+        card's page is named by its bytes; a record that cannot be read makes the reviews unknown, never none."""
+        import hashlib
+        import json
+        from ouroboros import review_ledger as ledger
+        from ouroboros.tools.cards import _show_card
+        from ouroboros.tools.core import _send_links, _send_photo
+
+        image = tmp_path / "shot.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 200)
+        ctx = self._ctx(tmp_path, monkeypatch)
+        assert "Host fact" not in _send_links(ctx, links=[{"label": "Docs", "url": "https://example.com/d"}])
+        page = "<!doctype html><button>Roll</button>"
+        card = json.loads(_show_card(ctx, title="Dice", fallback_text="A dice roller", app={"html": page}))
+        assert card["delivery"].split("\n")[1].startswith(
+            f"Host fact: accepted for delivery: app page, sha256 {hashlib.sha256(page.encode()).hexdigest()[:12]}, "
+            f"{len(page.encode())} B.")
+
+        def busy(*_args, **_kwargs):
+            raise OSError("index busy")
+
+        monkeypatch.setattr(ledger, "recent_records", busy)
+        assert _send_photo(ctx, file_path=str(image)).endswith("Reviews on record naming these bytes: unknown.")
+        off = self._ctx(tmp_path / "off", monkeypatch, review="off")
+        assert _send_photo(off, file_path=str(image)) == "OK: photo accepted for delivery to owner chat."

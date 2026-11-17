@@ -323,6 +323,21 @@ def test_materials_capture_explicit_registered_bytes_before_ask(tmp_path):
     assert ctx.pending_events[0]["materials"] == block["materials"]
 
 
+def test_a_question_with_materials_records_the_bytes_it_puts_up_and_one_without_none(tmp_path):
+    """Both directions: the card's decision materials are named by their bytes, as any send of them would be; a
+    question without materials adds no line."""
+    from ouroboros.artifacts import store_task_artifact_bytes
+    from ouroboros.tools.core_artifacts import _escalate
+
+    ctx = _tool_ctx(tmp_path)
+    stored = store_task_artifact_bytes(tmp_path, "root-1", name="choice.txt", data=b"Exact decision evidence")
+    receipt = _escalate(ctx, question="Choose?", options=["A"], assumption="Research", materials=[{"name": "choice.txt"}])
+    assert receipt.startswith("OK:") and receipt.splitlines()[-1] == (
+        f"Host fact: queued for delivery: choice.txt, sha256 {stored['sha256'][:12]}, 23 B. "
+        "Reviews on record naming these bytes: none.")
+    assert "Host fact" not in _escalate(ctx, question="Choose again?", options=["B"], assumption="Research")
+
+
 def test_material_reference_uses_descendant_inventory_and_rejects_forged_path(tmp_path):
     from ouroboros.artifacts import store_task_artifact_bytes
     from ouroboros.task_results import write_task_result

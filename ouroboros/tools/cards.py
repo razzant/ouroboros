@@ -292,6 +292,22 @@ def _card_body(ctx: ToolContext, components: Any, data: Any, widget: Any, app: A
     return supplied[0], body, supplied[0] == "widget" or bool(checked["actions"])
 
 
+def _shown_media(kind: str, body: Dict[str, Any], app: Any) -> list:
+    """The produced material a card puts up, for its receipt's show line (``owner_delivery.show_record``): an app's
+    page, or each image, audio and video a components card carries inline (``_media_nodes``), by its place."""
+    from ouroboros.tools.owner_delivery import shown_material
+
+    if kind == "app":
+        path = app.get("path") if isinstance(app, dict) else None
+        return [{"name": pathlib.Path(path).name if path else "app page", **body["app"]}]
+    shown = []
+    for where, node, media, _plain in _media_nodes(body.get("components")):
+        src = node.get("src").strip(_JS_SPACE) if isinstance(node.get("src"), str) else ""
+        if _DRAWABLE_MEDIA.fullmatch(src):
+            shown.append(shown_material(f"{media} {where}", b64=src.split(",", 1)[1]))
+    return shown
+
+
 def _show_card(ctx: ToolContext, title: str = "", fallback_text: str = "", components: Any = None,
                data: Any = None, widget: Any = None, app: Any = None, replace: str = "") -> str:
     """Store the card, then publish it to the owner's chat (live, or with the task's deferred events)."""
@@ -336,7 +352,7 @@ def _show_card(ctx: ToolContext, title: str = "", fallback_text: str = "", compo
         "replace": bool(replace), "interactive": interactive,
     }
     mode = deliver_owner_event(ctx, event)
-    named = named_delivery_receipt(ctx, event, mode, "card")
+    named = named_delivery_receipt(ctx, event, mode, "card", _shown_media(kind, body, app))
     identity = {"card_id": record["card_id"], "revision": int(record["revision"])}
     if mode in (UNDELIVERED, UNSUPPORTED_PEER):
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=json.dumps(

@@ -324,8 +324,87 @@ def _label(value: Any) -> str:
     return " ".join(str(value or "").split())[:80]
 
 
-def named_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) -> str:
-    """The frame's actual local destination and queue acceptance, never proof of display."""
+def named_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str, material: Any = ()) -> str:
+    """The frame's actual local destination and queue acceptance, never proof of display; a frame carrying produced
+    ``material`` (``shown_material``) adds the host's record of that show (``show_record``)."""
+    receipt = _named_receipt(ctx, evt, mode, noun)
+    show = show_record(ctx, mode, material)
+    return f"{receipt}\n{show}" if show else receipt
+
+
+def shown_material(name: Any, data: Any = None, *, b64: str = "") -> Dict[str, Any]:
+    """One piece of produced material a send puts up: its name, sha256 and size, from its bytes or the base64 text
+    its frame carries; empty when that text does not decode (no digest is named for bytes nobody can read)."""
+    import base64
+    import hashlib
+
+    if data is None:
+        try:
+            data = base64.b64decode(b64)
+        except ValueError:
+            return {}
+    return {"name": str(name), "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+
+
+def show_record(ctx: Any, mode: str, material: Any) -> str:
+    """The host's line for a send of produced material: what was accepted or queued for delivery, and which reviews
+    on record name those exact bytes (``_reviews_naming``). A fact on the existing receipt, never a gate: nothing
+    waits or is refused, and every review mode stays as it is. No line for a frame that carries no material or did
+    not go out, nor when task review is Off (no result review runs there to name anything)."""
+    items = [item for item in material or () if isinstance(item, dict) and item.get("sha256")]
+    if not items or mode not in ("live", "deferred"):
+        return ""
+    from ouroboros.config import get_task_review_mode
+
+    if get_task_review_mode() == "off":
+        return ""
+    found = _reviews_naming(ctx, {str(item["sha256"]): str(item.get("name") or "") for item in items})
+    shown = "; ".join(f"{item.get('name')}, sha256 {str(item['sha256'])[:12]}, {item.get('size')} B" for item in items)
+    reviews = "unknown" if found is None else "; ".join(found) or "none"
+    return (f"Host fact: {'accepted' if mode == 'live' else 'queued'} for delivery: {shown}. "
+            f"Reviews on record naming these bytes: {reviews}.")
+
+
+def _reviews_naming(ctx: Any, digests: Dict[str, str]) -> Any:
+    """Records of this task that name any of ``digests`` (sha256 -> name), read only: its result reviews, whose
+    retained subject lists each produced file by sha256 (``result_material.answer_text``), and its plan asks, which
+    keep each attachment's sha256. ``None`` (unknown) when this task or any of its records could not be read."""
+    from ouroboros import review_ledger as ledger
+    from ouroboros.plan_record import load_plan_record
+    from ouroboros.tools.review_result import _retained_subject_text
+
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    if not task_id:
+        return None
+
+    def naming(label: str, hashes: list) -> str:
+        return label + (" for " + ", ".join(digests[digest] for digest in hashes) if len(digests) > 1 else "")
+
+    found = []
+    try:
+        for row in ledger.recent_records(ledger.ledger_root(ctx), task_id, limit=50, hot_only=True, surface="result"):
+            if row.get("task_id") != task_id:
+                continue  # a descendant's record: its subject is retained in that task's own store
+            text = _retained_subject_text(ctx, str((row.get("subject") or {}).get("diff_sha") or ""))
+            if not text:
+                return None
+            if hashes := [digest for digest in digests if f"sha256 {digest}" in text]:
+                aggregate = str((row.get("verdict") or {}).get("aggregate") or "")
+                state = str(row.get("state") or "unknown") + (f", {aggregate}" if row.get("state") == "settled"
+                                                               and aggregate else "")
+                found.append(naming(f"result review {row.get('record_id')} ({state})", hashes))
+        record = load_plan_record(getattr(ctx, "budget_drive_root", None) or ctx.drive_root, task_id)
+        for ask in record.get("asks") or ():
+            attached = {str(item.get("sha256") or "") for item in ask.get("attached") or () if isinstance(item, dict)}
+            if hashes := [digest for digest in digests if digest in attached]:
+                found.append(naming(f"plan ask {ask.get('ask_id')}", hashes))
+    except Exception:
+        log.debug("records naming shown bytes unreadable for task %s", task_id, exc_info=True)
+        return None
+    return found
+
+
+def _named_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) -> str:
     if mode == UNSUPPORTED_PEER:
         return (f"⚠️ PEER_DELIVERY_UNSUPPORTED: {noun} not delivered: this peer conversation accepts text only. "
                 "Nothing was queued; any stored file or card remains available in this task.")
@@ -355,11 +434,11 @@ def named_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) 
     return f"OK: {noun} {state} {room} (Ouroboros side, not the place conversation). {path}"
 
 
-def publish_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) -> str:
+def publish_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str, material: Any = ()) -> str:
     """The send family's one acceptance receipt in every room."""
     from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 
-    text = named_delivery_receipt(ctx, evt, mode, noun)
+    text = named_delivery_receipt(ctx, evt, mode, noun, material)
     if mode in (UNDELIVERED, UNSUPPORTED_PEER):
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=text))
     return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text))
