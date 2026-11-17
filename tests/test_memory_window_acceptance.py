@@ -281,11 +281,13 @@ def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop
         assert fact["need"] - fact["reserve"] - fact["work"] <= tokens + -(-window // 100)
     events = [f.events.get_nowait() for _ in range(f.events.qsize())]
     sends = [event["context_attempt"] for event in events if "context_attempt" in event]  # the census the capsule reads
-    assert sends and {(send["preferred_at_send"], send["applied"], send["cause"]) for send in sends} == {
-        ("max", *start)}
+    shown = "max" if start[0] == "low" else start[0]  # Max whose books went to chapter maps stays Max (4A)
+    assert sends and {(send["preferred_at_send"], send["applied"], send["books"], send["cause"]) for send in sends} == {
+        ("max", shown, "whole" if start[0] == "max" else "maps", start[1])}
     rows = [event["data"] for event in events if event["type"] == "log_event"
             and event["data"].get("checkpoint_kind") == "context_fit_physical_mode"]
     assert [row["cause"] for row in rows] == ([start[1]] if start[1] else [])  # the task card's start row
+    assert [(row["effective_mode"], row["books"]) for row in rows] == ([("max", "maps")] if start[1] else [])
     assert [event["system_type"] for _root, event in sent] == (["low_start_notice"] if start[1] == "memory" else [])
 
 

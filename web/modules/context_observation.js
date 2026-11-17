@@ -150,6 +150,18 @@ export function lowMissedOf(fact) {
         + 'memory keeps its shortest tellings.', { n: `${Math.round(n / 1000)}K` });
 }
 
+// A start the owner holds in Max whose books went to chapter maps stays Max (`books: maps`, owner 15.11.2026, 4A):
+// why, by the start's recorded cause. The task card's start row says the same (`task_checkpoints.js`).
+export function mapsOf(cause) {
+    switch (cause) {
+    case 'memory': return fmt('Chapter maps: the history does not fit beside the whole books.', {});
+    case 'route': return fmt('Chapter maps: this model’s window cannot hold the whole books.', {});
+    case 'window': return fmt('Chapter maps: the whole books did not fit beside the rest of the start.', {});
+    case 'after_start': return fmt('The work moved to chapter maps after it started.', {});
+    default: return fmt('Chapter maps.', {});
+    }
+}
+
 // An explicitly incomplete census: what it listed is kept, but it is not the room's whole current state.
 const incomplete = () => fmt('The current read is incomplete.', {});
 
@@ -184,8 +196,11 @@ export function contextShown(observation, preferred) {
     // Agreement is today's closed capsule: its own words name it (as the overlay translated them); open, it is dated.
     const note = obs.partial ? incomplete() : '';
     if (mode === preferred) {
-        const text = [when.time, note].filter(Boolean).join(' ');
-        return { actual: mode, word, lit: [mode], differs: false, label: '', fact: text ? { word: when.word, text } : null };
+        const maps = mode === 'max' && obs.latest?.books === 'maps' ? mapsOf(obs.latest.cause) : '';
+        const text = [maps, when.time, note].filter(Boolean).join(' ');
+        return { actual: mode, word, lit: [mode], differs: false,
+            label: maps ? fmt(obs.state === 'now' ? 'Context: Max now, chapter maps' : 'Context: Max last, chapter maps', {}) : '',
+            fact: text ? { word: when.word, text } : null };
     }
     const sentence = [causeOf(obs.latest, preferred), when.time, note].filter(Boolean).join(' ');
     return { actual: mode, word, lit: [mode], differs: true,

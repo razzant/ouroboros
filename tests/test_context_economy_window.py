@@ -969,8 +969,9 @@ def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_f
     assert text == "Primary answered after return." and len(payloads) == 3
     rebound = [row for row in _drained(events) if row.get("checkpoint_kind") == "context_fit_route_rebound"]
     mode = {"roomy": "low", "tight": "nano"}[fallback]
-    assert [(row["preferred_mode"], row["effective_mode"], row["view_kept"]) for row in rebound] == [
-        ("max", mode, fallback == "roomy"), ("max", mode, True)]
+    named = {"roomy": "max", "tight": "nano"}[fallback]  # Max with chapter maps is named Max (4A)
+    assert [(row["preferred_mode"], row["effective_mode"], row["books"], row["view_kept"]) for row in rebound] == [
+        ("max", named, "maps", fallback == "roomy"), ("max", named, "maps", True)]
     assert tools._ctx.active_context_mode == mode and tools._ctx.context_fit_plan.preferred_mode == "max"
     assert tools._ctx.messages[0] == tools._ctx.context_fit_plan.projection(mode).system_message()
     assert ("cannot hold Max with even the shortest view of my memory; this task runs in Nano."  # kept by the return
@@ -1122,7 +1123,8 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     kinds = [row.get("checkpoint_kind") for row in rows]
     assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "low"
     # Memory folded first and, unable to make room, its own floor lowered the books in that same pass.
-    assert [row.get("effective_mode") for row in rows if row.get("checkpoint_kind") == "context_memory_coarsened"] == ["low"]
+    assert [(row.get("effective_mode"), row.get("books")) for row in rows  # Max with chapter maps is named Max (4A)
+            if row.get("checkpoint_kind") == "context_memory_coarsened"] == [("max", "maps")]
     assert "context_fit_low_retry" not in kinds
 
     def shows(sent, whole):

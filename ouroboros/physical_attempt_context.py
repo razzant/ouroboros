@@ -9,7 +9,7 @@ import contextvars
 import datetime
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator, Literal, Optional, TypedDict
+from typing import Any, Callable, Iterator, Literal, Optional, Tuple, TypedDict
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +50,16 @@ class PhysicalAttemptContext:
 OBSERVED = frozenset({"dispatched", "settled", "unresolved"})  # a send the ledger records as made
 
 
+def shown_mode(rendered_mode: str, preferred_mode: str, *, compact: bool = False) -> Tuple[str, str]:
+    """``(mode, books)``: the mode a send is named in and its books' form, the one fact every surface reads (owner
+    15.11.2026, 4A). A start the owner holds in Max whose books went to chapter maps renders the ``low`` frame but
+    stays Max with ``maps``; Low and Nano show chapter maps; Max shows the whole books unless its actor reads them as
+    maps by design (a delegated child, ``compact``)."""
+    if rendered_mode == "low" and preferred_mode == "max":
+        return "max", "maps"
+    return rendered_mode, "whole" if rendered_mode == "max" and not compact else "maps"
+
+
 class ContextAttemptObservation(TypedDict, total=False):
     """One attempt's context as its task's activity row carries it (the base of ``ContextAttemptFact``): the
     ``attempt_fact`` fields, then the call identity of the frame that delivered it (``supervisor.events``).
@@ -61,7 +71,8 @@ class ContextAttemptObservation(TypedDict, total=False):
     ledger_state: Literal["dispatched", "settled", "unresolved", "released"]
     round_id: str
     preferred_at_send: Literal["", "max", "low", "nano"]  # the task plan's owner mode when it sent
-    applied: Literal["max", "low", "nano"]  # the mode the sent candidate was rendered in
+    applied: Literal["max", "low", "nano"]  # the mode the send is named in (``shown_mode``): Max for Max's chapter maps
+    books: Literal["whole", "maps"]  # the books' form in this send
     profile: Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
     cause: Literal["", "memory", "route", "window", "after_start"]  # why lower; "" also when the original start is unknown
     target_missed: bool  # this send exceeded the owner's mode target (``context_target_miss``)
@@ -90,8 +101,11 @@ def attempt_fact(capture: Any, round_id: str = "") -> Optional[ContextAttemptFac
         if (not isinstance(context, PhysicalAttemptContext) or getattr(capture, "state", "") not in OBSERVED | {"released"}
                 or (round_id and context.round_id != round_id)):
             return None
+        applied, books = shown_mode(context.rendered_mode,  # task-local Low is the owner's Max with chapter maps
+                                    "max" if context.profile == "task_local_low" else context.preferred_mode,
+                                    compact=context.view_kind == "child")
         return {"attempt_id": str(capture.attempt_id), "ledger_state": str(capture.state), "round_id": context.round_id,
-                "preferred_at_send": context.preferred_mode, "applied": context.rendered_mode,
+                "preferred_at_send": context.preferred_mode, "applied": applied, "books": books,
                 "profile": context.profile, "cause": context.mode_cause,
                 "target_missed": bool(context.context_target_miss), "no_memory_tokens": context.no_memory_tokens,
                 "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
