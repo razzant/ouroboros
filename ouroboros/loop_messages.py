@@ -566,9 +566,12 @@ def acceptance_observation_prompt(ctx: Any, observation: Dict[str, Any]) -> str:
 
 def prepare_acceptance_observation(ctx: Any, trace: dict, incoming: Any, messages: list) -> None:
     """Capture the owner-source facts every round; while delivery control asks Main to select a
-    completion, append them when they changed (earlier rows stay for prefix caching)."""
+    completion, or one-shot facts returned its answer (it may still select one), append them when they
+    changed (earlier rows stay for prefix caching)."""
+    from ouroboros.delivery_facts import noted
+
     observed = capture_acceptance_observation(ctx, trace, incoming)
-    if not getattr(ctx, "_delivery_control_required", False):
+    if not getattr(ctx, "_delivery_control_required", False) and not noted(getattr(ctx, "_delivery_candidate", None)):
         return
     note = acceptance_observation_prompt(ctx, observed)
     if not note:
@@ -628,6 +631,10 @@ def _emit_round_progress(content: Any, msg: Dict[str, Any], emit_progress, llm_t
     also carries ``reasoning=True``: it is the model's thinking, shown whole in the
     card's details, while only visible text may name the card or its collapsed line.
     """
+    from ouroboros.llm_messages import DISPLAY_KEY
+
+    if isinstance(display := msg.get(DISPLAY_KEY), dict):  # the lane's projection: history bytes hold more
+        content, msg = display.get("text") or "", {**msg, "reasoning": display.get("reasoning") or ""}
     visible_text = _visible_round_text(content)
     if visible_text:
         safe_text = sanitize_tool_result_for_log(visible_text)
@@ -637,6 +644,24 @@ def _emit_round_progress(content: Any, msg: Dict[str, Any], emit_progress, llm_t
         display_reasoning = LLMClient.extract_display_reasoning(msg)
         if display_reasoning:
             emit_progress(sanitize_tool_result_for_log(display_reasoning), narration=True, reasoning=True)
+
+
+def _handle_text_response(
+    content: Optional[str],
+    llm_trace: Dict[str, Any],
+    accumulated_usage: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """Handle LLM response without tool calls (final response).
+
+    The answer is delivered as written; only its trace note, which feeds the stored
+    trace summary, is redacted like the round narration (``_emit_round_progress``)."""
+    content = content or ""
+    if content.strip():
+        llm_trace["reasoning_notes"].append(sanitize_tool_result_for_log(content).strip())
+        from ouroboros.task_finalization import TERMINAL_ORIGIN_MODEL_FINAL
+
+        accumulated_usage["terminal_origin"] = TERMINAL_ORIGIN_MODEL_FINAL
+    return content, accumulated_usage, llm_trace
 
 
 # ---------------------------------------------------------------------------

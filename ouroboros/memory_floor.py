@@ -525,7 +525,6 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     ``tool_names``: the schemas the next request sends, which its floor note reads; else those its start priced.
     """
     from ouroboros.context_fit import _governance_blocks, _system_blocks, _request_tokens
-    from ouroboros.tool_policy import select_tool_schemas
 
     if plan is None or getattr(plan, "core", None) is None or not plan.core.memory_view_json:
         raise ValueError("This actor has no captured memory view")
@@ -535,8 +534,7 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     old = shown.memory_facts.get("floor") or {}
     switched = old.get("mode_switch") or {}
     max_room = shown.memory_facts.get("max_room")  # the start's fact: a selection keeps its frame
-    start = None if tool_names is not None else json.loads(getattr(plan, "start_tool_schemas_json", None) or "null")
-    names = tool_names if start is None else select_tool_schemas(start, context_mode=mode).chosen  # None: no claim
+    names = tool_names if tool_names is not None else plan.start_schema_names(mode)  # None: no claim
     note = floor_note(level, window_tokens=old.get("window_tokens"), mode=mode, tool_names=names,
                       target_tokens=old.get("target_tokens"), budget_mode=plan.preferred_mode,
                       lowered_from=switched.get("from"), max_room=max_room, snapshot=snapshot)
@@ -913,7 +911,8 @@ def counterfactual_starts(plan: Any, snapshots: Mapping[str, mv.MemoryViewSnapsh
                 window_tokens=record.total_equivalent, known_window=record.usable is not None,
                 output_reserve=plan.output_reserve_tokens, window_record=record, ratio=ratio,
                 working_reserve_tokens=plan.working_reserve_tokens, work_room_levels=snapshot.spec.work_room_levels,
-                retain=predicted_section, provider=plan.provider, reasoning_effort=getattr(plan, "start_reasoning_effort", ""))
+                retain=predicted_section, provider=plan.provider, nano_base=getattr(plan, "start_nano_base", None),
+                reasoning_effort=getattr(plan, "start_reasoning_effort", ""))
         rescued = False
         try:
             try:

@@ -29,7 +29,8 @@ def test_note_pressure_measurement(tmp_path, monkeypatch, extra_chars, note_line
     assert result['ladder'].get('F8', 0) == note_lines, diagnostic
     assert bool(result['ladder'].get('F8a')) is aggregate, diagnostic
     assert result['ladder']['F7a'] == 1 and result['ladder']['F5a'] == 1
-    assert result['ladder']['F7'] == {0: 18, 32000: 34, 48000: 42, 52000: 43, 53000: 43, 54000: 43}[extra_chars]
+    # Nano's standing set sends the fixture's read_file too (tool_policy.NANO_RESIDENT_SCHEMA_NAMES): one more F7 step.
+    assert result['ladder']['F7'] == {0: 19, 32000: 34, 48000: 42, 52000: 43, 53000: 43, 54000: 43}[extra_chars]
     with monkeypatch.context() as earlier:
         earlier.setattr(mf, 'LADDER', tuple(s for s in mf.LADDER if s not in ('F8', 'F8a')))
         before = measure_core(core, tools, root=tmp_path, window=92000, reserve=10000)

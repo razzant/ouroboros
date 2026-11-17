@@ -527,6 +527,22 @@ class _OpenAICompatibleLaneMixin:
         # already gets. Cross-family sends strip it (sanitize_reasoning_on_model_switch
         # + the outbound scrubber), and the deepseek outbound build replays it.
         provider = str(target.get("provider") or "")
+        if (provider == "openai-compatible" and isinstance(msg.get("content"), str)
+                and not any(msg.get(key) for key in ("reasoning_content", "reasoning", "reasoning_details"))):
+            # A local server (llama.cpp without a reasoning parser, vLLM) can return the model's leading reasoning, or
+            # its lone closing ``</think>``, inside the answer; a reply with its own reasoning field is not read. The
+            # built-in lane's reader splits it off (``llm_local._split_leading_reasoning``); the reasoning stays beside
+            # the answer as the portable ``reasoning`` the outbound scrubber drops. An answer left empty takes the
+            # empty-response recovery. A reply with tool calls keeps its history (llama.cpp #24890) and gains its
+            # display projection (``llm_local.stamp_display``).
+            from ouroboros.llm_local import _split_leading_reasoning, stamp_display
+
+            if msg.get("tool_calls"):
+                stamp_display(msg)
+            elif (split := _split_leading_reasoning(msg["content"]))[0] != msg["content"]:
+                msg["content"] = split[0]
+                if split[1]:
+                    msg["reasoning"] = split[1]
         # MiniMax's two continuation carriers stay verbatim, including unknown
         # shapes. Retention does not make an opaque value displayable or portable.
         if provider not in {"deepseek", "minimax"}:

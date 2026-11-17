@@ -344,6 +344,10 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_publish_delivery_candidate",
         "_record_forced_finalization", "_server_web_allowed_by_task",
     })),
+    "ouroboros/delivery_facts.py": ("ouroboros/loop.py", "_loop", frozenset({
+        "_arm_delivery_control", "_append_or_merge_user_message", "_publish_delivery_candidate",
+        "_emit_round_progress", "_delivery_evidence_state", "_replace_delivery_candidate",
+    })),
     "ouroboros/loop_delivery.py": ("ouroboros/loop.py", "_loop", frozenset({
         'DeliveryCandidate', 'TERMINAL_ORIGIN_MODEL_FINAL', '_LoopExitContext',
         '_append_or_merge_user_message', '_arm_delivery_control', '_begin_task_acceptance_fence',

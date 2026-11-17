@@ -848,6 +848,9 @@ class OuroborosAgent:
         # A live call's native session answers the fit's route question: read as an attribute, so the executor
         # inventory sees this door (tests/test_executor_inventory.py).
         turn = self._realtime_turn if getattr(self, "_realtime_turn", None) is not None else None
+        # A call sends its own Nano base, the selectors and its feature's tools (``live_conversation``): its start is
+        # fitted on that set, never on the standing work set an ordinary turn carries.
+        nano_base = tuple(turn.feature.get("initial_tools", ())) if turn is not None else None
         with collector_rests(), measured_sections():  # each section's wall and CPU time rides on the build's context_memory_view receipt
             route_resolver, effort = context_start_route(ctx, task, saved_start,
                 _initial_effort_for(task, str(task.get("type") or "").lower()),
@@ -858,7 +861,9 @@ class OuroborosAgent:
                 task=task,
                 review_context_builder=lambda: build_review_context(review_env),
                 ctx=ctx,
-                tool_schemas=initial_tool_schemas(self.tools, context_mode=get_context_mode()), tool_registry=self.tools,
+                tool_schemas=initial_tool_schemas(self.tools, context_mode=get_context_mode(),
+                                                  standing=nano_base is None, schema_names=nano_base),
+                tool_registry=self.tools, nano_base=nano_base,
                 reasoning_effort=effort,
                 route_resolver=route_resolver,  # the fit's own route question, asked beside the build
             )

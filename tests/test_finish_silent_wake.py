@@ -1006,8 +1006,20 @@ def test_refused_quiet_selection_then_owner_stop_stays_internal(wake, internal):
     _host_notice_only(wake, text, usage, trace, bus, internal, "(owner_requested_finalization)")
 
 
-def test_provider_death_after_refused_quiet_selection_keeps_words_internal(wake):
+def test_provider_death_after_refused_quiet_selection_keeps_words_internal(wake, monkeypatch):
     """The provider-salvage rail retains the held quiet bytes; only its failure is announced."""
+    from ouroboros import context, context_fit as cf
+
+    evidence = SimpleNamespace(status="confirmed", stale=False, window_tokens=500_000, route_fp="wake-route")
+    def route(task, **_kw):
+        return {"model": task.get("model", "test-model"), "provider": "openai", "use_local": False}, evidence
+    monkeypatch.setattr(context, "_context_fit_route", route)
+    core = cf.ContextCore(base_prompt="Wake system.", bible_md="", architecture_md="", development_md="",
+        semi_stable_text="", dynamic_text="", user_content_json=json.dumps("Wake: no one has asked for a task."),
+        docs_need_development=False)
+    wake.ctx.context_fit_plan = cf.build_context_fit_plan(
+        SimpleNamespace(drive_root=wake.root), core, {"model": "test-model"}, preferred_mode="max",
+        route_resolver=route, tool_schemas=loop.initial_tool_schemas(wake.registry))
     wake.registry.override_handler("chat_history", lambda _ctx, **_kw: "read result")
     text, usage, trace, bus = wake.run([_refused_quiet_selection(INTERNAL), None, None, None])
     assert trace["forced_finalization"]["source"] == "retained_candidate"
@@ -1039,3 +1051,41 @@ def test_history_replay_and_completion_wins_owe_no_silent_row(wake):
     assert package["final_result_text"] == "" and package["internal_terminal_text"] == "internal note"
     section = sealed_final_prompt_section(package)
     assert "finished silently" in section and "never sent to the owner" in section
+
+
+# Prose completion after one-shot delivery facts (Nano regression).
+def _shown(monkeypatch):
+    """Every text the loop shows the person as an interim message (``_emit_round_progress``), in order."""
+    import ouroboros.loop as loop
+
+    shown, real = [], loop._emit_round_progress
+
+    def capture(content, msg, emit, trace):
+        if isinstance(content, str) and content.strip():  # a tool round without words shows no text
+            shown.append(content)
+        return real(content, msg, emit, trace)
+
+    monkeypatch.setattr(loop, "_emit_round_progress", capture)
+    return shown
+
+
+def test_a_silent_finish_stays_silent_through_the_facts(wake, monkeypatch):
+    """A wake chose finish_task(silent=true); the pre-delivery facts returned it once and the model then wrote prose.
+    Only a new explicit finish_task without silent ends the silence: nothing is sent or shown."""
+
+    shown = _shown(monkeypatch)
+    text, usage, trace, bus = wake.run([call("write_file", {"path": "report.md", "content": "Report"}),
+                                        finish(INTERNAL, silent=True),
+                                        {"role": "assistant", "content": "An ordinary line after the facts."}])
+    assert usage.get("wake_silent") is True
+    pending, _stored = emit(wake, text, usage, trace, bus=bus)
+    assert not sends(pending) and shown == []
+    # the model is told before it writes that its next words stay unspoken (review 8, Fable)
+    assert "You chose silence, so it stays unspoken; only finish_task without silent speaks." in str(wake.calls[-1])
+
+
+def test_an_explicit_spoken_finish_ends_the_silence(wake, monkeypatch):
+
+    text, usage, trace, bus = wake.run([call("write_file", {"path": "report.md", "content": "Report"}),
+                                        finish(INTERNAL, silent=True), finish("Spoken after all.")])
+    assert text == "Spoken after all." and not usage.get("wake_silent")

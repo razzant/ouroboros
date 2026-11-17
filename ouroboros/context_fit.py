@@ -117,11 +117,21 @@ class ContextFitPlan:
     account_pin: str = ""  # the profile the role pins ("": Auto, where an answer naming no route names no account)
     window_evidence: Tuple[str, str] = ("", "")  # the start's ``capability_evidence.window_evidence``, for its receipt
     start_tool_schemas_json: Optional[str] = None  # what the start fit priced (``null``: none); None: not captured
+    start_nano_base: Optional[Tuple[str, ...]] = None  # a live call's own Nano tools, priced by its start
     start_reasoning_effort: str = ""  # effort paired with this frame's provider for next-start pricing; ``start`` keeps history
     # The start fit's own mode and why it is below the owner's (``memory_floor.start_cause``): every reprojection
     # and route rebind keeps it, while ``initial_mode`` follows the current selection. ("", ""): not a built start;
     # ``UNKNOWN_START``: a restored task whose continuation did not carry its start (``restored_start``).
     start: Tuple[str, str] = ("", "")
+
+    def start_schema_names(self, mode: str) -> Optional[Tuple[str, ...]]:
+        """The schema names the start priced, selected for ``mode`` as the start selected them (a live call's own
+        Nano base, else the standing work set); None when the start priced none or was not captured."""
+        from ouroboros.tool_policy import select_tool_schemas
+
+        start, base = json.loads(self.start_tool_schemas_json or "null"), self.start_nano_base
+        return None if start is None else select_tool_schemas(
+            start, context_mode=mode, schema_names=base, standing=base is None).chosen
 
     def reproject_for_route(self, *, window_tokens: int, known_window: bool, ratio: float, output_reserve: int,
                             tool_schemas: Optional[List[Dict[str, Any]]], start_mode: Optional[str] = None,
@@ -211,13 +221,16 @@ class ContextFitPlan:
                     saving={start: math.ceil(deficit / units)}, slack=math.ceil(deficit / units) - math.ceil(excess / units))
 
         def narrowed(projection: ContextFitProjection) -> bool:
-            # A view whose level, budget and mode line did not move keeps its bytes (its floor note names its
-            # cut window); equal counts from another level never keep a view's budget provenance.
+            # Unchanged levels keep their bytes unless pressure requires a different receipt; equal counts
+            # from another level never keep a view's budget provenance.
             old, new = (dict(facts.get("floor") or {}) for facts in (projection.memory_facts or {},
                                                                      contents[projection.mode][1] or {}))
             return (any(old.get(key) != new.get(key) for key in ("forms_version", "steps", "runs", "by_budget", "target_tokens", "mode_switch"))
                     or projection.memory_facts.get("host_sections_addressed")
-                    != contents[projection.mode][1].get("host_sections_addressed"))
+                    != contents[projection.mode][1].get("host_sections_addressed")
+                    # Under measured pressure, a shorter receipt can pay the excess without another floor step.
+                    or (deficit > 0 and projection.mode == start
+                        and json.loads(projection.system_content_json) != contents[projection.mode][0]))
 
         def project(projection: Optional[ContextFitProjection]) -> Optional[ContextFitProjection]:
             if projection is not None and projection.mode in contents and narrowed(projection):
@@ -537,13 +550,13 @@ def estimate_context_prompt_tokens(
     from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
     from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 
-    from ouroboros.llm_messages import HOST_ONLY_MESSAGE_KEYS, STABLE_PREFIX_BLOCKS_KEY
+    from ouroboros.llm_messages import DISPLAY_KEY, HOST_ONLY_MESSAGE_KEYS, STABLE_PREFIX_BLOCKS_KEY
 
     # These top-level host receipts remain canonical but are absent from sends (the leading system message's stable
     # block count included: every send copy pops it, so the density witness never counted it).
     # Do not strip same-named keys inside native payloads or user/tool arguments.
     hidden = {HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY,
-              TOOL_RESULT_RECORD_KEY, STABLE_PREFIX_BLOCKS_KEY}
+              TOOL_RESULT_RECORD_KEY, STABLE_PREFIX_BLOCKS_KEY, DISPLAY_KEY}
     messages = [{key: value for key, value in message.items() if key not in hidden} for message in messages]
     messages = [{**message, "content": [
         {key: value for key, value in block.items() if key not in HOST_ONLY_MESSAGE_KEYS}
@@ -838,6 +851,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                       envelope_overhead_tokens: int = 0, start_work: bool = False, slack: int = 0, retain: Any = None,
                       admitted: bool = False, provider: str = "", reasoning_effort: str = "",
                       sized: Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]] = None,
+                      nano_base: Optional[Tuple[str, ...]] = None,
                       ) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
     """Select books once, choose memory in one walk. Unsent book forms share the selected memory, not another budget.
 
@@ -845,6 +859,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     its own note, so neither costs a form, mode or schema (owner 1.11.2026). At a fresh start on a known window the
     ordinary estimate, the book, its note and the reply the ordinary view keeps must fit, else the named refusal.
     ``retain``: how a host step captures its section (default ``section_floor.retain_section``).
+    ``nano_base``: the Nano tools a live call sends (its feature's, beside the selectors), priced instead of the
+    standing work set; ``resident`` prices exactly the tools given.
     Each mode's frame is the record's ``total_equivalent`` (a start keeps the whole reply reserve), or with
     ``admitted`` its admitted line (``WindowRecord.admitted``: a view the work holds, in whatever mode it is fitted again).
     A request is the estimator's one count of its messages and schemas in this ``provider``'s and effort's longest
@@ -862,7 +878,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     mode = select or start or preferred
     form = {m: "low" if core.compact_reference_docs or m == "nano" else m for m in floor.MODES}
     snapshot = snapshot_from_json(core.memory_view_json) if core.memory_view_json else None
-    names = [schema["function"]["name"] for schema in tool_schemas or []] if resident else None
+    names = [schema["function"]["name"] for schema in tool_schemas or []] if resident else nano_base
+    standing = resident or nano_base is None
 
     sections = {m: (*core.semi_stable_sections, *core.dynamic_sections,
                     *core.dynamic_head_sections,
@@ -896,7 +913,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         return max(1, (shapes[key] + forms + story + room + 3) // 4) + envelope_overhead_tokens
     asked = (saving or {}).get(start or preferred, 0)  # the shown request's saving, in estimator tokens
     original_fixed = measure(start or preferred, select_tool_schemas(tool_schemas or [], context_mode=mode,
-        schema_names=names), section_views(sections[start or preferred], previous))
+        schema_names=names, standing=standing), section_views(sections[start or preferred], previous))
     original_reserve = context_budget.context_mode_limits(mode, preferred, output_reserve, working_reserve_tokens=working_reserve_tokens)[1]
     def owed(fixed, reserve):  # what a frame still owes of it once its books, host forms and reserve paid their part
         return max(0, asked - (original_fixed - fixed) - math.floor((original_reserve - reserve) / max(ratio, 0.01)))
@@ -916,7 +933,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     def frame(selected):
         nonlocal receipts
-        sent = select_tool_schemas(tool_schemas or [], context_mode=selected, schema_names=names)
+        sent = select_tool_schemas(tool_schemas or [], context_mode=selected, schema_names=names, standing=standing)
         target, reserve = context_budget.context_mode_limits(selected, preferred, output_reserve,
                                                             working_reserve_tokens=working_reserve_tokens)
         record = replace(window_record, reserve=reserve) if window_record else None
@@ -1040,9 +1057,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         section_views(sections[m], receipts), whole), receipt) for m in floor.MODES}, mode
 
 
-def _whole_request(core, governance, mode, tool_schemas):
+def _whole_request(core, governance, mode, tool_schemas, nano_base=None):
     """Uncut selected request for a route's comparable density witness, before any floor step: the request with
-    one-letter memory texts, its tools, and the characters the whole story and room add beyond those letters."""
+    one-letter memory texts, its tools, and the characters the whole story and room add beyond those letters.
+    ``nano_base``: a live call's own Nano tools instead of the standing work set (``_view_projections``)."""
     from ouroboros.memory_view import room_chars, snapshot_from_json, story_chars
     from ouroboros.tool_policy import select_tool_schemas
 
@@ -1051,7 +1069,9 @@ def _whole_request(core, governance, mode, tool_schemas):
     form = "low" if core.compact_reference_docs or mode == "nano" else mode
     messages = _request_rows(_system_blocks(core, governance[form], "s" if story else "", "r" if room else "", mode),
                              core.user_content_json, core.supplementary_messages_json)
-    return messages, list(select_tool_schemas(tool_schemas or [], context_mode=mode).schemas), story + room - bool(story) - bool(room)
+    sent = select_tool_schemas(tool_schemas or [], context_mode=mode, schema_names=nano_base,
+                               standing=nano_base is None)
+    return messages, list(sent.schemas), story + room - bool(story) - bool(room)
 
 
 START_CAUSES = ("", "memory", "route", "window")  # ``memory_floor.start_cause``
@@ -1086,9 +1106,11 @@ def build_context_fit_plan(
     route_resolver: Callable[..., Tuple[Dict[str, Any], Any]],
     tool_schemas: Optional[List[Dict[str, Any]]] = None,
     reasoning_effort: str = "",
+    nano_base: Optional[Tuple[str, ...]] = None,
 ) -> ContextFitPlan:
     """Capture route facts, choose books and fit one start view, measured in the shape the route's provider and the
-    first send's ``reasoning_effort`` give the request (``_request_shapes``)."""
+    first send's ``reasoning_effort`` give the request (``_request_shapes``); ``nano_base``: a live call's own Nano
+    tools (``_view_projections``)."""
     preferred = str(preferred_mode or "max").strip().lower()
     if preferred not in {"low", "max", "nano"}:
         preferred = "max"
@@ -1103,7 +1125,7 @@ def build_context_fit_plan(
     role = view_role(view_task)
     view_kind = {"consciousness": "own_wake", "presence": "focus", "integrator": "owner_turn"}.get(role, role)
     # Select density before the single start walk, comparing the whole captured request at the size that can be sent.
-    rows, schemas, memory_chars = _whole_request(core, governance, preferred, tool_schemas)
+    rows, schemas, memory_chars = _whole_request(core, governance, preferred, tool_schemas, nano_base)
     counted("request_forms")
     levels, sized = start_room(view_task, role), {}
 
@@ -1148,7 +1170,7 @@ def build_context_fit_plan(
             preferred=preferred, tool_schemas=tool_schemas, window_tokens=state.window_record.total_equivalent,
             known_window=state.known_window, output_reserve=state.output_reserve, window_record=state.window_record,
             working_reserve_tokens=state.working_reserve, provider=provider, reasoning_effort=reasoning_effort,
-            sized=(rows, schemas, sized[provider]))
+            sized=(rows, schemas, sized[provider]), nano_base=nano_base)
 
         def fit(user_content_json: str) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
             return _view_projections(core, governance, user_content_json, **view_args, ratio=state.ratio,
@@ -1263,6 +1285,7 @@ def build_context_fit_plan(
         route_base_url=str(route.get("base_url") or ""), account_pin=str(route.get("account_pin") or ""),
         window_evidence=window_evidence(evidence, window_record),
         core=core, start_tool_schemas_json=json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True),
+        start_nano_base=nano_base,
         start_reasoning_effort=reasoning_effort,
         start=(initial_mode, "" if initial_mode == preferred else start_cause(contents[initial_mode][1])),
     )

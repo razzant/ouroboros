@@ -27,6 +27,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros import working_checkpoint
 from ouroboros.config import get_context_mode
 from ouroboros.conversation_lease import follow_loop_admission
+from ouroboros.delivery_facts import FACTS_NOTED_CONTROL, note_delivery_facts as _note_delivery_facts
+from ouroboros.delivery_facts import noted, note_shown_review, show_replaced_answer
 from ouroboros.finalization_timing import finalization_child_scope
 from ouroboros.observability import timed_phase
 from ouroboros.outcomes import reviewable_effect_projection
@@ -81,6 +83,10 @@ class DeliveryCandidate:
     owner_source_sha256: str = ""
     quiet: bool = False  # bytes of a wake's silent selection: replaced, never published, by other prose
 
+    def stale(self, evidence_revision: int, evidence_fingerprint: str) -> bool:
+        """Whether this answer was bound to other evidence than ``(evidence_revision, evidence_fingerprint)``."""
+        return (self.evidence_revision, self.evidence_fingerprint) != (evidence_revision, evidence_fingerprint)
+
     @property
     def owes_no_selection(self) -> bool:
         """Its next answer is fresh prose: a host-shown round (``FRESH_ANSWER_CONTROLS``) outside a control episode."""
@@ -95,9 +101,10 @@ _DELIVERY_HOLD_CONTROLS = frozenset({
     _SKILL_ACTION_HOLD_CONTROL,
     _AUTHORING_HANDOVER_HOLD_CONTROL,
 })
-# After these host-shown rounds (an owner follow-up, a routeless final's note) the answer is fresh, owing no selection.
+# After these host-shown rounds (an owner follow-up, a routeless final's note, one-shot finish facts:
+# ``delivery_facts``) the answer is fresh, owing no selection.
 ROUTELESS_NOTED_CONTROL = "routeless_final_noted"
-FRESH_ANSWER_CONTROLS = frozenset({"owner_revision_required", ROUTELESS_NOTED_CONTROL})
+FRESH_ANSWER_CONTROLS = frozenset({"owner_revision_required", ROUTELESS_NOTED_CONTROL, FACTS_NOTED_CONTROL})
 # The candidate degradations a normal exit derives from its own host suffixes (an unsettled child, an open plan).
 _SUFFIX_MARKS = frozenset({"host_child_status_suffix", "plan_review_advisory"})
 # Header of the host's own rendered control block; identifies the transcript's
@@ -526,12 +533,7 @@ def _current_delivery_candidate(
     evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(
         ctx.tools, ctx, llm_trace,
     )
-    if (
-        candidate.evidence_revision != evidence_revision
-        or candidate.evidence_fingerprint != evidence_fingerprint
-    ):
-        return None
-    return candidate
+    return None if candidate.stale(evidence_revision, evidence_fingerprint) else candidate
 
 
 def _degrade_retained_delivery_candidate(
@@ -748,7 +750,8 @@ def carry_forced_selection(tool_ctx: Any, request: dict | None, candidate: Any) 
         tool_ctx._completion_selected = request
 
 
-def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, content: Any = None) -> bool:
+def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, content: Any = None, *,
+                               emit_progress=None) -> bool:
     """Resolve one staged author act after the full batch, using its original observation."""
     from ouroboros.tool_capabilities import completion_observation_calls
     from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed, owner_source_sha256
@@ -790,8 +793,8 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
         finally:
             tool_ctx._acceptance_observation = previous
     if text is not None and not error:
-        candidate = _loop()._replace_delivery_candidate(tools, ctx, trace, text, control="selected")
-        candidate.quiet = bool(request.get("wake_silent"))
+        from ouroboros.delivery_facts import select_answer
+        candidate = select_answer(tools, ctx, trace, text, request, emit_progress)
         _loop()._latch_final_answer_marker(trace, "" if candidate.quiet else text)  # quiet words latch no fallback
     if not error and request["action"] == "finish" and unseen:
         error = "unobserved_tool_results: read the completed results before finishing: " + ", ".join(str(c.get("tool")) for c in unseen)
@@ -1193,12 +1196,17 @@ def _prepare_delivery_candidate(content: Any, tools: ToolRegistry, limit_ctx: An
     _loop()._project_child_result_dispositions(limit_ctx, llm_trace)
     held = getattr(tools._ctx, "_delivery_candidate", None)
     quiet_held = not explicit and getattr(held, "quiet", False)  # replaced even by empty prose, never published
+    keep_quiet = quiet_held and noted(held)  # prose after one-shot facts inherits a silent selection (delivery_facts)
     if resumed and quiet_held:
         return False, content  # a quiet selection lost with its execution id is chosen again
     fresh = control == "fresh" and (explicit or str(content or "").strip() or quiet_held)
-    candidate = _loop()._replace_delivery_candidate(tools, limit_ctx, llm_trace, str(content or ""), control="candidate") if fresh else held
+    candidate = held if not fresh or (explicit and held is not None) else _loop()._replace_delivery_candidate(
+        tools, limit_ctx, llm_trace, str(content or ""), control="candidate")
     if isinstance(candidate, DeliveryCandidate):
-        candidate.quiet = explicit and bool((getattr(tools._ctx, "_completion_selected", None) or {}).get("wake_silent"))
+        if fresh:
+            candidate.finalization_control = "candidate"
+        selected = getattr(tools._ctx, "_completion_selected", None) or {}
+        candidate.quiet = keep_quiet or explicit and bool(selected.get("wake_silent"))
         content = candidate.full_text
     if fresh or resumed:
         working_checkpoint.save_or_log(limit_ctx, "candidate")  # this attempt survives another interruption
@@ -1230,14 +1238,19 @@ def _no_tool_final_answer(
         return None
     # Each wait-free segment reads its children once; they may advance between segments (services stop, review, drain).
     with finalization_child_scope():
+        prior = getattr(tools._ctx, "_delivery_candidate", None)
+        was_noted = noted(prior)
         ready, content = _prepare_delivery_candidate(content, tools, limit_ctx, llm_trace,
                                                      explicit=explicit_candidate, resumed=resume_candidate)
-        if not ready:  # prose under armed control, or a resumed quiet selection lost with its execution
-            return held("quiet_selection_lost" if resume_candidate else "selection_required")
+        if not ready and resume_candidate:
+            return held("quiet_selection_lost")
+        if ready:
+            show_replaced_answer(prior, was_noted, getattr(tools._ctx, "_delivery_candidate", None), emit_progress,
+                                 llm_trace)
 
-        stopping = (getattr(tools._ctx, "_completion_selected", None) or {}).get("action") == "stop"
+        stopping = ready and (getattr(tools._ctx, "_completion_selected", None) or {}).get("action") == "stop"
         if not stopping:
-            if _loop()._enforce_plan_gate(
+            if ready and _loop()._enforce_plan_gate(
                 str(content or ""), messages, tools, llm_trace, emit_progress,
             ):
                 return held("plan_gate")
@@ -1245,15 +1258,17 @@ def _no_tool_final_answer(
             if handoff_msg:  # the pre-delivery notice rides the same door: one door, one return
                 notice = _loop()._claim_pre_delivery_notice(tools, limit_ctx.drive_root, limit_ctx.task_id, llm_trace)
                 handoff_msg = f"{handoff_msg}\n\n{notice}" if notice else handoff_msg
-                if content and content.strip():
+                if ready and content and content.strip():
                     messages.append({"role": "assistant", "content": content})
                 _loop()._append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{handoff_msg}")
                 note = "Subagent handoff status refreshed before final response." + (
                     " Pre-delivery facts shown with it." if notice else "")
                 emit_progress(note)
                 llm_trace["reasoning_notes"].append(note)
-                _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+                _note_delivery_facts(tools, limit_ctx, llm_trace)
                 return held("subagent_handoff", (_hold_cause(tools._ctx) or "pre_delivery_notice") if notice else "")
+            if not ready:  # child news is delivered even while selection remains owed
+                return held("selection_required")
             from ouroboros.owner_hurry import latched
             # The mind reads its review before it decides (owner 11.10); the rows themselves are the news.
             review_rows, review_present = ([], False) if resume_candidate or latched(tools._ctx) else (
@@ -1286,6 +1301,8 @@ def _no_tool_final_answer(
                         tools, llm_trace,
                         control=_AUTHORING_HANDOVER_HOLD_CONTROL,
                     )
+                elif getattr(tools._ctx, "_completion_hold_cause", "") in ("pre_delivery_notice", "red_check_notice"):
+                    _note_delivery_facts(tools, limit_ctx, llm_trace)
                 else:
                     _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
                 return held("finalization_nudge", _hold_cause(tools._ctx))
@@ -1307,13 +1324,8 @@ def _no_tool_final_answer(
         if services_finalized and not stopping:
             evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(tools, limit_ctx, llm_trace)
             candidate = getattr(tools._ctx, "_delivery_candidate", None)
-            if (
-                isinstance(candidate, _loop().DeliveryCandidate)
-                and (
-                    candidate.evidence_revision != evidence_revision
-                    or candidate.evidence_fingerprint != evidence_fingerprint
-                )
-            ):
+            if (isinstance(candidate, _loop().DeliveryCandidate)
+                    and candidate.stale(evidence_revision, evidence_fingerprint)):
                 if content and str(content).strip():
                     messages.append({"role": "assistant", "content": str(content)})
                 llm_trace["reasoning_notes"].append(
@@ -1344,7 +1356,10 @@ def _no_tool_final_answer(
                 _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
             content = candidate.full_text
 
+    shown_review: list = []  # what was put before the mind: a hold that only waits is told from an outcome shown
+
     def _hold_for_review(text: str) -> None:
+        shown_review.append(text)
         if content and str(content).strip():
             messages.append({"role": "assistant", "content": str(content)})
         _loop()._append_or_merge_user_message(messages, text)
@@ -1356,8 +1371,9 @@ def _no_tool_final_answer(
     if stopping:  # an explicit stop delivers unfinished work: no review is bought for it, and the record says why
         record_review_decision(llm_trace, "author_stop", ctx=tools._ctx)
     if not stopping and result_review_at_delivery(tools._ctx, content or "", llm_trace, _hold_for_review):
-        # The author continues freely; its next complete answer is selected explicitly.
-        return held("result_review", _hold_cause(tools._ctx))
+        cause = _hold_cause(tools._ctx)
+        note_shown_review(tools, limit_ctx, llm_trace, shown_review, cause)
+        return held("result_review", cause)
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
 
     # Close delivery under the same lock as routing, then drain once. A follow-up
@@ -1439,13 +1455,8 @@ def _no_tool_final_answer(
     # Fresh after projection too: a child can finish between these synchronous calls on another worker.
     evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(tools, limit_ctx, llm_trace)
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
-    if (
-        not stopping and isinstance(candidate, _loop().DeliveryCandidate)
-        and (
-            candidate.evidence_revision != evidence_revision
-            or candidate.evidence_fingerprint != evidence_fingerprint
-        )
-    ):
+    if (not stopping and isinstance(candidate, _loop().DeliveryCandidate)
+            and candidate.stale(evidence_revision, evidence_fingerprint)):
         if candidate.full_text:
             messages.append({"role": "assistant", "content": candidate.full_text})
         llm_trace["reasoning_notes"].append(
@@ -1453,7 +1464,9 @@ def _no_tool_final_answer(
             if evidence_fingerprint else
             "Delivery evidence can no longer be verified; the complete answer must be restated and is retained over unknown evidence."
         )
-        _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+        from ouroboros.delivery_facts import evidence_notice_control
+        _loop()._arm_delivery_control(tools, limit_ctx, llm_trace,
+                                      control=evidence_notice_control(evidence_revision, evidence_fingerprint))
         solving_again()
         return held("evidence_changed", "" if evidence_fingerprint else "unverifiable")
     if isinstance(candidate, _loop().DeliveryCandidate):
@@ -1526,7 +1539,8 @@ def finish_completed_stop(tools: ToolRegistry, ctx: Any, emit_progress: Any,
                           budget_remaining: float | None, ceiling: Any) -> Any:
     """Publish an already-authored stop without buying a wrap-up or parking for funds."""
     request = getattr(tools._ctx, "_completion_request", None)
-    if not isinstance(request, dict) or not consume_completion_request(tools, ctx, ctx.llm_trace):
+    if not isinstance(request, dict) or not consume_completion_request(tools, ctx, ctx.llm_trace,
+                                                                       emit_progress=emit_progress):
         return None
     if request.get("action") != "stop":
         return None
