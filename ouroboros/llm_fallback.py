@@ -235,9 +235,21 @@ class _RecoveryLadderMixin:
         exc: Exception,
     ) -> Optional[Dict[str, Any]]:
         """Strip replayed reasoning once for a non-overflow OpenRouter 400."""
-        if not target.get("supports_openrouter_extensions"):
+        if (not target.get("supports_openrouter_extensions")
+                or not self._has_replayed_reasoning_metadata(kwargs.get("messages") or [])):
             return None
         if not reasoning_strip_retry_allowed(exc):
+            return None
+        # A route's catalogue can explain a generic 400 before the loop sees it.
+        # Use the same answer, typed precedence and numeric equality as recovery.
+        from ouroboros._usage_response import provider_answer
+        from ouroboros.context_budget import cited_declared_limit
+        from ouroboros.loop_llm_call import classify_llm_exception
+        from ouroboros.pricing import declared_token_limits
+        model = str(kwargs.get("model") or target.get("resolved_model") or "")
+        if model and classify_llm_exception(exc).untyped and cited_declared_limit(
+                provider_answer(exc).said, int(kwargs.get("max_tokens") or kwargs.get("max_completion_tokens") or 0),
+                lambda: declared_token_limits("openrouter", model)):
             return None
         retry_kwargs = self._reroute_same_model_kwargs(target, kwargs)
         if retry_kwargs is not None:

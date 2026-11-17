@@ -470,6 +470,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         self._window = asdict(resolve_reviewer_window(
             slot.model, use_local=slot.use_local, model_role=f"reviewer:{slot.slot_id}",
             credential_profile_id=slot.session_profile, model_route=model_route, allow_fetch=False))
+        self._window.pop("capability_route", None)
         for key in ("window_tokens", "asserted_window_tokens"):
             self._window[key] = self._window[key] or None
         self._window["status"] = self._window["status"] or "unknown"

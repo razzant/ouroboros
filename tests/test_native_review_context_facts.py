@@ -168,7 +168,11 @@ def test_inspect_reports_previous_request_not_accumulated_or_cache_added_input(t
     result = executor.execute()
     inspected = json.loads(_tool_result(llm.calls[-1], "inspect"))
     facts = inspected["context"]
-    assert facts["window"] == dataclasses.asdict(window)
+    assert facts["window"] == {
+        "window_tokens": 200_000, "status": "asserted", "stale": True,
+        "observed_at": "2026-10-01T00:00:00Z", "model": "openai/fake-reviewer",
+        "asserted_window_tokens": 210_000, "model_route": {}, "window_record": None,
+    }
     assert facts["measurement_basis"] == "canonical_serialized_characters"
     assert facts["serialized_chars"] == native._wire_size(llm.calls[1]["messages"], llm.calls[1]["tools"])
     previous = facts["previous_request"]

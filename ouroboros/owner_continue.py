@@ -88,6 +88,10 @@ TECHNICAL_REASON_CODES = frozenset({
     # itself requires that could not be read (the producer's own cause; other authority refusals keep theirs). The
     # successor keeps that requirement; a larger route, the Context mode or a new task without it is the caller's choice.
     "context_capacity", "required_reference_unavailable",
+    # The size recovery's own forecast refused the last candidate (a provider's size refusal ends as llm_api_error,
+    # already here): the window, not a decision about the work, ended it. The successor starts from the window the
+    # route has learned since (P1, 15.11.2026); Continue stays the owner's explicit act, never an automatic retry.
+    "context_overflow",
 })
 # The loop's forced-finalization rails that are technical limits: an extracted
 # best-effort answer settles ``completed``, the host fallback ``failed``

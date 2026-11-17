@@ -1,0 +1,1 @@
+{"error": {"message": "Invalid 'messages': empty array. Expected an array with minimum length 1.", "type": "invalid_request_error", "param": "messages", "code": "empty_array"}}
