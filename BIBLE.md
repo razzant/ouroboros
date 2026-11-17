@@ -128,7 +128,7 @@ on every restart, but one personality that remembers its path.
     The work always has room; a chosen read is cut only by a fact.
     A reduction the owner did not choose is recorded as the window's,
     never as the owner's choice.
-  - ARCHITECTURE stays resident in owner-max while the books, my story in its retold forms and the work's room fit; otherwise that task runs as Low with chapter maps:
+  - ARCHITECTURE stays resident in owner-max while the books, my shortest tellings and the work's room fit; otherwise chapter maps come before memory below a telling:
     a disclosed fact of the route's window when removing what carries no
     meaning and folding my memory could not make room, and in every other
     case a failure I report and repair. `docs/DEVELOPMENT.md` stays resident when the work addresses
