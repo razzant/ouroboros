@@ -113,7 +113,8 @@ const restorePlaces = initPagePlaces();
 const pageNavigation = createPageNavigation({ layers, capture: opener => capturePagePlace({
     state, navState, settingsControls, dashboardControls, skillsControls, projectInstances, projectPanelTitle,
     rooms, mainChat, logsControls, restorePlaces, commitPage,
-}, opener), canLeave: key => canLeavePage(key, state, beforePageLeaveHandlers), land: () => restorePlaces.land(document.querySelector('.page.active')) });
+}, opener), canLeave: key => canLeavePage(key, state, beforePageLeaveHandlers), land: () => restorePlaces.land(document.querySelector('.page.active')),
+leave: () => rooms.rememberSelection(shownRoom()) });
 bindPageBack({ layers, currentHeader: () => navState.activeProjectId
     ? document.querySelector('.project-panel-bar') : document.querySelector(`#page-${state.activePage} > .app-page-header`) });
 const primarySidebar = document.getElementById('primary-sidebar');

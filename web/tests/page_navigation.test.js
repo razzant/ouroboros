@@ -67,6 +67,25 @@ test('a sidebar choice keeps the focus on its row, the opener a Project returns 
     nav.destroy(); layers.destroy();
 });
 
+test('a jump and its return let the room keep its selection before their blur; a sidebar choice blurs nothing', async () => {
+    const calls = [], body = {}, doc = { body, activeElement: body, addEventListener() {}, removeEventListener() {} };
+    const field = { blur() { calls.push('blur'); doc.activeElement = body; }, focus() { doc.activeElement = field; } };
+    const layers = createLayerStack({ win: null, doc: null });
+    const nav = createPageNavigation({ layers, doc, canLeave: () => true, leave: () => calls.push('leave'),
+        capture: () => ({ key: 'chat', label: 'Main', restore: () => () => {} }) });
+    field.focus();  // a draft in Main, a passage selected beside it (WebKit ends it with the blur)
+    await nav.go('project:one', () => {});
+    assert.deepEqual(calls, ['leave', 'blur'], 'the jump keeps the room\'s selection first');
+    field.focus();
+    layers.back('escape'); await settle();
+    assert.deepEqual(calls, ['leave', 'blur', 'leave', 'blur'], 'and so does its return');
+    calls.length = 0;
+    field.focus();
+    await nav.go('skills', () => {}, { map: true });
+    assert.deepEqual(calls, [], 'a sidebar choice neither blurs nor needs to keep');
+    nav.destroy(); layers.destroy();
+});
+
 test('only keyboard dismissals ask the returned place to show its focus ring', async () => {
     const layers = createLayerStack({ win: null, doc: null }), restored = [];
     const doc = { addEventListener() {}, removeEventListener() {} };

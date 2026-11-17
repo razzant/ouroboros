@@ -1,8 +1,9 @@
 import { pageLabel } from './pages.js';
 
-/** A jump is a page layer, never another history. The shell supplies the current retained place and the leave
- * guard; the destination commits synchronously with its return, after that guard has allowed the move. */
-export function createPageNavigation({ layers, capture, canLeave, land = () => {}, doc = document } = {}) {
+/** A jump is a page layer, never another history. The shell supplies the current retained place, the leave guard
+ * and `leave`, which keeps what the room on screen holds (its selection) before a jump's blur would end it; the
+ * destination commits synchronously with its return, after that guard has allowed the move. */
+export function createPageNavigation({ layers, capture, canLeave, land = () => {}, leave = () => {}, doc = document } = {}) {
     let serial = 0;
     let pressed = null;
     const onPress = (event) => { pressed = event; };
@@ -25,8 +26,9 @@ export function createPageNavigation({ layers, capture, canLeave, land = () => {
         if (await canLeave(key) === false || !current()) return false;
         // A jump lets go of the page it leaves. A map choice is pressed in the sidebar or drawer, which stays: its row
         // keeps the focus, the opener a layer the commit opens gives it back to (layers.js), and the room it leaves
-        // keeps its selection (WebKit drops a selection with the focus a blur takes from its room).
-        if (map !== true && origin.key !== key) doc.activeElement?.blur?.();
+        // keeps its selection (WebKit drops a selection with the focus a blur takes from its room); a jump's room keeps
+        // its own before that blur.
+        if (map !== true && origin.key !== key) { leave(); doc.activeElement?.blur?.(); }
         let id = null;
         layers.batch(() => {
             if (map === true) clear(); // sidebar/drawer; a section's own list and tabs keep the visit
@@ -36,6 +38,7 @@ export function createPageNavigation({ layers, capture, canLeave, land = () => {
                     returnTo: origin, destination: key, back: { label: origin.label, title: origin.title },
                     onClose: async (reason) => {
                         if (await canLeave(origin.key) === false) return false;
+                        leave();
                         doc.activeElement?.blur?.();
                         const restored = layers.batch(() => {
                             layers.remove(id);
