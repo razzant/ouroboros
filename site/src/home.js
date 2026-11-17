@@ -3,15 +3,16 @@ document.documentElement.classList.add("has-js");
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const finePointer = window.matchMedia("(hover: hover) and (pointer: fine)");
 const motionPaused = () => document.body.classList.contains("motion-paused");
+const still = () => reducedMotion.matches || motionPaused();
 
 /* The hero's third line cycles through what the agent does. One font size fits the longest phrase on one row;
    on a phone the phrases wrap instead. Both spans of a swap share one grid cell, so nothing is clipped and
    nothing moves below. Without JS or with reduced motion the line stays on one phrase. */
 function fitPower(host, lines) {
-  host.style.fontSize = "";
   host.style.minHeight = "";
-  const probe = document.createElement("span");
   const narrow = window.innerWidth <= 700;
+  host.style.fontSize = narrow ? "" : "1em";
+  const probe = document.createElement("span");
   probe.style.cssText = narrow
     ? `position:absolute;visibility:hidden;left:0;top:0;width:${host.clientWidth}px;white-space:normal`
     : "position:absolute;visibility:hidden;white-space:nowrap;left:-9999px;top:0";
@@ -26,7 +27,8 @@ function fitPower(host, lines) {
   probe.remove();
   if (narrow) { host.style.minHeight = `${tallest}px`; return; }
   const available = host.clientWidth;
-  if (widest > available && available > 0) host.style.fontSize = `${Math.max(0.5, available / widest * 0.995)}em`;
+  const scale = widest > available && available > 0 ? Math.max(0.5, available / widest * 0.995) : 1;
+  host.style.fontSize = `${scale}em`;
 }
 
 function initHeroPower() {
@@ -72,20 +74,26 @@ function initHeroPower() {
 /* One control pauses the ticker, the cycling line and the floating windows (WCAG 2.2.2); it appears only when motion runs. */
 function initMotionToggle() {
   const button = document.querySelector(".motion");
-  if (!button || reducedMotion.matches) return;
-  button.hidden = false;
+  if (!button) return;
+  const sync = () => { button.hidden = reducedMotion.matches; };
+  sync();
+  reducedMotion.addEventListener("change", sync);
   button.addEventListener("click", () => {
     const paused = document.body.classList.toggle("motion-paused");
-    button.setAttribute("aria-pressed", String(paused));
     button.textContent = paused ? "Resume motion" : "Pause motion";
   });
 }
 
-/* The ticker duplicates its own track once so the loop never shows a seam. */
+/* The ticker repeats its own items until half of the track is wider than the widest window this screen can show,
+   with one spare copy for the font swap, so the loop never shows a seam or a gap. */
 function initTicker() {
   const track = document.querySelector(".ticker-track");
   if (!track) return;
-  track.innerHTML += track.innerHTML;
+  const base = track.innerHTML;
+  const widest = Math.max(window.innerWidth, (window.screen && window.screen.width) || 0);
+  const copies = Math.ceil(widest / (track.scrollWidth || widest)) + 1;
+  track.innerHTML = base.repeat(copies * 2);
+  track.style.animationDuration = `${46 * copies}s`;
 }
 
 /* The download button names the visitor's platform; the link stays the platform picker. */
@@ -94,8 +102,9 @@ function initPlatformLabel() {
   if (!label) return;
   const ua = navigator.userAgent;
   const platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
-  const isTouch = /iPhone|iPad|Android/i.test(ua) || (/Mac/i.test(platform) && navigator.maxTouchPoints > 1);
-  if (isTouch) { label.textContent = ""; return; }
+  const touches = navigator.maxTouchPoints > 1;
+  const handheld = /iPhone|iPad|Android/i.test(ua) || (touches && /Mac|Linux (arm|aarch)/i.test(platform));
+  if (handheld) { label.textContent = ""; return; }
   if (/Win/i.test(platform)) label.textContent = " for Windows";
   else if (/Linux/i.test(platform)) label.textContent = " for Linux";
   else if (/Mac/i.test(platform)) label.textContent = " for Mac";
@@ -162,6 +171,7 @@ function initHeroStack() {
   const ask = () => { if (!ticking) { ticking = true; requestAnimationFrame(paint); } };
   if (finePointer.matches) {
     hero.addEventListener("pointermove", (event) => {
+      if (still()) return;
       const rect = hero.getBoundingClientRect();
       mx = ((event.clientX - rect.left) / rect.width - 0.5) * 2;
       my = ((event.clientY - rect.top) / rect.height - 0.5) * 2;
@@ -170,6 +180,7 @@ function initHeroStack() {
     hero.addEventListener("pointerleave", () => { mx = 0; my = 0; ask(); });
   }
   window.addEventListener("scroll", () => {
+    if (still()) return;
     scroll = Math.min(window.scrollY, window.innerHeight);
     ask();
   }, { passive: true });
@@ -181,6 +192,7 @@ function initShotTilt() {
   if (reducedMotion.matches || !finePointer.matches) return;
   document.querySelectorAll(".shot.lean").forEach((shot) => {
     shot.addEventListener("pointermove", (event) => {
+      if (still()) return;
       const rect = shot.getBoundingClientRect();
       const x = ((event.clientX - rect.left) / rect.width - 0.5) * 2;
       const y = ((event.clientY - rect.top) / rect.height - 0.5) * 2;
@@ -218,12 +230,6 @@ function initLogos() {
   });
 }
 
-splitWords();
-initHeroPower();
-initMotionToggle();
-initTicker();
-initPlatformLabel();
-initReveal();
-initHeroStack();
-initShotTilt();
-initLogos();
+/* The reveal runs first and every step is fenced: one failing step must not leave the page hidden. */
+const steps = [initReveal, splitWords, initHeroPower, initMotionToggle, initTicker, initPlatformLabel, initHeroStack, initShotTilt, initLogos];
+steps.forEach((step) => { try { step(); } catch (error) { console.error(step.name, error); } });

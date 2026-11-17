@@ -201,26 +201,48 @@ def test_rating_publication_is_complete_and_source_bound():
 
 
 def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
-    """Every capture and font the home page or its stylesheet names ships in site/public and in docs/, nothing
-    shipped is orphaned, and the social card's cache-busting hash is the card's own content hash."""
+    """Every capture and font the home page or its stylesheet names ships byte-identically in site/public and in
+    docs/, neither copy keeps an orphan, every capture declares its real pixel size, docs/ holds exactly the home
+    bundles the served page loads, and the social card's cache-busting hash is the card's own content hash on every
+    page that names the card, in the sources and in the served copies."""
     import hashlib
 
+    from PIL import Image
+
     html = (SITE / "index.html").read_text(encoding="utf-8")
+    served = (DOCS / "index.html").read_text(encoding="utf-8")
     css = (SITE / "src" / "home.css").read_text(encoding="utf-8")
     referenced = set(re.findall(r'(?:src|href)="/(ui/[^"]+|fonts/[^"]+)"', html))
-    referenced |= set(re.findall(r"url\(/(fonts/[^)]+)\)", css))
+    referenced |= set(re.findall(r"""url\(["']?/(fonts/[^)"']+)""", css))
     assert referenced
     for rel in sorted(referenced):
         assert (SITE / "public" / rel).is_file(), rel
-        assert (DOCS / rel).is_file(), rel
-    shipped_captures = {p.relative_to(SITE / "public").as_posix() for p in (SITE / "public" / "ui").glob("*.webp")}
-    assert shipped_captures == {rel for rel in referenced if rel.startswith("ui/")}
-    shipped_fonts = {p.relative_to(SITE / "public").as_posix() for p in (SITE / "public" / "fonts").glob("*.woff2")}
-    assert shipped_fonts == {rel for rel in referenced if rel.startswith("fonts/")}
-    assert "SIL OPEN FONT LICENSE" in (SITE / "public" / "fonts" / "LICENSE-Inter.txt").read_text(encoding="utf-8")
-    digest = hashlib.sha256((REPO / "assets" / "og-preview.png").read_bytes()).hexdigest()[:10]
-    assert html.count(f"og-preview.png?v={digest}") == 2
-    assert "86.74" in html and 'href="/llm-rating/"' in html
+        assert (SITE / "public" / rel).read_bytes() == (DOCS / rel).read_bytes(), rel
+    for root in (SITE / "public", DOCS):
+        captures = {p.relative_to(root).as_posix() for p in (root / "ui").glob("*.webp")}
+        assert captures == {rel for rel in referenced if rel.startswith("ui/")}, root
+        fonts = {p.relative_to(root).as_posix() for p in (root / "fonts").glob("*.woff2")}
+        assert fonts == {rel for rel in referenced if rel.startswith("fonts/")}, root
+        assert "SIL OPEN FONT LICENSE" in (root / "fonts" / "LICENSE-Inter.txt").read_text(encoding="utf-8")
+    sized = re.findall(r'<img src="/(ui/[^"]+)"[^>]*? width="(\d+)" height="(\d+)"', html)
+    assert len(sized) == html.count('<img src="/ui/')
+    for rel, width, height in sized:
+        with Image.open(SITE / "public" / rel) as capture:
+            assert capture.size == (int(width), int(height)), rel
+    assert {p.name for p in (DOCS / "assets").glob("home-*")} == set(re.findall(r'"/assets/(home-[^"]+)"', served))
+    card = (REPO / "assets" / "og-preview.png").read_bytes()
+    assert (DOCS / "assets" / "og-preview.png").read_bytes() == card
+    digest = hashlib.sha256(card).hexdigest()[:10]
+    naming = [
+        page
+        for root in (SITE, DOCS)
+        for page in (root / "index.html", *sorted(root.glob("*/index.html")))
+        if "og-preview.png" in page.read_text(encoding="utf-8")
+    ]
+    assert SITE / "index.html" in naming and DOCS / "index.html" in naming
+    for page in naming:
+        assert re.findall(r"og-preview\.png(\?v=[0-9a-f]*)?", page.read_text(encoding="utf-8")) == [f"?v={digest}"] * 2, page
+
 
 def test_readme_and_benchmark_page_keep_claim_values_in_sync():
     readme = (REPO / "README.md").read_text(encoding="utf-8")
