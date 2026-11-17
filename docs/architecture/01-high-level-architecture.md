@@ -540,7 +540,7 @@ ouroboros/ — agent core and shared runtime (§6)
     commit_gate.py — block classification, paid review-cycle counting and ceiling, the review-contract fingerprint
     git_rollback.py — Emits `rollback_request`; the supervisor runs the UI Rollback door's procedure (P4-S)
     git_pr.py — Five PR tools (non-core)
-    github.py, github_read.py, github_write.py — `github_read`, `github_write`, `pr_merge`; Project-bound gh, unprobed credential discovery; pre-launch refusals are `completed_no_effect`
+    github.py, github_read.py, github_write.py — `github_read`, `github_write`, `pr_merge`; Project-bound gh unless a read names `repo`, unprobed credential discovery
     github_checks.py — checks method: runs/jobs/annotations/PR rollup, source gaps, one deadline
     github_workflows.py, github_pr_write.py — read get(run, log)/list(artifact)/download(artifact); write create_pr/update(pr)
     parallel_review.py — Prepares and admits every seat before the review wave sends (§6 Surfaces and money admission)

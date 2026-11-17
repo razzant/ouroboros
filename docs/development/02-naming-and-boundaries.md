@@ -41,7 +41,7 @@ review-only.
 - Project focus changes the default target, not the tool surface: advisory, reviewed
   commit, rollback, promotion, restart and runtime control keep their
   system-repository contracts; `executor_ref` selects a process backend, not a sandbox;
-  GitHub tools take the shell binding, and project focus overrides ambient `GH_REPO`
+  GitHub tools default to the focused folder's repository over ambient `GH_REPO`
   (`ouroboros/tools/github.py`).
 - A process cwd decides relative paths, not the root task's write authority; semantic
   permission is never reconstructed from command words or guessed effects
