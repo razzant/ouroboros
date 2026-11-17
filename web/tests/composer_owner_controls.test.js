@@ -1041,31 +1041,48 @@ test('the model keeps its value: where the cap would cut it, Subagents, Context 
 });
 
 test('folded touch rings give their reach spacing back before Model is cut, and regain it as the row grows', () => {
-    const store = createModelCatalogStore({ readCatalog: async () => ({ items: [] }), readPreferences: async () => ({}) });
-    const styles = new Map();
-    const m = mountPair({ subagents: true, model: { store }, win: { ...hoverWindow(false), getComputedStyle: node => styles.get(node) || {} } });
-    const gap = () => m.row.dataset.ownerGlyphs && !m.row.dataset.ownerTight ? 12 : 8;
-    styles.set(m.row, { get columnGap() { return `${gap()}px`; } });
-    const values = { model: 83, subagents: 120, context: 120, effort: 120 };
-    const steps = [
-        [900, undefined, undefined, undefined, '', 8],
-        [260, 'true', 'true', undefined, '', 12],
-        [250, 'true', 'true', 'true', '', 8],
-        [230, 'values', 'true', 'true', '69px', 8],
-        [250, 'true', 'true', 'true', '', 8],
-        [260, 'true', 'true', undefined, '', 12],
-        [900, undefined, undefined, undefined, '', 8],
-    ];
-    for (const [width, compact, glyphs, tight, cap, pitch] of steps) {
-        const line = layRow(m, { width, values, gap });
+    // The row's gap is its layout's (style.css --composer-row-gap): 8 px docked, 6 px in the stacked layout, the phone's,
+    // where a coarse pointer folds the rings and the tight step happens. Folded rings stand 12 px apart (44 - 32) until
+    // the line is tight. The fit reads the computed gap: at 240 px the stacked row holds its tight line (237 px) where
+    // the docked one (243 px) would cut Model, and its cut at 230 px is the 6 px row's own.
+    const LAYOUTS = {
+        docked: [8, [
+            [900, undefined, undefined, undefined, '', 8],
+            [260, 'true', 'true', undefined, '', 12],
+            [250, 'true', 'true', 'true', '', 8],
+            [230, 'values', 'true', 'true', '69px', 8],
+            [250, 'true', 'true', 'true', '', 8],
+            [260, 'true', 'true', undefined, '', 12],
+            [900, undefined, undefined, undefined, '', 8],
+        ]],
+        stacked: [6, [
+            [900, undefined, undefined, undefined, '', 6],
+            [260, 'true', 'true', undefined, '', 12],
+            [240, 'true', 'true', 'true', '', 6],
+            [230, 'values', 'true', 'true', '75px', 6],
+            [240, 'true', 'true', 'true', '', 6],
+            [260, 'true', 'true', undefined, '', 12],
+            [900, undefined, undefined, undefined, '', 6],
+        ]],
+    };
+    for (const [layout, [rowGap, steps]] of Object.entries(LAYOUTS)) {
+        const store = createModelCatalogStore({ readCatalog: async () => ({ items: [] }), readPreferences: async () => ({}) });
+        const styles = new Map();
+        const m = mountPair({ subagents: true, model: { store }, win: { ...hoverWindow(false), getComputedStyle: node => styles.get(node) || {} } });
+        const gap = () => m.row.dataset.ownerGlyphs && !m.row.dataset.ownerTight ? 12 : rowGap;
+        styles.set(m.row, { get columnGap() { return `${gap()}px`; } });
+        const values = { model: 83, subagents: 120, context: 120, effort: 120 };
+        for (const [width, compact, glyphs, tight, cap, pitch] of steps) {
+            const line = layRow(m, { width, values, gap });
+            m.controls.syncState({});
+            assert.deepEqual([...line.said(), m.row.dataset.ownerTight, gap()], [compact, glyphs, cap, tight, pitch], `${layout} ${width}px`);
+            assert.ok(line.total() <= width, `${layout} ${width}px keeps one line`);
+        }
+        layRow(m, { width: steps[2][0], values, gap });
         m.controls.syncState({});
-        assert.deepEqual([...line.said(), m.row.dataset.ownerTight, gap()], [compact, glyphs, cap, tight, pitch], `${width}px`);
-        assert.ok(line.total() <= width, `${width}px keeps one line`);
+        m.controls.destroy();
+        assert.equal(m.row.dataset.ownerTight, undefined, `${layout}: destroy retires the tight spacing too`);
     }
-    layRow(m, { width: 250, values, gap });
-    m.controls.syncState({});
-    m.controls.destroy();
-    assert.equal(m.row.dataset.ownerTight, undefined, 'destroy retires the tight spacing too');
 });
 
 test('a row without the model keeps the fit it had: names, then the widest values cut, never glyphs alone', () => {
