@@ -167,7 +167,7 @@ export function mountPair({ hover = false, reply, win, withBox = false, projectI
         byId: (suffix) => (suffix === 'context-mode' ? contextEl : suffix === 'subagents-mode' ? subagentsEl
             : suffix === 'model-mode' ? modelEl : null),
         apiFetch: async (url, init) => {
-            const body = JSON.parse(init.body); posts.push([url, body]);
+            const body = JSON.parse(init.body); posts.push([url, body, init.headers]);
             const response = await answer.value;
             return response.json ? response : { ...response, json: async () => ({ project_id: projectId, context_mode: body.mode }) };
         },

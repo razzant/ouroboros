@@ -2,6 +2,7 @@
 // family. Main and Projects read their own authoritative values and save through the owner
 // endpoints (DESIGN: Composer owner controls); all four run on the capsule machine (capsule.js).
 import { fmt } from './i18n.js';
+import { APP_SETTINGS_ORIGIN } from './api_client.js';
 import {
     EFFORT_OPTIONS, EFFORT_RANGE_DEFAULT, OWNER_TIERS, effortText, normalizeEffortRange, ownerLevelIndex,
 } from './effort_levels.js';
@@ -558,7 +559,7 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
     };
     const saveContextMode = async mode => {
         const response = await apiFetch('/api/owner/context-mode', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(scoped({ mode })),
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...APP_SETTINGS_ORIGIN }, body: JSON.stringify(scoped({ mode })),
         });
         const reply = await response.json();
         if (!response.ok) throw new Error(reply?.error || 'Could not change context mode.');
