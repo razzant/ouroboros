@@ -9,6 +9,8 @@
  * @property {'max'|'low'|'nano'} applied  // the mode the sent candidate was rendered in
  * @property {string} profile  // owner_max | owner_low | owner_nano | task_local_low | task_local_nano
  * @property {''|'memory'|'route'|'window'|'after_start'} cause  // why applied is lower than preferred_at_send
+ * @property {boolean} target_missed  // this send exceeded the owner's mode target
+ * @property {?number} no_memory_tokens  // Low's missed target: the start's request with no memory, else null
  * @property {string} observed_at
  * @property {number} task_attempt
  * @property {string} llm_call_id

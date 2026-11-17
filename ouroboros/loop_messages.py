@@ -721,7 +721,9 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
     from ouroboros.context_anchor import refused_input
     refused = refused_input(usage, getattr(ctx, "context_fit_plan", None)) if measured else None
     from ouroboros.lead_fact import model_fact_words
-    parts = [_round_fact(ctx, tool_ctx), f"mode {ctx.active_context_mode}", model_fact_words(tool_ctx, ctx.active_model)]
+    plan_mode = getattr(getattr(ctx, "context_fit_plan", None), "preferred_mode", "")
+    mode = "max with chapter maps" if ctx.active_context_mode == "low" and plan_mode == "max" else ctx.active_context_mode
+    parts = [_round_fact(ctx, tool_ctx), f"mode {mode}", model_fact_words(tool_ctx, ctx.active_model)]
     notes = [note for note in (f"largest accepted input {int(accepted):,}" if accepted else "",
                                f"refused at ~{int(refused):,}" if refused else "") if note]
     largest = f" ({'; '.join(notes)})" if notes else ""

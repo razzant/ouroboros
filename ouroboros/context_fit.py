@@ -139,7 +139,8 @@ class ContextFitPlan:
                             refused_tokens: int = 0, select_mode: Optional[str] = None,
                             measured_input_tokens: Optional[int] = None, start_work: bool = False,
                             slack_tokens: int = 0, room_if_narrowed: bool = False,
-                            admitted: bool = False, reasoning_effort: str = "") -> "ContextFitPlan":
+                            admitted: bool = False, reasoning_effort: str = "",
+                            telling_floor: bool = False) -> "ContextFitPlan":
         """Fit shown bytes; the prepared envelope's raw estimate includes its signed size difference.
 
         The measurement belongs to this candidate, includes tools and excludes the reply; withholding an image can shrink it.
@@ -156,6 +157,7 @@ class ContextFitPlan:
         forms pay; the mode and a whole-or-outline section pay the measured excess alone. A view that fits is never
         touched, at a restore and on a place that holds no copy of it too: nothing is taken on the guess that the
         work will reach its wall (owner, 30 Sep 2026). ``start_work`` is a first send's own room and Max decision (voice).
+        ``telling_floor``: a refusal's first memory pass, which stops a Max view at my tellings (``memory_floor``).
         """
         from dataclasses import replace
 
@@ -212,7 +214,7 @@ class ContextFitPlan:
                     window_tokens=frame, known_window=known_window, output_reserve=output_reserve, ratio=ratio,
                     window_record=own, admitted=admitted,  # each mode's frame is read off the window (its reserve differs)
                     envelope_overhead_tokens=overhead, provider=self.provider, reasoning_effort=reasoning_effort,
-                    start_work=start_work,
+                    start_work=start_work, telling_floor=telling_floor,
                     resident=True, current_messages=current_messages,  # actual running tail, enable_tools included
                     kept={mode: memory_floor.kept_level(snapshot, self.projection(mode).memory_facts) if snapshot else None
                           for mode in memory_floor.MODES},
@@ -859,6 +861,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                       select: Optional[str] = None, kept_sections: Optional[Mapping[str, Iterable[Mapping]]] = None,
                       working_reserve_tokens: Optional[int] = None, window_record: Optional[WindowRecord] = None, work_room_levels: int = 1,
                       envelope_overhead_tokens: int = 0, start_work: bool = False, slack: int = 0, retain: Any = None,
+                      telling_floor: bool = False,
                       admitted: bool = False, provider: str = "", reasoning_effort: str = "",
                       sized: Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]] = None,
                       nano_base: Optional[Tuple[str, ...]] = None,
@@ -933,7 +936,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             known_window=known_window, output_reserve=output_reserve, ratio=ratio, non_memory_tokens=fixed,
             # The Max room as the receipt settles it (``with_max_room`` decides its cause), so the floor note of a
             # start memory lowered names what holds the room.
-            lowered_from=preferred if selected != preferred else None, start_work=start_work,
+            lowered_from=preferred if selected != preferred else None, start_work=start_work, telling_floor=telling_floor,
             max_room=floor.with_max_room({}, room_fact, selected).get("max_room"),
             tool_names=None if tool_schemas is None else sent.chosen, working_reserve_tokens=working_reserve_tokens,
             stated_window_tokens=stated.get(selected),  # the note names the window as stated, never the admitted frame
@@ -986,17 +989,18 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * (
             snapshot.spec.work_room_levels if snapshot else work_room_levels)
 
-    # Both Max decisions use the clean-start guard's minimum ordinary memory,
-    # priced in this request with its receipt, schemas, reserve and work room.
+    # Max's measure prices the clean-start guard's minimum ordinary memory, its books gate my shortest telling of the
+    # whole horizon (owner 15.11.2026, 4A: memory yields to my tellings before the books), each in this request with
+    # its receipt, schemas, reserve and work room.
     ordinary_measures = {}
-    def ordinary_need():
-        if mode in ordinary_measures:
-            return ordinary_measures[mode]
+    def ordinary_need(level_of=floor.ordinary_level):
+        if (mode, level_of) in ordinary_measures:
+            return ordinary_measures[mode, level_of]
         forms = section_views(sections[mode], receipts)
-        minimum = view(mode, sent, forms, window, boundary, level=floor.ordinary_level(snapshot)) if snapshot else floor.NO_VIEW
+        minimum = view(mode, sent, forms, window, boundary, level=level_of(snapshot)) if snapshot else floor.NO_VIEW
         price = measure(mode, sent, forms, minimum.story_chars, minimum.room_chars)
-        ordinary_measures[mode] = minimum, math.ceil(price * ratio) + reserve + work()
-        return ordinary_measures[mode]
+        ordinary_measures[mode, level_of] = minimum, math.ceil(price * ratio) + reserve + work()
+        return ordinary_measures[mode, level_of]
     minimum, need = ordinary_need() if (kept is None or start_work) and mode == "max" else (floor.NO_VIEW, 0)
     room_fact = floor.max_room_fact(snapshot, rendered_texts(core, section_views(sections[mode], receipts)),
         render_governance(governance[form[mode]], section_views(sections[mode], receipts)), story=floor.tokens_of(minimum.story_chars),
@@ -1004,6 +1008,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         window=window, reserve=reserve, work=work(), allowance=allowances["margin"]) if (kept is None or start_work) and mode == "max" else None
     if room_fact:
         room_fact.update(need=need, story=floor.tokens_of(minimum.story_chars), room=floor.tokens_of(minimum.room_chars))
+        if need > window and room_fact["zero_need"] <= window:  # only then can my shortest telling keep the books
+            room_fact["telling_need"] = ordinary_need(floor.telling_level)[1]
     if room_fact and floor.max_room_lost(room_fact):
         mode = "low"
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
@@ -1022,8 +1028,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     # is judged by its pieces' prices: a frame the fit walks away from is never drawn whole.
     while True:
         shown = floor.NO_VIEW if mode != "nano" and overflows() else render()
-        books_lost = ((kept is None or start_work) and mode == "max" and allowances["margin"] is not None
-                      and ordinary_need()[1] > window)
+        books_lost = (kept is None or start_work) and mode == "max" and bool(room_fact) and floor.max_room_lost(room_fact)
         if mode == "nano" or not (books_lost or overflows(shown)):
             break
         held = (sent, fixed, reserve, window, boundary, allowances), receipts
@@ -1323,5 +1328,5 @@ def _physical_context_for_fit(disposition: Any) -> PhysicalAttemptContext:
         window_witness_bound=getattr(measurement, "window_witness_bound", False),
         window_observation_fp=measurement.window_observation_fp,
         required_book_tokens=measurement.required_book_tokens, preferred_mode=measurement.preferred_mode,
-        mode_cause=measurement.mode_cause,
+        mode_cause=measurement.mode_cause, no_memory_tokens=measurement.no_memory_tokens,
     )
