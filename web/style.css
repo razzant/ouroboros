@@ -12415,8 +12415,9 @@ html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-
     width: auto;
     height: var(--touch-target-min);
     margin: 0;
-    display: flex;
-    align-items: center;
+    /* A block whose line is the row's height: centred, and a long name ends in an ellipsis (a flex box cut it). */
+    display: block;
+    line-height: var(--touch-target-min);
     clip-path: none;
     grid-area: auto;
 }

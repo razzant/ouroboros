@@ -103,6 +103,9 @@ test('Telegram sections keep a visible drawer control and one title baseline ins
     // box, never the header's (a static Refresh took the presses of every Skills tab at 320 and 350 px).
     assert.match(narrow.slice(0, narrow.indexOf('\n}')), /:is\(\.app-page-toolbar > button:last-child, \.logs-clear-list\) \{ position: relative; inset: auto; \}[\s\S]*:is\(\.app-page-title, \.app-page-lead-title\) \{ right: var\(--telegram-header-end\); \}/);
     assert.doesNotMatch(telegram, /button:last-child, \.logs-clear-list\) \{ position: static/);
+    // The name ends in an ellipsis: a block whose line is the row's height (a flex box cut "Consciousne" mid-letter).
+    assert.match(telegram, /:is\(\.app-page-title, \.app-page-lead-title\) \{[^}]*display: block;\n    line-height: var\(--touch-target-min\);/);
+    assert.doesNotMatch(telegram.slice(telegram.indexOf(':is(.app-page-title, .app-page-lead-title) {'), telegram.indexOf('grid-area: auto;\n}', telegram.indexOf(':is(.app-page-title, .app-page-lead-title) {'))), /display: flex/);
     assert.match(telegram, /:is\(\.app-page-toolbar > button:last-child, \.logs-clear-list\) \{\n    position: absolute;/, 'a wide row keeps the action in it');
     // A page's name takes the host row's one title slot: a page alone, and two panes of an automatic view; a list
     // alone (the automatic view in one column) keeps the place's name.
