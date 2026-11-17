@@ -37,9 +37,8 @@ html[data-layout="stack"] .settings-page { padding-inline: 12px; }
 
 /* The header's lead (settings.js, ui.css .section-lead): never the word `Settings` on a desk. Over the list, and
    over the home alone, stands its search field; over a page, `(‹) <page>` in the header's one title style. The band
-   holds no actions, so it keeps no end column: the field ends where the cards end. */
+   holds no actions (style.css, a section place's band), so the field ends where the cards end. */
 .settings-lead .settings-search { flex: 1 1 auto; min-width: 0; }
-html[data-layout="docked"] #page-settings > .app-page-header[data-lead] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }
 
 /* Two panes: the home is the rail beside the page, and a page is always open (settings.js: the last one opened, Models
    the first time; the list's Ouroboros row opens Ouroboros's card in the page's pane). */

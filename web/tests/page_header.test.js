@@ -56,6 +56,10 @@ test('a section band has the same inset without native chrome and one leading ed
     assert.ok(two.includes(`html[data-layout="docked"] ${band} ~ .section-shell > .section-rail {\n        padding-top: calc(var(--page-header-row-h) + var(--space-3));`),
         'the rail starts below it in any window');
     assert.doesNotMatch(css, /#page-dashboard > \.app-page-header\[data-empty\]/, 'no Dashboard rule keys on a measured emptiness');
+    // A section place's band keeps no end column (Logs' Clear ended 12px short of the cards), even under a return.
+    const rule = 'html[data-layout="docked"] .section-place > .app-page-header[data-lead] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }';
+    assert.ok(css.includes(rule) && css.indexOf(rule) > css.indexOf('html[data-layout="docked"] .app-page-header[data-lead][data-return] {'),
+        'after the rule a return sets, so it holds there too');
     // A phone's page row stands at the same inset (18px below a browser's top), under a system band when there is
     // one; a room keeps its own top, and Telegram's row and a macOS window's lights outrank this rule.
     // The drawer's × lands on the ☰ it replaces: its head shares the page row's one inset (it stood at 6px, ☰ at 18px).

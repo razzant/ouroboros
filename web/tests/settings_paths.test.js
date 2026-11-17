@@ -35,8 +35,8 @@ test('an empty Settings page band passes over its scroller; a named level retain
         'both hosts start the page below the band, before content scrolls beneath it');
     assert.match(css, /\.settings-page \{[^}]*padding: var\(--space-2\) var\(--page-header-padding-x\) 56px/,
         'a named band and one-column pages keep their ordinary inset');
-    assert.match(css, /html\[data-layout="docked"\] #page-settings > \.app-page-header\[data-lead\] \{ grid-template-columns: minmax\(0, 1fr\); grid-template-areas: "title"; \}/,
-        'a band without actions keeps no end column, so one column\'s search ends where the cards end');
+    assert.doesNotMatch(css, /#page-settings > \.app-page-header\[data-lead\] \{ grid-template-columns/,
+        'a band without actions keeps no end column through the section places\' one rule (page_header.test.js)');
 });
 
 /** Why `path` is no address ('' when it is one): the home, a door, or a page that a home row opens or a module serves. */

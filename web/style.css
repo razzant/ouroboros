@@ -1482,6 +1482,9 @@ html[data-layout="docked"] .app-page-header[data-lead] {
 /* With a return the folder rail keeps 14rem, or 40% of a narrow band (a tablet's column keeps Refresh in it); at the
    residual room floor the same row scrolls, so Paste cannot squeeze the rail to zero. */
 html[data-layout="docked"] .app-page-header[data-lead][data-return] { grid-template-columns: minmax(min(14rem, 40%), 1fr) auto; }
+/* A section place's band holds no actions (its page's controls stand in the page column's lead), so it keeps no end
+   column: Settings' search and Logs' Clear end where the cards end, with or without a return. */
+html[data-layout="docked"] .section-place > .app-page-header[data-lead] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }
 html[data-layout="docked"] .app-page-header[data-lead]::-webkit-scrollbar { display: none; }
 html[data-layout="docked"] .app-page-header[data-scroll-start] { --band-fade-start: var(--space-4); }
 html[data-layout="docked"] .app-page-header[data-scroll-end] { --band-fade-end: var(--space-4); }
