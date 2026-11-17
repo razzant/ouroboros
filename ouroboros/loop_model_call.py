@@ -1591,4 +1591,6 @@ def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target
     deficit = fit.measurement.capacity_deficit_tokens
     excess, asked = ((max(0, target - slack), min(slack, target)) if target else (deficit, slack) if deficit
                      else (WHOLE_CATEGORY, 0) if step == "memory_rest" else (0, slack or WHOLE_CATEGORY))
-    return shed_since_before() if _coarsen_memory_view(ctx, fit, saving=excess, slack=asked) else None
+    # The first pass stops a Max view at my tellings, so the books step goes before memory's rest (4A).
+    return shed_since_before() if _coarsen_memory_view(ctx, fit, saving=excess, slack=asked,
+                                                       telling_floor=step == "floor") else None

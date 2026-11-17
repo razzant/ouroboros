@@ -1052,10 +1052,13 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
     assert tool_ctx.memory_view_facts is kept and trace[VIEW_TRACE_KEY] == kept
 
 
-def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(main_call, monkeypatch, tmp_path):
-    """06.11, the other side of the low fold below: when memory's detail can pay what the owner's words passed the
-    window's send ceiling by (20,000 past the stated number less the reply floor), memory alone narrows and Max
-    keeps its whole books (29.10)."""
+@pytest.mark.parametrize("past,books", [(500, "whole"), (20_000, "maps")])
+def test_memory_pays_down_to_its_tellings_and_the_books_go_before_anything_below(main_call, monkeypatch, tmp_path,
+                                                                                past, books):
+    """06.11 and the one order of 15.11 (4A; consilium 17.11): when memory's detail down to its tellings can pay
+    what the owner's words passed the window's send ceiling by (`past` the stated number less the reply floor),
+    memory alone narrows and Max keeps its whole books (29.10); when only memory below a telling could, the books
+    go to chapter maps first, in the same first pass, and the work stays Max with chapter maps."""
     from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
     from ouroboros import memory_floor as mf
     from ouroboros.memory_view import snapshot_json
@@ -1073,15 +1076,17 @@ def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(ma
     windows["account-a"] = window = math.ceil((full + roomy.output_reserve_tokens) * 4 / 3) + 4_000
     built = plan(window)
     words = "Owner, while you worked: keep the old API alive. "
-    owner = {"role": "user", "content": words * math.ceil((window - full - NANO_MIN_HEADROOM_TOKENS + 20_000) * 4 / len(words))}
+    owner = {"role": "user", "content": words * math.ceil((window - full - NANO_MIN_HEADROOM_TOKENS + past) * 4 / len(words))}
     ctx.messages[:] = [*built.messages_for("max"), owner]
     gateway.results = [_answer(ROUTE, {"role": "assistant", "content": "Kept."})]
     gateway.dispatch = ["response_received"]
     tools._ctx.memory_view_facts = mf.trace_facts(built.projection("max").memory_facts)
     text, _usage, _trace = _run(ctx, tools, events, built)
     rows = _drained(events)
-    assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "max"
-    assert [row.get("effective_mode") for row in rows if row.get("checkpoint_kind") == "context_memory_coarsened"] == ["max"]
+    assert text == "Kept." and len(gateway.creates) == 1
+    assert tools._ctx.active_context_mode == ("max" if books == "whole" else "low")  # "low": Max's chapter-map frame
+    assert [(row.get("effective_mode"), row.get("books")) for row in rows
+            if row.get("checkpoint_kind") == "context_memory_coarsened"] == [("max", books)]
     assert "context_fit_low_retry" not in [row.get("checkpoint_kind") for row in rows]
 
 
