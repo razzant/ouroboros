@@ -487,7 +487,8 @@ def _child_registry(tmp_path, monkeypatch, *, profile, mode="max", grants=()):
 @pytest.mark.parametrize("profile", ["readonly", "acting"])
 @pytest.mark.parametrize("mode", ["low", "max"])
 def test_a_text_child_can_inspect_and_call_an_allowed_mcp_without_adding_its_schema(tmp_path, monkeypatch, profile, mode):
-    from ouroboros import loop as loop_module, safety
+    from ouroboros import loop as loop_module
+    from ouroboros import safety
     from ouroboros.tools.tool_result import ToolResult
 
     manager = _servers()
@@ -530,10 +531,9 @@ def test_a_text_child_can_inspect_and_call_an_allowed_mcp_without_adding_its_sch
 
 
 def test_a_child_gateway_takes_only_mcp_names_and_a_nano_child_keeps_loading_physically(tmp_path, monkeypatch):
-    """#3670 leaves the neighbouring contracts alone: an extension schema keeps its ordinary load path
-    (the gateway result carries MCP names only), and a Nano child — whose resident list never carries
-    the gateway — still loads MCP schemas into the request, exactly as before."""
-    from ouroboros import extension_loader, loop as loop_module
+    """An extension left out by a route limit loads physically; so does MCP on a default Nano child."""
+    from ouroboros import extension_loader, provider_models
+    from ouroboros import loop as loop_module
 
     _servers()
     registry = _child_registry(tmp_path, monkeypatch, profile="readonly")
@@ -544,14 +544,19 @@ def test_a_child_gateway_takes_only_mcp_names_and_a_nano_child_keeps_loading_phy
             "schema": {"type": "object", "properties": {}}, "timeout_sec": 5, "skill": "weather",
         })
     monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: True)
-    resident = initial_tool_schemas(registry)
-    assert ext in _names(resident)  # an extension schema is resident from the start, as before
+    initial = initial_tool_schemas(registry)
+    limit = len(initial) - 1
+    registry._ctx.active_model = "openai::gpt-fixture"
+    monkeypatch.setitem(provider_models.PROVIDER_TOOL_SCHEMA_LIMITS, "openai", limit)
+    resident, omitted = fit_tool_schemas_to_limit(initial, limit, keep=set(_names(initial)) - {ext})
+    assert omitted == (ext,) and "call_mcp_tool" in _names(resident)
     loop_module._setup_dynamic_tools(registry, resident, [], gateway=True)
-    before = json.dumps(resident)
-    receipt = registry.execute("enable_tools", {"tools": f"mcp_gitlab__create_issue, {ext}"})
-    assert "Call schemas for call_mcp_tool(name, arguments): mcp_gitlab__create_issue" in receipt
-    assert f"Already loaded: {ext}" in receipt  # a mixed load: the extension keeps its own path
-    assert json.dumps(resident) == before
+    lookup = "mcp_gitlab__get_merge_request"
+    receipt = registry.execute("enable_tools", {"tools": f"{lookup}, {ext}"})
+    assert f"Call schemas for call_mcp_tool(name, arguments): {lookup}" in receipt
+    assert "These MCP schemas are not added" in receipt
+    assert "Call schemas loaded" in receipt and f"{ext}. The next request carries" in receipt
+    assert len(resident) == limit and ext in _names(resident) and lookup not in _names(resident)
 
     nano = _child_registry(tmp_path, monkeypatch, profile="readonly", mode="nano")
     nano_resident = initial_tool_schemas(nano, context_mode="nano")

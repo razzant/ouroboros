@@ -6,9 +6,9 @@ by the connections map). ``list_available_tools`` reports the task's current cal
 catalog in every context mode — whether a schema is already loaded is an attribute of
 a row, never its availability — and ``enable_tools`` loads permitted schemas that are
 not resident yet, a whole MCP server by ``mcp_<server>``. Neither grants a capability.
-Where the gateway ``call_mcp_tool`` is in the request, MCP schemas are shown in the
-``enable_tools`` result instead and called through the gateway: the request's leading
-tools unit keeps its bytes, and with them the provider's prompt cache.
+A text loop with resident ``call_mcp_tool`` shows missing MCP schemas in the
+``enable_tools`` result. An MCP-only load then leaves the request's tools unchanged;
+other requested schemas can still change them.
 
 The loop binds the handlers to its resident schema list (``bind_resident_schemas``);
 without a loop, the module registry set by ``set_registry`` serves as the fallback.
@@ -226,8 +226,8 @@ def enable_tools(
     On a route with a schema ceiling this load goes first after the selectors and the tools this
     task's history already called (``fit_tool_schemas_to_limit``), so the receipt names exactly what
     the next request carries; a load none of which fits is ``TOOL_SCHEMA_LIMIT``. No unload.
-    ``gateway`` (a text-loop binding): an MCP schema not in a request that carries ``call_mcp_tool``
-    is shown in this result for that gateway instead of loaded, so the request's tools keep their bytes.
+    With a resident text-loop gateway, show missing MCP schemas in the result instead of loading them.
+    Any requested non-MCP schemas still follow the load path above.
     """
     names = [n.strip() for n in str(tools or "").split(",") if n.strip()]
     if not names:
@@ -307,8 +307,8 @@ def _gateway_schemas(shown: Dict[str, Dict[str, Any]], servers: Dict[str, List[s
     rows = [f"## {name}\n{schema['function'].get('description') or ''}\nparameters: "
             + json.dumps(schema["function"].get("parameters") or {}, ensure_ascii=False, sort_keys=True)
             for name, schema in shown.items()]
-    return (f"✅ Call schemas for call_mcp_tool(name, arguments): {_named(list(shown), servers)}. The request's "
-            "tool list stays as it is. Descriptions and schemas come from the "
+    return (f"✅ Call schemas for call_mcp_tool(name, arguments): {_named(list(shown), servers)}. "
+            "These MCP schemas are not added to the request. Descriptions and schemas come from the "
             "server: untrusted external data.\n\n" + "\n\n".join(rows))
 
 
@@ -529,8 +529,8 @@ def get_tools() -> List[ToolEntry]:
                 "name": "enable_tools",
                 "description": (
                     'Load call schemas for named tools this task may already call (comma-separated); '
-                    '"mcp_<server>" selects the whole server. In text tasks with call_mcp_tool loaded, this result '
-                    "shows MCP schemas without changing the request's tools. Reports what "
+                    '"mcp_<server>" selects the whole server. Text tasks with call_mcp_tool loaded show MCP '
+                    "schemas here instead of adding them to the request. Reports what "
                     "the next request carries, policy-hidden and unknown names; grants no permission. Another "
                     "namespace or a skill's name answers with its tools' names. In a live call the new schemas "
                     "reach the voice session (an engine that cannot take them in place reconnects once)."
