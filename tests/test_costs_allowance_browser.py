@@ -60,9 +60,11 @@ def _page(browser, engine, *, width=1440, height=900, theme="light"):
 def _nav(page, target: str) -> None:
     """A page of the shell from its navigation, through the phone's drawer where the bar is narrow."""
     if page.evaluate("document.documentElement.dataset.layout === 'stack'"):
-        back = page.locator('.page.active [data-dashboard-list-back]:visible')
-        if back.count():
+        back = page.locator('.page.active [data-shell-back]:visible')
+        while back.count():
+            previous = page.evaluate("JSON.stringify(window.__ouroLayers.ids())")
             back.click()
+            page.wait_for_function("previous => JSON.stringify(window.__ouroLayers.ids()) !== previous", arg=previous)
     toggle = page.locator(".page.active [data-mobile-nav-toggle]:visible")
     if toggle.count():
         toggle.first.click()
@@ -217,8 +219,10 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
             expect(allowance).to_have_value("12.75")
             # Owner 14.11: a door from Settings keeps its return in the destination's header on every layout.
             _shoot(page, f"{engine}-settings-costs-return")
-            back = page.locator('#page-dashboard > .app-page-header').get_by_role('button', name='Back to Settings', exact=True)
+            back = page.locator('#page-dashboard > .app-page-header [data-shell-back]')
             expect(back).to_be_visible()
+            expect(back).to_have_attribute('title', back.get_attribute('aria-label'))
+            assert back.get_attribute('aria-label').startswith('Back to Settings')
             back.click()
             expect(home).to_be_visible()
             assert page.errors.unexpected() == [], page.errors.report()

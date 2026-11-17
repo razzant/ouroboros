@@ -85,10 +85,12 @@ function msgTimeOf(date, now) {
     yesterday.setDate(now.getDate() - 1);
     const short = date.toDateString() === yesterday.toDateString()
         ? `${tr('time.yesterday', 'Yesterday')}, ${hhmm(date)}` : clockOf(date, now);
-    return { short, full: `${monthName(date)} ${date.getDate()}, ${date.getFullYear()} ${tr('time.at', 'at')} ${hhmm(date)}` };
+    const full = `${monthName(date)} ${date.getDate()}, ${date.getFullYear()} ${tr('time.at', 'at')} ${hhmm(date)}`;
+    return { short, full, exact: `${full}:${String(date.getSeconds()).padStart(2, '0')}` };
 }
 
-/** {short, full} presentation of a message timestamp, or null when unreadable. */
+/** {short, full, exact} presentation of a message timestamp (`exact`: the full form to the second), or null when
+ *  unreadable. */
 export function formatMsgTime(isoStr) {
     if (!isoStr) return null;
     try {
@@ -157,6 +159,13 @@ export function savedTerminalRowNote(row) {
 export function boundedText(value, maxLen = 1200) {
     const text = String(value ?? '');
     return text.length > maxLen ? `${text.slice(0, maxLen)}…[truncated]` : text;
+}
+
+/** A machine name in words, where nothing names it better: its underscores spaced, its first letter a capital
+ *  (`delegate_run_start_requested` → "Delegate run start requested"); '' for an empty name. */
+export function machineWords(name) {
+    const words = String(name ?? '').replace(/_+/g, ' ').trim();
+    return words && words[0].toUpperCase() + words.slice(1);
 }
 
 /** Broadcast the shared skill-lifecycle event used by marketplace/settings UI. */

@@ -11,7 +11,7 @@ test('a task message landing in a task names its sender in that task timeline', 
     const evt = { type: 'task_message_injected', task_id: 'receiver-1', source_task_id: 'sender-9', provenance: 'independent_task' };
     const view = summarizeLogEvent(evt);
     assert.equal(view.headline, 'Message from task sender-9');
-    assert.ok(view.meta.includes('provenance=independent_task'));
+    assert.ok(view.meta.includes('provenance independent_task'));
     assert.equal(getLogTaskGroupId(evt), 'receiver-1');
     assert.equal(isGroupedTaskEvent(evt), true);
     assert.equal(categorizeLogEvent(evt, view), 'tasks');
@@ -22,7 +22,8 @@ test('a written task-authored message shows in the sender timeline with its targ
     const view = summarizeLogEvent(evt);
     assert.equal(view.headline, 'Message sent to task receiver-1');
     assert.equal(view.phase, 'info');
-    assert.ok(view.meta.includes('target=receiver-1'));
+    assert.match(view.headline, /receiver-1/, 'the headline names the target');
+    assert.ok(!view.meta.some((fact) => fact.includes('receiver-1')), 'the facts do not repeat its id');
     assert.equal(getLogTaskGroupId(evt), 'sender-9');
 });
 

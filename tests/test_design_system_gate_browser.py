@@ -106,8 +106,22 @@ MEASURE = """root => {
             (r.width < 43.9 || r.height < 43.9) && !hits(e, r))
             small.push({node:name(e),label:(e.getAttribute('aria-label') || e.textContent).trim().slice(0,65),
                 width:Math.round(r.width*10)/10,height:Math.round(r.height*10)/10});
-        if (e.matches('.app-page-header') && r.height > 56.1)
-            headers.push({node:name(e),height:Math.round(r.height*10)/10});
+        if (e.matches('.app-page-header')) {
+            // A narrow Skills column lends its tabs one line under the header, as the Logs rail can have.
+            const skillsBelow = e.closest('#page-skills') && s.gridTemplateAreas.includes('"tabs tabs"');
+            const rail = e.querySelector(skillsBelow ? '.app-tab-strip' : '.logs-kinds'), rb = rail?.getBoundingClientRect();
+            const secondLine = rb?.height && rb.top >= r.top + 28;
+            const gap = secondLine ? parseFloat(getComputedStyle(skillsBelow ? e : rail.closest('.section-lead-page')).rowGap) || 0 : 0;
+            const margin = secondLine ? parseFloat(getComputedStyle(rail).marginBottom) || 0 : 0;
+            const height = r.height - (secondLine ? rb.height + gap + margin : 0);
+            const docked = document.documentElement.dataset.layout === 'docked';
+            // A phone's page row stands 18px below a browser's top, a room's bar at its own (DESIGN "Page header").
+            const band = docked && !e.closest('#page-chat') ? (coarse ? 80 : 66) : e.closest('#page-chat') ? 56 : 67;
+            if (height > band + .1)
+                headers.push({node:name(e),height:Math.round(height*10)/10});
+            if (secondLine && new Set([...rail.children].filter(shown).map(n=>Math.round(n.getBoundingClientRect().top))).size > 1)
+                headers.push({node:name(rail),wrapped:true});
+        }
     }
     return {overflow, small, headers};
 }"""
@@ -196,6 +210,10 @@ def open_nav(page, name):
     # A one-column section page has Back in place of Places. Return through its real header controls.
     if page.locator('html').get_attribute('data-layout') == 'stack':
         while not toggle.count():
+            if page.locator('html').get_attribute('data-telegram-back') == 'back':
+                page.evaluate('Telegram.WebApp.BackButton.callback()')
+                rest(page)
+                continue
             back = page.locator('.page.active .app-page-header .shell-back:visible').first
             if not back.count():
                 break
@@ -263,10 +281,19 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                     facts[key] = page.evaluate(MEASURE, root)
                     if any(facts[key].values()):
                         failures[key] = facts[key]
-                    # A page alone has Back; beside its list the Places control stays with that list.
+                    if view != 'home':
+                        label = page.locator(root + ' [data-settings-lead-name]').text_content().strip()
+                        if label and not page.locator(root + ' > .app-page-header').get_by_role('heading', name=label, exact=True).count():
+                            failures[key + '/heading'] = 'the level heading left the accessibility tree'
+                    # One leading slot: a deeper level owns Back even when its list still fits beside it.
                     if width < 720:
-                        control = '[data-mobile-nav-toggle]' if page.locator(HOME).is_visible() else '[data-settings-back]'
-                        if not page.locator(root + ' .app-page-header ' + control).is_visible():
+                        host_back = page.locator('html').get_attribute('data-telegram-back') == 'back'
+                        page_back = page.evaluate('() => Boolean(window.__ouroLayers.page()?.back)')
+                        control = '[data-shell-back]' if page_back else '[data-mobile-nav-toggle]'
+                        if host_back:
+                            if page.locator(root + ' .app-page-header [data-shell-back]:visible').count():
+                                failures[key + '/navigation'] = 'the page duplicates Telegram Back'
+                        elif not page.locator(root + ' .app-page-header ' + control).is_visible():
                             failures[key + '/navigation'] = f'the expected {control} left the header'
                 # The home, every page a module registered (the list of skill forms and the fixture skill's form
                 # among them), and one editor of a page that lists entries.
@@ -288,7 +315,7 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                 tab_name = 'page'
                 if tabs:
                     if name == 'dashboard' and not tabs[index].is_visible():
-                        page.locator(root + ' [data-dashboard-list-back]').click()
+                        page.evaluate("() => window.__ouroLayers.back('control')")
                         rest(page)
                     tabs[index].click()
                     tab_name = tabs[index].get_attribute('data-dashboard-tab') if name == 'dashboard' else tabs[index].inner_text().strip()
@@ -297,6 +324,10 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                 facts[key] = page.evaluate(MEASURE, root)
                 if any(facts[key].values()):
                     failures[key] = facts[key]
+                if name == 'dashboard':
+                    label = page.locator(root + ' [data-dashboard-lead-name]').text_content().strip()
+                    if label and not page.locator(root + ' > .app-page-header').get_by_role('heading', name=label, exact=True).count():
+                        failures[key + '/heading'] = 'the page heading left the accessibility tree'
         facts['sidebar'] = sidebar_metrics(page)
         if len(facts['sidebar']) != 1:
             failures['sidebar'] = facts['sidebar']

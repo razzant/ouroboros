@@ -1,8 +1,10 @@
 // Dashboard › Logs is data first: a hidden panel keeps every entry current and writes no node, reads no history;
-// shown, it catches up newest first a chunk per frame, Raw is the received event written only when opened, and an
-// open Timeline grows in place. Runs the real module on the shared dashboard DOM fixture.
+// shown, it catches up newest first a chunk per frame, an event's record is the received event written only while it
+// is open (an event is its own fold), and an open timeline grows in place. Runs the real module on the shared
+// dashboard DOM fixture.
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 
 import { initLogs } from '../modules/logs.js';
 import { setup } from './dashboard_dom_fixture.js';
@@ -16,10 +18,10 @@ function mountLogs(t, { page = 'dashboard', history = {}, beforeLeave } = {}) {
     const fixture = setup(t);
     for (const name of STREAMS) fixture.routes.set(logUrl(name), response({ entries: history[name] || [] }));
     const state = { activePage: page, dashboardActiveSubtab: 'logs' };
-    initLogs({ mount: fixture.mount, ws: fixture.ws, state, setBeforePageLeave: beforeLeave });
+    const controls = initLogs({ mount: fixture.mount, ws: fixture.ws, state, setBeforePageLeave: beforeLeave });
     const list = fixture.mount.querySelector('#log-entries');
     return {
-        ...fixture, state, list,
+        ...fixture, state, list, controls,
         emit: (data) => fixture.ws.emit('log', { data }),
         show: () => {
             state.activePage = 'dashboard';
@@ -28,10 +30,38 @@ function mountLogs(t, { page = 'dashboard', history = {}, beforeLeave } = {}) {
         card: (id) => list.children.find((node) => node.dataset.taskGroup === id),
         click: (target) => list.dispatchEvent({ type: 'click', target }),
         toggle: (details, open) => { details.open = open; list.dispatchEvent({ type: 'toggle', target: details }); },
+        // An event is its one fold, opened or closed the way the browser does: its `toggle` reaches the list.
+        record: (node, open = true) => {
+            node.open = open;
+            list.dispatchEvent({ type: 'toggle', target: node });
+        },
     };
 }
 
 const at = (second) => `2026-11-04T01:00:${String(second).padStart(2, '0')}Z`;
+
+test('the section owns the filter rail and Clear; the list has no sticky chrome', (t) => {
+    const { mount, ws, document } = setup(t);
+    const band = document.createElement('div');
+    let tab;
+    initLogs({ mount, ws, state: { activePage: 'chat' }, setControls: (name, node) => { tab = name; band.appendChild(node); } });
+    assert.equal(tab, 'logs');
+    assert.equal(mount.querySelector('#log-filters'), null);
+    assert.ok(band.querySelector('#log-filters').classList.contains('app-tab-strip'));
+    assert.equal(band.querySelector('#btn-clear-logs').textContent, 'Clear');
+    assert.ok(mount.querySelector('#log-entries'), 'the events stay in their scroller');
+    assert.ok(band.querySelector('#btn-clear-logs').classList.contains('btn-default'));
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(css, /\.logs-kinds\[data-scroll-end\] \{ --tab-fade-end: var\(--space-4\); \}/);
+    assert.match(css, /\.logs-kinds\[data-scroll-start\] \{ --tab-fade-start: var\(--space-4\); \}/);
+    assert.match(css, /html\[data-layout="stack"\] #page-dashboard \.logs-kinds \{ grid-area: 2 \/ 1 \/ auto \/ -1; padding: var\(--space-2\) var\(--page-header-padding-x\);\s*margin: 0 calc\(-1 \* var\(--page-header-padding-x\)\); max-width: none; scroll-padding-inline: var\(--page-header-padding-x\); \}/,
+        'a phone\'s rail runs to the page\'s edges, its chips starting at the column, so a hidden chip fades at the edge');
+    const wide = css.indexOf('html[data-layout="stack"] #page-dashboard .logs-kinds { margin-block: calc(-1 * var(--space-2)) calc(-1 * var(--space-5)); }');
+    assert.ok(wide > 0 && wide < css.indexOf('@container sectionplace (max-width: calc(40rem - 0.02px))'),
+        'two panes in a stack window keep the rail in the one row without its shadow room growing it; the phone rule comes after');
+    assert.match(css, /html\[data-layout="stack"\] \.logs-card \{[^}]*background: none;[^}]*box-shadow: none;/);
+    assert.ok(mount.querySelector('.logs-card').classList.contains('ui-card'), 'the desk retains the object');
+});
 
 test('Clear cancels a pending backfill without accepting its late rows or leaving Loading behind', async (t) => {
     const { mount, routes, ws } = setup(t);
@@ -75,18 +105,37 @@ test('a hidden panel writes no node and reads no history; shown, it catches up a
     assert.equal(logs.list.children.length, 3);
     const busy = logs.card('busy');
     assert.equal(busy.dataset.category, 'errors', 'the failure earned while hidden still files the card under Errors');
-    assert.equal(busy.querySelector('[data-task-headline]').textContent, 'Still working');
-    assert.equal(busy.querySelector('[data-task-count]').textContent, 'x2');
-    assert.match(logs.list.textContent, /test_backfilled_event|earlier/i);
+    assert.equal(busy.querySelector('.log-words').textContent, 'Run command failed', 'a card holding a failure says it in its words');
+    assert.equal(busy.querySelector('.log-count').textContent, '2 events', 'a task\'s count says what it counts');
+    assert.equal(busy.querySelector('.log-failure-word').textContent, '1 step failed', 'and its failure in words');
+    assert.match(logs.list.textContent, /Test backfilled event|earlier/i);
 
     // Away and back: nothing new, nothing read again.
     logs.state.activePage = 'settings';
     logs.emit({ type: 'task_heartbeat', phase: 'running', task_id: 'busy', ts: at(4) });
-    assert.equal(busy.querySelector('[data-task-count]').textContent, 'x2', 'a hidden card is not redrawn');
+    assert.equal(busy.querySelector('.log-count').textContent, '2 events', 'a hidden card is not redrawn');
     logs.show();
     await settle();
-    assert.equal(busy.querySelector('[data-task-count]').textContent, 'x3');
+    assert.equal(busy.querySelector('.log-count').textContent, '3 events');
     assert.equal(logs.calls.length, STREAMS.length);
+});
+
+test('the selected Logs tab stays hidden while the one-column Dashboard shows its list', async (t) => {
+    const logs = mountLogs(t, { page: 'chat' });
+    // The automatic view names no column: below 40rem the sheets hide the page's column, so the panel has no box.
+    const body = logs.mount.querySelector('#page-logs');
+    body.getClientRects = () => [];
+    logs.mount.setAttribute('data-section-view', 'auto');
+    logs.emit({ type: 'waiting_for_its_page', ts: at(1) });
+    logs.show();
+    await settle();
+    assert.equal(logs.calls.length, 0, 'the section list is not the selected tab being shown');
+    assert.equal(logs.list.children.length, 0);
+    body.getClientRects = () => [{ width: 1, height: 1 }];
+    logs.window.dispatchEvent({ type: 'ouro:dashboard-subtab-shown', detail: { tab: 'logs' } });
+    await settle();
+    assert.equal(logs.calls.length, STREAMS.length);
+    assert.equal(logs.list.children.length, 1, 'the selected reader catches up when its page is revealed');
 });
 
 test('the first showing after a burst draws the newest entries at once and the rest a chunk per frame, in order', async (t) => {
@@ -98,48 +147,48 @@ test('the first showing after a burst draws the newest entries at once and the r
     assert.equal(logs.list.children.length, 0);
 
     logs.show();
-    // An event's type is printed only where its headline does not already say it (U028): the headline names it.
-    const types = () => logs.list.children.map((node) => node.querySelector('.log-headline').textContent);
+    // An event's name is its type in words on its first line, said once (U028): an unknown event has no other words.
+    const types = () => logs.list.children.map((node) => node.querySelector('.log-name').textContent);
     assert.equal(logs.list.children.length, 40, 'the newest chunk is on screen at once');
-    assert.equal(types().at(-1), 'burst_event_99');
+    assert.equal(types().at(-1), 'Burst event 99');
     runFrame();
     assert.equal(logs.list.children.length, 80);
     logs.emit({ type: 'live_during_catch_up', ts: at(59) });  // a live entry meanwhile is newest
     runFrame();
     runFrame();
     assert.equal(logs.list.children.length, 101);
-    assert.deepEqual(types(), [...Array.from({ length: 100 }, (_, index) => `burst_event_${index}`), 'live_during_catch_up']);
+    assert.deepEqual(types(), [...Array.from({ length: 100 }, (_, index) => `Burst event ${index}`), 'Live during catch up']);
     await settle();  // the history owed since the panel was hidden has been read; nothing outlives the test
     for (let index = 0; index < 4 && frames.length; index += 1) runFrame();
 });
 
-test('Raw pins the received event while open, discloses a repeat, and releases its page when closed', async (t) => {
+test('an open record pins the received event, discloses a repeat, and releases its page when its fold closes', async (t) => {
     const logs = mountLogs(t);
     await settle();
     const first = { type: 'deps_sync_ok', reason: 'boot', source: 'lock', ts: at(1), detail: { n: 1 } };
     logs.emit(first);
     const entry = logs.list.children[0];
     const raw = entry.querySelector('.log-raw');
-    const button = entry.querySelector('.log-raw-toggle');
-    assert.equal(raw.textContent, '', 'no Raw text exists before it is asked for');
-    logs.click(button);
+    assert.equal(entry.querySelector('summary'), entry.querySelector('.log-head'), 'the event\'s head is its fold\'s summary');
+    assert.equal(entry.querySelector('.log-name').textContent, 'Dependencies in sync');
+    assert.equal(raw.textContent, '', 'no record text exists before it is asked for');
+    logs.record(entry);
     await settle();
     assert.equal(raw.hidden, false);
     assert.equal(raw.textContent, JSON.stringify(first, null, 2));
-    assert.equal(button.textContent, 'Hide raw');
     const repeat = { ...first, ts: at(2), detail: { n: 2 } };
-    logs.emit(repeat);  // collapses into the same entry (x2)
+    logs.emit(repeat);  // collapses into the same entry (×2)
     assert.equal(logs.list.children.length, 1);
-    assert.equal(entry.querySelector('.log-repeat').textContent, 'x2');
-    assert.equal(raw.textContent, JSON.stringify(first, null, 2), 'an open Raw keeps the source the owner asked for');
+    assert.equal(entry.querySelector('.log-count').textContent, '×2', 'a repeat of one event says ×N');
+    assert.equal(raw.textContent, JSON.stringify(first, null, 2), 'an open record keeps the source the owner asked for');
     assert.match(entry.querySelector('.log-raw-status').textContent, /entry changed/);
-    logs.click(button);
+    logs.record(entry, false);
     assert.equal(raw.hidden, true);
     assert.equal(raw.textContent, '', 'closed, the text is let go');
 
     logs.emit({ type: 'unserializable_event', ts: at(3), size: 1n });
     const odd = logs.list.children.at(-1);
-    logs.click(odd.querySelector('.log-raw-toggle'));
+    logs.record(odd);
     assert.match(odd.querySelector('.log-raw-status').textContent, /^Raw unavailable: /);
 });
 
@@ -149,8 +198,9 @@ test('an open Timeline grows in place, keeps MAX rows, and closed lets its rows 
     logs.emit({ type: 'task_started', task_id: 't', ts: at(1) });
     logs.emit({ type: 'tool_call_finished', tool: 'read_file', is_error: false, task_id: 't', ts: at(2) });
     const card = logs.card('t');
-    const details = card.querySelector('details');
-    const rows = () => card.querySelector('[data-task-timeline]').querySelectorAll('.log-task-event');
+    const details = card;
+    assert.equal(card.querySelectorAll('details').length, 0, 'a task\'s card is its one fold: it opens its timeline');
+    const rows = () => card.querySelector('.log-task-timeline').querySelectorAll('.log-task-event');
     assert.equal(rows().length, 0, 'a closed Timeline holds no rows');
     logs.toggle(details, true);
     const [one, two] = rows();
@@ -184,11 +234,11 @@ test('a history owed while hidden merges by time: old rows go before the live on
     assert.equal(list[1].dataset.taskGroup, 'busy');
     assert.notEqual(list.at(-1).dataset.taskGroup, 'busy', 'the newest live row stays last');
     const busy = logs.card('busy');
-    assert.equal(busy.querySelector('[data-task-count]').textContent, 'x2');
-    assert.equal(busy.querySelector('[data-task-headline]').textContent, 'read_file finished', 'the older row does not take over the card');
-    logs.toggle(busy.querySelector('details'), true);
-    const rows = busy.querySelectorAll('.log-task-event').map((row) => row.querySelector('.log-headline').textContent);
-    assert.equal(rows.at(-1), 'read_file finished', 'the timeline is in time order');
+    assert.equal(busy.querySelector('.log-count').textContent, '2 events');
+    assert.equal(busy.querySelector('.log-words').textContent, 'Read file finished', 'the older row does not take over the card');
+    logs.toggle(busy, true);
+    const rows = busy.querySelectorAll('.log-task-event').map((row) => row.querySelector('.log-name').textContent);
+    assert.equal(rows.at(-1), 'Read file finished', 'the timeline is in time order');
 });
 
 test('past the bound a merge lets the oldest go by time, never the entries that arrived live', async (t) => {
@@ -200,9 +250,8 @@ test('past the bound a merge lets the oldest go by time, never the entries that 
     logs.show();
     await settle();
     assert.equal(logs.list.children.length, 500);
-    assert.match(logs.list.children.at(-1).textContent, /test_live_keeps_its_place|Event/);
-    assert.equal(logs.list.children.at(-1).querySelector('.log-raw-toggle') !== null, true);
-    logs.click(logs.list.children.at(-1).querySelector('.log-raw-toggle'));
+    assert.match(logs.list.children.at(-1).textContent, /Test live keeps its place/);
+    logs.record(logs.list.children.at(-1));
     await settle();
     assert.match(logs.list.children.at(-1).querySelector('.log-raw').textContent, /test_live_keeps_its_place/);
 });
@@ -231,25 +280,25 @@ test('backfilled rows older than an open Timeline\'s rows take their places in t
     await settle();
     const row = (second, tool) => ({ type: 'tool_call_finished', tool, is_error: false, task_id: 't', ts: at(second) });
     logs.emit(row(30, 'third_tool'));
-    logs.toggle(logs.card('t').querySelector('details'), true);
-    const timeline = logs.card('t').querySelector('[data-task-timeline]');
+    logs.toggle(logs.card('t'), true);
+    const timeline = logs.card('t').querySelector('.log-task-timeline');
     const [third] = timeline.querySelectorAll('.log-task-event');
     logs.routes.set(logUrl('events'), response({ entries: [row(10, 'first_tool'), row(20, 'second_tool')] }));
     logs.ws.emit('open');  // a reconnect reads the recent history again
     await settle();
     const rows = timeline.querySelectorAll('.log-task-event');
-    assert.deepEqual(rows.map((node) => node.querySelector('.log-headline').textContent),
-        ['first_tool finished', 'second_tool finished', 'third_tool finished']);
+    assert.deepEqual(rows.map((node) => node.querySelector('.log-name').textContent),
+        ['First tool finished', 'Second tool finished', 'Third tool finished']);
     assert.equal(rows[2], third, 'the row already shown keeps its node');
 });
 
-test('Raw shown again keeps its page, scroll and selection after another page takes focus, but never adopts another selection', async (t) => {
+test('a received event\'s open record shown again keeps its page, scroll, text node and selection after another page takes focus, but never adopts another selection; only its download is rebuilt', async (t) => {
     const leaving = [];
     const logs = mountLogs(t, { beforeLeave: handler => leaving.push(handler) });
     await settle();
     logs.emit({ type: 'deps_sync_ok', reason: 'boot', ts: at(1), detail: 'x'.repeat(200) });
     const entry = logs.list.children[0];
-    logs.click(entry.querySelector('.log-raw-toggle'));
+    logs.record(entry);
     await settle();
     await settle();
     const pre = entry.querySelector('.log-raw');
@@ -294,7 +343,7 @@ test('Raw shown again keeps its page, scroll and selection after another page ta
     // An explicit page move starts at that page's top: tests/test_logs_raw_browser.py (a worker-sized event, real engines).
 });
 
-test('a compact row names the fields its view left out and points at Raw; an adopted live twin keeps its own view', async (t) => {
+test('a compact row names the fields its view left out in its record; an adopted live twin keeps its own view', async (t) => {
     const logs = mountLogs(t, { history: { events: [compactRef({ type: 'llm_api_error', ts: at(1) },
         { omitted_fields: ['error', 'response_body'], omitted_field_count: 3 })] } });
     await settle();
@@ -302,9 +351,10 @@ test('a compact row names the fields its view left out and points at Raw; an ado
     const note = entry.querySelector('[data-log-omitted]');
     assert.ok(note, 'the entry says what is missing');
     assert.match(note.textContent, /error, response_body and 1 more/);
-    assert.match(note.textContent, /Raw/);
+    assert.match(note.textContent, /The record below reads the whole row\./);
+    assert.equal(note.parentElement, entry, 'the note stands in the fold, beside the record');
     logs.emit({ type: 'task_heartbeat', phase: 'running', task_id: 'g', ts: at(2), note: 'live' });
-    logs.toggle(logs.card('g').querySelector('details'), true);
+    logs.toggle(logs.card('g'), true);
     logs.routes.set(logUrl('events'), response({ entries: [compactRef({ type: 'task_heartbeat', phase: 'running', task_id: 'g', ts: at(2) },
         { omitted_fields: ['note'], omitted_field_count: 1 })] }));
     logs.ws.emit('open');
@@ -328,14 +378,17 @@ for (const [unavailable, reason, said] of [[[], '', null], [['source_refs', 'cap
             source: row._raw.source, representation: 'reconstructed', sha256: sha, total_bytes: text.length, offset: 0,
             next_offset: text.length, has_more: false, text, unavailable_fields: unavailable, unavailable_reason: reason }));
         const [entry] = logs.list.children;
-        logs.click(entry.querySelector('.log-raw-toggle'));
+        logs.record(entry);
         await settle();
         await settle();
         const status = entry.querySelector('.log-raw-status').textContent;
-        assert.match(status, /^0–\d+ of \d+ bytes · reconstructed/);
+        // A record of one page names no byte range (owner 14.11: "0–100 of 100 bytes · stored"); its kind reads in words.
+        assert.match(status, /^Reconstructed · /);
+        assert.doesNotMatch(status, /bytes/);
         if (said) assert.match(status, said);
         else assert.doesNotMatch(status, /missing/);
-        assert.equal(entry.querySelector('.log-raw').textContent, text);
+        // A record read whole reads as one JSON value, indented as a received event is (one format for raw data).
+        assert.equal(entry.querySelector('.log-raw').textContent, '{\n  "checkpoint_kind": "context_view"\n}');
     });
 }
 
@@ -361,6 +414,28 @@ test('the compact read\'s skipped damaged records are disclosed for that read on
     await settle();
     await settle();
     assert.equal(status.hidden, true, 'a later read without damage clears it');
+});
+
+test('a return restores its own entry offset after a later visit scrolls the same Logs list', async (t) => {
+    const logs = mountLogs(t);
+    await settle();
+    logs.emit({ type: 'test_first', ts: at(1) });
+    logs.emit({ type: 'test_second', ts: at(2) });
+    await settle();
+    const page = logs.mount.querySelector('#page-logs');
+    page.scrollHeight = 1600; page.clientHeight = 500;
+    page.getBoundingClientRect = () => ({ top: 0, bottom: 500 });
+    logs.list.children.forEach((node, index) => {
+        node.getBoundingClientRect = () => ({ top: 300 + index * 400 - page.scrollTop, bottom: 400 + index * 400 - page.scrollTop });
+    });
+    page.scrollTop = 100; await page.fire('scroll');
+    const restore = logs.controls.captureReading();
+    page.scrollTop = 400; await page.fire('scroll');
+    restore(); await settle();
+    assert.equal(page.scrollTop, 100);
+    const same = logs.controls.captureReading();
+    same(); await settle();
+    assert.equal(page.scrollTop, 100, 'a place still there does not move');
 });
 
 test('adopting exact sources for live twins costs one pass over the entries, not one per backfilled row', async (t) => {

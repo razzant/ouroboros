@@ -2,12 +2,19 @@
 // facts that were read; a row's answer says its fact or that it was not read; and showing the home starts nothing: no
 // daemon, no model catalogue, no review pool, no tool-server refresh, no status poll. A page reads when it is shown.
 import assert from 'node:assert/strict';
+import { settingsDoorName } from '../modules/settings_pages.js';
 import test from 'node:test';
+
+test('a door names its destination, without adding words to an internal row', () => {
+    assert.equal(settingsDoorName('Costs', 'dashboard:costs'), 'Costs, Dashboard');
+    assert.equal(settingsDoorName('Context', 'main:context'), 'Context, Main');
+    assert.equal(settingsDoorName('Skills', 'page:skills'), 'Skills');
+    assert.equal(settingsDoorName('Models', 'models'), 'Models');
+});
 
 import { createClaudexorStatusStore } from '../modules/claudexor_status_store.js';
 import { getContributions } from '../modules/contributions.js';
 import { createHostStart } from '../modules/host_starting_status.js';
-import { renderPageHeader } from '../modules/page_header.js';
 import { initSettings } from '../modules/settings.js';
 import { readSettings, writeEntry } from '../modules/settings_controls.js';
 import { askOuroboros, beingState, homeAnswers, mountSettingsHome, needRows } from '../modules/settings_home.js';
@@ -483,112 +490,47 @@ test('the Context door shows Main and nothing else: with a project room open it 
     // A project room is open over Main: showPage('chat') with no options is what closes it (app.js showPage).
     await controls.open('main:context');
     await settle();
-    assert.deepEqual(shown, [['chat']], 'Main is shown, the open Project closed by the page change itself');
+    assert.deepEqual(shown.map(([page]) => page), ['chat'], 'Main is shown, the open Project closed by the page change itself');
     assert.deepEqual(posts, [], 'no POST /api/owner/context-mode, no write of any kind');
     assert.ok(!env.calls.some((call) => String(call).includes('context-mode')));
     assert.deepEqual(dashboard, []);
-    // A door to a Dashboard tab asked for from outside Settings (a capsule's limit door) carries its row and no way
-    // back: nobody came from Settings.
+    // A door carries its destination row; the shell, not Settings, owns its return.
     await controls.open('dashboard:costs', { row: 'TOTAL_BUDGET' });
     assert.deepEqual(dashboard, [['costs', { row: 'TOTAL_BUDGET' }]]);
 });
 
-// The fixture's element, also reading `:scope > X` (a child) as a browser does: a door's way back finds the page's own
-// header so (dashboard.js settingsReturn). Children an innerHTML builds are made of the same element.
-class ScopeStub extends Stub {
-    querySelectorAll(selector) {
-        const scoped = selector.match(/^:scope > (\S+)$/);
-        if (scoped) return this.children.filter((child) => child.matches(scoped[1]));
-        return super.querySelectorAll(selector);
-    }
-    set innerHTML(html) {
-        super.innerHTML = html;
-        const upgrade = (node) => { Object.setPrototypeOf(node, ScopeStub.prototype); node.children.forEach(upgrade); };
-        this.children.forEach(upgrade);
-    }
-    get innerHTML() { return super.innerHTML; }
-    toggleAttribute(name, force) {
-        const on = force ?? !this.hasAttribute(name);
-        if (on) this.setAttribute(name, ''); else this.removeAttribute(name);
-        return on;
-    }
-}
-
-test('a Settings door keeps its path and header Back in both layouts', async (t) => {
-    const { env, content, state, shown, showPage } = world(t);
-    const layout = (name) => {
-        env.window.ouroLayout = { layout: name };
-        env.window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout: name } }));
-    };
-    layout('docked');
-    env.document.createElement = (tag) => new ScopeStub(tag);
+test('all seven Settings doors use ordinary navigation; a Tools door retains its level for the shell return', async (t) => {
+    const { env, content, state, shown, showPage, layers } = world(t);
     const dashboard = [];
-    const layered = [];
-    const layers = { push: (layer) => layered.push(`push ${layer.id}`), remove: (id) => layered.push(`remove ${id}`), batch: (fn) => fn() };
-    // The two pages as their modules draw them: the shared header (renderPageHeader), Circles with its action and the
-    // Dashboard's shell, Skills with its tabs and its own parts under the header.
-    const pageOf = (id, html) => {
-        const page = env.document.createElement('div');
-        page.id = id;
-        page.className = 'page app-page-glass';
-        page.innerHTML = html;
-        content.appendChild(page);
-        return page;
-    };
-    const circles = pageOf('page-circles', `${renderPageHeader({ page: 'circles', actionsHtml: '<button type="button">New circle</button>' })}
-        <div class="dashboard-shell"><div class="dashboard-body"></div></div>`);
-    const skills = pageOf('page-skills', `${renderPageHeader({ page: 'skills', tabsHtml: '<div class="skills-tabs"></div>' })}
-        <div class="skills-search-chrome"></div><div class="skills-scroll"></div>`);
-    const partsOf = (page) => page.children.map((part) => part.className);
-    const skillsParts = partsOf(skills);
-    const controls = initSettings({ state, ws: env.ws, showPage, layers, openDashboardTab: (...args) => dashboard.push(args), setBeforePageLeave() {} });
+    const controls = initSettings({ state, ws: env.ws, showPage, layers,
+        openDashboardTab: (...args) => dashboard.push(args), setBeforePageLeave() {} });
     await controls.open('');
     await settle();
-    const homeEl = content.querySelector('[data-settings-home]');
-    const press = async (to) => { await homeEl.fire('click', { target: homeEl.querySelector(`[data-settings-open="${to}"]`) }); await settle(); };
-    const headerOf = (page) => page.querySelector(':scope > .app-page-header');
-    // What stands in the header's Back slot, and whether the header says it holds one.
-    const backOf = (page) => {
-        const slot = headerOf(page).querySelector('[data-page-back]');
-        return { inSlot: slot.children.map((node) => node.getAttribute('aria-label')),
-            marked: headerOf(page).hasAttribute('data-back'), rows: page.querySelectorAll('.dashboard-back').length };
-    };
-    const none = { inSlot: [], marked: false, rows: 0 };
-    const back = { inSlot: ['Back to Settings'], marked: true, rows: 0 };
-
-    // A Dashboard tab: the path the door was pressed on travels with it, and the tab draws the row.
-    await press('dashboard:costs');
-    assert.deepEqual(dashboard, [['costs', { row: '', back: '' }]]);
-
-    // Circles: Back stands in its header's Back slot, never as a row of its own, with its one layer.
-    await press('page:circles');
-    assert.deepEqual(shown.at(-1), ['circles']);
-    assert.deepEqual(backOf(circles), back, 'the docked header leads back to Settings too');
-    layout('stack');
-    assert.deepEqual(backOf(circles), back);
-    assert.equal(layered.at(-1), 'push settings-door-back', 'Escape and the system\'s Back return to Settings too');
-    // Its press returns to Settings, and the slot is emptied and its layer gone.
-    await headerOf(circles).querySelector('[data-dashboard-back]').fire('click', {});
+    const home = content.querySelector('[data-settings-home]');
+    home.clientHeight = 500;
+    home.getBoundingClientRect = () => ({ top: 0, bottom: 500 });
+    home.querySelectorAll('[data-settings-open]').forEach((row) => { row.getBoundingClientRect = () => ({ top: 0, bottom: 40 }); });
+    const doors = ['page:skills', 'page:circles', 'dashboard:costs', 'dashboard:consciousness',
+        'dashboard:evolution', 'dashboard:updates', 'dashboard:storage'];
+    for (const destination of doors) {
+        const row = home.querySelector(`[data-settings-open="${destination}"]`);
+        assert.ok(row, destination);
+        await home.fire('click', { target: row });
+        await settle();
+        const [kind, name] = destination.split(':');
+        if (kind === 'page') assert.deepEqual(shown.at(-1), [name, {}]);
+        else assert.deepEqual(dashboard.at(-1), [name, { row: '' }]);
+    }
+    await controls.open('tools');
     await settle();
-    assert.deepEqual([shown.at(-1), backOf(circles)], [['settings'], none]);
-    assert.ok(layered.includes('remove settings-door-back'));
-
-    // Skills: in its header's slot as well; the page's own parts stay as they were.
-    await press('page:skills');
-    assert.deepEqual(backOf(skills), back);
-    layout('docked');
-    assert.deepEqual(backOf(skills), back);
-    layout('stack');
-    assert.deepEqual(backOf(skills), back);
-    assert.deepEqual(partsOf(skills), skillsParts);
-    // Leaving that page any other way empties the slot.
-    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'files' } }));
-    assert.deepEqual(backOf(skills), none);
-
-    // The same door asked for from outside Settings shows the page and no way back.
-    await controls.open('page:circles');
-    await settle();
-    assert.deepEqual([shown.at(-1), backOf(circles)], [['circles'], none]);
+    const origin = controls.capture();
+    const level = content.querySelector('.settings-page');
+    assert.equal(level.dataset.settingsPage, 'tools');
+    await level.querySelector('.settings-page-body').fire('click', { target: level.querySelector('[data-setting-row="tools:door:skills"]') });
+    assert.deepEqual(shown.at(-1), ['skills', {}], 'a level door needs no private Back callback');
+    origin.restore();
+    assert.equal(content.querySelector('.settings-page'), level, 'the retained level is restored');
+    assert.equal(origin.title, 'Settings › Tools');
 });
 
 test('Ask Ouroboros puts the words into Main as an unsent draft and replaces no draft that is there', async () => {
@@ -693,6 +635,7 @@ test('the Accounts row counts the accounts beside every page: the home\'s passiv
 
 test('a Settings door keeps one history entry from the list or a page, and a refused leave keeps its levels', async (t) => {
     const { createLayerStack } = await import('../modules/layers.js');
+    const { createPageNavigation } = await import('../modules/page_navigation.js');
     const { registerSettingsPage } = await import('../modules/settings_pages.js');
     for (const origin of ['list', 'one-column', 'two-pane']) for (const door of ['page:skills', 'dashboard:costs']) for (const allowed of [true, false]) {
         await t.test(`${origin}/${door}/${allowed}`, async (sub) => {
@@ -702,34 +645,46 @@ test('a Settings door keeps one history entry from the list or a page, and a ref
                 pushState: () => calls.push('push'), back: () => calls.push('back'),
             } });
             sub.after(() => layers.destroy());
-            const skills = env.document.createElement('div'); skills.id = 'page-skills';
-            skills.innerHTML = '<div class="app-page-header"></div><section></section>';
-            content.append(skills);
-            let leave;
+            let leave, controls;
             registerSettingsPage('test-door-history', { title: 'Door', mount(_body, { ctx }) { leave = ctx.openSettings; } });
-            const showPage = async (name) => {
-                await Promise.resolve(); // app.js awaits its before-page-leave handlers
-                if (name !== 'settings' && !allowed) return false;
+            const shown = name => {
                 state.activePage = name;
                 env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));
-                return true;
             };
-            const controls = initSettings({ state, ws: env.ws, layers, showPage, openDashboardTab: async () => {
-                if (await showPage('dashboard')) layers.push({ id: 'dashboard-back', page: true, focus: false });
-            } });
+            const nav = createPageNavigation({ layers, doc: env.document,
+                canLeave: async key => key.startsWith('settings:') || allowed,
+                capture: () => {
+                    const saved = controls.capture();
+                    return { key: `settings:${state.settingsPath}`, label: 'Settings', title: saved.title,
+                        restore() { state.activePage = 'settings'; saved.restore(); shown('settings'); } };
+                } });
+            sub.after(() => nav.destroy());
+            const showPage = (name, options = {}) => nav.go(options.key || name,
+                () => { shown(name); options.enter?.(); }, options);
+            controls = initSettings({ state, ws: env.ws, layers, showPage,
+                openDashboardTab: name => showPage('dashboard', { key: `dashboard:${name}` }) });
             const home = content.querySelector('[data-settings-home]');
             home.getClientRects = () => origin === 'one-column' ? [] : [{}];
-            await controls.open(origin === 'list' ? '' : 'test-door-history');
+            await controls.open(origin === 'list' ? '' : 'test-door-history', { map: true });
             await settle();
             const hadLayer = origin === 'one-column';
             assert.deepEqual(calls, hadLayer ? ['push'] : []);
+            const retained = content.querySelector('[data-settings-page="test-door-history"]');
             if (origin === 'list') await home.fire('click', { target: home.querySelector(`[data-settings-open="${door}"]`) });
             else await leave(door);
             await settle();
             assert.deepEqual(calls, hadLayer || allowed ? ['push'] : [], 'the handover never consumes and replaces an existing history entry');
             assert.equal(layers.size(), hadLayer || allowed ? 1 : 0);
-            assert.equal(layers.top(), allowed ? (door === 'page:skills' ? 'settings-door-back' : 'dashboard-back') : hadLayer ? 'settings-level-1' : null);
+            assert.equal(layers.top(), allowed ? 'page-return-1' : hadLayer ? 'settings-level-1' : null);
             assert.equal(state.activePage, allowed ? (door === 'page:skills' ? 'skills' : 'dashboard') : 'settings');
+            if (allowed) {
+                assert.equal(layers.returnPage().back.label, 'Settings');
+                layers.back('escape'); await settle();
+                assert.equal(state.activePage, 'settings');
+                assert.equal(state.settingsPath, origin === 'list' ? '' : 'test-door-history');
+                assert.equal(layers.top(), hadLayer ? 'settings-level-1' : null);
+            }
+            if (retained) assert.equal(content.querySelector('[data-settings-page="test-door-history"]'), retained, 'the same level survives leave or refusal');
         });
     }
 });

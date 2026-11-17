@@ -24,6 +24,7 @@ import { controlIcon } from './page_icons.js';
 import { createStatusMark, paintStatusMark } from './status_mark.js';
 import { hangUnderCapsules } from './room_work.js';
 import { motionMs, reducedMotion } from './motion.js';
+import { bindScrollFade } from './scroll_fade.js';
 
 export { allowanceText };
 // A campaign stopped by its limit or waiting for the owner's chat is the owner's move too (the state's own marks are
@@ -105,7 +106,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
 
     // ---- the Shade: the room Shade's anchor and material under the bar
     const anchor = element('div', 'rw-shade-anchor cx-anchor');
-    const shade = element('div', 'rw-surface rw-shade cx-shade');
+    const shade = element('div', 'rw-surface scroll-fade-y rw-shade cx-shade');
     shade.id = `${uid}-shade`;
     shade.hidden = true;
     shade.tabIndex = -1;
@@ -151,6 +152,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     shade.append(body);
     anchor.append(shade);
     bar.append(anchor);
+    const disposeShadeFade = bindScrollFade(shade);
 
     let view = null;
     let open = false;
@@ -306,7 +308,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         return (away && bar.querySelector('.rw-trigger:not([hidden])')) || chip;
     }
 
-    const disposers = [];
+    const disposers = [disposeShadeFade];
     const listen = (target, type, fn, options) => {
         target.addEventListener(type, fn, options);
         disposers.push(() => target.removeEventListener(type, fn, options));

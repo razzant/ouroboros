@@ -610,9 +610,11 @@ def test_project_room_reader_survives_reload_and_closes_with_its_room(direct_ser
             assert page.evaluate(LEFT_BEHIND, feed) == {
                 "readers": 0, "open_dialogs": 0, "room_kept_away": True, "focus_connected": True}
             _release(page, held)
-            # On a phone the other room covers Main's menu: close it, then reopen the room.
+            # The other room was opened by a reference from this one, a jump: closing it returns here (the jump's
+            # return, docs/DESIGN.md "Layers and dismissal"), and the room reopens its reader.
             page.locator("#project-panel-close").click()
-            feed = _enter_room(page, room)
+            page.locator(feed).wait_for(state="visible", timeout=30_000)
+            assert page.evaluate("() => window.__ouroLayers.ids()") == ["project"]
             state = _open(page, "room-notes.txt", ready=".document-reader-source", feed=feed)
             assert state["source"] == NOTES
             _close_with_escape(page)
@@ -958,11 +960,14 @@ def test_reader_in_a_translated_ui_and_copy_without_async_clipboard(direct_serve
                 big = page.evaluate(COPY_STATE)
                 assert not big["highlighted"] and len(big["code_text"]) > 32768, len(big["code_text"])
                 # Keyboard activation from a scrolled document exercises both
-                # actual focus restoration and a nonzero viewport position.
+                # actual focus restoration and a nonzero viewport position. The
+                # owner scrolls with the focus kept on Copy: focus the keyboard
+                # can see comes clear of the reader's fade when it lands
+                # (scroll_fade.js), so the scroll comes after it.
                 page.evaluate("""() => {
                     const dialog = document.querySelector('dialog.document-reader');
-                    dialog.querySelector('.document-reader-body').scrollTop = 100;
                     dialog.querySelector('.md-code-copy').focus({preventScroll: true});
+                    dialog.querySelector('.document-reader-body').scrollTop = 100;
                 }""")
                 page.keyboard.press("Enter")
                 page.wait_for_function("() => document.querySelector('dialog.document-reader .md-code-copy').textContent === 'Скопировано'")

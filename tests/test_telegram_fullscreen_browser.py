@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from tests._phone_room_shared import VIEWPORT, facts, history, shot, telegram_sdk
-from tests.test_design_system_gate_browser import rest, seed_page, settle
+from tests.test_design_system_gate_browser import open_nav, rest, seed_page, settle
 from tests.test_shell_interactions_browser import open_project, shell_ui
 from tests.test_subscription_setup_browser import subscription_ui
 
@@ -359,3 +359,36 @@ def test_page_notices_keep_their_margin_inside_telegrams_side_insets(shell_ui, w
     shot(page, name)
     assert measured['right'] >= side + 18 - 0.5 and measured['left'] >= side - 0.5, measured
     page.close()
+
+
+# Each visible header control, and what a press at its centre reaches.
+HEADER_PRESSES = """() => [...document.querySelectorAll('#page-skills > .app-page-header :is(.app-tab, .app-page-toolbar button)')]
+    .filter(n => n.getClientRects().length).map(n => { const r = n.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return {name: n.textContent.trim(), reached: n === hit || n.contains(hit), left: r.left, right: r.right,
+                within: r.left >= 0 && r.right <= innerWidth}; })"""
+
+
+@pytest.mark.parametrize('root', [16, 24])
+def test_a_telegram_sections_tabs_stay_pressable_beside_every_action_that_left_the_row(shell_ui, root):
+    """Grok r2: at 320 px Skills' Update (prepended into its toolbar) and Refresh stood over the third tab, so Sources
+    could not be pressed. Below Telegram's row the tabs and the actions share lines in flow: an action that does not
+    fit beside the tabs starts the next line, at either root size."""
+    sdk = telegram_sdk(fullscreen='grant', insets={'top': 13}, content={'top': 46})
+    page = telegram_page(shell_ui, 320, 700, sdk)
+    page.route('**/api/extensions', lambda route: route.fulfill(json={'skills': [
+        {'name': f'update-{i}', 'description': 'Test update', 'enabled': True, 'loaded': True,
+         'review_status': 'pass', 'review_gate': 'pass', 'install': {'basis': 'trusted', 'source': {'id': 'official'},
+         'release': {'version': '1'}, 'update_available': {'digest': str(i) * 64, 'version': '2'}}} for i in (1, 2)],
+        'live': {}}))
+    page.add_init_script(f"document.addEventListener('DOMContentLoaded', () => {{ document.documentElement.style.fontSize = '{root}px'; }})")
+    boot(page, shell_ui)
+    page.wait_for_function("() => document.documentElement.dataset.telegramFullscreen === 'active'")
+    open_nav(page, 'skills')
+    page.locator('#skills-update-all').wait_for()
+    rest(page)
+    presses = page.evaluate(HEADER_PRESSES)
+    shot(page, f'telegram-skills-header-320-{root}-{shell_ui["engine"]}')
+    assert [p['name'] for p in presses] == ['Installed', 'Browse', 'Sources', 'Update 2', 'Refresh'], presses
+    assert all(p['reached'] and p['within'] for p in presses), presses
+

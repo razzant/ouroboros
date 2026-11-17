@@ -35,7 +35,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
 **Principles**
 
 1. **The room is plain.** Page, sidebar and panel backgrounds are the room colour or
-   one step off it. Never a gradient, glow, wash, texture or animation behind content.
+   one step off it. Never a decorative gradient, glow, wash, texture or animation behind content.
 2. **Objects rest; they are not outlined.** A bubble, card or group is one flat fill
    on the *rest* shadow: no gradient on it and no light along its edge. What floats over moving content (the work list, menus, the
    composer field, dialogs, the drawer, ↓ latest) takes the *float* shadow. Inside an object a
@@ -119,6 +119,8 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    section's list, a navigation row, a limit's card, a glyph), and one quantity on one screen is
    read from one snapshot and written one way; a new part appears only when the old one cannot do
    the job, and then replaces it everywhere.
+
+9. **Moving content never ends on a line.** Content fades past stationary bars, strips, sheet heads and menus. The shared edge appears only while content waits beyond it; nothing opaque covers it. Floating controls use one glass; the Widgets board keeps crisp edges (owner 20.10), and a room's feed carries no fade (owner 21.10).
 
 **Seed (light | dark)**
 
@@ -379,7 +381,7 @@ A wizard-only layout token is fine; a second value for a shared role is not.
 
 ### Focus
 
-Keyboard focus has **one** appearance:
+Keyboard focus, including a return, has **one** appearance:
 
 ```css
 outline: 2px solid var(--focus-accent-border);
@@ -390,7 +392,7 @@ outline-offset: 2px;
 A Project transcript uses two gutter corners (owner 28.10), quiet after a
 pointer until a key; forced colours use an inset system-colour ring. No blue
 or green ring in ordinary themes, no `box-shadow` outline or colour matched
-to the control: a focus ring is the reader's cursor, consistent across surfaces.
+to the control. Pointer returns restore focus without a ring.
 
 **Hover paint is not a focus ring.** A rule written as
 `.x:hover, .x:focus-visible { background: … }` gives a keyboard user exactly
@@ -907,10 +909,10 @@ Two shapes carry a tone, and they are not interchangeable:
   *is* the status and has nothing else to carry it.
 
 Surfaces whose tone is a class suffix rather than `data-tone`
-(`.toast-*`, `.log-phase`, `.widget-table-status`,
+(`.toast-*`, `.widget-table-status`,
 `.widget-metric` / `.widget-callout`) name the same tokens. A task card's chip
-(`.chat-live-phase`) and a settled Logs task headline keep their phase classes as
-facts and take their tone from the `data-chip-tone` attribute their painters write. A surface that
+(`.chat-live-phase`) keeps its phase classes as facts, its tone in the
+`data-chip-tone` its painter writes; Logs reuses it for a failure alone (owner 14.11, «переиспользуются»). A surface that
 paints only its edge (a card tinted by its state, a callout's left rule) takes
 the border and leaves its own background alone; a toast keeps its glass
 background, because a translucent status fill over live page content costs the
@@ -974,10 +976,10 @@ status sentence's or a composer chip's dot is its tone, §4).
   changes before an update, an Evolution chip, the consciousness chip or a Consciousness sentence that needs the owner
   or was stopped by the spending limit (new starts refused, or its wake proven held at the allowance it started
   with); (2) a warning worth reading — warn toasts and sentences,
-  Settings and onboarding notes, warnings inside task timelines, reviews and Logs
-  events, account quota, and a work that went to a fallback route by itself, until that is resolved
+  Settings and onboarding notes, warnings inside task timelines and reviews,
+  account quota, and a work that went to a fallback route by itself, until that is resolved
   (its card's model fact and the same word in the Main sheet); (3) the System voice (a pale tint in the light theme, its name
-  in the dark one), a voice, not a status; (4) a few data categories that are not statuses (Logs and Storage
+  in the dark one), a voice, not a status; (4) a few data categories that are not statuses (Storage
   categories, the fourth default chart series). What goes on by itself or what someone chose — queued, waiting,
   paused, pausing, stopped, unconfirmed, work in flight, a mode, a level, a setting
   value — is never amber; the fallback above is amber because the work then runs on a model nobody chose for it.
@@ -1307,7 +1309,7 @@ preference when it opens and on every reconnect; there is no file watcher.
     text size; compact surfaces and cards keep `--type-body`. A table in
     either renderer scrolls sideways only when its columns cannot fit even
     wrapped, and only then is it a named keyboard region (`Scrollable
-    table`) whose sides that still hide columns fade. No stacked row cards,
+    table`) whose hidden sides use the shared fade. No stacked row cards,
     no guessing a table's purpose from its words, no smaller text to make it
     fit.
   - A thematic break is a `--divider` hairline with section spacing.
@@ -2668,8 +2670,8 @@ controls remain live; the unfinished checkpoint never erases the outcome.
 ### Widgets board
 
 The Widgets page is a board of live cards. The owner arranges the board; each
-widget's content belongs to its author. The board scrolls with crisp edges: no
-fade dims a card where the list cuts it.
+widget's content belongs to its author. The board scrolls with crisp edges: its
+cards keep their edges rather than taking the shared fade.
 
 - **One surface per card.** A card is its head (title; a framed card's status and
   Start; the ⋮ menu and the move grip) over its content: a frame lies on the card
@@ -2992,9 +2994,7 @@ Reading… (Could not be read after a failed read) and the control waits. Settin
 list is search, Ouroboros's card and groups of navigation rows (§10), each a page's name over its current answer;
 the list and an open page stand together, and a page is always open, Models the first time and later the last
 one. A row opens its page or is a door: what lives elsewhere (a Dashboard page beside its live state, Main's
-composer) shows its value here and leads there with ↗; there, in every layout, the destination's header starts
-with the round Back named Back to Settings, which returns to the Settings page the row stood on and goes when used or
-when another place is chosen (owner 14.11). A list of entries (agents, MCP servers, keys, fallbacks)
+composer) shows its value here and leads there with ↗; its accessible name names the destination. A list of entries (agents, MCP servers, keys, fallbacks)
 is heads: a press opens the entry's page, Add an unsaved one. The card speaks in Ouroboros's voice: what it has
 read that waits for the owner here, each with its one action; a fact it has not read is said by the row it concerns,
 never on the card.
@@ -3355,10 +3355,10 @@ are this row; a list groups it under a quiet group name, on a phone one card of 
 
 ### A section with pages
 
-Settings and Dashboard are sections with pages, and their pages stand as a list beside the open page: from 40rem
-of the section's box the list is a rail (`--section-rail-w`) and the page stands beside it, each column named in
-the band over it (over the list what the section puts there, Settings its search field; over the page its name in
-the header's one title style, with no Back). A page is always open: the section's first page the first time
+Settings and Dashboard hold a list beside the open page: from 40rem
+of the section's box the list is a rail (`--section-rail-w`) and the page stands beside it. The band holds the list's
+controls (Settings' search; on a phone, in the list) and the page's controls. Its chosen row names the page; the heading stays for readers,
+and a deeper Settings level keeps its name. A page is always open: the section's first page the first time
 (Settings: Models), later the last one opened on the device. Narrower, one column shows the list, under the
 section's name led by Ouroboros's picture, or the page, under Back and its name. Choosing a row keeps the list
 where it was and the page arrives on `--motion-fade`. A section's pages are never tabs (§3).
@@ -3460,37 +3460,35 @@ Telegram, and nothing depends on a haptic (`web/modules/haptics.js`).
 
 ### Layers and dismissal
 
-The drawer, the Project panel and a file Files shows
-alone on a narrow page are layers in one stack (`web/modules/layers.js`); the file is part of the page, so it lies
-under every overlay, also when its read lands after the drawer opened. Dialogs, menus and the work list keep their own
-Escape and outside-press dismissal. Escape, ×, a press on the scrim close the
-topmost layer and only it; a Project that covers Main (the phone's card, a finger's
-docked column) is modal with the docked sidebar live, its covered room inert once it
-has arrived; the system or browser Back and Telegram's Back close
-what is on top: a dialog over a layer first, then the layer. While a layer is
-open the page holds exactly one same-address history entry, so Back closes it
-instead of leaving the app; navigation itself is still never written into the
-address. A modal layer makes the rest of the shell inert (never what opens over
-it); closing refocuses the opener unless focus moved somewhere live. The shell
-draws one close glyph and one More glyph (`web/modules/page_icons.js`).
+A jump leaves a named page layer under overlays in `web/modules/layers.js`. Every move except a sidebar/drawer
+choice, section list row or tab is a jump. Jumps stack; sidebar/drawer choices clear returns; section choices keep
+them. Jumps land at their row or top, a key's on its Back; Back/sidebar restore place. Drawer, Project, section levels and Files'
+preview share this stack. Escape, browser, system, mouse, Telegram and ⌘[ (Ctrl+[ elsewhere) use one Back: popup
+first, then top layer. Dialogs, menus and the work list keep their dismissal; Escape clears a filled search first.
+× and the scrim close their layer; a Project reached by a jump closes by ×, its scrim or Back to where the jump
+was pressed. A Project covering Main (phone card or finger's docked column) is modal, with
+the docked sidebar live and covered room inert once it arrives. Modal layers make the shell inert, never overlays;
+closing refocuses the opener unless focus moved somewhere live. One same-address history entry exists while any
+layer is open: Back closes it before leaving the app, without address routing. Close and More use the shared
+glyphs (`web/modules/page_icons.js`).
 
 ### Page header
 
-One component (`web/modules/page_header.js`) draws every page's header and the Project panel's, as one row
-except the narrow toolbar below. No decorative icon. On docked, a section without pages that the column already
-names shows no title: its tabs or Files' location take that place and its actions the end, on Main's line, so the
-bar has two ends as Main's does; tabs wrap and never scroll, a location that does not fit scrolls inside it (it
-rests at the folder you are in, no folder wider than the bar's start), and in the macOS window its empty parts
-still move the window. A section with pages names its two columns (A section with pages). A header with nothing to
-show draws no bar, and its page starts at the window's top edge: the band under the macOS title bar stays the
-window's (owner 22.10), the page's first row starts below it, and the Widgets board's cards pass under it with
-crisp edges (owner 20.10), while a room's feed passes under its bar's frosted edge ("A room's edges"), and a plain
-press in the empty band still moves the window. A Project shows its name. In the stack layout the row is at most 56 px and is the only header row:
-the leading control (Ouroboros's picture at a room or a section's list, Back on a page), the destination's name,
-its status, then a room's consciousness chip and Panic; a page's tabs stand at the top of the page, never as a
-second header row, and Files' location and its actions return above the list (below). The name wins over the
-status word, which a short row drops whole after its start step, keeping its mark, and Main's title ellipsizes
-before its chip or Panic yields (in Telegram's fullscreen the row is Telegram's: "Telegram's shared row").
+The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first control is a round
+Back with the arrow, its destination in its name: the top layer's, peeled one at a time (“Back to
+Settings › Tools”). Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
+(Consciousness model), distinct from its return. Docked, the sidebar names a section without pages: tabs or Files' location lead its
+band, actions end it, at one height and shape. Controls share the content's leading inset, centred in native chrome or
+18px below a browser's top. Rails use the shared fade;
+location reveals its folder without widening the rail. Section headings follow
+“A section with pages”; a Project shows its name.
+An empty band draws nothing. Its scroller reaches the window's top; its first row starts below the macOS band,
+which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10), while a room's
+feed passes under its bar's frosted edge ("A room's edges"); other moving content fades by principle 9. Empty band space still drags the window. In stack layout the header is one row of 44px controls,
+a page's 18px below a browser's top: one leading control (the picture on a room or section list, the round Back when
+owed), destination name, status, then a room's consciousness chip and Panic. Tabs or filters occupy one line below;
+chip rails run to the page's edges (a desk's Logs fades its rail short of Clear), with no outer events panel on a phone. A short row drops the status word whole after its start step, keeping its mark; Main's title ellipsizes before
+its chip or Panic yields (in Telegram's fullscreen a room's row is Telegram's: "Telegram's shared row").
 A Project's name keeps one line inside its capsule, at the controls' size and weight (`--type-body`, 600), and ends
 in an ellipsis, so its capsule keeps the bar's height (owner 2026-11-01, A·14; it replaces the second line of
 2026-10-28). The name keeps its own direction, so a right-to-left interface still shows a Latin name's start. The
@@ -3499,11 +3497,11 @@ title opens even in an empty Project, starts with it, wrapped. Where the room co
 column) a name still cut leaves the consciousness chip its brain and mark, its accessible name keeping the whole
 state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
-Navigation sharing a toolbar also returns below the bar when the
-content column is too narrow, including while the sidebar is resized; the toolbar wraps in its
-own row. Files' location and its actions return above the list on one row; folder names fit, actions wrap.
+Skills keeps its Back, tabs and short actions in one row; below 33rem with a return, 30rem without, tabs sit below. On phones Update stays beside the tabs; Refresh ends the title row.
+Files keeps location and actions in the band, its divider at the window top; the filter heads the list, which
+scrolls under the shared fade. Circles ends the band with New circle; Widgets has no controls.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
-container, 700 px); narrower, the list comes first and a chosen file replaces it under `Back to folder`, which
+container, 700 px); narrower, the list comes first and a chosen file replaces it with a round Back to its folder, which
 keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has its own row at the top) and reopens
 it; another page keeps it too (a return says whether the file changed meanwhile); another file or folder asks. The folder's status stands over the list (audit №7, owner
 2026-10-28T22:09Z).
@@ -3517,7 +3515,8 @@ height, keeps clear of Telegram's two controls and centres its capsules on their
 touch reach. Telegram reports the row's height but not its controls' widths, so the bar keeps a reserve for each
 (`html[data-telegram-back]` says whether Telegram draws its Back or its Close, `web/modules/host_telegram.js`). The
 name's capsule opens the work list without a caret, since Telegram's ⌄ stands in the same row; Main's title shows
-whole or not at all, as the status word does, so a narrow phone may show the status mark alone. The consciousness chip
+whole or not at all, as the status word does, so a narrow phone may show the status mark alone (from 360 px; at
+320 px even the mark is cut). The consciousness chip
 becomes a row of the work list (below). The room's and the drawer's × give way to Telegram's Back, which closes them
 (both are layers); the work list and the consciousness sheet hang under the row at the page's width. With the keyboard
 up the bar stays in the row, in the page's flow as every keyboard room's bar is.
@@ -3608,9 +3607,8 @@ disclosure's summary and a field. One exception, the folded composer row's last 
 owner controls"). In a capsule's open levels on a narrow phone a value
 keeps only its drawn height. Nothing that acts is hidden until hover
 there (a Project row's menu is reached by its long press).
-No page scrolls sideways at any width; only code, tables and a bar's
-Files location scroll sideways, inside themselves, with a fade where content
-hides. Text wraps before it widens a column. A pinch only magnifies (owner 23.10): while it
+A page's strips may scroll sideways inside themselves with the shared fade; code, tables and a bar's
+Files location do too. Text wraps before it widens a column. A pinch only magnifies (owner 23.10): while it
 holds, the room keeps its size and a sideways finger pans the magnified page instead
 of moving the drawer.
 
@@ -3630,14 +3628,13 @@ opens and holds the field, the row and the pressed control still.
 
 ### Telegram
 
-Inside the Telegram Mini App the page tells Telegram it is ready,
-fills the screen (fullscreen if granted, the owner's to leave), turns off
-Telegram's swipe-down so lists scroll, shows
-Telegram's Back while a layer is open and its Close otherwise, gives Telegram's
-header and bottom bar the room's colour, follows Telegram's light or dark as the
-System appearance, and respects Telegram's safe areas on all four sides
-(`web/modules/host_telegram.js`). In fullscreen a room's bar is Telegram's row ("Telegram's shared row"); everything
-else is the same page.
+Inside Telegram the page announces readiness, fills the screen (fullscreen if granted, the owner's to leave),
+and disables swipe-down so lists scroll. Telegram owns Back while a layer is open, Close otherwise; the page
+then draws no Back. Its bars take the room's colour; System appearance follows Telegram's theme. Safe areas apply
+on all sides (`web/modules/host_telegram.js`). Fullscreen sections share one title baseline beside the drawer
+picture and one action, 12px clear of both host buttons (108px, 100px safe sides). Below 416px that row cannot hold
+the name beside the action, so the action takes the line under it and the name stays whole, ending in an ellipsis
+only at the host's buttons. The rail stays below. A room's bar is Telegram's row itself ("Telegram's shared row").
 
 Enforcement: `tests/test_design_system_gate_browser.py` visits every registered
 page and Settings' home and pages in WebKit and Chromium at 320, 360, 390, a Telegram-like

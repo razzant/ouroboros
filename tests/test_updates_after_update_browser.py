@@ -438,7 +438,7 @@ def drawer(page, width, opened):
     if width >= 980:
         return
     if opened:
-        page.click("[data-dashboard-list-back]")
+        page.click("#page-dashboard [data-shell-back]")
         page.locator("[data-mobile-nav-toggle]:visible").first.click()
         page.wait_for_function("document.getElementById('content').inert === true")
     else:

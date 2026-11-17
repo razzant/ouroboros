@@ -1,6 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createLayerStack } from '../modules/layers.js';
+import { clearReloadParams, createLayerStack } from '../modules/layers.js';
+
+test('a destination level sits under its jump; its named parent control closes that level alone', () => {
+    const layers = createLayerStack({ doc: null, win: null }), closed = [];
+    layers.push({ id: 'jump', page: true, returnTo: {}, onClose: () => closed.push('jump') });
+    layers.push({ id: 'level', page: true, before: 'jump', onClose: () => closed.push('level') });
+    assert.deepEqual(layers.ids(), ['level', 'jump']);
+    layers.back('control', 'level');
+    assert.deepEqual(closed, ['level']);
+    assert.deepEqual(layers.ids(), ['jump']);
+    layers.back('history');
+    assert.deepEqual(closed, ['level', 'jump']);
+    assert.equal(layers.size(), 0);
+    layers.destroy();
+});
+
+test('boot hints are consumed by the history owner without erasing a layer or a page address', () => {
+    const state = { ouroborosLayer: true }, calls = [];
+    const win = { location: { href: 'https://local/?room=2&_ouro_reason=refresh&_ouro_refresh=1#settings' },
+        history: { state, replaceState: (...args) => calls.push(args) } };
+    clearReloadParams(win);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][0], state);
+    assert.equal(String(calls[0][2]), 'https://local/?room=2#settings');
+    win.location.href = 'https://local/?room=2#settings';
+    clearReloadParams(win);
+    assert.equal(calls.length, 1, 'ordinary addresses take no write');
+});
 
 // The layer stack (P2): one dismiss for every layer, one history entry while any is open, inert outside a modal
 // layer, focus into the layer and back to the opener. A fake DOM small enough to read: nodes with parents,
@@ -49,6 +76,7 @@ function makeWin() {
             constructor(type, init) { Object.assign(this, { type, defaultPrevented: false }, init); }
             preventDefault() { this.defaultPrevented = true; }
         },
+        Event: class { constructor(type, init) { Object.assign(this, { type }, init); } },
     };
     return win;
 }
@@ -88,6 +116,43 @@ test('push, top, size, pop through the owner, remove is idempotent', () => {
     w.layers.push({ id: 'b', el: w.panel, onClose() {} });
     w.layers.push({ id: 'a', el: w.sidebar, modal: false, onClose() {} });
     assert.deepEqual(w.layers.ids(), ['a', 'b']);
+    w.layers.destroy();
+});
+
+test('Escape clears search first; shortcut, mouse and host Back dismiss the popup before the page layer, and root is quiet', () => {
+    for (const input of ['shortcut', 'mouse', 'host']) {
+        const w = world(), closed = [];
+        let routed = 0;
+        for (const button of [0, 1, 2, 3, 4]) w.win.fire('pointerdown', { button, stopPropagation() { routed++; } });
+        assert.equal(routed, 2, 'only browser history buttons bypass click-away handlers');
+        const field = w.node('input', w.content);
+        field.matches = selector => selector.includes('search');
+        field.value = 'words'; field.focus();
+        w.layers.push({ id: 'return', page: true, modal: false, focus: false, onClose: () => closed.push('page') });
+        w.win.fire('keydown', { key: 'Escape', preventDefault() {} });
+        assert.equal(field.value, ''); assert.equal(w.layers.size(), 1);
+        const popup = w.node('div', w.doc.body);
+        popup.onkey = event => { if (event.key === 'Escape') { event.preventDefault(); closed.push('popup'); w.doc.dialogs = []; } };
+        w.doc.dialogs = [popup];
+        const press = () => input === 'host' ? w.layers.back('host-back')
+            : input === 'mouse' ? (w.win.fire('auxclick', { button: 3, preventDefault() {} }), w.win.fire('popstate'))
+                : w.win.fire('keydown', { key: '[', metaKey: true, preventDefault() {} });
+        press(); assert.deepEqual(closed, ['popup']); assert.equal(w.layers.size(), 1);
+        press(); assert.deepEqual(closed, ['popup', 'page']);
+        press(); assert.deepEqual(closed, ['popup', 'page'], 'at root nothing is dismissed');
+        w.layers.destroy(); assert.equal(w.win.listeners.size, 0);
+    }
+});
+
+test('a new layer waits for consumption of the old sentinel before arming its own', async () => {
+    const w = world();
+    w.layers.push({ id: 'old', focus: false }); await tick();
+    w.layers.remove('old'); await tick();
+    w.layers.push({ id: 'new', focus: false }); await tick();
+    assert.deepEqual(w.win.history.calls.map(call => call[0]), ['push', 'back']);
+    w.win.fire('popstate'); await tick();
+    assert.deepEqual(w.layers.ids(), ['new']);
+    assert.deepEqual(w.win.history.calls.map(call => call[0]), ['push', 'back', 'push']);
     w.layers.destroy();
 });
 
@@ -181,6 +246,33 @@ test('browser Back retains a pending asynchronous close and a refusal; a stale c
     await tick();
     assert.equal(w.layers.top(), 'return', 'the old close cannot retire its replacement');
     w.layers.destroy();
+});
+
+test('a second Back or Escape during a pending jump is held for the returned level, with one history entry', async () => {
+    for (const second of ['history', 'escape']) {
+        const w = world();
+        let resolve, closed = 0;
+        w.layers.push({ id: 'page-return-1', page: true, modal: false, focus: false,
+            onClose: () => new Promise(done => { resolve = done; }).then(() => {
+                w.layers.batch(() => {
+                    w.layers.remove('page-return-1');
+                    w.layers.push({ id: 'tools', page: true, modal: false, focus: false, onClose: () => { closed++; } });
+                });
+            }) });
+        await tick();
+        w.layers.back('control');
+        if (second === 'history') w.win.fire('popstate');
+        else w.win.fire('keydown', { key: 'Escape', preventDefault() {} });
+        await tick();
+        assert.equal(w.layers.historyArmed(), true, 'pending return still owns browser Back');
+        assert.equal(closed, 0, 'the second press waits for arrival');
+        resolve(); await tick();
+        assert.equal(closed, 1, 'the held press closes the returned level exactly once');
+        assert.equal(w.layers.size(), 0);
+        assert.equal(w.layers.historyArmed(), false, 'the last level consumes the sole sentinel');
+        assert.equal(w.win.history.calls.filter(([kind]) => kind === 'back').length, 1);
+        w.layers.destroy();
+    }
 });
 
 test('a modal layer makes everything outside it inert; a non-modal one leaves the sidebar live', () => {
@@ -511,6 +603,31 @@ test('a later commit supersedes a pending inert difference; one without inertAft
     await tick();
     assert.equal(v.content.inert, true);
     v.layers.destroy();
+});
+
+test('a sync nested in a jump\'s batch keeps its motion: the covered room turns inert when the motion ends', async () => {
+    const w = world();
+    let arrived;
+    // page_navigation.js pushes the return and commits the destination in one batch; the shell's sync inside it
+    // (app.js syncNavigationState) names the motion that covers the room.
+    w.layers.batch(() => {
+        w.layers.push({ id: 'page-return-1', page: true, modal: false, focus: false, opener: null, returnTo: {}, onClose() {} });
+        w.layers.batch(() => w.layers.push({ id: 'project', el: w.panel, modal: true, onClose() {} }),
+            { inertAfter: new Promise((resolve) => { arrived = resolve; }) });
+    });
+    assert.deepEqual(w.layers.ids(), ['page-return-1', 'project']);
+    assert.equal(w.content.inert, false, 'the room is not written while the panel comes in');
+    arrived();
+    await tick();
+    assert.equal(w.content.inert, true, 'inert once the panel has arrived');
+    // A nested sync that names no motion (null) applies at once, as its own commit would.
+    w.layers.batch(() => w.layers.batch(() => w.layers.remove('project'), { inertAfter: null }));
+    assert.equal(w.content.inert, false);
+    // Even inside a jump that named a motion still under way: the nested sync's explicit null is the commit's.
+    w.layers.batch(() => w.layers.batch(() => w.layers.push({ id: 'project', el: w.panel, modal: true, onClose() {} }),
+        { inertAfter: null }), { inertAfter: new Promise(() => {}) });
+    assert.equal(w.content.inert, true, 'inert at once, though the outer motion never ends');
+    w.layers.destroy();
 });
 
 test('what is opened over the shell beside it (a dialog, a menu, a toast) stays live under a modal layer', () => {

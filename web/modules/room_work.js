@@ -36,6 +36,7 @@ import { errorWords } from './ui_primitives.js';
 import { motionMs, reducedMotion } from './motion.js';
 import { roomCoversMain } from './layout.js';
 import { closingLine } from './settled_card.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { closeModelSheet } from './model_sheet.js';
 
 // The closed list rises back as it fades (room_work.css rw-unfold, reversed).
@@ -154,7 +155,7 @@ export function createRoomWork({
     const name = panel && bar?.querySelector('.app-page-title');
 
     // ---- the surface: one floating list in every room, hung under the room's bar (room_work.css)
-    const surface = element('div', 'rw-surface rw-shade');
+    const surface = element('div', 'rw-surface scroll-fade-y rw-shade');
     surface.id = `${uid}-surface`;
     surface.hidden = true;
     surface.tabIndex = -1;  // where a pointer open lands: a landing point, never a control
@@ -227,6 +228,7 @@ export function createRoomWork({
     const detailNames = new Map();
     const detailReads = new Set();
     const disposers = [];
+    disposers.push(bindScrollFade(surface));
     const listen = (target, type, fn, options) => {
         if (!target?.addEventListener) return;
         target.addEventListener(type, fn, options);

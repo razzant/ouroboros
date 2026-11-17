@@ -8,7 +8,7 @@ the way the owner does in each layout."""
 from __future__ import annotations
 
 SETTINGS = "#page-settings"
-HEADER_BACK = f"{SETTINGS} > .app-page-header [data-settings-back]"
+HEADER_BACK = f"{SETTINGS} > .app-page-header [data-shell-back]"
 LEAD_NAME = f"{SETTINGS} [data-settings-lead-name]"
 CARD = f"{SETTINGS} [data-settings-card]"
 TWO_PANES = """async () => (await import('/static/modules/layout.js'))
