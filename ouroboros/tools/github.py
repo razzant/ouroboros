@@ -347,7 +347,7 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
         return _refused(ctx, f"⚠️ GH_TARGET_UNAVAILABLE: this call resolved {pinned[0].slug} on {pinned[0].host}, but a "
                              f"later step named {named}; that step was not sent.", "target")
     try:
-        from ouroboros.tool_access import build_resolved_resource_binding
+        from ouroboros.tool_access import build_resolved_resource_binding, folderless_scratch_dir
 
         cwd, env = pathlib.Path(ctx.repo_dir), _gh_env(ctx)
         cmd = ["gh", *args]
@@ -391,7 +391,9 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
                 if workspace and cwd != pathlib.Path(workspace).resolve(strict=False):
                     return _refused(ctx, "⚠️ GH_TARGET_UNAVAILABLE: the task's Project binding could not be resolved.",
                                     "target")
-                if branch and not (cwd.is_dir() and (workspace or room_dir or not project)):
+                # The resolver's default selection decides: kept body work (resource_intent system_repo) selects the
+                # body checkout; work with no folder selects only its own scratch, where gh finds no branch.
+                if branch and not (cwd.is_dir() and folderless_scratch_dir(ctx) is None):
                     return _refused(ctx, "⚠️ GH_TARGET_UNAVAILABLE: gh fills this route's {branch} from the selected "
                                          "folder, which is unavailable; name the branch in the route.", "target")
             if workspace or room_dir or project:

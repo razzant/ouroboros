@@ -689,3 +689,27 @@ def test_a_read_naming_its_repository_needs_no_project_folder(tmp_path, gh_calls
         assert not implicit.startswith("⚠️") and {kw["cwd"] for _argv, kw in gh_calls} == {str(project)}, implicit
     else:
         assert implicit.startswith("⚠️ GH_TARGET_") and not gh_calls, implicit
+
+
+@pytest.mark.parametrize("direct", [True, False])
+@pytest.mark.parametrize("intent", ["system_repo", "", "explicit_none"])
+def test_a_branch_route_runs_in_the_kept_body_checkout_never_a_folderless_scratch(tmp_path, gh_calls, direct, intent):
+    """#3613: readmission that keeps a Project's body work records resource_intent system_repo and no room lens
+    (``project_placement.readmit_placement``), so the resolver selects the body checkout and gh fills a named
+    repository's {branch} there. The same Project with no folder selects only its own scratch, which has no branch:
+    refused, typed, before gh starts. Neither outcome depends on the room or chat fields."""
+    ctx, body = _context(tmp_path, "system")
+    ctx.is_direct_chat, ctx.project_id = direct, "project-fixture"
+    ctx.task_metadata = {"resource_intent": {"kind": intent}} if intent else {}
+    read = next(entry.handler for entry in github.get_tools() if entry.name == "github_read")
+    for form in ("{branch}", ":branch"):
+        ctx._active_builtin_tool_result = None
+        result = read(ctx, method="api", route="repos/{owner}/{repo}/compare/main..." + form, repo="owner/selected")
+        if intent == "system_repo":
+            routes = [(argv[3], kw["cwd"]) for argv, kw in gh_calls]
+            assert routes == [("repos/owner/selected/compare/main..." + form, str(body))], result
+        else:
+            refused = ctx._active_builtin_tool_result
+            assert result.startswith("⚠️ GH_TARGET_UNAVAILABLE:") and not gh_calls, result
+            assert (refused.status, refused.meta.get("operation_outcome")) == ("unavailable", "completed_no_effect")
+        gh_calls.clear()
