@@ -270,11 +270,32 @@ def test_recent_people_reads_at_most_its_cap_per_place_and_says_so(tmp_path, mon
 
     for minute in range(5):
         arrival("busy", f"U{minute}", f"2026-11-17T10:0{minute}:00+00:00")
-    arrival("gh", "U0", "2026-11-17T10:00:00+00:00", provider="github")
+    arrival("gh", "U4", "2026-11-17T10:00:00+00:00", provider="github")  # U4 is also among the busy place's newest
     now = datetime.fromisoformat("2026-11-17T12:00:00+00:00").timestamp()
     monkeypatch.setattr(arrivals, "PEOPLE_ROW_CAP", 3)
     people = arrivals.recent_people(tmp_path, ["busy", "gh"], days=7, now=now,
                                     services={"busy": "slack", "gh": "github"})
     assert people == {"by_place": {"busy": 3, "gh": 1}, "total": 4, "capped": True}
     assert V._people_line(people) == "At least 4 people wrote there in the last 7 days."
+
+
+def test_the_preview_counts_people_by_service(tmp_path, monkeypatch):
+    """The real preview hands each place's service to the people count (review r2: without it two services merge)."""
+    import ouroboros.place_arrivals as arrivals
+    import ouroboros.places as places_module
+
+    stored = {"t": SimpleNamespace(place_id="t", label="Telegram · Lab", state="active", provider="telegram"),
+              "g": SimpleNamespace(place_id="g", label="GitHub · repo", state="active", provider="github")}
+    monkeypatch.setattr(places_module, "place_records",
+                        lambda _root: SimpleNamespace(places=stored, circle_context=lambda _pid: None))
+    seen = {}
+
+    def people(_root, ids, *, days, now=None, services=None):
+        seen.update(ids=list(ids), days=days, services=services)
+        return {"by_place": {"t": 1, "g": 1}, "total": 2, "capped": False}
+
+    monkeypatch.setattr(arrivals, "recent_people", people)
+    preview = V.read_switch_preview(tmp_path, "off")
+    assert seen == {"ids": ["t", "g"], "days": 7, "services": {"t": "telegram", "g": "github"}}
+    assert "2 people wrote there in the last 7 days." in preview["lines"]
 

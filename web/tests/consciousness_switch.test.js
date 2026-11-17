@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { switchActionWords, switchDialog, turnConsciousness } from '../modules/consciousness_switch.js';
+import { readSwitchPreview } from '../modules/consciousness_api.js';
 
 const PREVIEW = {
     lines: ['Ouroboros will act only when you write to it.', '3 places will be heard, not answered: Ops, Team and Home.'],
@@ -60,3 +61,16 @@ test('a turn sends the same /bg after a yes, nothing after a no, and asks nothin
     assert.equal(asked, 4);
     assert.equal(sent.length, 0);
 });
+
+test('the preview read keeps «could not be read» (null) apart from «no place» ([])', async () => {
+    const previous = globalThis.fetch;
+    try {
+        for (const [places, expected] of [[null, null], [[], []]]) {
+            globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ lines: ['x'], places }) });
+            assert.deepEqual((await readSwitchPreview('off')).places, expected);
+        }
+    } finally {
+        globalThis.fetch = previous;
+    }
+});
+

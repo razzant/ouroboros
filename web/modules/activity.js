@@ -434,6 +434,8 @@ export function keptStopToast(receipt, name) {
 export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
     if (!mount) return { refresh: () => {} };
     let busy = false;
+    // The switch's preview is being read (seconds on a large install): a repaint meanwhile keeps saying so.
+    let switchReading = false;
     let refreshRevision = 0;
     let migrationTimer = null, destroyed = false;
     // Remembered across re-renders: whether each disclosure (a group, a row's Details) is open, by its key. A refresh
@@ -568,7 +570,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             <span class="ui-row-title activity-name">Consciousness</span>
             <span class="ui-row-meta activity-sub">${esc(bg.position || (enabled ? 'enabled' : 'disabled'))}${detail ? ` · ${detail}` : ''}${facts ? ` · ${facts}` : ''}</span>
             <div class="ui-row-actions activity-row-actions">
-                <button type="button" class="btn btn-sm btn-default" data-act="bg-toggle" data-enabled="${enabled ? '1' : '0'}"${ws ? '' : ' disabled'}>${esc(switchActionWords(enabled))}</button>
+                <button type="button" class="btn btn-sm btn-default" data-act="bg-toggle" data-enabled="${enabled ? '1' : '0'}"${ws && !switchReading ? '' : ' disabled'}>${esc(switchReading ? switchReadingWords() : switchActionWords(enabled))}</button>
                 <button type="button" class="btn btn-sm btn-ghost" data-act="bg-open" aria-label="Open Dashboard › Consciousness"${openDashboardTab ? '' : ' hidden'}>Details</button>
             </div>
         </div>${keptServicesHtml(kept)}`;
@@ -797,9 +799,14 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 showToast(...keptStopToast(receipt, name));
             } else if (act === 'bg-toggle') {
                 // The one switch (consciousness_switch.js): it names what changes, then sends the Dashboard's /bg.
-                const label = btn.textContent;
-                btn.textContent = switchReadingWords();  // the preview read can take seconds on a large install
-                if (await turnConsciousness(btn.dataset.enabled === '1' ? 'off' : 'on', { ws, onRead: () => { btn.textContent = label; } })) {
+                switchReading = true;  // the preview read can take seconds on a large install; a repaint keeps it
+                btn.textContent = switchReadingWords();
+                const done = () => {
+                    switchReading = false;
+                    const current = mount.querySelector('[data-act="bg-toggle"]');
+                    if (current) current.textContent = switchActionWords(current.dataset.enabled === '1');
+                };
+                if (await turnConsciousness(btn.dataset.enabled === '1' ? 'off' : 'on', { ws, onRead: done })) {
                     await new Promise((resolve) => setTimeout(resolve, 400));
                 }
             }
@@ -812,6 +819,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             }
         } finally {
             busy = false;
+            switchReading = false;
             btn.disabled = false;
             await refresh();
         }
