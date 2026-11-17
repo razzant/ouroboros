@@ -6,6 +6,8 @@ import hashlib
 import json
 import threading
 from contextlib import contextmanager
+from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -492,6 +494,143 @@ def test_nested_inventory_and_links_keep_addresses_not_display_identity(tmp_path
     assert links[2]["path"] == str(tmp_path / "projects" / "p" / "knowledge" / "people" / "b.md")
     assert links[2]["address"]["scope"] == "project:p"
     assert links[2]["status"] == "present"
+
+
+def _link_header(reply, label):
+    prefix = f"[Knowledge {label}] "
+    return json.loads(next(line[len(prefix):] for line in reply.splitlines() if line.startswith(prefix)))
+
+
+def test_read_shows_outgoing_link_facts_and_keeps_unlinked_notes_identical(tmp_path):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    target = address(tmp_path, "links")
+    target.shelf.mkdir(parents=True)
+    (target.shelf / "present.md").write_text("Present.", encoding="utf-8")
+    target.path.write_text("[Inline](present.md) [Full][gap] [Collapsed][] [Shortcut]\n\n"
+                           "[gap]: missing.md\n[Collapsed]: present.md#section\n[Shortcut]: missing-two.md\n\n"
+                           "[Outside](https://example.invalid/missing.md) [Mail](mailto:reader@example.invalid)\n"
+                           "[Here](#section)\n", encoding="utf-8")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    reply = tools._knowledge_read(ctx, "links")
+    assert "[Knowledge links] " in reply
+    assert _link_header(reply, "links") == {
+        "present": [{"scope": "global", "topic": "present"}] * 2,
+        "unwritten": [{"scope": "global", "topic": "missing"}, {"scope": "global", "topic": "missing-two"}],
+        "external": 2, "same_source": [{"scope": "global", "topic": "links"}],
+    }
+    assert "[Knowledge backlinks" not in reply
+    plain = address(tmp_path, "isolated")
+    plain.path.write_bytes(b"# Isolated\r\nUnlinked source.\n")
+    note = store.read_knowledge_note(plain)
+    assert tools._knowledge_read(ctx, "isolated") == tools._source_view(note)[0]
+    assert before == {path: path.read_bytes() for path in before}
+    assert set(tmp_path.rglob("*")) == {target.shelf.parent, target.shelf, *before, plain.path}
+
+
+def test_link_facts_ride_a_read_from_the_start_and_survive_odd_spellings_and_unresolvable_names(tmp_path):
+    """Range pages after the first carry no link lines; an entity- or backslash-spelled link still joins as a
+    backlink; a link whose resolution raises an OS error names its outgoing links unavailable, never fails the read."""
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    target = address(tmp_path, "a&b")
+    target.shelf.mkdir(parents=True)
+    target.path.write_text("Target with an ampersand.\n", encoding="utf-8")
+    address(tmp_path, "entity").path.write_text("[x](<a&amp;b.md>)\n", encoding="utf-8")
+    address(tmp_path, "escaped").path.write_text("[y](a\\&b.md)\n", encoding="utf-8")
+    address(tmp_path, "mixed").path.write_text("[z](<a&amp;%62.md>)\n", encoding="utf-8")  # entity plus percent
+    whole = tools._knowledge_read(ctx, "a&b")
+    assert "[Knowledge backlinks (readable shelves now)] " in whole
+    assert '"topic": "entity"' in whole and '"topic": "escaped"' in whole and '"topic": "mixed"' in whole
+    assert "[Knowledge backlinks" not in tools._knowledge_read(ctx, "a&b", start_char=3)
+    assert "[Knowledge backlinks" in tools._knowledge_read(ctx, "a&b", start_char=0)
+    long_name = address(tmp_path, "long-link")
+    long_name.path.write_text("[far](" + "n" * 300 + ".md)\nBody kept.\n", encoding="utf-8")
+    reply = tools._knowledge_read(ctx, "long-link")
+    assert reply.endswith(long_name.path.read_text(encoding="utf-8")) and '"unavailable": "OSError"' in reply
+
+
+def test_read_backlinks_join_exact_addresses_only_on_readable_shelves(tmp_path, monkeypatch):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path / "child", project_id="shelf-call")
+    ctx.budget_drive_root = str(tmp_path)
+    topic = "targets/звено"
+
+    def put(scope, name, text):
+        addr = address(tmp_path, name, scope)
+        addr.path.parent.mkdir(parents=True, exist_ok=True)
+        addr.path.write_text(text, encoding="utf-8")
+        return addr
+
+    target = put("project:shelf-own", topic, "# Shared display name\nProject target.\n")
+    put("global", topic, "# Shared display name\nDistinct global target.\n")
+    put("project:shelf-own", "a-archived", "---\narchive: {at: '2026-01-02', reason: superseded}\n---\n"
+        "[Raw](targets/звено.md)\n")
+    encoded = quote("звено.md").lower()  # URL hex case does not change the resolved filename.
+    put("global", "from-global", f"[Full][target]\n\n[target]: ../../projects/shelf-own/knowledge/targets/{encoded}\n")
+    put("project:shelf-call", "from-call", "[One](../../shelf-own/knowledge/targets/звено.md)\n"
+        "[Two](../../shelf-own/knowledge/targets/звено.md#section)\n")
+    put("project:shelf-call", "other-scope", "[Global](../../../memory/knowledge/targets/звено.md)\n")
+    hidden = put("project:shelf-hidden", "hidden-source", "[Hidden](../../shelf-own/knowledge/targets/звено.md)\n")
+    unrelated = put("global", "unrelated", "Nothing to link here.\n")
+    put("global", "only-words", "The file звено.md is mentioned, without a link.\n")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    read_paths, parsed = [], []
+    real_read, real_parse = Path.read_bytes, store.parse_markdown_source
+    monkeypatch.setattr(Path, "read_bytes", lambda path: read_paths.append(path) or real_read(path))
+    monkeypatch.setattr(store, "parse_markdown_source", lambda raw, path:
+                        parsed.append(Path(path)) or real_parse(raw, path))
+    reply = tools._knowledge_read(ctx, topic, scope=target.scope)
+    assert "[Knowledge backlinks (readable shelves now)] " in reply
+    assert _link_header(reply, "backlinks (readable shelves now)") == [
+        {"scope": "project:shelf-own", "topic": "a-archived", "state": "archived"},
+        {"scope": "global", "topic": "from-global", "state": "active"},
+        {"scope": "project:shelf-call", "topic": "from-call", "state": "active"},
+    ]
+    assert hidden.path not in read_paths and unrelated.path not in parsed
+    assert "[Knowledge links]" not in reply and reply.endswith(target.path.read_text(encoding="utf-8"))
+    global_read = tools._knowledge_read(ctx, topic, scope="global")
+    assert _link_header(global_read, "backlinks (readable shelves now)") == [
+        {"scope": "project:shelf-call", "topic": "other-scope", "state": "active"}]
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+
+def test_backlinks_follow_source_rename_and_deletion_without_writes(tmp_path):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    target = address(tmp_path, "target")
+    target.shelf.mkdir(parents=True)
+    target.path.write_text("Target.\n", encoding="utf-8")
+    source = target.shelf / "source.md"
+    source.write_text("[Target](target.md)\n", encoding="utf-8")
+    for name in ("source", "renamed", None):
+        if name == "renamed":
+            source = source.rename(source.with_name("renamed.md"))
+        elif name is None:
+            source.unlink()
+        before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in tmp_path.rglob("*") if path.is_file()}
+        reply = tools._knowledge_read(ctx, "target")
+        if name:
+            assert "[Knowledge backlinks (readable shelves now)] " in reply
+            assert _link_header(reply, "backlinks (readable shelves now)") == [
+                {"scope": "global", "topic": name, "state": "active"}]
+        else:
+            assert reply == tools._source_view(store.read_knowledge_note(target))[0]
+        assert before == {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in tmp_path.rglob("*") if path.is_file()}
+
+
+def test_unresolvable_links_do_not_hide_the_note_or_other_backlinks(tmp_path):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    target = address(tmp_path, "target")
+    target.shelf.mkdir(parents=True)
+    target.path.write_text("Exact target.\n", encoding="utf-8")
+    broken = target.shelf / "broken.md"
+    broken.write_text("[Bad](https://[broken)\n[Target](target.md)\n", encoding="utf-8")
+    (target.shelf / "valid.md").write_text("[Target](target.md)\n", encoding="utf-8")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    reply = tools._knowledge_read(ctx, "broken")
+    assert reply.endswith(broken.read_text(encoding="utf-8"))
+    assert '[Knowledge links] {"unavailable": "ValueError"}' in reply
+    reply = tools._knowledge_read(ctx, "target")
+    assert reply.endswith("Exact target.\n")
+    assert {"scope": "global", "topic": "valid", "state": "active"} in _link_header(reply, "backlinks (readable shelves now)")
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
 
 def test_project_and_global_scope_refs_resolve_from_forked_context(tmp_path, monkeypatch):

@@ -3,11 +3,15 @@
 The files are the authority. This module owns address resolution, source reads,
 generated inventory and the short source/history/index write transaction. It
 does not select memories, call models or decide what an observation means.
+Generated ``memory/knowledge/index-full.md`` (``INDEX_FILE``) is reserved,
+never a topic. A stale revision the journal tail holds gets all changes since,
+whole; otherwise the writer returns the current source.
 """
 
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import time
@@ -17,7 +21,7 @@ from itertools import chain
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Mapping
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote, unquote, unquote_to_bytes, urlsplit
 
 import yaml
 
@@ -600,6 +604,32 @@ def knowledge_links(note: KnowledgeNote) -> tuple[dict[str, Any], ...]:
             except ValueError:
                 pass  # An ordinary source link need not be a KB address.
         rows.append(row)
+    return tuple(rows)
+
+
+def knowledge_backlinks(note: KnowledgeNote, shelves: tuple[KnowledgeAddress, ...]) -> tuple[dict[str, Any], ...]:
+    """Current sources on the readable shelves, joined by resolved scope and topic.
+
+    File-name bytes (also percent-encoded) only select candidates to parse; the
+    existing Markdown resolver decides identity. No graph or disk index is kept.
+    """
+    filename = note.address.path.name.encode("utf-8")
+    rows = []
+    for shelf in {item.shelf: item for item in shelves}.values():
+        for row in inventory_knowledge(shelf, navigation=True):
+            address = replace(shelf, topic=row["topic"])
+            try:
+                raw = address.path.read_bytes()
+                spelled = unquote(html.unescape(raw.decode("utf-8", "replace")).replace("\\", "")).encode("utf-8")
+                if filename not in raw and filename not in unquote_to_bytes(raw) and filename not in spelled:
+                    continue  # also entity- or backslash-spelled names, as the Markdown parser reads them
+                source = _note(address, raw)
+                links = knowledge_links(source)
+            except (OSError, UnicodeDecodeError, ValueError):
+                continue  # Unreadable sources or unresolvable URLs supply no link facts.
+            if any(link.get("address", {}).get("scope") == note.address.scope
+                   and link["address"]["topic"] == note.address.topic for link in links):
+                rows.append({"scope": address.scope, "topic": address.topic, "state": source.state})
     return tuple(rows)
 
 
