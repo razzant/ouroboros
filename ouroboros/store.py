@@ -453,14 +453,13 @@ def read_file_bytes(path: Any, *, limit: Optional[int] = None) -> bytes:
 
 
 def copy_file_bytes(source: Any, destination: Any) -> Any:
-    """``shutil.copy2`` that reads a SQLite file through ``open_for_read`` (a ``copytree``
-    ``copy_function``) and refuses a WAL index; the copy is a byte copy, not a consistent snapshot
-    of a live store."""
+    """``shutil.copy2`` that reads a SQLite file through ``open_for_read`` (a ``copytree`` ``copy_function``),
+    refuses a WAL index and the same file (from CPython 3.12 a Windows ``copy2`` skips that refusal); the
+    copy is a byte copy, not a consistent snapshot of a live store."""
     refuse_wal_index(source)
     target = pathlib.Path(destination)
     if target.is_dir():
         target = target / pathlib.Path(source).name
-    # Ahead of copy2 too: from CPython 3.12 it copies with CopyFile2 on Windows before its own same-file check.
     if target.exists() and os.path.samefile(source, target):
         raise shutil.SameFileError(f"{source!r} and {str(target)!r} are the same file")
     if os.name == "nt" or not is_sqlite_file(source):
