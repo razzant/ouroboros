@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { historyNodeIsProtected } from '../modules/chat_history_replay.js';
-import { createProjectReadReceipt, isAtNewestMessage, newestMessageOffset } from '../modules/project_read_state.js';
+import { createProjectReadReceipt, feedScale, isAtNewestMessage, newestMessageOffset } from '../modules/project_read_state.js';
 import { ElementStub } from './chat_dom_fixture.js';
 import { TS, row, late, room, placeAtTop, until, quiet } from './project_read_state_fixture.js';
 
@@ -519,6 +519,25 @@ test('the read band is the viewport less the header above and the composer below
     assert.equal(at(50, { ...chrome, header: frosted }), false, 'under the bar\'s edge');
     assert.equal(at(50, chrome), true, 'the same row under a bar without an edge is read');
     assert.equal(at(80, { ...chrome, header: frosted }), true, 'below the edge');
+    // A phone's drawer scales the room to 0.96 (the bar 40 px tall drawn 38.4): the edge is drawn 30.72 px, so the band
+    // starts at 38.4 + 30.72 = 69.12. A row ending at 69.5 shows; with the edge unscaled (38.4 + 32 = 70.4) it would not.
+    const scaled = Object.assign(el(0, 38.4), { offsetHeight: 40, getBoundingClientRect: () => ({ top: 0, bottom: 38.4, height: 38.4 }),
+        ownerDocument: frosted.ownerDocument });
+    const ends = (bottom, facts) => isAtNewestMessage({ history_id: 'chat:9', out_of_order: true }, {
+        delivered: () => true, nodes: () => [el(bottom - 20, bottom)], viewport: el(0, 300), atBottom: () => true, ...facts });
+    assert.equal(ends(69.5, { ...chrome, header: scaled }), true, 'the edge is measured in the page\'s scale');
+    assert.equal(ends(69, { ...chrome, header: scaled }), false, 'and still hides what lies under it');
+});
+
+// A correction measured on screen moves the feed in its own pixels: a question card centred while the phone's drawer
+// hands the room back (chat_decision.js) must not land under the bar once the room is drawn whole again.
+test('a feed drawn scaled converts what is measured on screen into its own pixels; drawn whole or unmeasured it is 1', () => {
+    const feed = (screen, own) => ({ offsetHeight: Math.round(own), getBoundingClientRect: () => ({ height: screen }),
+        ownerDocument: { defaultView: { getComputedStyle: () => ({ height: `${own}px` }) } } });
+    assert.equal(feedScale(feed(480, 500)), 0.96, 'scaled to 0.96 by the drawer');
+    assert.equal(feedScale(feed(500, 500)), 1, 'drawn whole');
+    assert.equal(feedScale(feed(0, 0)), 1, 'not laid out: nothing to convert');
+    assert.equal(feedScale({ offsetHeight: 400, getBoundingClientRect: () => ({ height: 380 }) }), 0.95, 'no computed style: its offset height');
 });
 
 // Chrome can cover the whole feed (a tall draft in a short window): nothing is

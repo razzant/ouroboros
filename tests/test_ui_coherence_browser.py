@@ -93,6 +93,9 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
     # sibling at the bar's own level, it paints over the edge as the capsules do, so its words stay sharp.
     reach = 64 if width >= 1000 else 32
     assert paint["reach"] == pytest.approx(paint["bar"] + reach, abs=1), paint
+    # The transcript's first row clears the bar and its edge (style.css --chat-top-reserve), not only the bar and note.
+    feed_top = page.locator("#chat-messages").evaluate("el => parseFloat(getComputedStyle(el).paddingTop)")
+    assert feed_top >= paint["bar"] + reach - 1, (feed_top, paint)
     assert page.locator("#page-chat > .chat-page-note > *").count() and page.locator("#page-chat > .chat-page-note").is_visible()
     order = page.evaluate("""() => { const bar = document.querySelector('#page-chat > .chat-page-header');
         const note = document.querySelector('#page-chat > .chat-page-note');
@@ -438,11 +441,13 @@ PILL_LANDING_JS = """async qid => {
     let last = null;
     for (let quiet = 0; quiet < 2;) { await frame(); quiet = feed.scrollTop === last ? quiet + 1 : 0; last = feed.scrollTop; }
     const page = document.querySelector('#page-chat');
-    const header = page.querySelector('.chat-page-header').getBoundingClientRect();
+    const bar = page.querySelector('.chat-page-header'), header = bar.getBoundingClientRect();
     const toolbar = page.querySelector('.chat-toolbar-row').getBoundingClientRect();
     const card = feed.querySelector(`.chat-quiz-card[data-quiz-id="${qid}"]`);
     const box = card.closest('.chat-bubble').getBoundingClientRect();
-    const top = Math.max(feed.getBoundingClientRect().top, header.bottom);
+    // Below the header and its frosted edge (style.css "A room's edges"), where every landing in the room clears.
+    const edge = parseFloat(getComputedStyle(bar).getPropertyValue('--edge-reach')) || 0;
+    const top = Math.max(feed.getBoundingClientRect().top, header.bottom + edge);
     return {below_header: Math.round(box.top - top), above_composer: Math.round(toolbar.top - box.top),
             scroll_top: feed.scrollTop, focused: document.activeElement === card.querySelector('.chat-quiz-question')};
 }"""

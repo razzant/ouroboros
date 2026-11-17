@@ -12382,7 +12382,7 @@ html[data-layout="docked"] :is(#page-chat, .project-panel) {
 }
 /* What floats right under the bar lies over its edge, as its capsules do: Main's history note and a room's search sheet
    come after the bar at its own level, so they paint over it, never blurred. A Project's status note stands in its flow
-   below the edge (the room's reserve counts the edge, chat.js). With the keyboard up the bar stands in the page's flow
+   below the edge (its top reserve counts the edge, --chat-top-reserve below). With the keyboard up the bar stands in the page's flow
    and nothing passes under it: the edge ends with the bar, so a short keyboard room's newest line, a note or Search
    under the bar keep their words sharp. */
 body.keyboard-open :is(#page-chat.active, .project-panel) {
