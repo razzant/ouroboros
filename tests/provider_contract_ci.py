@@ -23,6 +23,9 @@ from ouroboros.utils import sanitize_tool_result_for_log
 CANARY_TIMEOUT_SEC = 120.0
 CANARY_MAX_TOKENS = 1024
 CANARY_CONTINUATION_MAX_TOKENS = 2048
+# A row whose model reasons before an unforced call (tool_choice "auto"): 1024 may end in
+# thinking before the call. A ceiling, not a spend; only rows that name it get it.
+CANARY_REASONING_MAX_TOKENS = 16_384
 CANARY_EMPTY_RESPONSE_MAX_ATTEMPTS = 2
 CANARY_EMPTY_RESPONSE_BACKOFF_SEC = 1.0
 CANARY_TOOL_NAME = "delegate_start"
@@ -41,6 +44,7 @@ class ProviderCanary:
     reasoning_effort: str
     named_tool_choice: bool = True
     continue_to_final: bool = False
+    max_tokens: int = CANARY_MAX_TOKENS
 
 
 # The CI's shared OpenRouter key is refused by Google, Anthropic and OpenAI models (HTTP 403, provider terms),
@@ -50,8 +54,9 @@ OPENROUTER_ROUTES_KEY_ENV = "OPENROUTER_PROVIDER_ROUTES_API_KEY"
 
 _OPENROUTER_CANARIES = (
     ProviderCanary(
-        "openrouter_gemini", "google/gemini-3.8-flash", "openrouter",
-        OPENROUTER_ROUTES_KEY_ENV, True, "medium",
+        # The continuation proves the replay of its tool turn, which every Main round after a call depends on.
+        "openrouter_gemini", "google/gemini-4-hydrogen", "openrouter",
+        OPENROUTER_ROUTES_KEY_ENV, True, "medium", continue_to_final=True,
     ),
     ProviderCanary(
         "openrouter_opus", "anthropic/claude-opus-5", "openrouter",
@@ -62,7 +67,7 @@ _OPENROUTER_CANARIES = (
         OPENROUTER_ROUTES_KEY_ENV, True, "medium", named_tool_choice=False,
     ),
     ProviderCanary(
-        "openrouter_gpt", "openai/gpt-5.6-luna", "openrouter",
+        "openrouter_gpt", "openai/gpt-6.1-terra", "openrouter",
         OPENROUTER_ROUTES_KEY_ENV, True, "medium",
     ),
     ProviderCanary(
@@ -76,8 +81,12 @@ _OPENROUTER_CANARIES = (
 )
 
 _DIRECT_ANTHROPIC_CANARY = ProviderCanary(
-    "anthropic_direct", "anthropic::claude-sonnet-5", "anthropic",
-    "ANTHROPIC_API_KEY", True, "medium",
+    # Sonnet 5.5 refuses tool_choice "any"/"tool" on every request (tool-use docs and a live
+    # 400, 2026-11-16), so its row calls through "auto" as Main does; the model then reasons first.
+    # The continuation replays that signed reasoning, the contract every Main round after a call needs.
+    "anthropic_direct", "anthropic::claude-sonnet-5-5", "anthropic",
+    "ANTHROPIC_API_KEY", True, "medium", named_tool_choice=False, continue_to_final=True,
+    max_tokens=CANARY_REASONING_MAX_TOKENS,
 )
 
 _OPTIONAL_DIRECT_CANARIES = (
@@ -90,7 +99,7 @@ _OPTIONAL_DIRECT_CANARIES = (
         # CARRIES reasoning_effort, and the canary pins that carriage. The
         # continuation is mandatory too: DeepSeek's tool contract is defined by
         # replaying reasoning_content on the second request.
-        "deepseek_direct", "deepseek::deepseek-v4-flash", "deepseek",
+        "deepseek_direct", "deepseek::deepseek-flash", "deepseek",
         "DEEPSEEK_API_KEY", False, "medium", continue_to_final=True,
     ),
     ProviderCanary(
@@ -842,7 +851,7 @@ def run_provider_contract_canary(
             "tools": copy.deepcopy(sent_tools),
             "tool_choice": tool_choice,
             "reasoning_effort": canary.reasoning_effort,
-            "max_tokens": CANARY_MAX_TOKENS,
+            "max_tokens": canary.max_tokens,
             # Main sets stream=True on every remote completion, so the canary's
             # first turn must exercise that transport rather than one Main never
             # uses. Rows that continue to a final answer keep their second turn
@@ -896,10 +905,13 @@ def run_provider_contract_canary(
         chat_kwargs={
             "messages": continuation,
             "model": canary.model,
-            "tools": [copy.deepcopy(_delegate_start_tool(tools))],
+            # The first turn's registry, as Main keeps it: replayed signed reasoning is bound to
+            # system, tools and earlier messages, never to tool_choice or max_tokens (Anthropic
+            # "Prefix checks on thinking blocks", read 2026-11-16), so only "none" changes here.
+            "tools": copy.deepcopy(sent_tools),
             "tool_choice": "none",
             "reasoning_effort": canary.reasoning_effort,
-            "max_tokens": CANARY_CONTINUATION_MAX_TOKENS,
+            "max_tokens": max(canary.max_tokens, CANARY_CONTINUATION_MAX_TOKENS),
             "no_proxy": True,
             "timeout": CANARY_TIMEOUT_SEC,
         },

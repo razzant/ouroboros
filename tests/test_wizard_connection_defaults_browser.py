@@ -328,7 +328,7 @@ def test_a_connected_subscription_keeps_the_saved_catalog_through_preview_and_fi
     assert shown(parse(onboarding.saved()["OUROBOROS_SUBAGENTS"])[0]) == shown(parse(saved)[0])
 
 
-SAVED_MODELS = {"OUROBOROS_MODEL": "google/gemini-3.8-flash", "OUROBOROS_MODEL_LIGHT": "",
+SAVED_MODELS = {"OUROBOROS_MODEL": "google/gemini-4-hydrogen", "OUROBOROS_MODEL_LIGHT": "",
                 "OUROBOROS_MODEL_FALLBACKS": "", "OUROBOROS_MODEL_VISION": ""}
 
 
@@ -353,8 +353,8 @@ def test_a_connected_subscription_proposes_only_the_model_slots_the_wizard_owns(
     if document is not None and not keyed:  # the saved Main has no key here: the wizard says so, writes nothing
         assert body is None and error.startswith("Main uses OpenRouter"), error
         summary = page.locator(".summary-card").inner_text()
-        assert "OpenRouter · google/gemini-3.8-flash" in summary
-        assert "Uses Main · OpenRouter · google/gemini-3.8-flash" in summary  # Light: the saved blank
+        assert "OpenRouter · google/gemini-4-hydrogen" in summary
+        assert "Uses Main · OpenRouter · google/gemini-4-hydrogen" in summary  # Light: the saved blank
         assert saved == document
         return
     assert body is not None and not error, error

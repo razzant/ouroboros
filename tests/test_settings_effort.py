@@ -114,7 +114,7 @@ def test_review_models_default_in_config():
     assert "OUROBOROS_REVIEW_MODELS" not in SETTINGS_DEFAULTS
     assert "OUROBOROS_REVIEW_MODELS" in RETIRED_SETTING_KEYS
     assert list(OPENROUTER_REVIEW_DEFAULTS["triad"]) == [
-        "google/gemini-3.8-flash",
+        "google/gemini-4-hydrogen",
         "openai/gpt-6.1-sol",
         "anthropic/claude-opus-5.5",
     ]

@@ -26,6 +26,7 @@ from tests.provider_contract_ci import (
     CANARY_CONTINUATION_MAX_TOKENS,
     CANARY_EMPTY_RESPONSE_MAX_ATTEMPTS,
     CANARY_MAX_TOKENS,
+    CANARY_REASONING_MAX_TOKENS,
     CANARY_SUBAGENT_ID,
     CANARY_TIMEOUT_SEC,
     CANARY_TOOL_NAME,
@@ -206,18 +207,18 @@ def test_provider_alarm_output_sanitizes_token_shaped_evidence(capsys):
 def test_exact_provider_canary_matrix_logical_turns_and_attempt_bound():
     matrix = provider_canary_matrix()
     assert [(row.canary_id, row.model) for row in matrix] == [
-        ("openrouter_gemini", "google/gemini-3.8-flash"),
+        ("openrouter_gemini", "google/gemini-4-hydrogen"),
         ("openrouter_opus", "anthropic/claude-opus-5"),
         ("openrouter_fable", "anthropic/claude-fable-5.1"),
-        ("openrouter_gpt", "openai/gpt-5.6-luna"),
+        ("openrouter_gpt", "openai/gpt-6.1-terra"),
         ("openrouter_grok", "x-ai/grok-4.6"),
         ("openrouter_deepseek", "deepseek/deepseek-v4-pro-0813"),
         ("openai_direct_main", "openai::gpt-5.6-terra"),
         ("openai_direct_light", "openai::gpt-5.6-luna"),
         ("openai_direct_fallback", "openai::gpt-5.6-sol"),
-        ("anthropic_direct", "anthropic::claude-sonnet-5"),
+        ("anthropic_direct", "anthropic::claude-sonnet-5-5"),
         ("minimax_direct", "minimax::MiniMax-M3"),
-        ("deepseek_direct", "deepseek::deepseek-v4-flash"),
+        ("deepseek_direct", "deepseek::deepseek-flash"),
         ("cloudru_direct", "cloudru::zai-org/GLM-5.3"),
         ("gigachat_direct", "gigachat::GigaChat-2-Max"),
     ]
@@ -238,19 +239,24 @@ def test_exact_provider_canary_matrix_logical_turns_and_attempt_bound():
         "deepseek_direct",
     }
     assert [row.canary_id for row in matrix if row.continue_to_final] == [
-        "openai_direct_main", "deepseek_direct"
+        "openrouter_gemini", "openai_direct_main", "anthropic_direct", "deepseek_direct"
     ]
+    # Sonnet 5.5 refuses a forced tool_choice on every request: its row calls through auto as Main does.
     assert [row.canary_id for row in matrix if not row.named_tool_choice] == [
-        "openrouter_fable", "gigachat_direct"
+        "openrouter_fable", "anthropic_direct", "gigachat_direct"
     ]
+    # Only that row reasons before an unforced call, so only it gets the larger ceiling.
+    assert {row.canary_id: row.max_tokens for row in matrix if row.max_tokens != CANARY_MAX_TOKENS} == {
+        "anthropic_direct": CANARY_REASONING_MAX_TOKENS,
+    }
     logical_turns = sum(1 + int(row.continue_to_final) for row in matrix)
-    assert logical_turns == 16
-    assert logical_turns * CANARY_EMPTY_RESPONSE_MAX_ATTEMPTS == 32
+    assert logical_turns == 18
+    assert logical_turns * CANARY_EMPTY_RESPONSE_MAX_ATTEMPTS == 36
     assert sum(
         1 + int(row.continue_to_final)
         for row in matrix
         if row.credential_required
-    ) == 11
+    ) == 13
     # The routes to Google, Anthropic and OpenAI read a secret of their own: the shared CI key is refused
     # there (HTTP 403, provider terms). The rest of OpenRouter keeps the shared key; every route is required.
     assert {row.canary_id: (row.credential_env, row.credential_required)
@@ -273,6 +279,15 @@ def test_direct_anthropic_named_tool_choice_projects_without_type_error():
     }
     assert LLMClient._build_anthropic_tool_choice("required") == {"type": "any"}
     assert LLMClient._build_anthropic_tool_choice("none") == {"type": "none"}
+    # An explicit forced choice reaches Sonnet 5.5 as asked, never quietly as auto: that
+    # model's 400 is the caller's fact. Only the canary row itself asks for auto.
+    target = {"provider": "anthropic", "resolved_model": "claude-sonnet-5-5",
+              "usage_model": "anthropic/claude-sonnet-5-5", "base_url": "https://api.anthropic.example/v1"}
+    payload = LLMClient(api_key="unused")._build_remote_candidate(
+        target, [{"role": "user", "content": "hi"}], "high", 64, named, None, full_registry_canary_tools(),
+    )
+    assert payload["tool_choice"] == {"type": "tool", "name": CANARY_TOOL_NAME}
+    assert not next(row for row in provider_canary_matrix() if row.canary_id == "anthropic_direct").named_tool_choice
 
 
 def test_openai_models_follow_default_ssot_without_allowlist(monkeypatch):
@@ -1012,7 +1027,7 @@ def test_public_chat_builds_full_registry_request_for_every_matrix_row():
         first = client.calls[0]
         assert first["model"] == canary.model
         assert first["reasoning_effort"] == canary.reasoning_effort
-        assert first["max_tokens"] == CANARY_MAX_TOKENS
+        assert first["max_tokens"] == canary.max_tokens  # CANARY_MAX_TOKENS unless the row names its own
         assert first["stream"] is True  # the transport Main actually sends
         assert first["no_proxy"] is True
         assert first["bypass_response_cache"] is False
@@ -1041,10 +1056,9 @@ def test_public_chat_builds_full_registry_request_for_every_matrix_row():
             # Non-stream on purpose: continuation rows keep the non-stream transport covered at zero extra sends.
             assert "stream" not in second
             assert second["bypass_response_cache"] is False
-            assert second["max_tokens"] == CANARY_CONTINUATION_MAX_TOKENS
-            assert [tool["function"]["name"] for tool in second["tools"]] == [
-                CANARY_TOOL_NAME,
-            ]
+            assert second["max_tokens"] == max(canary.max_tokens, CANARY_CONTINUATION_MAX_TOKENS)
+            # The same fitted registry: the signed reasoning this turn replays is bound to it.
+            assert second["tools"] == first["tools"]
             assert [message["role"] for message in second["messages"]] == [
                 "user", "assistant", "tool", "tool",
             ]
