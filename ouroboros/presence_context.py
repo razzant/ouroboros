@@ -829,6 +829,7 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
     (``focus_owner_now``)."""
     from copy import deepcopy
     from ouroboros.config import get_consciousness_autonomy, runtime_setting
+    from ouroboros.knowledge import speaker_pages
     from ouroboros.presence_runner import presence_event_identity
     from ouroboros.places import (PlaceError, is_owner_account, observed_facts, owner_author, place_owner_accounts,
                                   place_model_route, wake_matches, writes_as_owner)
@@ -858,7 +859,9 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
                             "owner_confirmed": owner_author(accounts, place.place_id, event.actor, event.account_id,
                                                             event.conversation_id, event.message),
                             **({"authenticated": event.actor["authenticated"]} if "authenticated" in event.actor else {}),
-                            "is_bot": "from_bot" in facts},
+                            "is_bot": "from_bot" in facts,
+                            **speaker_pages(drive_root, event.provider, event.account_id, actor,
+                                            unverified=event.actor.get("authenticated") is False)},
                   "matched_wakes": [w.fact for w in wake_matches(place, facts)]},
         "focus_allowance": allowance,
     }

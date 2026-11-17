@@ -73,6 +73,68 @@ An interpretation grounded in two episodes.
     assert published(tmp_path, history(target)[-1]) == second.current.text
 
 
+def test_an_unquoted_numeric_id_joins_and_a_later_arrival_carries_the_same_speaker_facts(tmp_path):
+    """A numeric account id written without quotes loads as a YAML integer and still joins by its decimal string; a
+    boolean never does. An arrival handed to running work states the same key and page facts as a focus frame."""
+    from types import SimpleNamespace
+    from ouroboros.place_intake import arrival_actor
+
+    keys = [{"provider": "chat", "namespace": "bot-7", "id": 123456789}, {"provider": "chat", "namespace": "bot-7", "id": True}]
+    assert store.write_knowledge_note(address(tmp_path, "people/rowan"), "---\ntype: person\nsummary: Rowan.\nkeys: "
+                                      + json.dumps(keys) + "\n---\n# Rowan\n").ok
+    reader = "knowledge_read(topic='people/rowan', scope='global')"
+    assert store.speaker_pages(tmp_path, "chat", "bot-7", "123456789")["page"] == reader
+    assert store.speaker_pages(tmp_path, "chat", "bot-7", "True")["page"].startswith("no global knowledge note")
+    event = SimpleNamespace(provider="chat", account_id="bot-7", actor={"platform_actor_id": "123456789", "display_name": "R"})
+    actor = arrival_actor(tmp_path, event)
+    assert actor["page"] == reader and actor["display_name"] == "R"
+    assert actor["key"] == {"provider": "chat", "namespace": "bot-7", "id": "123456789"}
+
+
+def test_a_key_joins_the_pages_listing_its_exact_strings_through_revision(tmp_path):
+    """Keys only join (SPEC §2.3): provider, namespace and id equal as authored, case kept and nothing trimmed; one key
+    on several pages is a fact, never merged or ranked; an archived page is named apart; reading writes nothing."""
+    reader, none = "knowledge_read(topic={!r}, scope='global')".format, "no global knowledge note lists this key in its keys frontmatter"
+    chat = {"provider": "chat", "namespace": "T-ONE", "id": "U-VELA"}
+
+    def page(topic, *keys):
+        result = store.write_knowledge_note(address(tmp_path, topic), "---\ntype: person\nsummary: Someone.\nkeys: "
+                                            + json.dumps(list(keys)) + "\n---\n# Someone\n")
+        assert result.ok
+        return result.current
+
+    def pages(provider, namespace, actor_id, **unverified):
+        found = store.speaker_pages(tmp_path, provider, namespace, actor_id, **unverified)
+        assert found.pop("key") == {"provider": provider, "namespace": namespace, "id": actor_id}  # the arrival's, exact
+        return found
+
+    assert pages("chat", "T-ONE", "U-VELA") == {"page": none}  # an install without notes
+    vela = page("people/vela", chat, {"provider": "mail", "namespace": "", "id": "vela@example.org"})
+    page("clients/vela-desk", {**chat, "label": "work"})  # one key on two pages; a further field changes nothing
+    page("people/orin", {**chat, "namespace": "T-TWO"}, {**chat, "id": "u-orin"})
+    files = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    assert pages("chat", "T-ONE", "U-VELA") == {"pages": [reader("clients/vela-desk"), reader("people/vela")]}
+    assert pages("chat", "T-TWO", "U-VELA") == {"page": reader("people/orin")}  # the same id in another account scope
+    assert pages("chat", "T-ONE", "u-orin") == {"page": reader("people/orin")}
+    for provider, namespace, actor_id in (("chat", "T-ONE", "U-ORIN"), ("chat", "T-ONE", "u-orin "), ("chat", "t-one", "U-VELA"),
+                                          ("mail", "T-ONE", "U-VELA"), ("chat", "", "U-VELA"), ("mail", "box", "vela@example.org")):
+        assert pages(provider, namespace, actor_id) == {"page": none}, (provider, namespace, actor_id)
+    assert pages("mail", "", "vela@example.org", unverified=True) == {"page": reader("people/vela"),
+                                                                       "matched_by": "an unverified address"}
+    assert pages("chat", "T-ONE", "U-NOBODY", unverified=True) == {"page": none}  # nothing found, nothing labelled
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == files
+    # A revision keeps authored keys: a summary-only overwrite merges them; archive names the page apart, restore returns it.
+    vela = store.write_knowledge_note(vela.address, "---\nsummary: Someone else.\n---\n# Someone\nNew.\n",
+                                      expected_revision=vela.revision).current
+    assert vela.metadata["keys"][0] == chat and pages("mail", "", "vela@example.org") == {"page": reader("people/vela")}
+    vela = store.write_knowledge_note(vela.address, "", "archive", expected_revision=vela.revision, reason="moved").current
+    assert pages("chat", "T-ONE", "U-VELA") == {"page": reader("clients/vela-desk"), "archived_pages": [reader("people/vela")]}
+    assert pages("mail", "", "vela@example.org") == {"archived_pages": [reader("people/vela")]}
+    assert store.write_knowledge_note(vela.address, "", "restore", expected_revision=vela.revision).ok
+    assert pages("mail", "", "vela@example.org") == {"page": reader("people/vela")}
+    assert store.speaker_pages(None, "chat", "T-ONE", "U-VELA") == {} == store.speaker_pages(tmp_path, "chat", "T-ONE", "")
+
+
 def test_legacy_read_append_and_explicit_overwrite_do_not_force_migration(tmp_path):
     target = address(tmp_path, "old")
     target.shelf.mkdir(parents=True)
