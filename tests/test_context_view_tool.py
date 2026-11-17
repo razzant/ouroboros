@@ -96,7 +96,9 @@ def test_receipt_itself_is_included_in_final_fit_before_publication(tmp_path, mo
         return {"accepted": not candidate[-1].get("content", "").startswith("[Context view receipt]")
                 if isinstance(candidate[-1].get("content"), str) else True}
     result = _run_round_compaction(messages, _context(tmp_path, ctx, schemas, monkeypatch, fit))
-    assert len(calls) == 2 and result is messages
+    # The candidate, then with its receipt, then with the list of removed bodies counted instead of listed.
+    assert len(calls) == 3 and result is messages
+    assert '"bodies_removed": ' in calls[1][-1]["content"] and '"bodies_removed_omitted": 1' in calls[2][-1]["content"]
     assert ctx._context_view_receipt["status"] == "fit_rejected"
 
 
@@ -353,3 +355,114 @@ def test_a_request_restored_after_a_pause_without_replace_note_ids_names_no_note
     assert resumed._context_view_receipt["status"] == "applied"
     assert not any(m.get("tool_call_id") == "read" for m in result)
     assert other in result and (note in result) is (saved == "before_replace_note_ids")
+
+
+@pytest.mark.parametrize("saved", ["with_its_write_time", "before_notes_carried_one"])
+def test_a_note_is_dated_by_its_compact_context_call_even_when_a_pause_applies_it_later(tmp_path, monkeypatch, saved):
+    """Both directions: the note carries the time the mind wrote it (its compact_context call), even when the view is
+    applied after a pause saved the request; a request saved before requests carried that time is dated when applied."""
+    import datetime
+    from ouroboros import utils
+    from ouroboros.context_compaction import _capsule_metadata, note_written
+    from ouroboros.owner_wait import continuation_state, restore_continuation_state
+
+    messages, schemas = _source(), []
+    ctx = SimpleNamespace(task_id="paused-view", drive_root=tmp_path, budget_drive_root=tmp_path,
+                          active_context_mode="low")
+    record_context_view(ctx, messages, schemas)
+    monkeypatch.setattr(utils, "utc_now_iso", lambda timespec="auto": "2026-11-13T19:48:59+00:00")
+    _compact_context(ctx, working_note="The read is understood.", keep_unit_ids=[])
+    monkeypatch.undo()
+    state = json.loads(json.dumps(continuation_state(ctx, messages, {}, {}, 1, schemas, set())))
+    if saved == "before_notes_carried_one":
+        del state["context_observations"]["_pending_compaction"]["written_at"]
+    resumed = SimpleNamespace(task_id=ctx.task_id, drive_root=tmp_path, budget_drive_root=tmp_path,
+                              active_context_mode="low")
+    restored = []
+    restore_continuation_state(SimpleNamespace(_ctx=resumed), state, restored, {}, {}, set())
+
+    result = _run_round_compaction(restored, _context(tmp_path, resumed, schemas, monkeypatch))
+    meta = next(meta for row in result if (meta := _capsule_metadata(row)[1]))
+    if saved == "with_its_write_time":
+        assert meta["written_at"] == "2026-11-13T19:48:59+00:00" and note_written(meta) == "2026-11-13 19:48 UTC"
+    else:
+        applied = datetime.datetime.fromisoformat(meta["written_at"])
+        assert abs(datetime.datetime.now(datetime.timezone.utc) - applied) < datetime.timedelta(minutes=5)
+    assert next(row for row in result if _capsule_metadata(row)[1])["content"][0]["text"].startswith(
+        f"[Actor-authored working view, written {note_written(meta)}; ")
+
+
+def _receipt(rows):
+    """The view's receipt row and the view it closes; host producers may append rows after it."""
+    index = next(i for i, row in enumerate(rows) if str(row.get("content")).startswith("[Context view receipt]"))
+    return json.loads(rows[index]["content"].split("\n", 1)[1]), rows[:index]
+
+
+def test_a_fold_receipt_names_the_notes_in_view_and_each_body_that_left_by_a_restorable_address(tmp_path, monkeypatch):
+    """Both directions: an applied fold's receipt lists every note in view (id, write time or "not recorded", first
+    line) and every source body that left (what it was, its address), facts only; the address restores that body; a
+    restore that removes nothing names no body; a receipt the window cannot hold drops the list for a count rather
+    than undoing the view."""
+    from ouroboros.context_compaction import context_units
+    from tests.test_compaction import _note, _undated
+
+    older = _undated(_note(tmp_path, "Goal: keep the owner's exact wording.", "older"))
+    messages = [*_source(), older]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, messages, [])
+    _compact_context(ctx, working_note="The read confirms the goal.", keep_unit_ids=[])
+    folded = _run_round_compaction(copy.deepcopy(messages), _context(tmp_path, ctx, [], monkeypatch))
+    notice, view = _receipt(folded)
+    capsule_ids = [unit.unit_id for unit in context_units(view) if unit.start >= 2]
+
+    assert [set(note) for note in notice["notes_kept"]] == [{"id", "written", "first_line"}] * 2
+    assert [note["id"] for note in notice["notes_kept"]] == capsule_ids
+    assert [note["first_line"] for note in notice["notes_kept"]] == ["The read confirms the goal.",
+                                                                     "Goal: keep the owner's exact wording."]
+    assert notice["notes_kept"][1]["written"] == "not recorded" and notice["notes_kept"][0]["written"].endswith(" UTC")
+    read = context_units(messages, scope="dialogue")[0]
+    assert notice["bodies_removed"] == [{"source": "tool read_file {}",
+                                         "address": {"unit_id": read.unit_id, "raw_sha256": read.raw_sha256}}]
+    assert set(notice["restore_checkpoint"]) == {"kind", "root", "path", "size", "sha256"}
+
+    record_context_view(ctx, view, [])
+    ref = {"checkpoint_ref": notice["restore_checkpoint"], **notice["bodies_removed"][0]["address"]}
+    assert "requested" in _compact_context(ctx, restore_unit_refs=[ref])
+    restored = _run_round_compaction(copy.deepcopy(view), _context(tmp_path, ctx, [], monkeypatch))
+    again, _ = _receipt(restored)
+    assert ctx._context_view_receipt["status"] == "applied" and "Long exact evidence" in json.dumps(restored)
+    assert "bodies_removed" not in again and "restore_checkpoint" not in again and len(again["notes_kept"]) == 2
+
+    def window(rows, _tools):  # a window that holds the view and its receipt, but not the list of bodies
+        return {"accepted": '"bodies_removed": ' not in str(rows[-1].get("content"))}
+
+    record_context_view(ctx, messages, [])
+    _compact_context(ctx, working_note="The read confirms the goal.", keep_unit_ids=[])
+    held = _run_round_compaction(copy.deepcopy(messages), _context(tmp_path, ctx, [], monkeypatch, fit=window))
+    counted, _ = _receipt(held)
+    assert ctx._context_view_receipt["status"] == "applied" and counted["bodies_removed_omitted"] == 1
+    assert "restore_checkpoint" not in counted and len(counted["notes_kept"]) == 2
+
+
+def test_inspect_sends_its_shared_fields_on_page_one_only_and_every_unit_once(tmp_path, monkeypatch):
+    """Both directions: page one carries the fields every page shares; a later page carries only its units, the paging
+    and the view revision, within the page limit; together the pages list every unit exactly once."""
+    from ouroboros import tool_capabilities
+
+    messages = [*_source()[:2], *(row for index in range(80) for row in _read(f"r{index}"))]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, messages, [])
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 6000)
+    pages, offset = [], 0
+    while offset is not None:
+        text = _compact_context(ctx, inspect=True, offset=offset)
+        pages.append((text, json.loads(text)))
+        offset = pages[-1][1].get("next_offset")
+
+    first, later = pages[0][1], pages[1:]
+    assert len(later) >= 2 and {"rule", "schema_names", "inventory", "fit_measurement", "restore_checkpoint"} <= set(first)
+    for text, page in later:
+        assert set(page) <= {"view_revision", "offset", "total", "units", "next_offset"} and page["units"]
+        assert page["view_revision"] == first["view_revision"] and len(text) <= 6000
+    listed = [row["unit_id"] for _, page in pages for row in page["units"]]
+    assert len(listed) == len(set(listed)) == first["total"] == first["inventory"]["units"]

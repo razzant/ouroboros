@@ -159,7 +159,8 @@ def test_an_authored_fold_checkpoints_the_exact_source_before_its_capsule(monkey
     assert receipt.status == "applied"
     assert len(rebuilt) == 1 and rebuilt[0]["role"] == "assistant"
     capsule = rebuilt[0]["content"][0]["_context_capsule"]
-    assert rebuilt[0]["content"][0]["text"].startswith("[Actor-authored working view; exact source retained by checkpoint]\n")
+    assert rebuilt[0]["content"][0]["text"].startswith(
+        f"[Actor-authored working view, written {cc.note_written(capsule)}; exact source retained by checkpoint]\n")
     assert capsule["authorship"] == "actor" and capsule["generation"] == 1
     assert capsule["retention"] == "summarized"
     assert capsule["checkpoint_ref"]["sha256"] == "c" * 64
@@ -241,6 +242,45 @@ def _unattributed(capsule: dict) -> dict:
     return legacy
 
 
+def _undated(capsule: dict) -> dict:
+    """The same note as a release before notes carried their write time wrote it: its old label, no ``written_at``."""
+    legacy = copy.deepcopy(capsule)
+    block = legacy["content"][0]
+    block["text"] = "[Actor-authored working view; exact source retained by checkpoint]\n" + block["text"].partition("\n")[2]
+    del block["_context_capsule"]["written_at"]
+    block["_context_capsule"]["visible_sha256"] = cc._sha256(block["text"])
+    assert cc._capsule_metadata(legacy)[1] is not None
+    return legacy
+
+
+def test_a_new_note_is_dated_when_the_mind_wrote_it_and_an_older_note_keeps_its_bytes(tmp_path):
+    """Both directions: a fold dates its new note by the write time its request carries, in the one label written with
+    the note and in ``written_at``; a note written before notes carried their time keeps every byte through the fold,
+    its label undated, and reads "not recorded"."""
+    older = _undated(_note(tmp_path, "An earlier finding.", "older"))
+    view = [older, *_large_unit("read", "r")]
+    before = copy.deepcopy(view)
+
+    folded, receipt = cc.compact_tool_history_llm(
+        view, request=_authored(view, note="The read agrees with the finding."), observed_messages=view,
+        tool_schemas=[], fit_candidate=lambda *_: {"accepted": True}, drive_root=tmp_path, task_id="compaction",
+        written_at="2026-11-13T19:48:59+00:00")
+
+    assert receipt.status == "applied" and folded[0] == before[0]
+    assert cc.note_written(folded[0]["content"][0]["_context_capsule"]) == "not recorded"
+    new = folded[1]["content"][0]
+    assert new["text"] == ("[Actor-authored working view, written 2026-11-13 19:48 UTC; exact source retained by "
+                           "checkpoint]\nThe read agrees with the finding.")
+    assert new["_context_capsule"]["written_at"] == "2026-11-13T19:48:59+00:00"
+    assert cc.note_written(new["_context_capsule"]) == "2026-11-13 19:48 UTC"
+    merged, again = cc.compact_tool_history_llm(
+        folded, request=replace(_authored(folded, note="Merged."), replace_note_ids=(cc.context_units(folded)[0].unit_id,)),
+        observed_messages=folded, tool_schemas=[], fit_candidate=lambda *_: {"accepted": True}, drive_root=tmp_path,
+        task_id="compaction", written_at="2026-11-14T08:00:00Z")
+    assert again.status == "applied" and merged[0]["content"][0]["text"].startswith(
+        "[Actor-authored working view, written 2026-11-14 08:00 UTC; exact source retained by checkpoint; replaced notes: ")
+
+
 def test_an_empty_keep_selection_folds_tool_units_but_keeps_every_earlier_note(tmp_path):
     """Both directions: keep_unit_ids=[] still folds every eligible tool unit, and no earlier note leaves with
     them, whatever its authorship; a capsule written before authorship existed is not silently merged either."""
@@ -257,7 +297,8 @@ def test_an_empty_keep_selection_folds_tool_units_but_keeps_every_earlier_note(t
     assert set(receipt.retained_unit_ids) == {units[0].unit_id, units[1].unit_id}
     assert len(folded) == 3 and "-result-tail-read" not in json.dumps(folded)
     assert folded[2]["content"][0]["text"] == (
-        "[Actor-authored working view; exact source retained by checkpoint]\nThe read confirms the goal.")
+        f"[Actor-authored working view, written {cc.note_written(folded[2]['content'][0]['_context_capsule'])}; "
+        "exact source retained by checkpoint]\nThe read confirms the goal.")
 
 
 @pytest.mark.parametrize("source_kind", ["restored", "emergency_body", "emergency_host_rows"])

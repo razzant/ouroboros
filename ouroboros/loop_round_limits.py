@@ -563,7 +563,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             observed_tool_schemas=observed["tool_schemas"], tool_schemas=schemas,
             fit_candidate=fit_candidate, drive_root=ctx.drive_root or pathlib.Path(ctx.drive_logs).parent,
             task_id=ctx.task_id, trace_refs_by_tool_call_id=reclaim_trace_refs(tool_ctx),
-            exposed_units=observed.get("exposed_units"),
+            exposed_units=observed.get("exposed_units"), written_at=proposal.get("written_at"),
         )
         receipt = asdict(result)
         from ouroboros.context_source_view import retire_host_rows_after_fold
@@ -602,6 +602,9 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         from ouroboros.tools.tool_discovery import update_resident_notice
         candidate = copy.deepcopy(candidate)
         update_resident_notice(ctx.tools, schemas, candidate)
+    if pending is not None:  # an applied view's facts, kept with the receipt they appear in
+        from ouroboros.tools.compact_context import fold_receipt_facts
+        receipt.update(fold_receipt_facts(proposal["observed"]["messages"], candidate, receipt))
     receipt_source, retained_receipt = None, None
     if receipt["status"] != "no_op":
         from ouroboros.artifacts import store_actor_source_bytes
@@ -631,11 +634,10 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         if memory_price:
             notice["memory_view"] = memory_price
         if receipt["status"] == "applied":  # what the fold freed and kept; the next request's count measures its re-read
-            from ouroboros.tools.compact_context import residue_by_kind
+            from ouroboros.tools.compact_context import FOLD_FACT_KEYS, residue_by_kind
             notice.update(reclaimed_tokens=receipt.get("reclaimed_tokens"), residue=residue_by_kind(candidate),
                           resulting_input_tokens=(receipt.get("fit") or {}).get("estimated_input_tokens"),
-                          basis="host estimates", **({"replaced_notes": receipt["replaced_notes"]}
-                                                     if receipt.get("replaced_notes") else {}))
+                          basis="host estimates", **{key: receipt[key] for key in FOLD_FACT_KEYS if receipt.get(key)})
         exceptions = receipt.get("request_exceptions") or []
         if receipt.get("inherited_selections_unapplied"):
             notice["inherited_selections_unapplied"] = receipt["inherited_selections_unapplied"]
@@ -644,11 +646,14 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         with_receipt = [*candidate, {"role": "user", "content": "[Context view receipt]\n" + json.dumps(notice, ensure_ascii=False)}]
         try:
             final_fit = fit_candidate(copy.deepcopy(with_receipt), copy.deepcopy(schemas))
-            if final_fit.get("accepted") is not True and exceptions:
+            for detail in ("request_exceptions", "bodies_removed"):
+                if final_fit.get("accepted") is True or detail not in notice:
+                    continue
                 # Optional detail must not undo an otherwise fitting view. The
                 # counted omission still points to the whole retained receipt.
-                notice.pop("request_exceptions")
-                notice["request_exceptions_omitted"] = len(exceptions)
+                notice[f"{detail}_omitted"] = len(notice.pop(detail))
+                if detail == "bodies_removed":
+                    notice.pop("restore_checkpoint", None)
                 with_receipt = [*candidate, {"role": "user", "content": "[Context view receipt]\n"
                     + json.dumps(notice, ensure_ascii=False)}]
                 final_fit = fit_candidate(copy.deepcopy(with_receipt), copy.deepcopy(schemas))
