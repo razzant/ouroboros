@@ -42,7 +42,7 @@ from ouroboros.gateway.owner_settings import (
     settings_document_mutation,
     owner_write_guard,
     post_commit_failure_response,
-    record_settings_change,
+    record_context_mode_change, record_settings_change,
     settings_document_digest,
     unsaved_error,
 )
@@ -732,11 +732,7 @@ def _api_owner_context_mode_sync(request: Request, body: Any) -> JSONResponse:
             os.environ["OUROBOROS_CONTEXT_MODE"] = next_mode
             os.environ["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
             cognition = main_cognition()
-    _owner_audit(
-        request,
-        "context_mode",
-        {"project_id": project_id, "context_mode": next_mode, "previous_context_mode": previous_mode},
-    )
+    record_context_mode_change(request, project_id, next_mode, previous_mode, cognition["context_mode"])
     return JSONResponse({"ok": True, "project_id": project_id, "context_mode": next_mode, "cognition": cognition, **receipt})
 
 

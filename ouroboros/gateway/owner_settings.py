@@ -393,6 +393,40 @@ def record_settings_change(request: Request | None, changes: Optional[Dict[str, 
         log.warning("Settings saved; their change record or Main row failed", exc_info=True)
 
 
+_CONTEXT_MODE_NAMES = {"max": "Max", "low": "Low", "nano": "Nano"}
+
+
+def record_context_mode_change(request: Request, project_id: str, requested: str, old: str, new: str) -> None:
+    """Record a committed context-mode save: its ``owner_api_action`` (``action="context_mode"``) and, when the
+    room's mode changed, the owner act's one System receipt in that room (``context_mode_changed``), dated by its
+    own time: old → new, which work it reaches and who changed it when the request declared that. The composer's
+    capsule tells the human; the room's history is what tells the mind at its next start there, so the receipt is
+    posted whatever surface declared the save. No change, no row; neither step can unsave the mode."""
+    owner_audit(request, "context_mode", {"project_id": project_id, "context_mode": requested, "previous_context_mode": old})
+    if not old or not new or old == new:
+        return
+    try:
+        from supervisor import message_bus
+
+        if project_id:
+            from ouroboros.projects_registry import get_project
+
+            chat = (get_project(request_drive_root(request), project_id) or {}).get("chat_id")
+        else:  # the owner's primary chat once bound, else Main, as every owner notice is addressed
+            from supervisor.schedule_notes import owner_chat_id
+
+            chat = owner_chat_id(request_drive_root(request))
+        if not chat:
+            return
+        actor = _ROW_ACTORS.get(str(declared_settings_origin(request).get("actor") or ""))
+        text = (f"Context mode of this room: {_CONTEXT_MODE_NAMES.get(old, old)} → {_CONTEXT_MODE_NAMES.get(new, new)}. "
+                "Work started from now uses it; work already running keeps the mode it started with."
+                + (f" {actor}" if actor else ""))
+        message_bus.send_with_budget(int(chat), text, role="system", system_type="context_mode_changed")
+    except Exception:
+        log.warning("Context mode saved; its System row failed", exc_info=True)
+
+
 OWNER_SETTING_WRITERS = {
     "OUROBOROS_CONTEXT_MODE": "POST /api/owner/context-mode",
     "OUROBOROS_RUNTIME_MODE": "POST /api/owner/runtime-mode",
@@ -830,6 +864,7 @@ __all__ = [
     "_owner_write_settings",
     "owner_write_guard",
     "post_commit_failure_response",
+    "record_context_mode_change",
     "record_settings_change",
     "settings_document_digest",
     "unsaved_error",
