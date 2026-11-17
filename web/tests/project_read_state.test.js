@@ -513,6 +513,12 @@ test('the read band is the viewport less the header above and the composer below
     assert.equal(at(100, chrome), true);
     assert.equal(at(250, { header: el(0, 40), composer: el(220, 300, false) }), true, 'a hidden composer covers nothing');
     assert.equal(at(250, {}), true, 'a feed without chrome is its viewport');
+    // The bar's frosted edge reaches 32 px below it (style.css "A room's edges"): a row under it is not read yet.
+    const frosted = Object.assign(el(0, 40), { ownerDocument: { defaultView: { getComputedStyle: () => ({
+        getPropertyValue: (name) => (name === '--edge-reach' ? '32px' : '') }) } } });
+    assert.equal(at(50, { ...chrome, header: frosted }), false, 'under the bar\'s edge');
+    assert.equal(at(50, chrome), true, 'the same row under a bar without an edge is read');
+    assert.equal(at(80, { ...chrome, header: frosted }), true, 'below the edge');
 });
 
 // Chrome can cover the whole feed (a tall draft in a short window): nothing is

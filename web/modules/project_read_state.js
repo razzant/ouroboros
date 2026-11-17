@@ -196,8 +196,10 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
 export function readBand(viewport, header, composer) {
     let { top, bottom } = viewport.getBoundingClientRect();
     if (header?.getClientRects?.().length) {
-        const edge = parseFloat(header.ownerDocument?.defaultView?.getComputedStyle?.(header)?.getPropertyValue?.('--edge-reach'));
-        top = Math.max(top, header.getBoundingClientRect().bottom + (edge || 0));
+        // The edge in the page's own scale: a phone's drawer scales the room, and the edge with it.
+        const box = header.getBoundingClientRect();
+        const edge = parseFloat(header.ownerDocument?.defaultView?.getComputedStyle?.(header)?.getPropertyValue?.('--edge-reach')) || 0;
+        top = Math.max(top, box.bottom + edge * (header.offsetHeight > 0 && box.height > 0 ? box.height / header.offsetHeight : 1));
     }
     if (composer?.getClientRects?.().length) bottom = Math.min(bottom, composer.getBoundingClientRect().top);
     return { top, bottom };

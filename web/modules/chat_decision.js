@@ -14,6 +14,7 @@ import { syncQuestionMaterials } from './result_files.js';
 import { memberPaused } from './work_status.js';
 import { createSecretRequestForms } from './secret_hitl.js';
 import { createStatusMark, paintStatusMark } from './status_mark.js';
+import { readBand } from './project_read_state.js';
 
 // A question head's mark: its lifecycle's dot (question_presentation.questionMark), neutral while an answer is in
 // flight (Sending…, checking it, Not confirmed: the owner has moved). The one painter of it, whoever changed the card.
@@ -208,6 +209,11 @@ export function createChatDecision({
         }
         if (!current() || !card) return false;
         card.scrollIntoView?.({ block: 'center', behavior: 'auto' });
+        // A card taller than what the reader sees keeps its head below the room's bar and its frosted edge (readBand).
+        const feed = card.closest?.('#chat-messages, .chat-messages');
+        const bar = feed?.closest('.project-panel')?.querySelector('.project-panel-bar') || feed?.closest('#page-chat')?.querySelector('.chat-page-header');
+        const under = bar ? readBand(feed, bar, null).top + 12 - card.getBoundingClientRect().top : 0;
+        if (under > 0) feed.scrollTop -= under;
         ((focus === 'question' ? null : card.querySelector('.chat-quiz-comment'))
             || card.querySelector('.chat-quiz-question'))?.focus?.({ preventScroll: true });
         didReveal();

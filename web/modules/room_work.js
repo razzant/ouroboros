@@ -20,6 +20,7 @@ import { openConfirmDialog } from './confirm_dialog.js';
 import { createStartFailure, startFailureCause, startingStatus } from './host_starting_status.js';
 import { compareHistoryPosition } from './chat_history_replay.js';
 import { createHistoryReveal } from './chat_history_reveal.js';
+import { readBand } from './project_read_state.js';
 import { fmt, tr } from './i18n.js';
 import { questionPresentation, questionWords } from './question_presentation.js';
 import { taskCancelPending } from './log_events.js';
@@ -960,12 +961,10 @@ export function createRoomWork({
 
     function scrollToNode(node) {
         reading.cancel();
-        // Main's measured reserve includes its error note and the bar's frosted edge; a Project's row lands below its bar
-        // and that edge (style.css "A room's edges"), and its in-flow status bar already clears the feed.
-        const edge = bar ? parseFloat(globalThis.getComputedStyle?.(bar)?.getPropertyValue?.('--edge-reach')) || 0 : 0;
-        const reserve = asPanel
-            ? Math.max(0, (bar?.getBoundingClientRect().bottom || 0) + edge - messagesDiv.getBoundingClientRect().top)
-            : parseFloat(page.style?.getPropertyValue?.('--chat-header-reserve')) || 0;
+        // A row lands below the bar and its frosted edge (readBand), in Main below its error note too (the measured
+        // reserve); a Project's in-flow status bar already clears the feed.
+        const clear = readBand(messagesDiv, bar, null).top - messagesDiv.getBoundingClientRect().top;
+        const reserve = asPanel ? clear : Math.max(clear, parseFloat(page.style?.getPropertyValue?.('--chat-header-reserve')) || 0);
         messagesDiv.scrollTop += node.getBoundingClientRect().top - messagesDiv.getBoundingClientRect().top - reserve;
         reading.stick = false;
         reading.scroll();
