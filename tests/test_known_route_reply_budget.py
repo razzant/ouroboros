@@ -91,9 +91,18 @@ def test_unbound_helper_uses_known_window_and_its_own_accepted_density(tmp_path,
         episode = _episode(tmp_path, monkeypatch, server)  # reads metadata through the normal start
         before = ce._read(ce.canonical_evidence_root()).get("token_density", {})
         assert not any(pair.get("view_kind") == "helper" for value in before.values() for pair in value.get("pairs", []))
-        def unexpected_get(*_args, **_kwargs):
-            pytest.fail("helper finalization must not fetch metadata")
-        monkeypatch.setattr("requests.get", unexpected_get)
+        import httpx
+        fetched = []
+
+        def recorded_get(url, *_args, **_kwargs):  # the metadata readers' own client; every read fails busy
+            fetched.append(url)
+            raise httpx.ConnectError("busy", request=httpx.Request("GET", url))
+
+        monkeypatch.setattr("httpx.get", recorded_get)
+        ce.probe(ce.canonical_evidence_root(), provider="openai-compatible", model=MOCK_SLUG,
+                 base_url=server.base_url, force=True)
+        assert fetched, "a forced start read reaches the metadata client: the recorder is live"
+        fetched.clear()
         client = LLMClient(api_key="unused-keyless")
         scope = ua.UsageScope(drive_root=episode.drive, task_id="helper", root_task_id="helper", category="task")
         with ua.usage_scope(scope):
@@ -107,10 +116,53 @@ def test_unbound_helper_uses_known_window_and_its_own_accepted_density(tmp_path,
                                                  MOCK_SLUG, estimate_tokens=18_100, view_kind="own_wake")[1] == "cold_estimate"
             second, _ = client.chat([{"role": "user", "content": "a" * 72_000}], MOCK_SLUG, max_tokens=65_536)
             assert ANSWER in str(second)
+    assert not fetched, "helper finalization must not fetch metadata"
     assert len(server.posts) == 2
     assert all(post["input"] + post["reply"] <= WINDOW for post in server.posts)
     assert server.posts[1]["reply"] < WINDOW - 18_000 - 10_000  # calibrated, not the cold host estimate
 
+
+
+def test_a_helper_attempt_builds_its_window_context_once(tmp_path, monkeypatch):
+    from ouroboros import llm_attempt, llm_helper_window
+
+    built, original = [], llm_helper_window._helper_attempt_context
+
+    def counted(target, payload):
+        built.append(payload.get("max_tokens"))
+        return original(target, payload)
+
+    with StrictWindowServer(chars_per_token=2.5) as server:
+        episode = _episode(tmp_path, monkeypatch, server)
+        monkeypatch.setattr(llm_attempt, "_helper_attempt_context", counted)
+        monkeypatch.setattr(llm_helper_window, "_helper_attempt_context", counted)
+        scope = ua.UsageScope(drive_root=episode.drive, task_id="helper", root_task_id="helper", category="task")
+        with ua.usage_scope(scope):
+            text, _ = LLMClient(api_key="unused-keyless").chat(
+                [{"role": "user", "content": "a" * 40_000}], MOCK_SLUG, max_tokens=65_536)
+    assert ANSWER in str(text)
+    assert len(server.posts) == 1 and len(built) == 1, built  # priced once; its request reuses that context
+
+
+def test_a_main_attempt_leaves_no_priced_candidate_behind(monkeypatch):
+    """Main brings its own context: nothing is bound for its candidate, before or after its request is built."""
+    from ouroboros import llm_attempt, llm_helper_window
+    from ouroboros.request_wire_recovery import request_wire_call_scope
+
+    physical = ua.PhysicalAttemptContext(profile="owner_max", rendered_mode="max", measurement_basis="cold_estimate",
+        route_fp="route", round_id="round", target_total_tokens=None, capacity_total_tokens=1_000_000,
+        context_target_miss=False, automatic_pass_used=False)
+    target = {"provider": "openai-compatible", "resolved_model": "fixture", "base_url": "http://127.0.0.1:1/v1"}
+    monkeypatch.setattr("ouroboros.response_limits.response_limit_for_target",
+                        lambda *_a, **_kw: SimpleNamespace(ceiling=lambda value: value))
+    llm_helper_window._PRICED.set((None, None))
+    with request_wire_call_scope(), ua.bind_physical_attempt_context(physical):
+        candidate = llm_attempt._finalized_physical_candidate(
+            target, {"model": "fixture", "messages": [{"role": "user", "content": "x" * 4096}], "max_tokens": 1000},
+            "chat.completions")
+        assert llm_helper_window._PRICED.get() == (None, None)
+        assert llm_attempt._attempt_request(target, candidate).physical_context is physical
+    assert llm_helper_window._PRICED.get() == (None, None)
 
 def test_final_admission_charges_the_wire_reply_not_only_the_nano_floor():
     from ouroboros.llm_attempt import main_context_fit_refusal

@@ -698,7 +698,7 @@ def test_only_a_changed_instance_releases_equal_size_refusal():
 
 @pytest.mark.parametrize('failure', ['lock', 'timeout', 'save'])
 def test_unpublished_read_keeps_ceiling_over_historical_acceptance(tmp_path, clock, monkeypatch, failure):
-    """Astra: real four-second contention once; other failures use the store seam."""
+    """Real four-second lock contention once; other failures use the store seam."""
     from contextlib import nullcontext
     record_observation(tmp_path, 'r', accepted=200000)
     evidence = server(clock)
@@ -719,7 +719,7 @@ def test_unpublished_read_keeps_ceiling_over_historical_acceptance(tmp_path, clo
 
 
 def test_expired_frontier_survives_refusal_and_equal_cache_restore(tmp_path, clock):
-    """Astra: an equal fresh receipt outlives the store frontier's timestamp."""
+    """An equal fresh receipt outlives the store frontier's timestamp."""
     from copy import deepcopy
     first = resolve_window(server(clock), 8192, root=tmp_path)
     clock[0] += timedelta(seconds=ce._CONFIRMED_TTL_SEC // 2)
@@ -855,3 +855,27 @@ def test_failed_receipt_cache_does_not_block_new_reads_or_acceptances(tmp_path, 
     assert observer.observe('read120')[0] == 111808
     assert observer.live.window_sequence > 0
     assert observer.observe('accept200')[0] == 200000
+
+
+def _captured(record, window=80000):
+    return SimpleNamespace(window_record=record, window_tokens=window, status="confirmed", provider="openai-compatible")
+
+
+@pytest.mark.parametrize("other_read_first", [False, True])
+def test_a_captured_plan_keeps_a_later_acceptance_whatever_read_came_between(tmp_path, clock, other_read_first):
+    record_observation(tmp_path, "r", accepted=200000)
+    plan = _captured(resolve_window(server(clock, 80000), 8192, root=tmp_path))
+    if other_read_first:
+        resolve_window(server(clock, 120000), 8192, root=tmp_path)
+    record_observation(tmp_path, "r", accepted=100000)
+    if not other_read_first:
+        resolve_window(server(clock, 120000), 8192, root=tmp_path)
+    assert resolve_window(plan, 8192, root=tmp_path).usable == 100000
+
+
+def test_a_captured_serving_read_past_its_ttl_is_unknown(tmp_path, clock):
+    plan = _captured(resolve_window(server(clock, 80000), 8192, root=tmp_path))
+    assert resolve_window(plan, 8192, root=tmp_path).total.tokens == 80000
+    clock[0] += timedelta(seconds=ce._CONFIRMED_TTL_SEC + 1)
+    record = resolve_window(plan, 8192, root=tmp_path)
+    assert record.total is None and record.admitted is None

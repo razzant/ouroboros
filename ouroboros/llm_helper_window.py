@@ -5,7 +5,30 @@ The pure Nano/Low/Max formula remains in context_budget.
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Any, Dict
+
+#: ``(candidate, context)``: the helper context ``bound_reply_allowance`` priced for that exact candidate object.
+_PRICED: ContextVar = ContextVar("helper_priced_candidate", default=(None, None))
+
+
+def priced_for(candidate, context, *, source=None):
+    """Bind ``context`` to ``candidate``, or carry the binding of ``source`` to it (none: unbound); returns ``candidate``."""
+    bound, priced = _PRICED.get()
+    if source is None:
+        _PRICED.set((candidate, context))
+    else:
+        _PRICED.set((candidate, priced) if bound is source else (None, None))
+    return candidate
+
+
+def helper_context_for(target: Dict[str, Any], payload: Dict[str, Any]):
+    """The helper context of this final candidate: the one already priced for it (read once), else one build."""
+    bound, context = _PRICED.get()
+    if bound is not payload:
+        return _helper_attempt_context(target, payload)
+    _PRICED.set((None, None))
+    return context
 
 
 def _helper_attempt_context(target: Dict[str, Any], payload: Dict[str, Any]):

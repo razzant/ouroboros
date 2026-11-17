@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import artifacts
+from ouroboros.capability_evidence import utc_now_iso
 from ouroboros.context_budget import RECLAIM_LOW_WATER_DIVISOR
 from ouroboros.memory_inventory import VIEW_TRACE_KEY
 from ouroboros.tools.tool_result import ToolResult
@@ -240,7 +241,8 @@ def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="ass
     # A declared window's RouteFacts (its units). ``holds_reply``: a total known to hold the reply too (a local
     # server's one buffer), read less the whole reserve; any other stated total is read less the reply floor.
     evidence = SimpleNamespace(route_fp=f"r-{window}", status=status, stale=status != "asserted", window_tokens=window,
-                               route_facts=facts or {}, source="local_health" if holds_reply else "metadata")
+                               route_facts=facts or {}, source="local_health" if holds_reply else "metadata",
+                               ts=utc_now_iso())  # a serving statement is dated, as its read is
     monkeypatch.setattr(ouroboros.context, "_context_fit_route", lambda *_a, **_kw: ({"model": "m2", "provider": "p"}, evidence))
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: ratio)
     rebound, mode = _rebind_context_fit_plan(plan, registry, messages, model="m2", use_local=False, start_mode="low",
@@ -629,7 +631,7 @@ def _native(main_call, monkeypatch, tmp_path, *, task_text="hi", owner_mode="low
         fp = ce.route_fingerprint(provider="claudexor", model=MODEL, base_url="", options=options(account))
         return SimpleNamespace(route_fp=fp, status="confirmed" if window else "unprobeable",
                                stale=False, window_tokens=window, source_id="codex",
-                               source="local_health" if account in holds_reply else "advertised",
+                               source="local_health" if account in holds_reply else "advertised", ts=utc_now_iso(),
                                credential_profile_id=account, account_fingerprint=f"fingerprint-{account[-1]}")
 
     def route(task, **_kw):  # the account a production rebind asks for: explicit, the role's pin, or observed
