@@ -62,14 +62,14 @@ def valid_wake_fact(fact: Any) -> bool:
     return isinstance(fact, str) and (fact in (*WAKE_FACTS, FACT_LEGACY_ADDRESSED) or is_wake_signal(fact))
 
 
-def declared_wake_signals(connector: str) -> set[str]:
-    """Only the authenticated connector's live publication can vouch for a signal."""
+def declared_fact_labels(connector: str) -> dict[str, str]:
+    """``{fact: label}`` its live publication words itself (a signal, which only it can vouch for, or a core kind)."""
     from ouroboros.extension_registry_state import live_contribution_projection
 
-    return {fact["id"] for row in live_contribution_projection()
+    return {fact["id"]: fact["label"] for row in live_contribution_projection()
             if row.get("provides") == "place" and row.get("skill") == connector
-            for fact in row.get("facts", [])
-            if isinstance(fact, dict) and is_wake_signal(fact.get("id"))}
+            for fact in row.get("facts", []) if isinstance(fact, dict)
+            and valid_wake_fact(fact.get("id")) and isinstance(fact.get("label"), str)}
 
 
 class PlaceError(ValueError):
@@ -963,14 +963,14 @@ def _change_place(old: Place | None, action: str, author: str, values: dict) -> 
         if not isinstance(facts, list) or any(not valid_wake_fact(f) for f in facts):
             raise PlaceError("place_wake_invalid", "wakes")
         added_signals = {f for f in facts if is_wake_signal(f)} - {w.fact for w in old.wakes}
-        if added_signals and not added_signals <= declared_wake_signals(old.connector):
+        if added_signals and not added_signals <= declared_fact_labels(old.connector).keys():
             raise PlaceError("place_wake_undeclared", "wakes", "place_wake_undeclared: this connector has not declared that signal; turn it on or choose a listed kind.")
         return replace(old, wakes=tuple(next((w for w in old.wakes if w.fact == fact), WakeItem(fact, author)) for fact in dict.fromkeys(facts)))
     if action in {"add_wake", "remove_wake"}:
         fact = values.get("fact", "")
         if not valid_wake_fact(fact):
             raise PlaceError("place_wake_invalid", "fact")
-        if action == "add_wake" and is_wake_signal(fact) and fact not in declared_wake_signals(old.connector):
+        if action == "add_wake" and is_wake_signal(fact) and fact not in declared_fact_labels(old.connector):
             raise PlaceError("place_wake_undeclared", "fact", "place_wake_undeclared: this connector has not declared that signal; turn it on or choose a listed kind.")
         items = tuple(w for w in old.wakes if w.fact != fact)
         if action == "add_wake":

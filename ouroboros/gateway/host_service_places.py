@@ -145,7 +145,7 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         return _presence_error("the task store is importing; retry shortly", 503, "migrating", "retry")
     from ouroboros.presence_admission import PresenceAdmissionError
     from ouroboros.presence_continuation import continuation_version, turn_response
-    from ouroboros.places import declared_wake_signals
+    from ouroboros.places import declared_fact_labels
     from ouroboros.presence_events import PresenceEventInvalid, outside_origin, parse_presence_event
     from ouroboros.presence_executions import PresenceTurnInterrupted
     from ouroboros.presence_runner import (
@@ -166,13 +166,14 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         continuing = continuation_version(payload.get("continuation_version", 0))
         event_payload = payload.get("event")
         # The whole event is checked before admission (``presence_events``); its place's origin after it.
-        event = parse_presence_event(event_payload, vouched_facts=declared_wake_signals(skill_name),
+        declared = declared_fact_labels(skill_name)  # the words its admission carries to the focus, by value
+        event = parse_presence_event(event_payload, vouched_facts=declared,
                                      staged_files=payload.get("staged_files"), reporting_version=reporting_version,
                                      continuing=continuing)
-        admission = await host._bounded_host_read(ctx, functools.partial(
+        admission = replace(await host._bounded_host_read(ctx, functools.partial(
             host._admit_presence, ctx, skill_name, str(payload.get("binding_id") or ""),
             provider=event.provider, account_id=event.account_id, conversation_id=event.conversation_id,
-            thread_id=event.thread_id))
+            thread_id=event.thread_id)), fact_labels=declared)
         if outside_origin(admission, event):
             return _presence_error("presence event does not match its owner-created binding", 403,
                                    "presence_origin_mismatch", "rejected")

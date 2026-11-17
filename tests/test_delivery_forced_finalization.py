@@ -2141,3 +2141,23 @@ def test_forced_legacy_control_is_containment_only_and_cannot_select_replacement
     assert "delivery_control" not in text and "Unselected legacy replacement" not in text
     assert usage["reason_code"] == "round_limit"
     assert returned_trace["delivery_candidate"]["acceptance_binding"]["authoritative"] is False
+
+
+def test_a_forced_answer_shows_the_answer_one_shot_facts_returned_before_replacing_it(tmp_path, monkeypatch):
+    """Panel 7 (Kimi): one-shot facts returned the full answer, then the round limit's forced wrap-up writes a shorter
+    text that replaces it. The displaced answer reaches the room first; the forced text is what is delivered."""
+    from ouroboros.delivery_facts import FACTS_NOTED_CONTROL
+
+    loop, registry, limit_ctx, trace = _forced_test_context(tmp_path)
+    shown = []
+    limit_ctx.emit_progress = lambda text, **_kw: shown.append(text)
+    report = "Full report: three findings, each with its evidence and the fix applied."
+    candidate = loop._replace_delivery_candidate(registry, limit_ctx, trace, report, control="candidate")
+    candidate.finalization_control = FACTS_NOTED_CONTROL  # what delivery_facts.note_delivery_facts leaves
+    monkeypatch.setattr(loop, "call_llm_with_retry",
+                        lambda *_a, **_k: ({"role": "assistant", "content": "Done, see above."}, 0.0))
+
+    text, _usage, _trace = loop._handle_round_limit(limit_ctx)
+
+    assert text.startswith("Done, see above.") and shown == [report]
+    assert registry._ctx._delivery_candidate.full_text == text

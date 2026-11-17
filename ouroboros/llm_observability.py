@@ -182,12 +182,14 @@ def chat_observed(
         msg, usage = llm.chat(**kwargs)
     except Exception as exc:
         safe = sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}")
+        reply = getattr(exc, "reply_message", None)  # a non-result reply keeps its output and usage on record
         persist_observed_call(
             root,
             task_id=task_id or call_type,
             call_id=f"{call_id}_error",
             call_type=f"{call_type}_error",
-            payload={"error": f"{type(exc).__name__}: {exc}", "kwargs": traced_kwargs},
+            payload={"error": f"{type(exc).__name__}: {exc}", "kwargs": traced_kwargs,
+                     **({"message": reply, "usage": getattr(exc, "usage", {})} if isinstance(reply, dict) else {})},
             manifest={**_base_manifest(call_type, kwargs), "status": "error", "error": safe},
         )
         raise

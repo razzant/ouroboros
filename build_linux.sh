@@ -53,6 +53,8 @@ if [ ! -f "python-standalone/bin/python3" ]; then
     exit 1
 fi
 PORTABLE_PYTHON="python-standalone/bin/python3"
+# A python-standalone left from an earlier pin would ship again; the build venv derives from it.
+"$PORTABLE_PYTHON" scripts/check_python_build.py
 
 # Bundle the official Node.js runtime the Claudexor pin names, so node-runtime skills work in the
 # packaged app out of the box; always re-verified, and the build's own Playwright CLI runs on it.

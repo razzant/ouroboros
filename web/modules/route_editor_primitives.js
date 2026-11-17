@@ -204,9 +204,11 @@ export function configuredApiProviders(settings = {}, providerProfiles = {}) {
  * draft `settings`, by the server's rule (provider_models.proposal_connection, server_runtime._proposal_connection;
  * #2969): the built-in key when it serves or no key of that provider does, else the only named one, else the named
  * key `main` already runs on. Before that choice they keep the shipped spelling, and `choice` lists the keys a Main
- * still on it waits for (Settings' `main_connection_choice`).
+ * still on it waits for (Settings' `main_connection_choice`). The defaults are those of the key a proposal lands on:
+ * `profileOf(kind, name)` names the profile its own choice selects (an OpenAI key on Responses), as
+ * provider_connections.direct_provider_defaults does on the server; '' keeps the kind's own.
  */
-export function connectionDefaults(modelDefaults, profile, settings = {}, providerProfiles = {}, main = '') {
+export function connectionDefaults(modelDefaults, profile, settings = {}, providerProfiles = {}, main = '', profileOf = () => '') {
     const keys = configuredApiProviders(settings, providerProfiles).map(({ id }) => id)
         .filter((id) => connectionParts(id).kind === profile);
     const names = keys.map((id) => connectionParts(id).name);
@@ -218,7 +220,8 @@ export function connectionDefaults(modelDefaults, profile, settings = {}, provid
         const { source, model } = parseModelSource(entry);
         return name && source === profile ? `${profile}@${name}::${model}` : entry;
     }).join(', ');
-    const defaults = modelDefaults[profile] || modelDefaults.openrouter || {};
+    const keyProfile = name === null ? '' : profileOf(profile, name);
+    const defaults = (keyProfile && modelDefaults[keyProfile]) || modelDefaults[profile] || modelDefaults.openrouter || {};
     return { defaults: Object.fromEntries(Object.entries(defaults).map(([slot, value]) => [slot, onKey(value)])),
         choice: name === null && own === profile ? keys : [] };
 }

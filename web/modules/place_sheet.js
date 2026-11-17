@@ -16,8 +16,8 @@ import { modelCatalog } from './model_catalog_store.js';
 import { disconnectPlace, failureText, normalizePlace, normalizePlaceStatus, PLACES_CHANGED_EVENT, readPlaceConnector, readPlaceRooms, readPlaces, updatePlace } from './consciousness_api.js';
 import { mountPlaceHistory, placeRoomsHtml } from './place_history.js';
 import {
-    PLACE_STATES, SILENT_CARD, WAKE_FACT_WORDS, accountIdText, authorWord, capitalized, inheritedModel, listWords, placeService, placeStateOf,
-    placeStateWord, placeTitle, placedByWord, sameWords, signalLabels, wakeFactWord, writtenByWord,
+    ACTIVE_UNCHECKED_NOTE, PLACE_STATES, SILENT_CARD, WAKE_FACT_WORDS, accountIdText, authorWord, capitalized, inheritedModel, listWords, noKindChecked,
+    placeService, placeStateOf, placeStateWord, placeTitle, placedByWord, sameWords, signalLabels, wakeFactWord, writtenByWord,
 } from './consciousness_words.js';
 
 /** Ask the Skills page for one installed skill's card, or Browse filtered to connectors. */
@@ -119,11 +119,14 @@ function stateHtml(place, ui) {
     // What the chosen state does: a quiet note in the tray; what Silent guarantees is a host fact in the
     // System voice, under the tray (fills never stack).
     // Why it is quiet now, by its one cause, in the host's words (owner 15.11, 5A), with the door where that cause
-    // is changed; the stored choice stays chosen in the strip above it.
+    // is changed; the stored choice stays chosen in the strip above it. Active with no kind checked claims no wake
+    // (the list says that setting).
     const quiet = place.quiet;
     const door = quiet?.door === 'costs' ? ['open-costs', tr('places.costs.door', 'Costs ›')]
         : quiet ? ['open-consciousness', tr('places.consciousness.door', 'Consciousness ›')] : null;
-    const note = quiet ? tr(quiet.note, quiet.note) : state?.note || 'Its state could not be read.';
+    const note = quiet ? tr(quiet.note, quiet.note)
+        : place.state === 'active' && noKindChecked(place) ? tr('places.state.active.unchecked', ACTIVE_UNCHECKED_NOTE)
+            : state?.note || 'Its state could not be read.';
     const doorHtml = door ? ` <button type="button" class="consciousness-inline-link ui-hit-area" data-place-act="${door[0]}">${escapeHtml(door[1])}</button>` : '';
     return `<div class="settings-effort-card place-state">
             <label id="place-state-label">What it does here</label>
@@ -147,11 +150,14 @@ function wakesHtml(place, ui) {
             <span${authored ? ' data-i18n-authored' : ''}>${escapeHtml(label)}</span></label>${chosen ? chipHtml(tr(`places.author.${chosen.author}`, authorWord(chosen.author)), 'neutral') : ''}</li>`;
     }).join('');
     const service = `<span data-i18n-authored>${escapeHtml(ui.serviceLabel || place.serviceLabel || place.provider)}</span>`;
+    const unchecked = noKindChecked(place);
     return `<p class="place-sheet-note">${fmt('A checked kind calls it here at once, when {service} reports it.', { service })}</p>
         <ul class="place-wake-list">${items}</ul>
         ${vocabulary.includes('from_bot') ? `<p class="place-sheet-note">${tr('places.wake.bots', 'Bot messages need this check; once checked, they can wake it without another checked kind.')}</p>` : ''}
         ${['off', 'panic'].includes(place.quiet?.cause) ? `<p class="place-sheet-note">${tr('places.wake.consciousness_off', 'While consciousness is off, nothing here wakes it.')}</p>`
-        : place.state === 'silent' ? `<p class="place-sheet-note">${tr('places.wake.silent', 'Silent: these still wake it to read and think; what it would say or change here is held.')}</p>` : ''}
+        : place.state === 'paused' ? ''
+            : unchecked ? `<p class="place-sheet-note">${tr('places.wake.none', 'No kind is checked: no event starts a new conversation here at once. An ongoing conversation can still wake it.')}</p>`
+                : place.state === 'silent' ? `<p class="place-sheet-note">${tr('places.wake.silent', 'Silent: these still wake it to read and think; what it would say or change here is held.')}</p>` : ''}
         ${place.state === 'paused' ? `<p class="place-sheet-note">${tr('places.wake.paused', 'While this place is Paused, nothing here wakes it.')}</p>` : ''}
         <p class="place-sheet-note">${tr('places.wake.honesty', 'Everything else here it sees at its next own wake and decides what to read.')}</p>`;
 }

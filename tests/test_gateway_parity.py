@@ -472,7 +472,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "status", "outcome_axes", "reason_code", "cancel_origin", "delegated_runs_unreconciled", "root_phase_checkpoint",
         "timeout_retry_from", "original_task_id", "finalization_recovery", "terminal_origin",
         "finishing_reviews", "late_work", "can_resume", "cancelable", "presence_pause",
-        "last_line", "last_line_at", "tool_calls", "detached", "project_name", "lead", "processing",
+        "last_line", "last_line_at", "tool_calls", "detached", "place_origin", "project_name", "lead", "processing",
     }, "ActiveChatActivity adds optional outcome/retry/review evidence without changing required activity facts"
     from ouroboros.physical_attempt_context import ContextAttemptFact
 
@@ -486,7 +486,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     question_keys |= {"status", "outcome_axes", "reason_code", "cancel_origin", "delegated_runs_unreconciled", "root_phase_checkpoint",
                       "timeout_retry_from", "original_task_id", "finalization_recovery", "terminal_origin"}
     question_keys |= {"finishing_reviews", "late_work", "can_resume", "cancelable", "presence_pause"}
-    question_keys |= {"last_line", "last_line_at", "tool_calls", "detached", "project_name"}
+    question_keys |= {"last_line", "last_line_at", "tool_calls", "detached", "place_origin", "project_name"}
     assert {key: value for key, value in activity_fields.items() if key not in question_keys} == get_type_hints(ActiveDirectTurn, include_extras=True), (
         "ActiveChatActivity must mirror ActiveDirectTurn's field shape so one client reducer hydrates both"
     )
@@ -509,7 +509,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     assert activity_schema["properties"].pop("finishing_reviews")["type"] == "boolean"
     assert activity_schema["properties"].pop("delegated_runs_unreconciled") == {"type": "array", "items": {"type": "string"}}
     for field, kind in {"last_line": "string", "last_line_at": "string", "tool_calls": "integer",
-                        "detached": "boolean", "project_name": "string"}.items():
+                        "detached": "boolean", "place_origin": "object", "project_name": "string"}.items():
         assert activity_schema["properties"].pop(field)["type"] == kind
     assert not question_keys & set(activity_schema["required"])
     assert activity_schema == json_schema_for(ActiveDirectTurn), (

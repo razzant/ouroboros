@@ -2,8 +2,9 @@
 
 Read from ``event.message`` (CREATING_SKILLS "Places and focus transport ingress"): attachment records
 that did not arrive (``attachments[]`` with a non-``staged`` status, or the slack/email dialect
-``content_available: false``), descriptions of content without words (``non_text``), a forward's origin,
-the replied message and its quoted part (alone, too), an album, and the address behind linked words.
+``content_available: false``), descriptions of content without words (``non_text``), the reported origin of
+its text (``forward_origin``), the replied message and its quoted part (alone, too), an album, and the address
+behind linked words.
 ``event.text``, the person's exact words, is never read for meaning or changed: the focus frame
 (``presence_context``) renders these lines in their own labelled block, once, from the event record, so the
 frame re-renders from that record. Staged files are the host attachment manifest's to show, never repeated
@@ -20,6 +21,8 @@ from typing import Any, Mapping
 from ouroboros.archive_reader import display_name, size_words
 
 STAGED = "staged"
+# The ``non_text`` kind of an observed change rather than new words (CREATING_SKILLS; ``place_intake.observed_change``).
+STATE_CHANGE = "state_change"
 HEADING = "What the connector reports about this message (host facts, not their words):"
 # A connector may describe content without words in up to this many characters (a poll with its options, a
 # checklist, a contact card); a longer description is cut with its count shown, never silently.
@@ -128,12 +131,15 @@ def _account(value: Any) -> str:
 
 
 def _origin(origin: Any) -> str:
+    """A message's reported text origin (``forward_origin``) as the connector names it: who, signed and when, each only
+    when given. One that names nobody is an unidentified source: never "another author", since the connector may mark
+    words it could not attribute (an earlier revision), which proves no other writer."""
     if isinstance(origin, str):
         return _quoted(origin)
     origin = _mapping(origin)
     who = (_account(origin.get("sender_user")) or (_quoted(origin["sender_user_name"]) if _first(
         origin, "sender_user_name") else "") or _account(origin.get("sender_chat") or origin.get("chat"))
-           or "another author")
+           or "an unidentified source")
     signed = f", signed {_quoted(origin['author_signature'])}" if _first(origin, "author_signature") else ""
     when = f", at {_when(origin.get('date'))}" if _when(origin.get("date")) else ""
     return who + signed + when
@@ -153,8 +159,9 @@ def reply_target(message: Any, *, source: str = "") -> dict[str, str] | None:
     if not reply and ident in (None, "") and not isinstance(quote, str):
         return None
     author = _account(reply.get("from")) or _account(reply.get("sender_chat"))
-    if reply.get("forward_origin"):
-        author = _origin(reply["forward_origin"]) + (f" (forwarded by {author})" if author else "")
+    if reply.get("forward_origin"):  # who sent it stays named; the text's reported origin stands beside, as reported
+        origin = f"reported text origin: {_origin(reply['forward_origin'])}"
+        author = f"{author} ({origin})" if author else origin
     words = next((reply[key] for key in ("text", "caption") if isinstance(reply.get(key), str)), None)
     if words is None and isinstance(quote, str):
         words, author = quote, (author or "author not recorded") + " (quoted excerpt)"
@@ -190,7 +197,7 @@ def _reply(message: Mapping[str, Any]) -> list[str]:
             + (f" by {author}" if author else "")
             + (f": {_quoted(words)}" if words else ", whose words the event does not carry")
             + (f"; it carried {', '.join(display_name(name) for name in files)}" if files else "")
-            + (f"; that message was itself forwarded from {_origin(reply['forward_origin'])}"
+            + (f"; that message's reported text origin: {_origin(reply['forward_origin'])}"
                if reply.get("forward_origin") else "") + ".")
     return [line, *([f"Quotes from it: {_quoted(quote)}."] if quote else [])]
 
@@ -208,11 +215,13 @@ def connector_fact_lines(message: Any, *, text: str = "", sender: str = "", sour
               + (f" [truncated {len(description) - DESCRIPTION_CHARS} chars{whole}]"
                  if len(description) > DESCRIPTION_CHARS else "") + "." for kind, description in non_text_items(message)]
     if message.get("forward_origin"):
+        # The reported origin of the text, as given: a forward's writer, or words of an earlier revision the connector
+        # could not attribute. It never says the whole text is another's, nor denies the sender's own part of it.
         lines.append(f"The channel's own post {_origin(message['forward_origin'])}, forwarded automatically into its "
                      "discussion group: the start of this comment thread."
                      if message.get("is_automatic_forward") is True else
-                     f"Forwarded: these words were written by {_origin(message['forward_origin'])}, not by "
-                     f"{_quoted(sender) if sender else 'the sender'}.")
+                     f"Reported text origin: {_origin(message['forward_origin'])}; this does not confirm that all the "
+                     f"text was written by {_quoted(sender) if sender else 'the sender'}.")
     lines += _reply(message)
     if album := message.get("media_group_id"):
         position = message.get("media_group_position")

@@ -351,10 +351,12 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
             const header = document.querySelector('#page-chat .chat-page-header');
             return {header: rect('#page-chat .chat-page-header'), toast: rect('.toast-stack--room .toast'),
                 composer: rect('#page-chat #chat-input-area'), background: getComputedStyle(header).backgroundColor,
-                before: getComputedStyle(header, '::before').content};
+                edge: getComputedStyle(header, '::before').backgroundImage,
+                edgeEvents: getComputedStyle(header, '::before').pointerEvents};
         }""")
+        # The bar paints nothing of its own; under its capsules lies the room's edge (DESIGN "A room's edges"), no press.
         assert facts["background"] == "rgba(0, 0, 0, 0)"
-        assert facts["before"] in ("none", "normal")
+        assert "linear-gradient" in facts["edge"] and facts["edgeEvents"] == "none", facts
         assert facts["toast"]["top"] > facts["header"]["bottom"]
         assert facts["toast"]["bottom"] <= facts["composer"]["top"]
         assert not page.locator("#page-chat .chat-page-note").is_visible()
@@ -473,10 +475,11 @@ def test_status_fitting_skips_unchanged_paints_and_tracks_capsule_width(shell_ui
     title.evaluate("el => { el.textContent = 'Main'; }")
     page.wait_for_function("document.querySelector('#page-chat .rw-trigger').dataset.word !== 'off'")
     capsule = page.locator("#page-chat .app-page-title-row")
-    rest = capsule.evaluate("el => getComputedStyle(el).backgroundImage")
+    paint = "el => { const s = getComputedStyle(el); return s.backgroundImage + ' ' + s.backgroundColor; }"
+    rest = capsule.evaluate(paint)
     title.hover()
     page.wait_for_timeout(160)
-    hover = capsule.evaluate("el => getComputedStyle(el).backgroundImage")
+    hover = capsule.evaluate(paint)
     assert hover != rest, "hovering the title answers across the whole capsule"
     title.click()
     page.wait_for_selector("#page-chat .rw-shade:not([hidden])")

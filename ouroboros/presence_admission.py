@@ -36,6 +36,9 @@ class PresenceAdmission:
     place: Place | None = None
     allowance: Mapping[str, Any] | None = None
     circle: Mapping[str, Any] | None = None  # circle words with both origins, and model, at admission
+    # The words the connector's live declaration gives its facts (``places.declared_fact_labels``), as a door read
+    # them; a carrier takes the whole map from its seed, by value: display only, never a fact's meaning.
+    fact_labels: Mapping[str, str] | None = None
 
 
 def admit_presence_turn(*, drive_root: Path, authenticated_transport_skill: str, binding_id: str = "",

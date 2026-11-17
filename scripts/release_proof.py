@@ -65,6 +65,7 @@ RELEASE_GATES = (
     "skill-smoke",
     "lint",
     "test-verdict",
+    "quick-test",
 )
 JOB_RESULTS = ("success", "failure", "cancelled", "skipped")
 # Owner decision 1A of 2026-10-21: every gate must succeed; nothing is waived by tag.

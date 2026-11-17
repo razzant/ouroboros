@@ -290,3 +290,33 @@ def test_a_named_connection_fingerprints_its_own_endpoint_and_shares_a_fixed_one
     assert capability_base_url("cloudru@cr2::m", settings) == "https://cloudru-2.example/v1"
     assert capability_base_url("openrouter@byok::x/y", settings) == capability_base_url("x/y", settings) == ""
     assert capability_base_url("openrouter@gone::x/y", settings) == ""
+
+
+def test_openai_api_surface_is_a_closed_choice_read_as_written():
+    from ouroboros.provider_models import normalize_builtin_choices
+
+    rows, error = normalize_connections([{"kind": "openai", "name": "w", "api_key": "k", "api_surface": "auto"}])
+    assert "api_surface must be chat_completions or responses" in error and rows == []
+    assert normalize_builtin_choices({"OPENAI_API_SURFACE": "Bogus"}) == (
+        "OPENAI_API_SURFACE must be chat_completions or responses.")
+    settings = {"OPENAI_API_SURFACE": " Responses "}
+    assert normalize_builtin_choices(settings) == "" and settings["OPENAI_API_SURFACE"] == "responses"
+    rows, error = normalize_connections([{"kind": "openai", "name": "w", "api_key": "k", "api_surface": "responses"}])
+    assert error == "" and rows[0]["api_surface"] == "responses"
+
+
+def test_only_a_genuinely_new_openai_connection_is_seeded_on_responses():
+    from ouroboros.provider_connections import seed_new_api_surfaces
+
+    after = {"OPENAI_API_KEY": "sk-new"}
+    assert seed_new_api_surfaces(after, {}) == ["OPENAI_API_SURFACE"] and after["OPENAI_API_SURFACE"] == "responses"
+    for before, after in (({"OPENAI_API_KEY": "sk-env"}, {"OPENAI_API_KEY": "sk-typed"}),  # an environment-only key
+                          ({}, {"OPENAI_API_KEY": "k", "OPENAI_API_SURFACE": "chat_completions"}),  # chosen
+                          ({}, {"OPENAI_API_KEY": "k", "OPENAI_BASE_URL": "http://compatible"})):  # the legacy pair
+        assert seed_new_api_surfaces(after, before) == [] and after.get("OPENAI_API_SURFACE", "") in {"", "chat_completions"}
+    before = {CONNECTIONS_KEY: [{"kind": "openai", "name": "old", "api_key": "a"}]}
+    after = {CONNECTIONS_KEY: [{"kind": "openai", "name": "old", "api_key": "a"},
+                               {"kind": "openai", "name": "new", "api_key": "b"},
+                               {"kind": "anthropic", "name": "x", "api_key": "c"}]}
+    assert seed_new_api_surfaces(after, before) == ["openai@new"]
+    assert [row.get("api_surface") for row in after[CONNECTIONS_KEY]] == [None, "responses", None]

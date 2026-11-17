@@ -18,7 +18,7 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
         "_append_or_merge_user_message _evict_stale_image_blocks "
         "_append_or_merge_user_content _owner_marked_content _record_owner_directive "
         "_initialize_owner_directives _visible_round_text _emit_round_progress "
-        "_latch_final_answer_marker"
+        "_latch_final_answer_marker _handle_text_response"
     ),
     # The root admission seal (born as the task-acceptance fence; its persisted names stay).
     "delivery_seal": (

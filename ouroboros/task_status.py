@@ -1507,7 +1507,7 @@ def format_subagent_absorption_message(
     omitted = 0
     from ouroboros.cost_projection import cost_display
 
-    from ouroboros.task_finalization import terminal_host_notice_text
+    from ouroboros.task_finalization import displaced_answer_note, terminal_host_notice_text
 
     for child in terminal:
         cid = str(child.get("task_id") or child.get("id") or "")
@@ -1548,6 +1548,8 @@ def format_subagent_absorption_message(
             )
         else:
             lines.append("[no result text returned]")
+        if note := displaced_answer_note(child):
+            lines.append(note)
         pointers = _child_artifact_pointers(child)
         if pointers:
             lines.append("artifacts: " + "; ".join(pointers))

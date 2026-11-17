@@ -918,6 +918,9 @@ def _task_get_response(request: Request) -> JSONResponse:
     payload["question_rooms"] = question_display_rooms(drive_root, task_id, payload.get("owner_quiz"))
     from ouroboros.owner_continue import continuation_offer  # Batch4: a Continue, or its accepted successor
     payload["continuation_offer"] = continuation_offer(data, task_id)
+    from ouroboros.subagent_messages import place_origin  # the place that called it, as its census and frames say it
+    if origin := place_origin(data["metadata"] if isinstance(data.get("metadata"), dict) else {}):
+        payload["place_origin"] = origin
     objections = _plan_objections_view(drive_root, task_id, data)  # the host's fold; the browser never re-derives it
     if objections is not None:
         payload["plan_objections"] = objections

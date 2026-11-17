@@ -165,6 +165,17 @@
       },
       {
         "group": "more",
+        "id": "openai-api-surface",
+        "inputType": "text",
+        "label": "OpenAI API",
+        "note": "",
+        "placeholder": "",
+        "settingKey": "OPENAI_API_SURFACE",
+        "settingsInputId": "s-openai-api-surface",
+        "stateKey": "openaiApiSurface"
+      },
+      {
+        "group": "more",
         "id": "cloudru-key",
         "inputType": "password",
         "label": "Cloud.ru Foundation Models API Key",
@@ -474,6 +485,7 @@
     "modelAccounts": {},
     "modelContextWindows": {},
     "modelProcessingPreferences": {},
+    "openaiApiSurface": "",
     "openaiKey": "",
     "openrouterKey": "",
     "perTaskCostUsd": 50.0,
@@ -586,6 +598,15 @@
       "safety": "",
       "vision": ""
     },
+    "openai-responses": {
+      "consciousness": "",
+      "deep_self_review": "openai::gpt-6.1-sol",
+      "fallback": "openai::gpt-6.1-sol",
+      "light": "openai::gpt-6-luna",
+      "main": "openai::gpt-6.1-terra",
+      "safety": "",
+      "vision": ""
+    },
     "openrouter": {
       "consciousness": "",
       "fallback": "openai/gpt-6.1-terra",
@@ -614,6 +635,9 @@
     "openai/gpt-5.6-terra",
     "openai/gpt-5.6-sol",
     "openai/gpt-5.6-luna",
+    "openai::gpt-6.1-terra",
+    "openai::gpt-6.1-sol",
+    "openai::gpt-6-luna",
     "openai::gpt-5.6-terra",
     "openai::gpt-5.6-sol",
     "openai::gpt-5.6-luna",

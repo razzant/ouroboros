@@ -3,11 +3,15 @@
 The files are the authority. This module owns address resolution, source reads,
 generated inventory and the short source/history/index write transaction. It
 does not select memories, call models or decide what an observation means.
+Generated ``memory/knowledge/index-full.md`` (``INDEX_FILE``) is reserved,
+never a topic. A stale revision the journal tail holds gets all changes since,
+whole; otherwise the writer returns the current source.
 """
 
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import time
@@ -17,7 +21,7 @@ from itertools import chain
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Mapping
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote, unquote, unquote_to_bytes, urlsplit
 
 import yaml
 
@@ -294,7 +298,7 @@ def _navigation_descriptor(address: KnowledgeAddress, raw: bytes | None = None) 
     error = _archive_error(address.topic, metadata)
     return {**address.as_dict(), "title": title, "type": metadata.get("type"), "summary": metadata.get("summary"),
             "state": "archived" if "archive" in metadata and not error else "active",
-            "archive": metadata.get("archive"), "archive_error": error}
+            "archive": metadata.get("archive"), "archive_error": error, "keys": metadata.get("keys")}
 
 
 # a note's address -> (what proves its bytes unchanged, its navigation row); a listing drops deleted notes
@@ -491,6 +495,45 @@ def knowledge_index_views(address: KnowledgeAddress, *, overview: KnowledgeNote 
             render_knowledge_outline(rows, legacy, scope=address.scope))
 
 
+def _key_part(value: Any) -> Any:
+    """A key part as written: a YAML integer (an unquoted numeric account id) is its decimal string; nothing else."""
+    return str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+
+
+def speaker_pages(canonical_root: Path | None, provider: str, namespace: str, actor_id: str, *,
+                  unverified: bool = False) -> dict[str, Any]:
+    """A place speaker's exact key and the global notes whose ``keys`` hold it, as host facts of the turn.
+
+    A key is an outside name of a note's subject, ``{provider, namespace, id}`` (an account id in its account scope,
+    an email, a repository), three strings only the mind writes in the note's ``keys`` frontmatter list. It joins by
+    equality alone: case kept, nothing trimmed, an empty namespace meets only an empty one, a display name never.
+    Several notes holding one key are all named, never merged or ranked; archived ones are named apart; a key grants
+    no authority. One pass over the global shelf's navigation, which writes nothing. Without a data root or an
+    actor id there is no key and no fact."""
+    if canonical_root is None or not actor_id:
+        return {}
+    key = {"provider": provider, "namespace": namespace, "id": actor_id}
+    found: dict[str, list[str]] = {"active": [], "archived": []}
+    shelf = resolve_knowledge_address(canonical_root, OVERVIEW_TOPIC, "global")
+    for row in inventory_knowledge(shelf, navigation=True):
+        held = row.get("keys") if isinstance(row.get("keys"), list) else []
+        if any(isinstance(entry, Mapping) and {name: _key_part(entry.get(name)) for name in key} == key for entry in held):
+            found[row["state"]].append(f"knowledge_read(topic={row['topic']!r}, scope='global')")
+    active, archived = found["active"], found["archived"]
+    facts: dict[str, Any] = {"key": key}
+    if len(active) == 1:
+        facts["page"] = active[0]
+    elif active:
+        facts["pages"] = active
+    if archived:
+        facts["archived_pages"] = archived
+    if not active and not archived:
+        facts["page"] = "no global knowledge note lists this key in its keys frontmatter"
+    elif unverified:
+        facts["matched_by"] = "an unverified address"
+    return facts
+
+
 @contextmanager
 def knowledge_write_lock(shelf: Path):
     """One stable sidecar serializes existing note/index/history writers."""
@@ -561,6 +604,32 @@ def knowledge_links(note: KnowledgeNote) -> tuple[dict[str, Any], ...]:
             except ValueError:
                 pass  # An ordinary source link need not be a KB address.
         rows.append(row)
+    return tuple(rows)
+
+
+def knowledge_backlinks(note: KnowledgeNote, shelves: tuple[KnowledgeAddress, ...]) -> tuple[dict[str, Any], ...]:
+    """Current sources on the readable shelves, joined by resolved scope and topic.
+
+    File-name bytes (also percent-encoded) only select candidates to parse; the
+    existing Markdown resolver decides identity. No graph or disk index is kept.
+    """
+    filename = note.address.path.name.encode("utf-8")
+    rows = []
+    for shelf in {item.shelf: item for item in shelves}.values():
+        for row in inventory_knowledge(shelf, navigation=True):
+            address = replace(shelf, topic=row["topic"])
+            try:
+                raw = address.path.read_bytes()
+                spelled = unquote(html.unescape(raw.decode("utf-8", "replace")).replace("\\", "")).encode("utf-8")
+                if filename not in raw and filename not in unquote_to_bytes(raw) and filename not in spelled:
+                    continue  # also entity- or backslash-spelled names, as the Markdown parser reads them
+                source = _note(address, raw)
+                links = knowledge_links(source)
+            except (OSError, UnicodeDecodeError, ValueError):
+                continue  # Unreadable sources or unresolvable URLs supply no link facts.
+            if any(link.get("address", {}).get("scope") == note.address.scope
+                   and link["address"]["topic"] == note.address.topic for link in links):
+                rows.append({"scope": address.scope, "topic": address.topic, "state": source.state})
     return tuple(rows)
 
 

@@ -404,6 +404,67 @@ def test_server_read_is_a_declaration_even_when_settings_is_smaller(tmp_path, mo
     assert ce._read(tmp_path) == before
 
 
+@pytest.mark.parametrize("standing,history", [(False, False), (False, True), (True, False)])
+def test_window_learning_uses_the_actors_nano_schema_set(tmp_path, monkeypatch, standing, history):
+    from ouroboros.tool_policy import initial_tool_schemas
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx._nano_standing = standing
+    expected = initial_tool_schemas(registry, "nano", ["read_file"] if history else [], standing=standing)
+    if not standing and not history:
+        assert {s["function"]["name"] for s in expected} == {
+            "compact_context", "enable_tools", "list_available_tools"}
+    usage = {}
+    sr.stamp(usage, _sdk_error(400, json.dumps({"error": {
+        "type": sr.LLAMA_CPP_TYPE, "n_ctx": 80000, "n_prompt_tokens": 90000}}).encode()))
+    plan = SimpleNamespace(route_fp="call-fixture", provider="openai-compatible", model="fixture",
+                           window_record=None, window_witness_bound=True)
+    messages = [{"role": "system", "content": "Low view"}]
+    if history:
+        messages += [{"role": "assistant", "content": None, "tool_calls": [{"id": "r1", "type": "function",
+                      "function": {"name": "read_file", "arguments": "{}"}}]}]
+    ctx = SimpleNamespace(accumulated_usage=usage, context_fit_plan=plan, active_use_local=False,
+                          active_context_mode="low", active_model="fixture", messages=messages, tools=registry,
+                          tool_schemas=initial_tool_schemas(registry, "low"), model_role="main", task_id="call1")
+
+    def rebind(*args, **kwargs):
+        messages[0] = {"role": "system", "content": "Nano view"}
+        return plan, "nano"
+
+    assert learn_window_from_refusal(ctx, SimpleNamespace(_rebind_context_fit_plan=rebind))
+    assert ctx.tool_schemas == expected  # same canonical bytes as a Nano start, including history's tools
+
+
+def test_a_tool_loaded_but_not_yet_called_survives_the_rebind_into_nano(tmp_path, monkeypatch):
+    """Review 8 (Fable): enable_tools loaded a tool, a size refusal rebinds the request into Nano before it is called;
+    the loaded tool's schema is still sent."""
+    from ouroboros.tool_policy import initial_tool_schemas
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx._actor_loaded_tool_names = {"query_code"}  # what enable_tools(["query_code"]) leaves
+    usage = {}
+    sr.stamp(usage, _sdk_error(400, json.dumps({"error": {
+        "type": sr.LLAMA_CPP_TYPE, "n_ctx": 80000, "n_prompt_tokens": 90000}}).encode()))
+    plan = SimpleNamespace(route_fp="loaded-fixture", provider="openai-compatible", model="fixture",
+                           window_record=None, window_witness_bound=True)
+    messages = [{"role": "system", "content": "Low view"}]
+    ctx = SimpleNamespace(accumulated_usage=usage, context_fit_plan=plan, active_use_local=False,
+                          active_context_mode="low", active_model="fixture", messages=messages, tools=registry,
+                          tool_schemas=initial_tool_schemas(registry, "low"), model_role="main", task_id="loaded1")
+
+    def rebind(*args, **kwargs):
+        messages[0] = {"role": "system", "content": "Nano view"}
+        return plan, "nano"
+
+    assert learn_window_from_refusal(ctx, SimpleNamespace(_rebind_context_fit_plan=rebind))
+    names = [schema["function"]["name"] for schema in ctx.tool_schemas]
+    assert "query_code" in names and "finish_task" in names
+
+
 def test_engine_display_recognizes_size_but_never_supplies_numbers(tmp_path, monkeypatch):
     from ouroboros.llm_claudexor import ClaudexorModelError
     from ouroboros.loop_llm_call import classify_llm_exception
@@ -524,6 +585,7 @@ def test_numberless_fact_does_not_shadow_unitless_recognition(basis, via):
 
 def test_http200_text_refusal_rebinds_real_sdk_request_to_nano(tmp_path, monkeypatch):
     from tests._first_contact import ANSWER, _episode, _run
+    from ouroboros.tool_policy import NANO_RESIDENT_SCHEMA_NAMES
     from tests._first_contact_server import FakeLlamaServer
 
     def refusal(count):
@@ -549,9 +611,12 @@ def test_http200_text_refusal_rebinds_real_sdk_request_to_nano(tmp_path, monkeyp
         episode = _episode(tmp_path, monkeypatch, server)
         text, usage, _trace = _run(episode)
     main = [post for post in server.posts if post["tools"]]
+    sent = [body for kind, body in server.calls if body.get("tools") and kind != "safety"]
+    names = {tool["function"]["name"] for tool in sent[-1]["tools"]}
     assert ANSWER in str(text), (text, server.posts)
-    assert main[0]["refused"] and main[0]["tools"] > 3
-    assert len(main) == 2 and main[1]["tools"] == 3 and not main[1].get("refused")
+    assert main[0]["refused"] and main[0]["tools"] > len(NANO_RESIDENT_SCHEMA_NAMES)
+    assert len(main) == 2 and not main[1].get("refused")
+    assert "finish_task" in names and names <= NANO_RESIDENT_SCHEMA_NAMES and len(names) == main[1]["tools"]
     assert episode.tools._ctx.active_context_mode == "nano"
 
 

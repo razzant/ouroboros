@@ -245,6 +245,7 @@
  * @property {PlaceHistoryImport=} historical_import  // never owner confirmation or attention
  * @property {string=} sent_at  // the provider send time its arrival recorded; absent: unknown, never inferred
  * @property {PlaceHistoryReaction=} reaction  // a typed reaction arrival or receipt; absent: not one
+ * @property {Array<{kind:string,description:string}>=} non_text  // what the row carries without words (a `state_change`, a sticker, a poll), as its connector described it; never speech
  */
 
 /**

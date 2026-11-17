@@ -23,7 +23,9 @@ def test_workflow_filters_cover_the_lane_and_request_builders():
                  "tests/fixtures/size_refusals/manifest.json", "tests/_window_history.py",
                  "tests/_first_contact_server.py", "scripts/context_gate.py", "ouroboros/deployment_policy.py",
                  "ouroboros/gateway/settings.py", "ouroboros/pricing.py", "tests/fixtures/llm_golden/aux_routes.json",
-                 "docs/inventories/FACADE_INVENTORY.md"):
+                 "docs/inventories/FACADE_INVENTORY.md",
+                 # the call start's seam (tests/test_live_call_start_fit.py): the agent hands nano_base to the fit
+                 "ouroboros/agent.py", "ouroboros/live_conversation.py"):
         assert any(fnmatchcase(path, pattern) for pattern in paths), path
     assert not any(fnmatchcase("web/styles.css", pattern) for pattern in paths)
     assert workflow["permissions"] == {"contents": "read"}

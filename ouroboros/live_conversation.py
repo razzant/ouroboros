@@ -364,7 +364,8 @@ class ConversationHost:
         self.plan = ctx.context_fit_plan
         if self.plan.model != turn.model or self.plan.provider != turn.route.accounting_provider:
             raise RealtimeSetupError("route", "call input must use the selected realtime route")
-        self.schemas = initial_tool_schemas(tools, context_mode=self.plan.initial_mode,
+        ctx._nano_standing = False  # a call keeps its own Nano base: the selectors and its feature's tools
+        self.schemas = initial_tool_schemas(tools, context_mode=self.plan.initial_mode, standing=False,
                                            schema_names=turn.feature.get("initial_tools", ()))
         self._schemas_mode = self.plan.initial_mode
         _reset_turn_state(ctx)
@@ -431,7 +432,7 @@ class ConversationHost:
         from ouroboros.tools.tool_discovery import update_resident_notice
 
         enabled = set(self.ctx._actor_loaded_tool_names)
-        selected = initial_tool_schemas(self.tools, context_mode=mode,
+        selected = initial_tool_schemas(self.tools, context_mode=mode, standing=False,
                                         schema_names=self.turn.feature.get("initial_tools", ()))
         names = {schema["function"]["name"] for schema in selected}
         selected.extend(schema for schema in self.schemas

@@ -14,7 +14,7 @@ import { setup, NodeStub } from './dashboard_dom_fixture.js';
 
 const strip = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 const raw = (id, fields = {}) => ({ place_id: id, connector: 'chat-bridge', provider: 'chat', label: `Chat · ${id}`, state: 'active',
-    revision: 2, notes: [], wakes: [], owner_accounts: [], readiness: { text: 'Connector on', tone: 'ok' }, ...fields });
+    revision: 2, notes: [], wakes: [{ fact: 'mention', author: 'owner' }], owner_accounts: [], readiness: { text: 'Connector on', tone: 'ok' }, ...fields });
 const RESPONSE = {
     connectors: [{ connector: 'chat-bridge', label: 'Chat', destination: 'vendor:chat', readiness: { text: 'Connector on', tone: 'ok' } }],
     circles: [
@@ -64,6 +64,25 @@ test('a place a cause keeps quiet says why, muted, to the eye and to a screen re
     assert.match(placeRowHtml(alpha), /data-tone="ok">active</);
     assert.equal(normalizePlacesResponse({ ...RESPONSE, places: [raw('t', { quiet: { cause: 'off' } })] }).places[0].quiet, null,
         'a cause without its words is no cause');
+});
+
+test('a place with no wake kind checked says that setting beside its state, muted; Paused and Off keep their own words', () => {
+    // An Active place with an empty list read «active» with the ok dot, as if events called it at once. The row states
+    // the setting and promises neither a wake nor silence: an ongoing conversation can still wake it.
+    const [active, silent, paused, off, bots] = normalizePlacesResponse({ ...RESPONSE, places: [raw('a', { wakes: [] }),
+        raw('s', { state: 'silent', wakes: [] }), raw('p', { state: 'paused', wakes: [] }), raw('o', { wakes: [], quiet: { cause: 'off', word: 'Hears only · consciousness off', note: 'Consciousness is off: it only hears here, and nothing here wakes it until you turn it on.', door: 'consciousness' } }),
+        raw('b', { wakes: [{ fact: 'from_bot', author: 'owner' }] })] }).places;
+    const row = placeRowHtml(active, { title: 'a', source: 'Chat' });
+    assert.match(row, /<span class="ui-status" data-tone="muted">active · no wake kinds checked<\/span>/);
+    assert.match(row, /aria-label="Open a \(Chat\): active · no wake kinds checked; last event /);
+    assert.match(placeRowHtml(silent), /data-tone="muted">silent · no wake kinds checked</);
+    assert.match(placeRowHtml(paused), /data-tone="muted">paused</);
+    assert.doesNotMatch(placeRowHtml(paused), /kinds checked/, 'Paused already says nothing wakes it');
+    assert.match(placeRowHtml(off), /data-tone="muted">Hears only · consciousness off</);
+    assert.doesNotMatch(placeRowHtml(off), /kinds checked/, 'Off says the nearer cause once');
+    assert.match(placeRowHtml(bots), /data-tone="ok">active</, 'a bot check alone is a checked kind');
+    assert.doesNotMatch(row, /mentions|replies|every message/i, 'the wake list stays in the sheet');
+    assert.doesNotMatch(row, /nothing|never|silent|no event/i, 'the row promises no silence');
 });
 
 test('a row whose name is its service says the service once, to the eye and to a screen reader', () => {

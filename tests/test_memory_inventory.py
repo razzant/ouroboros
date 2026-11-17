@@ -203,6 +203,18 @@ def test_the_readers_publish_nothing(tmp_path):
     assert (chronicle / "records.jsonl").read_bytes() == log
     assert sorted(path.name for path in chronicle.iterdir()) == files
 
+    from ouroboros import knowledge, knowledge_versions
+
+    target = knowledge.resolve_knowledge_address(tmp_path, "fixture-note", "global")
+    assert knowledge.write_knowledge_note(target, "A retained source.").ok
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+              for path in target.shelf.parent.rglob("*") if path.is_file()}
+    events, baseline = knowledge_versions.knowledge_changes(tmp_path, None, gaps)
+    assert events == [] and baseline["global"]["offset"] > 0
+    assert len(knowledge_versions.knowledge_changes(tmp_path, {}, gaps)[0]) == 1 and not gaps
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in target.shelf.parent.rglob("*") if path.is_file()} == before
+
 
 # --- an account's period --------------------------------------------------------------------------
 

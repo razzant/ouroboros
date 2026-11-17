@@ -4,6 +4,7 @@
 // composer's pills reaches whichever of them is off screen. It owns no polling or saved state:
 // `/api/state` names the canonical questions and actions, the feed holds their cards.
 import { createModelWaitController } from './model_wait.js';
+import { readBand } from './project_read_state.js';
 import { projectReference, nameProjectReference } from './project_reference.js';
 import { createTaskResumeButton, openTaskControlMenu, requestStop, hurryTaskAction,
     resumeTaskAction, ACTION_RESUME, ACTION_HURRY, TASK_CONTROL_TRIGGER_LABEL } from './task_control_menu.js';
@@ -167,13 +168,9 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         const card = messagesDiv.querySelector(`.chat-quiz-card[data-task-id="${CSS.escape(String(target.row.task_id))}"][data-quiz-id="${CSS.escape(String(target.row.quiz_id))}"]`);
         return card?.closest('.chat-bubble') || card || null;
     }
-    // The reading area between the floating header and the composer.
+    // The reading area between the floating header (with its frosted edge) and the composer.
     function view() {
-        const box = messagesDiv.getBoundingClientRect();
-        const header = page.querySelector('.chat-page-header')?.getBoundingClientRect();
-        const composer = toolbar?.getBoundingClientRect();
-        return { top: Math.max(box.top, header ? header.bottom : box.top),
-            bottom: Math.min(box.bottom, composer && composer.height ? composer.top : box.bottom) };
+        return readBand(messagesDiv, page.querySelector('.chat-page-header'), toolbar);
     }
     function onScreen(node) {
         if (!node?.isConnected) return false;

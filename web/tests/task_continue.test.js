@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 
 import { continueNonce, continueOfferView, continueTaskAction, syncContinueAction } from '../modules/task_continue.js';
 import { taskReasonDetail, taskReasonPhrase, taskTerminalPhase } from '../modules/log_events.js';
+import { historicalTerminalFacts } from '../modules/settled_card.js';
 import { ElementStub, installDom, restoreDom } from './chat_dom_fixture.js';
 
 function memoryStorage() {
@@ -142,6 +143,19 @@ test('chat reaches the Continue action through the one settled-card seam', () =>
     const seam = readFileSync(new URL('../modules/settled_card.js', import.meta.url), 'utf8');
     assert.match(seam, /syncContinueAction\(record, detail, options\)/);
     assert.match(seam, /return syncResultFilesItem\(record, detail\)/);
+});
+
+// The card this settles through chat.js is replayed in task_origin.test.js («evidence row»); here, the facts it keeps.
+test('a replayed row keeps every terminal fact it froze, the current outcome\'s phase first', () => {
+    const origin = { place_id: 'github:example-org/lanternworks', place_label: 'GitHub · Lanternworks', wakes: ['my_thread'] };
+    const row = { task_id: 'replayed', text: 'not a terminal fact', wake_summary: 'Filed the report.',
+        suggested_name: 'Look at the export report', schedule_name: 'Daily check', place_origin: origin,
+        historical_terminal: { status: 'completed', phase: 'warn', ts: '2026-11-17T07:00:00Z', quiet_effective: true },
+        current_outcome: { outcome_phase: 'done', revision: '2026-11-17T07:01:00Z' } };
+    assert.deepEqual(historicalTerminalFacts(row), { status: 'completed', phase: 'done', ts: '2026-11-17T07:00:00Z',
+        quiet_effective: true, wake_summary: 'Filed the report.', suggested_name: 'Look at the export report',
+        schedule_name: 'Daily check', place_origin: origin });
+    assert.equal(historicalTerminalFacts({ ...row, current_outcome: undefined }).phase, 'warn', 'no current outcome: the durable phase');
 });
 
 function settledRootCard(taskId, { isSubagent = false } = {}) {

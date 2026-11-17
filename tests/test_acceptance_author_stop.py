@@ -124,7 +124,7 @@ def _run_stop_loop(tmp_path, monkeypatch, responses, *, stop_services, produced=
     result, usage, trace = loop.run_llm_loop(
         messages=[{"role": "user", "content": "Ship the export endpoint."}],
         tools=registry, llm=SimpleNamespace(default_model=lambda: "test-model"),
-        drive_logs=data / "logs", emit_progress=lambda _text, *, incident=None: None,
+        drive_logs=data / "logs", emit_progress=lambda _text, *, incident=None, narration=False, reasoning=False: None,
         incoming_messages=queue.Queue(), task_id=task_id, drive_root=data,
     )
     return SimpleNamespace(result=result, usage=usage, trace=trace, panels=panels,

@@ -336,16 +336,39 @@ def test_place_reader_reads_again_when_an_import_changes_its_room(skills_browser
         client.close()
 
 
+# The places listing's rows as Circles draws them, inside that page's own wrappers (circles.js initCircles: the body is
+# the container its narrow layout reads); each row's state words, tone and overflow by its place id.
+CIRCLE_ROWS = """async () => {
+    const [{readPlaces}, {unassignedFoldHtml}] = await Promise.all([import('/static/modules/consciousness_api.js'),
+        import('/static/modules/circles.js')]);
+    const view = await readPlaces(), host = document.createElement('div');
+    host.id = 'qa-circles';
+    host.innerHTML = `<div class="dashboard-shell"><div class="dashboard-body circles-body" data-circles-body><section
+        class="ui-card circles-directory" aria-label="Circles">${unassignedFoldHtml(view.places, {}, {}, {alone: true})}</section></div></div>`;
+    document.body.append(host);
+    const rows = Object.fromEntries([...host.querySelectorAll('[data-place-open]')].map((row) => {
+        const status = row.querySelector('.ui-status'), facts = row.querySelector('.consciousness-place-facts');
+        return [row.dataset.placeOpen, {state: status.textContent, tone: status.dataset.tone, label: row.getAttribute('aria-label'),
+            cut: facts.scrollWidth - facts.clientWidth, over: row.scrollWidth - row.clientWidth, right: row.getBoundingClientRect().right}];
+    }));
+    return {rows, wide: document.documentElement.scrollWidth - innerWidth};
+}"""
+
+
 @pytest.mark.parametrize('engine,width,theme', MATRIX)
-def test_place_reader_shows_reactions_as_labelled_facts(skills_browser, tmp_path, monkeypatch, engine, width, theme):
+def test_place_reader_shows_reactions_and_changes_as_labelled_facts(skills_browser, tmp_path, monkeypatch, engine, width, theme):
     """Real producer rows through the real history API: a person's, a chat's, an aggregate's reaction and my own
     receipt read as wordless facts at both widths, with nothing typed as a person's or my speech; words a receipt
-    sent beside its reaction stay my speech, followed by its fact."""
+    sent beside its reaction stay my speech, followed by its fact. Changes and content without words read the same
+    way: a change's revised words stay speech beside it, an author nobody recorded is said so, and my v0 reply never
+    takes the facts of the event it answered. A place with no wake kind checked says that setting on its Circles row,
+    once in its sheet (under "What calls it here") and on the conversation's state card."""
     from dataclasses import replace
+    from ouroboros import places
     from ouroboros.place_intake import decide_attention, reaction_refusal, settle_heard
     from ouroboros.presence_admission import admit_presence_turn
     from ouroboros.presence_delivery import PresenceDeliveryRecorder
-    from ouroboros.presence_runner import capture_presence_event
+    from ouroboros.presence_runner import _log_dialogue, capture_presence_event
     client, place, _task, event = scenario(tmp_path, monkeypatch)
     admission = admit_presence_turn(drive_root=tmp_path, authenticated_transport_skill='bridge',
                                     provider='chat', account_id='qa', conversation_id='design')
@@ -379,6 +402,34 @@ def test_place_reader_shows_reactions_as_labelled_facts(skills_browser, tmp_path
         'account_id': 'qa', 'conversation_id': 'design', 'thread_id': '', 'text': 'Noted, **thanks**.', 'format': '',
         'origin': {'kind': 'tool'}, 'message': {'reaction': {'schema_version': 1, 'operation': 'add', 'new': [thumb],
                     'target': {'message_id': '1712.0002', 'resolution': 'resolved'}, 'effect': 'applied'}}})
+    # A named actor's review request and edit (its words as they now stand), an assignment whose initiator the
+    # connector could not name, a poll; and my v0 reply to the request, whose transport keeps the event it answered.
+    ann = {'platform_actor_id': 'ann', 'display_name': 'Ann Reader'}
+    def change(description):
+        return {'non_text': [{'kind': 'state_change', 'description': description}]}
+    for key, actor, text, message in (
+        ('review', ann, '', change('requested a review from qa-bot')),
+        ('assigned', {'attribution': 'unknown'}, '', change('assigned qa-bot; the event names no one who did it')),
+        ('edited', ann, 'Frame 6 needs more contrast. Steps and a screenshot are in the description.', change('edited the description')),
+        ('poll', ann, '', {'non_text': [{'kind': 'poll', 'description': 'poll "Which fix first?": the button; the label'}]})):
+        arrival = replace(event, source_event_id=f'qa-{key}', actor=actor, text=text, facts=(), message=message)
+        decision, details = decide_attention(tmp_path, admission, arrival)
+        assert decision == 'silent' and details['reason'] == ('change_actor_unknown' if key == 'assigned' else 'no_wake_match')
+        captured = capture_presence_event(admission, arrival, drive_root=tmp_path)
+        settle_heard(tmp_path, captured, arrival, details['reason'])
+        if key == 'review':
+            _log_dialogue(tmp_path, task=captured, event=arrival, direction='out', text='I will look at the review.',
+                          chat_id=captured['chat_id'], user_id=0, task_id=captured['id'])
+    # Active with no wake kind checked; the other place of this connector is Active and called by mentions.
+    places.edit_place(tmp_path, place.place_id, 'set_wakes', author='owner', wakes=[])
+    places.edit_place(tmp_path, place.place_id, 'set_state', author='owner', state='active')
+    called = next(row for row in places.place_rows(tmp_path).values() if row.place_id != place.place_id)
+    places.edit_place(tmp_path, called.place_id, 'set_wakes', author='owner', wakes=['mention'])
+    places.edit_place(tmp_path, called.place_id, 'set_state', author='owner', state='active')
+    quiet, held = (places.connect_place(tmp_path, connector='bridge', provider='chat', account_id='qa', conversation_id=room,
+                                        label=f'Synthetic {room} room') for room in ('quiet', 'held'))
+    places.edit_place(tmp_path, quiet.place_id, 'set_state', author='owner', state='silent')
+    places.edit_place(tmp_path, held.place_id, 'set_state', author='owner', state='paused')  # Paused says its own words
     skill = fixture('extensions_fix_r1.json')['skills'][0]
     skill.update(name='bridge', description='Synthetic connector for captured conversations.', connects=['chat'], install=None)
     evidence = Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(tmp_path / 'evidence'))) / 'place-reader-reactions'
@@ -405,8 +456,29 @@ def test_place_reader_shows_reactions_as_labelled_facts(skills_browser, tmp_path
         page.add_style_tag(url='/static/consciousness.css')
         page.evaluate("({theme,width}) => { document.documentElement.classList.add('ouro-ui'); document.documentElement.dataset.theme=theme; "
                       "document.documentElement.dataset.layout=width < 720 ? 'stacked' : 'wide'; }", {'theme': theme, 'width': width})
+        # Circles' rows, as that page draws them from the real places listing: the setting beside the state, muted.
+        circles = page.evaluate(CIRCLE_ROWS)
+        rows = circles['rows']
+        assert rows[place.place_id]['state'] == 'active · no wake kinds checked' and rows[place.place_id]['tone'] == 'muted', rows
+        assert 'active · no wake kinds checked' in rows[place.place_id]['label'], rows
+        assert rows[called.place_id]['state'] == 'active' and rows[called.place_id]['tone'] == 'ok', rows
+        assert rows[quiet.place_id]['state'] == 'silent · no wake kinds checked' and rows[quiet.place_id]['tone'] == 'muted', rows
+        assert rows[held.place_id]['state'] == 'paused' and rows[held.place_id]['tone'] == 'muted', rows
+        assert all(row['cut'] <= 0 and row['over'] <= 0 and row['right'] <= width + 0.5 for row in rows.values()), rows
+        assert circles['wide'] <= 0, circles
+        page.screenshot(path=str(evidence / f'{engine}-{width}-{theme}-circles.png'))
+        page.evaluate("document.getElementById('qa-circles').remove()")
         open_place_sheet(page, place.place_id)
         sheet = page.locator('.place-sheet')
+        sheet.locator('[data-place-room]').first.wait_for()
+        # The setting is said once, under "What calls it here", promising neither a wake nor silence.
+        assert sheet.locator('.place-state-note').inner_text() == 'Lives here: listens, speaks and acts.'
+        wakes = sheet.locator('[data-place-section="wakes"]')
+        said = wakes.inner_text()
+        assert said.count('kind is checked') == 1 and ('No kind is checked: no event starts a new conversation here at '
+                                                       'once. An ongoing conversation can still wake it.') in said, said
+        assert 'these still wake it' not in said and 'nothing here wakes it' not in said, said
+        assert wakes.locator('input[type="checkbox"]:checked').count() == 0
         sheet.locator('[data-place-room]').first.click()
         reactions = sheet.locator('.place-convo-row:has(.place-convo-reaction)')
         reactions.first.wait_for()
@@ -431,9 +503,29 @@ def test_place_reader_shows_reactions_as_labelled_facts(skills_browser, tmp_path
         assert not any('is-owner' in row['voice'] for row in rows)
         reactions.first.scroll_into_view_if_needed()
         page.screenshot(path=str(evidence / f'{engine}-{width}-{theme}.png'))
+        assert sheet.locator('[data-history-state]').inner_text() == (
+            'Active now, no wake kinds checked: it hears, speaks and acts here; an ongoing conversation can still wake it.')
+        changes = sheet.locator('.place-convo-row:has(.place-convo-nontext)').evaluate_all("""nodes => nodes.map(row => ({
+            who: row.querySelector('.place-convo-who').textContent, authored: row.querySelector('.place-convo-who').hasAttribute('data-i18n-authored'),
+            meta: row.querySelector('.place-convo-meta').textContent, speech: row.querySelectorAll('.place-convo-text').length,
+            facts: [...row.querySelectorAll('.place-convo-nontext')].map(n => n.textContent.replace(/\\s+/g, ' ').trim()),
+            sizes: [...row.querySelectorAll('.place-convo-nontext')].map(n => getComputedStyle(n).fontSize)}))""")
+        assert [row['facts'] for row in changes] == [
+            ['Change: requested a review from qa-bot'], ['Change: assigned qa-bot; the event names no one who did it'],
+            ['Change: edited the description'], ['Without words: poll "Which fix first?": the button; the label']], changes
+        assert [row['speech'] for row in changes] == [0, 0, 1, 0], 'no empty bubble; revised words stay speech'
+        assert (changes[0]['who'], changes[0]['authored']) == ('Ann Reader', True), changes[0]
+        assert (changes[1]['who'], changes[1]['authored']) == ('Author not recorded', False), changes[1]
+        assert 'Heard as background; who made this change is unknown' in changes[1]['meta'], changes[1]
+        assert all(size == '12px' for row in changes for size in row['sizes']), changes
+        reply = sheet.locator('.place-convo-row.is-assistant', has_text='I will look at the review.')
+        assert reply.count() == 1 and reply.locator('.place-convo-nontext, .place-convo-reaction').count() == 0, \
+            'my v0 reply keeps its words alone, never the facts of the event it answered'
+        sheet.locator('.place-convo-row:has(.place-convo-nontext)').first.scroll_into_view_if_needed()
+        page.screenshot(path=str(evidence / f'{engine}-{width}-{theme}-changes.png'))
         geometry = sheet.evaluate("""el => { const body = el.querySelector('[data-place-body]');
             return {page: document.documentElement.scrollWidth, width: innerWidth, body: [body.clientWidth, body.scrollWidth],
-                    fits: [...el.querySelectorAll('.place-convo-reaction')].every(n => n.getBoundingClientRect().right <= body.getBoundingClientRect().right + 1)}; }""")
+                    fits: [...el.querySelectorAll('.place-convo-reaction, .place-convo-nontext')].every(n => n.getBoundingClientRect().right <= body.getBoundingClientRect().right + 1)}; }""")
         assert geometry['page'] <= geometry['width'] and geometry['body'][1] <= geometry['body'][0] + 1 and geometry['fits'], geometry
         assert not errors, errors
     finally:
