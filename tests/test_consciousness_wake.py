@@ -567,7 +567,8 @@ def test_human_input_is_classified_by_producer_provenance(tmp_path):
         "owner_message", "correspondent_message", "card_answer", "task_error"]
     lines = _lines(observation)
     assert lines[1].startswith("- message in a place in ") and lines[1].endswith("] from a correspondent")
-    assert lines[2].startswith("- owner card q9 on task asker: answered") and "chose option 1: Keep" in lines[2]
+    assert lines[2].startswith("- owner card q9 on task asker: answered") and (
+        "The owner pressed option 1 and wrote no words. The label «Keep» is the text of task asker") in lines[2]
     assert "task w1 runner failed" in lines[3]
     text = observation.full_text()
     assert "I opened this cycle" not in text and "machine traffic" not in text and "my reply" not in text
@@ -621,11 +622,12 @@ def test_answered_card_line_renders_mixed_answers_and_missing_facts_honestly():
     both = wake._answered_card_line("t1", "q1", {
         "answered_at": _iso(now - 120), "asked_at": _iso(now - 240), "options": ["Go", "Stop"],
         "answered_index": 0, "comment": "but only on weekdays", "question": "Deploy?"}, now=now)
-    assert both == ("- owner card q1 on task t1: answered 2 min ago; asked 4 min ago; "
-                    "chose option 1: Go; with the words: but only on weekdays; question: Deploy?")
+    assert both == ("- owner card q1 on task t1: answered 2 min ago; asked 4 min ago; The owner pressed option 1 "
+                    "(«Go», the text of task t1) and wrote: but only on weekdays; question: Deploy?")
     bare = wake._answered_card_line("t1", "q2", {"answered_at": "not a stamp", "answered_index": 5}, now=now)
-    assert bare == ("- owner card q2 on task t1: answered at an unknown time; asked at an unknown time; "
-                    "chose option 6: label unavailable; question: question text unavailable")
+    assert bare == ("- owner card q2 on task t1: answered at an unknown time; asked at an unknown time; The owner "
+                    "pressed option 6, whose label is not recorded, and wrote no words.; question: question text "
+                    "unavailable")
     empty = wake._answered_card_line("t1", "q3", {"answered_at": _iso(now - 60)}, now=now)
     assert "answer text unavailable" in empty
 

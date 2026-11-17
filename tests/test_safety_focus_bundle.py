@@ -22,6 +22,8 @@ from tests.test_place_focus import focus as _focus
 focus = _focus
 RULES = "Rule one: keep private work private.\nRule two: hold a disputed send and ask me in Main."
 OPENING = "host or Ouroboros text that opened this run; not the owner's words"
+PRESS_AUTHOR = ("the owner's act: a press of one option of the card quoted in reply_to, with no words of their own "
+                "(the option's label is the card's text, written by Ouroboros)")
 
 
 def _whole(rows):
@@ -148,8 +150,8 @@ def test_an_owner_answer_reaches_the_supervisor_with_the_card_it_answers(focus, 
     root, _place, _admission, _event = focus
     _ctx, bundle, _prompt = _reply_bundle(root, monkeypatch, checker, extra_rows=tuple(drained._owner_directives))
     [shown] = [source for source in bundle["occasion"]["sources"] if source.get("quiz_id") == "q7"]
-    assert shown == {**answer, "author": "the owner: the owner's answer to the card quoted in reply_to "
-                                         "(the card's text was written by Ouroboros)"}  # the answer and its card
+    assert shown == {**answer, "author": PRESS_AUTHOR}  # the press, an act of my human's, and its card
+    assert answer["source"] == "owner_press"
     assert shown["content"] == "1. Publish it" and shown["reply_to"]["text"].startswith(card["question"])
 
 
@@ -243,11 +245,11 @@ def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(check
     prompt, sources = sources_of(helper)
     card_reply = {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
                   "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n(host record: my human pressed option 1)"}
-    later_words = {"author": "the owner: a later message to this work", "ts": "2026-10-04T06:00:00+00:00"}
-    assert sources == [{"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""],
+    later_words = {"author": PRESS_AUTHOR, "ts": "2026-10-04T06:00:00+00:00"}  # a press: my human's act, no words
+    assert sources == [{"source": "owner_press", "content": "1. Publish it", "msg_id": addresses[""],
                         "reply_to": card_reply, **later_words}]
     assert addresses["sibling"] not in prompt and "March figures" not in prompt
-    corpus = {"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""], "chat_id": "1",
+    corpus = {"source": "owner_press", "content": "1. Publish it", "msg_id": addresses[""], "chat_id": "1",
               "client_message_id": "owner-answer", "carried": True}
     helper._owner_directives = [dict(corpus)]  # its corpus copy, without the card and time its held row has
     assert sources_of(helper)[1] == [{**corpus, "reply_to": card_reply, **later_words}]
@@ -262,8 +264,10 @@ def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(check
     prompt, sources = sources_of(later)
     brief = ("this task's brief: written by its parent task (Ouroboros) with blocks added by the host; "
              "not the owner's words")
+    record = ("(host record: my human pressed «1. Publish it» and wrote no words; the label is the asking task's "
+              "text)")  # the field carries the host's record of the act, never the label as their words
     assert sources == [{"source": "initial_text", "content": "Ship the release notes.", "author": brief},
-                       {"source": "owner_mailbox", "content": "1. Publish it", "msg_id": "chat 1 / owner-answer",
+                       {"source": "owner_press", "content": record, "msg_id": "chat 1 / owner-answer",
                         "reply_to": card_reply, **later_words}]
     assert addresses["sibling"] not in prompt and "March figures" not in prompt
     later._owner_directives.append(dict(corpus))

@@ -46,8 +46,9 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.owner_words import (OWNER_SOURCES, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card, answered_card_reply,
-                                   carded, reply_target, scheduled_text_items)
+from ouroboros.answer_facts import option_answer, press_record, row_source
+from ouroboros.owner_words import (OWNER_PRESS, OWNER_SOURCES, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card,
+                                   answered_card_reply, carded, reply_target, scheduled_text_items)
 from ouroboros.review_evidence_sections import renders_exactly
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
@@ -109,6 +110,7 @@ OWNER_SOURCE_KINDS = frozenset({"owner_text", "quiz_answer", "quiz_closed", "car
 # label is none of these is not promoted to owner text. The door's labels in words carried by value (a follow-up's, a
 # drafted start's ``owner_corpus``) are my human's.
 CORPUS_INITIAL_SOURCES = frozenset({"origin_message", "initial_user", "initial_text", "initial_text_transcript"})
+CARD_ANSWER_SOURCES = frozenset({"owner_quiz_answer", OWNER_PRESS})  # an answer to a card: words, or a press (an act)
 CORPUS_OWNER_SOURCES = OWNER_SOURCES - CORPUS_INITIAL_SOURCES
 CARRIED_DOOR_SOURCES = frozenset({"origin_message", "initial_user"})
 CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message"})
@@ -286,7 +288,7 @@ def _drafted_start(root: pathlib.Path, result: Dict[str, Any], task_id: str, met
         return None
     answers: List[Dict[str, Any]] = []
     for row in metadata.get("owner_corpus") if isinstance(metadata.get("owner_corpus"), list) else []:
-        if not isinstance(row, dict) or row.get("source") != "owner_quiz_answer":
+        if not isinstance(row, dict) or row.get("source") not in CARD_ANSWER_SOURCES:
             continue  # the corpus pass names a malformed row; other owner words stay later sources
         asker, quiz_id, words, msg_id = (row.get(key) for key in ("source_task_id", "quiz_id", "content", "msg_id"))
         typed = all(isinstance(value, str) and value.strip() for value in (asker, quiz_id, words, msg_id))
@@ -297,7 +299,7 @@ def _drafted_start(root: pathlib.Path, result: Dict[str, Any], task_id: str, met
         if card is None:
             gaps.append("start_quiz_answer_unresolved")
             continue
-        answers.append({"source": "owner_quiz_answer", "content": words, "msg_id": msg_id, "source_task_id": asker,
+        answers.append({"source": row["source"], "content": words, "msg_id": msg_id, "source_task_id": asker,
                         "quiz_id": quiz_id, "request_id": block["request_id"], "card": card})
     expected = result.get("expected_output")
     return {"source": "drafted_start", "task_id": task_id, "objective": objective,
@@ -312,8 +314,8 @@ def valid_start(start: Any) -> bool:
             and all(isinstance(start.get(key), str) and start[key].strip() for key in ("task_id", "objective"))
             and isinstance(start.get("author"), dict) and start["author"].get("kind") == "task"
             and isinstance(answers, list)
-            and all(isinstance(row, dict) and row.get("source") == "owner_quiz_answer" and isinstance(row.get("card"), dict)
-                    and all(isinstance(row.get(key), str) and row[key].strip()
+            and all(isinstance(row, dict) and row.get("source") in CARD_ANSWER_SOURCES
+                    and isinstance(row.get("card"), dict) and all(isinstance(row.get(key), str) and row[key].strip()
                             for key in ("content", "msg_id", "source_task_id", "quiz_id")) for row in answers))
 
 
@@ -597,9 +599,10 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             if door and original is not None:  # a carried copy of the original's own message is that message
                 door = not (client_identity == origin_identity if client_identity and origin_identity
                             else words == original.get("content"))
-            if source in CORPUS_INITIAL_SOURCES and not door:  # the run's first text: the original's own projection
+            opening = source == OWNER_PRESS and client_identity == origin_identity != ""  # a late answer head's press
+            if source in CORPUS_INITIAL_SOURCES and not door or opening:  # its first text: the original's projection
                 if original is not None and isinstance(row.get("reply_to"), dict):
-                    original.setdefault("reply_to", row["reply_to"])  # and the message it replies to
+                    original.setdefault("reply_to", row["reply_to"])  # and what it replies to (a press: its card)
                 continue
             owner = source in CORPUS_OWNER_SOURCES or door
             if named(identity, words, owner, row) is not None or not identity and words in texts[owner]:
@@ -609,7 +612,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                 ids = {key: row[key] for key in (*ROW_IDS[1:], "reply_to") if row.get(key)}
                 # An answer to the predecessor's own card reads that card from its own record.
                 card = (answered_card(quizzes.get(ids.get("quiz_id", "")), text)
-                        if source == "owner_quiz_answer" and ids.get("source_task_id") == task_id else None)
+                        if source in CARD_ANSWER_SOURCES and ids.get("source_task_id") == task_id else None)
                 later.append({"source": source, "content": text, "msg_id": msg_id, **ids,
                               **({"card": card} if card else {}), **({"words": words} if "words" in row else {})})
             elif source in CORPUS_PLACE_SOURCES:  # carried whole, with its ids, provider identity and reply target
@@ -684,7 +687,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         if msg_id:
             exact[msg_id] = entry["_exact_row"]  # a late answer's frame, or an earlier rendering, is proven against it
         if kind in OWNER_SOURCE_KINDS:
-            row = {"source": "owner_quiz_answer" if kind == "quiz_answer" else "owner_mailbox",
+            row = {"source": row_source(entry, "owner_quiz_answer" if kind == "quiz_answer" else "owner_mailbox"),
                    "content": str(entry.get("text") or ""), "msg_id": msg_id,
                    "ts": str(entry.get("ts") or ""), "exact_row": entry["_exact_row"]}
             if target := reply_target(root, entry.get("reply_reference")):  # the message these words reply to
@@ -707,8 +710,8 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                 address = owner_row_address(row)
                 if address not in seen:
                     target = reply_target(source_root, row.get("reply_to")) if isinstance(row.get("reply_to"), dict) else {}
-                    later.append(carded({"source": "owner_mailbox", "content": owner_text(row), "msg_id": address,
-                                         **({"reply_to": target} if target else {})}, row))
+                    later.append(carded({"source": row_source(row, "owner_mailbox"), "content": owner_text(row),
+                                         "msg_id": address, **({"reply_to": target} if target else {})}, row))
                     seen[address] = (owner_text(row), True)
                     quoted += [{**ref, "_owner_source_root": str(source_root)}
                                for ref in row.get("attachments") or [] if isinstance(ref, dict)]
@@ -799,17 +802,18 @@ def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _card_lines(row: Dict[str, Any]) -> List[str]:
-    """One answered card for the successor: the asking task's question, then the owner's answer."""
+    """One answered card for the successor: the asking task's question, then the owner's answer, a press as their
+    act on that task's label (``answer_facts.option_answer``)."""
     card = row.get("card") if isinstance(row.get("card"), dict) else {}
     options = card.get("options") if isinstance(card.get("options"), list) else []
     index, comment = card.get("answered_index"), str(card.get("comment") or "")
-    answer = [f"chose option {index + 1}: {options[index]}"] if type(index) is int and 0 <= index < len(options) else []
-    answer += [f"wrote (verbatim): {comment}"] if comment.strip() else []
+    answer = (option_answer(card, index, comment, asker=row.get("source_task_id")) if type(index) is int
+              else f"The owner wrote (verbatim): {comment}" if comment.strip()
+              else f"The owner answered (verbatim): {row.get('content') or ''}")
     return [f"- Card {card.get('quiz_id') or row.get('quiz_id')} of task {row.get('source_task_id')}, "
             f"asked {card.get('asked_at') or 'at an unrecorded time'}: {card.get('question')}",
             f"  Options: {'; '.join(f'{n}. {label}' for n, label in enumerate(options, 1)) or 'none recorded'}",
-            f"  The owner {'; '.join(answer) or 'answered (verbatim): ' + str(row.get('content') or '')}"
-            f" (answered {card.get('answered_at') or 'at an unrecorded time'})."]
+            f"  {answer} (answered {card.get('answered_at') or 'at an unrecorded time'})."]
 
 
 def recorded_system_checkout(result: Dict[str, Any]) -> Dict[str, str]:
@@ -955,9 +959,10 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
                                                             ("constraints", "Constraints")) if api.get(key)]
     if later:
         lines += ["", "Other owner words in that task's record (verbatim, in order):"]
-        for row in later:
-            lines += (_card_lines(row) if isinstance(row.get("card"), dict)
-                      else [f"- {row.get('ts') or ''} {row['content']}"])
+        for row in later:  # a press without its card: the host's record of the act, never its label as words
+            lines += (_card_lines(row) if isinstance(row.get("card"), dict) else [f"- {row.get('ts') or ''} " + (
+                press_record(row["content"], who="the owner")
+                if row.get("source") == OWNER_PRESS else row["content"])])
     confirmed = [row for row in sources.get("confirmed_place") or [] if isinstance(row, dict) and row.get("content")]
     if confirmed:  # my human's words are never shortened to a count or a pointer
         lines += ["", "Words from your human's confirmed account in that place (their words there, by provenance; an order "

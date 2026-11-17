@@ -301,7 +301,7 @@ def test_late_answer_accepted_metadata_rebuilds_full_frame_after_canonical_gc(tm
     ref = late_answer_ref(queued["task_metadata"]["late_answer"])
     frame = late_answer_model_text(tmp_path, ref, queued["text"])
     assert "Question was: Which approach?" in frame
-    assert "The owner chose option 2: Second" in frame
+    assert "The owner pressed option 2 and wrote no words. The label «Second» is the text of task t" in frame
     assert "Research meanwhile" in frame and "could not be read" not in frame
     # Snapshot identity cannot silently point at another question or task.
     mismatched = {**ref, "task_id": "other"}

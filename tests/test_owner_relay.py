@@ -383,13 +383,17 @@ def test_a_relayed_answer_carries_the_card_it_answers(tmp_path, shape):
     inject_relay(receiver, {"kind": "relay_entry", "text": "Please act on it.", "owner_rows": [answer],
                             "relay": relay_envelope("quoted", [owner_quote(tmp_path, answer)], chat_id=1),
                             "source_task_id": "teller"}, messages)
-    [row] = [row for row in receiver._owner_directives if row["source"] == "owner_mailbox"]
-    assert "Publish exactly this reply?" not in str(row["content"])
+    # A press without words is my human's act, never their words: typed so in the corpus and in the quote.
+    [row] = [row for row in receiver._owner_directives if row["source"] == "owner_press"]
+    assert row["content"] == "1. Publish it" and "Publish exactly this reply?" not in str(row["content"])
     assert row["reply_to"] == {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
                                "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n"
                                        "(host record: my human pressed option 1)"}
     words = next(str(m["content"]) for m in messages if "Owner words quoted verbatim" in str(m["content"]))
     assert "[Host question frame]" in words and "Publish exactly this reply?" in words  # the model reads it too
+    assert ("\n(host record: my human pressed «1. Publish it» and wrote no words; the label is the text of task asker)"
+            "\n") in words and "\n1. Publish it\n" not in words
+    assert "The label «Publish it» is the text of task asker" in words
 
 
 def test_a_relay_answer_is_owed_before_the_queue_and_survives_a_failed_send(tmp_path, monkeypatch):

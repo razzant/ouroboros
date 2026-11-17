@@ -295,6 +295,7 @@ def _drain_incoming_messages(
                 ack_content(entry)
                 continue
             if kind == KIND_QUIZ_ANSWER:
+                from ouroboros.answer_facts import answer_source
                 from ouroboros.owner_quiz import late_answer_owner_text
                 from ouroboros.owner_words import answered_card_reply
                 delivery = entry.get("quiz_delivery") or {}
@@ -303,7 +304,7 @@ def _drain_incoming_messages(
                 from ouroboros.owner_relay import retain_owner_message
                 held = retain_owner_message(owner_ctx, (answer.get("delivery") or {}).get("answer_row")) if isinstance(answer, dict) else None
                 _loop()._record_owner_directive(  # the card it answers rides beside it, the asking task's words
-                    owner_ctx, source="owner_quiz_answer", content=owner_words, msg_id=str(entry.get("msg_id") or ""),
+                    owner_ctx, source=answer_source(answer), content=owner_words, msg_id=str(entry.get("msg_id") or ""),
                     origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id"), **_arrival(held, entry.get("ts"))},
                     reply_to=answered_card_reply(answer, delivery.get("task_id")))
                 deliver_quiz_answer(
@@ -330,6 +331,7 @@ def _drain_incoming_messages(
                 model_msg = card_press_model_text(str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root,
                                                   entry.get("card_press"), dmsg)
             owner_content = _owner_content({**entry, "text": model_msg}, drive_root, task_id)
+            from ouroboros.answer_facts import row_source
             from ouroboros.owner_words import answered_card_reply, answered_card_source, reply_target
 
             chats = str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root  # the room's rows
@@ -340,9 +342,10 @@ def _drain_incoming_messages(
                 text=dmsg,
                 ts=str(entry.get("ts") or ""),
             )
+            source = row_source(entry, "owner_mailbox")  # a late answer's press without words is an act
             _loop()._record_owner_directive(
                 owner_ctx,
-                source="owner_mailbox",
+                source=source,
                 content=_owner_content(entry, drive_root, task_id), words=dmsg,  # the rendering, its exact text beside
                 msg_id=str(entry.get("msg_id") or ""),
                 # The same message relayed, or read from its room, is one row: its room and client id name it.

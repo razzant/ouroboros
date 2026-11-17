@@ -287,25 +287,23 @@ def _card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, now: float,
 
 
 def _answered_card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, now: float) -> str:
-    """One answered card of the window: stamps, the recorded answer whole (my human's own words, so in the fallback
-    form too), a named question preview and no verdict on what the answer meant. A secret request's answer is the
+    """One answered card of the window: stamps, the recorded answer whole (my human's own words verbatim, so in the
+    fallback form too; a press as their act on the asking task's label, ``answer_facts.option_answer``), a named
+    question preview and no verdict on what the answer meant. A secret request's answer is the
     host's typed outcome: its event, plugin and field ids, never a value."""
+    from ouroboros.answer_facts import option_answer
     from ouroboros.owner_quiz import secret_outcome_block, secret_outcome_summary
 
     parts = []
     for key, word in (("answered_at", "answered"), ("asked_at", "asked")):
         stamp = _parse_iso(block.get(key))
         parts.append(f"{word} {ago_text(now - stamp)}" if stamp is not None else f"{word} at an unknown time")
-    options = block.get("options") if isinstance(block.get("options"), list) else []
     index = block.get("answered_index")
     comment = str(block.get("comment") or "")
     if secret_outcome_block(block) is block:
         answer = f"host outcome {secret_outcome_summary(block)}"
     elif isinstance(index, int) and not isinstance(index, bool):
-        label = str(options[index]) if 0 <= index < len(options) else "label unavailable"
-        answer = f"chose option {index + 1}: {label}"
-        if comment.strip():
-            answer += f"; with the words: {comment}"
+        answer = option_answer(block, index, comment, asker=task_id)
     elif comment.strip():
         answer = f"answered in own words: {comment}"
     else:

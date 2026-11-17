@@ -37,13 +37,16 @@ _MAX_VALUES_BYTES = 64 * 1024
 
 def card_input_frame(record: Dict[str, Any], label: str, values: Optional[Dict[str, Any]], *, author: str = "") -> str:
     """The host-authored frame its reader reads; the press is the owner's, the words are the host's.
-    ``author`` names the task that showed the card when the reader is another task."""
+    ``author`` names the task that showed the card when the reader is another task. A press with no values
+    typed says whose text its label is and that no words of the owner's came with it (``answer_facts``)."""
+    from ouroboros.answer_facts import card_label_fact
+
     card = f"the card «{record.get('title') or ''}» that task {author} showed" if author else \
         f"your card «{record.get('title') or ''}»"
     text = f"[Card input] The owner pressed «{label}» on {card} (card {record['card_id']})."
     if values:
-        text += "\nValues:\n" + json.dumps(values, ensure_ascii=False, indent=1)
-    return text
+        return text + "\nValues:\n" + json.dumps(values, ensure_ascii=False, indent=1)
+    return f"{text} {card_label_fact(author)}"
 
 
 def _stored_press(root: Any, ref: Any) -> Tuple[Optional[Dict[str, str]], Dict[str, Any], Dict[str, Any]]:

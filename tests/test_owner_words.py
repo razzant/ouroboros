@@ -23,6 +23,8 @@ from ouroboros.tools.tool_context import ToolContext
 REPO = pathlib.Path(__file__).resolve().parents[1]
 ROOT = "root0001"
 TS = "2026-09-30T05:41:45+00:00"
+# How every reader's set shows a press without words: the host's record of the act, its card on the next row.
+PRESSED = "(host record: my human pressed «{}» and wrote no words; the label is the asking task's text)"
 MIND = {"kind": "mind", "task_id": ROOT, "focus": {"role": "root", "task_id": ROOT}}
 
 
@@ -289,7 +291,7 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
         ("ctx", "", f"received {received['Plain direct text']}", "Plain direct text"),
         ("ctx", "chat 1 / cm-mail", _at(2), "Add charts"),
         ("ctx", "msg mail-2", f"received {received['Mailbox only']}", "Mailbox only"),
-        ("ctx", "chat 1 / cm-ans", _at(3), "1. Publish it"),
+        ("ctx", "chat 1 / cm-ans", _at(3), PRESSED.format("1. Publish it")),  # a press: an act, never words
         ("ctx", "msg card-1", f"received {received['[Card] typed into the card']}", "[Card] typed into the card"),
         ("ctx", "chat 1 / cm-relay", _at(5), "Quoted by the teller")]
     assert ow.render_owner_words(rows, audience="child").count("[received ") == 4
@@ -311,7 +313,7 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
     late = _ctx(tmp_path, task_id="late0001", metadata={"late_answer": {
         "task_id": "asker", "quiz_id": "q9", "answer_snapshot": {"task_id": "asker", "quiz": late_card}}})
     _initialize_owner_directives(late, [{"role": "user", "content": "[late answer frame]"}])
-    assert _stamps(ow.work_words(late)[0]) == [("ctx", "", _at(6), "2. Yes"),
+    assert _stamps(ow.work_words(late)[0]) == [("ctx", "", _at(6), PRESSED.format("2. Yes")),
                                                ("ctx", "quiz q9 of task asker", "", "Go?\n1. No\n2. Yes\n(host record: my human pressed option 2)")]
     before = _ctx(tmp_path, task_id="pre0001", metadata={"objective_author": {"kind": "task", "task_id": ROOT}, "owner_corpus": [
         {"source": "owner_mailbox", "content": "Add charts", "msg_id": "mail-1", "client_message_id": "cm-mail"},
@@ -392,7 +394,7 @@ def test_a_helper_in_the_room_shows_a_drained_message_once_and_one_message_is_on
     # A room answer read live (no focus holds it): once, its card beside it under the asking task's name.
     _chat(tmp_path, answer)
     rows = ow.work_words(helper)[0]
-    assert _stamps(rows)[-2:] == [("room", f"chat {room} / cm-ans", _at(3), "1. Publish it"), (
+    assert _stamps(rows)[-2:] == [("room", f"chat {room} / cm-ans", _at(3), PRESSED.format("1. Publish it")), (
         "room", "quiz q7 of task asker", "", "Publish?\n1. Publish it\n2. Not now\n(host record: my human pressed option 1)")]
     assert rows[-1]["author"] == "Ouroboros, task asker" and rows[-1]["source"] == ow.REPLY_TARGET
     assert [row["ref"] for row in rows].count(f"chat {room} / cm-ans") == 1

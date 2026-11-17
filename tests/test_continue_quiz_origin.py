@@ -194,11 +194,13 @@ def test_a_wake_started_root_continues_with_the_cards_it_started_from(tmp_path, 
     assert text.index(QUESTION) < text.index("Yes, start it")
     metadata = successor["metadata"]
     corpus = metadata["owner_corpus"]
-    # The owner corpus keeps the owner's exact words with the card identity; each card's question rides beside
-    # its answer as the message it replies to (the asking task's words), never inside the owner's words.
+    # The owner corpus keeps the owner's exact words with the card identity, and a press without words as their act
+    # (``owner_press``, never their words); each card's question rides beside its answer as the message it replies to
+    # (the asking task's words), never inside the owner's words.
     assert [(row["source"], row["content"]) for row in corpus] == [
-        ("owner_quiz_answer", "1. Yes, start it"), ("owner_quiz_answer", "Europe and Turkey, not Asia"),
-        ("owner_quiz_answer", "2. 2026")]
+        ("owner_press", "1. Yes, start it"), ("owner_quiz_answer", "Europe and Turkey, not Asia"),
+        ("owner_press", "2. 2026")]
+    assert f"The owner pressed option 1 and wrote no words. The label «Yes, start it» is the text of task {WAKE}" in text
     assert [(row["source_task_id"], row["quiz_id"]) for row in corpus] == [
         (WAKE, "q-start"), (WAKE, "q-scope"), (rid, "q-root")]
     assert not any(QUESTION in json.dumps(row["content"]) or ROOT_QUESTION in json.dumps(row["content"])
@@ -228,14 +230,14 @@ def test_the_producer_records_its_start_sources_where_every_writer_persists_them
 
     queue, workers, bridge, root, wake = _wake_started_root(tmp_path, monkeypatch)
     rid = root["id"]
-    answered = [row for row in wake._owner_directives if row["source"] == "owner_quiz_answer"]
+    answered = [row for row in wake._owner_directives if row["source"] in {"owner_quiz_answer", "owner_press"}]
     # Each answer is read with its card, the asking task's words beside the owner's.
     assert [(row["reply_to"]["author"], row["reply_to"]["text"].splitlines()[0]) for row in answered] == [
         (f"Ouroboros, task {WAKE}", QUESTION), (f"Ouroboros, task {WAKE}", SCOPE_QUESTION)]
     # Each row names the answer's own chat row (the row the wake holds): its room, client id and accept time.
     held = {row["client_message_id"]: row for row in wake._held_owner_messages.values()}
     start_id, scope_id = f"quiz_answer:{WAKE}:q-start", f"quiz_answer:{WAKE}:q-scope"
-    expected = [{"source": "owner_quiz_answer", "content": "1. Yes, start it", "msg_id": start_id,
+    expected = [{"source": "owner_press", "content": "1. Yes, start it", "msg_id": start_id,
                  "source_task_id": WAKE, "quiz_id": "q-start", "chat_id": "1", "client_message_id": start_id,
                  "ts": held[start_id]["ts"], "reply_to": answered[0]["reply_to"]},
                 {"source": "owner_quiz_answer", "content": "Europe and Turkey, not Asia", "msg_id": scope_id,
@@ -279,7 +281,7 @@ def test_the_second_hop_keeps_the_start_basis_and_the_drafted_objective(tmp_path
     start = row["metadata"]["continuation"]["owner_sources"]["start"]
     assert start["task_id"] == root["id"] and start["author"] == {"kind": "task", "task_id": WAKE}
     assert [(r["source"], r["content"]) for r in row["metadata"]["owner_corpus"]] == [
-        ("owner_quiz_answer", "1. Yes, start it"), ("owner_quiz_answer", "Europe and Turkey, not Asia")]
+        ("owner_press", "1. Yes, start it"), ("owner_quiz_answer", "Europe and Turkey, not Asia")]
     workers.PENDING.clear()
     assert queue.restore_pending_from_snapshot() == 1
     assert workers.PENDING[0]["metadata"]["continuation"]["owner_sources"]["start"] == start

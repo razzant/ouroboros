@@ -243,9 +243,10 @@ def owner_quote(root, row: dict, *, address: str = "") -> dict:
              "owner_row": copy.deepcopy(row)}
     if isinstance(row.get("reply_to"), dict) and row["reply_to"]:  # what the owner was replying to, as the host resolved it
         quote["reply_to"] = copy.deepcopy(row["reply_to"])
-    if isinstance(answered := answered_card_source(row)[0], dict):  # a quiz row's card or a late answer's snapshot
+    answered, asker = answered_card_source(row)
+    if isinstance(answered, dict):  # a quiz row's card or a late answer's snapshot, under the asking task's name
         from ouroboros.owner_quiz import recorded_answer_frame
-        quote["question_frame"] = recorded_answer_frame(answered)
+        quote["question_frame"] = recorded_answer_frame(answered, asker=str(asker or ""))
     return quote
 
 
@@ -341,17 +342,20 @@ def carried_quote_line(quote: dict, *, address: str, fact=None) -> str:
 
 
 def _quote_body(row: dict, line: str) -> str:
-    """The quoted row under its line: its words whole, then the message it replies to, the card it answers and
-    the files it carries, each as a host frame beside my human's words."""
+    """The quoted row under its line: its words whole (a press without words: the host's record of the act), then
+    the message it replies to, the card it answers and the files it carries, each as a host frame beside my human's
+    words."""
+    from ouroboros.answer_facts import row_words
     from ouroboros.owner_words import answered_card_source
 
-    body = f"{line}\n{owner_text(row)}"
+    body = f"{line}\n{row_words(row)}"
     if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
         body += ("\n[Host reference: the message these owner words reply to; context, not the owner's words]\n"
                  + json.dumps(row["reply_to"], ensure_ascii=False))
-    if isinstance(answered := answered_card_source(row)[0], dict):  # the question it answers, for the model too
+    answered, asker = answered_card_source(row)
+    if isinstance(answered, dict):  # the question it answers, for the model too, under the asking task's name
         from ouroboros.owner_quiz import recorded_answer_frame
-        body += "\n[Host question frame]\n" + recorded_answer_frame(answered)
+        body += "\n[Host question frame]\n" + recorded_answer_frame(answered, asker=str(asker or ""))
     if row.get("attachments"):
         body += "\n[Host-retained attachments]\n" + json.dumps(row["attachments"], ensure_ascii=False)
     return body
@@ -394,6 +398,7 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
     own voice. A ``host_carried`` entry takes the carried mode (``inject_carried``) instead. Returns the addresses
     of carried rows shown here under the fact ``reached this work`` (the drain's closing control); ``[]`` otherwise."""
     from ouroboros import loop
+    from ouroboros.answer_facts import row_source
     from ouroboros.owner_words import answered_card_reply, answered_card_source, owner_place_accounts, reply_target
     from ouroboros.tool_access import canonical_data_root
 
@@ -421,7 +426,8 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
         address = owner_row_address(row)
         # An answer replies to its card (a quiz row's own, or a late answer's snapshot), else to its chat target.
         replied = answered_card_reply(*answered_card_source(row)) or reply_target(source_root, row.get("reply_to")) or None
-        loop._record_owner_directive(ctx, source="owner_mailbox", content=owner_text(row), msg_id=address, carried=True,
+        loop._record_owner_directive(ctx, source=row_source(row, "owner_mailbox"), content=owner_text(row),
+                                     msg_id=address, carried=True,
                                      origin={"source_task_id": entry.get("source_task_id"),
                                              "client_message_id": row.get("client_message_id"),
                                              "chat_id": row.get("chat_id"), "ts": row.get("ts")},

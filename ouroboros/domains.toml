@@ -550,6 +550,7 @@ D20 = "Presence"
 "ouroboros/owner_model.py" = "D01"
 "ouroboros/owner_source.py" = "D09"
 "ouroboros/owner_quiz.py" = "D09"  # F6 sync (#Q-2b): owner quiz cards, structural expiry with the authoring task
+"ouroboros/answer_facts.py" = "D09"  # an answered card as models read it: a press is the owner's act
 "ouroboros/owner_mailbox.py" = "D01"
 "ouroboros/peer_roster.py" = "D01"  # the worker-side roster note beside the mailbox that renders its messages
 "ouroboros/live_works.py" = "D01"

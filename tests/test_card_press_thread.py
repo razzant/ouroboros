@@ -149,7 +149,8 @@ def test_a_press_on_a_continued_tasks_card_reaches_its_successor(tmp_path, monke
     assert _inbox(bridge) == [], "no turn of its own"
     [entry] = drain_owner_entries(tmp_path, "successor", set())
     assert entry["kind"] == KIND_CARD_INPUT
-    assert entry["text"] == f"[Card input] The owner pressed «Book it» on the card «Flights» that task asker showed (card {card['card_id']})."
+    assert entry["text"] == (f"[Card input] The owner pressed «Book it» on the card «Flights» that task asker showed "
+                             f"(card {card['card_id']}). The label is the text of task asker; no words of their own.")
 
 
 def test_a_head_a_press_started_reads_the_card_frame(tmp_path, monkeypatch):
@@ -173,7 +174,7 @@ def test_a_head_a_press_started_reads_the_card_frame(tmp_path, monkeypatch):
     carried_turn(monkeypatch, tmp_path, agent, 1, "Book it", None,
                  task_metadata={"client_message_id": f"card_input:{card['card_id']}:r1", "card_press": press})
     assert agent.task["text"] == (f"[Card input] The owner pressed «Book it» on the card «Flights» that task task-1 showed "
-                                  f"(card {card['card_id']}).")
+                                  f"(card {card['card_id']}). The label is the text of task task-1; no words of their own.")
     lost = card_press_model_text(tmp_path, {**press, "request_id": "gone"}, "Book it")
     assert lost == "[Card input] On a card of task task-1 that can no longer be read, the owner pressed:\nBook it"
     plain = _Agent()
