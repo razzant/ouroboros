@@ -3455,7 +3455,7 @@ Telegram, and nothing depends on a haptic (`web/modules/haptics.js`).
 
 A jump leaves a named page layer under overlays in `web/modules/layers.js`. Every move except a sidebar/drawer
 choice, section list row or tab is a jump. Jumps stack; sidebar/drawer choices clear returns; section choices keep
-them. Jumps land at their row or top; Back/sidebar restore place. Drawer, Project, section levels and Files'
+them. Jumps land at their row or top, a key's on its Back; Back/sidebar restore place. Drawer, Project, section levels and Files'
 preview share this stack. Escape, browser, system, mouse, Telegram and ⌘[ (Ctrl+[ elsewhere) use one Back: popup
 first, then top layer. Dialogs, menus and the work list keep their dismissal; Escape clears a filled search first.
 × and the scrim close their layer. A Project covering Main (phone card or finger's docked column) is modal, with

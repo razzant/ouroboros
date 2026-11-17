@@ -20,13 +20,15 @@ export function createPageNavigation({ layers, capture, canLeave, land = () => {
         return capture(target?.closest?.('button, a, [role="button"], [role="tab"]') || target || doc.activeElement);
     };
     async function go(key, commit, { map = false, row = '', origin = currentPlace(), current = () => true } = {}) {
+        const fromKey = pressed?.eventPhase ? pressed.detail === 0 : false;  // a key's click (Enter, Space) counts none
         // A source owns its claim until this commit; covering its room then transfers ownership to the destination.
         if (await canLeave(key) === false || !current()) return false;
         if (origin.key !== key) doc.activeElement?.blur?.();
+        let id = null;
         layers.batch(() => {
             if (map === true) clear(); // sidebar/drawer; a section's own list and tabs keep the visit
             else if (!map && origin.key !== key) {
-                const id = `page-return-${++serial}`;
+                id = `page-return-${++serial}`;
                 layers.push({ id, page: true, modal: false, focus: false, opener: null,
                     returnTo: origin, destination: key, back: { label: origin.label, title: origin.title },
                     onClose: async (reason) => {
@@ -44,6 +46,9 @@ export function createPageNavigation({ layers, capture, canLeave, land = () => {
             commit();
             if (!map && origin.key !== key && !row) land();
         });
+        // A jump made from a key leaves focus on the destination's round Back (a row it asked for keeps its own); a
+        // pointer's jump leaves focus where the page puts it.
+        if (fromKey && id && !row) doc.querySelector?.(`[data-shell-back][data-page-layer="${id}"]`)?.focus?.({ preventScroll: true });
         return true;
     }
     return { go, clear, capture: currentPlace, destroy: () => doc.removeEventListener('click', onPress, true) };

@@ -20,6 +20,26 @@ test('the pressed opener survives a microtask between click listeners but never 
     nav.destroy();
 });
 
+test('a jump made from a key focuses the destination\'s round Back; a pointer\'s jump and a named row do not', async () => {
+    const layers = createLayerStack({ win: null, doc: null });
+    let onClick;
+    const back = { focus() { doc.activeElement = back; } };
+    const doc = { activeElement: null, addEventListener: (_, handler) => { onClick = handler; }, removeEventListener() {},
+        querySelector: (selector) => (selector === `[data-shell-back][data-page-layer="${layers.returnPage()?.id}"]` ? back : null) };
+    const nav = createPageNavigation({ layers, doc, canLeave: () => true,
+        capture: () => ({ key: 'chat', label: 'Main', restore: () => {} }) });
+    for (const [detail, row, focused] of [[0, '', true], [1, '', false], [0, 'TOTAL_BUDGET', false]]) {
+        doc.activeElement = null;
+        const event = { target: { closest: () => null }, eventPhase: 1, detail };
+        onClick(event);
+        await nav.go('skills', () => {}, { row });
+        event.eventPhase = 0;
+        assert.equal(doc.activeElement === back, focused, `detail ${detail}, row "${row}"`);
+        layers.back(); await settle();
+    }
+    nav.destroy(); layers.destroy();
+});
+
 test('only keyboard dismissals ask the returned place to show its focus ring', async () => {
     const layers = createLayerStack({ win: null, doc: null }), restored = [];
     const doc = { addEventListener() {}, removeEventListener() {} };
