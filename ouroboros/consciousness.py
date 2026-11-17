@@ -674,8 +674,10 @@ class BackgroundConsciousness:
         except Exception:
             log.debug("consciousness: places unreadable for the start sentence", exc_info=True)
             places = None
-        try:  # a spent or unreadable window names no wake (review r3, r4): read now, not the status view's cache
-            allowance = str(self._allowance_view(time.time(), fresh=True).get("status") or "")
+        try:  # a spent or unreadable window names no wake (reviews r3, r4): read now, not the status view's cache, and
+            # with the display's short wait, never the admission's long one that would hold the owner's next command (r5)
+            from ouroboros.consciousness_allowance import allowance_window
+            allowance = str(allowance_window(self._drive_root, allow_stale=True).get("status") or "")
         except Exception:
             allowance = "allowance_unknown"
         return on_sentence(at, places, get_consciousness_autonomy(), get_consciousness_daily_usd(), allowance) + note

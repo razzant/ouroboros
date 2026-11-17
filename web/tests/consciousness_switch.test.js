@@ -96,6 +96,8 @@ test('an answer the preview cannot read, or one that never ends, is never «no p
         assert.deepEqual((await readSwitchPreview('off')).places.map((row) => row.label), ['Lab', 'Ops']);
         globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ lines: ['x'], places: [{ place_id: 'lab', label: 'Lab' }, { state: 'active' }] }) });
         await assert.rejects(readSwitchPreview('off'));
+        globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ lines: ['x'], places: [{ label: '   ', state: 'active' }] }) });
+        await assert.rejects(readSwitchPreview('off'), undefined, 'a name of blanks is no name (review r5)');
         // A preview that never answers ends at its lifetime (here shortened), so the switch is never held.
         globalThis.fetch = (_url, init) => new Promise((_resolve, reject) => {
             init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));

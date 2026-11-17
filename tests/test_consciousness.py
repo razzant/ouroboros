@@ -989,15 +989,19 @@ def test_start_and_stop_flip_the_flag_and_stop_arms_a_graceful_stop_of_a_live_wa
     assert clock.clock.enabled is True
     # A spent window and a $0 allowance name no wake in the receipt (review r3): start reads both.
     import ouroboros.consciousness as consciousness_module
-    view, daily = clock.clock._allowance_view, consciousness_module.get_consciousness_daily_usd
+    import ouroboros.consciousness_allowance as allowance_module
+    window, daily = allowance_module.allowance_window, consciousness_module.get_consciousness_daily_usd
+    reads = []
     clock.clock.stop()
-    monkeypatch.setattr(clock.clock, "_allowance_view", lambda *_a, **_k: {"status": "exhausted"})
+    # The display read (short wait), never the admission's long one that would hold the next command (review r5).
+    monkeypatch.setattr(allowance_module, "allowance_window", lambda *a, **k: reads.append(k) or {"status": "exhausted"})
     assert clock.clock.start().startswith("Consciousness on, but its allowance for the last 24 hours is spent")
+    assert reads and reads[-1].get("allow_stale") is True
     clock.clock.stop()
     monkeypatch.setattr(consciousness_module, "get_consciousness_daily_usd", lambda: 0.0)
     assert clock.clock.start().startswith("Consciousness on, but its allowance is $0.00")
     monkeypatch.setattr(consciousness_module, "get_consciousness_daily_usd", daily)
-    monkeypatch.setattr(clock.clock, "_allowance_view", view)
+    monkeypatch.setattr(allowance_module, "allowance_window", window)
     _launched(clock)
     stopped: list = []
     done = threading.Event()
