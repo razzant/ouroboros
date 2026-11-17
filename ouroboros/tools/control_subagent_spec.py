@@ -192,19 +192,27 @@ def schedule_subagent_param_names() -> frozenset:
 
 
 _INTERNAL_SCHEDULE_OPTIONS: frozenset = frozenset()
+SCHEDULE_REFUSAL = "⚠️ TOOL_ARG_ERROR (schedule_subagent): "
+_STRICT_SCHEMA = ("Use the strict schema: subagent_id, objective, expected_output, optional role/context/constraints/"
+                  "memory_mode/workspace_root/effort and (for mutative children) write_surface/write_root/"
+                  "protected_paths_grant/external_tool_grants.")
 
 
-def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tuple[Dict[str, Any], str]:
-    """Normalize and validate the public schedule_subagent fields.
+def one_refusal(problems: list) -> str:
+    """Every problem of one request in one refusal, each worded as its own check words it (the W2 shape of
+    ``arg_feedback.argument_refusal``; DEVELOPMENT 02: field, value and repair in one reply), so fixing one never
+    meets the next on the following call. One problem reads exactly as it always did."""
+    return SCHEDULE_REFUSAL + "; ".join(str(problem).rstrip(". ") for problem in problems) + "."
 
-    Returns ``(fields, "")`` or ``({optional reason}, refusal)``. Extracted from ``_schedule_task`` so
-    the handler stays inside the method-size gate — argument validation is a coherent
-    phase with one job, not a slice taken to shed lines.
-    """
+
+def _shape_problems(params: Dict[str, Any], unsupported: Any) -> list:
+    """The independent shape problems of a request: each checks one field alone (unknown names, the required fields,
+    mode, deadline, claims, memory mode, effort, memory view), so all of them are named together before any route is
+    selected; checks that depend on other fields or on the route follow once these pass."""
+    problems = [f"unsupported argument(s): {', '.join(unsupported)}. {_STRICT_SCHEMA}"] if unsupported else []
     if params.get("mode") not in (None, "ask", "plan", "agent"):
-        return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): mode must be ask, plan or agent."
+        problems.append("mode must be ask, plan or agent.")
     deadline_at = str(params.get("deadline_at") or "").strip()
-    memory_mode = str(params.get("memory_mode") or "forked").strip().lower()
     if deadline_at:
         # `deadline_at` became MODEL-AUTHORED in v6.87.7; it used to be computed by
         # plan_review, where neither check could fail. Both failures below are SILENT
@@ -216,44 +224,53 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
 
         parsed = parse_deadline_ts(deadline_at)
         if parsed is None:
-            return {}, (
-                "⚠️ TOOL_ARG_ERROR (schedule_subagent): deadline_at must be an ISO-8601 UTC "
-                f"instant such as 2026-08-02T18:30:00Z (got: {deadline_at!r})."
-            )
-        if parsed <= utc_now():
-            return {}, (
-                "⚠️ TOOL_ARG_ERROR (schedule_subagent): deadline_at is already in the past "
-                f"({deadline_at}); a child bound to it would finalize before doing any work."
-            )
-    objective = str(params.get("objective") or "").strip()
-    if not objective:
-        return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): objective is required."
-    expected_output = str(params.get("expected_output") or "").strip()
-    if not expected_output:
-        return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): expected_output is required."
+            problems.append("deadline_at must be an ISO-8601 UTC instant such as 2026-08-02T18:30:00Z "
+                            f"(got: {deadline_at!r}).")
+        elif parsed <= utc_now():
+            problems.append(f"deadline_at is already in the past ({deadline_at}); a child bound to it would "
+                            "finalize before doing any work.")
+    for field in ("objective", "expected_output"):
+        if not str(params.get(field) or "").strip():
+            problems.append(f"{field} is required.")
     raw_claims = params.get("acceptance_claims")
-    if raw_claims is not None and (
-        not isinstance(raw_claims, list)
-        or any(not isinstance(item, str) for item in raw_claims)
-    ):
-        return {}, (
-            "⚠️ TOOL_ARG_ERROR (schedule_subagent): acceptance_claims must be an array "
-            "of plain strings (one checkable claim per entry)."
-        )
+    if raw_claims is not None and (not isinstance(raw_claims, list) or any(not isinstance(item, str) for item in raw_claims)):
+        problems.append("acceptance_claims must be an array of plain strings (one checkable claim per entry).")
+    if str(params.get("memory_mode") or "forked").strip().lower() not in VALID_SUBTASK_MEMORY_MODES:
+        problems.append(f"memory_mode must be one of: {', '.join(sorted(VALID_SUBTASK_MEMORY_MODES))}. memory_mode=shared "
+                        "is disabled for live local subagents until a sanitized shared-context mode exists.")
+    effort_error = requested_child_effort(params.get("effort"), "schedule_subagent")[1]
+    if effort_error:
+        problems.append(effort_error.removeprefix(SCHEDULE_REFUSAL))
+    view = params.get("memory_view")
+    if isinstance(view, dict) and (view.get("owner_words") is False or view.get("marks") == "none"):
+        problems.append("memory_view only widens a child's view; it keeps my human's words and the marks in force.")
+    if isinstance(view, dict) and not set(view) <= set(MEMORY_VIEW_FIELDS):
+        problems.append(f"memory_view fields are {', '.join(MEMORY_VIEW_FIELDS)} "
+                        f"(got: {', '.join(sorted(map(str, set(view) - set(MEMORY_VIEW_FIELDS))))}).")
+    return problems
+
+
+def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
+                               unsupported: Any = ()) -> tuple[Dict[str, Any], str]:
+    """Normalize and validate the public schedule_subagent fields.
+
+    Returns ``(fields, "")`` or ``({optional reason}, refusal)``. Extracted from ``_schedule_task`` so
+    the handler stays inside the method-size gate — argument validation is a coherent
+    phase with one job, not a slice taken to shed lines. The independent shape problems,
+    with the ``unsupported`` names the handler found, are refused together (``_shape_problems``).
+    """
+    if problems := _shape_problems(params, unsupported):
+        return {}, one_refusal(problems)
+    deadline_at = str(params.get("deadline_at") or "").strip()
+    memory_mode = str(params.get("memory_mode") or "forked").strip().lower()
+    objective = str(params.get("objective") or "").strip()
+    expected_output = str(params.get("expected_output") or "").strip()
     # Vacuous claims normalize to ABSENT, never an error (the v6.65.1/.2 lesson:
     # min-constraints shape placeholder junk instead of preventing it).
     acceptance_claims = [
-        item.strip() for item in (raw_claims or []) if isinstance(item, str) and item.strip()
+        item.strip() for item in (params.get("acceptance_claims") or []) if isinstance(item, str) and item.strip()
     ]
-    if memory_mode not in VALID_SUBTASK_MEMORY_MODES:
-        allowed = ", ".join(sorted(VALID_SUBTASK_MEMORY_MODES))
-        return {}, (
-            f"⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_mode must be one of: {allowed}. "
-            "memory_mode=shared is disabled for live local subagents until a sanitized shared-context mode exists."
-        )
-    requested_effort, effort_error = requested_child_effort(params.get("effort"), "schedule_subagent")
-    if effort_error:
-        return {}, effort_error
+    requested_effort = requested_child_effort(params.get("effort"), "schedule_subagent")[0]
     directory_options = {}
     if "directory_strategy" in params:
         strategy = params["directory_strategy"]
@@ -361,12 +378,6 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
             return {}, "⚠️ BROWSER_ORIGIN_NOT_GRANTED: this caller may only narrow its inherited allowed_origins."
         resource_policy["allowed_origins"] = origins
     view = params.get("memory_view")
-    if isinstance(view, dict) and (view.get("owner_words") is False or view.get("marks") == "none"):
-        return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_view only widens a child's view; "
-                    "it keeps my human's words and the marks in force.")
-    if isinstance(view, dict) and not set(view) <= set(MEMORY_VIEW_FIELDS):
-        return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_view fields are "
-                    f"{', '.join(MEMORY_VIEW_FIELDS)} (got: {', '.join(sorted(map(str, set(view) - set(MEMORY_VIEW_FIELDS))))}).")
     return {
         "deadline_at": deadline_at, "objective": objective, "expected_output": expected_output,
         "role": str(params.get("role") or "").strip(),

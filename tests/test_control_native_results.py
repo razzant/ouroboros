@@ -137,7 +137,8 @@ def test_a_direct_selector_call_without_an_invocation_still_returns_its_text(tmp
     ("label", "prefix"),
     [
         ("effort_arg_error", "⚠️ TOOL_ARG_ERROR (schedule_subagent): effort must be auto or one of: "),
-        ("validator_refusal", "⚠️ TOOL_ARG_ERROR (schedule_subagent): objective is required."),
+        # Every independent shape problem of the call in one refusal (objective="" and no expected_output).
+        ("validator_refusal", "⚠️ TOOL_ARG_ERROR (schedule_subagent): objective is required; expected_output is required."),
         (
             "capability_arg_error",
             "⚠️ TOOL_ARG_ERROR (schedule_subagent): required_capabilities must be a list of strings.",
