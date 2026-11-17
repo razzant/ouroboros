@@ -250,14 +250,16 @@ def test_new_repository_tools_keep_target_through_read_and_readback(
         "update": ["repos/owner/selected/git/ref/heads/release", "repos/owner/selected/pulls/7"],
     }
     assert [argv[2] for argv, _ in complete_gh if argv[1] == "api"] == api_paths.get(operation, [])
+    # A read naming its repository runs every leg, the generic API ones included, in the task's own task_drive.
+    scratch = ctx.task_drive_root() if name == "github_read" and repo else None
     for argv, kwargs in complete_gh:
         assert kwargs["env"]["GH_HOST"] == "configured.example"
         if argv[1] == "api":
             assert argv[-2:] == ["--hostname", "github.example"]
-            assert kwargs["cwd"] == str(ctx.repo_dir)
+            assert kwargs["cwd"] == str(scratch or ctx.repo_dir)
             assert kwargs["env"]["GH_REPO"] == "unrelated/wrong-repo"
             continue
-        assert kwargs["cwd"] == str(expected_cwd)
+        assert kwargs["cwd"] == str(scratch or expected_cwd)
         if repo and argv[1:3] == ["repo", "view"]:
             assert argv[3] == repo and "--repo" not in argv
         elif repo:
@@ -332,6 +334,8 @@ def test_every_repository_tool_keeps_target_in_all_subcalls(tmp_path, gh_calls, 
     # An omitted repo names its one target before the first REST or GraphQL leg; the checks reader has none.
     assert len(gh_calls) == count + (not repo and args["method"] != "checks")
     assert "repo" in entry.schema["parameters"]["properties"]
+    # A read naming its repository needs no checkout: every leg, the ones that take no repo too, runs in its task_drive.
+    scratch = ctx.task_drive_root() if name == "github_read" and repo else None
     for argv, kwargs in gh_calls:
         if argv[1:3] == ["repo", "view"]:
             assert argv[-2:] == ["--json", "nameWithOwner,url"]
@@ -341,12 +345,13 @@ def test_every_repository_tool_keeps_target_in_all_subcalls(tmp_path, gh_calls, 
             route, hostname, fields = _api_parts(argv)
             if route == "graphql":  # Node facts follow the PR URL returned by GitHub, like list(kind='pr').
                 assert argv == ["gh", "api", "graphql", "--hostname", "github.example", "--input", "-"]
-                assert kwargs["cwd"] == str(ctx.repo_dir)
+                assert kwargs["cwd"] == str(scratch or ctx.repo_dir)
                 assert json.loads(kwargs["input"])["variables"] == {"ids": ["PR_node7"]}
                 continue
             if route.startswith("repos/owner/selected/check-runs/"):  # The checks reader's one literal path: the URL GitHub returned.
                 assert argv == ["gh", "api", "repos/owner/selected/check-runs/55/annotations?per_page=100",
                                 "--hostname", "github.example"]
+                assert kwargs["cwd"] == str(scratch or ctx.repo_dir)
                 continue
             assert "--repo" not in argv  # gh api has no --repo: the route or the typed fields name the repository.
             assert route.startswith("repos/owner/selected/") and hostname == "github.example" and "{owner}" not in route
@@ -354,7 +359,7 @@ def test_every_repository_tool_keeps_target_in_all_subcalls(tmp_path, gh_calls, 
             assert argv[-2:] == ["--repo", repo]
         else:
             assert "--repo" not in argv
-        assert kwargs["cwd"] == str(expected_cwd)
+        assert kwargs["cwd"] == str(scratch or expected_cwd)
         if kind != "system":
             assert "GH_REPO" not in kwargs["env"]
         assert kwargs["env"]["GH_HOST"] == "configured.example"
@@ -520,6 +525,8 @@ def test_presence_repository_selection_keeps_host_argument_authority(tmp_path, g
         assert result.startswith("github_read get issue #7")
         assert len(gh_calls) == (1 if bound else 2)
         assert gh_calls[-1][0][2] == ("repos/owner/allowed/issues/7" if bound else "repos/owner/selected/issues/7")
+        # The host-bound repo is a named repository too: that read runs in the task's own task_drive.
+        assert gh_calls[-1][1]["cwd"] == str(ctx.task_drive_root() if bound else ctx.repo_dir)
 
 
 def _role_context(tmp_path, kind, role):
@@ -572,8 +579,10 @@ def test_read_only_child_reads_github_where_a_writer_would(tmp_path, request, mo
         assert (status, code, launched) == ("error", "TOOL_ARG_ERROR", [])
         return
     assert status == "ok" and launched
-    # The repository subcommands run in the selected folder, without the ambient GH_REPO default.
-    assert all((selected, ambient) == (str(cwd), False) for argv, selected, ambient in launched if argv[1] != "api")
+    # The repository subcommands run in the selected folder, or for a read naming its repository in the task's own
+    # task_drive, without the ambient GH_REPO default.
+    folder = ctx.task_drive_root() if repo else cwd
+    assert all((selected, ambient) == (str(folder), False) for argv, selected, ambient in launched if argv[1] != "api")
 
 
 def test_read_only_child_keeps_every_other_github_gate(tmp_path, gh_calls, monkeypatch):
@@ -606,14 +615,101 @@ def test_read_only_child_with_an_unavailable_project_folder_sends_nothing(tmp_pa
     assert not gh_calls
 
 
-def test_a_directory_that_cannot_be_bound_is_a_typed_no_effect_target_refusal(tmp_path, gh_calls, monkeypatch):
-    """An explicit repo does not replace the selected folder as gh's directory, and never falls back to the system
-    repository: an unreadable room registry refuses, typed, before gh starts."""
+def test_an_observe_wake_reads_a_named_repository_without_its_project_folder(tmp_path, gh_calls, monkeypatch):
+    """#3613 under Observe: with the Project folder moved away, a github_read naming its repository passes the registry
+    and runs every leg in the task's own task_drive, while the GitHub actions Observe withholds stay withheld."""
+    from ouroboros.consciousness_authority import apply_consciousness_authority
+
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
-    ctx, _ = _context(tmp_path, "room")
-    ctx.task_metadata = {"_project_room_note": "registry unavailable"}
-    result = _registry(ctx).execute_result("github_read", {"method": "get", "kind": "issue", "target": 7,
-                                                           "repo": "owner/selected"})
-    assert result.text.startswith("⚠️ GH_TARGET_UNAVAILABLE:") and "registry unavailable" in result.text
-    assert (result.status, result.meta.get("operation_outcome")) == ("unavailable", "completed_no_effect")
+    ctx, project = _context(tmp_path, "queued")
+    project.rmdir()
+    ctx.task_metadata = apply_consciousness_authority({"id": "wake", "metadata": {
+        "initiator": "consciousness", "consciousness_autonomy": "observe"}})["metadata"]
+    registry = _registry(ctx)
+    for name, args in (("github_write", {"method": "comment", "target": 7, "body": "text"}),
+                       ("pr_merge", {"number": 7, "expected_head_sha": SHA, "method": "merge"})):
+        assert registry.execute_result(name, {**args, "repo": "owner/selected"}).status == "blocked", name
     assert not gh_calls
+
+    read = registry.execute_result("github_read", {"method": "get", "kind": "pr", "target": 7, "include": ["diff"],
+                                                   "repo": "owner/selected"})
+
+    assert read.status == "ok", read.text
+    assert [argv[1] if argv[1] == "api" else " ".join(argv[1:3]) for argv, _ in gh_calls] == ["api", "pr diff", "api"]
+    assert {kw["cwd"] for _argv, kw in gh_calls} == {str(ctx.task_drive_root())} and not project.exists()
+
+
+@pytest.mark.parametrize("state", ["healthy", "moved-room", "unreadable-registry", "moved-workspace", "folderless"])
+def test_a_read_naming_its_repository_needs_no_project_folder(tmp_path, gh_calls, state):
+    """#3613: the Project folder moved outside Ouroboros. A read naming its repository runs every leg, the count read
+    GitHub's PR URL names included, in the task's own task_drive whatever that folder's state, and so does a GraphQL
+    query whose stdin variables carry a literal {branch}. A route with either branch placeholder gh fills from the
+    folder still needs it: it runs there, or is refused, typed, before gh starts. An omitted repo still means the
+    folder. Nothing falls back to the system repository or recreates the moved folder."""
+    ctx, project = _context(tmp_path, "queued" if state in ("healthy", "moved-workspace") else "room")
+    if state in ("moved-room", "moved-workspace"):
+        project.rmdir()
+    if state == "moved-room":  # What room_chat_lens_dir records for a selected folder that no longer exists.
+        ctx.task_metadata["_project_room_note"] = f"project 'project-fixture' working_dir {project} is unusable"
+    elif state == "unreadable-registry":
+        ctx.task_metadata = {"_project_room_note": "registry unavailable"}
+    elif state == "folderless":
+        ctx.task_metadata = {}
+    read = next(entry.handler for entry in github.get_tools() if entry.name == "github_read")
+    scratch = str(ctx.task_drive_root())
+
+    named = read(ctx, method="get", kind="pr", target=7, include=["diff"], repo="owner/selected")
+
+    assert named.startswith("github_read get pr #7"), named
+    assert [argv[1] if argv[1] == "api" else " ".join(argv[1:3]) for argv, _ in gh_calls] == ["api", "pr diff", "api"]
+    assert {kw["cwd"] for _argv, kw in gh_calls} == {scratch}
+    gh_calls.clear()
+    # A {branch} in the GraphQL stdin body is data, not an endpoint placeholder: the query needs no checkout either.
+    query = 'query($head:String!){repository(owner:"owner",name:"selected"){ref(qualifiedName:$head){name}}}'
+    graphql = read(ctx, method="api", graphql=query, variables={"head": "{branch}"}, repo="owner/selected")
+    assert not graphql.startswith("⚠️"), graphql
+    [(argv, kw)] = gh_calls
+    assert (argv, kw["cwd"]) == (["gh", "api", "graphql", "--input", "-"], scratch)
+    assert json.loads(kw["input"])["variables"] == {"head": "{branch}"}
+    gh_calls.clear()
+    for form in ("{branch}", ":branch"):  # Both branch forms of gh's endpoint pattern are filled from the folder.
+        ctx._active_builtin_tool_result = None
+        branch = read(ctx, method="api", route="repos/{owner}/{repo}/compare/main..." + form, repo="owner/selected")
+        if state == "healthy":  # The folder exists: gh reads the branch there.
+            routes = [(argv[3], kw["cwd"]) for argv, kw in gh_calls]
+            assert routes == [("repos/owner/selected/compare/main..." + form, str(project))], branch
+        else:
+            refused = ctx._active_builtin_tool_result
+            assert branch.startswith("⚠️ GH_TARGET_UNAVAILABLE:") and not gh_calls, branch
+            assert (refused.status, refused.meta.get("operation_outcome")) == ("unavailable", "completed_no_effect")
+        gh_calls.clear()
+    implicit = read(ctx, method="get", kind="issue", target=7)
+    assert project.exists() is (state not in ("moved-room", "moved-workspace"))
+    if state == "healthy":  # The omitted repo names the folder's repository, read in the folder.
+        assert not implicit.startswith("⚠️") and {kw["cwd"] for _argv, kw in gh_calls} == {str(project)}, implicit
+    else:
+        assert implicit.startswith("⚠️ GH_TARGET_") and not gh_calls, implicit
+
+
+@pytest.mark.parametrize("direct", [True, False])
+@pytest.mark.parametrize("intent", ["system_repo", "", "explicit_none"])
+def test_a_branch_route_runs_in_the_kept_body_checkout_never_a_folderless_scratch(tmp_path, gh_calls, direct, intent):
+    """#3613: readmission that keeps a Project's body work records resource_intent system_repo and no room lens
+    (``project_placement.readmit_placement``), so the resolver selects the body checkout and gh fills a named
+    repository's {branch} there. The same Project with no folder selects only its own scratch, which has no branch:
+    refused, typed, before gh starts. Neither outcome depends on the room or chat fields."""
+    ctx, body = _context(tmp_path, "system")
+    ctx.is_direct_chat, ctx.project_id = direct, "project-fixture"
+    ctx.task_metadata = {"resource_intent": {"kind": intent}} if intent else {}
+    read = next(entry.handler for entry in github.get_tools() if entry.name == "github_read")
+    for form in ("{branch}", ":branch"):
+        ctx._active_builtin_tool_result = None
+        result = read(ctx, method="api", route="repos/{owner}/{repo}/compare/main..." + form, repo="owner/selected")
+        if intent == "system_repo":
+            routes = [(argv[3], kw["cwd"]) for argv, kw in gh_calls]
+            assert routes == [("repos/owner/selected/compare/main..." + form, str(body))], result
+        else:
+            refused = ctx._active_builtin_tool_result
+            assert result.startswith("⚠️ GH_TARGET_UNAVAILABLE:") and not gh_calls, result
+            assert (refused.status, refused.meta.get("operation_outcome")) == ("unavailable", "completed_no_effect")
+        gh_calls.clear()

@@ -798,9 +798,6 @@ def _record_project_letters_home(env: Any, task: Dict[str, Any], outcome_axes: D
     # Record the cycle in its project journal; project_digest only
     # touches recency. Unified memory already includes the project thread.
     _pid = resolve_project_id(task)
-    # The journal bounds long objectives with a pointer to task_results,
-    # which retains the full objective and outcome.
-    _objective = str(task.get("objective") or task.get("description") or task.get("text") or "")
     _exec_status = str((outcome_axes.get("execution") or {}).get("status") or "unknown")
     try:
         # One fail-soft seam (project_journal.record_task_finalization) for
@@ -814,7 +811,6 @@ def _record_project_letters_home(env: Any, task: Dict[str, Any], outcome_axes: D
         record_task_finalization(
             _pid,
             task,
-            objective=_objective,
             kind="done" if _exec_status in (EXECUTION_OK, EXECUTION_BEST_EFFORT) else "blocked",
             exec_status=_exec_status,
             # Registry lives on the canonical drive; stamps the durable

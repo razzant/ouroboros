@@ -746,7 +746,8 @@ def test_configured_signing_publishes_the_verified_signer(tmp_path: Path):
     }
     assert f"from **Example Publisher** (certificate SHA-1 `{SIGNER}`)" in notes
     assert "`Ouroboros.exe` and the bundled interpreter's `python.exe` and `pythonw.exe`" in notes
-    assert "(CPython 3.10.22 from python-build-standalone 20261009)" in notes
+    upstream = CATALOG["pythonUpstream"]
+    assert f"(CPython {upstream['pythonVersion']} from python-build-standalone {upstream['release']})" in notes
     assert "timestamped Authenticode signatures" in notes and "before and after signing" in notes
     # The scope boundary: nothing else in the ZIP, no later environment or Git update.
     assert "signs no other file in the ZIP" in notes and "later created from that interpreter" in notes

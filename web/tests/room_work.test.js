@@ -107,6 +107,7 @@ test('the mounted list holds its order while open, settles ended work and only n
         const anchor = header.children.find((child) => child.classList.contains('rw-shade-anchor'));
         const surface = anchor.children.find((child) => child.classList.contains('rw-surface'));
         assert.ok(surface.classList.contains('rw-shade'));
+        assert.ok(surface.classList.contains('scroll-fade-y'));
         const list = surface.querySelector('.rw-list');
         const ids = () => list.children.map((row) => row.dataset.id);
         assert.ok(trigger.contains(badge), 'the real status badge is the control’s word');

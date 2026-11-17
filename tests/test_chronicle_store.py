@@ -4,6 +4,7 @@ import json
 import pathlib
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 
 import pytest
 
@@ -726,7 +727,9 @@ def test_rebuilt_index_has_the_same_rows_folds_sequences_and_page_order(tmp_path
     def snapshot():
         derived = ([(r["id"], r["sequence"]) for r in store.records()],
                    [r["id"] for r in store.pages_of_room("r")], store.sealed_row_refs("r"), store.room_head("r"))
-        with sqlite3.connect(store.index_path) as db:
+        # closed here: from CPython 3.12 a dropped connection stays open until garbage collection,
+        # and Windows cannot unlink a file that is still open
+        with closing(sqlite3.connect(store.index_path)) as db:
             tables = {name: sorted(db.execute(f"SELECT * FROM {name}"))
                       for name in ("page_rows", "folded", "active_marks")}
         return tables, derived

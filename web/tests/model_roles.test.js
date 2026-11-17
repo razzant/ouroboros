@@ -4,8 +4,18 @@ import { readFileSync } from 'node:fs';
 import { MAIN_FOLLOW_NOTE, composeModelSource, createModelRolesEditor, inheritTargetOf, modelContextNote,
     modelSourceGroups, parseModelSource, sourceChoice, sourceFromChoice } from '../modules/model_roles.js';
 import { configuredApiProviders, routeChoiceGroups } from '../modules/route_editor_primitives.js';
+import { settingsTitle } from '../modules/settings_home.js';
 
-const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url)));
+const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url), 'utf8'));
+
+test('a model role names its destination without repeating the source section, while the parent stays Models', () => {
+    assert.equal(settingsTitle('models'), 'Models');
+    for (const [slot, name] of [['main', 'Main model'], ['light', 'Light model'],
+        ['consciousness', 'Consciousness model'], ['websearch', 'Web search model'], ['fallback/2', 'Fallback model 2']]) {
+        assert.equal(settingsTitle(`models/role/${slot}`), name);
+    }
+    assert.equal(settingsTitle('models'), 'Models');
+});
 
 test('source/model spelling is reversible and never embeds the account', () => {
     for (const value of ['google/a', 'openai::b', 'claudexor::codex=gpt-test', 'custom::x=y']) {

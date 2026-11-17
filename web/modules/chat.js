@@ -1,6 +1,7 @@
 import { escapeHtmlAttr, isoMicros } from './utils.js';
 import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { renderPageHeader } from './page_header.js';
+import { clearReloadParams } from './layers.js';
 import { fluentIcon, renderSkillIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { createRoomHeader, mainHeaderActionsHtml } from './chat_header.js';
@@ -482,16 +483,6 @@ export function createChatInstance({
     try {
         pendingRestartNotice = restartNoticeText(new URL(window.location.href).searchParams.get('_ouro_reason') || '');
     } catch {}
-    function clearReloadParams() {
-        try {
-            const url = new URL(window.location.href);
-            if (!url.searchParams.has('_ouro_reason') && !url.searchParams.has('_ouro_refresh')) return;
-            url.searchParams.delete('_ouro_reason');
-            url.searchParams.delete('_ouro_refresh');
-            window.history.replaceState({}, '', url);
-        } catch {}
-    }
-
     function rememberMessageKey(key) {
         if (!key || seenMessageKeys.has(key)) return;
         seenMessageKeys.add(key);
@@ -1228,12 +1219,12 @@ export function createChatInstance({
                 <div class="chat-live-foot-end" data-live-foot-end></div>
             </div>
             <div data-live-reviews-host></div>
-            <div class="chat-live-details">
+            <div class="chat-live-details scroll-fade-y">
                 <div data-live-phase-detail hidden></div>
                 <dl class="chat-live-facts" data-live-facts hidden></dl>
                 <div data-live-cost-detail hidden></div>
             </div>
-            <div class="chat-live-timeline" data-live-timeline id="${escapeHtmlAttr(timelineId)}"></div>
+            <div class="chat-live-timeline scroll-fade-y" data-live-timeline id="${escapeHtmlAttr(timelineId)}"></div>
             <div class="chat-live-episode-history" data-live-episode-history hidden></div>
         `;
         const part = (name) => root.querySelector(`[data-live-${name}]`);  // the card's own named parts
@@ -3512,7 +3503,7 @@ export function createChatInstance({
         showLatest,
         resume,
         ws,
-        // Shell exposure after its motion: present retained notice state, without fetching or scrolling.
+        captureReading: () => reading.capture(),
         showHistoryNotice: () => { if (!destroyed) historyControls.showNotice(); },
         refreshHistory: readReceipt.refresh,
         revealQuestion,

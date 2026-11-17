@@ -47,6 +47,7 @@ jobs:
       - uses: ./.github/actions/setup-python-env
         with:
           profile: build
+          interpreter: shipped  # the Python the packaged launcher and its window run on
       # The laptop of razzant/ouroboros#3204. A runner that refuses the size keeps its
       # own: the case below measures whatever screen it gets and prints it.
       - name: Set the display to 1366x768

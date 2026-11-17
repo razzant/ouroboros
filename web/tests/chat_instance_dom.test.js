@@ -62,6 +62,42 @@ test('createChatInstance renders a real assistant bubble without senderLabel sha
         restoreDom(prior);
     }
 });
+// A room's feed carries no fade (DESIGN principle 9): its own mask would make it one stacking context, so a card
+// could not lift over the composer, and Chromium drops the lazy-load margin of the photos inside a masked scroller.
+// A card's own scrollers inside the feed keep the shared fade.
+for (const [room, options] of [['Main', { chatId: 1, asPanel: false }], ['a Project', { chatId: 2, asPanel: true }]]) {
+    test(`${room}'s feed takes no shared fade or room-top switch; its live card's scrollers keep theirs`, async () => {
+        const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({
+            messages: [], window: { complete: true }, active_chat_activities: [], active_chat_activities_complete: true,
+            supervisor_ready: true }) }));
+        const handlers = new Map();
+        let generation = 0, instance;
+        try {
+            instance = createChatInstance({
+                ws: { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); }, isConnected: () => true, send() {} },
+                state: { activePage: 'chat', projectChatIds: new Set(options.asPanel ? [options.chatId] : []), unreadCount: 0 },
+                updateUnreadBadge() {}, idPrefix: 'chat', mountEl: mount, ...options,
+                stateSnapshots: { begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+                    gate() { return Promise.resolve(this.begin()); }, isCurrent: () => true, apply() {}, fail() {}, latest: () => null },
+            });
+            const feed = globalThis.document.byId.get('chat-messages');
+            const page = mount.children.find((node) => node.id === (options.asPanel ? 'panel-chat' : 'page-chat'));
+            assert.equal(feed.classList.contains('scroll-fade-y'), false, 'the feed itself is never masked');
+            assert.equal(Object.hasOwn(page.dataset, 'roomTop'), false, 'no prototype switch on the room root');
+            listActivity(instance, 'feed-card', options.chatId);
+            handlers.get('chat')({ chat_id: options.chatId, role: 'system', is_progress: true, task_id: 'feed-card',
+                content: 'Reading the feed', ts: '2026-11-17T00:00:00Z' });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            const card = walkCard(feed, 'feed-card');
+            const part = (name) => card?.children.find((node) => node.classList.contains(name));
+            assert.equal(part('chat-live-timeline')?.classList.contains('scroll-fade-y'), true);
+            assert.equal(part('chat-live-details')?.classList.contains('scroll-fade-y'), true);
+        } finally {
+            instance?.destroy();
+            restoreDom(prior);
+        }
+    });
+}
 test('first task-bound review hydrates a progress-created owner once and reconciles task truth', async () => {
     const calls = [];
     let resolveDeferredDetail = null, resolveNoopDetail = null;

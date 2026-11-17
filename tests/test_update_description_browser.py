@@ -389,7 +389,8 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
 # The door's destination, through the real producers and consumers: the gateway's admission and Main's
 # history read by the real router (``door``), the task's tool rows by the real tool-log writer, Main by
 # chat.js, and the navigation by app.js's own revealQuotedSource and ``ouro:open-task`` listener, read
-# from app.js verbatim. Only ``showPage`` stands in for the shell: it switches the page and announces it.
+# from app.js verbatim. Only the shell stands in: ``showPage`` switches the page and announces it, and the page
+# navigation's ``capture`` names the place a jump leaves (app.js revealQuotedSource takes its origin there).
 MAIN_BOOT = """<script type="module">
 import {initDashboard} from '/static/modules/dashboard.js';
 import {initUpdates} from '/static/modules/updates.js';
@@ -419,8 +420,9 @@ const showPage=async(name)=>{
 const app=await (await fetch('/static/app.js')).text();
 const door=app.slice(app.indexOf('async function revealQuotedSource('),app.indexOf('\\nfunction freshProjectRow'));
 const noProject=()=>{throw new Error('a Main task never reads Projects');};
-new Function('apiClient','mainChat','state','showPage','closeProjectPanel','showToast','tr','fetchJson','openProjectPanel',
-    'let projectNavigationGeneration = 0;\\n'+door)(apiClient,mainChat,state,showPage,()=>{},text=>notices.push(text),tr,noProject,noProject);
+const pageNavigation={capture:()=>({key:state.activePage})};
+new Function('apiClient','mainChat','state','showPage','pageNavigation','showToast','tr','fetchJson','openProjectPanel',
+    'let projectNavigationGeneration = 0;\\n'+door)(apiClient,mainChat,state,showPage,pageNavigation,text=>notices.push(text),tr,noProject,noProject);
 window.ready=true;
 </script>"""
 
@@ -754,7 +756,7 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     page.set_viewport_size({"width": 320, "height": OWNER_WINDOW["height"]})
     page.evaluate(FRAMES)
     if page.locator("#dashboard-panel-updates").is_visible():
-        page.click("[data-dashboard-list-back]")
+        page.get_by_role("button", name="Back to Dashboard", exact=True).click()
         page.wait_for_selector("#dashboard-panel-updates", state="hidden")
     current["status"] = _status(large, {**_letter(large, "ready"), "text": large["text"]})
     sockets[-1].send(SAVED)
@@ -767,3 +769,94 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     shot("05-long-from-list")
     from_list = letter("long-from-list")
     assert from_list["more"] == "Read all" and from_list["content"] > from_list["height"] > 0, from_list
+
+
+@pytest.mark.parametrize("channel", ["stable", "qa", "development"])
+def test_applied_update_button_admits_retained_range(subscription_ui, door, tmp_path, channel):
+    """Real SPA button → gateway → admitted task → its save, on a merged install after a level check: the serving
+    merge holds the official target, so the checked pair names nothing incoming and Write follows the retained
+    material. Older prose reads "Earlier update"; the text saved for the material reads neutrally until the next
+    check refreshes its ancestry; with no text, Details name the range and no offer."""
+    from ouroboros import update_letter as ul
+    from tests.test_update_description import TARGET, NEWER, _request, _finish
+
+    ui = subscription_ui
+    merge = "d" * 40
+    recent = {"base_sha": TARGET, "target_sha": NEWER, "update_channel": channel,
+              "target_ref": {"development": "managed/ouroboros", "qa": "managed/ouroboros-stable",
+                             "stable": "managed/main"}[channel]}
+    # What the level check recorded: the pair M..N and, for the older text it showed, that its target is inside M.
+    level = {"checked_key": {**recent, "base_sha": merge}, "material": {"key": recent, "text_bytes": 123},
+             "checked_running_sha": merge, "target_in_running": True, "target_in_for": TARGET}
+    _offer(door.root, state="ready", text="Older update: widgets and sharing.", revision=23, **level)
+    status = {**_status(FIXTURE["small"], {}), "available": False, "check_ok": True,
+              "current_sha": merge, "running_sha": merge, "latest_sha": "", "checked_target_sha": NEWER,
+              "current_version": "7.11.1-alpha.0", "update_channel": channel, "target_ref": recent["target_ref"]}
+    calls, sockets = [], []
+
+    def respond(route):
+        path = urlparse(route.request.url).path
+        if path == "/api/update/description":
+            posted = json.loads(route.request.post_data)
+            calls.append(posted)
+            response = door.client.post(path, json=posted)
+            route.fulfill(status=response.status_code, content_type="application/json", body=response.text)
+        else:
+            projected = ul.project_letter_for_panel(status, drive_root=door.root)
+            route.fulfill(content_type="application/json", body=json.dumps({**status, "letter": projected}))
+
+    def connect(socket):
+        sockets.append(socket)
+        socket.send(json.dumps({"type": "heartbeat"}))
+
+    def saved_shows(text):  # the server's own frame after a save; the status read brings the text
+        sockets[-1].send(json.dumps({"type": "update_progress_changed"}))
+        page.wait_for_function("t => document.querySelector('#updates-letter-body').textContent.includes(t)", arg=text)
+
+    page = ui["new_page"](viewport={"width": 1422, "height": 1058}, color_scheme="dark")
+    page.route_web_socket("**/ws", connect)
+    page.route("**/api/update/status", respond)
+    page.route("**/api/update/check", respond)
+    page.route("**/api/update/description", respond)
+    page.goto(ui["url"] + "/")
+    page.click('[data-nav-page="dashboard"]')
+    page.click('[data-dashboard-tab="updates"]')
+    button, label, note = (page.locator(f"#updates-letter-{part}") for part in ("write", "label", "note"))
+    provenance = page.locator("#updates-letter-provenance")
+    button.wait_for()
+    assert button.inner_text() == "Write description"
+    assert label.inner_text() == "Earlier update"
+    assert note.inner_text() == f"This description covers an earlier update ({BASE[:8]} → {TARGET[:8]})."
+    assert "Older update" in page.locator("#updates-letter-body").inner_text()
+    output = diagnostic_directory(tmp_path, "update-range", publish=True)
+    page.screenshot(path=str(output / f"{channel}-retained.png"))
+    assert door.pending == [] and calls == []
+    button.click()
+    page.wait_for_function("document.querySelector('#updates-letter-write').disabled")
+    assert calls == [{"mode": "write", "base_sha": TARGET, "target_sha": NEWER}]
+    [task] = door.pending
+    assert task["metadata"]["update_description"]["key"] == recent
+    assert f"{TARGET}..{NEWER}" in task["text"]
+    assert ul.read_record(door.root)["text"] == "Older update: widgets and sharing."
+    # The requested task saves the retained range; until the next check its ancestry still describes the older
+    # text, so the heading is neutral, no note calls it earlier and Rewrite names its own range.
+    saved = ul.save_description("What this update brings: a calmer Updates panel.", TARGET, NEWER, 23,
+                                author={"task_id": task["id"], "model": "test"}, drive_root=door.root)
+    assert saved["outcome"] == "saved"
+    _finish(door.root, task["id"], "completed")
+    saved_shows("a calmer Updates panel")
+    page.wait_for_function("document.querySelector('#updates-letter-write').textContent === 'Rewrite'")
+    assert label.inner_text() == "What's new" and note.is_hidden()
+    assert f"Changes {TARGET[:8]} → {NEWER[:8]}." in provenance.text_content()
+    page.screenshot(path=str(output / f"{channel}-saved.png"))
+    # The public API still lets an owner intentionally rephrase the saved text.
+    rephrase = _request(door, mode="rewrite", base=TARGET, target=NEWER)
+    assert rephrase.status_code == 200
+    _finish(door.root, rephrase.json()["task_id"], "completed")
+    # With no text at all, Write still names the retained range and Details name it without claiming an offer.
+    _offer(door.root, **level)
+    sockets[-1].send(json.dumps({"type": "update_progress_changed"}))
+    page.wait_for_function("document.querySelector('#updates-letter-write').textContent === 'Write description'")
+    assert label.inner_text() == "What's new" and note.inner_text() == "No description of this update yet."
+    assert provenance.text_content() == f"Changes {TARGET[:8]} → {NEWER[:8]}."
+    page.screenshot(path=str(output / f"{channel}-letterless.png"))

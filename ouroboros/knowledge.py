@@ -412,8 +412,9 @@ def render_knowledge_index(rows: tuple[dict[str, Any], ...], legacy_context: str
 
 
 def outline_keeps_summary(note_type: Any) -> bool:
-    """Whether the outline keeps a note's summary (a person's note does); the receipt reads the same rule."""
-    return str(note_type or "").strip().casefold() == PERSON_TYPE
+    """Whether the outline keeps a note's summary: a note typed person does, the type read as a family (its first
+    word, split at hyphens, underscores and any whitespace: ``person``, ``person-note``). The receipt reads it too."""
+    return str(note_type or "").casefold().replace("_", " ").replace("-", " ").split()[:1] == [PERSON_TYPE]
 
 
 def render_knowledge_outline(rows: tuple[dict[str, Any], ...], legacy_context: str = "", *,
@@ -422,8 +423,8 @@ def render_knowledge_outline(rows: tuple[dict[str, Any], ...], legacy_context: s
 
     A line is the note's address and its title, grouped by the shelf directory the note was
     written into (its authored path, never an inferred category). A note whose authored
-    ``type`` is ``person`` keeps its summary: understanding of people is the continuity an
-    outline must not thin. Every summary and body stays one read away.
+    type is ``person`` or of its family (``outline_keeps_summary``) keeps its summary: understanding
+    of people is the continuity an outline must not thin. Every summary and body stays one read away.
     """
     active = [row for row in rows if row.get("state", "active") == "active"]
     groups: dict[str, list[str]] = {}
@@ -439,7 +440,7 @@ def render_knowledge_outline(rows: tuple[dict[str, Any], ...], legacy_context: s
     body = "\n\n".join((f"{group}\n" if group else "") + "\n".join(lines)
                         for group, lines in sorted(groups.items(), key=lambda item: (item[0] != "", item[0])))
     archived = sum(row.get("state") == "archived" for row in rows)
-    rendered = (f"Outline: every active note ({len(active)}) by its address and title; people's notes keep their "
+    rendered = (f"Outline: every active note ({len(active)}) by its address and title; notes typed person keep their "
                 f"summaries. Full summaries: knowledge_list(scope={scope!r}); one note: "
                 f"knowledge_read(topic=..., scope={scope!r}).\n\n" + (body or "(empty)") + "\n")
     rendered += f"\nArchived notes: {archived}. Open with knowledge_list(scope={scope!r}, view='archived').\n"

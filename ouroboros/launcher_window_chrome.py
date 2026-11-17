@@ -28,11 +28,13 @@ measured returns the window to the ordinary bar rather than leave a transparent 
 
 WKWebView takes the clicks under a transparent bar, so AppKit's title bar never sees them: the script
 reports a plain left press inside the measured band, off any control and any text the page declares
-selectable (``cursor: text``). A first press goes back to
-AppKit's ``performWindowDragWithEvent:``. A second cannot go back: natively the title bar view hands a
-press under a transparent bar to the web view again, never zooming. So this leaf performs the Mac's
-"Double-click a window's title bar" choice, read at each double-click as Chromium reads it: Zoom
-(stored as ``Maximize``, and the default) and Minimize by their public calls, Do Nothing by nothing.
+selectable (``cursor: text``). The report arrives after AppKit dequeued later events (a Force Touch trackpad
+sends pressure events within half a millisecond of a press; one was AppKit's current event at 17 of 19 band
+reports, owner's probe 17.11), so it acts on the mouse-down a local monitor kept, when in this window's band. A first
+press, while the button is down, goes back to AppKit's ``performWindowDragWithEvent:``. A second cannot go back:
+natively the title bar view hands a press under a transparent bar to the web view again, never zooming. So this
+leaf performs the Mac's "Double-click a window's title bar" choice, read at each double-click as Chromium reads it:
+Zoom (stored as ``Maximize``, and the default) and Minimize by their public calls, Do Nothing by nothing.
 Fill uses AppKit's private ``_zoomFill:`` only when present, as Chromium does; it is not Zoom.
 An isolated macOS 26.4 probe matched the ordinary bar; other versions remain unqualified.
 A visible toolbar stays as an opaque band over a full-screen page, so it hides on entering full screen. AppKit
@@ -113,7 +115,6 @@ _FULL_SIZE_CONTENT = 1 << 15  # NSWindowStyleMaskFullSizeContentView
 _TITLE_VISIBLE, _TITLE_HIDDEN = 0, 1
 _SEPARATOR_NONE = 1  # NSTitlebarSeparatorStyleNone
 _TABBING_DISALLOWED = 2
-_LEFT_MOUSE_DOWN, _LEFT_MOUSE_UP, _LEFT_MOUSE_DRAGGED = 1, 2, 6
 _BUTTONS = (0, 1, 2)  # close, miniaturize, zoom
 _FULL_SCREEN = 1 << 14  # NSWindowStyleMaskFullScreen
 # AppKit's full-screen notifications, each with the phase it begins; its failures are delegate messages only.
@@ -398,7 +399,7 @@ class WindowChrome:
         self._native: Any = None
         self._webview: Any = None
         self._world: Any = None
-        self._handler: Any = None
+        self._press: Any = None  # the app's last left mouse-down as AppKit dispatched it (the monitor in before_show)
         self._fill: Any = None  # the title bar container pywebview painted; None: never integrate
         self._ordinary: dict = {}  # the switches integration changed, as they were before
         self._observers: list = []
@@ -440,20 +441,26 @@ class WindowChrome:
             return
         self._observe_full_screen(native)  # a source handoff needs the phase even without the document script
         try:
+            import AppKit
             import WebKit
 
             webview = _webview_of(self._window)
             world = WebKit.WKContentWorld.worldWithName_(WORLD)
-            handler = _handler_class().alloc().init()
+            handler = _handler_class().alloc().init()  # the content controller retains it
             handler.chrome = self
             controller = webview.configuration().userContentController()
             controller.addScriptMessageHandler_contentWorld_name_(handler, world, HANDLER)
             controller.addUserScript_(WebKit.WKUserScript.alloc().initWithSource_injectionTime_forMainFrameOnly_inContentWorld_(
                 DOCUMENT_SCRIPT, WebKit.WKUserScriptInjectionTimeAtDocumentStart, True, world))
+            # Main thread, as AppKit dispatches each left mouse-down of the app; the event goes on unchanged.
+            # Never removed: one per process, and a closed window refuses its reports.
+            if AppKit.NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                    AppKit.NSEventMaskLeftMouseDown, self._keep) is None:
+                raise RuntimeError("AppKit gave no left mouse-down monitor")
         except Exception:
-            log.warning("The window keeps its ordinary title bar and appearance: no document script.", exc_info=True)
+            log.warning("The window keeps its ordinary title bar and appearance: no script or monitor.", exc_info=True)
             return
-        self._native, self._webview, self._world, self._handler = native, webview, world, handler
+        self._native, self._webview, self._world = native, webview, world
         try:
             fill = native.contentView().superview().subviews().lastObject()  # the view pywebview just painted
             self._fill = fill if native.standardWindowButton_(_BUTTONS[0]).isDescendantOf_(fill) else None
@@ -489,10 +496,8 @@ class WindowChrome:
             return
         elif kind == "appearance":
             self._set_appearance(message.get("choice"), message.get("theme"))
-        elif kind == "drag":
-            self._drag()
-        elif kind == "double-click":
-            self._double_click()
+        elif kind in ("drag", "double-click"):
+            self._band(kind)
 
     def _navigation_finished(self) -> None:
         """pywebview ``before_load`` (synchronous, main thread): a document that never declared is ordinary."""
@@ -818,40 +823,37 @@ class WindowChrome:
         if toolbar is not None:
             toolbar.setVisible_(visible)
 
-    def _live_press(self, kinds: tuple) -> Any:
-        """The left-button event of ``kinds`` a band message came from while AppKit still processes it; None once
-        AppKit moved past it."""
-        if not self._integrated or self._fullscreen:
-            return None
+    def _keep(self, event: Any) -> Any:
+        self._press = event
+        return event
+
+    def _band(self, kind: str) -> None:
+        """A band press the page reported, acted on as the kept mouse-down of this integrated, windowed window, if it
+        lies above the content layout rect (the page's band edge is content). A drag goes back to AppKit's own window
+        drag while the button is down; a double-click is the Mac's title-bar choice, read now so a changed setting
+        applies at once, for a second press held or released (a third is none). No press is handed to a view."""
         import AppKit
-
-        event = AppKit.NSApplication.sharedApplication().currentEvent()
-        return event if event is not None and event.type() in kinds else None
-
-    def _drag(self) -> None:
-        """The title bar's press: AppKit's own window drag, from the event the press is still in."""
-        press = self._live_press((_LEFT_MOUSE_DOWN, _LEFT_MOUSE_DRAGGED))
-        if press is not None:
-            self._native.performWindowDragWithEvent_(press)
-
-    def _double_click(self) -> None:
-        """The Mac's title-bar double-click choice, read now so a changed setting applies at once. The second
-        press counts while held, or by its release when the message arrives late (AppKit's own bar acts on the
-        release); a third press is no double-click. One message, one action: no press is handed to a view."""
-        press = self._live_press((_LEFT_MOUSE_DOWN, _LEFT_MOUSE_UP))
-        if press is None or press.clickCount() != 2:
-            return
         import Foundation
 
-        action = Foundation.NSUserDefaults.standardUserDefaults().stringForKey_(_DOUBLE_CLICK_SETTING)
-        if action is None or action == _ZOOM:
-            self._native.performZoom_(None)
-        elif action == _MINIMIZE:
-            self._native.performMiniaturize_(None)
-        elif action == "Fill" and self._native.respondsToSelector_("_zoomFill:"):
-            self._native._zoomFill_(None)
-        elif action != _NOTHING:
-            log.info("Title bar double-click action %r is unavailable; nothing done.", str(action))
+        press, native = self._press, self._native
+        if press is None or not self._integrated or self._fullscreen or press.windowNumber() != native.windowNumber():
+            return
+        layout = native.contentLayoutRect()
+        if press.locationInWindow().y <= layout.origin.y + layout.size.height:
+            return
+        if kind == "drag":
+            if AppKit.NSEvent.pressedMouseButtons() & 1:
+                native.performWindowDragWithEvent_(press)
+        elif press.clickCount() == 2:
+            action = Foundation.NSUserDefaults.standardUserDefaults().stringForKey_(_DOUBLE_CLICK_SETTING)
+            if action is None or action == _ZOOM:
+                native.performZoom_(None)
+            elif action == _MINIMIZE:
+                native.performMiniaturize_(None)
+            elif action == "Fill" and native.respondsToSelector_("_zoomFill:"):
+                native._zoomFill_(None)
+            elif action != _NOTHING:
+                log.info("Title bar double-click action %r is unavailable; nothing done.", str(action))
 
     def _set_appearance(self, choice: Any, theme: Any) -> None:
         choice, theme = str(choice or ""), str(theme or "")

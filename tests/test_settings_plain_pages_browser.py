@@ -376,7 +376,7 @@ def test_voice_and_calls_says_the_saved_choices_and_opens_the_form_of_the_skill_
     door.click()
     opened = settings_page(page, "skill/live_conversation")
     opened.wait_for(state="visible")
-    assert page.locator("#page-settings > .app-page-header [data-settings-back]").get_attribute("aria-label") == "Back to Voice and calls"
+    assert page.locator("#page-settings > .app-page-header [data-shell-back]").get_attribute("aria-label") == "Back to Voice and calls"
     assert page.locator("#page-settings [data-settings-lead-name]").inner_text().strip() == "Calls (beta)"
     form = opened.locator('[data-extension-settings-form][data-skill="live_conversation"]')
     form.wait_for(state="visible")

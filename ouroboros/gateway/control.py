@@ -489,7 +489,7 @@ async def _preflight_description(plan: dict) -> dict:
 async def api_update_description(request: Request) -> JSONResponse:
     """The owner's Write/Rewrite: ONE ordinary Main task describes the named range.
 
-    The range must be the one the last check offered or the saved description's own; a
+    The range must be checked, retained in update material or the saved description's own; a
     request whose task has not ended answers 409 with that task. The task is admitted with
     its scheduled receipt like any host-started root, and runs on the ordinary Main route.
     """
@@ -511,7 +511,7 @@ async def api_update_description(request: Request) -> JSONResponse:
             return json_error("A description is already being written.", 409,
                               task_id=outcome["task_id"], task_status=outcome["status"])
         if outcome["outcome"] == "range_not_offered":
-            return json_error("This range is not the offered update or the saved description's range; "
+            return json_error("This range has no checked update, retained material or saved description; "
                               "check for updates first.", 409, legal_ranges=outcome["legal_ranges"])
         if outcome["outcome"] == "refused":
             return json_error(f"The writing task was not accepted ({outcome['reason']}).", 503,

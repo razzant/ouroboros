@@ -33,6 +33,23 @@ def test_settings_minimum_spans_the_content_tracks_without_the_result():
     assert 'grid-column: 1 / -1;' in rule('.settings-row > .settings-row-result')
 
 
+def test_header_presence_comes_from_writers_and_telegram_owns_its_back():
+    css = without_comments((WEB / 'style.css').read_text(encoding='utf8'))
+    settings = without_comments((WEB / 'settings.css').read_text(encoding='utf8'))
+    assert 'html[data-telegram-back="back"] .app-page-return { display: none; }' in css
+    assert '.app-page-header[data-return]' in css and '[data-search-in-home]' in settings
+    assert ':has([data-settings-search-slot]:empty)' not in settings
+    assert 'data-page-back' not in css and '.dashboard-back' not in css
+    scope = 'html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header'
+    leading = re.search(re.escape(scope) + r' > \.app-page-leading \{([^}]+)\}', css)[1]
+    assert 'display: flex;' in leading, 'sections keep a visible way to the drawer in Telegram'
+    assert '--telegram-header-start: 108px;' in css and '--telegram-header-end: 100px;' in css
+    assert scope + ' {' in css, 'Telegram section placement excludes room bars'
+    slot = re.search(r'\.app-page-return \{([^}]+)\}', css)[1]
+    assert 'flex: none;' in slot, 'the round Back never yields to the page controls'
+    assert 'width' not in slot and '.shell-back-name' not in css, 'no word beside the chevron, so nothing to truncate'
+
+
 # No exception: status/provenance/stat labels keep the renderer's sentence case.
 UPPERCASE_ALLOWLIST = {}
 
@@ -56,7 +73,7 @@ MAX_WIDTH_DEBT = {
     'web/onboarding.css': {'900px': 1, '760px': 1, '720px': 1},  # wizard
     'web/room_work.css': {'900px': 1},  # existing Shade height recipe (L1)
     'web/settings.css': {'980px': 2, '760px': 1, '640px': 1, '600px': 1},  # existing form/MCP layout debt
-    'web/style.css': {'980px': 1, '640px': 2, '620px': 2},  # legacy content only: the shell's queries are gone (L1)
+    'web/style.css': {'980px': 1, '640px': 2, '620px': 2},
     'web/ui.css': {'640px': 1},  # native field font-size/zoom recipe
 }
 
@@ -192,7 +209,7 @@ def test_no_has_on_an_element_holding_a_rooms_rows():
         assert not has_on_a_row_holder(selector), selector
 
 
-# DEVELOPMENT "Design System": no `:has()` argument tests `:empty`, at any depth. The system WebKit (the macOS app's
+# DEVELOPMENT "Design System": no `:has()` argument tests `:empty`, `:focus`, or `:focus-within`, at any depth. The system WebKit (the macOS app's
 # WKWebView, Safari, iOS; measured on 26.4, 2026-11-15) does not re-match it when content comes or goes after the
 # first paint, so the rule keeps its first answer until something else restyles the subtree: Back placed in a header
 # painted without it stood alone at the window's top edge (owner 14.11), and a Settings row whose words came later kept
@@ -200,24 +217,24 @@ def test_no_has_on_an_element_holding_a_rooms_rows():
 # for a child (`.x:has(> .slot > *)`) where the tested element only holds elements, or let the text's one writer say it
 # in an attribute the sheet keys on (`data-no-meta`, ui_primitives.js setRowMeta). A plain `:empty` on the element
 # itself is re-matched.
-def empty_in_has(selectors):
-    """A `:has()` whose argument tests `:empty`, at any depth (inside `:not()`/`:is()`, after a combinator)."""
+def late_state_in_has(selectors):
+    """A `:has()` whose argument tests `:empty`, `:focus`, or `:focus-within`, at any depth (inside `:not()`/`:is()`, after a combinator)."""
     selectors = re.sub(r'"[^"]*"|\'[^\']*\'', '""', selectors)  # quoted text is never a selector
-    return any(re.search(r"(?<!\\):empty(?![\w-])", argument, re.I) for _, argument in arguments(selectors, "has"))
+    return any(re.search(r"(?<!\\):(?:empty|focus|focus-within)(?![\w-])", argument, re.I) for _, argument in arguments(selectors, "has"))
 
 
-def test_has_never_tests_empty():
+def test_has_never_tests_late_state():
     found = [f"{path.relative_to(ROOT).as_posix()}:{line}: {' '.join(selectors.split())}" for path in first_party_sheets()
-             for line, selectors in selectors_by_line(path.read_text(encoding="utf-8")) if empty_in_has(selectors)]
-    assert not found, "Ask for a child or a writer's attribute, never :empty inside :has() (comment above):\n" + "\n".join(found)
-    for selector in (".a:has(:empty)", ".a:has(> .b:empty)", ".a:not(:has(> :not(:empty)))", ".a:has(> :is(.b, .c:EMPTY))",
+             for line, selectors in selectors_by_line(path.read_text(encoding="utf-8")) if late_state_in_has(selectors)]
+    assert not found, "Ask for a child or a writer's attribute, never :empty, :focus, or :focus-within inside :has() (comment above):\n" + "\n".join(found)
+    for selector in (".a:has(:focus)", ".a:has(:not(:focus-within))", ".a:has(:empty)", ".a:has(> .b:empty)", ".a:not(:has(> :not(:empty)))", ".a:has(> :is(.b, .c:EMPTY))",
                      ".a:has(+ .b > .c:not(:empty))", ".a:has(~ .b .c:empty) .d", ".x, .a:is(.b:has(> .c > :empty))"):
-        assert empty_in_has(selector), selector
-    for selector in (".a:empty", ".a:not(:empty) ~ .b", ".a:has(> *)", ".a:not(:has(> .b > *))", ".a:empty:has(> .b)",
+        assert late_state_in_has(selector), selector
+    for selector in (".a:has(> .b:focus-visible)", ".a:has(> [data-focused])", ".a:empty", ".a:not(:empty) ~ .b", ".a:has(> *)", ".a:not(:has(> .b > *))", ".a:empty:has(> .b)",
                      ".a:has(> .is-empty)", '.a:has([aria-label=":has(:empty)"])', ".a:has(> .b\\:empty)"):
-        assert not empty_in_has(selector), selector
+        assert not late_state_in_has(selector), selector
     sheet = '/* .a:has(:empty) { } */ .b:empty::after { content: ":has(:empty)"; } .c:has(> .d > *) { color: red; }'
-    assert [(line, empty_in_has(selectors)) for line, selectors in selectors_by_line(sheet)] == [(1, False), (1, False)]
+    assert [(line, late_state_in_has(selectors)) for line, selectors in selectors_by_line(sheet)] == [(1, False), (1, False)]
 
 
 def test_has_guard_reads_every_selector_position():
@@ -240,3 +257,49 @@ def test_has_guard_reads_every_selector_position():
     assert [(line, unscoped_has(selectors)) for line, selectors in selectors_by_line(css)] == [
         (3, True), (4, False), (5, True), (6, False), (7, False), (8, True), (9, False), (10, True), (12, True), (13, False),
         (14, False), (15, True)]
+
+
+# Principle 9's static seam: this guard catches the exact form the stylesheet can state without a DOM walk — a rule
+# whose selector explicitly names a shared `.scroll-fade-y` scroller and a descendant that is sticky/fixed and painted.
+# Portalled floating glass, the composer and a table head are the named allowed forms; an opaque edge in any other
+# explicit descendant is a cut. Rules such as `.logs-filters` whose ancestor relationship exists only in markup are
+# deliberately outside this static check and remain visual evidence.
+SCROLLER_DESCENDANT = re.compile(r"(?:\.scroll-fade-y|#chat-messages|\.chat-messages|\.document-reader-body|\.rw-shade)\s+[^{}]*")
+POSITIONED = re.compile(r"\bposition\s*:\s*(?:sticky|fixed)\b", re.I)
+PAINT = re.compile(r"\bbackground(?:-color)?\s*:\s*([^;]+)", re.I)
+
+
+def positioned_opaque_scroller_descendants(css):
+    css = without_comments(css)
+    violations = []
+    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
+        selector, body = match.group(1).strip(), match.group(2)
+        if not SCROLLER_DESCENDANT.search(selector) or not POSITIONED.search(body):
+            continue
+        paint = PAINT.search(body)
+        if not paint:
+            continue
+        value = paint.group(1).strip().lower()
+        if value in {"none", "transparent", "initial", "inherit", "unset"}:
+            continue
+        lower_selector = selector.lower()
+        if "backdrop-filter" in body.lower() or "table" in lower_selector or "thead" in lower_selector \
+                or "composer" in lower_selector or "#chat-input-area" in lower_selector:
+            continue
+        violations.append(selector)
+    return violations
+
+
+def test_scroller_edges_do_not_gain_opaque_positioned_descendants():
+    actual = [str(path.relative_to(ROOT)) for path in first_party_sheets()
+              if positioned_opaque_scroller_descendants(path.read_text(encoding="utf-8"))]
+    assert not actual, "Opaque sticky/fixed paint must not cover a moving scroller: " + ", ".join(actual)
+
+    broken = ".scroll-fade-y .bad-edge { position: sticky; top: 0; background: var(--bg-primary); }"
+    assert positioned_opaque_scroller_descendants(broken), "the guard must fire on an opaque cut"
+    allowed = """
+        .scroll-fade-y .composer { position: fixed; background: var(--surface-float); backdrop-filter: var(--glass); }
+        .scroll-fade-y table thead { position: sticky; top: 0; background: var(--surface-object); }
+        .scroll-fade-y .quiet { position: sticky; top: 0; background: transparent; }
+    """
+    assert not positioned_opaque_scroller_descendants(allowed), "composer, table heads and transparent edges stay allowed"

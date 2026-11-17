@@ -360,18 +360,18 @@ class ProviderAnswer:
         own = [(speaker, text) for speaker, text, history in self.said if not history]
         return next((row for row in own if row[0] == own[-1][0]), ("", ""))
 
-    def recognized_objects(self, speaker: str, sentence: str, code: str) -> List[Dict[str, Any]]:
-        """The quoted current object's subtree, excluding sibling diagnostics and earlier attempts."""
+    def recognized_subtree(self, speaker: str, sentence: str, code: str) -> List[int]:
+        """Indices of the quoted current object (the one ``speaker`` said ``sentence`` in, else the one carrying
+        ``code``) and its subtree, excluding sibling diagnostics and earlier attempts."""
         root = next((i for i, obj in enumerate(self.objects) if not obj.history and obj.speaker == speaker
                      and (sentence in obj.sentences if sentence else code in obj.codes)), None)
         if root is None:
             return []
-        selected, values = {root}, []
-        for i, obj in enumerate(self.objects):
-            if not obj.history and (i == root or obj.parent in selected):
-                selected.add(i)
-                values.append(obj.value)
-        return values
+        selected = [root]
+        for i, obj in enumerate(self.objects):  # a parent is read before its children
+            if i > root and not obj.history and obj.parent in selected:
+                selected.append(i)
+        return selected
 
     def facts(self, quoted: Tuple[str, str] = ("", ""), **recognition: Any) -> Dict[str, Any]:
         """This answer for the owner line and the mind that continues, sanitized: the quoted ``speaker`` and

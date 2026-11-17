@@ -146,6 +146,7 @@ def test_whoami_names_the_acting_login_token_kind_source_and_scopes(gh, monkeypa
     _line, payload = _payload(gh.read(method="whoami", repo="github.example/owner/selected"))
     assert payload["item"]["token_kind"] == "gh CLI login" and payload["item"]["host"] == "github.example"
     assert gh.calls[-1][0][-2:] == ["--hostname", "github.example"]
+    assert gh.calls[-1][1]["cwd"] == str(gh.ctx.task_drive_root())  # A named repository: the task's own task_drive.
 
 
 # ---- get ---------------------------------------------------------------------------------------------
@@ -365,7 +366,8 @@ def test_explicit_repo_is_substituted_into_routes_with_its_host(gh):
     gh.read(method="get", kind="issue", target=7, repo="github.example/owner/selected")
     argv, kw = gh.calls[0]
     assert argv == ["gh", "api", "repos/owner/selected/issues/7", "--hostname", "github.example"]
-    assert kw["cwd"] == str(gh.cwd) and "GH_REPO" not in kw["env"]
+    # A named repository needs no checkout: the task's own task_drive, never the Project folder.
+    assert kw["cwd"] == str(gh.ctx.task_drive_root()) and "GH_REPO" not in kw["env"]
     gh.answer = lambda p, argv, kw: json.dumps({"data": {"repository": {"discussion": None}}})
     text = gh.read(method="get", kind="discussion", target=5, repo="owner/selected")
     assert "discussion #5 was not found" in text

@@ -613,7 +613,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         for (let details = target.closest?.('details'); details; details = details.parentElement?.closest?.('details')) {
             if (!details.open) details.open = true;
         }
-        target.focus?.();
+        target.focus?.({ preventScroll: true });
     }
 
     async function refresh() {
@@ -621,8 +621,6 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         clearTimeout(migrationTimer); migrationTimer = null;
         const revision = ++refreshRevision;
         rememberDisclosure();
-        const focused = focusedControl();
-        const focusedKey = focused && { act: focused.dataset.act, id: focused.dataset.id || '', holdId: focused.dataset.holdId || '' };
         // A refresh says nothing while it reads (aria-busy only): a line that came and went under each heading moved
         // every row below it (DESIGN principle 6). Only the first read and a failure speak.
         sections.forEach(({ root, status, loaded }) => {
@@ -638,12 +636,9 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             getJson('/api/services/kept'),
         ]);
         if (destroyed || revision !== refreshRevision) return;
-        // A request can take long enough for the owner to move focus elsewhere.
-        // Only restore the original control when it is still the active owner;
-        // if this render detaches it, activeElement is still the original node
-        // immediately before replacement.  A different active element means
-        // the owner made a newer choice while the request was in flight.
-        const mayRestoreFocus = !focusedKey || document.activeElement === focused;
+        // Keep the control focused now: a return may have restored it while this read was pending.
+        const focused = focusedControl();
+        const focusedKey = focused && { act: focused.dataset.act, id: focused.dataset.id || '', holdId: focused.dataset.holdId || '' };
         const census = results[1].status === 'fulfilled' ? results[1].value : null;
         const kept = results[3].status === 'fulfilled' ? results[3].value : null;
         const renderers = [(data) => renderQueue(data?.queue, census), (data) => renderBg(data, kept), renderSchedules];
@@ -673,7 +668,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                     : 'Could not load. Current state is unknown. Reopen Activity to try again.', 'error');
             }
         });
-        if (mayRestoreFocus) restoreFocus(focusedKey);
+        restoreFocus(focusedKey);
     }
 
     // One seam for every lifecycle button: the owner NAMES the action and why.

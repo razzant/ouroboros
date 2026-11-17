@@ -17,7 +17,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from ouroboros.contracts.chat_id_policy import project_chat_id
 from ouroboros.composer_cognition import (ensure_project_cognition, main_cognition, project_cognition, project_model_choice,
-                                          project_processing_choice)
+                                          project_processing_choice, new_room_cognition)
 from ouroboros.contracts.schema_versions import with_schema_version
 from ouroboros.project_facts import project_display_name, sanitize_project_id
 from ouroboros.project_closure import apply_closed, select_projects
@@ -1089,7 +1089,7 @@ def create_project(
             "name": _validated_name(name, pid),
             "chat_id": project_chat_id(pid),
             "working_dir": str(working_dir or "").strip(),
-            "cognition": cognition,
+            "cognition": new_room_cognition(cognition),
             "origin": str(origin or "owner"),
             "created_at": utc_now_iso(),
             "last_active_at": utc_now_iso(),

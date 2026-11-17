@@ -2,6 +2,7 @@
 // their callers; each binding has an explicit, synchronous lifetime.
 
 import { leaveAsPicture, motionMs } from './motion.js';
+import { bindScrollFade } from './scroll_fade.js';
 
 // A closed menu's picture shrinks a little toward where it grew from as it fades (ui.css ui-popup-in, reversed).
 const POPUP_LEAVES = [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(0.96)' }];
@@ -174,6 +175,21 @@ export function bindPopoverPosition(popup, { anchor, field, point, align = 'star
         const oy = point ? point.y - top : (below ? 0 : rect.height);
         popup.style.setProperty('--ui-popup-origin', `${clamp(ox, rect.width)}px ${clamp(oy, rect.height)}px`);
     }
+    // Popups are portalled to the document body, outside the faded scroller that owns their anchor. Their own
+    // bounded list still uses the shared edge decoration, so a menu never gets cut by its opener's mask.
+    const noFade = () => {};
+    let disposeFade = noFade;
+    let fadeFrame = null;
+    const maybeBindFade = () => {
+        fadeFrame = null;
+        if (disposed) return;
+        const scrollHeight = Number(popup.scrollHeight);
+        const clientHeight = Number(popup.clientHeight);
+        if (disposeFade !== noFade || !Number.isFinite(scrollHeight) || !Number.isFinite(clientHeight)
+            || scrollHeight <= clientHeight + 1) return;
+        popup.classList?.add?.('scroll-fade-y');
+        disposeFade = bindScrollFade(popup);
+    };
     const onScroll = (event) => {
         if (event.target?.nodeType && popup.contains(event.target)) return;
         if (onAnchorScroll) onAnchorScroll(event);
@@ -184,10 +200,14 @@ export function bindPopoverPosition(popup, { anchor, field, point, align = 'star
     win.visualViewport?.addEventListener('resize', reposition);
     win.visualViewport?.addEventListener('scroll', reposition);
     reposition();
+    maybeBindFade();
+    if (disposeFade === noFade && win.requestAnimationFrame) fadeFrame = win.requestAnimationFrame(maybeBindFade);
     return {
         reposition,
         destroy() {
             disposed = true;
+            if (fadeFrame !== null) win.cancelAnimationFrame?.(fadeFrame);
+            disposeFade();
             win.removeEventListener('scroll', onScroll, true);
             win.removeEventListener('resize', reposition);
             win.visualViewport?.removeEventListener('resize', reposition);
