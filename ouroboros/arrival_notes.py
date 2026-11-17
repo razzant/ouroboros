@@ -12,7 +12,10 @@ note in view precedes the arrival, so nothing is joined by time, and nothing is 
 from __future__ import annotations
 
 import datetime
+import logging
 from typing import Any, Dict, List, Sequence
+
+log = logging.getLogger(__name__)
 
 
 def _written(value: Any) -> str:
@@ -51,11 +54,16 @@ def notes_line(messages: Sequence[Any]) -> str:
 
 def mark_arrival(ctx: Any, messages: List[Dict[str, Any]], rows: Sequence[int], *, pressed: bool = False) -> None:
     """Append the arrival's host lines to the last row of my human's this drain delivered (``rows``: positions of the
-    rows it delivered, typed at delivery and never merged); a delivery that warrants no line changes nothing."""
+    rows it delivered, typed at delivery and never merged); a delivery that warrants no line changes nothing. Lines the
+    host cannot compute are left out and logged: the delivered row stands, as for the surface note beside it."""
     from ouroboros.answer_facts import last_own_words
 
-    lines = [line for line in ((last_own_words(ctx) if pressed and ctx is not None else ""), notes_line(messages))
-             if line]
+    try:
+        lines = [line for line in ((last_own_words(ctx) if pressed and ctx is not None else ""), notes_line(messages))
+                 if line]
+    except Exception:  # noqa: BLE001 - host facts beside a delivered row of my human's, never the delivery itself
+        log.warning("Arrival lines not computed; the delivered row stands without them", exc_info=True)
+        return
     if not lines or not rows:
         return
     row, text = messages[rows[-1]], "\n".join(lines)

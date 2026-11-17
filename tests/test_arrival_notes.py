@@ -71,6 +71,21 @@ def test_two_rows_of_my_human_in_one_drain_close_once_on_the_last(tmp_path):
     assert view[-1]["content"].startswith("[Message from my human]: Second\n[Host fact: your working-view notes")
 
 
+def test_a_line_the_host_cannot_compute_never_costs_the_delivery(tmp_path, monkeypatch, caplog):
+    from ouroboros import arrival_notes
+
+    def unreadable(_messages):
+        raise RuntimeError("unreadable capsule")
+
+    view = [{"role": "user", "content": "Brief"}, _note(tmp_path, "Goal: keep the reply short.", "goal")]
+    with monkeypatch.context() as patched:
+        patched.setattr(arrival_notes, "notes_line", unreadable)
+        failed = _drain(tmp_path, copy.deepcopy(view))
+    assert failed[-1]["content"] == f"[Message from my human]: {WORDS}"  # delivered, without the line
+    assert "Arrival lines not computed" in caplog.text
+    assert "working-view notes in view now" in _drain(tmp_path, copy.deepcopy(view))[-1]["content"]  # computed: shown
+
+
 def _press(tmp_path, ctx, block):
     from ouroboros.loop_round_limits import _drain_incoming_messages
     from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, write_owner_message
