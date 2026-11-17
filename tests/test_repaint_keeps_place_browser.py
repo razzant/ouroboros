@@ -201,7 +201,7 @@ def test_files_draws_the_same_folder_in_place_and_reads_another_from_its_first_r
         page.goto(gate_ui['url'] + '/')
         page.wait_for_selector('#chat-input', state='attached')
         open_nav(page, 'files')
-        box = page.locator('#files-list')
+        box = page.locator('#page-files .files-sidebar')  # the filter and the list scroll as one (DESIGN "Page header")
         box.locator('.files-entry').nth(59).wait_for(state='attached')
         box.evaluate('box => { box.scrollTop = 300; }')
         rest(page)
