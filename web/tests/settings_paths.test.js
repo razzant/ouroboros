@@ -186,20 +186,22 @@ test('a page left with unsaved words is put aside and comes back as it was left;
     const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
     const pages = () => content.querySelectorAll('.settings-page').map((level) => level.dataset.settingsPage);
     const words = () => content.querySelector('[data-words]');
+    content.querySelector('[data-settings-home]').getClientRects = () => [];
     await controls.open('test-editor');
     await settle();
 
-    // The owner types and presses Back without Save: the page leaves the screen and is not let go.
+    // The owner types and presses Back without Save: the page leaves the screen and is not let go. (One column: the
+    // list is not beside the page, so the page shows its Back.)
     words().setAttribute('value', 'typed');
     unsaved = true;
-    await controls.open('');
+    await content.querySelector('.app-page-header [data-shell-back]').fire('click');
     await settle();
     assert.deepEqual([pages(), state.settingsPath, letGo.length], [[], '', 0]);
     // Its path opens the same page again, as it was left, with Back named anew.
     await controls.open('test-editor');
     await settle();
     assert.deepEqual([pages(), drawn.length, words().getAttribute('value')], [['test-editor'], 1, 'typed']);
-    assert.equal(drawn.length, 1);
+    assert.equal(content.querySelector('.app-page-header [data-shell-back]').getAttribute('aria-label'), 'Back to Settings');
 
     // Saved or discarded, the page is let go when it is left and drawn anew the next time.
     unsaved = false;

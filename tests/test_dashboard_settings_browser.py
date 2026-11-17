@@ -322,6 +322,7 @@ def test_costs_shows_subscriptions_from_the_passive_view_alone_and_its_doors_ope
     assert not [path for path, _ in ui["posts"] if "/api/claudexor/" in path], "nothing is woken or refreshed"
     _serve(page, "accounts")
     door.click()
+    page.locator('#page-settings [data-settings-page="accounts/codex"]').wait_for(state="visible")
     back = page.locator('#page-settings > .app-page-header [data-shell-back]')
     back.wait_for()
     assert back.get_attribute("aria-label") == "Back to Dashboard › Costs" and back.get_attribute("title") == "Back to Dashboard › Costs"

@@ -709,7 +709,7 @@ def test_skills_tabs_and_existing_toolbar_survive_a_narrow_content_column(engine
         page.wait_for_function("document.getElementById('content').clientWidth === 320")
         assert page.locator('#page-skills .app-page-title').evaluate("el => getComputedStyle(el).clipPath === 'inset(50%)'")
         strip = page.locator('#page-skills .app-page-lead .app-tab-strip')
-        assert strip.evaluate('el => el === window.__skillsTabs && el.clientWidth > 0')
+        assert strip.evaluate('el => el === window.__skillsTabs && el.clientWidth > 80')
         assert page.evaluate("document.activeElement.dataset.tab === 'installed'")
         for selector in ('#skills-update-all', '#skills-refresh'):
             button = page.locator(selector)
@@ -745,6 +745,13 @@ def test_skills_tabs_and_existing_toolbar_survive_a_narrow_content_column(engine
             assert abs(positions[0] - positions[1]) < 1, 'trailing actions cannot move the tabs under the pointer'
             below = strip.locator('[data-tab="installed"]').bounding_box()['y'] >= lead.bounding_box()['y'] + lead.bounding_box()['height']
             assert below == (column == 488), 'only the column too narrow for the return, tabs and short actions takes two lines'
+            if column == 733:
+                back_box, tab_box = lead.bounding_box(), strip.locator('[data-tab="installed"]').bounding_box()
+                assert abs((back_box['y'] + back_box['height'] / 2) - (tab_box['y'] + tab_box['height'] / 2)) <= 1, \
+                    ('one row: Back stands on the tabs\' centre line', back_box, tab_box)
+                assert lead.evaluate("""n => { const h = n.closest('.app-page-header'), r = h.getBoundingClientRect();
+                    return Math.abs(n.getBoundingClientRect().left - (r.left + parseFloat(getComputedStyle(h).paddingLeft))) <= 1; }"""), \
+                    'one row: Back opens it at the band\'s leading inset'
     finally:
         page.close()
 

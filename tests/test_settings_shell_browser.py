@@ -234,6 +234,7 @@ def test_a_wide_page_box_shows_the_home_beside_the_page_with_no_layer(subscripti
     second.wait_for(state="visible")
     back = page.locator("#page-settings > .app-page-header [data-shell-back]")
     assert back.is_visible() and back.get_attribute("aria-label") == back.get_attribute("title") == "Back to Shell test"
+    assert len(page.evaluate(SETTINGS_LAYERS)) == 1, "beside the home only the deeper level is a layer"
     assert go_back(page) == "test-shell"
     assert first.is_visible() and back.count() == 0 and page.evaluate(SETTINGS_LAYERS) == []
     # A jump from Skills has the same named return in the wide header.

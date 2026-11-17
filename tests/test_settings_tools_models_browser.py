@@ -268,6 +268,10 @@ def test_a_tool_servers_page_saves_its_entry_keeps_typed_text_and_remove_asks_fi
     assert lead_name(page) == "GitHub"
     back = header_back(page)
     assert back.is_visible() and back.get_attribute("aria-label") == back.get_attribute("title") == "Back to Tools"
+    back.click()
+    page.wait_for_function("() => [...document.querySelectorAll('#page-settings [data-settings-page]')].filter((e) => !e.hidden).at(-1)?.dataset.settingsPage === 'tools'")
+    assert top_path(page) == "tools", "Back opens the list it names"
+    editor = open_entry(page, "github")
     name = editor.locator('[data-mcp-field="name"]')
     name.fill("GitHub (work)")
     # A status read lands while the form holds typed text: the text stays, and so does the caret.
