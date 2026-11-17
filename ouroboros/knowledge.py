@@ -491,6 +491,11 @@ def knowledge_index_views(address: KnowledgeAddress, *, overview: KnowledgeNote 
             render_knowledge_outline(rows, legacy, scope=address.scope))
 
 
+def _key_part(value: Any) -> Any:
+    """A key part as written: a YAML integer (an unquoted numeric account id) is its decimal string; nothing else."""
+    return str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+
+
 def speaker_pages(canonical_root: Path | None, provider: str, namespace: str, actor_id: str, *,
                   unverified: bool = False) -> dict[str, Any]:
     """A place speaker's exact key and the global notes whose ``keys`` hold it, as host facts of the turn.
@@ -508,7 +513,7 @@ def speaker_pages(canonical_root: Path | None, provider: str, namespace: str, ac
     shelf = resolve_knowledge_address(canonical_root, OVERVIEW_TOPIC, "global")
     for row in inventory_knowledge(shelf, navigation=True):
         held = row.get("keys") if isinstance(row.get("keys"), list) else []
-        if any(isinstance(entry, Mapping) and {name: entry.get(name) for name in key} == key for entry in held):
+        if any(isinstance(entry, Mapping) and {name: _key_part(entry.get(name)) for name in key} == key for entry in held):
             found[row["state"]].append(f"knowledge_read(topic={row['topic']!r}, scope='global')")
     active, archived = found["active"], found["archived"]
     facts: dict[str, Any] = {"key": key}

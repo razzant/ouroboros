@@ -73,6 +73,24 @@ An interpretation grounded in two episodes.
     assert published(tmp_path, history(target)[-1]) == second.current.text
 
 
+def test_an_unquoted_numeric_id_joins_and_a_later_arrival_carries_the_same_speaker_facts(tmp_path):
+    """A numeric account id written without quotes loads as a YAML integer and still joins by its decimal string; a
+    boolean never does. An arrival handed to running work states the same key and page facts as a focus frame."""
+    from types import SimpleNamespace
+    from ouroboros.place_intake import arrival_actor
+
+    keys = [{"provider": "chat", "namespace": "bot-7", "id": 123456789}, {"provider": "chat", "namespace": "bot-7", "id": True}]
+    assert store.write_knowledge_note(address(tmp_path, "people/rowan"), "---\ntype: person\nsummary: Rowan.\nkeys: "
+                                      + json.dumps(keys) + "\n---\n# Rowan\n").ok
+    reader = "knowledge_read(topic='people/rowan', scope='global')"
+    assert store.speaker_pages(tmp_path, "chat", "bot-7", "123456789")["page"] == reader
+    assert store.speaker_pages(tmp_path, "chat", "bot-7", "True")["page"].startswith("no global knowledge note")
+    event = SimpleNamespace(provider="chat", account_id="bot-7", actor={"platform_actor_id": "123456789", "display_name": "R"})
+    actor = arrival_actor(tmp_path, event)
+    assert actor["page"] == reader and actor["display_name"] == "R"
+    assert actor["key"] == {"provider": "chat", "namespace": "bot-7", "id": "123456789"}
+
+
 def test_a_key_joins_the_pages_listing_its_exact_strings_through_revision(tmp_path):
     """Keys only join (SPEC §2.3): provider, namespace and id equal as authored, case kept and nothing trimmed; one key
     on several pages is a fact, never merged or ranked; an archived page is named apart; reading writes nothing."""
