@@ -57,8 +57,9 @@ def fixed_density(monkeypatch):
 
 
 def _route(window, known=True, source="metadata"):
+    from ouroboros.capability_evidence import utc_now_iso  # a serving statement is dated, as its read is
     evidence = SimpleNamespace(route_fp="route", status="confirmed" if known else "unprobeable",
-                               stale=False, window_tokens=window, source=source)
+                               stale=False, window_tokens=window, source=source, ts=utc_now_iso())
     return lambda *_a, **_kw: ({"provider": "fixture", "model": "fixture"}, evidence)
 
 

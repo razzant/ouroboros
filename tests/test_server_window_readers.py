@@ -175,3 +175,43 @@ def test_server_reader_has_no_import_back_to_evidence_owners():
             if node.module == 'ouroboros':
                 dependencies.update('ouroboros.' + alias.name for alias in node.names)
     assert not dependencies & {'ouroboros.' + owner for owner in owners}
+
+
+@pytest.mark.parametrize("prior_age_hours,known", [(0, True), (25, False)])
+def test_a_failed_start_read_keeps_a_fresh_window_and_reads_once(monkeypatch, tmp_path, prior_age_hours, known):
+    """A start forces its server read; a busy server then hides no confirmed read still inside its TTL."""
+    from datetime import datetime, timedelta, timezone
+
+    import httpx
+
+    from ouroboros.context_window import resolve_window
+    from ouroboros.response_limits import probe_context_route
+
+    route = dict(provider="openai-compatible", model="openai-compatible::fixture", base_url="http://127.0.0.1:18080/v1",
+                 use_local=False, options=None, _resolved_target=None)
+    monkeypatch.setattr("ouroboros.vision_routing.record_catalog_image_input", lambda *a, **k: None)
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: _Response(200, {"data": [{"id": "fixture", "meta": {"n_ctx": 80000}}]}))
+    assert resolve_window(probe_context_route(tmp_path, route, task={"route_start_read": True}), 8192,
+                          root=tmp_path).total.tokens == 80000
+    data = ce._read(tmp_path)
+    recorded_at = (datetime.now(timezone.utc) - timedelta(hours=prior_age_hours)).isoformat()
+    for row in data["probes"].values():
+        row["ts"] = recorded_at
+    ce._save(tmp_path, data)
+    asked = []
+
+    def busy(url, **kw):
+        asked.append(url)
+        raise httpx.ReadTimeout("busy", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", busy)
+    failed_at = datetime.now(timezone.utc)
+    evidence = probe_context_route(tmp_path, route, task={"route_start_read": True})
+    assert evidence.stale is not known and evidence.read == "failed"  # the record says its read failed
+    record = resolve_window(evidence, 8192, root=tmp_path)
+    assert (record.total.tokens if record.total else None) == (80000 if known else None)
+    assert len(asked) == len(set(asked)) and asked  # the one forced read, no repeat
+    if known:  # still sizing, as the stored statement of its own date, never as this start's live read
+        assert "this read stated no window" in evidence.detail
+        kind, observed_at = ce.window_evidence(evidence, record)
+        assert kind == "recorded" and datetime.fromisoformat(observed_at) < failed_at

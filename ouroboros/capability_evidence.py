@@ -6,7 +6,7 @@ fingerprint (provider + base_url + model + headers/beta + relevant options):
 
   status:
     confirmed   — a trustworthy live/local source reported it
-                  (source = provider_metadata | local_health)
+                  (source = provider_metadata | server_metadata | local_health)
     asserted    — the owner acknowledged it for an EXACT route fingerprint
                   (source = owner_ack); auditable, invalidated on ANY route change
     unprobeable — no metadata source and no owner-ack (e.g. OpenAI/Anthropic
@@ -1081,17 +1081,21 @@ def _probe_window(
         _store_evidence(drive_root, "probes", fp, ev.to_json())
         return ev, "answered"
 
-    # window <= 0. A provider OUTAGE must NEVER erase a prior confirmed record
-    # (the module invariant) — keep it, surfaced as stale, and do not overwrite the
-    # cache. Otherwise distinguish a transient outage (STATUS_FAILED, so the owner
-    # sees an error: "no connection") from a route that simply has no metadata
-    # source (STATUS_UNPROBEABLE -> the owner-ack path).
+    # window <= 0. A failed read must NEVER erase a prior known record (the module
+    # invariant): it is kept unwritten, with this read named ``failed``. Inside its TTL
+    # it still sizes the route, as the unforced probe would return it (shown as recorded,
+    # with its own date, never live); past the TTL it is stale. Without a prior,
+    # distinguish a transient outage (STATUS_FAILED, so the owner sees an error: "no
+    # connection") from a route with no metadata source (STATUS_UNPROBEABLE -> owner-ack).
     prior = cached if isinstance(cached, dict) else None
     prior_win = int((prior or {}).get("window_tokens") or 0)
     prior_status = str((prior or {}).get("status") or "")
     if prior is not None and prior_status in _KNOWN_STATUS and prior_win > 0:
+        if _probe_age(prior) <= (_CONFIRMED_TTL_SEC if prior_status == STATUS_CONFIRMED else _FAILED_TTL_SEC):
+            return _cached_evidence(prior, fp, model, provider, detail=(
+                f"kept the record of {prior.get('ts') or 'unknown date'}: this read stated no window")), "failed"
         return _cached_evidence(prior, fp, model, provider, stale=True,
-                                detail="kept prior evidence (probe blip)"), ""
+                                detail="kept prior evidence (probe blip)"), "failed"
     if _metadata_fetch_transport_failed(provider, model, use_local):
         ev = CapabilityEvidence(0, STATUS_FAILED, SOURCE_NONE, fp, model, provider, ts=utc_now_iso(),
                                 detail="provider unreachable during probe")
@@ -1180,6 +1184,10 @@ def _pinned_record(drive_root: Any, route: Dict[str, Any], fingerprint: str = ""
 
 def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, target: Optional[dict] = None, **route) -> CapabilityEvidence:
     """Resolve independent context and output facts; one owner's window ack cannot suppress output discovery.
+
+    Declaration precedence, owned here: a role window (``with_role_window``) > the route's acknowledgement > fresh
+    metadata > a failed Auto read's pool minimum (``_pool_bound``) > unknown; discovery dates and cadence are its
+    own. ``context_window.window_authority`` receives the one declaration this returns and the serving read.
 
     One catalog read serves both: a read that answered also states the output limit, and a read that failed (live, its
     ten-minute record, or a live failure that kept an exact prior record stale) is named by it, so neither is
