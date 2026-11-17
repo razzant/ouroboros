@@ -468,7 +468,7 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         assert read_install_record(drive, name) == previous_record
     else:
         version = {'live_conversation': '0.1.34', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.21', 'openai_realtime': '0.1.10',
-                   'unix_computer_use': '0.7.2'}.get(name, '0.1.1')
+                   'unix_computer_use': '0.7.3'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)
         assert compute_content_hash(installed) != previous_hash
@@ -478,6 +478,9 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
             paths += ["driver.py", "ui/call_settings.js"]
         elif name == "openai_realtime":
             paths += ["live.py"]
+        elif name == "unix_computer_use":
+            # The window capture's own helper and target mixin, and the native resolver it loads by path.
+            paths += ["capture.py", "macos_capture.py", "macos_native.py"]
         for path in paths:
             assert (installed / path).read_bytes() == (repo / "skills" / name / path).read_bytes()
     assert all((state / path).read_bytes() == value for path, value in retained.items())

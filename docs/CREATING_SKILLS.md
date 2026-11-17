@@ -709,7 +709,12 @@ Each item takes only these keys (anything else is a manifest error):
 - `entry` (required): a relative path of a file in the skill (no `..`, absolute path or
   cache/dependency folder such as `node_modules` or `.ouroboros_env`); it is part of the
   reviewed, hashed payload, and `skill_preflight` checks it by the rule a start applies.
-- `runtime`: currently `node` only; defaults to the manifest's `runtime`.
+- `runtime`: `node` or `agent_python`; defaults to the manifest runtime.
+  `agent_python` uses valid `OUROBOROS_AGENT_PYTHON` or `sys.executable` with
+  `-I -B`. It imports packages installed in that interpreter; `-I` ignores
+  `PYTHONPATH` and user-site, and this runtime does not select the skill's
+  isolated Python environment. Managed domains refuse it; ordinary Python
+  scripts stay PATH-first.
 - `title`: the Settings display name; defaults to `id`.
 - `task_session`, `browser_policy`: the MCP call-lifetime choices (DEVELOPMENT §12);
   `browser_policy` needs `task_session: true`.
@@ -723,13 +728,12 @@ the same id that this skill did not write is never overwritten. An agent carries
 step with `skill_owner_action(action="connect_mcp")`: `preview: true` first, then the
 owner's answer as `owner_source` with the preview's `settings_digest`.
 
-The row stores no command. Every listing, Settings Test and call
-derives the runtime binary, `<skill folder>/<entry>`, the skill folder as working directory and
-both flags from the installed skill (read-only in Settings), so a moved app or runtime
-needs no reconnect. The server gets your scripts' environment: granted settings, state
-folder, packages. Under a deployment's execution domain each start runs the verified work
-copy in its work container, on its runtime (not an extension's: its package stays on the
-service). While the skill is off, missing, edited and not re-accepted, short of grants or
+The row stores no command. Listing, Settings Test and calls derive binary,
+entry, cwd and flags from the installed skill, so moving the app or runtime
+needs no reconnect. Servers receive scripts' granted settings and state folder.
+Managed domains run Node script servers in containers, staging verified
+copies as needed; extensions stay on the service.
+While the skill is off, missing, edited and not re-accepted, short of grants or
 packages, or no longer declares the server, or the domain cannot start it, only that
 server is unavailable (`MCP_SKILL_UNAVAILABLE`) and nothing starts anywhere; the row
 stays. An accepted update or changed granted value is listed anew and running task

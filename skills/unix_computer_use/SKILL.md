@@ -1,7 +1,7 @@
 ---
 name: unix_computer_use
 description: Local and remote desktop observation and input, with macOS semantic actions, explicit foreground control, screenshot-bound coordinates and honest outcome receipts.
-version: 0.7.2
+version: 0.7.3
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -20,10 +20,11 @@ tools:
     effect: read
   - name: list_connections
     effect: read
+mcp_servers: [{"id": "mac_window_session", "title": "Mac window session (capture-only)", "runtime": "agent_python", "entry": "window_session_server.py", "task_session": true}]
 when_to_use: The user asks Ouroboros to inspect a desktop, take a screenshot, act in a named application (click/type/press keys there), drag, or operate a local/explicitly configured remote GUI under human or benchmark supervision.
 model_experience:
-  what_model_sees: Desktop tools include bounded AX reads (hierarchy, separate title/description/value/url with a chosen text_limit), local macOS element_act press/set_value without activation or pointer input (optionally followed by a read of the same window in the same call), explicit foreground input, screenshot observation IDs, capabilities and connections. Screenshots auto-attach as images; receipts separate action dispatch, readback, the read after the action and front observations.
-  token_effect: When loaded, all 25 tool schemas total about 16K characters; Nano can load tools on demand. Results are compact JSON without dropped fields. Input receipts grow with commands and output; screenshots add an image and capture metadata. Window lists and AX reads grow with returned entries and text (limit, app, max_nodes, text_limit); an element_act observation adds its own tree (default max_nodes 600; ax_tree 150). A receipt marked observed_effect also carries that tree and its window text into result review, increasing the material sent to the selected reviewers.
+  what_model_sees: Desktop tools include bounded AX reads (hierarchy, separate title/description/value/url with a chosen text_limit), local macOS element_act press/set_value without activation or pointer input (optionally followed by a read of the same window in the same call), explicit foreground input, screenshot observation IDs, capture-only images of one exact local macOS window, capabilities and connections. Screenshots auto-attach as images; receipts separate action dispatch, readback, the read after the action and front observations. Once the owner connects its MCP server, `mcp_mac_window_session__begin`/`frame`/`release` keep one capture-only stream of one exact local macOS window for the task, and `frame` returns the latest image as an MCP image with its seq and ages.
+  token_effect: When loaded, all 25 tool schemas total about 16K characters; Nano can load tools on demand. Results are compact JSON without dropped fields. Input receipts grow with commands and output; screenshots add an image and capture metadata. Window lists and AX reads grow with returned entries and text (limit, app, max_nodes, text_limit); an element_act observation adds its own tree (default max_nodes 600; ax_tree 150). A receipt marked observed_effect also carries that tree and its window text into result review, increasing the material sent to the selected reviewers. The connected window session adds three MCP tool schemas (about 1.4K characters) and its server instructions; each delivered frame is one image of at most 1280x800 with a small JSON object, and `frame(after_seq=...)` sends no image when nothing newer exists.
 ---
 
 # Unix Computer Use
@@ -70,6 +71,23 @@ Tools:
   field, so the host attaches the image to the conversation in the same round;
   an engine that cannot take images receives the path instead (host behaviour),
   so the text facts in every other tool are the way to check without a picture.
+  With `window=` (a `window_id` or exact title, as `window_list` prints them)
+  and `app=`, local macOS 14+ captures that one window through ScreenCaptureKit
+  in a short-lived helper (`macos_capture.py`), also while other windows cover it,
+  without activating anything: the window's own pixels, no cursor, no shadow, at
+  its size (downscaled as above), under a new file name each call. Only a window
+  ScreenCaptureKit lists for the resolved application's process qualifies; none
+  or several (`no_window`, `window_not_found`, `window_ambiguous`) is refused,
+  never replaced by another window or a display. `window=` without `app=`, on a
+  remote connection or off macOS is refused before anything else runs. Without
+  the Screen Recording grant (prompt-free preflight) nothing is asked or captured
+  (`screen_recording_denied`). Both ScreenCaptureKit answers share one 5 s budget;
+  the helper has 30 s in all, and only its normal end with one complete answer and
+  a PNG that decodes at the reported size is a capture. The result is capture-only
+  (`capture_kind: window`, `mapped_input_available: false`): no `observation_id`,
+  transform or `display`; its `auto_attach_source` names that window, so a newer
+  capture of it replaces only that window's older picture in what the model is sent. A window that is not on
+  screen (`window.on_screen: false`: minimized, another Space) may come back blank.
 - `click` (left/right/middle, double/triple), the thin aliases
   `double_click`/`triple_click` (models call these names unprompted), `move`,
   `left_click_drag`, `mouse_down`/`mouse_up`, `cursor_position`, `type_text`,
@@ -98,6 +116,65 @@ Tools:
 - `remote_exec` runs a shell command on the active remote backend only; it
   refuses on local backend. Use ordinary Ouroboros shell/file tools for local
   work.
+
+## Window session (opt-in MCP tools)
+
+`screenshot(window=)` stays the zero-setup way to see one window once. For a task that
+keeps watching ONE window, the skill also declares an MCP server, `mac_window_session`
+(`window_session_server.py`, `task_session: true`). The owner connects it once with
+**Connect tools** on the Skills card. Discovery may start an idle server, but nothing
+is captured until `begin`. The host then starts one server process for that task loop,
+keeps it for the loop's later calls and ends it with the loop (a Stop, the task's end, a
+restart): no companion, no process that outlives the task, nothing restored afterwards.
+
+- `mcp_mac_window_session__begin(app, window)` resolves `app` launch-free and selects
+  exactly one of its windows as `screenshot(window=)` does (a `window_id` or an exact
+  title; none or several is refused), once: the stream stays bound to that window, and
+  a title is never looked up again. It starts one ScreenCaptureKit stream of that
+  window alone (no cursor, no shadow, no audio; at most 1280x800, 5 frames per second,
+  four queued surfaces) and returns facts, no image. One session per task: another
+  `begin` is `session_exists` until `release`.
+- `mcp_mac_window_session__frame(after_seq, wait_ms)` returns the latest complete image
+  as an MCP image beside one JSON object. `seq` numbers the session's images and
+  `frame_age_ms` is that image's own age (`frame_time_basis`: the stream's display
+  time, else when it was received). `stream.last_report` with its age is separate
+  evidence: `idle` says the window had not changed at that moment; it is not a newer
+  image. Pass the last `seq` as `after_seq` to receive an image only when a newer one
+  exists (`wait_ms`, at most 10000, waits for it); otherwise the answer is
+  `image: false`, `no_newer_frame`, and the same picture is not sent again. Reset this
+  cursor after a new `begin`: sequence numbers belong to that session, not the task's history.
+- `mcp_mac_window_session__release()` ends the stream; without a session it is a
+  no-op. `stop_unconfirmed` means the stream did not confirm its stop: call it again,
+  since no other session begins until it is confirmed.
+
+No image is served, and nothing restarts by itself, when the stream ended
+(`stream_stopped` with `stop.reason`: `user_stopped` when the owner ended the capture in
+macOS, `system_stopped`, `no_capture_source`, `released`); when its last report was
+not a readable image or `idle`: `blank`, `suspended`, `stopped`, a sample that could
+not be read (`invalid_sample`, `callback_error`) or, on macOS 15.2+, `inactive`, the
+stream's notice that its window closed (`frame_withheld` with `withheld.status`; a
+later image of the same stream is served again); or once the window server no longer
+lists the window for that process (`window_gone`; used only where it listed the window
+at `begin`, which `window_gone_check` says). `window_gone` is final for the session: a
+window that later reuses the id is not shown, and only `release` and a new `begin`
+watch a window again. A native end arriving after delivery closed is kept separately
+as `stream_end`; after `user_stopped` in either `stop.reason` or `stream_end.reason`,
+ask the owner before beginning again.
+`window.on_screen` is ScreenCaptureKit's listing and decides nothing: a hidden window
+reads `false` and can still be watched. An app may retain a window after its Close
+button merely hides it: if macOS still exposes that surface, it is still selectable.
+`window_gone` means disappearance from the window server, not inference about the app's UI.
+
+The images are capture-only, like `screenshot(window=)`: one window's pixels, no
+`observation_id`, no display mapping (`mapped_input_available: false`), and no input
+tool may use their coordinates; act through `element_act` or a mapped `screenshot`.
+This MCP observer always targets the LOCAL Mac, independently of the selected remote
+computer-use connection; it does not retarget input tools. Local macOS 14+ with the Screen Recording grant (the prompt-free preflight; without it
+nothing is asked); elsewhere `begin` answers `unsupported_platform` or `unsupported_os`,
+and listing the tools runs nothing native. macOS normally marks a running capture
+with its own indicator; an owner who ends the capture there is reported as
+`user_stopped`. The server holds only the latest frame; each image a task asked for
+is kept by the host with that call's result.
 
 ## Choosing a control path
 
@@ -548,7 +625,8 @@ Layout: `plugin.py` (registration, coordinate contract, local input),
 `place.py` (targets, activation, the receipt composer `_finish` shared by every
 transport, window rows, element reads), `remote.py` (OSWorld and SSH
 transports), `macos_native.py` (the helper process), `paste_chord.js` (the
-macOS paste chord, local and over SSH). The skill intentionally
+macOS paste chord, local and over SSH), `macos_stream.py` and
+`window_session_server.py` (the window session and its MCP server). The skill intentionally
 does not hide OS permission requirements, and missing backends produce explicit
 errors with the capability report instead of guessing. The agent should prefer
 semantic application APIs when available and should ask the human before

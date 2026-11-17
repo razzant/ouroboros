@@ -1,4 +1,4 @@
-"""Public Connect refusals and the first Node-only MCP declaration contract."""
+"""Public Connect refusals and the skill MCP runtime declaration contract."""
 import json
 from types import SimpleNamespace
 
@@ -14,10 +14,33 @@ from ouroboros.contracts.skill_manifest import SkillManifestError, parse_skill_m
 def test_mcp_declaration_does_not_promise_other_script_runtime_semantics(runtime):
     text = ('---\nname: demo\ndescription: d\nversion: 1.0.0\ntype: script\nruntime: '
             + runtime + '\nscripts: [server]\nmcp_servers: [{id: demo, entry: server}]\n---\n')
-    with pytest.raises(SkillManifestError, match="only the node runtime"):
+    with pytest.raises(SkillManifestError, match="only node or agent_python runtimes"):
         parse_skill_manifest_text(text)
     # The existing script contract is unaffected by this new optional declaration.
     assert parse_skill_manifest_text(text.replace('mcp_servers: [{id: demo, entry: server}]\n', '')).runtime == runtime
+
+
+def test_agent_python_is_only_an_explicit_mcp_runtime_and_node_still_inherits():
+    text = ('---\nname: demo\ndescription: d\nversion: 1.0.0\ntype: script\n'
+            'runtime: python3\nscripts: [setup.py]\n'
+            'mcp_servers: [{id: demo, runtime: agent_python, entry: server.py}]\n---\n')
+    manifest = parse_skill_manifest_text(text)
+    assert manifest.runtime == "python3"
+    assert manifest.mcp_servers[0]["runtime"] == "agent_python"
+    top_level = parse_skill_manifest_text(text.replace("runtime: python3", "runtime: agent_python"))
+    assert any("unknown runtime 'agent_python'" in warning for warning in top_level.validate())
+    inherited = parse_skill_manifest_text(text.replace("runtime: python3", "runtime: node")
+                                           .replace("runtime: agent_python, ", ""))
+    assert inherited.mcp_servers[0]["runtime"] == "node"
+
+
+@pytest.mark.parametrize("runtime", ["[python]", "{name: python}"])
+def test_mcp_runtime_wrong_shape_has_typed_manifest_error(runtime):
+    text = ('---\nname: demo\ndescription: d\nversion: 1.0.0\ntype: script\n'
+            'runtime: node\nscripts: [setup.mjs]\n'
+            f'mcp_servers: [{{id: demo, runtime: {runtime}, entry: server.mjs}}]\n---\n')
+    with pytest.raises(SkillManifestError, match="supports only node or agent_python runtimes"):
+        parse_skill_manifest_text(text)
 
 
 @pytest.mark.parametrize("present,status", [(False, 404), (True, 409)])

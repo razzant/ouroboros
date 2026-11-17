@@ -747,9 +747,9 @@ def _parse_mcp_servers(raw: Any, manifest_runtime: str) -> List[Dict[str, Any]]:
                                      fix_hint="write entry as a path inside the skill, e.g. scripts/server.mjs")
         runtime = item.get("runtime", manifest_runtime)
         runtime = runtime.strip().lower() if isinstance(runtime, str) else runtime
-        if runtime != "node":
-            raise SkillManifestError(f"mcp_servers {server_id!r} currently supports only the node runtime",
-                                     fix_hint="set runtime to node; other skill runtimes keep their existing script path")
+        if not isinstance(runtime, str) or runtime not in {"node", "agent_python"}:
+            raise SkillManifestError(f"mcp_servers {server_id!r} supports only node or agent_python runtimes",
+                                     fix_hint="set runtime to node or agent_python; ordinary script runtimes are unchanged")
         title = item.get("title", server_id)
         flags = {key: item.get(key, False) for key in ("task_session", "browser_policy")}
         if not isinstance(title, str) or not title.strip() or any(not isinstance(v, bool) for v in flags.values()):
