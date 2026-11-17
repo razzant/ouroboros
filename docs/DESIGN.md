@@ -478,8 +478,8 @@ Enter as a line break.
 ### Composer owner controls
 
 Each composer saves its room's **Model**, **Subagents**, **Context** and **Effort** through the owner endpoints,
-in that order after Ouroboros's picture, with Model first. Main supplies a one-time copy of the last three to new Projects;
-later changes stay in their room. A room's Model is never copied: it follows Main until the room chooses,
+in that order after Ouroboros's picture, with Model first. Main supplies a one-time copy of Subagents and Effort to new
+Projects, whose Context starts at Max; later changes stay in their room. A room's Model is never copied: it follows Main until the room chooses,
 and says so (name `Main`, value Main's model); a choice stays with its room.
 Readback comes from Main state or the named Project, never another room. Saves apply
 to new participants; running work retains its choices through Resume. A refusal

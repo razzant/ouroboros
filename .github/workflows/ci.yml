@@ -991,7 +991,7 @@ jobs:
   # a runner with executed payload code at all (it used to run first on the
   # ubuntu leg, before that leg's install smoke).
   # A review leg runs Ouroboros's own skill review on ONE cheap stochastic
-  # reviewer slot (deepseek/deepseek-v4.1-flash, low effort, isolated settings;
+  # reviewer slot (z-ai/glm-5.3, low effort, isolated settings;
   # production reviewer defaults stay untouched), ubuntu-only (an
   # LLM verdict is OS-independent), one leg per review skill so the three
   # live reviews run in parallel under the product's own review window.
