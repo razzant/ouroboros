@@ -40,7 +40,8 @@ def sent(monkeypatch):
 
 def test_a_start_memory_lowered_to_low_says_so_without_numbers_or_advice():
     line = low_start_line(_plan(_room()), "low", "rootA")
-    assert line == "Task rootA started in Low with chapter maps: memory did not fit beside the full books."
+    assert line == ("Task rootA started in Max with chapter maps: my memory, even in its shortest tellings, did not fit "
+                    "beside the whole books.")
     assert not any(char.isdigit() for char in line) and len(line.splitlines()) == 1  # numbers stay in the task's facts
     assert not any(word in line for word in ("may bring", "should", "must", "fold", "episode", "again"))
 
@@ -59,7 +60,7 @@ def test_a_measured_crowded_start_gets_its_line(monkeypatch):
     held = _fact(_start(core, 2_000_000, monkeypatch))
     plan = _start(core, _crowded_window(held), monkeypatch)
     assert plan.initial_mode == "low" and _fact(plan)["cause"] == "crowded"
-    assert low_start_line(plan, plan.initial_mode, "wake").startswith("Task wake started in Low with chapter maps:")
+    assert low_start_line(plan, plan.initial_mode, "wake").startswith("Task wake started in Max with chapter maps:")
     assert low_start_line(_start(core, 2_000_000, monkeypatch), "max", "wake") == ""
 
 
@@ -79,7 +80,7 @@ def test_the_line_goes_through_the_outbox_once_per_low_episode(tmp_path, sent):
     [(root, event)] = sent
     assert root == tmp_path.resolve() and event["chat_id"] == 7 and event["task_id"] == ""
     assert event["role"] == "system" and event["system_type"] == "low_start_notice" and event["type"] == "send_message"
-    assert event["delivery_id"] == "low_start:rootA:1" and event["text"].startswith("Task rootA started in Low")
+    assert event["delivery_id"] == "low_start:rootA:1" and event["text"].startswith("Task rootA started in Max with chapter maps")
     opened = start("rootB", _room())
     assert opened["task"] == "rootA" and len(sent) == 1  # Low holds: no second line
     for task, room, mode, plan in (("kid", _room(), "low", {"role": "child"}), ("nan", _room("held"), "max", {"role": "nanny"}),

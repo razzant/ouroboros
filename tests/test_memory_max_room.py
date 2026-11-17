@@ -61,12 +61,13 @@ def test_memory_or_schemas_that_take_the_books_room_are_measured_without_advice(
     assert plan.initial_mode == "low" and fact["cause"] == "crowded" and fact["cuts"] == []
     assert fact["floor_need"] <= fact["window"] and fact["short"] == fact["need"] - fact["window"] > 0
     shown = plan.low_projection.system_content_json
-    assert "Low with chapter maps. The host's measure of this start: window " in shown and "b" * 40_000 not in shown
+    assert ("Max with chapter maps, for the window: my memory, even in its shortest tellings, does not fit beside the whole "
+            "books and the work's room. The host's measure of this start: window ") in shown and "b" * 40_000 not in shown
     assert not any(words in shown for words in ("may bring the books back", "Folding memory"))
     assert f"(pages no part or account holds yet {fact['unfolded']:,})" in shown
-    assert not any(words in shown for words in ("failure", "crowds the books out", "cannot make room", "did not fit beside"))
+    assert not any(words in shown for words in ("failure", "crowds the books out", "cannot make room", "did not fit beside", "Low with"))
     line = memory_facts(plan, "low")
-    assert f"beside a Max room of {fact['allowance']:,}; Low; " in line
+    assert f"beside a Max room of {fact['allowance']:,}; Max with chapter maps, for the window; " in line
     assert not any(words in line for words in ("may bring", "Folding", "failure"))
     # The fact rides in the receipt the task trace keeps, and a selection keeps the start's frame.
     assert mf.trace_facts(plan.low_projection.memory_facts)["max_room"] == fact
@@ -94,11 +95,12 @@ def test_a_route_whose_window_cannot_hold_the_books_floor_is_a_disclosed_fact(mo
     assert plan.initial_mode == "low" and fact["cause"] == "route" and fact["floor_need"] > fact["window"]
     assert fact["parts"][0][0] == "books"  # largest first
     shown = plan.low_projection.system_content_json
-    assert ("Low with chapter maps, a disclosed fact of this route: its window cannot hold the books beside my core, "
+    assert ("Max with chapter maps, for the window, a disclosed fact of this route: its window cannot hold the books beside my core, "
             f"assignment, reply reserve and the work's room (needs {fact['floor_need']:,} > 200,000: books ") in shown
     assert "folding memory or dropping tool schemas cannot make room here." in shown and "may bring" not in shown
     line = memory_facts(plan, "low")
-    assert "; Low, a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here" in line
+    assert ("; Max with chapter maps, for the window, a disclosed fact of this route: folding memory or dropping tool schemas "
+            "cannot make room here") in line
 
 
 def test_a_directly_required_book_at_the_max_boundary_never_lowers_the_start(monkeypatch):

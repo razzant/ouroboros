@@ -1229,3 +1229,95 @@ def test_a_project_rooms_context_reads_only_its_own_root_works(direct_server_wit
         finally:
             _record(tmp_path, "context-synthetic-project-webkit", seen)
             browser.close()
+
+
+# What the capsule says for the owner's Max whose books went to chapter maps, and for Low's missed target where Low
+# is chosen (owner 15.11.2026, 3A and 4A; words settled by the consilium, 17.11), at the owner's two desk widths of
+# the transcript and on a phone.
+WORDS = """() => {
+    const el = document.querySelector('#page-chat .chat-context-mode');
+    const hint = el.querySelector('.ui-hint');
+    const box = hint.hidden ? null : hint.getBoundingClientRect();
+    return { word: el.querySelector('.chat-capsule-value').textContent,
+        label: el.querySelector('.chat-capsule-head').getAttribute('aria-label') || '',
+        text: hint.querySelector('.ui-hint-text').textContent, fact: hint.querySelector('.ui-hint-fact-text').textContent,
+        box: box && [box.left, box.top, box.right, box.bottom], viewport: [innerWidth, innerHeight],
+        docScroll: document.documentElement.scrollWidth > innerWidth + 1 };
+}"""
+
+
+def _maps(cause: str) -> dict:
+    row = _sent("max", work="synthetic-work-m", at="2026-01-05T10:10:00+00:00")
+    row["context_attempt"].update(applied="max", books="maps", profile="task_local_low", cause=cause)
+    return row
+
+
+def _low_missed() -> dict:
+    row = _sent("low", preferred="low", work="synthetic-work-l", at="2026-01-05T10:12:00+00:00")
+    row["context_attempt"].update(books="maps", target_missed=True, no_memory_tokens=532_173)
+    return row
+
+
+def _sized(page, transcript: int | None) -> None:
+    """A desk viewport sized until the transcript is as wide as asked (``test_card_model_browser._open``)."""
+    for _ in range(4 if transcript else 0):
+        page.wait_for_timeout(200)
+        now = page.evaluate("() => document.querySelector('#chat-messages').clientWidth")
+        if now == transcript:
+            break
+        size = page.viewport_size
+        page.set_viewport_size({"width": size["width"] + transcript - now, "height": size["height"]})
+
+
+@pytest.mark.parametrize("engine", ["webkit", "chromium"])
+@pytest.mark.parametrize("tag,transcript,mobile", [("desk581", 581, False), ("desk282", 282, False), ("phone390", None, True)])
+def test_context_names_chapter_maps_and_lows_missed_target_at_every_width(direct_server_with_data, engine, tag, transcript,  # noqa: F811
+                                                                        mobile, tmp_path):
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import sync_playwright
+
+    url = direct_server_with_data["url"]
+    width, height = (390, 844) if mobile else (1100, 800)
+    with sync_playwright() as pw:
+        browser, page = _launch(pw, engine, viewport={"width": width, "height": height}, is_mobile=mobile, has_touch=mobile)
+        seen = {}
+        try:
+            rows = _observe_context(page, [])
+            _open_chat(page, url, width=width, height=height, theme="dark")
+            _sized(page, transcript)
+            head = f"{CONTEXT} .chat-capsule-head"
+            rows[:] = [_maps("memory")]
+            page.wait_for_function(f"() => document.querySelector('{CONTEXT} .chat-capsule-head').getAttribute('aria-label')"
+                                   " === 'Context: Max now, chapter maps'", timeout=15_000)
+            page.locator(head).click()
+            page.wait_for_function(f"() => document.querySelector('{CONTEXT}').dataset.open === 'true'")
+            page.wait_for_timeout(450)
+            seen["maps"] = facts = page.evaluate(WORDS)
+            _shot(page, tmp_path, f"context-maps-{engine}-{tag}")
+            assert facts["word"] == "Max" and facts["fact"].startswith("Chapter maps: the history does not fit beside the whole books."), facts
+            left, top, right, bottom = facts["box"]
+            assert left >= 0 and top >= 0 and right <= facts["viewport"][0] and bottom <= facts["viewport"][1] and not facts["docScroll"], facts
+            page.keyboard.press("Escape")
+            page.wait_for_function(f"() => document.querySelector('{CONTEXT}').dataset.open === 'false'")
+            # Low chosen in this room, whose newest owner-Low start missed the target: the screen says it before the next.
+            page.locator(head).click()
+            page.wait_for_function(f"() => document.querySelector('{CONTEXT}').dataset.open === 'true'")
+            page.locator(f'{CONTEXT} .chat-seg[data-mode="low"]').click()
+            page.wait_for_function(f"() => document.querySelector('{CONTEXT}').dataset.contextMode === 'low'", timeout=15_000)
+            rows[:] = [_low_missed()]
+            page.wait_for_function(f"() => document.querySelector('{CONTEXT} .chat-capsule-value').textContent === 'Low'", timeout=15_000)
+            if page.evaluate(f"() => document.querySelector('{CONTEXT}').dataset.open") != "true":
+                page.locator(head).click()
+                page.wait_for_function(f"() => document.querySelector('{CONTEXT}').dataset.open === 'true'")
+            page.wait_for_function(f"() => document.querySelector('{CONTEXT} .ui-hint-text').textContent.startsWith('Low’s 250K')",
+                                   timeout=15_000)
+            page.wait_for_timeout(450)
+            seen["low"] = facts = page.evaluate(WORDS)
+            _shot(page, tmp_path, f"context-low-missed-{engine}-{tag}")
+            assert facts["text"] == ("Low’s 250K target was not met at the last start here: without memory it already needed "
+                                     "about 532K; memory keeps its shortest tellings."), facts
+            left, top, right, bottom = facts["box"]
+            assert left >= 0 and top >= 0 and right <= facts["viewport"][0] and bottom <= facts["viewport"][1] and not facts["docScroll"], facts
+        finally:
+            _record(tmp_path, f"context-maps-low-{engine}-{tag}", seen)
+            browser.close()
