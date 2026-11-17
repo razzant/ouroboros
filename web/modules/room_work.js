@@ -843,6 +843,11 @@ export function createRoomWork({
             const home = chipHome();
             if (home && chip.parentNode !== home) home.prepend(chip);
         }
+        // While the chip is a row of the list, the room's capsule is the drawn way to its sheet and names that sheet too,
+        // so a return from a page the sheet opened (page_places.js follows aria-controls) lands on the capsule, not on the
+        // folded row or the sheet's empty anchor.
+        const controls = listed ? `${uid}-surface ${chip.getAttribute('aria-controls') || ''}`.trim() : `${uid}-surface`;
+        if (trigger.getAttribute('aria-controls') !== controls) trigger.setAttribute('aria-controls', controls);
     }
 
     function paintTrigger() {

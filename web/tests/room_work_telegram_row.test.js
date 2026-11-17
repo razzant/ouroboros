@@ -17,6 +17,7 @@ function mountMain(doc, mount) {
     const group = node('app-page-actions ui-chrome-group', header);
     const chip = doc.createElement('button');
     chip.className = 'cx-chip ui-chrome-control';
+    chip.setAttribute('aria-controls', 'cx-shade');
     group.appendChild(chip);
     const badge = doc.createElement('span');
     badge.className = 'status-badge';
@@ -42,10 +43,15 @@ test('in Telegram\'s shared row the consciousness chip is a row of the work list
         const extras = header.querySelector('.rw-extras');
         assert.equal(chip.parentNode, extras, 'in Telegram\'s row the chip is a row of the work list');
         assert.equal(extras.children[0], chip, 'it comes before Restart and the budget');
+        // The room's capsule is then the drawn way to the chip's sheet: a return from a page the sheet opened lands on it.
+        const trigger = header.querySelector('.rw-trigger');
+        const controls = () => trigger.getAttribute('aria-controls').split(' ');
+        assert.deepEqual(controls().slice(1), ['cx-shade'], 'in the row the capsule names the chip\'s sheet too');
         // Telegram leaves fullscreen: the bar is the page's own again and the chip its capsule.
         root.dataset.telegramFullscreen = 'expanded';
         work.update();
         assert.equal(chip.parentNode, group, 'outside the shared row the chip is the bar\'s capsule');
+        assert.equal(controls().length, 1, 'and the capsule names its own list alone');
         assert.equal(group.children[0], chip, 'it leads the end group again');
         root.dataset.telegramFullscreen = 'active';
         work.update();
