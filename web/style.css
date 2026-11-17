@@ -4735,10 +4735,10 @@ html[data-layout="stack"] .app-page-header {
     padding-top: calc(var(--chrome-inset) + var(--inset-top));
     column-gap: var(--space-2);
 }
-/* A page's row stands at the bands' one inset, as on a desk (DESIGN "Page header"): 18px below a browser's top, or just
-   under the system's band where the screen has one. A room keeps its own top, Telegram its row, a macOS window the
-   traffic lights' line. */
-:where(html[data-layout="stack"]:not([data-window-chrome="integrated"])) #content > .page:not(#page-chat) > .app-page-header {
+/* A page's row, and the drawer's head whose × replaces its ☰, stand at the bands' one inset, as on a desk (DESIGN "Page
+   header"): 18px below a browser's top, or just under the system's band where the screen has one. A room keeps its
+   own top, Telegram its row, a macOS window the traffic lights' line. */
+:where(html[data-layout="stack"]:not([data-window-chrome="integrated"])) :is(#content > .page:not(#page-chat) > .app-page-header, .drawer-head) {
     padding-top: max(calc((var(--page-header-row-h) - var(--control-h-float)) / 2), calc(var(--chrome-inset) + var(--inset-top)));
 }
 html[data-layout="stack"] .chat-page-header {

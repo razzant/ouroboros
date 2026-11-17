@@ -58,7 +58,8 @@ test('a section band has the same inset without native chrome and one leading ed
     assert.doesNotMatch(css, /#page-dashboard > \.app-page-header\[data-empty\]/, 'no Dashboard rule keys on a measured emptiness');
     // A phone's page row stands at the same inset (18px below a browser's top), under a system band when there is
     // one; a room keeps its own top, and Telegram's row and a macOS window's lights outrank this rule.
-    assert.match(css, /:where\(html\[data-layout="stack"\]:not\(\[data-window-chrome="integrated"\]\)\) #content > \.page:not\(#page-chat\) > \.app-page-header \{\s*padding-top: max\(calc\(\(var\(--page-header-row-h\) - var\(--control-h-float\)\) \/ 2\), calc\(var\(--chrome-inset\) \+ var\(--inset-top\)\)\);/);
+    // The drawer's × lands on the ☰ it replaces: its head shares the page row's one inset (it stood at 6px, ☰ at 18px).
+    assert.match(css, /:where\(html\[data-layout="stack"\]:not\(\[data-window-chrome="integrated"\]\)\) :is\(#content > \.page:not\(#page-chat\) > \.app-page-header, \.drawer-head\) \{\s*padding-top: max\(calc\(\(var\(--page-header-row-h\) - var\(--control-h-float\)\) \/ 2\), calc\(var\(--chrome-inset\) \+ var\(--inset-top\)\)\);/);
     assert.match(css, /html\[data-layout="stack"\] \.app-page-header \{[^}]*padding-top: calc\(var\(--chrome-inset\) \+ var\(--inset-top\)\);/,
         'rooms keep the stack row\'s own top');
 });
