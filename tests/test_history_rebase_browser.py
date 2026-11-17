@@ -275,7 +275,7 @@ def test_send_while_a_room_opened_cold_loads_keeps_a_failed_draft_and_stays_at_t
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
 def test_unavailable_recent_in_a_shallow_room_reopens_following_the_present(direct_server_with_data, browser_engine, tmp_path):
-    """A recent read that could not be loaded, ↓ with the present loaded: the retained room reopens live."""
+    """A shallow retained window still owes a failed catch-up; after repair, a failed reopen keeps its following."""
     from playwright.sync_api import sync_playwright
     from tests.ui_chat_viewport_smoke import _emit_ws_frame
 
@@ -304,15 +304,32 @@ def test_unavailable_recent_in_a_shallow_room_reopens_following_the_present(dire
             page.evaluate(_FRAMES)
             before = page.evaluate('() => window.__historyReads.length')
             page.locator('#project-panel-body .chat-scroll-bottom-btn').click()
+            page.wait_for_function(f'n => ({since})(n).some(r => r.done)', arg=[before, cid])
             page.evaluate(_FRAMES)
+            assert page.locator(feed).evaluate(_GAP) <= 8, '↓ reaches retained messages even when catch-up fails'
+            assert page.locator('#project-panel-body .chat-scroll-bottom-btn').is_visible(), 'Retry stays reachable at the retained bottom'
+            assert page.locator('#project-panel-body .chat-scroll-bottom-btn').get_attribute('aria-label') == 'Retry loading latest messages'
+            failed = page.evaluate(since, [before, cid])
+            assert len(failed) == 1 and failed[0].get('error'), failed
+            page.evaluate('() => { window.__continuityFault = null; }')
+            page.locator('#project-panel-body .chat-scroll-bottom-btn').click()
+            _idle(page, feed)
             page.evaluate(_FRAMES)
-            assert page.evaluate(since, [before, cid]) == [], 'the loaded present needs no read'
             assert page.locator(feed).evaluate(_GAP) <= 8
 
             page.locator('#project-panel-close').click()
             page.locator('.chat-instance-panel[data-pending-work="1"]').wait_for(state='attached')
             assert page.locator('.chat-instance-panel[data-pending-work="1"]').count() == 1
+            page.evaluate("id => { window.__continuityFault = {chatId: id, fail: 'recent'}; }", cid)
+            before = page.evaluate('() => window.__historyReads.length')
             _click_project(page, project)
+            # CSS-visible off-screen is not a shown room. A failed read opens the panel at its loading bound;
+            # WebKit can clamp the hidden feed before that entrance, so assert the consumer after it is exposed.
+            page.wait_for_function("""() => {
+                const panel = document.getElementById('project-panel');
+                return panel.classList.contains('open')
+                    && !panel.getAnimations().some(a => a.pending || a.playState === 'running');
+            }""")
             page.evaluate(_FRAMES)
             _emit_ws_frame(page, {'type': 'chat', 'chat_id': cid, 'role': 'assistant',
                                   'content': 'LIVE_REPLY_AFTER_SHALLOW_REOPEN', 'ts': '2026-09-27T22:00:00Z'})

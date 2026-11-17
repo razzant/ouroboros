@@ -2225,6 +2225,11 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
 .chat-scroll-bottom-btn:hover { color: var(--text-primary); }
 .chat-scroll-bottom-btn:not(:disabled):hover { background: var(--surface-capsule-hover); }
 .chat-scroll-bottom-btn:not(:disabled):active { filter: var(--press); }
+/* ↓ still reading the present it goes to: its press's own colour holds and only the arrow carries the history
+   loader's pulse, begun at its dim half so the press reads as taken in its first frame; the new-activity dot keeps
+   its meaning and stands still. */
+.chat-scroll-bottom-btn[aria-busy="true"] { filter: var(--press); cursor: progress; }
+.chat-scroll-bottom-btn[aria-busy="true"] svg { animation: thinking-pulse 1.5s ease-in-out -0.75s infinite; }
 .chat-scroll-bottom-btn:disabled { box-shadow: none; }
 .chat-scroll-bottom-btn:focus-visible {
     outline: 2px solid var(--focus-accent-border);
@@ -9985,9 +9990,11 @@ html[data-layout="stack"] .project-panel {
         transition: opacity var(--motion-fade) ease;
     }
     html[data-layout="docked"] .project-panel.open { opacity: 1; }
-    .chat-load-older[aria-busy="true"] .chat-load-older-btn {
+    .chat-load-older[aria-busy="true"] .chat-load-older-btn,
+    .chat-scroll-bottom-btn[aria-busy="true"] svg {
         animation: none;
     }
+    .chat-scroll-bottom-btn[aria-busy="true"] svg { opacity: 0.5; }  /* the pulse's dim half, held still */
 }
 
 /* Agent accounts (D30).

@@ -69,6 +69,10 @@ export function historyCoverage(recent, pages = []) {
     return { complete: start === 0 && end === horizon && !gaps, gaps, horizonGap };
 }
 
+// Where a read goes is apart from whether it is still wanted: a navigation to one place (a task, a page left) begins
+// a chain away from the present and fails on its own, while the present (`latest`, also ↓'s) is the window's read.
+const navigates = direction => direction === 'around' || direction === 'revisit';
+
 /** Chat's bounded archive-page owner. DOM, reading protection and live rows stay
  * with the chat instance; only fetchPage is asynchronous. Cursors are opaque.
  * It also owns the open window's `after_cursor` (CLIENT_CONTRACT §5 "Reading
@@ -135,6 +139,7 @@ export function createChatHistoryPager({
             loading: pending?.direction || '',
             error: failure?.error || null,
             retryDirection: failure?.direction || '',
+            retryReturn: Boolean(failure?.returning),  // the failed read was ↓'s own, its Retry a fresh ↓
             retryCursor: failure?.cursor ?? null,
             canOlder, canNewer,
             // The chain does not show the present: newer pages of it, or a navigation began it.
@@ -190,6 +195,7 @@ export function createChatHistoryPager({
     }
 
     function sourceReadError(data) {
+        // A failed source has no page. A partial projection still has useful rows and continuation boundaries.
         if (!data?.page_cursor && data?.reason_code === 'history_source_unavailable') {
             const error = new Error(data.error || 'Some saved history is unavailable. Retry loading messages.');
             error.body = data;
@@ -223,11 +229,12 @@ export function createChatHistoryPager({
             : { id, chain: nextChain, index,
                 requestCursor: data.page_cursor, nextCursor: data.next_cursor ?? null,
                 hasMore: data.has_more, rows: messageCount, loaded: true, coverage: data.coverage ?? null });
-        applyPage(data.messages, { ...page, direction, window: data.window ?? null, recentVersion: data.recentVersion, ...extra });
+        applyPage(data.messages, { ...page, direction, window: data.window ?? null,
+            recentVersion: data.recentVersion, page_cursor: data.page_cursor, ...extra });
         if (!alive()) return { status: 'disposed' };
         // Only a read of the present restarts the arrivals; a page around one place is not the present.
         if (newChain) {
-            chain = nextChain; pages = [page]; pageRows.clear(); failure = null; jumped = Boolean(stillWanted);
+            chain = nextChain; pages = [page]; pageRows.clear(); failure = null; jumped = navigates(direction);
             if (direction === 'latest') newest(data);
         }
         else pages[index] = page;
@@ -240,21 +247,39 @@ export function createChatHistoryPager({
         return { status: 'applied', page, releasedPageIds, messageCount, anchor: data.anchor ?? null };
     }
 
-    // `stillWanted` marks an explicit navigation to one place: a newer one supersedes it while it
-    // loads, it waits out a window read rather than replacing it, and its failure is its own, never
-    // the window's Retry.
+    // The reader returns to the present (↓): a page still loading for older history, or a navigation to one place,
+    // yields before it is drawn, so it can neither move the window's focus nor release the present under that reader.
+    // A read of the present stays; the arrivals and the room's newest read are not the pager's to stop.
+    function toPresent() {
+        if (!pending || pending.direction === 'latest' || pending.direction === 'recent') return;
+        pending.abort.abort();
+        pending = null;
+        publish();
+    }
+
+    // `stillWanted` marks a read made for one intent (a navigation, ↓): it is dropped before it lands once the reader
+    // moved on, and a newer navigation supersedes it while it loads. A navigation waits out a window read rather
+    // than replacing it, and its failure is its own, never the window's Retry; ↓'s `latest` is the window's read.
     function request(direction, index, cursor, newChain = false, { query = null, stillWanted = null, prepared = null } = {}) {
         if (!alive()) return Promise.resolve({ status: 'disposed' });
-        const newest = stillWanted && newestInFlight();
-        if (newest) return newest.then(() => stillWanted()
+        const navigation = navigates(direction);
+        const again = () => (stillWanted()
             ? request(direction, index, cursor, newChain, { query, stillWanted, prepared }) : { status: 'superseded' });
-        if (pending && stillWanted && pending.stillWanted) { pending.abort.abort(); pending = null; }
-        if (pending && stillWanted) return pending.promise.then(() => (stillWanted()
-            ? request(direction, index, cursor, newChain, { query, stillWanted, prepared }) : { status: 'superseded' }));
+        const newest = navigation && newestInFlight();
+        if (newest) return newest.then(again);
+        if (pending && navigation && pending.stillWanted) { pending.abort.abort(); pending = null; }
+        if (pending && navigation) return pending.promise.then(again);
+        if (stillWanted && direction === 'latest') toPresent();
+        // A read of the present already out serves this one too: it lands while its latest asker wants it (a ↓ by
+        // its claim, not an earlier one's), and always once one without a claim joins.
+        if (pending && direction === 'latest' && (stillWanted || pending.direction === 'latest')) {
+            pending.stillWanted &&= stillWanted;
+            return pending.promise;
+        }
         if (pending) return pending.direction === direction
             ? pending.promise : Promise.resolve({ status: 'busy' });
         const operation = { direction, index, cursor, newChain, stillWanted, abort: new AbortController(), landed: landedArrivals };
-        if (!stillWanted) failure = null;
+        if (!navigation) failure = null;
         pending = operation;
         operation.promise = Promise.resolve()
             .then(() => alive() && pending === operation
@@ -270,7 +295,11 @@ export function createChatHistoryPager({
             })
             .catch(error => {
                 if (!alive() || pending !== operation) return { status: 'disposed' };
-                if (!stillWanted) failure = { direction, index, cursor, newChain, error };
+                // The window's read keeps its failure for Retry while it is wanted; one the reader left is no failure.
+                // A claim still on it at failure is ↓'s own (a read ↓ only joined is its asker's).
+                if (!navigation && operation.stillWanted?.() !== false) {
+                    failure = { direction, index, cursor, newChain, error, returning: Boolean(operation.stillWanted) };
+                }
                 return { status: 'error', error, cursor };
             })
             .finally(() => {
@@ -341,11 +370,12 @@ export function createChatHistoryPager({
     // arrived since the newest read, else the newest page (`whole`, no cursor yet, a
     // window grown full, one `canArrive` declines, a refusal or a failure). When
     // arrivals cannot answer, chat's newest read starts within this very call.
-    function read({ fromReconnect = false, whole = false } = {}) {
+    function read({ fromReconnect = false, whole = false, current = () => true } = {}) {
         const started = visit;
+        // A superseded reconnect leaves its queued read to the current catch-up.
+        if (!alive() || !current()) return Promise.resolve(false);
         const inFlight = newestInFlight();
-        if (inFlight) return inFlight.then(() => started === visit && read({ fromReconnect, whole }));
-        if (!alive()) return Promise.resolve(false);
+        if (inFlight) return inFlight.then(() => started === visit && read({ fromReconnect, whole, current }));
         if (whole || !canArrive() || !(arrival || arrivable())) {
             return readNewest({ fromReconnect });
         }
@@ -372,7 +402,8 @@ export function createChatHistoryPager({
                 publish();
                 return { status: 'error', error: sourceError, cursor: null };
             }
-            if (!sourceError && failure?.direction === 'recent') { failure = null; publish(); }
+            // The newest read answers a failed read of the present, the room's own or ↓'s (its Retry is ↓ again).
+            if (!sourceError && (failure?.direction === 'recent' || failure?.direction === 'latest')) { failure = null; publish(); }
             if (pending || (pages.length && !rechain)) return { status: 'ignored' };
             try {
                 const result = pages.length ? land(data, { index: 0, direction: 'latest', newChain: true }, { ...rechain, rechained: true })
@@ -402,8 +433,11 @@ export function createChatHistoryPager({
                 : request('newer', index, pages[index].requestCursor);
         },
         // Explicit return to latest starts a new snapshot only after success.
-        // Old protected pages remain mounted until the reader unpins them.
-        latest: () => request('latest', 0, null, true),
+        // Old protected pages remain mounted until the reader unpins them. ↓ passes its claim (`stillWanted`):
+        // pages still loading yield to it (`toPresent`), a read of the present already out is shared, and once the
+        // reader has moved on its answer is dropped before it lands.
+        latest: (stillWanted = null) => request('latest', 0, null, true, { stillWanted }),
+        toPresent,
         // One explicit navigation to one place, as a new chain: the page around `address`
         // (`task:<id>`, DESIGN "Room work status"), or a page the reader left read again by its
         // `page_cursor` (`revisit`). Dropped before it applies once `stillWanted()` says no.
