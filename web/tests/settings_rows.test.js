@@ -119,6 +119,18 @@ test('a typed value commits on change, never on input, once; it says what it was
     assert.equal(view.line(TOTAL), 'Saved · was 250 · Undo');
 });
 
+test('a row put away while a read repaints and shown again (a level kept for a return) still says its result', async (t) => {
+    const { server, view } = await start(t, [TOTAL]);
+    const [node] = view.container.querySelectorAll('[data-setting-row]');
+    let away = true;
+    Object.defineProperty(node, 'isConnected', { get: () => !away });
+    await readSettings();  // a fresh read repaints the rows on screen while this one is away
+    away = false;
+    await view.type(TOTAL, '250');
+    assert.deepEqual(server.posts, [{ TOTAL_BUDGET: 250 }]);
+    assert.equal(view.line(TOTAL), 'Saved · was 200 · Undo', 'the row it is used through paints again');
+});
+
 test('Undo restores absence with unset, and restores a previously stored value with an assignment', async (t) => {
     for (const oldAbsent of [true, false]) await t.test(oldAbsent ? 'absent' : 'stored', async (t) => {
         const { server, view } = await start(t, [TOTAL]);

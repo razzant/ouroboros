@@ -855,7 +855,7 @@ export function bindSettingRows(container, ctx = {}) {
         const row = find(node.dataset.settingRow);
         if (!row) return;
         const paint = () => {
-            if (node.isConnected === false) { BOUND.get(row.id)?.delete(paint); return; }
+            if (node.isConnected === false) return;  // away (a level kept for a return): its painter until dispose()
             paintRow(node, row, ctx);
         };
         paintWithRow(row.id, paint);
