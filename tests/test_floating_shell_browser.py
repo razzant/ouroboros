@@ -449,6 +449,9 @@ def test_status_fitting_skips_unchanged_paints_and_tracks_capsule_width(shell_ui
     transport = Transport(page, activities=[activity("main-work", "thinking")], history={1: reading(14)})
     page.goto(shell_ui["url"])
     page.wait_for_selector("#page-chat .rw-trigger:not(:disabled)")
+    # Count from the census word on the capsule: its first paint replaces the markup's Connecting…, a new word that is
+    # measured once, and Chromium may draw it seconds after the trigger enables.
+    page.wait_for_function("document.querySelector('#page-chat .rw-trigger').title === 'Thinking'")
     page.wait_for_timeout(400)
     page.evaluate("""() => {
         const badge = document.querySelector('#page-chat .rw-trigger .status-badge');
