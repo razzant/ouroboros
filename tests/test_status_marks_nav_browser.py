@@ -558,7 +558,7 @@ def test_a_rows_menu_opens_by_right_click_or_keyboard_and_says_the_rows_state(na
         page.close()
     name = PROJECTS[1]['name']
     right = facts['right']
-    assert right['role'] == 'none' and right['items'] == ['pin', 'rename', 'delete'] and right['focused'] == 'pin', facts
+    assert right['role'] == 'none' and right['items'] == ['pin', 'rename', 'folder', 'delete'] and right['focused'] == 'pin', facts
     assert (right['shape'], right['hue'], right['word']) == ('moving', 'unread', 'Working'), facts
     assert right['words'] == 'Working · new messages', facts
     assert right['name'] == f'Actions for {name} · Working · new messages', facts
