@@ -99,17 +99,21 @@ def resolve_target(model: str, settings: Optional[Dict[str, Any]] = None, *,
     mapping; without it the runtime view is read. Building a target builds no client.
     """
     explicit_settings = settings is not None
+    snapshot = {}
 
     def configured(key: str, default: Any = "") -> Any:
-        if explicit_settings:
-            return settings.get(key, default)  # type: ignore[union-attr]
-        return runtime_setting(key, default)
+        if key not in snapshot:
+            read = settings.get if explicit_settings else runtime_setting
+            snapshot[key] = copy.deepcopy(read(key, default))
+        return snapshot.get(key, default)
 
     route = _resolver_route(model)
     provider, resolved_model = route.kind, route.model.strip()
     if provider == "claudexor" and route.valid:
         source, native_model = parse_claudexor_model(model)
         return {
+            "capability_route": {"provider": provider, "model": model, "base_url": "",
+                                 "dispatch_base_url": "http://127.0.0.1"},
             "provider": provider, "source": source, "resolved_model": native_model,
             "usage_model": f"claudexor::{resolved_model}", "api_key": "", "default_headers": {},
             # The daemon's address as route identity only; discovery never uses it, and each
@@ -122,11 +126,22 @@ def resolve_target(model: str, settings: Optional[Dict[str, Any]] = None, *,
         resolved_model = normalize_anthropic_model_id(resolved_model)
     usage_model = (f"{provider}@{route.connection}::{resolved_model}" if route.connection
                    else _ProviderRoutingMixin._qualified_model_name(provider, resolved_model))
-    return {"provider": provider, "resolved_model": resolved_model, "usage_model": usage_model,
+    target = {"provider": provider, "resolved_model": resolved_model, "usage_model": usage_model,
             **_kind_target(provider, get, route.connection, configured,
                            api_key_override=None if explicit_settings else api_key_override,
                            openrouter_base_url=OPENROUTER_BASE_URL if explicit_settings else openrouter_base_url),
             "connection": route.connection}
+    from ouroboros.provider_models import capability_base_url
+
+    # Preserve existing capability keys (including fixed-provider empty endpoints
+    # and OpenAI's legacy alias), alongside the endpoint this target really sends to.
+    if provider == "openai" and not route.connection:
+        # Metadata's legacy alias is not a dispatch read (deployment policy tracks those).
+        read = dict(settings).get if explicit_settings else runtime_setting
+        snapshot["OPENAI_BASE_URL"] = copy.deepcopy(read("OPENAI_BASE_URL", ""))
+    target["capability_route"] = {"provider": provider, "model": model,
+        "base_url": capability_base_url(model, snapshot), "dispatch_base_url": target["base_url"]}
+    return target
 
 
 _DIRECT_LANE = {"supports_openrouter_extensions": False, "supports_generation_cost": False}

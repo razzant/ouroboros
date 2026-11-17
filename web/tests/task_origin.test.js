@@ -100,6 +100,23 @@ test('the line names the place, what called the work in a heard message\'s words
     // What someone outside wrote is marked as theirs; the host's own words (the reason, «you») are not.
     assert.deepEqual(placeOriginParts(noted({})).map((part) => part.authored), [true, false, true]);
     assert.deepEqual(placeOriginParts(noted({ actor: { id: '7', label: 'rowan', owner: true } })).map((part) => part.authored), [true, false, false]);
+    // A kind its connector declared reads in those words, as written and marked theirs; words for a kind this work
+    // did not match, or empty ones, say nothing.
+    const discussion = { wakes: ['signal.new_discussion'], labels: { 'signal.new_discussion': 'New discussion', mention: 'Mentions you' } };
+    assert.equal(read(discussion), [PLACE, 'New discussion', 'tern-walker'].join(SEP));
+    assert.deepEqual(placeOriginParts(noted(discussion)).map((part) => part.authored), [true, true, true]);
+    assert.deepEqual(noted(discussion).labels, { 'signal.new_discussion': 'New discussion' });
+    assert.equal(read({ wakes: ['mention', 'signal.new_discussion'], labels: { 'signal.new_discussion': 'New discussion' } }),
+        [PLACE, 'mentions it and New discussion', 'tern-walker'].join(SEP));
+    assert.equal(read({ wakes: ['mention'], labels: { mention: '  ' } }), [PLACE, 'mentions it', 'tern-walker'].join(SEP));
+}));
+
+test('Details name a declared kind in its connector\'s words, as written, beside the host\'s own', () => withDocument(() => {
+    const rows = (patch) => { const record = { isSubagent: false }; noteOrigin(record, { place_origin: origin(patch) }); return record.originRows; };
+    const labels = { 'signal.new_discussion': 'new discussion thread' };
+    assert.deepEqual(rows({ wakes: ['signal.new_discussion'], labels })[1], ['What called it', authored('new discussion thread')]);
+    assert.deepEqual(rows({ wakes: ['mention', 'signal.new_discussion'], labels })[1], ['What called it', authored('Mentions and new discussion thread')]);
+    assert.deepEqual(rows({ wakes: ['mention'] })[1], ['What called it', 'Mentions'], 'the host\'s words alone stay its own');
 }));
 
 test('the place is not repeated where the card\'s name already is it; a doubled stored label reads once', () => withDocument(() => {
@@ -310,6 +327,15 @@ test('replay: a progress row, a terminal row and an evidence row each name the o
             assert.equal(f.lineNodes().length, 1, name);
         } finally { f.close(); }
     }
+    // A declared kind, replayed: its connector's words on the line and in Details, each marked theirs.
+    const declared = origin({ wakes: ['signal.new_discussion'], labels: { 'signal.new_discussion': 'New discussion' } });
+    const f = fixture([progress({ ...named, place_origin: declared })].map((row) => ({ chat_id: 1, ts: TS, ...row })));
+    try {
+        await f.replay();
+        assert.equal(f.line(), [PLACE, 'New discussion', 'tern-walker'].join(SEP));
+        assert.deepEqual(f.lineNodes()[0].children.map((span) => span.dataset.i18nAuthored), ['', '', '']);
+        assert.match(f.facts(), /<dt>What called it<\/dt><dd><span data-i18n-authored="">New discussion<\/span><\/dd>/);
+    } finally { f.close(); }
 });
 
 test('a Main portal reads the origin from its census row: no frame of the work reaches Main', async () => {

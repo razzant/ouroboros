@@ -21,12 +21,12 @@ import math
 import re
 import threading
 from dataclasses import asdict
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 from ouroboros.anthropic_native_custody import is_replayed_native_content
-from ouroboros.context_budget import (
-    CONTEXT_OVERFLOW_CODES, HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, context_overflow_message,
-)
+from ouroboros._usage_response import provider_answer, typed_values
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, size_refusal
+from ouroboros.llm_helper_window import _helper_attempt_context
 from ouroboros.request_wire_contract import physical_candidate_bytes as _canonical_candidate_bytes
 from ouroboros.request_wire_recovery import prepare_wire_payload_for_send
 from ouroboros.transport_custody import (  # noqa: F401 -- consumers import these two scopes through this module
@@ -183,40 +183,43 @@ def _is_provider_policy_refusal(exc: BaseException) -> bool:
     )
 
 
-def _structured_error_values(payload: Any) -> Set[str]:
-    if not isinstance(payload, dict):
-        return set()
-    nodes = [payload]
-    if isinstance(payload.get("error"), dict):
-        nodes.append(payload["error"])
-    return {
-        str(node.get(key) or "").strip().lower()
-        for node in nodes
-        for key in ("code", "type")
-        if str(node.get(key) or "").strip()
-    }
+def is_size_refusal(failure: Any, *, any_status: bool = False) -> bool:
+    """Whether a failure is a size refusal by the one shared recognition (``context_budget.size_refusal`` over
+    ``provider_answer``): an exception, read from the facts attached to it and never a stale ContextVar, or an
+    HTTP 200 body's error object, whose status is its integer ``error.code``. ``any_status``: the local lane reads
+    its own server's answer, whose 5xx with these words is no outage to wait out."""
+    answer = provider_answer(failure)
+    if not isinstance(failure, BaseException):
+        return size_refusal(answer, answer.status) is not None
+    status = None if any_status else next((value for value in (
+        getattr(failure, "status_code", None), getattr(getattr(failure, "response", None), "status_code", None))
+        if type(value) is int and value), None)
+    return size_refusal(answer, status, typed_values(failure, answer), str(failure)) is not None
 
 
-def _is_structured_context_overflow_exception(exc: BaseException) -> bool:
-    """Read only facts attached to this exception; never a stale ContextVar."""
-    values = {
-        str(getattr(exc, key, "") or "").strip().lower()
-        for key in ("code", "type")
-        if str(getattr(exc, key, "") or "").strip()
-    }
-    values.update(_structured_error_values(getattr(exc, "body", None)))
-    capture = getattr(exc, "physical_attempt_capture", None)
-    if capture is not None:
-        values.update({
-            str(getattr(capture, key, "") or "").strip().lower()
-            for key in ("provider_code", "provider_error_type")
-            if str(getattr(capture, key, "") or "").strip()
-        })
-    return bool(values & CONTEXT_OVERFLOW_CODES)
+def body_error_facts(error: Dict[str, Any], transient: bool) -> Dict[str, Any]:
+    """An HTTP 200 body's error for the loop: a refusal under the status its integer ``error.code`` names.
 
+    Size is recognised on the whole object and before the transient heuristic (``transient``), so a size refusal
+    that says "try again" is no outage; ``message`` stays the bounded log projection of the quoted sentence and
+    ``answer`` the record the loop stamps (``loop_transport.owner_provider_answer``)."""
+    from ouroboros.context_budget import SIZE_REFUSAL_STATUSES
 
-def _is_structured_context_overflow_body(error: Any) -> bool:
-    return bool(_structured_error_values(error) & CONTEXT_OVERFLOW_CODES)
+    answer = provider_answer({"error": error})
+    size = size_refusal(answer, answer.status)
+    transient = transient and not size
+    facts = answer.facts(size[2:] if size else ("", ""), basis=size[0] if size else "",
+                         untyped=not size and not transient and answer.status in SIZE_REFUSAL_STATUSES)
+    from ouroboros.size_refusal import from_answer
+    numbers = from_answer(answer, answer.status)
+    if numbers is not None:
+        facts["size"] = numbers.to_json()
+    sentence = facts.get("sentence", "")
+    return {"code": error.get("code"), "type": error.get("type"), "message": sentence[:300],
+            # A cut sentence says so: the owner's quote must not read this prefix as whole.
+            **({"message_truncated": True} if len(sentence) > 300 else {}),
+            "kind": ("rate_limit" if transient and str(error.get("code")) == "429"
+                     else "provider_transient" if transient else "provider_error"), "answer": facts}
 
 
 def _is_http_status(exc: BaseException, code: int) -> bool:
@@ -460,10 +463,9 @@ def reasoning_strip_retry_allowed(exc: BaseException) -> bool:
     """A 400 may omit replay unless an existing refusal/overflow path owns it."""
     if getattr(exc, "stream_incomplete", False) or isinstance(exc, ProcessingNotStarted):
         return False
-    if _is_structured_context_overflow_exception(exc) or _is_provider_policy_refusal(exc):
+    if is_size_refusal(exc) or _is_provider_policy_refusal(exc):  # the loop's size recovery owns it
         return False
-    # The loop's size recovery owns textual overflow too, including aggregated errors.
-    return not context_overflow_message(str(exc)) and _is_http_status(exc, 400)
+    return _is_http_status(exc, 400)
 
 
 def effort_request_facts(target: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -532,11 +534,16 @@ def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]
         physical.rendered_mode, "", request.max_completion_tokens,
         working_reserve_tokens=request.working_reserve_tokens)[1]
     reserve = max(reserve, request.working_reserve_tokens or 0)
-    if getattr(physical, "required_book_tokens", 0) and physical.rendered_mode == "nano":
-        reserve = max(reserve, int(request.max_completion_tokens or 0))  # the reply the view without the book keeps
+    # API JSON carries a wire maximum. Claudexor also seals JSON, but its
+    # max_completion_tokens is a logical reserve, not an engine payload field.
+    if (request.provider != "claudexor" and request.candidate_measurement_kind == "canonical_json_v1") or (
+            getattr(physical, "required_book_tokens", 0) and physical.rendered_mode == "nano"):
+        reserve = max(reserve, int(request.max_completion_tokens or 0))
     exact = request.prompt_tokens_exact is not None
     size = request.prompt_tokens_exact if exact else math.ceil(
         request.prompt_tokens_bounded_estimate * (physical.measurement_density or 1.0))
+    if not exact and physical.view_kind == "helper":
+        size = max(size, request.prompt_tokens_bounded_estimate)  # same raw floor as the reply policy
     free = window - reserve - size
     if free >= 0:
         return None  # only physical W gates; the owner target never vetoes a send
@@ -606,7 +613,7 @@ def _attempt_request(
         candidate_context_sha256=hashlib.sha256(context).hexdigest(),
         candidate_context_size_bytes=len(context),
         candidate_measurement_kind="canonical_json_v1",
-        physical_context=current_physical_attempt_context(),
+        physical_context=current_physical_attempt_context() or _helper_attempt_context(target, payload),
         route_is_loopback=is_loopback_base_url(target.get("base_url")),
         prompt_tokens_bounded_estimate=bounded_tokens,
         prompt_tokens_exact=measured.get("input_tokens"),
@@ -679,43 +686,32 @@ def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Di
     the field is never created. An exact shortfall is the typed local overflow before
     any send, carrying this candidate's facts; an estimate never refuses.
     """
-    from ouroboros.context_budget import LocalContextTooLargeError, exact_reply_shortfall, reply_allowance_tokens
-    from ouroboros.context_fit import bounded_prompt_tokens_for_payload
+    from ouroboros.context_budget import LocalContextTooLargeError
+    from ouroboros.llm_helper_window import window_reply_candidate
 
     context = current_physical_attempt_context()
+    helper = context is None
     field = next((key for key in ("max_completion_tokens", "max_tokens", "max_output_tokens")
                   if isinstance(payload.get(key), int) and not isinstance(payload.get(key), bool)), None)
     if field is not None:
         from ouroboros.response_limits import response_limit_for_target
         payload = {**payload, field: response_limit_for_target(target).ceiling(payload[field])}
-    if context is None or field is None or context.rendered_mode != "nano":
+    if field is None:
+        return payload
+    context = context or _helper_attempt_context(target, payload)
+    if context is None or context.rendered_mode != "nano":
         return payload
     window, measured = context.capacity_total_tokens, _exact_local_measurement(target, payload)
-    exact = bool(measured)
     if target.get("provider") == "local":
         window = target.get("context_window_tokens") if target.get("context_window_confirmed") else window
-    if exact:
-        raw = input_tokens = int(measured["input_tokens"])
-        window = measured.get("context_window") or window
-    else:
-        from ouroboros.request_wire_recovery import registered_source_payload
-
-        source = registered_source_payload(payload) or payload  # a re-finalized wire form counts as its source
-        raw = bounded_prompt_tokens_for_payload(
-            {key: source[key] for key in ("system", "messages", "tools", "functions") if key in source}, 0)
-        input_tokens = math.ceil(raw * float(getattr(context, "measurement_density", None) or 1.0))
-    frame = dict(caller_max_tokens=int(payload[field]), nano=True, input_tokens=input_tokens, window_tokens=window)
-    # A directly required handbook keeps the reply this candidate without it gets; the admission charges both.
-    book = int(getattr(context, "required_book_tokens", 0) or 0)
-    density = 1.0 if exact else float(getattr(context, "measurement_density", None) or 1.0)
-    candidate = {**payload, field: reply_allowance_tokens(owner_nano=context.profile == "owner_nano", exact=exact,
-                                                          **{**frame, "input_tokens": input_tokens - book},
-                                                          raw_input_tokens=raw - book / density)}
-    if exact and exact_reply_shortfall(**frame):
+    candidate, shortfall, input_tokens, window = window_reply_candidate(
+        payload, field, context, window, measured, helper=helper)
+    if shortfall:
         request = _attempt_request(target, candidate)
         error = LocalContextTooLargeError(
-            f"the local model's window of {int(window)} tokens leaves {int(window) - input_tokens} for the reply "
-            f"after {input_tokens} exact input tokens, below the floor of {min(frame['caller_max_tokens'], 8_192)}")
+            f"the model's window of {int(window)} tokens leaves {int(window) - input_tokens} for the reply "
+            f"after {input_tokens} exact input tokens, "
+            f"below the floor of {min(payload[field], 8_192)}")
         error.refused_candidate = refused_candidate_facts(
             request, input_tokens=input_tokens, context_window_tokens=int(window))
         raise error

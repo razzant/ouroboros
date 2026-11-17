@@ -38,7 +38,7 @@ def _with_coordination_context(ctx: Any, raw: str) -> str:
 # LOAD-BEARING COUPLING: "malformed_response"/"daemon_unreachable" can also be
 # raised post-POST (a run may be live) — they are safe here ONLY because the
 # ClaudexorUnavailable handler in tools/delegate attaches the pending
-# invocation handle to every non-4xx fault, and the custody-handle guard
+# invocation handle to every fault after its POST was entered (a 4xx too), and the custody-handle guard
 # below then forces the wake. Refactors of that error path must keep
 # post-POST refusals carrying a handle.
 _DEFINITE_UNRUN_REASONS = frozenset({
@@ -887,7 +887,7 @@ def append_startup_receipt(
 
     if seen is not None:
         ctx._loop_mailbox_seen_ids = seen
-    stage_pending_wake_exposure(ctx, delivered)
+    stage_pending_wake_exposure(ctx, delivered, mail=False)  # its old wake's mail stays the first drain's
     # The canonical receipt, not its narrowed view, names every id the ACK covers.
     defer_content_ack(ctx, lambda: acknowledge_pending_wake(ctx, startup_wake))
     ctx._configured_startup_wake = ""

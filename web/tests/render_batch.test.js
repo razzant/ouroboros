@@ -174,6 +174,34 @@ test('the empty-Main greeting and the reconnect notice are chrome: a read over t
     assert.equal(controls.beginRecent(), false, 'a painted transcript gets no loading chrome');
 });
 
+test('a migrating store is waiting for ↓, never a failed read, also while its automatic retry is out', () => {
+    const doc = { byId: new Map(), createElement: (tag) => new ElementStub(tag, doc) };
+    const messages = new ElementStub('div', doc);
+    messages.isConnected = true;
+    const controls = createHistoryControls(messages);
+    const migrating = Object.assign(new Error('importing'), { status: 503, body: { reason_code: 'migrating' } });
+    const snapshot = { initialized: true, canOlder: true };
+    const facts = (state = snapshot) => { const { waiting, failed } = controls.render(state); return { waiting, failed }; };
+    controls.endRecent(migrating);
+    assert.equal(controls.recentFailed(), false);
+    assert.deepEqual(facts(), { waiting: true, failed: false });
+    assert.equal(controls.beginRecent(), true);
+    assert.deepEqual(facts(), { waiting: true, failed: false }, 'the read that asks again still waits');
+    controls.endRecent(new Error('offline'));
+    assert.equal(controls.recentFailed(), true);
+    assert.deepEqual(facts(), { waiting: false, failed: true }, 'an ordinary failure is one');
+    controls.endRecent();
+    assert.deepEqual(facts({ ...snapshot, error: migrating, retryDirection: 'latest' }), { waiting: true, failed: false },
+        '↓\'s own read refused by the upgrade waits too');
+    assert.deepEqual(facts({ ...snapshot, error: new Error('offline'), retryDirection: 'latest' }), { waiting: false, failed: true });
+    controls.endRecent(new Error('cut short'), true);  // a partial read's note heads the edge
+    assert.deepEqual(facts({ ...snapshot, error: migrating, retryDirection: 'latest' }), { waiting: true, failed: false },
+        '↓\'s own read refused by the upgrade waits, whichever note heads the edge');
+    controls.endRecent(new Error('offline'));
+    assert.deepEqual(facts({ ...snapshot, error: migrating, retryDirection: 'latest' }), { waiting: false, failed: true },
+        'an earlier refusal never hides the room\'s later ordinary failure');
+});
+
 // ─────────────── sticky hydration / replay contracts ──────────────────────
 
 test('sticky single-flight never swallows the post-completion resync', () => {
@@ -189,8 +217,8 @@ test('sticky single-flight never swallows the post-completion resync', () => {
     assert.match(fn, /run: \(\) => historyPager\.read\(\)/);
     assert.doesNotMatch(fn, /awaitInitialHydration/);
     // The reconnect branch of the open handler reads the newest page whole (frames sent while away are lost),
-    // through the read that folds every reconnect arriving meanwhile into one more.
-    assert.match(chatSource, /\? syncHistory\(\{ fromReconnect: true \}\)/);
+    // through the pager. chat_history_integration.test.js exercises queued reconnects and the actual re-fetch.
+    assert.match(chatSource, /isReconnect \? historyPager\.read\(\{ fromReconnect: true, whole: true,/);
     // Every failed sync resets the sticky promise.
     assert.ok((chatSource.match(/initialHydrationPromise = null;/g) || []).length >= 3);
 });

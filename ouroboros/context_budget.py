@@ -254,7 +254,7 @@ def output_or_body_size_message(text: Any) -> bool:
         return False
     from ouroboros.capability_evidence import _parse_ctx_requested
 
-    (stated_input, stated_reply, _), limit = _parse_ctx_requested(low), _parse_ctx_limit_number(low)
+    (stated_input, stated_reply, _), limit = _parse_ctx_requested(low), _parse_ctx_limit_number(low, server_forms=False)
     return not (limit and 0 < stated_input < limit and stated_reply < limit)
 
 
@@ -270,13 +270,21 @@ _CTX_LIMIT_PATTERNS = tuple(re.compile(pattern, re.I) for pattern in (
 ))
 
 
-def _parse_ctx_limit_number(text: str) -> int:
-    """Extract a stated context-token limit, or 0 when its units are unknown."""
+def _parse_ctx_limit_number(text: str, *, server_forms: bool = True) -> int:
+    """Extract a stated context-token limit, or 0 when its units are unknown.
+
+    The patterns above first, unchanged; then the server forms of ``size_refusal.FORMS`` (llama.cpp, vLLM's decoder,
+    LM Studio), whose window counts only when it is stated in tokens."""
     for pattern in _CTX_LIMIT_PATTERNS:
         match = pattern.search(str(text or ""))
         if match:
             return int(match.group(1).replace(",", ""))
-    return 0
+    if not server_forms:
+        return 0  # keep legacy classification separate from broader fact extraction
+    from ouroboros.size_refusal import form_numbers
+
+    found = form_numbers(text)
+    return found.token_window if found is not None else 0
 
 
 def context_overflow_message(text: Any) -> bool:
@@ -291,7 +299,66 @@ def context_overflow_message(text: Any) -> bool:
     low = str(text or "").lower()
     if output_or_body_size_message(low):
         return False
-    return any(marker in low for marker in CONTEXT_OVERFLOW_MESSAGE_MARKERS) or _parse_ctx_limit_number(low) > 0
+    return any(marker in low for marker in CONTEXT_OVERFLOW_MESSAGE_MARKERS) or _parse_ctx_limit_number(low, server_forms=False) > 0
+
+
+LOCAL_CONTEXT_CODES = frozenset({"exceed_context_size_error"})  # llama.cpp n_ctx / n_prompt_tokens
+SIZE_REFUSAL_STATUSES = frozenset({400, 413, 422})
+_PLAIN_INTEGER = re.compile(r"(?<![\w.,-])\d+(?![\w]|[.,]\d)")
+
+
+def size_refusal(answer: Any, status: Optional[int], typed: Any = (), printed: str = "") -> Optional[Tuple[str, str, str, str]]:
+    """How a refused request's answer (``_usage_response.provider_answer``) says a smaller input cures it:
+    ``(basis, code, speaker, sentence)``, else None.
+
+    The final status sets the family first: only a client refusal (400, 413, 422, or an answer that carries no
+    status) is read for size; any other status is its own family whatever its words say. Inside the family the
+    evidence counts from any layer of the same attempt, earlier upstream attempts included: a typed size code
+    (``typed``, also among the failure's own ``typed`` values); then the frozen list, which is the phrase markers
+    and the unit-guarded parser above, never extended (``frozen``; a failure whose body does not carry the words
+    still speaks through its ``printed`` form, which is never quoted); HTTP 413 alone (``status_413``). The
+    basis says what the answer may teach (``context_window.record_refusal``). A caller that types causes of
+    another kind applies them first.
+    """
+    if status and status not in SIZE_REFUSAL_STATUSES:
+        return None
+    # The added local code must not retype a wrapper's unrelated named refusal.
+    generic = {"400", "badrequesterror", "invalid_request_error", "invalidrequesterror", "error"}
+    local_codes = LOCAL_CONTEXT_CODES if all(code.lower() in CONTEXT_OVERFLOW_CODES | LOCAL_CONTEXT_CODES | generic
+        for code in (*typed, *answer.own_codes())) else frozenset()
+    stated = next(((who, text) for who, text, history in answer.said if not history and context_overflow_message(text)), None)
+    for code in typed:
+        if code.lower() in CONTEXT_OVERFLOW_CODES | local_codes:
+            return "typed", code, *(stated or answer.innermost())
+    for speaker, code, history in answer.codes:
+        if code.lower() in CONTEXT_OVERFLOW_CODES | local_codes:
+            own = [text for who, text, earlier in answer.said if (who, earlier) == (speaker, history)]
+            # Its sentence that states the size, else its last: a gateway's empty wrapper line is not the cause.
+            return "typed", code, speaker, next((text for text in own if context_overflow_message(text)), own[-1] if own else "")
+    for speaker, text, _history in answer.said:
+        if context_overflow_message(text):
+            return "frozen", "", speaker, text
+    if printed and context_overflow_message(printed):
+        return "frozen", "", "", ""
+    return ("status_413", "", *answer.innermost()) if status == 413 else None
+
+
+def cited_declared_limit(said: Any, reply_allowance: int, *declarations: Any) -> Optional[Tuple[int, Any, str, str]]:
+    """``(N, its declaration, speaker, sentence)`` for a plain decimal integer a sentence of the attempt cites that
+    is above the reply allowance the refused request sent and EQUALS a token limit declared for the route.
+
+    Each of ``declarations`` maps a declared limit to what it declares; they are read in order, a callable one
+    only when a cited integer is still unmatched. Equality compares two statements of one party, so it needs no
+    interval and no acceptance history; an output cap refuses only a reply larger than itself, so the allowance
+    keeps it quiet without reading a word. Recognition only: the number states no unit and teaches no window."""
+    cited = [(int(match.group()), speaker, text) for speaker, text, _history in said
+             for match in _PLAIN_INTEGER.finditer(text) if int(match.group()) > reply_allowance]
+    for declared in declarations if cited else ():
+        declared = declared() if callable(declared) else declared
+        for number, speaker, text in cited:
+            if number in declared:
+                return number, declared[number], speaker, text
+    return None
 
 MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate"]
 ReclaimStatus = Literal[

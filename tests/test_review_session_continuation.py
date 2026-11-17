@@ -23,7 +23,7 @@ RESUMABLE = {"cause": "pool_exhausted", "carriers": ["native", "packet"], "reset
 
 def _engine(monkeypatch, *, resumable=True, stops=1, lose_response=False):
     """``lose_response``: the engine accepts the first continuation POST (its run exists) and the reply is lost."""
-    posts, accepted = [], {}
+    posts, accepted, lookups = [], {}, []
 
     def capabilities(self):
         return {"harnesses": [dict(FakeGateway.catalog_entry)], "runControlKeys": ["continueFrom"]}
@@ -49,16 +49,47 @@ def _engine(monkeypatch, *, resumable=True, stops=1, lose_response=False):
         posts.append((dict(request), idempotency_key))
         if "continueFrom" in request:  # one run per idempotency key, like the engine
             self.start_requests.append(dict(request))
-            run_id = accepted.setdefault(idempotency_key, f"run-{len(accepted) + 2}")
+            body, run_id = accepted.setdefault(idempotency_key, (dict(request), f"run-{len(accepted) + 2}"))
+            assert body == request, "the same engine key cannot accept another request"
             if lose_response and sum("continueFrom" in sent for sent, _key in posts) == 1:
                 raise OSError("Continuation accepted, response lost")
             return {"runId": run_id, "storeId": "store-r"}  # the admitting store, as an opted-in receipt names it
         return first_start(self, request, idempotency_key=idempotency_key)
 
+    def lookup(self, request, *, idempotency_key=""):
+        lookups.append((dict(request), idempotency_key))
+        command = accepted.get(idempotency_key)
+        if command is None:
+            return {"status": "not_found", "storeId": "store-r"}
+        body, run_id = command
+        assert request == body, "lookup must read the exact accepted request, not create another"
+        return {"status": "found", "storeId": "store-r", "handle": {
+            "jobId": f"job-{run_id.removeprefix('run-')}", "runId": run_id,
+            "state": "failed" if int(run_id.removeprefix("run-")) <= stops else "succeeded"}}
+
     monkeypatch.setattr(FakeGateway, "agent_capabilities", capabilities)
     monkeypatch.setattr(FakeGateway, "start_run", start)
     monkeypatch.setattr(FakeGateway, "get_run", detail)
+    monkeypatch.setattr(FakeGateway, "operations", lambda _s: [{"method": "POST", "path": "/v2/runs/lookup"}],
+                        raising=False)
+    monkeypatch.setattr(FakeGateway, "lookup_run", lookup, raising=False)
+    monkeypatch.setattr(FakeGateway, "lookup_requests", lookups, raising=False)
     return posts
+
+
+def accept_legacy_successor(monkeypatch, root, token, *, lose_response=False):
+    """The older host actually sent this recorded command before collection; the new host may only read it."""
+    record = custody.invocation_record(root, token)
+    assert record["state"] == "pending" and record["request"] == {"continueFrom": "run-1"}
+    if lose_response:
+        with pytest.raises(OSError, match="Continuation accepted, response lost"):
+            FakeGateway().start_run(record["request"], idempotency_key=token)
+    else:
+        assert FakeGateway().start_run(record["request"], idempotency_key=token)["runId"] == "run-2"
+
+    def forbidden(*_a, **_k):
+        pytest.fail("a legacy collection re-POSTed an accepted or unknown successor")
+    monkeypatch.setattr(FakeGateway, "start_run", forbidden)
 
 
 def _run(tmp_path, state, checkpoints, stamps, *, reconcile=False, **extra):
@@ -130,13 +161,45 @@ def test_a_legacy_successor_recorded_by_an_older_host_is_joined_never_recreated(
                                                                               legacy_state):
     posts = _engine(monkeypatch, stops=1)
     checkpoints, stamps = [], []
-    token = legacy_successor(tmp_path, checkpoints, started=legacy_state == "started")
+    legacy_successor(tmp_path, checkpoints, started=legacy_state == "started")
+    monkeypatch.setattr(FakeGateway, "operations", lambda _s: [{"method": "POST", "path": "/v2/runs/lookup"}],
+                        raising=False)
+    monkeypatch.setattr(FakeGateway, "lookup_run", lambda _s, request, **_k: {
+        "status": "found", "storeId": "store-r", "handle": {
+            "jobId": "job-2", "runId": "run-2", "state": "succeeded"}}, raising=False)
     facts = _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, checkpoints, stamps, reconcile=True)
     assert facts["text"] == "[]" and facts["run_id"] == "run-2"
     replayed = [key for request, key in posts if "continueFrom" in request]
-    assert replayed == ([] if legacy_state == "started" else [token])  # the recorded POST, its own key and bytes
+    assert replayed == []  # accepted work is read, not re-created by collection
     custody._CUSTODY.clear()  # a joined successor binds only the store its own receipt named
     assert custody.replay(tmp_path)["run-2"].daemon_store_id == ("" if legacy_state == "started" else "store-r")
+
+
+@pytest.mark.parametrize("answer", ["engine_410", "lookup_unavailable"])
+def test_a_legacy_successor_whose_read_is_refused_stays_pending_and_the_stop_is_reported(
+        tmp_path, monkeypatch, fake_route, answer):  # noqa: F811
+    """A legacy successor's refused/unavailable read is not proof the original POST created nothing:
+    no creating replay or definite refusal is written; the stopped run's typed failure is reported."""
+
+    posts = _engine(monkeypatch, stops=1)
+    checkpoints = []
+    token = legacy_successor(tmp_path, checkpoints)
+    sent = []
+    monkeypatch.setattr(FakeGateway, "operations", lambda _s: [{"method": "POST", "path": "/v2/runs/lookup"}],
+                        raising=False)
+    def refuse(self, request, *, idempotency_key=""):
+        sent.append(idempotency_key)
+        raise ClaudexorUnavailable("continuation_predecessor_not_retained", "gone",
+                                  status_code=410 if answer == "engine_410" else 0)
+    monkeypatch.setattr(FakeGateway, "lookup_run", refuse, raising=False)
+    with pytest.raises(ClaudexorUnavailable) as stop:
+        _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, checkpoints, [], reconcile=True)
+    assert stop.value.code == "credential_pool_exhausted"  # the stopped run's own typed failure
+    assert sent == [token]  # read the stored body and key once, never POST a creating start
+    assert [row for row in custody.custody_rows(tmp_path)
+            if row.get("type") == custody.START_FAILED and row.get("invocation_id") == token] == []
+    assert custody.invocation_record(tmp_path, token)["state"] == "pending"
+    assert len(posts) == 1  # only the first run's POST ever went through the scripted engine
 
 
 def test_gateway_continuation_uses_existing_start_protocol(monkeypatch):
@@ -187,3 +250,121 @@ def test_a_stopped_thread_turn_is_never_continued_from_its_run(tmp_path, monkeyp
                 operation_id="op-thread", timeout_sec=60, use_thread=True, thread_id="thread-1"))
     assert len(turns) == 1 and "continueFrom" not in turns[0] and not posts
     assert error.value.failure_details["resumable"]["cause"] == "pool_exhausted"
+
+
+@pytest.mark.parametrize("timing", ["early_4xx", "late_202"])
+def test_a_legacy_accepted_successor_is_read_without_reposting_and_accounts_both_runs(
+        tmp_path, monkeypatch, fake_route, timing):  # noqa: F811
+    """An older host POSTed the successor: early 400 left only its request, late 202 bound it.
+    Collection joins that same accepted command and preserves both runs' own failure and money."""
+    from ouroboros import delegate_custody_current as current
+
+    posts = _engine(monkeypatch, stops=2)
+    checkpoints = []
+    token = legacy_successor(tmp_path, checkpoints)
+    legacy_body = {"continueFrom": "run-1"}
+    # The old host really entered its creating POST before this collection; it admitted run-2.
+    if timing == "early_4xx":
+        old_start = FakeGateway.start_run
+        def early(self, request, *, idempotency_key=""):
+            old_start(self, request, idempotency_key=idempotency_key)
+            raise ClaudexorUnavailable("credential_pool_exhausted", "Account limit reached during review",
+                                      status_code=400)
+        monkeypatch.setattr(FakeGateway, "start_run", early)
+        with pytest.raises(ClaudexorUnavailable):
+            FakeGateway().start_run(legacy_body, idempotency_key=token)
+    else:
+        FakeGateway().start_run(legacy_body, idempotency_key=token)
+        record_legacy_successor(tmp_path, checkpoints[0], started=True)
+    reads = []
+    monkeypatch.setattr(FakeGateway, "operations", lambda _s: [{"method": "POST", "path": "/v2/runs/lookup"}],
+                        raising=False)
+
+    def lookup(_self, request, *, idempotency_key=""):
+        reads.append((request, idempotency_key))
+        return {"status": "found", "storeId": "store-r", "handle": {
+            "jobId": "run-2", "runId": None, "state": "failed",
+            "problem": {"code": "credential_pool_exhausted", "status": 400}}}
+    monkeypatch.setattr(FakeGateway, "lookup_run", lookup, raising=False)
+    # It has already been accepted; a creating replay is itself the regression.
+    def forbidden(*_a, **_k):
+        pytest.fail("a legacy collection re-POSTed an accepted or unknown successor")
+    monkeypatch.setattr(FakeGateway, "start_run", forbidden)
+    for _ in range(2):
+        with pytest.raises(ClaudexorUnavailable) as failure:
+            _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, checkpoints, [], reconcile=True)
+        assert failure.value.code == "credential_pool_exhausted"
+        assert failure.value.failure_details["resumable"] == RESUMABLE
+        assert failure.value.review_partial_output == "PARTIAL REVIEW NOTES"
+    assert reads == ([({"continueFrom": "run-1"}, token)] if timing == "early_4xx" else [])
+    held = current.run(tmp_path, "run-2")
+    assert held.task_id == "t-review" and held.continuation_of == "run-1"
+    assert held.route_id == "fake-review" and held.model == "fake-small"
+    assert held.access == "readonly" and held.mode == "ask"
+    assert custody.invocation_record(tmp_path, token)["run_id"] == "run-2"
+    rows = list(custody.custody_rows(tmp_path))
+    assert {r["run_id"] for r in rows if r["type"] == custody.LEDGER_RECORDED} == {"run-1", "run-2"}
+    assert len([r for r in rows if r["type"] == custody.LEDGER_RECORDED]) == 2
+    assert len([r for r in rows if r["type"] == custody.STARTED and r.get("invocation_id") == token]) == 1
+    assert len(posts) == 2  # original run and the old host's one successor POST, never a third
+
+
+@pytest.mark.parametrize("miss", ["not_found", "unsupported", "refused", "unreadable", "store_mismatch"])
+def test_a_legacy_pending_successor_lookup_miss_never_creates(tmp_path, monkeypatch, fake_route, miss):  # noqa: F811
+    posts = _engine(monkeypatch)
+    checkpoints = []
+    token = legacy_successor(tmp_path, checkpoints)
+    reads = []
+    monkeypatch.setattr(FakeGateway, "operations", lambda _s: [] if miss == "unsupported" else [
+        {"method": "POST", "path": "/v2/runs/lookup"}], raising=False)
+    monkeypatch.setattr(FakeGateway, "engine_ref", {"store": "store-r"}, raising=False)
+
+    def lookup(_self, request, *, idempotency_key=""):
+        reads.append((request, idempotency_key))
+        if miss in {"refused", "unreadable"}:
+            raise ClaudexorUnavailable("idempotency_conflict" if miss == "refused" else "daemon_timeout",
+                                      "lookup failed", status_code=409 if miss == "refused" else 0)
+        return {"status": "not_found", "storeId": "other" if miss == "store_mismatch" else "store-r"}
+    monkeypatch.setattr(FakeGateway, "lookup_run", lookup, raising=False)
+    for _ in range(2):
+        with pytest.raises(ClaudexorUnavailable) as failure:
+            _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, checkpoints, [], reconcile=True)
+        assert failure.value.code == "credential_pool_exhausted"
+        assert failure.value.failure_details["resumable"] == RESUMABLE
+    assert len(reads) == (0 if miss == "unsupported" else 2)
+    assert len(posts) == 1 and custody.invocation_record(tmp_path, token)["state"] == "pending"
+    assert not any(row.get("invocation_id") == token and row["type"] in {custody.STARTED, custody.START_FAILED}
+                   for row in custody.custody_rows(tmp_path))
+
+
+@pytest.mark.parametrize("field", ["task_id", "surface", "slot_id", "operation_id"])
+def test_legacy_successor_requires_its_exact_original_seat_before_any_read(tmp_path, monkeypatch, fake_route, field):  # noqa: F811
+    from ouroboros.review_execution import ReviewRouteUnavailable
+
+    posts = _engine(monkeypatch)
+    checkpoints = []
+    token = legacy_successor(tmp_path, checkpoints)
+    original = custody.invocation_record
+    def foreign(root, key):
+        record = original(root, key)
+        return {**record, field: "another-seat"} if key == token else record
+    monkeypatch.setattr(custody, "invocation_record", foreign)
+    monkeypatch.setattr(FakeGateway, "operations", lambda _s: pytest.fail("foreign seat was read"), raising=False)
+    with pytest.raises(ReviewRouteUnavailable) as failure:
+        _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, checkpoints, [], reconcile=True)
+    assert failure.value.code == "review_recovery_request_mismatch" and len(posts) == 1
+
+
+def test_legacy_successor_does_not_bind_a_run_already_seen(tmp_path, monkeypatch, fake_route):  # noqa: F811
+    posts = _engine(monkeypatch)
+    checkpoints = []
+    token = legacy_successor(tmp_path, checkpoints)
+    monkeypatch.setattr(FakeGateway, "operations", lambda _s: [{"method": "POST", "path": "/v2/runs/lookup"}],
+                        raising=False)
+    monkeypatch.setattr(FakeGateway, "lookup_run", lambda *_a, **_k: {
+        "status": "found", "storeId": "store-r", "handle": {
+            "jobId": "job-1", "runId": "run-1", "state": "failed"}}, raising=False)
+    with pytest.raises(ClaudexorUnavailable) as failure:
+        _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, checkpoints, [], reconcile=True)
+    assert failure.value.code == "credential_pool_exhausted" and len(posts) == 1
+    assert custody.invocation_record(tmp_path, token)["state"] == "pending"

@@ -12,6 +12,7 @@ import re
 import shutil
 import socket
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -305,10 +306,17 @@ def test_the_real_sdk_reports_accepted_refused_and_unreachable_without_stopping_
         receiver.server.shutdown()
         receiver.server.server_close()
         logger.error("synthetic failure with the receiver gone")
-        sentry_sdk.flush(timeout=5)
+        # Until the transport gives up (flush returns as soon as it has): urllib3 tries four connects, and Windows
+        # refuses each one to a closed loopback port only after its SYN retries, about two seconds.
+        sentry_sdk.flush(timeout=30)
         gone = status(None)
     finally:
         logger.removeHandler(handler)
+        # Closing still sends the SDK's report of the lost event to the receiver that is gone, so on Windows its worker
+        # outlives the extension's one-second close at unload; close it here and wait for that thread to end.
+        sentry_sdk.get_client().close(timeout=30)
+        for worker in [thread for thread in threading.enumerate() if thread.name == "sentry-sdk.BackgroundWorker"]:
+            worker.join(timeout=30)
     [row] = gone["processes"]
     assert (row["queued"], row["accepted"], row["refused"], row["unreachable"]) == (3, 1, 1, 1), row
     assert row["last"].startswith("unreachable (no HTTP answer)") and "Last outcome not accepted" in gone["problem"]

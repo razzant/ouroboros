@@ -118,7 +118,7 @@ def test_install_finish_retire_both_ways_then_an_explicit_reinstall_from_the_sur
         scratches[task_id] = _scratch(world, task_id, access)
         assert (_seed_installed(scratches[task_id]) / "__init__.py").is_file()
         assert _imports(scratches[task_id]) == "installed"
-    legacy = scratches["auto"].parent / "ob-review-legacy-venv"  # made before the declaration: no record names it
+    legacy = scratches["auto"].parent.parent / "ob-review-legacy-venv"  # made before the declaration: no record names it
     legacy.mkdir()
     (legacy / "pyvenv.cfg").write_text("home = /legacy\n", encoding="utf-8")
 
@@ -163,7 +163,7 @@ def test_a_scratch_its_producer_retained_is_never_destroyed(world):
     report = task_custody.remove_custody_trash(data)
     assert (report["removed"], report["stuck"]) == (1, {})
     assert [(hold["class"], hold["count"], hold["example"]) for hold in report["holds"]] == [
-        ("producer_retained", 1, f"{scratch}: {reason}")]
+        ("producer_retained", 1, f"{scratch.parent}: {reason}")]
     assert task_custody.remove_custody_trash(data)["holds"] == report["holds"]  # the hold stands, unchanged
     assert (scratch / "only-here.txt").read_text(encoding="utf-8") == "unique input\n"
     assert retire_synthetic_retention(scratch, reason)

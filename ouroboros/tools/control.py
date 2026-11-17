@@ -452,7 +452,8 @@ def get_tools() -> List[ToolEntry]:
                            "earlier fold too) into one text you accept, placed where the oldest was. Originals are journaled first, unnamed blocks stay, a stale or "
                            "ambiguous selection changes nothing; nothing leaves by count, size or age. Write what you carry now, in any form: intentions, concerns, "
                            "questions, debts, waits, decisions that coordinate work, and why you would return; several can stand side by side. Another work's status "
-                           "stands in its own facts: repeat it only where it changes what you intend. Persists across sessions, read whole at every task start. Project "
+                           "stands in its own facts: repeat it only where it changes what you intend. Persists across sessions; integrating foci read it whole when "
+                           "their context is built, delegated children do not; a write does not reach a work already running. Project "
                            "rooms included: one working memory in every room.",
             "parameters": {"type": "object", "properties": {
                 "content": {"type": "string", "description": "The new block, or the accepted text of a fold"},

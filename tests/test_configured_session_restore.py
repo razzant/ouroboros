@@ -264,8 +264,9 @@ def test_shown_interactions_save_before_ack_and_survive_cold_restore(
     limit = SimpleNamespace(tools=registry, messages=messages, llm_trace=trace, accumulated_usage=usage,
                             owner_msg_seen=seen, round_idx=8, tool_schemas=[], budget_tail="tool")
     assert ctx._sleep_interaction_seen == {run_id: ["q1"]}
-    assert "wake-mail" in seen
-    assert not drain_owner_entries(tmp_path, task_id, seen, 2), "live transcript already contains this mail"
+    # A tool wake's shown mail is seen; a startup receipt shows its old wake's mail but leaves it to the first drain.
+    assert ("wake-mail" in seen) is (delivery == "tool")
+    assert bool(drain_owner_entries(tmp_path, task_id, set(seen), 2)) is (delivery == "startup")
     assert ds._load_state(ctx, "")["pending_wake"]
     assert drain_owner_entries(tmp_path, task_id, set(), 2)
     if save_fails:

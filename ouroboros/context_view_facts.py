@@ -140,7 +140,7 @@ def remember_size_refusal(ctx, refused, *, measured):
     was sized against. ``refused``: the round's comparison candidate, a capture or a pre-send refusal's facts;
     ``measured``: the round measured that request, so its ``_context_`` facts describe it. Nothing is taken from another
     attempt: what this refusal does not tell stays unknown. It lives through the round's failed fallback walk, which
-    restores none of it (``loop_model_call._route_fit_key``), and through its unsent candidates, which refuse nothing;
+    restores none of it (``context_anchor._route_fit_key``), and through its unsent candidates, which refuse nothing;
     an answer clears it and the next round reads none of it. This round's own attempt keeps the required book inside
     that very request (``book``, as its own measurement counted it); only the host's known-window prediction before
     sending also keeps the window its admission judged (``capacity``), the one decomposition ``required_book_fact``
@@ -148,7 +148,7 @@ def remember_size_refusal(ctx, refused, *, measured):
     of the book's estimate."""
     import math
 
-    from ouroboros.capability_evidence import _parse_ctx_requested
+    from ouroboros.size_refusal import for_usage
     from ouroboros.context_anchor import _anchor_model_key
 
     usage, plan = ctx.accumulated_usage, getattr(ctx, "context_fit_plan", None)
@@ -156,7 +156,8 @@ def remember_size_refusal(ctx, refused, *, measured):
     own = physical is not None and physical.round_id == f"{usage.get('execution_id') or ''}:round:{ctx.round_idx}"
     measured = bool(measured) and (not own or usage.get("_context_route_fp", "") == physical.route_fp)
     route = physical.route_fp if own else str(usage.get("_context_route_fp") or "") if measured else ""
-    stated_input, _reply, stated_total = _parse_ctx_requested(str(usage.get("_last_llm_provider_message") or ""))
+    refusal = for_usage(usage)
+    stated_input, stated_total = (refusal.requested, refusal.requested_total) if refusal.units == "tokens" else (0, 0)
     sent = int(getattr(refused, "prompt_tokens_bounded_estimate", 0) or 0) if own else 0
     if getattr(refused, "predicted_free_tokens", None) is not None:  # a size it does not state stays unknown
         kind, tokens, basis = "input", int(getattr(refused, "estimated_input_tokens", 0) or 0), "known_window_prediction"
@@ -243,10 +244,11 @@ def request_window_fact(usage, *, overflow=False, round_idx=None, earlier_only=F
 def _failure_request_text(usage, walked):
     """The last failure's own stated request and the window its round assumed. After a configured route's failed walk
     the restored window and estimate are another attempt's: only the failure's own statement stays, if it made one."""
-    from ouroboros.capability_evidence import _parse_ctx_requested
+    from ouroboros.size_refusal import for_usage
     from ouroboros.context_window import WindowRecord
 
-    input_tokens, _reply, total = _parse_ctx_requested(usage.get("_last_llm_provider_message", ""))
+    refusal = for_usage(usage)
+    input_tokens, total = (refusal.requested, refusal.requested_total) if refusal.units == "tokens" else (0, 0)
     stated = f"request {'input' if input_tokens else 'total'} {input_tokens or total:,} tokens (provider stated)"
     if walked:
         model = (usage.get("_last_llm_failure") or {}).get("model")
@@ -292,7 +294,8 @@ def window_projection(record, *, under_way: bool = False):
     observed = limit.observed_at if limit else ""
     source = limit.source if limit else "unknown"
     labels = {"user_setting": "set in Settings", "owner_ack": "owner confirmation",
-              "provider_metadata": "server metadata", "local_health": "local serving window"}
+              "provider_metadata": "server metadata", "local_health": "local serving window",
+              "server_metadata": "the server's own window"}
     label = labels.get(source, source)
     dated = f"{label} {observed.replace('T', ' ')[:16]}".strip()
     if source == "refusal":
@@ -308,7 +311,11 @@ def window_projection(record, *, under_way: bool = False):
             text += f"; accepted input ≥ {record.accepted:,} ({record.accepted_at.replace('T', ' ')[:16]})"
     text += f"; reply reserve {record.reserve:,}"
     contradiction = asdict(record.contradicted_by) if record.contradicted_by else None
-    if contradiction:
+    if contradiction and record.limiting == record.contradicted_by:
+        for stated in record.declared:
+            if stated.source in {"user_setting", "owner_ack"} and stated.tokens > record.limiting.tokens:
+                text += f"; {labels[stated.source]} {stated.tokens:,} capped by the serving window"
+    elif contradiction:
         label = labels.get(contradiction["source"], contradiction["source"])
         text += (f"; {label} says {contradiction['tokens']:,} {contradiction['kind']}"
                  f" ({contradiction['observed_at'].replace('T', ' ')[:16]})")

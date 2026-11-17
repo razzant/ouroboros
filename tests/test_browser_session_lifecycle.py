@@ -152,6 +152,22 @@ def test_the_bridge_refuses_its_own_loop_and_a_dead_loop_at_once():
         owner.run(asyncio.sleep(0))
     assert time.monotonic() - started < 1.0
     assert owner.close() is False  # nothing confirms what a dead loop held
+    # The system hands an ended thread's identifier to a later thread (#3522: a close started after the loop was
+    # joined): that caller is not the loop, so it hears the session closed and the first close's outcome.
+    heard = {}
+
+    def recycled():
+        owner._thread._ident = threading.get_ident()  # the ended loop's number, as the system recycles it
+        for name, call in (("run", lambda: owner.run(asyncio.sleep(0))), ("close", owner.close)):
+            try:
+                heard[name] = call()
+            except BaseException as exc:  # noqa: BLE001 - the outcome is the subject
+                heard[name] = exc
+
+    caller = threading.Thread(target=recycled)
+    caller.start()
+    caller.join(10)
+    assert isinstance(heard["run"], browser_session.BrowserSessionClosed) and heard["close"] is False, heard
 
 
 def test_closing_settles_a_hung_command_and_a_concurrent_close_reports_the_first():

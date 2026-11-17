@@ -570,8 +570,9 @@ scrolling and dragging.
 pill's corners tightening; the name and divider yield first), last scrolling inside
 itself, faded where levels hide. A closed line too narrow drops the names, then
 ellipsizes the longest values; before that cut reaches Model's value, Subagents, Context and Effort
-fold to their glyphs, which still say their values, and
-only then is Model's value cut. All is measured, so no breakpoint (`web/modules/capsule_fit.js`).
+fold to their glyphs, which still say their values; folded under a coarse pointer they stand at their 44 px reach
+apart, and if that line still wraps they take the ordinary gap, where neighbouring reaches may meet by at most 6 px,
+before Model's value is cut (owner 10.11; council 16.11). All is measured, so no breakpoint (`web/modules/capsule_fit.js`).
 
 **It opens in place.** Beside the others the strip grows by its width. Alone, its
 glass grows from the closed capsule to the whole line in 300 ms on the iOS sheet
@@ -1466,50 +1467,57 @@ newer messages unread; it reads what it missed as on reconnect. Explicit navigat
 message, a search match or a row of the room's work status. Its landing reads the bounded page around the target as the room's
 history: `Load more history` continues older from it and `Scroll to latest message` returns to the present.
 
-A room's history is its own. A page is counted in the room's messages, never in
-bytes of other rooms' traffic: the newest page holds the room's newest messages,
-and `Load more history` reads the next older messages of the same room, only
-ever older ones (owner decisions 2026-09-14 and 2026-10-05). It shows only while
-older history exists, and one press keeps reading until messages land or the
-room's beginning is reached, so no press is empty. A positive scroll gesture at
-the reading edge loads the same way. Messages arriving while the reader is in
-older history never move where the next press goes on: it reads above what is
-being read, and anything a long absence left unloaded below is read by the
-return to the present. Narration (task progress) keeps loading
-alongside the conversation, but only the conversation keeps the control: once the
-room's beginning is reached it leaves, even if older narration of the oldest
-cards remains unread. A page around work that only narrated pages that narration.
-The floating `Scroll to latest message` is the one return to the present; when
-the present is already loaded it moves there and follows without a read.
+A room's pages count its messages, never other rooms' bytes; the newest holds
+its newest messages. `Load more history` reads only that room's older messages
+(owner 2026-09-14 and 2026-10-05), appearing only while any remain. One press or
+positive scroll gesture at the reading edge reads until messages land or the
+room begins. Arrivals cannot shift this older cursor; return reads gaps below.
+Narration loads alongside conversation; its unread past cannot keep the control
+once conversation reaches its beginning. A page around
+narration-only work pages its narration.
+The floating `Scroll to latest message` (↓) alone returns to the present: it
+immediately reaches retained messages' end while fetching fresh history, even
+after absence, disconnect or failure. Older loading yields; fresh loading shares
+a current read. A confirmed present follows without reading.
+Return and arrival reads, automatic too, keep ↓ visible and pulsing like the
+history loader. Waiting is no error; empty rooms respond
+immediately and land on arrival.
+Only a successful, complete covering read begun since the last disconnect
+confirms freshness. Retained rows, including a follower's restored place, earn
+no fresh read credit. Arrival navigation reaches the covered
+newest-arrived message wherever it lies. After a target jump or revisit,
+↓ restores the present paging chain even on a partial latest read, keeping useful
+partial history accessible.
 
-A failed history read offers Retry; a failed read of the present by ↓ leaves the
-view in place with the same Retry. A failed full-output read keeps the line's
-capped preview and offers no Retry of its own; collapsing and expanding the line
-asks again. Reading on, even inside a bounded box, supersedes a ↓ or question
-still loading. A wheel, swipe or key over a bounded box moves that box, not the
-conversation, until the box reaches its edge. A scrollbar drag follows new
-replies only when released at the live edge; a wheel, swipe or key reading down
-follows once its scrolling ends there. Expanding a line or receiving its full
-output leaves it in place; only a newer line moves a card timeline to its end.
-New replies remain below in the same live conversation without moving the passage.
+Failed history reads offer Retry at the in-feed edge. Partial pages show gaps;
+Retry never blocks their rows, older history or navigation.
+After an unconfirmed attempt, ↓ stays visible at the retained end as Retry; a bare
+disconnect is not a failed read. This Retry starts a cancellable return;
+Refresh and other reads' Retry preserve place. New reading gestures,
+even in bounded boxes, or navigation supersede pending ↓ or questions.
+Failed full-output reads keep capped previews; collapse and expand to retry,
+with no Retry control.
+Wheels, swipes and keys scroll bounded boxes until their edge. Scrollbar drags
+follow new replies only on release at the live edge; wheel, swipe or key
+scrolling follows when it ends there. Expansion or full output preserves place;
+only a newer line moves a card timeline to its end. New replies stay below
+without moving the passage.
 
-When loaded fragments are disconnected or their coverage is uncertain (reading
-far back releases the newest pages from memory while replies keep arriving), the
-room says `Some saved history is not loaded. Shown messages may have gaps.` where the gap lies: at the
-in-feed `Load more history` edge that heads the loaded window, including beside a read failure or approximate position (owner 21.10).
-The room raises no notice of its own over its newest rows (U021). A failed read stays in header chrome.
-Bytes written after a read found a source empty count as missing until a later
-read delivers them from its start. Mixed task cards keep one node and use this
-general note: dates, common row IDs and an exhausted cursor cannot establish a
-separator or full coverage. `Beginning of saved history` requires the room's
-conversation to be delivered completely. Retained origins say `Saved project
-context`; a matching canonical source row adopts that node and removes the label.
-The context itself certifies no archive coverage. When a room is shown again
-and the reader's exact place is gone, the view falls back to its card, then the
-previous clamped position, and the same persistent note explains the
-approximation until explicit navigation clears it. Visible rows and card lines,
-selection, focus and expanded Reviews keep their actual nodes during
-reconciliation.
+Reading far back releases newest pages, bounding retention as replies arrive.
+Disconnected fragments or uncertain coverage show
+`Some saved history is not loaded. Shown messages may have gaps.` at the
+in-feed `Load more history` edge heading the window, beside any failure or
+approximation (owner 21.10), never over newest rows (U021).
+Bytes added after an empty-source read remain missing until read from its
+start. Mixed cards keep one node and this note; dates, shared row IDs and exhausted
+cursors prove neither a separator nor full coverage.
+`Beginning of saved history` requires complete conversation delivery.
+Retained origins say `Saved project context` until a matching canonical row
+adopts the node and removes the label; context proves no archive coverage.
+On return, a lost place falls back to its card, then the clamped prior position,
+with this note until explicit navigation clears it.
+Reconciliation keeps visible rows, card lines, selection, focus and expanded
+Reviews in their actual nodes.
 
 ### Room work status
 
@@ -2231,7 +2239,7 @@ name's line cannot hold (a long model name, a long circle name) goes under the n
 wraps there; a row's facts wrap the same way, and nothing is ever wider than the head or the row.
 
 A row: mark, the place's own name, service, state word (on a place not Paused, the muted dot with
-“· consciousness off” while Off leaves it only hearing or with “· no wake kinds checked”), readiness only when
+“· consciousness off” while Off leaves it only hearing, or that no kind is checked), readiness only when
 not simply on, the last captured event (“no captured event”, never “no activity”), its model only when the place
 overrides, and the optional description, ellipsized: its own field, empty until written, never a note's
 first line; purpose, not a rule.
@@ -2288,19 +2296,19 @@ Sheet/reader use status labels over manifest labels; otherwise core words stay. 
 declared labels/settings.
 Bot messages both wake and permit hearing bots. Other events are own-wake observations;
 the mind decides what to read, so the sheet must not promise exhaustive reading.
-While Off the host's `only_hears` replaces what would claim a wake: Active's note and the conversation's state
-card (Silent alike) say it only hears here, the wake note (Active or Silent) that nothing here wakes it, with the
-door `Consciousness ›` (Dashboard › Consciousness, where Start is; no second Start). With no kind checked the
-wake note and state card say so; an ongoing conversation can still wake it. Paused keeps its words.
+While Off the host's `only_hears` replaces what would claim a wake: the state note and the conversation's state
+card say it only hears here, the wake note that nothing here wakes it, with the door `Consciousness ›` (Dashboard ›
+Consciousness, where Start is; no second Start). With no kind checked Active's note claims no wake; the wake note
+and state card say an ongoing conversation can still wake it (owner 16.11: the full repair). Paused keeps its words.
 Conflicts: “Changed elsewhere; your text is kept”. Resave uses fresh facts.
 
 Reader out rows say “as {label}”/“as you”. Heard chips accompany reasons with
 sheet labels or fact words; hide `any_message`. Whole held replies follow System,
-authored and labelled “held, unchecked”. A reaction (`place_history.reaction`) or wordless fact
-(`non_text`) adds one meta line, a translated prefix (“Reaction: …”) before the authored words, and
-no bubble of its own: reactions are context only and wake nothing. Words a receipt sent beside it
-stay its speech; failed and uncertain receipts and the late notice while Silent keep their System
-rows. An author not recorded is said so; other missing fields add nothing.
+authored and labelled “held, unchecked”. A reaction or wordless fact (`place_history.reaction`, `non_text`)
+adds one meta line, a translated prefix (“Reaction: …”) before its authored words, no bubble:
+reactions are context only and wake nothing. Words a receipt sent beside it stay its speech; failed and uncertain
+receipts and the late notice while Silent keep their System rows. An unrecorded author is said so; other missing
+fields add nothing.
 
 ### Voice controls
 
@@ -2515,7 +2523,7 @@ One positive task-local tool-call count joins that line and remains after Done
 (owner 22.10, A). Subagents are not aggregated. Rounds (usable solve responses)
 and known zero calls stay in Details, making no work or footer row; missing
 counts stay absent. Session nanny counts appear only in `Supervision` (footer and
-Details), apart from unreported executor counts. Portals keep one count. Model provenance, origin and a finished card's update time stay in Details; work a place started adds one meta line under a root's or Main portal's name: the place unless the name is it, what called it and who. A root's Details add `Spent on` and `Ran on`, its read-time cost breakdown by purpose and by the route that
+Details), apart from unreported executor counts. Portals keep one count. Model provenance, origin and a finished card's update time stay in Details; work a place started adds one meta line under a root's or Main portal's name: the place unless the name is it, what called it in its connector's declared words, and who (owner 16.11, 1). A root's Details add `Spent on` and `Ran on`, its read-time cost breakdown by purpose and by the route that
 served the rows: each line in the card's money words beside the model calls, sessions and tokens the ledger
 recorded, a part it did not record absent; the main line keeps its one amount (owner 02.09). Money
 there is ONE line whose wording carries its openness and never renders an
@@ -3560,7 +3568,8 @@ element (the Reviews door's), so a control's `::after` stays the recipe's; a row
 that wraps on a phone (a question's recovery, an account's actions) and a strip of
 chips that scrolls gives its controls the minimum as their own height, so no
 reach covers a neighbour or is clipped (audit №4, owner 2026-10-28T22:09Z); so do a
-disclosure's summary and a field. In a capsule's open levels on a narrow phone a value
+disclosure's summary and a field. One exception, the folded composer row's last step before Model is cut ("Composer
+owner controls"). In a capsule's open levels on a narrow phone a value
 keeps only its drawn height. Nothing that acts is hidden until hover
 there (a Project row's menu is reached by its long press).
 No page scrolls sideways at any width; only code, tables and a bar's

@@ -68,7 +68,7 @@ class TestRegistry:
     def test_direct_defaults_registered(self):
         assert DIRECT_PROVIDER_DEFAULTS["deepseek"] is DEEPSEEK_DIRECT_DEFAULTS
         assert DEEPSEEK_DIRECT_DEFAULTS["main"] == "deepseek::deepseek-v4-pro"
-        assert DEEPSEEK_DIRECT_DEFAULTS["light"] == "deepseek::deepseek-v4-flash"
+        assert DEEPSEEK_DIRECT_DEFAULTS["light"] == DEEPSEEK_DIRECT_DEFAULTS["fallback"] == "deepseek::deepseek-flash"
         assert DEEPSEEK_DIRECT_DEFAULTS["deep_self_review"] == "deepseek::deepseek-v4-pro"
         assert DIRECT_PROVIDER_REVIEW_ROLES["deepseek"] == ("main",)
 

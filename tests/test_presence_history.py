@@ -544,14 +544,22 @@ def _delivered(pages):
 
 
 def _metered(monkeypatch, read):
-    """Statements and SQLite VM instructions of one read (``tests/test_dialogue_store.py`` counts the same)."""
+    """Statements, SQLite VM instructions and rows handed to Python of one read (``tests/test_dialogue_store.py``
+    counts the first two the same way). A row handed over is a step that leaves SQLite and waits for the
+    interpreter lock again: on a busy server each costs up to a switch interval."""
     from ouroboros import store
-    counts, real = {"statements": 0, "steps": 0}, store.connect
+    counts, real = {"statements": 0, "steps": 0, "rows": 0}, store.connect
 
     def connect(*args, **kwargs):
         conn = real(*args, **kwargs)
         conn.set_trace_callback(lambda _statement: counts.__setitem__("statements", counts["statements"] + 1))
         conn.set_progress_handler(lambda: counts.__setitem__("steps", counts["steps"] + 1) or 0, 1)
+        factory = conn.row_factory
+
+        def counted(cursor, row):
+            counts["rows"] += 1
+            return factory(cursor, row) if factory is not None else row
+        conn.row_factory = counted
         return conn
     store.close_connections()
     with monkeypatch.context() as patch:
@@ -950,14 +958,17 @@ def test_main_keeps_its_own_newest_page_after_a_bulk_import_into_a_place_room(tm
     a place arrival, so its conversation probes leave rooms holding them out: 11,000 imported rows stored after
     Main's own leave Main's newest page whole, at the cost a 2,000-row import leaves. What Main shows from
     elsewhere stays: a chat-less legacy row, another non-Project room's row, a private Main contact and a focus's
-    narration stored under the place room."""
+    narration stored under the place room. Finding those rooms (one statement after the index check) and listing
+    the store's rooms (one row) cost the same whatever the places and rooms: forty more captured rooms in five
+    more places add no statement and no row handed to Python, where a statement per place and a row per room each
+    waited for the interpreter lock on the owner's busy server (#3399)."""
     import math
 
     from ouroboros.gateway import history
     from ouroboros.place_arrivals import _dialogue_indexes
     measured = {}
-    for size in (2_000, 11_000):
-        root = tmp_path / f"main{size}" / "data"
+    for size, places in ((2_000, 0), (11_000, 0), (2_000, 5)):
+        root = tmp_path / f"main{size}-{places}" / "data"
         main = [{"ts": f"2026-10-25T09:{n:02d}:00+00:00", "direction": "in", "chat_id": 1, "text": f"main {n}",
                  "client_message_id": f"owner-{n}"} for n in range(30)]
         elsewhere = [{"ts": "2026-10-25T08:00:00+00:00", "direction": "in", "text": "legacy without a room"},
@@ -971,6 +982,10 @@ def test_main_keeps_its_own_newest_page_after_a_bulk_import_into_a_place_room(tm
                      "task_id": f"turn-{n}", "place_id": "place", "sender_session_id": "person", "historical_import": {
                          "version": 1, "authorship": "participant", "received_at": "2026-10-26T09:00:00+00:00"}}
                     for n in reversed(range(size))]
+        imported += [{"ts": (OLD + timedelta(minutes=n)).isoformat(), "direction": "in", "chat_id": BULK_CHAT + 1 + place * 8 + n,
+                      "type": "place_arrival", "text": f"old elsewhere {place}-{n}", "source": "presence:chat",
+                      "client_message_id": f"elsewhere-{place}-{n}", "task_id": f"turn-{place}-{n}", "place_id": f"place-{place}",
+                      "sender_session_id": "person"} for place in range(places) for n in range(8)]
         (root / "logs").mkdir(parents=True)
         (root / "logs" / "chat.jsonl").write_text("".join(json.dumps(row) + "\n" for row in elsewhere + main + imported))
         ds.ensure(root)
@@ -987,14 +1002,17 @@ def test_main_keeps_its_own_newest_page_after_a_bulk_import_into_a_place_room(tm
         assert {"legacy without a room", "another room's row", "a private word for the owner",
                 "focus narration under the place room"} <= set(shown), shown
         assert not any(text.startswith("old ") for text in shown) and page["has_more"] is False
-        measured[size] = cost
+        measured[size, places] = cost
     allowance = 128 * math.ceil(math.log2(11_000 / 2_000))
-    assert measured[11_000]["statements"] == measured[2_000]["statements"], measured
-    assert measured[11_000]["steps"] <= measured[2_000]["steps"] + allowance, measured
+    assert measured[11_000, 0]["statements"] == measured[2_000, 0]["statements"], measured
+    assert measured[11_000, 0]["steps"] <= measured[2_000, 0]["steps"] + allowance, measured
+    assert measured[2_000, 5]["statements"] == measured[2_000, 0]["statements"], measured
+    assert measured[2_000, 5]["rows"] == measured[2_000, 0]["rows"], measured
     if target := os.environ.get("OUROBOROS_TEST_EVIDENCE_ROOT"):
         Path(target).mkdir(parents=True, exist_ok=True)
         (Path(target) / "main-read-after-place-import.json").write_text(json.dumps(
-            {"synthetic": True, "allowance_steps": allowance, "measured": measured}, indent=2))
+            {"synthetic": True, "allowance_steps": allowance,
+             "measured": {f"{size}-{places}": cost for (size, places), cost in measured.items()}}, indent=2))
 
 
 def test_recall_reads_from_the_latest_message_by_time_after_an_import(room):

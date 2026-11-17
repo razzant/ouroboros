@@ -1138,3 +1138,55 @@ def test_the_translator_leaves_a_place_an_account_and_an_id_as_written_and_trans
         assert page.evaluate(facts) == markup
         _shoot_card(page, f"origin-{engine}-1100-light-words.png", "words")
         assert not writes, writes
+
+
+# A connector's own kind, as its declaration words it (`place_origin.labels`, frozen with the focus).
+DECLARED = _origin(wakes=["signal.new_discussion"], labels={"signal.new_discussion": "New discussion"})
+DECLARED_FRENCH = {"language": "fr", "english": False, "entries": {
+    "code:task.fact.called_by": {"text": "Ce qui l’a appelé"}, "New discussion": {"text": "Nouvelle discussion"}}}
+
+
+@pytest.mark.parametrize("engine,width,height,theme", [("chromium", 1100, 750, "light"), ("webkit", 390, 844, "dark")])
+def test_a_kind_its_connector_declared_reads_in_its_words_on_the_card_and_in_details_after_a_reload(engine, width, height, theme):
+    """Work a connector's own kind called says that kind in the words its declaration gave it, never its id: on the line
+    under the name and in Details, from history and again after a reload, kept as written under translation while the
+    host's words beside it translate."""
+    playwright = _skip_without_smoke()
+    prefix = f"declared-{engine}-{width}-{theme}"
+    rows = [_born("declared", "Reading the new discussion", suggested_name="Answer the new discussion", place_origin=DECLARED),
+            _born_end("declared", suggested_name="Answer the new discussion", place_origin=DECLARED, wake_summary=FILED)]
+    with playwright.sync_playwright() as pw, card_room(pw, engine, theme, width, height, rows=rows) as room:
+        page = room["page"]
+        writes = []
+        page.on("request", lambda request: writes.append(request.url) if request.method != "GET" else None)
+        for phase in ("history", "reload"):
+            if phase == "reload":
+                room["load"]()
+            page.locator('.chat-live-card[data-task-id="declared"] .chat-live-origin').wait_for()
+            _settle(page)
+            card = page.evaluate(ORIGIN_CARD, "declared")
+            assert card["text"] == ORIGIN_SEP.join(["GitHub · Lanternworks", "New discussion", "pike-meadow"]), (phase, card)
+            assert [authored for _, authored in card["spans"]] == [True, True, True], (phase, card["spans"])
+            assert card["lines"] == 1 and card["line"]["top"] >= card["titleBox"]["bottom"] - 0.5, (phase, card)
+            assert card["line"]["right"] <= card["card"]["right"] + 0.5 and card["cut"] <= 0 and card["wide"] <= 0, card
+            ratio = _contrast(card["ink"], card["fill"])
+            assert ratio is None or ratio >= 4.5, (phase, card["ink"], card["fill"], ratio)
+            _shoot_card(page, f"{prefix}-{phase}.png", "declared")
+            _open_origin_details(page, "declared")
+            facts = {label: (words, spans) for label, words, spans in page.evaluate(ORIGIN_FACTS, "declared")}
+            assert facts["What called it"] == ("New discussion", [["New discussion", True]]), (phase, facts)
+            assert "signal" not in page.locator('.chat-live-card[data-task-id="declared"]').inner_text()
+            _shoot_card(page, f"{prefix}-{phase}-details.png", "declared")
+        # Under translation the host's words change and the connector's words stay as written.
+        page.evaluate("""async (payload) => { window.i18n = await import('/static/modules/i18n.js');
+            window.i18n.setMissTransport(() => Promise.resolve(null)); window.i18n.applyPayload(payload); }""", DECLARED_FRENCH)
+        room["emit"]([("chat", _born("declared-fr", "Reading the new discussion", suggested_name="Answer it",
+                                     place_origin=DECLARED))])
+        page.locator('.chat-live-card[data-task-id="declared-fr"] .chat-live-origin').wait_for()
+        _open_origin_details(page, "declared-fr")
+        page.evaluate("""() => window.i18n.createTranslator(
+            { skipRoots: '[data-i18n-authored]', userContent: '', excludeSelector: '' }).applyTo(document.body)""")
+        facts = {label: (words, spans) for label, words, spans in page.evaluate(ORIGIN_FACTS, "declared-fr")}
+        assert facts["Ce qui l’a appelé"] == ("New discussion", [["New discussion", True]]), facts
+        assert page.evaluate(ORIGIN_CARD, "declared-fr")["spans"][1] == ["New discussion" + ORIGIN_SEP, True]
+        assert not writes, writes

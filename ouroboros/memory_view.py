@@ -36,7 +36,6 @@ from __future__ import annotations
 from ouroboros.text_sentences import first_sentence
 
 import dataclasses
-import datetime
 import functools
 import json
 import logging
@@ -55,7 +54,7 @@ from ouroboros.dialogue_provenance import (RoomLabelResolver, is_presence_task, 
 from ouroboros.mark_anchors import describe as describe_anchor
 from ouroboros.memory_view_account import (account_entries, account_lines, accounts_line, fix_map, quote_line as quote_line,
                                          page_quote_lines, story_quote_rows as story_quote_rows, told_here, told_map)
-from ouroboros.memory_view_legacy import INDENT, indented as _indented, retold_lines
+from ouroboros.memory_view_legacy import INDENT, TRANSFER_LABEL, indented as _indented, retold_lines
 from ouroboros.context_timing import counted, timed_section
 from ouroboros.utils import append_jsonl, sha256_text, utc_now_iso
 
@@ -83,24 +82,8 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _minute(value: Any) -> str:
-    try:
-        moment = datetime.datetime.fromisoformat(str(value))
-    except ValueError:
-        return str(value)
-    if moment.tzinfo is not None:
-        moment = moment.astimezone(datetime.timezone.utc)
-    return moment.strftime("%Y-%m-%d %H:%M")
-
-
-def _period(span: Any, note: str = "") -> str:
-    """``start → end`` of a source time span, minutes in UTC, then ``note`` (a ``Period``'s: a block's period is
-    labelled as the block's); a span with unknown bounds says so."""
-    span = _mapping(span)
-    if not span.get("start") and not span.get("end"):
-        return "period unknown"
-    text = f"{_minute(span.get('start') or '?')} → {_minute(span.get('end') or '?')}"
-    return (text + " (incomplete)" if span.get("incomplete") else text) + note
+# One display of a stored moment for every reader (``memory_inventory.minute``); the old names stay for callers.
+_minute, _period = memory_inventory.minute, memory_inventory.period_text
 
 
 def room_labeler(root: pathlib.Path) -> Callable[..., str]:
@@ -366,17 +349,14 @@ def _activation(store: ChronicleStore) -> Dict[str, Any]:
 
 # --- the story: legacy pointers, pages and parts ---------------------------------------------------
 
-def _legacy_period(pointer: Mapping[str, Any], rows: Any = None) -> str:
-    """The pointer's period: its room's own rows (``LegacyUnit.ts_span``), else its block's, labelled as the block's."""
-    if _mapping(rows).get("start") or _mapping(rows).get("end"):
-        return _period(rows)
-    raw = _mapping(_mapping(pointer.get("covers")).get("raw_range"))
-    span = _mapping(raw.get("ts_span"))
-    if raw.get("status") == "exact" and (span.get("start") or span.get("end")):
-        return _period(span) + " (block period)"
-    if pointer.get("range_text"):
-        return f"{pointer['range_text']} (block period)"
-    return "period known from the retelling text only"
+def _legacy_period(period: memory_inventory.Period, range_text: Any = None) -> str:
+    """A retold or transferred record's period (``memory_inventory.record_period``): its room's own rows, else its
+    block's or the one its source states, labelled; else the old writer's block label, or what is known."""
+    if period.span:
+        return _period(period.span, period.note())
+    if period.source == "stated":
+        return "period not stated by its source"
+    return f"{range_text} (block period)" if range_text else "period known from the retelling text only"
 
 
 def _legacy_span(rows: Any) -> List[str]:
@@ -386,8 +366,10 @@ def _legacy_span(rows: Any) -> List[str]:
 
 
 def _gap_detail(store: ChronicleStore, pointer: Mapping[str, Any]) -> str:
-    record = store.get(pointer["node_id"]) or {}
-    return str(_mapping(record.get("metadata")).get("source_gap") or "the old writer marked this period as a gap")
+    meta = _mapping((store.get(pointer["node_id"]) or {}).get("metadata"))
+    if meta.get("transfer"):  # a transfer's gap is its source's, told as data, never the old writer's
+        return memory_inventory.quoted(meta["source_gap"]) if meta.get("source_gap") else "its source marked this as a gap"
+    return str(meta.get("source_gap") or "the old writer marked this period as a gap")
 
 
 def _fixes(store: ChronicleStore, record: Mapping[str, Any], fixes: Mapping[str, List[Dict[str, Any]]]) -> List[Dict[str, str]]:
@@ -432,7 +414,7 @@ def _story_pages(store: ChronicleStore, label: Callable[..., str], units: Mappin
             "kind": record["kind"], "id": record["id"], "room_id": room,
             "label": str(_mapping(record.get("metadata")).get("room_label") or label(room)),
             **({"lead_rule": record["metadata"]["lead_rule"]} if "lead_rule" in _mapping(record.get("metadata")) else {}),
-            "source_period": period.span, "period_basis": period.source,
+            "source_period": period.span, "period_basis": period.source, "period_bases": list(period.bases or (period.source,)),
             "period": _period(period.span, period.note()), **_record_words(record),
             "status": str(record.get("status") or ""), "signer": draft_signer(record.get("author")),
             "stamp": stamp_summary(record.get("host_stamp")), "fixes": _fixes(store, record, fixes),
@@ -527,24 +509,35 @@ def _capture_story(store: ChronicleStore, sources: _StorySources, units: List[me
     label = sources.label
     pointers = {pointer["node_id"]: pointer for pointer in memory_inventory.legacy_pointers(store)}
     open_rooms = {unit.room_id for unit in units if not unit.folded}
-    words = {record["id"]: str(record.get("current_text") or "") for room in sorted(open_rooms)
-             for record in store.room_records(room, kinds=("legacy",))}
+    held = {record["id"]: record for room in sorted(open_rooms) for record in store.room_records(room, kinds=("legacy",))}
     story, refusals = [], []
     for unit in units:
         if unit.folded:
             continue
         pointer = pointers.get(unit.record_id) or {"node_id": unit.record_id}
+        record, moved, named = held.get(unit.record_id) or {}, pointer.get("transfer"), pointer.get("label")
         gap = pointer.get("kind") == "gap" or pointer.get("legacy_type") in ("gap", "cursor_gap")
+        period = memory_inventory.record_period(store, {**record, **pointer, "id": unit.record_id, "kind": "legacy"},
+                                                {unit.record_id: unit})
         entry = {"kind": "legacy", "id": unit.record_id, "room_id": unit.room_id, "block": unit.block,
-                 "label": str(pointer.get("label") or label(unit.room_id)), "period": _legacy_period(pointer, unit.ts_span),
+                 "label": memory_inventory.quoted(named) if moved and named else str(named or (
+                     TRANSFER_LABEL if moved and unit.room_id == LEGACY_ROOM_ID else label(unit.room_id))),
+                 "period": _legacy_period(period, pointer.get("range_text")),
                  "span": _legacy_span(unit.ts_span), "rows": unit.rows if unit.raw == "exact" else None,
                  "chars": unit.retelling_chars, "messages": pointer.get("messages"),
-                 "gap": _gap_detail(store, pointer) if gap else ""}
-        period = memory_inventory.record_period(store, {**pointer, "id": unit.record_id, "kind": "legacy"},
-                                                {unit.record_id: unit})
-        entry.update(source_period=period.span, period_basis=period.source)
-        if not gap and unit.record_id in words:
-            entry["text"] = words[unit.record_id]
+                 "gap": _gap_detail(store, pointer) if gap else "", "source_period": period.span,
+                 "period_basis": period.source, "period_bases": list(period.bases or (period.source,))}
+        if record:  # who wrote it; a transfer's coming and its source's dates (``chronicle_import``)
+            meta = _mapping(record.get("metadata"))
+            entry["author"] = record.get("author")
+            entry["byline"] = memory_inventory.record_byline(record)
+            entry.update({key: meta[name] for key, name in memory_inventory.TRANSFER_FACTS
+                          if moved and meta.get(name) is not None})
+            if moved:
+                entry.update(provenance="; ".join((entry["byline"], memory_inventory.transfer_words(record))),
+                             stated_span=_legacy_span(meta.get("stated_period")))
+        if not gap and record:
+            entry["text"] = str(record.get("current_text") or "")
         story.append(entry)
         if unit.refusal:
             read = _mapping(_mapping(_mapping(unit.refusal.get("response_ref")).get("read")).get("arguments"))
@@ -553,8 +546,8 @@ def _capture_story(store: ChronicleStore, sources: _StorySources, units: List[me
     pages = _story_pages(store, label, {unit.record_id: unit for unit in units}, terminal=sources.terminal)
     told = told_map([entry for entry in pages if entry["kind"] == "account"])  # a retold record an account tells
     story = [{**entry, "told_by": told[entry["id"]]} if entry["id"] in told else entry for entry in story]
-    progress = memory_inventory.legacy_progress(units)
-    open_units = [unit for unit in units if not unit.folded]
+    progress = memory_inventory.legacy_progress(units)  # the helper retelling's alone: a transfer is no block
+    open_units = [unit for unit in units if not unit.folded and not (pointers.get(unit.record_id) or {}).get("transfer")]
     status = {"folded": progress["folded"], "total": progress["periods"], **memory_inventory.story_counts(store),
               "open_records": len(open_units), "open_rows": sum(unit.rows for unit in open_units),
               "open_chars": sum(unit.retelling_chars for unit in open_units), "helper_route": "",
@@ -800,11 +793,8 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
             pointer_records = [*records, *roomless]
             retold[:0] = [record for record in roomless if record["kind"] == "legacy"
                           and _mapping(record.get("metadata")).get("legacy_type") not in ("gap", "cursor_gap")]
-        facts["legacy"] = [{"id": record["id"], "text": str(record.get("current_text") or ""), "period": _legacy_period(
-                                {"covers": record.get("covers"), "range_text": _mapping(record.get("metadata")).get(
-                                    "legacy_range_text")}, getattr(unit, "ts_span", None)),
-                            "of": LEGACY_ROOM_LABEL if str(record.get("room_id")) == LEGACY_ROOM_ID else ""}
-                           for record in retold if not getattr(unit := units.get(record["id"]), "folded", False)
+        facts["legacy"] = [_room_legacy(store, record, units) for record in retold
+                           if not getattr(units.get(record["id"]), "folded", False)
                            and record["id"] not in whole and record["id"] not in told]
         own = {} if spec.story else {e["id"]: {**e, "part": None} for e in _story_pages(store, label, units, room)
                                       if e["room_id"] == room and e["kind"] != "account"}  # floor_order retains period age
@@ -833,6 +823,17 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
 
         facts["project_words"] = project_words(root, int(room), open_rows=[*facts["lane1"], *facts["origins"]], indent=INDENT)
     return facts
+
+
+def _room_legacy(store: ChronicleStore, record: Mapping[str, Any], units: Mapping[str, Any]) -> Dict[str, Any]:
+    """A retold or transferred record of a room page: its words, its period and, for a transfer, whose they are and
+    how they came; a helper's room-less retelling keeps its "unknown provenance" label."""
+    moved = memory_inventory.transfer_words(record)
+    of = ("; ".join((memory_inventory.record_byline(record), moved)) if moved
+          else LEGACY_ROOM_LABEL if str(record.get("room_id")) == LEGACY_ROOM_ID else "")
+    period = memory_inventory.record_period(store, record, units)
+    return {"id": record["id"], "text": str(record.get("current_text") or ""), "of": of, "transfer": bool(moved),
+            "period": _legacy_period(period, _mapping(record.get("metadata")).get("legacy_range_text"))}
 
 
 def _mark_target(target: Any) -> str:
@@ -1096,7 +1097,9 @@ def _told_lines(account_id: str, children: Mapping[str, List[Dict[str, Any]]]) -
     spans = [_mapping(item.get("source_period")) for item in records]
     span = source_time_span([s[key] for s in spans for key in ("start", "end") if s.get(key)],
                             incomplete=any(not s or s.get("incomplete") for s in spans))
-    basis = " (includes block periods)" if any(item.get("period_basis") in ("block", "mixed") for item in records) else ""
+    bases = {basis for item in records for basis in item.get("period_bases") or (item.get("period_basis"),)}
+    named = [words for basis, words in (("block", "block periods"), ("stated", "periods their sources state")) if basis in bases]
+    basis = f" (includes {' and '.join(named)})" if named else ""
     return [f"- {len(records)} story records told through this account (including nested selections); "
             f"{_period(span)}{basis}; exact records and selections in the composition reader"]
 
@@ -1224,7 +1227,7 @@ def _status_lines(status: Mapping[str, Any], refusals: Tuple[Dict[str, Any], ...
         return []
     lines = [f"Story status: the helper retelling is folded {status['folded']} of {status['total']} blocks; "
              f"{status['open_records']} retold records are still open ({status['open_rows']} rows, "
-             f"{status['open_chars']} chars of retelling; helper route {status['helper_route']})."]
+             f"{status['open_chars']} chars; future folds use helper route {status['helper_route']})."]
     for refusal in refusals:  # the retelling's own id is not the helper's answer
         read = (f"its answer: read_file(root='runtime_data', path='{refusal['path']}')" if refusal.get("path")
                 else "its answer was not retained")
@@ -1286,10 +1289,8 @@ def _story_text(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]
         lines += ["", "### My account across rooms"]
         for entry in accounts:
             lines += _page_lines(entry) + _told_lines(entry['id'], told)
-    if pointers:
-        taken = set(gone.get("F3", ()))
-        lines += ["", "### Old memory retold by a helper before the update (not lived; exact sources readable by id)"]
-        lines += retold_lines(pointers, taken)
+    if pointers:  # the helper's retelling, then transfers, each under its heading (memory_view_legacy)
+        lines += retold_lines(pointers, set(gone.get("F3", ())))
     shown = set(gone.get("F5", ()))
     quotes_gone = set(gone.get("F7", ()))
     aggregate = [entry for entry in pages if entry['id'] in shown] if gone.get('F5a') else []
@@ -1400,9 +1401,10 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
     mine |= {ident[5:] for ident in mine if ident.startswith("bare:")}
     people |= {ident[5:] for ident in people if ident.startswith("bare:")}
     lines = [f"{_room_heading(room)} — head {room['head']}"]
-    if room["legacy"]:
-        lines += ["", "### Retold before the update (helper retelling, not lived)"]
-        lines += [_retold(item, item["id"] in retold) for item in room["legacy"]]
+    for moved, heading in ((False, "### Retold before the update (helper retelling, not lived)"),
+                           (True, "### Transferred memory (author and transfer named per record)")):
+        if items := [item for item in room["legacy"] if item.get("transfer", False) is moved]:
+            lines += ["", heading, *(_retold(item, item["id"] in retold) for item in items)]
     lines += (["", "### Pages under my parts" if all(i["part"] for i in room["under_parts"]) else "### Pages of this room",
                *(_retold(item, item["id"] in retold or item.get("standing", False)) for item in room["under_parts"])]
               if room["under_parts"] else [])

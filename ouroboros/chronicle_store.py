@@ -66,7 +66,7 @@ from ouroboros.utils import append_jsonl, assert_test_data_path, utc_now_iso
 SCHEMA_VERSION = 3
 KINDS = frozenset({"page", "part", "note", "correction", "decision", "mark", "mark_view", "mark_release",
                    "legacy", "gap", "activation", "account", "selection"})
-AUTHOR_KINDS = frozenset({"mind", "helper", "host", "legacy_helper"})
+AUTHOR_KINDS = frozenset({"mind", "helper", "host", "legacy_helper", "source_author"})
 STORY_KINDS = ("page", "part", "note", "legacy", "gap", "account")
 # An account or its selection changes the common view, not what one room's story says: neither moves a room head.
 HEAD_KINDS = ("page", "part", "note", "correction", "decision", "legacy", "gap")
@@ -169,9 +169,11 @@ def is_late_review_mark(mark: Any) -> bool:
     return isinstance(author, Mapping) and author.get("kind") == "host" and author.get("operation") == LATE_REVIEW_OPERATION
 
 
-def _author_problem(author: Any) -> str:
+def _author_problem(author: Any, kind: Any = None) -> str:
     if not isinstance(author, dict) or author.get("kind") not in AUTHOR_KINDS:
         return "author.kind is one of " + ", ".join(sorted(AUTHOR_KINDS))
+    if author["kind"] == "source_author" and kind != "legacy":
+        return "a source_author signs only legacy records: the words of a transfer (chronicle_import)"
     if author["kind"] == "mind":
         focus = author.get("focus")
         if not isinstance(focus, dict) or not _nonblank(focus.get("role")) or not _nonblank(author.get("task_id")):
@@ -818,7 +820,7 @@ class ChronicleStore:
                 refusal = self._head_refusal(db, room, expected_sequence)
                 if refusal is not None or target["kind"] not in _CORRECTABLE:
                     return refusal
-                current = self._current_revision(db, target["id"])
+                current = self._revisions(db, target["id"])[-1]
                 if expected_revision is None and current != target["id"]:
                     return _refuse("revision_required", "the target already has a correction: pass "
                                    "expected_revision", current_revision=current)
@@ -878,6 +880,8 @@ class ChronicleStore:
             record["room_id"] = str(record.get("room_id", ""))
             old = db.execute("SELECT body FROM records WHERE id=?", (record["id"],)).fetchone()
             old_record = json.loads(old[0]) if old else identities.get(record["id"])
+            if old_record is None and "ts" in record and _mapping(record.get("metadata")).get("transfer") is not None:
+                return _refuse("invalid", "the store dates a transfer's publication; its source's date is legacy_written_at")
             record.setdefault("ts", old_record["ts"] if old_record else utc_now_iso())
             if old_record is not None and old_record != record:
                 return _refuse("invalid", "identity collision: this id already holds a different record",
@@ -934,9 +938,11 @@ class ChronicleStore:
         kind = record.get("kind")
         if kind not in KINDS:
             return _refuse("invalid", f"unknown record kind {kind!r}")
-        problem = _author_problem(record.get("author"))
+        problem = _author_problem(record.get("author"), kind)
         if problem:
             return _refuse("invalid", problem)
+        if kind != "legacy" and _mapping(record.get("metadata")).get("transfer") is not None:
+            return _refuse("invalid", "metadata.transfer is only valid on legacy records")
         if kind in _TEXT_KINDS and not _nonblank(record.get("text")):
             return _refuse("invalid", f"a {kind} needs text")
         if kind in ("page", "part") and record["author"]["kind"] not in ("mind", "helper"):
@@ -1000,6 +1006,10 @@ class ChronicleStore:
         if places != list(range(places[0], places[0] + len(places))):
             return _refuse("invalid", "members are adjacent in their room's order of unfolded records")
         return None
+
+    def _rule_legacy(self, db, record):
+        from ouroboros.chronicle_import import transfer_problem  # the legacy format's owner (lazy: it imports this)
+        return _refuse("invalid", problem) if (problem := transfer_problem(record)) else None
 
     def _rule_note(self, db, record):
         if record["author"]["kind"] != "mind" or not _nonblank(record.get("task_id")):
@@ -1152,10 +1162,6 @@ class ChronicleStore:
             "SELECT id FROM records WHERE room=? AND sequence>? AND kind IN (%s) ORDER BY sequence"
             % ",".join("?" * len(HEAD_KINDS)), (room, expected, *HEAD_KINDS)))
         return _refuse("revision_conflict", "the room changed since that head", current_head=head, conflict_ids=newer)
-
-    def _current_revision(self, db, record_id) -> str:
-        fixes = _lookups(db).targeting(record_id, ("correction",))
-        return fixes[-1][1]["id"] if fixes else record_id
 
     def _revisions(self, db, record_id) -> List[str]:
         """The record's own id, then each correction's, in publication order: every revision it ever had."""
@@ -1510,7 +1516,8 @@ class ChronicleStore:
             return look.sealed(room_id)
 
     def legacy_pointer_rows(self) -> List[Dict[str, Any]]:
-        """One compact row per legacy section or gap: room, label, period and how to open it."""
+        """One compact row per legacy section or gap: room, label, period and how to open it; the activation
+        import's by block, then room, then sequence; a transfer's (``chronicle_import``) after them all, by sequence."""
         pointers = []
         for row in self.interpreted(kinds=("legacy", "gap")):
             meta = row.get("metadata") or {}
@@ -1518,10 +1525,10 @@ class ChronicleStore:
                              "label": meta.get("label"), "legacy_type": meta.get("legacy_type"),
                              "legacy_block": meta.get("legacy_block"), "range_text": meta.get("legacy_range_text"),
                              "messages": meta.get("room_message_count"),  # the old writer's own count for the room
-                             "covers": row.get("covers"), "revision": row["revision"],
+                             "covers": row.get("covers"), "revision": row["revision"], "transfer": meta.get("transfer"),
                              "folded_into": row["folded_into"], "sequence": row["sequence"]})
         return sorted(pointers, key=lambda p: (p["legacy_block"] if type(p["legacy_block"]) is int else _NO_BLOCK,
-                                               p["room_id"], p["sequence"]))
+                                               bool(p["transfer"]), "" if p["transfer"] else p["room_id"], p["sequence"]))
 
     def active_marks(self, room_id: Any = None, include_global: bool = True) -> List[Dict[str, Any]]:
         """A room's acting marks (and the global ones); ``room_id=None`` is every room's."""

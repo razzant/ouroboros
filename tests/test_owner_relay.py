@@ -804,6 +804,141 @@ def test_cross_root_return_reference_survives_continue(tmp_path):
     assert event["progress_meta"]["reply_to"]["snippet"] == "exact owner words"
 
 
+def _dispatch_ctx(tmp_path, task_id="asker"):
+    """A work's loop context as the agent builds one at dispatch: its dispatch metadata carries no held map."""
+    from tests._budget_pause_exact_helpers import _loop_ctx
+
+    ctx, _limit = _loop_ctx(tmp_path, task_id)
+    ctx.budget_drive_root, ctx.task_metadata, ctx._loop_mailbox_seen_ids = tmp_path, {"root_task_id": task_id}, set()
+    ctx.current_chat_id, ctx.pending_events, ctx.drive_logs = 1, [], lambda: tmp_path / "logs"
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    return ctx
+
+
+def test_a_new_dispatch_of_a_work_keeps_its_held_words_and_open_relays_on_its_record(tmp_path, monkeypatch):
+    """The work holds the owner's answer to its card and another work's relay quoting an owner row; both sit on its
+    record. It parks and resumes in a new dispatch of the same id: the agent builds the context first
+    (``build_runtime_section``: ``owner_quote_handles``), then the loop restores the continuation. The record must still
+    hold both rows and the open relay at the end, and a Continue of the work must inherit them: a first build that
+    replaced the record from the dispatch metadata alone emptied the quote handles of three works on 13 Nov."""
+    import json
+
+    from ouroboros import owner_wait
+    from ouroboros.context import build_runtime_section
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.owner_relay import flush_held_state
+    from ouroboros.task_results import load_task_result
+    from ouroboros.working_checkpoint import flush_content_acks
+    from tests._context_shared import _make_health_env
+    from tests.test_question_answer_routing import answer, runtime
+
+    app, _bridge, _q, _task = runtime(tmp_path, monkeypatch)
+    row, relayed = source(tmp_path)
+    quotes, error = quote_rows(context(tmp_path, row), [relayed])
+    assert not error
+    write_relay(tmp_path, "asker", relay_id="r1", note="Another work's note", quotes=quotes, chat_id=1,
+                teller_task_id="teller")
+    first = _dispatch_ctx(tmp_path)
+    assert answer(app).status_code == 200
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "asker", None, first._loop_mailbox_seen_ids,
+                             owner_ctx=first, defer_content_ack=True)
+    flush_content_acks(first)
+    held = set(first._held_owner_messages)
+    assert relayed in held and len(held) == 2 and "r1" in first._open_relays
+    assert set(load_task_result(tmp_path, "asker")["held_owner_messages"]) == held, "baseline: the durable copy"
+    saved = json.loads(json.dumps(owner_wait.continuation_state(first, [], {}, {}, 1, [], set())))  # the park's source
+
+    second = _dispatch_ctx(tmp_path)  # the same task id in a new dispatch: a fresh context, no held map in metadata
+    build_runtime_section(_make_health_env(tmp_path / "env"), {"id": "asker", "metadata": second.task_metadata},
+                          ctx=second)  # agent._prepare_task_context -> build_llm_messages, before the loop runs
+    at_build = load_task_result(tmp_path, "asker") or {}
+    assert set(at_build.get("held_owner_messages") or {}) == held and "r1" in (at_build.get("open_relays") or {})
+    owner_wait.restore_continuation_state(SimpleNamespace(_ctx=second), saved, [], {}, {}, set())
+    assert set(second._held_owner_messages) == held and "r1" in second._open_relays, "memory is whole again"
+    flush_held_state(second)  # what the terminal save (working_checkpoint.save_terminal) adds
+
+    after = load_task_result(tmp_path, "asker") or {}
+    assert set(after.get("held_owner_messages") or {}) == held and "r1" in (after.get("open_relays") or {})
+    assert set(owner_sources(tmp_path, after, "asker")["held_owner_messages"]) == held, "a Continue inherits them"
+
+
+@pytest.mark.parametrize("parks", [False, True])
+def test_an_answered_relay_stays_closed_when_the_same_continue_successor_starts_again(tmp_path, monkeypatch, parks):
+    """A Continue successor inherits an open relay (``metadata.continuation.owner_sources``) and answers it, so the
+    relay leaves its map and its record. It then starts again under the same id (a cold resume or a restart): its own
+    present, empty map is its state, so the unchanged metadata does not reopen the relay; the quoted row stays held.
+    A start whose first read of the record fails does not replace it from the inherited view (``_settle_seed``), in
+    its own process or after it parks with that view and resumes (the continuation keeps the view partial)."""
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.tools.control_runtime import _send_user_message
+
+    row, handle = source(tmp_path)
+    quotes, error = quote_rows(context(tmp_path, row), [handle])
+    assert not error
+    write_relay(tmp_path, "receiver", relay_id="return", note="context", quotes=quotes, chat_id=1,
+                teller_task_id="teller")
+    receiver = context(tmp_path); receiver.task_id = "receiver"
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "receiver", None, set(), owner_ctx=receiver)
+    sources = owner_sources(tmp_path, {"origin_message_text": "Work", "origin_message_ref": {},
+                                       "held_owner_messages": receiver._held_owner_messages,
+                                       "open_relays": receiver._open_relays,
+                                       "owner_mailbox": {"rows": [], "read_complete": True}}, "receiver")
+    assert "return" in sources["open_relays"]
+    write_task_result(tmp_path, "successor", "running")
+
+    def dispatch():
+        ctx = context(tmp_path)
+        ctx.task_id, ctx.task_metadata = "successor", {"continuation": {"owner_sources": sources}}
+        held_owner_messages(ctx)  # this dispatch's first context build
+        return ctx
+
+    first = dispatch()
+    assert "return" in first._open_relays
+    assert _send_user_message(first, "Done", reply_to_relay="return").startswith("OK:")
+    assert (load_task_result(tmp_path, "successor") or {}).get("open_relays") == {}, "answered on the record"
+    again = dispatch()
+    assert again._open_relays == {}, "not reopened from the unchanged metadata"
+    assert set(again._held_owner_messages) == set(first._held_owner_messages) and again._held_owner_messages
+
+    # The same start with the store too busy to read the record: its first build sees only the inherited view, so
+    # no write may replace the record from it; once a read lands the record keeps its rows and its closed relay.
+    from ouroboros import task_store
+    from ouroboros.owner_relay import flush_held_state, retain_owner_message
+    from ouroboros.store import StoreBusy
+
+    real_read, busy = task_store.read_document, {"on": True}
+
+    def read(root, task_id, **kwargs):
+        if busy["on"] and task_id == "successor":
+            raise StoreBusy("controlled busy read", reason="test")
+        return real_read(root, task_id, **kwargs)
+
+    monkeypatch.setattr(task_store, "read_document", read)
+    blind = dispatch()
+    assert "return" in blind._open_relays, "the inherited view only"
+    later = {"chat_id": 1, "direction": "in", "ts": "2026-10-02T00:00:00Z", "text": "later owner words",
+             "client_message_id": "owner-2", "attachments": []}
+    dialogue_store.append(tmp_path, "chat", later)
+    assert retain_owner_message(blind, later)
+    busy["on"] = False
+    record = load_task_result(tmp_path, "successor") or {}
+    assert record.get("open_relays") == {} and set(record["held_owner_messages"]) == set(first._held_owner_messages)
+    if parks:  # it parks with that partial view and resumes in a new dispatch that can read the record
+        import json
+
+        from ouroboros import owner_wait
+
+        saved = json.loads(json.dumps(owner_wait.continuation_state(blind, [], {}, {}, 1, [], set())))
+        blind = dispatch()
+        owner_wait.restore_continuation_state(SimpleNamespace(_ctx=blind), saved, [], {}, {}, set())
+    flush_held_state(blind)  # the terminal save: the record reads now
+    record = load_task_result(tmp_path, "successor") or {}
+    assert record.get("open_relays") == {} == blind._open_relays, "the answered relay stays closed"
+    assert set(record["held_owner_messages"]) == set(first._held_owner_messages) | set(blind._held_owner_messages)
+    assert len(record["held_owner_messages"]) == len(first._held_owner_messages) + 1, "the later row joins them"
+
+
 def test_running_work_content_contract_delivers_its_room_to_root_child_and_nanny(tmp_path, monkeypatch):
     """Ingress -> addressed mailbox -> next drain -> every member, without cross-room broadcast.
 

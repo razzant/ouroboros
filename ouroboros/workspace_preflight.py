@@ -15,16 +15,19 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import uuid
 from typing import Any, Dict, Iterable, List, NamedTuple, Tuple
 
 from ouroboros import work_domain
 from ouroboros.platform_layer import (
-    IS_LINUX, IS_MACOS, IS_WINDOWS, bootstrap_process_path, node_runtime_health, resolve_bundled_node,
+    IS_LINUX,
+    IS_MACOS,
+    IS_WINDOWS,
+    bootstrap_process_path,
+    node_runtime_health,
+    resolve_bundled_node,
 )
 from ouroboros.utils import utc_now_iso
-
 
 _CURATED_TOOLS = (
     "git", "python", "python3", "pip", "pip3", "pytest", "uv",
@@ -286,49 +289,21 @@ def _owned_directory(base: Any, parts: Tuple[str, ...], execution: pathlib.Path)
 
 
 def _session_scratch(owner: pathlib.Path, execution: pathlib.Path) -> pathlib.Path:
-    """One short physical directory; its record stays in the ungranted task drive until its task is
+    """One short workspace; its container's record stays in the ungranted task drive until its task is
     over (``release_finished_scratch``) or the drive retires, whichever comes first.
 
     A same-task/key start reuses it. Literal retries never call this function. Allocation is
     serialized using the existing file lock; no process owns an in-memory cleanup obligation.
     """
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
-    from ouroboros.session_scratch import recorded_scratch, work_session_scratch
-    from ouroboros.test_environment import git_ancestor, session_scratch_parent
-    from ouroboros.utils import atomic_write_json
+    from ouroboros.session_scratch import prepare_session_scratch
 
     lock = owner / "prepare.lock"
     fd = acquire_exclusive_file_lock(lock, timeout_sec=5, stale_sec=120, owner_aware_stale=True)
     if fd is None:
         raise OSError(f"session scratch preparation is busy: {owner}")
     try:
-        record = owner / "scratch.json"
-        if os.path.lexists(record):
-            try:
-                path = recorded_scratch(record)
-            except FileNotFoundError:
-                pass  # a new start may allocate after OS aging; literal retry never comes here
-            else:
-                if git_ancestor(path) is not None or path == execution or path in execution.parents or execution in path.parents:
-                    raise ValueError(f"{path} overlaps a Git working tree or the execution root")
-                return path  # never recreate a path between identity validation and granting it
-        if work_domain.managed():  # the work engine's session writes it: the work domain's own folder
-            path = work_session_scratch(execution)
-            seen = work_domain.lstat(path)
-            atomic_write_json(record, {"schema_version": 1, "path": str(path), "identity": [seen.st_dev, seen.st_ino]})
-            return path
-        parent = session_scratch_parent().resolve()
-        if git_ancestor(parent) is not None:
-            raise ValueError(f"{parent} is inside a Git working tree")
-        path = pathlib.Path(tempfile.mkdtemp(prefix="obs-", dir=parent))
-        try:
-            _owned_directory(parent, (path.name,), execution)
-            seen = path.lstat()
-            atomic_write_json(record, {"schema_version": 1, "path": str(path), "identity": [seen.st_dev, seen.st_ino]})
-        except Exception:
-            path.rmdir()  # not yet granted; only this allocation's empty directory
-            raise
-        return path
+        return prepare_session_scratch(owner / "scratch.json", execution)
     finally:
         release_exclusive_file_lock(lock, fd)
 

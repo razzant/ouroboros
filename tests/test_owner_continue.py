@@ -1176,3 +1176,21 @@ def test_a_carried_rendering_keeps_its_reference_and_its_words_through_each_cont
         write_task_result(tmp_path, successor["id"], "cancelled", result="interrupted", review_evidence={
             "task_inputs": inputs}, cancel_origin={"source": "snapshot_restore", "reason": "server_shutdown"})
         current, nonce = successor["id"], f"hop-{hop}-press-2941"
+
+
+from ouroboros.owner_continue import continuation_eligibility
+
+
+def test_both_size_refusal_endings_offer_continue():
+    for reason in ("llm_api_error", "context_overflow"):
+        verdict = continuation_eligibility({"status": "failed", "reason_code": reason}, "solo")
+        assert verdict == {"eligible": True, "cause": reason, "refusal": ""}, reason
+
+
+def test_an_owner_stop_after_a_size_refusal_still_refuses():
+    verdict = continuation_eligibility({"status": "cancelled", "reason_code": "context_overflow",
+                                        "cancel_origin": {"source": "owner_stop"}}, "solo")
+    assert verdict["eligible"] is False and verdict["refusal"] == "stopped_by_owner"
+    child = continuation_eligibility({"status": "failed", "reason_code": "context_overflow",
+                                      "parent_task_id": "root", "root_task_id": "root"}, "child")
+    assert child["refusal"] == "not_a_root_task"

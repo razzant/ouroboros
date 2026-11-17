@@ -11,9 +11,10 @@ import { capitalized, heardFactWord, listWords, sameWords, wakeFactWord } from '
 
 /**
  * The host's `place_origin` (`subagent_messages.initiator_meta`, also on a census row): what the admitted focus
- * recorded, pure over its stored metadata. `wakes` are the checked kinds that matched, in the place's order; `routed`
- * says none did and the conversation's works were read instead. An absent or empty `actor` is an author nobody identified.
- * @typedef {{place_id:string,place_label?:string,provider?:string,actor?:{id?:string,label?:string,owner?:boolean,bot?:boolean},wakes:string[],routed?:boolean}} PlaceOrigin
+ * recorded, pure over its stored metadata. `wakes` are the checked kinds that matched, in the place's order, and
+ * `labels` the words their connector declared for some of them; `routed` says none did and the conversation's works
+ * were read instead. An absent or empty `actor` is an author nobody identified.
+ * @typedef {{place_id:string,place_label?:string,provider?:string,actor?:{id?:string,label?:string,owner?:boolean,bot?:boolean},wakes:string[],labels?:Object<string,string>,routed?:boolean}} PlaceOrigin
  */
 
 const text = (value) => (typeof value === 'string' ? value.trim() : '');
@@ -26,43 +27,49 @@ const SEP = '\u00a0\u00b7 ';
 function placeOriginOf(raw) {
     if (!raw || typeof raw !== 'object' || !text(raw.place_id)) return null;
     const actor = raw.actor && typeof raw.actor === 'object' ? raw.actor : {};
+    const wakes = (Array.isArray(raw.wakes) ? raw.wakes : []).map(text).filter(Boolean);
+    const words = raw.labels && typeof raw.labels === 'object' ? raw.labels : {};
     return {
         placeId: text(raw.place_id), label: placeLabelOnce(text(raw.place_label)), provider: text(raw.provider),
-        wakes: (Array.isArray(raw.wakes) ? raw.wakes : []).map(text).filter(Boolean), routed: raw.routed === true,
+        wakes, labels: Object.fromEntries(wakes.filter((fact) => text(words[fact])).map((fact) => [fact, text(words[fact])])),
+        routed: raw.routed === true,
         actor: { id: text(actor.id), label: text(actor.label), owner: actor.owner === true, bot: actor.bot === true },
     };
 }
 
 /** The line's parts for one card: the place unless `title` already is it, what called the work in the words a heard
  *  message carries (`every message` names no kind, so it adds none), and whose event it was. `authored` marks words
- *  someone outside wrote (a place's label, an account's name), which are never translated; the host's own words (the
- *  reason, `you`) arrive translated. */
+ *  someone outside wrote (a place's label, a kind's declared words, an account's name), which are never translated;
+ *  the host's own words (the reason, `you`) arrive translated. */
 export function placeOriginParts(origin, title = '') {
     if (!origin) return [];
-    const why = listWords(origin.wakes.map((fact) => heardFactWord(fact)))
+    const said = origin.wakes.filter((fact) => heardFactWord(fact, origin.labels));
+    const why = listWords(said.map((fact) => heardFactWord(fact, origin.labels)))
         || (origin.routed && !origin.wakes.length ? tr('task.origin.routed', 'ongoing conversation') : '');
     const { owner, label } = origin.actor;
-    return [{ text: sameWords(placeLabelOnce(title), origin.label) ? '' : origin.label, authored: true }, { text: why, authored: false },
+    return [{ text: sameWords(placeLabelOnce(title), origin.label) ? '' : origin.label, authored: true },
+        { text: why, authored: said.some((fact) => origin.labels[fact]) },
         { text: owner ? tr('places.account.you', 'you') : label, authored: !owner }].filter((part) => part.text);
 }
 
 /** The same origin whole, as rows of the card's Details: the place (its service's id beside a label that does not
- *  name it), each matched kind by its name in the place's "What calls it here", and the event's author with what the
- *  admission recorded about them. A gap is said as a gap. Authored words keep their boundary exactly as the DOM
- *  serializes it (`data-i18n-authored=""`), so an unchanged list equals its own markup and is never rebuilt under a
- *  reader's selection. */
+ *  name it), each matched kind by its name in the place's "What calls it here" (its connector's own words kept as
+ *  written), and the event's author with what the admission recorded about them. A gap is said as a gap. Authored
+ *  words keep their boundary exactly as the DOM serializes it (`data-i18n-authored=""`), so an unchanged list equals
+ *  its own markup and is never rebuilt under a reader's selection. */
 function placeOriginRows(origin) {
     const authored = (value) => `<span data-i18n-authored="">${escapeHtml(value)}</span>`;
     const joined = (parts) => parts.filter(Boolean).join(META_PART_SEPARATOR);
     const place = origin.label || origin.placeId;
     const named = place.toLowerCase().includes(origin.provider.toLowerCase());
-    const called =capitalized(listWords(origin.wakes.map((fact) => wakeFactWord(fact))))
+    const kinds = listWords(origin.wakes.map((fact) => wakeFactWord(fact, origin.labels)));
+    const called = (origin.labels[origin.wakes[0]] ? kinds : capitalized(kinds))
         || (origin.routed ? tr('task.origin.routed.detail', 'An ongoing conversation of its work; no checked kind matched') : '');
     const { actor } = origin;
     const who = actor.label || actor.id;
     return [
         [tr('task.fact.place', 'Place'), joined([authored(place), named ? '' : authored(origin.provider)])],
-        [tr('task.fact.called_by', 'What called it'), escapeHtml(called)],
+        [tr('task.fact.called_by', 'What called it'), origin.wakes.some((fact) => origin.labels[fact]) ? authored(called) : escapeHtml(called)],
         [tr('task.fact.from', 'From'), who ? joined([authored(who), actor.owner ? escapeHtml(tr('places.account.you', 'you')) : '',
             actor.bot ? escapeHtml(tr('task.origin.bot', 'bot')) : '', actor.label && actor.id && actor.id !== actor.label ? authored(actor.id) : ''])
             : escapeHtml(tr('places.author_unknown', 'Author not recorded'))],

@@ -840,6 +840,8 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
     if place.place_id not in accounts:  # the places cannot be read now: the admitted row's own accounts
         accounts = {place.place_id: place.owner_accounts}
     facts = observed_facts(event)
+    matched, words = [w.fact for w in wake_matches(place, facts)], getattr(admission, "fact_labels", None) or {}
+    named = {fact: words[fact] for fact in matched if fact in words}  # what the connector's declaration calls a kind
     actor = str(event.actor.get("platform_actor_id") or event.actor.get("id") or "")
     owner_address = is_owner_account(place, actor, event.account_id, accounts[place.place_id])
     identity = deepcopy(event.identity)
@@ -859,9 +861,9 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
                                                             event.conversation_id, event.message),
                             **({"authenticated": event.actor["authenticated"]} if "authenticated" in event.actor else {}),
                             "is_bot": "from_bot" in facts},
-                  "matched_wakes": [w.fact for w in wake_matches(place, facts)],
-                  # The Host routed it to the mind (several works read its conversation): display provenance that
-                  # every inheritor of this focus keeps, never the allowance or any authority.
+                  "matched_wakes": matched, **({"matched_labels": named} if named else {}),
+                  # Display provenance every inheritor of this focus keeps, never the allowance or any authority: the
+                  # words of its matched kinds, and that the Host routed it (several works read its conversation).
                   **({"routed": True} if allowance.get("route") is True else {})},
         "focus_allowance": allowance,
     }

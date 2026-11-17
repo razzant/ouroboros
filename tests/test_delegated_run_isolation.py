@@ -567,6 +567,8 @@ class _TerminalSweepGateway:
     """A daemon for the orphan sweep: recovery re-POSTs bind a run; every asked
     run is already terminal-succeeded; controls are accepted."""
 
+    store_identity = "fixture-store"
+
     def __init__(self, run_id="run-rec", state="succeeded"):
         self.run_id, self.state = run_id, state
 
@@ -603,7 +605,7 @@ def _binding_request_row(task_id, invocation_id, handle):
         root_task_id="", parent_task_id="",
         snapshot_id=handle.snapshot_id, execution_root=handle.path,
         baseline_sha=handle.baseline_sha, target_root=handle.target_root,
-        authority_source="acting_constraint")
+        authority_source="acting_constraint", daemon_store_id="fixture-store")
 
 
 class TestOrphanReconciliation:

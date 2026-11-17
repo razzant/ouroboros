@@ -675,3 +675,12 @@ def test_the_real_transport_records_the_sent_images_and_retries_without_them(roo
     assert [list(images) for images in ctx.accumulated_usage[vr.REFUSED_IMAGES_KEY].values()] == [[DIGEST_A]]
     finals = list(_ledger(root).values())  # request-wire recovery may add refused attempts
     assert finals[-1] == "settled" and set(finals[:-1]) == {"unresolved"}
+
+
+@pytest.mark.parametrize('code', ['content_filter', 'content_policy_violation'])
+def test_typed_content_filter_keeps_same_round_image_retry(root, code):
+    provider = _Provider(root, _refuse_images(lambda: _ProviderError(400, 'Image rejected', code)))
+    ctx = _round(root, provider)
+    result = loop._call_round_model(ctx)
+    assert result is not None
+    assert provider.sent == [{DIGEST_A}, frozenset()]

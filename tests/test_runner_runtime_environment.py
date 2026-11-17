@@ -143,8 +143,13 @@ def test_a_nested_gate_lives_under_its_owner_and_a_top_level_gate_keeps_the_defa
     parent = (tmp_path / "default").resolve()
     parent.mkdir()
     monkeypatch.setattr(test_environment, "default_temp_parent", lambda: parent)
-    top = test_environment.gate_root()
-    assert top.parent == parent and top.name.startswith("obs-"), "a record of a kept root needs this name"
+    evidence = {}
+    top = test_environment.gate_root(evidence=evidence)
+    assert top.name == "w" and top.parent.parent == parent and top.parent.name.startswith("obs-")
+    identity = evidence["scratch_ownership"]
+    assert identity["path"] == str(top.parent) and identity["schema_version"] == 2
+    assert (top.parent / test_environment.SCRATCH_CONTAINER_MARKER).read_text() == identity["nonce"] + "\n"
+    assert not list(top.iterdir()), "the host marker is outside the initially empty workspace"
 
 
 def test_fingerprint_environment_projection_creates_no_directories(tmp_path):

@@ -1,6 +1,7 @@
 // The settled task card's one seam: its Files row (result_files.js) and its
 // Continue action (task_continue.js) follow the same settled task detail; the
 // work's review-gate field (review_gate_card.js) follows every detail, live ones too.
+// A replayed history row settles its card from the terminal facts it froze (historicalTerminalFacts).
 
 import { syncResultFilesItem } from './result_files.js';
 import { syncReviewGateItem } from './review_gate_card.js';
@@ -38,4 +39,13 @@ export function syncClosingSentence(record, detail) {
         record.wakeSummary = sentence;
     }
     return Boolean(words);
+}
+
+/** The terminal facts a replayed history row froze for its card (chat.js `historicalTerminals`, settled through
+ *  `noteTaskDetails`): its durable terminal, the current outcome's phase, and the sentence, name, schedule and place
+ *  the settled card reads. */
+export function historicalTerminalFacts(row) {
+    return { ...row.historical_terminal, ...(row.current_outcome && { phase: row.current_outcome.outcome_phase }),
+        wake_summary: row.wake_summary, suggested_name: row.suggested_name, schedule_name: row.schedule_name,
+        place_origin: row.place_origin };
 }

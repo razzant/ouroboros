@@ -216,7 +216,7 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
     const page = document.createElement('div');
     page.id = 'page-dashboard';
     page.className = 'page app-page-glass section-place';
-    page.dataset.sectionView = 'page';
+    page.dataset.sectionView = 'auto';
     // The band: over the list nothing; over the page `(‹) <page>` in the header's one title style.
     const leadHtml = `<div class="section-lead dashboard-lead">
             <span class="section-lead-col section-lead-rail"></span>
@@ -224,7 +224,7 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
         </div>`;
     page.innerHTML = `
         ${renderPageHeader({ page: 'dashboard', leadHtml })}
-        <div class="dashboard-shell section-shell" data-section-view="page">
+        <div class="dashboard-shell section-shell" data-section-view="auto">
             <nav class="dashboard-rail section-rail scroll-fade-y" aria-label="Dashboard">
                 <div class="section-list"><section class="section-group">
                     <div class="ui-card section-rows dashboard-tabs" role="tablist" aria-orientation="vertical" aria-label="Dashboard views">
@@ -274,7 +274,9 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
     }
 
     function paint() {
-        const view = panes() || level ? 'page' : 'home';
+        // The container query shows the automatic page beside its list. Keeping that intent independent of width
+        // leaves the rail rendered even before a layout event or ResizeObserver can report a narrower box.
+        const view = level ? 'page' : 'auto';
         page.dataset.sectionView = view;
         shell.dataset.sectionView = view;
         const tab = DASHBOARD_TABS.find((each) => each.value === state.dashboardActiveSubtab);

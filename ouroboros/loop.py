@@ -76,6 +76,7 @@ from ouroboros.loop_transport import (
     fallback_chain_allowed as _fallback_chain_allowed,  # noqa: F401 -- resolved by loop_model_call._recover_failed_round at call time
     finalize_now_transport_terminal as _finalize_now_transport_terminal,  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
     last_assistant_text as _last_assistant_text,
+    provider_failure_hint,
     provider_terminal_fallback_text as _provider_terminal_fallback_text,
     reconcile_transport_wait as _reconcile_transport_wait,  # noqa: F401 -- resolved by loop_model_call._recover_failed_round at call time
     task_deadline_epoch as _task_deadline_epoch,  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
@@ -309,15 +310,14 @@ def _provider_unavailable_result(
             source=no_call, provider_terminal=wall, host_words=not salvaged,
         )
         return with_terminal_notice(text, usage, llm_trace)
-    met = round_failure_words(ctx.accumulated_usage, ctx.round_idx)  # a provider content refusal is named as itself, never an outage
+    # The round's failure as observed: a content refusal by its kind, else the provider's own sentence with its
+    # speaker or the host's class; never an outage the host did not establish.
+    met = round_failure_words(ctx.accumulated_usage, ctx.round_idx) or provider_failure_hint(ctx.accumulated_usage)
     prompt = (
         "[DEADLINE] Primary model work reached the owner deadline. Produce the best final answer now from verified work and state what remains undone."
         if is_deadline_exhausted else
         f"[PROVIDER_UNAVAILABLE] No route returned a usable response.{met} The task is being INTERRUPTED, not "
-        "completed. Summarize the verified work so far and state plainly what remains undone." if met else
-        "[PROVIDER_UNAVAILABLE] The model provider failed to return a usable response. "
-        "The task is being INTERRUPTED by this outage, not completed. Summarize the "
-        "verified work so far and state plainly what remains undone."
+        "completed. Summarize the verified work so far and state plainly what remains undone."
     )
     text, usage, llm_trace = _forced_final_answer(
         ctx, prompt=prompt, fallback_text=fallback,
@@ -645,7 +645,7 @@ def run_llm_loop(
                 limit_ctx, context_fit_plan, active_context_mode, _preferred_context_mode, _controls)
             _held = _delegate_hold_round_top(tools, limit_ctx, _controls, emit_progress,
                                              new_input=transcript_growth_signature(messages) != _pre_drain_sig)
-            if _held == "park":  # the hold's host-armed sleep was parked, no model call: its wake is the next top's
+            if _held in ("park", "redrain"):  # no model call: the next top drains first (a parked hold's wake too)
                 free_redial = True
                 continue
             if isinstance(_held, tuple):  # the unknown no-resend terminal: zero provider calls

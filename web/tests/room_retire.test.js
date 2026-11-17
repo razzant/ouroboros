@@ -302,3 +302,114 @@ test('a catch-up read still out after its bound is said once and unsaid when it 
     await wait(40);
     assert.deepEqual([catchUp.active, changes], [false, 3], 'a cancelled bound never fires');
 });
+
+test('a return\'s read is the one ↓ waits for while it is out; an earlier read\'s end or a room leaving clears nothing newer', () => {
+    const catchUp = createCatchUp(() => {}, 20);
+    assert.equal(catchUp.reading, null, 'an opening room is back from nowhere');
+    const first = Promise.resolve(), second = Promise.resolve();
+    catchUp.begin(() => true, first);
+    assert.equal(catchUp.reading, first, 'out from the return on, before any request');
+    catchUp.begin(() => true, second);  // the socket closed and opened again before it settled
+    catchUp.end(first);
+    assert.equal(catchUp.reading, second, 'an earlier read settling changes nothing');
+    catchUp.end(second);
+    assert.equal(catchUp.reading, null, 'settled, failed or not: the room holds what it has and says so');
+    catchUp.begin(() => true, first);
+    catchUp.cancel();  // the room left
+    assert.equal(catchUp.reading, null);
+    catchUp.end(first);
+    assert.equal(catchUp.reading, null);
+});
+
+test('catch-up retry requires an attempted unconfirmed read, not a bare absence', () => {
+    const catchUp = createCatchUp(() => {});
+    catchUp.confirmWindow({ recentVersion: 1 });
+    catchUp.cancel(1);
+    assert.equal(catchUp.owed, true);
+    assert.equal(catchUp.retry, false);
+    const read = Promise.resolve();
+    catchUp.begin(() => true, read, 1);
+    assert.equal(catchUp.retry, false, 'a pending attempt is not a failure');
+    catchUp.cancel(1);
+    assert.equal(catchUp.retry, true, 'a started catch-up interrupted by disconnect is retryable');
+    catchUp.confirmWindow({ recentVersion: 2 });
+    assert.equal(catchUp.retry, false);
+    catchUp.cancel(3);
+    catchUp.confirmWindow({ recentVersion: 3 });
+    assert.equal(catchUp.retry, true, 'a response begun before the latest absence confirms nothing');
+    catchUp.confirmWindow({ recentVersion: 4 });
+    catchUp.begin(() => true, read, 4);
+    catchUp.end(read);
+    assert.equal(catchUp.retry, true, 'a completed catch-up without confirmation failed');
+    catchUp.confirmWindow({ recentVersion: 5 });
+    assert.equal(catchUp.retry, false);
+});
+
+test('catch-up is owed from absence through failure, and only a read begun after it confirms the present', () => {
+    const catchUp = createCatchUp(() => {});
+    assert.equal(catchUp.owed, false);
+    catchUp.cancel(5);
+    assert.equal(catchUp.owed, true, 'before begin, the retained window is already unconfirmed');
+    catchUp.confirmWindow({ recentVersion: 5 });
+    assert.equal(catchUp.owed, true, 'an interrupted read may still return, but predates the absence');
+    const read = Promise.resolve();
+    catchUp.begin(() => true, read, 5);
+    catchUp.end(read);
+    assert.equal(catchUp.owed, true, 'settled, including failure, is not confirmation');
+    catchUp.confirmWindow({ recentVersion: 6 });
+    assert.equal(catchUp.owed, false);
+    catchUp.cancel(7);
+    catchUp.end(read);
+    catchUp.confirmWindow({ recentVersion: 6 });
+    assert.equal(catchUp.owed, true, 'a repeated disconnect cannot inherit an earlier success');
+    catchUp.confirmWindow({ recentVersion: 8 });
+    assert.equal(catchUp.owed, false);
+});
+
+test('a newest read that failed part-way discharges no absence; one bounded only by its page does', () => {
+    const catchUp = createCatchUp(() => {});
+    catchUp.cancel(5);
+    catchUp.confirmWindow({ recentVersion: 6, window: { complete: false, truncated_by: ['quota', 'chat_projection_failed'] } });
+    assert.equal(catchUp.owed, true, 'the rows after a projection fault are missing: this is not the present');
+    catchUp.confirmWindow({ recentVersion: 7, window: { complete: false, truncated_by: ['progress_projection_failed'] } });
+    catchUp.confirmWindow({ recentVersion: 8, reason_code: 'history_source_unavailable', window: { complete: false } });
+    assert.equal(catchUp.owed, true);
+    catchUp.confirmWindow({ recentVersion: 9, window: { complete: false, truncated_by: ['quota'] } });
+    assert.equal(catchUp.owed, false, 'a whole read bounded by its page is current');
+});
+
+test('a partial newest read owes repair even without an absence; a later whole read settles it', () => {
+    const catchUp = createCatchUp(() => {});
+    assert.equal(catchUp.confirmWindow({ recentVersion: 1, window: { truncated_by: ['quota', 'chat_projection_failed'] } }), false);
+    assert.equal(catchUp.owed, true, 'partial data must not become a reusable present');
+    catchUp.confirmWindow({ recentVersion: 1 });
+    assert.equal(catchUp.owed, true, 'only a newer read can repair it');
+    assert.equal(catchUp.confirmWindow({ recentVersion: 2, window: { truncated_by: ['quota'] } }), true);
+    assert.equal(catchUp.owed, false);
+});
+
+test('settling waits out each catch-up read a reconnect begins meanwhile, and stops for a room no longer current', async () => {
+    const catchUp = createCatchUp(() => {}, 20);
+    const opens = [];
+    // As chat.js `open` does: a read's own settling ends its feedback before its promise answers.
+    const read = () => { const promise = new Promise(resolve => opens.push(resolve)).then(() => catchUp.end(promise)); return promise; };
+    const first = read();
+    catchUp.begin(() => true, first);
+    let settled = false;
+    void catchUp.settled(() => true).then(() => { settled = true; });
+    catchUp.begin(() => true, read());  // the socket closed and opened again before the first read answered
+    opens[0]();
+    await new Promise(setImmediate);
+    assert.equal(settled, false, 'the later reconnect\'s read decides');
+    opens[1]();
+    await new Promise(setImmediate);
+    assert.equal(settled, true);
+    let current = true, stopped = false;
+    catchUp.begin(() => true, read());
+    void catchUp.settled(() => current).then(() => { stopped = true; });
+    catchUp.begin(() => true, read());
+    current = false;
+    opens[2]();
+    await new Promise(setImmediate);
+    assert.equal(stopped, true, 'a read still out keeps no one waiting who left');
+});

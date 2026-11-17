@@ -679,18 +679,19 @@ def test_transport_dead_observation_keeps_the_hold_instead_of_a_refused_exit(
 
 # --- #2992: a spilled wake the hold delivers ------------------------------------------------------------------
 
-_HOLD_TAIL = "OWNER-MAIL-TAIL-hold"
+_HOLD_TAIL, _HOLD_MAIL = "LEAF-RESULT-TAIL-hold", "Owner instruction: integrate the leaf now"
 
 
 def _spilling_hold(tmp_path, monkeypatch):
-    """The real wake publication under the hold; its one read posts owner mail too long to inline, so the wake spills."""
+    """The real wake publication under the hold: its one read answers a leaf result too long to inline, so the wake
+    spills; the owner writes while the hold reads, so that mail wakes nothing here and is the round-top drain's."""
     from ouroboros.owner_mailbox import write_owner_message
     from tests._run_wait_shared import wake_now
 
     def observe(_ctx, rid, *_a, **_k):
-        assert write_owner_message(tmp_path, "Owner instruction: " + "one exact long line; " * 1200 + _HOLD_TAIL,
-                                   "t-hold", msg_id="owner-mail")
-        return json.dumps({"status": "succeeded", "run_id": rid, "last_seq": 2})
+        assert write_owner_message(tmp_path, _HOLD_MAIL, "t-hold", msg_id="owner-mail")
+        return json.dumps({"status": "succeeded", "run_id": rid, "last_seq": 2,
+                           "result": "Leaf result: " + "one exact long line; " * 1200 + _HOLD_TAIL})
 
     monkeypatch.setattr(delegate_hold, "hold_wake", lambda ctx, runs, **_k: wake_now(ctx, runs, wait_once=observe))
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
@@ -709,14 +710,26 @@ def _hold_wake_facts(tmp_path, registry):
             [entry["msg_id"] for entry in drain_owner_entries(tmp_path, "t-hold", set(), "1")])
 
 
-def test_a_spilled_wake_reaches_the_hold_receipt_whole_before_its_acknowledgement(tmp_path, monkeypatch, _quiet_probe):
-    """The hold appends its receipt and ACKs at once; a spilled wake's summary would acknowledge the owner mail
-    it cut. The receipt carries the wake's exact source instead, then the ACK covers what it showed."""
+@pytest.mark.parametrize("tombstone", ["written", "refused"])
+def test_a_spilled_wake_reaches_the_hold_receipt_whole_before_its_acknowledgement(tmp_path, monkeypatch, _quiet_probe, tombstone):
+    """The hold appends its receipt and ACKs at once; a spilled wake's summary would acknowledge what it cut. The
+    receipt carries the wake's exact source instead, then the ACK covers what it showed. The owner's words, written
+    after this round's drain while the hold read its leaf, reach the same resumed request once, as their own row:
+    the resumed hold drains again before the request (``delegate_hold.round_top`` -> ``"redrain"``)."""
     registry = _spilling_hold(tmp_path, monkeypatch)
+    if tombstone == "refused":  # the latch stays active: the resumed request still carries the mail with the receipt
+        real_write = delegate_hold.write_unknown_hold
+
+        def no_tombstone(ctx, run_id, fields):
+            if not run_id:
+                raise OSError("controlled tombstone failure")
+            return real_write(ctx, run_id, fields)
+
+        monkeypatch.setattr(delegate_hold, "write_unknown_hold", no_tombstone)
     seen = []
 
     def check(messages, accumulated_usage):
-        seen.append(_without_context_facts(messages)[-1]["content"])
+        seen.append([str(row.get("content") or "") for row in _without_context_facts(messages)])
         accumulated_usage.pop("_last_llm_error_kind", None)
         return {"role": "assistant", "content": "integrated"}, 0.0
 
@@ -725,15 +738,16 @@ def test_a_spilled_wake_reaches_the_hold_receipt_whole_before_its_acknowledgemen
     result, _usage, _trace = run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
 
     assert result == "integrated" and calls["n"] == 2
-    assert seen[0].startswith("[DELEGATED LEAF WAKE / UNKNOWN-HOLD RESUME]")
-    assert _HOLD_TAIL in seen[0] and '"wake_delivery"' not in seen[0], "the whole wake, not its summary"
+    [receipt] = [text for text in seen[0] if text.startswith("[DELEGATED LEAF WAKE / UNKNOWN-HOLD RESUME]")]
+    assert _HOLD_TAIL in receipt and '"wake_delivery"' not in receipt, "the whole wake, not its summary"
+    assert _HOLD_MAIL not in receipt and sum(text.count(_HOLD_MAIL) for text in seen[0]) == 1, "once, as its own row"
     assert _hold_wake_facts(tmp_path, registry) == (False, [])
 
 
 def test_an_unreadable_spilled_wake_source_takes_the_no_resend_exit_and_acknowledges_nothing(
         tmp_path, monkeypatch, _quiet_probe):
     """No fallback to the summary: the hold cannot show the whole wake, so it takes its honest no-resend terminal;
-    the wake and its mail stay unacknowledged for the next attempt."""
+    the wake stays unacknowledged and the owner's mail unread for the next attempt."""
     import ouroboros.artifacts as artifacts
 
     registry = _spilling_hold(tmp_path, monkeypatch)

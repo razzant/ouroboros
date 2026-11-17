@@ -604,6 +604,7 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
     function measureNames() {
         delete row.dataset.ownerCompact;
         delete row.dataset.ownerGlyphs;
+        delete row.dataset.ownerTight;
         row.style.setProperty('--capsule-value-cap', '');
         capsules.forEach((capsule) => { delete capsule.el.dataset.nameFit; capsule.measureName(); });
         if (!wraps()) return;
@@ -629,10 +630,12 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
         const valueWidth = (capsule) => widthOf(capsule.el.querySelector('.chat-capsule-value'));
         let cap = waterLevel(capsules.map(valueWidth), over());
         // The model keeps its value (owner 10.11, «10. A»): where the cap would cut it, Subagents, Context and Effort
-        // fold to their glyphs first, and only a line that still wraps cuts the model's own value.
+        // fold to their glyphs first. Their touch spacing yields before the model's own value is cut.
         const model = capsules.find((capsule) => capsule.kind === 'model');
         if (model && cap < valueWidth(model)) {
             row.dataset.ownerGlyphs = 'true';
+            if (!wraps()) return;
+            row.dataset.ownerTight = 'true';
             if (!wraps()) return;
             cap = waterLevel([valueWidth(model)], over());
         }
@@ -725,7 +728,7 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
             textObserver?.disconnect();
             for (const control of controls) control.destroy();
             fold?.destroy();
-            if (row?.dataset) { delete row.dataset.ownerCompact; delete row.dataset.ownerGlyphs; }
+            if (row?.dataset) { delete row.dataset.ownerCompact; delete row.dataset.ownerGlyphs; delete row.dataset.ownerTight; }
             row?.style?.setProperty?.('--capsule-value-cap', '');
         },
     };

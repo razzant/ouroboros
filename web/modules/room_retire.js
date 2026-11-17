@@ -194,19 +194,43 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
 
 /** A room back on screen or reconnected reads what it missed (DESIGN "History edges"). A read still out after the
  * bound a loading state waits for (300 ms) is said in the room's status (`active`, then `changed()`): the last known
- * state is not passed as now. `begin(current)` arms the bound (`current()` false: the room left meanwhile), `end()`
- * is the read settled, `cancel()` a room leaving or torn down (its return reads, and says so, anew). */
+ * state is not passed as now. `begin(current, read)` arms the bound for `read` (`current()` false: the room left
+ * meanwhile). `reading` shares that work and `settled(current)` waits it out, a later reconnect's read too; `owed`
+ * separately survives failure and the interval before begin. Leaving, disconnecting and beginning a reconnect record
+ * the latest requested history version. Only an admitted newer read that was not cut short (`confirmWindow` takes its
+ * answer: a refused source or a projection fault leaves rows out, CLIENT_CONTRACT "Reading history") discharges that
+ * absence, however a page bounds it; a late pre-disconnect response cannot. `confirmWindow` returns whether the read was
+ * whole; a fault owes repair even without an absence. `end` ends only the matching read's
+ * feedback; `cancel` records absence. `retry` distinguishes an unconfirmed attempt from absence alone. */
 export function createCatchUp(changed, bound = 300) {
-    let timer = null, active = false;
+    let timer = null, active = false, reading = null, after = null, failed = false;
     const stop = () => { clearTimeout(timer); timer = null; };
     return {
         get active() { return active; },
-        begin(current) {
+        get reading() { return reading; },
+        get owed() { return after !== null; },
+        get retry() { return after !== null && failed && !reading; },
+        confirmWindow({ recentVersion, reason_code: refused, window }) {
+            const cut = refused || window?.truncated_by?.some?.(cause => String(cause).endsWith('_projection_failed'));
+            if (cut) after = Math.max(after ?? 0, recentVersion);
+            else if (recentVersion > after) after = null;
+            failed = after !== null;
+            return !cut;
+        },
+        async settled(current) { while (current() && reading) await reading; },
+        begin(current, read = null, requested = 0) {
             stop();
+            after = requested;
+            reading = read;
             timer = setTimeout(() => { timer = null; if (current()) { active = true; changed(); } }, bound);
         },
-        end() { stop(); if (active) { active = false; changed(); } },
-        cancel() { stop(); active = false; },
+        end(read = null) {
+            if (read !== reading) return;
+            stop(); reading = null;
+            if (read) failed = after !== null;
+            if (active || read && failed) { active = false; changed(); }
+        },
+        cancel(requested = 0) { stop(); failed ||= Boolean(reading); active = false; reading = null; after = requested; },
     };
 }
 

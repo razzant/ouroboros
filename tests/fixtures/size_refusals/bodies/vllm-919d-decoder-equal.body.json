@@ -1,0 +1,1 @@
+{"error": {"message": "The decoder prompt (length 80000) plus the number of requested output tokens (at least 1) is longer than the maximum model length of 80000. Make sure that `max_model_len` is no smaller than the number of text tokens (prompt + requested output tokens).", "type": "BadRequestError", "param": null, "code": 400}}

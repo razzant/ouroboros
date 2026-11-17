@@ -750,7 +750,8 @@ def _checker_targets(policy: DeploymentPolicy, served: tuple) -> str:
     targets: list = []
     for model, local, _account in policy.checker.routes():
         try:
-            targets.append(_local_binding(effective) if local else resolve_target(model, projection))
+            target = _local_binding(effective) if local else resolve_target(model, projection)
+            targets.append({key: value for key, value in target.items() if key != "capability_route"})
         except (ConnectionUnavailable, ValueError) as exc:
             targets.append(["unavailable", type(exc).__name__, str(exc)])
     return hashlib.sha256(json.dumps(targets, sort_keys=True, default=str).encode("utf-8")).hexdigest()

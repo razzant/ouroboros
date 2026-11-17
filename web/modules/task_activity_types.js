@@ -120,6 +120,10 @@
  * @property {string=} reason_code
  */
 /**
+ * @typedef {Object} TaskContinueRequest
+ * @property {string} action_nonce
+ */
+/**
  * @typedef {Object} TaskContinueResponse
  * @property {boolean=} ok
  * @property {string=} task_id

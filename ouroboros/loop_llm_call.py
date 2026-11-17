@@ -31,14 +31,15 @@ from ouroboros.model_wait import (
     OWNER_WORDS_WAITING, ModelWaitInterrupted, current_model_wait, model_wait_reason, propagate_model_control,
 )
 from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY, pop_custom_validation_receipts
-from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_refusal, single_physical_send, track_physical_attempts
+from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_refusal, is_size_refusal, single_physical_send, track_physical_attempts
 from ouroboros.observability import mark_last_answer, new_call_id, new_execution_id, persist_call
 from ouroboros.pricing import emit_llm_usage_event, infer_model_category, normalize_usage_cost as _normalize_usage_cost
 from ouroboros.send_clock import main_send_scope
 from ouroboros.task_pacing import main_loop_wire_options
 from ouroboros.task_custody import canonical_owner_root
 from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death, outcome_unknown_on_chain
-from ouroboros._usage_response import CONTENT_REFUSAL_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS, TOOL_CALL_FINISH_REASONS, output_exhaustion_facts, response_finish_reason
+from ouroboros._usage_response import (CONTENT_REFUSAL_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS, TOOL_CALL_FINISH_REASONS,
+                                       output_exhaustion_facts, provider_answer, response_finish_reason, typed_values)
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, UsageAccountingError, bind_physical_attempt_context, current_usage_scope, last_physical_attempt_capture, physical_attempt_capture_from_exception
 from ouroboros.physical_attempt_context import observe_dispatch
 from ouroboros.primary_route_observation import note_content_refusal
@@ -275,10 +276,11 @@ def _classify_empty_response(usage: Dict[str, Any], msg: Dict[str, Any]) -> Tupl
     if finish in _STRUCTURED_CONTEXT_OVERFLOW_CODES:
         return "remote_context_overflow", False, True
     body_err = usage.get("provider_error") if isinstance(usage, dict) else None
-    if isinstance(body_err, dict) and any(
-        str(body_err.get(key) or "").strip().lower() in _STRUCTURED_CONTEXT_OVERFLOW_CODES
-        for key in ("code", "type")
-    ):
+    # A refusal under its body's own status; a typed cause of another kind keeps its kind, as on an exception.
+    typed_other = isinstance(body_err, dict) and any(
+        _provider_code_kind(str(body_err.get(key) or "")) in ("quota_exhausted", "auth_error") for key in ("type", "code"))
+    if isinstance(body_err, dict) and not typed_other and (
+            (body_err.get("answer") or {}).get("basis") or is_size_refusal(body_err)):
         return "remote_context_overflow", False, True
     if not body_err and finish in OUTPUT_LIMIT_FINISH_REASONS:
         return "llm_empty_response", False, True
@@ -369,9 +371,7 @@ def _cooldown_kind_for_empty_response(body_error: Dict[str, Any], event_type: st
     primary keeps its full plan-preserved budget; cooldown is the second layer)."""
     body_kind = str(body_error.get("kind") or "")
     if body_error:
-        body_code = str(body_error.get("code") or "").strip()
-        body_message = str(body_error.get("message") or "")
-        if body_code == "413" or _output_or_body_size_message(body_message):
+        if _output_or_body_size_message(str(body_error.get("message") or "")):
             return "request_too_large"
     return body_kind if body_kind in _COOLDOWN_ERROR_KINDS else event_type
 
@@ -500,6 +500,11 @@ class LlmErrorClassification:
     # exponential backoff.
     retry_after_sec: Optional[float] = None
     reset_at: str = ""
+    # A size refusal's recognition basis (``context_budget.size_refusal``) and the ``(speaker, sentence)`` that carried it.
+    basis: str = ""
+    said: Tuple[str, str] = ("", "")
+    # A client refusal no typed code explains: only such an answer may be recognised by a cited declared limit.
+    untyped: bool = False
 
 
 def _emit_live_log(event_queue: Optional[queue.Queue], payload: Dict[str, Any]) -> None:
@@ -520,8 +525,8 @@ def _short_error_text(value: Any, limit: int = 220) -> str:
 
 from ouroboros.context_budget import (  # one overflow vocabulary for every seam
     CONTEXT_OVERFLOW_CODES as _STRUCTURED_CONTEXT_OVERFLOW_CODES,
-    context_overflow_message as _context_overflow_message,
-    output_or_body_size_message as _output_or_body_size_message,
+    OUTPUT_OR_BODY_SIZE_MARKERS, SIZE_REFUSAL_STATUSES,
+    output_or_body_size_message as _output_or_body_size_message, size_refusal,
 )
 _FORCED_INCOMPLETE_FINISH_REASONS = (_STRUCTURED_CONTEXT_OVERFLOW_CODES | OUTPUT_LIMIT_FINISH_REASONS
                                      | TOOL_CALL_FINISH_REASONS)
@@ -572,15 +577,7 @@ _NON_RETRYABLE_PROVIDER_MARKERS = {
         "401",
         "403",
     ),
-    "request_too_large": (
-        "max_tokens",
-        "maximum tokens",
-        "output tokens",
-        "maximum output",
-        "too many tokens",
-        "request body too large",
-        "body too large",
-    ),
+    "request_too_large": (*OUTPUT_OR_BODY_SIZE_MARKERS, "too many tokens"),
     "bad_request": (
         "badrequest",
         "bad request",
@@ -624,22 +621,6 @@ is_rate_limit_text = _is_rate_limit_text  # public SSOT aliases for the safety l
 NON_RETRYABLE_PROVIDER_MARKERS = _NON_RETRYABLE_PROVIDER_MARKERS
 
 
-def _is_context_overflow_error(exc: Exception, safe_error: str) -> bool:
-    """Classify untyped local/remote context-window overflow.
-
-    The output-size precedence lives inside the SHARED helper, not here, so
-    Main, the local transport, and the summarizer classify identically."""
-    if isinstance(exc, LocalContextTooLargeError):
-        return True
-    provider_text = _exception_provider_message(exc, "")
-    classification_text = "\n".join(
-        value for value in (safe_error, provider_text) if str(value or "").strip()
-    )
-    if _is_rate_limit_text(classification_text):
-        return False
-    return _context_overflow_message(classification_text)
-
-
 def _exception_status_code(exc: Exception) -> Optional[int]:
     for attr in ("status_code", "status", "code"):
         value = getattr(exc, attr, None)
@@ -659,51 +640,9 @@ def _exception_status_code(exc: Exception) -> Optional[int]:
     return value if isinstance(value, int) else None
 
 
-def _exception_body(exc: Exception) -> Dict[str, Any]:
-    """Read a structured provider body without turning a diagnostic into a failure."""
-    body = getattr(exc, "body", None)
-    if isinstance(body, dict):
-        return body
-    response = getattr(exc, "response", None)
-    parser = getattr(response, "json", None)
-    if callable(parser):
-        try:
-            value = parser()
-            return value if isinstance(value, dict) else {}
-        except Exception:
-            return {}
-    return {}
-
-
-def _exception_provider_values(exc: Exception) -> List[str]:
-    values: List[str] = []
-
-    def add(value: Any) -> None:
-        text = str(value or "").strip()
-        if text and text not in values:
-            values.append(text)
-
-    body = _exception_body(exc)
-    nested = body.get("error") if isinstance(body.get("error"), dict) else {}
-    metadata = next((src["metadata"] for src in (nested, body) if isinstance(src.get("metadata"), dict)), {})  # an SDK's body is the error itself
-    for value in (getattr(exc, "code", None), getattr(exc, "type", None), body.get("code"), body.get("type"),
-                  nested.get("code"), nested.get("type"), metadata.get("limit_source")):  # the provider's typed limit, last
-        add(value)
-    capture = getattr(exc, "physical_attempt_capture", None)
-    if capture is not None:
-        add(getattr(capture, "provider_code", None))
-        add(getattr(capture, "provider_error_type", None))
-    return values
-
-
-def _exception_provider_code(exc: Exception, safe_error: str) -> str:
-    values = _exception_provider_values(exc)
-    for value in values:
-        if value.lower() in _STRUCTURED_CONTEXT_OVERFLOW_CODES:
-            return value
-    for value in values:
-        if value.lower() in _RETRYABLE_PROVIDER_CODES:
-            return value
+def _exception_provider_code(values: List[str], body_values: List[str], size_family: bool) -> str:
+    """The failure's leading typed value: a size code inside the client family, a retryable code, else the first
+    named code the classifier types."""
     generic_bad_request_wrappers = {
         "badrequest",
         "badrequesterror",
@@ -711,48 +650,32 @@ def _exception_provider_code(exc: Exception, safe_error: str) -> str:
         "invalidrequesterror",
         "error",
     }
+
+    def generic(value: str) -> bool:
+        return value == "400" or value.lower().replace("_", "").replace("-", "").replace(" ", "") in generic_bad_request_wrappers
+
+    for wanted in ((_STRUCTURED_CONTEXT_OVERFLOW_CODES,) if size_family else ()) + (_RETRYABLE_PROVIDER_CODES,):
+        for value in values:
+            if value.lower() in wanted:
+                return value
     for value in values:
-        normalized = value.lower().replace("_", "").replace("-", "").replace(" ", "")
-        if (
-            not value.isdigit()
-            and normalized not in generic_bad_request_wrappers
-            and _provider_code_kind(value)
-        ):
+        if not value.isdigit() and not generic(value) and _provider_code_kind(value):
             return value
     # A response body that repeats only the generic numeric 400 is not a
     # provider-specific code. Leave it empty so its message can classify the
     # actual context/output failure; attr-only numeric codes stay available.
-    body = _exception_body(exc)
-    nested = body.get("error")
-    body_values = [
-        text for source in ((body, nested) if isinstance(nested, dict) else (body,))
-        for key in ("code", "type") if (text := str(source.get(key) or "").strip())
-    ]
-    if body_values and all(
-        value == "400"
-        or value.lower().replace("_", "").replace("-", "").replace(" ", "")
-        in generic_bad_request_wrappers
-        for value in body_values
-    ):
+    if body_values and all(generic(value) for value in body_values):
         return ""
     return values[0] if values else ""
 
 
 def _exception_provider_message(exc: Exception, safe_error: str = "") -> str:
-    """Best-effort human-readable provider error BODY text.
-
-    Strict OpenAI-compatible providers (cloud.ru Foundation Models, vLLM/SGLang)
-    return a 400 whose BODY distinguishes otherwise-identical status codes — e.g. a
-    cloud.ru content-filter ("guardrails") block vs an ``Extra inputs are not
-    permitted`` reasoning_content echo. ``provider_code`` alone cannot tell them
-    apart, so surface the body message (sanitized + truncated) into the durable
-    event for Logs, never the owner row. Pure read of ``exc.body``/repr; never changes routing."""
-    body = _exception_body(exc)  # always a dict
-    nested = body.get("error") if isinstance(body.get("error"), dict) else {}
-    for text in (nested.get("message"), body.get("message"), str(safe_error or "").strip()):
-        if str(text or "").strip():
-            return sanitize_tool_result_for_log(str(text))[:600]
-    return ""
+    """The Logs diagnostic of a failure: the innermost party's own sentence (``provider_answer``), sanitized and
+    truncated, else the exception's printed form. Two refusals can share a status and code (a content-filter block,
+    a rejected field), so the durable event keeps the words; never the owner row or an input to classification."""
+    engine = getattr(exc, "problem", None)  # an engine-typed problem's own message is its Logs diagnostic
+    return sanitize_tool_result_for_log(provider_answer(exc).innermost()[1] or str(
+        (engine.get("message") if isinstance(engine, dict) else "") or safe_error or "").strip())[:600]
 
 
 def _provider_code_kind(provider_code: str) -> str:
@@ -790,16 +713,20 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
     if wcode == "credential_pool_exhausted" and reset_at:
         return LlmErrorClassification("provider_error", False, _exception_status_code(exc), wcode, reset_at=reset_at)
     status_code = _exception_status_code(exc)
-    provider_code = _exception_provider_code(exc, safe)
+    # The final status sets the family: only a client refusal, or an answer with no status, is read for size.
+    size_family = not status_code or status_code in SIZE_REFUSAL_STATUSES
+    answer = provider_answer(exc)
+    values = typed_values(exc, answer)
+    provider_code = _exception_provider_code(values, answer.own_codes(), size_family)
     # Typed refusal (llm_attempt.ProviderPolicyRefusal): nothing upstream answered,
     # permanent by class — structural, and it outranks every prose heuristic below.
     if _is_provider_policy_refusal(exc):
         return LlmErrorClassification(PROVIDER_POLICY_REFUSAL, False, status_code, provider_code or PROVIDER_POLICY_REFUSAL)
-    provider_message = _exception_provider_message(exc, safe)
-    classification_text = "\n".join(v for v in (safe, provider_message) if str(v or "").strip())
-    low = classification_text.lower()
-    if provider_code.lower() in _STRUCTURED_CONTEXT_OVERFLOW_CODES:
-        return LlmErrorClassification("context_overflow", False, status_code, provider_code)
+    # Its current path's own words, else its printed form: an earlier upstream attempt never re-types the final answer.
+    low = "\n".join([text for _speaker, text, history in answer.said if not history] or [safe]).lower()
+    if size_family and provider_code.lower() in _STRUCTURED_CONTEXT_OVERFLOW_CODES:
+        return LlmErrorClassification("context_overflow", False, status_code, provider_code, basis="typed",
+                                      said=(size_refusal(answer, status_code, [provider_code]) or (*[""] * 2, *answer.innermost()))[2:])
     provider_kind = _provider_code_kind(provider_code)
     # Named codes and numeric auth/quota codes are typed authority. Only a
     # numeric code that maps to generic bad_request defers to the semantic body
@@ -811,29 +738,28 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
         return LlmErrorClassification(provider_kind, False, status_code, provider_code)
     if provider_code.lower() in _RETRYABLE_PROVIDER_CODES:
         return LlmErrorClassification("provider_transient", True, status_code, provider_code)
-    if status_code == 429:
+    if status_code == 429 or (not status_code and _is_rate_limit_text(low)):
         return LlmErrorClassification("provider_transient", True, status_code, provider_code)
-    if _is_rate_limit_text(low):
-        return LlmErrorClassification("provider_transient", True, status_code, provider_code)
-    if _output_or_body_size_message(low):
-        return LlmErrorClassification("request_too_large", False, status_code, provider_code)
-    if _is_context_overflow_error(exc, classification_text):
-        return LlmErrorClassification("context_overflow", False, status_code, provider_code)
+    if size := size_refusal(answer, status_code, printed=safe):  # size evidence outranks output words on the same answer
+        return LlmErrorClassification("context_overflow", False, status_code, size[1] or provider_code, basis=size[0], said=size[2:])
+    untyped = status_code in SIZE_REFUSAL_STATUSES
+    if size_family and any(_output_or_body_size_message(text) for text in (*(row[1] for row in answer.said), safe)):
+        return LlmErrorClassification("request_too_large", False, status_code, provider_code, untyped=untyped)
     if provider_kind:
-        return LlmErrorClassification(provider_kind, False, status_code, provider_code)
+        return LlmErrorClassification(provider_kind, False, status_code, provider_code, untyped=untyped)
     for kind, markers in _NON_RETRYABLE_PROVIDER_MARKERS.items():
-        if any(marker in low for marker in markers):
-            return LlmErrorClassification(kind, False, status_code, provider_code)
-    if status_code in {400, 401, 402, 403, 413, 422}:
+        # A known final status is the status: digits inside a sentence (a count like 4026546) never restate it.
+        if any(marker in low for marker in markers if not (status_code and marker.isdigit())):
+            return LlmErrorClassification(kind, False, status_code, provider_code, untyped=untyped)
+    if status_code in {400, 401, 402, 403, 422}:
         kind = {
             400: "bad_request",
             401: "auth_error",
             402: "quota_exhausted",
             403: "auth_error",
-            413: "request_too_large",
             422: "bad_request",
         }[status_code]
-        return LlmErrorClassification(kind, False, status_code, provider_code)
+        return LlmErrorClassification(kind, False, status_code, provider_code, untyped=untyped)
     if status_code == 408 or (status_code is not None and 500 <= status_code <= 599):
         return LlmErrorClassification("provider_transient", True, status_code, provider_code)
     if status_code is not None and 400 <= status_code <= 499:
@@ -1001,8 +927,8 @@ def _record_llm_call_error(
         ctx.accumulated_usage["_last_llm_reset_at"] = classification.reset_at
     else:
         ctx.accumulated_usage.pop("_last_llm_reset_at", None)
-    from ouroboros.loop_transport import stamp_owner_provider_message
-    stamp_owner_provider_message(ctx.accumulated_usage, error)  # the event above keeps the diagnostic provider_message
+    from ouroboros.size_refusal import stamp_failure
+    stamp_failure(ctx.accumulated_usage, error, classification)  # the event above keeps the diagnostic provider_message
     for key, value in (("_last_llm_status_code", classification.status_code),
                        ("_last_llm_provider_code", classification.provider_code)):
         if value:
@@ -1254,8 +1180,8 @@ def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated
     accumulated_usage["_model_substitutions"] = model_facts.get("substituted") or []
     for stale in ("_last_llm_error", "_last_llm_error_kind", "_last_llm_failure", "_acting_route_failure", "_last_llm_retry_same_request",
                   "_last_llm_status_code", "_last_llm_provider_code", "_last_llm_provider_message",
-                  "_last_llm_provider_fields", "_last_llm_provider_message_cut", "_last_llm_resource_refusal",
-                  "_last_llm_output_exhausted", "_last_llm_attempt_custody"):
+                  "_last_llm_provider_fields", "_last_llm_provider_answer", "_last_llm_provider_message_cut", "_last_llm_resource_refusal",
+                  "_last_llm_output_exhausted", "_last_llm_attempt_custody", "_last_llm_size_refusal"):
         accumulated_usage.pop(stale, None)
     receipts = pop_custom_validation_receipts(usage, msg.get("tool_calls") or [])
     accumulated_usage.pop(CUSTOM_RECEIPTS_USAGE_KEY, None)

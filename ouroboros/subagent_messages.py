@@ -145,10 +145,11 @@ def initiator_meta(record: Mapping[str, Any] | None) -> Dict[str, Any]:
 def place_origin(metadata: Mapping[str, Any]) -> Dict[str, Any]:
     """Where a place's work came from and why, for its card's one line: the place (``place_id``, its label as admitted),
     the provider, the author the admission saw (``focus.actor``: ``owner``/``bot`` only when true) and the wake items
-    its event matched (``focus.matched_wakes``), or ``routed`` when it came because several works read its
-    conversation (``focus.routed``; a focus minted before that key keeps it in its own allowance). A root or child
-    that inherits the focus carries it too; {} for work no place started. Copied from host-minted metadata by value;
-    an author the connector named no id or name for has no ``actor``, never "a person"."""
+    its event matched (``focus.matched_wakes``) with the words its connector declared for them (``labels``, from
+    ``focus.matched_labels``), or ``routed`` when it came because several works read its conversation
+    (``focus.routed``; a focus minted before that key keeps it in its own allowance). A root or child that inherits
+    the focus carries it too; {} for work no place started. Copied from host-minted metadata by value; an author the
+    connector named no id or name for has no ``actor``, never "a person"."""
     focus = metadata.get("focus")
     if not isinstance(focus, Mapping) or not focus.get("place_id"):
         return {}
@@ -160,12 +161,14 @@ def place_origin(metadata: Mapping[str, Any]) -> Dict[str, Any]:
            **({"owner": True} if actor.get("owner_confirmed") is True else {}),
            **({"bot": True} if actor.get("is_bot") is True else {})}
     wakes, allowance = focus.get("matched_wakes"), metadata.get("focus_allowance")
+    wakes = [fact for fact in wakes if isinstance(fact, str)] if isinstance(wakes, list) else []
+    words = focus.get("matched_labels") if isinstance(focus.get("matched_labels"), Mapping) else {}
+    labels = {fact: words[fact] for fact in wakes if isinstance(words.get(fact), str) and words[fact].strip()}
     routed = focus.get("routed") is True or (isinstance(allowance, Mapping) and allowance.get("route") is True)
     return {"place_id": str(focus["place_id"]),
             **({"place_label": str(place["label"])} if place.get("label") else {}),
             **({"provider": str(event["provider"])} if event.get("provider") else {}),
-            **({"actor": who} if who else {}),
-            "wakes": [fact for fact in wakes if isinstance(fact, str)] if isinstance(wakes, list) else [],
+            **({"actor": who} if who else {}), "wakes": wakes, **({"labels": labels} if labels else {}),
             **({"routed": True} if routed else {})}
 
 

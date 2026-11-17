@@ -225,6 +225,37 @@ test('a room reopened without unread keeps its bottom', async (t) => {
     assert.notEqual(r.messages.scrollTop, 0);
 });
 
+test('↓ reaches retained rows during catch-up without reading a missing or offscreen newest arrival', async (t) => {
+    let arrivals = 0;
+    const r = room(t, { onReadingLatest: () => { arrivals += 1; } });
+    placeAtTop(t, r, 'chat:9');
+    r.server.rows = [row(1), row(2)];
+    r.server.window = { complete: true, truncated_by: [], latest_message: { history_id: 'chat:2' } };
+    await r.instance.refreshHistory({ revision: 1 });
+    r.readUp();
+    arrivals = 0;
+    r.server.rows = [late(9), row(1), row(2)];
+    r.server.window = { complete: true, truncated_by: [], latest_message: { history_id: 'chat:9', out_of_order: true } };
+    const release = r.gate();
+    r.reconnect();
+    await until(() => r.reads.length === 2);
+    void r.instance.showLatest();
+    await quiet();
+    assert.equal(r.messages.scrollTop, r.messages.scrollHeight, 'retained rows are reached before the read settles');
+    assert.equal(arrivals, 0, 'the old bottom cannot acknowledge the missing arrival');
+    const receipt = r.instance.refreshHistory({ revision: 1 });
+    release('fail');
+    assert.equal((await receipt).painted, false, 'the failed catch-up still owes freshness');
+    await r.instance.showLatest(); // Retry is a new physical return.
+    const repaired = await r.instance.refreshHistory({ revision: 2 });
+    assert.equal(repaired.read, false, 'the new message exists, but is above the physical bottom');
+    assert.equal(arrivals, 0);
+    await r.instance.showLatest({ arrive: true });
+    const opened = await r.instance.refreshHistory({ revision: 2 });
+    assert.equal(opened.read, true, 'arrival-based navigation still reaches the actual newest message');
+    assert.equal(r.messages.scrollTop, 0);
+});
+
 test('an unread opening whose newest message is on screen at the bottom moves nothing', async (t) => {
     const r = room(t);
     r.server.rows = [row(1), row(2)];

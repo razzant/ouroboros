@@ -380,7 +380,8 @@
  *   Absent = visible speech (and every row written before the fact).
  * @property {{call_id:string,item_id:string,played_ms:number,status:'played'|'generated'|'interrupted'}=} spoken
  *   Generated speech and actual playback evidence; retained on history replay.
- * @property {string=} initiator  // The turn's origin label: "consciousness" on every frame and row of a self-initiated wake-up (and the roots it starts); absent on an owner's turn.
+ * @property {string=} initiator
+ *   The turn's origin label: "consciousness" on every frame and row of a self-initiated wake-up (and the roots it starts); absent on an owner's turn.
  * @property {import('./task_origin.js').PlaceOrigin=} place_origin  // The place that called this work, beside `initiator`: on a focus's work and the works it starts; absent elsewhere.
  * @property {('owner'|'ouroboros'|'unknown')=} continue_requester  // Continue's declared requester; unknown if undeclared, absent on other work.
  * @property {boolean=} cancelable
@@ -1217,7 +1218,8 @@
  * @property {Object.<string,Object>=} model_waits
  * @property {TaskCostBreakdown=} cost_breakdown
  * @property {{status: 'pending'|'problem'|'complete', pending_count: number, problem_count: number, promoted_ref_count: number, promoted_source_handle_count: number, problem_reasons?: Array<{reason:string,count:number}>}=} history_retention
- *   Background history placement, separate from task outcome. Routine progress is detail-only; only a problem appears on the collapsed card.
+ *   Background history placement, separate from task outcome. Routine progress is detail-only;
+ *   only a problem appears on the collapsed card.
  * @property {import('./task_origin.js').PlaceOrigin=} place_origin  // the place that called this work, as on its frames and census row
  * @property {string=} cancel_state
  * @property {string=} cancel_reason
@@ -1397,10 +1399,7 @@
 /** @typedef {import('./task_activity_types.js').KeptServiceStopResponse} KeptServiceStopResponse */
 /** @typedef {import('./task_activity_types.js').TaskPauseRequest} TaskPauseRequest */
 /** @typedef {import('./task_activity_types.js').TaskPauseResponse} TaskPauseResponse */
-/**
- * @typedef {Object} TaskContinueRequest
- * @property {string} action_nonce
- */
+/** @typedef {import('./task_activity_types.js').TaskContinueRequest} TaskContinueRequest */
 /** @typedef {import('./task_activity_types.js').TaskContinueResponse} TaskContinueResponse */
 /** @typedef {import('./task_activity_types.js').ContinuationOffer} ContinuationOffer */
 /**
@@ -1577,7 +1576,7 @@ export const MAX_QUIZ_OPTIONS = 6;
 // Mirror task_decision._COMMENT_MAX: ingress refuses longer comments, never
 // truncates; cards must offer only comments the ingress can deliver verbatim.
 export const MAX_DECISION_COMMENT = 2000;
-export const GATEWAY_CONTRACT_VERSION = '7.10.2-alpha.0';
+export const GATEWAY_CONTRACT_VERSION = '7.11.1-alpha.0';
 /** @typedef {import('./client_contract_types.js').ChatHistoryPosition} ChatHistoryPosition */
 /** @typedef {import('./client_contract_types.js').ChatHistoryResponse} ChatHistoryResponse */
 

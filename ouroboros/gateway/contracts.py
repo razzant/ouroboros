@@ -261,7 +261,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     initiator: NotRequired[str]  # origin label: "consciousness" on a wake-up's frames/rows (and its roots); absent on an owner's turn
     continue_requester: NotRequired[str]  # who asked for this Continue, read from its admission: owner|ouroboros|unknown; absent elsewhere
     # A place's work (and what it starts): {place_id, place_label?, provider?, actor?: {id?, label?, owner?, bot?}, wakes,
-    # routed?}, copied by value from its admission's focus (``subagent_messages.place_origin``); absent on other work.
+    # labels?, routed?}, by value from its admission's focus (``subagent_messages.place_origin``); absent on other work.
     place_origin: NotRequired[Dict[str, Any]]
     # Monetary projections are nullable when the physical-attempt ledger cannot be read: ``None`` is distinct from a
     # confirmed $0. The honest names (accounted upper bounds, not settled receipts), the only outbound spellings since

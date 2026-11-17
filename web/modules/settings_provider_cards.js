@@ -71,7 +71,7 @@ export const PROVIDER_CARDS = [
     {
         id: 'deepseek', kind: 'deepseek', title: 'DeepSeek', icon: '', hint: 'Direct OpenAI-compatible runtime (v4 family)', advanced: true,
         fields: [{ id: 's-deepseek-key', rowField: 'api_key', settingKey: 'DEEPSEEK_API_KEY', secret: true, label: 'API key', placeholder: 'sk-...' }],
-        note: 'Pick DeepSeek as the source in Models or Agents, then choose deepseek-v4-pro or deepseek-v4-flash.',
+        note: 'Pick DeepSeek as the source in Models or Agents, then choose deepseek-v4-pro or deepseek-flash.',
     },
     {
         id: 'zai', kind: 'zai', title: 'Z.ai (GLM)', icon: '', hint: 'Direct OpenAI-compatible runtime', advanced: true,

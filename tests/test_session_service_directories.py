@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import delegate_custody as custody
-from ouroboros import session_scratch, workspace_preflight, test_environment
+from ouroboros import session_scratch, test_environment, workspace_preflight
 from ouroboros.delegate_start_instructions import scratch_fact
 from ouroboros.workspace_preflight import (
     PACKAGE_DOWNLOADS_DIRNAME,
@@ -50,7 +50,25 @@ def _synthetic_temp_parent(tmp_path, monkeypatch):
 
 def _scratch_for(data, task, key):
     record = data / "task_drives" / task / SESSION_SCRATCH_DIRNAME / key / "scratch.json"
-    return pathlib.Path(json.loads(record.read_text(encoding="utf-8"))["path"])
+    row = json.loads(record.read_text(encoding="utf-8"))
+    path = pathlib.Path(row["path"])
+    return path / "w" if row["schema_version"] == 2 else path
+
+
+def _legacy_scratch(record):
+    """An explicit legacy fixture, with its payload preserved: no production migration is requested or used."""
+    row = json.loads(record.read_text(encoding="utf-8"))
+    container = pathlib.Path(row["path"])
+    if row["schema_version"] == 1:
+        return container
+    legacy = container.with_name(container.name + "-legacy")
+    (container / "w").rename(legacy)
+    (container / session_scratch.SCRATCH_MARKER).unlink()
+    container.rmdir()
+    seen = legacy.lstat()
+    record.write_text(json.dumps({"schema_version": 1, "path": str(legacy),
+                                  "identity": [seen.st_dev, seen.st_ino]}), encoding="utf-8")
+    return legacy
 
 
 def _seat_scratch_for(data, task, operation):
@@ -59,7 +77,9 @@ def _seat_scratch_for(data, task, operation):
 
     home = seat_dir(data, task, operation)
     record = home / SESSION_SCRATCH_DIRNAME / f"seat-{home.name}" / "scratch.json"
-    return pathlib.Path(json.loads(record.read_text(encoding="utf-8"))["path"]), record
+    row = json.loads(record.read_text(encoding="utf-8"))
+    container = pathlib.Path(row["path"])
+    return container / "w" if row["schema_version"] == 2 else container, record
 
 
 class _Catalog:
@@ -236,12 +256,16 @@ def test_new_start_replaces_missing_scratch_but_never_adopts_a_replacement(tmp_p
         assert not pathlib.Path(sibling.scratch).is_relative_to(root)
         assert not pathlib.Path(other.scratch).is_relative_to(root)
     scratch.rmdir()
+    (scratch.parent / session_scratch.SCRATCH_MARKER).unlink()
+    scratch.parent.rmdir()
     lost = _prepare(tmp_path, _Catalog(GRANTED))
     assert lost.roots and lost.scratch != first.scratch
     assert not scratch.exists()  # a new start allocates; exact retry never comes here
-    replacement = pathlib.Path(lost.scratch)
+    replacement = pathlib.Path(lost.scratch).parent
+    (replacement / "w").rmdir()
+    (replacement / session_scratch.SCRATCH_MARKER).unlink()
     replacement.rmdir()
-    _symlink_or_skip(replacement, pathlib.Path(sibling.scratch))
+    _symlink_or_skip(replacement, pathlib.Path(sibling.scratch).parent)
     replaced = _prepare(tmp_path, _Catalog(GRANTED))
     assert replaced.roots == () and "not the recorded scratch" in replaced.limitation
 
@@ -273,7 +297,7 @@ def test_existing_drive_settlement_retires_only_its_short_scratch(tmp_path, layo
     # The producer's retention is never deleted, and no longer holds the custodied drive in the trash.
     report = task_custody.remove_custody_trash(data)
     assert (report["removed"], report["stuck"]) == (1, {}) and [hold["class"] for hold in report["holds"]] == ["producer_retained"]
-    assert report["holds"][0]["example"].startswith(held.scratch) and report["holds"][0]["count"] == 1
+    assert report["holds"][0]["example"].startswith(str(pathlib.Path(held.scratch).parent)) and report["holds"][0]["count"] == 1
     assert not retired.exists() and not pathlib.Path(first.scratch).exists()
     assert (pathlib.Path(held.scratch) / test_environment.RETENTION_MARKER).is_file()
     assert pathlib.Path(sibling.scratch).is_dir()
@@ -306,19 +330,19 @@ def test_failed_scratch_removal_keeps_its_ownership_record(tmp_path, monkeypatch
     [retired] = (data / "state/custody_trash").iterdir()
     original_remove = force_remove.force_rmtree
     monkeypatch.setattr(force_remove, "force_rmtree",
-                        lambda path: None if pathlib.Path(path) == pathlib.Path(grant.scratch) else original_remove(path))
+                        lambda path: None if pathlib.Path(path) == pathlib.Path(grant.scratch).parent else original_remove(path))
     assert task_custody.remove_custody_trash(data)["stuck"]
     assert pathlib.Path(grant.scratch).is_dir()
     assert (retired / SESSION_SCRATCH_DIRNAME / "snap-1/scratch.json").is_file()
 
 
 def test_replaced_short_directory_is_neither_granted_nor_deleted(tmp_path):
-    """A real directory under the recorded name but another inode is never granted or deleted: its record
+    """A real container under the recorded name without its nonce is never granted or deleted: its record
     alone moves into a held handoff entry (``identity_unverified``), and the retired drive itself goes."""
     from ouroboros import task_custody
 
     grant = _prepare(tmp_path, _Catalog(GRANTED))
-    scratch = pathlib.Path(grant.scratch)
+    scratch = pathlib.Path(grant.scratch).parent
     displaced = scratch.with_name(scratch.name + "-original")
     scratch.rename(displaced)  # retain the inode so the new directory cannot reuse it
     scratch.mkdir()
@@ -343,8 +367,8 @@ def test_replaced_short_directory_is_neither_granted_nor_deleted(tmp_path):
 def test_real_bus_through_safe_test_uses_the_actual_short_grant(tmp_path, monkeypatch, consumer):
     """The previously failing AF_UNIX consumer, under the grant named in an ordinary start.
     No engine/OS-boundary claim: native qualification separately verifies the applied grant."""
-    from tests.test_delegate_continuation import _start
     from ouroboros.test_evidence import evidence_directory
+    from tests.test_delegate_continuation import _start
 
     monkeypatch.setattr(test_environment, "session_scratch_parent", _PLATFORM_TEMP_PARENT)
     if consumer == "delegate":
@@ -362,7 +386,7 @@ def test_real_bus_through_safe_test_uses_the_actual_short_grant(tmp_path, monkey
                                       route_id="route")
         drive = data / "task_drives" / "task-1"
     scratch = pathlib.Path(request["execution"]["auxiliaryWritableRoots"][0])
-    assert scratch.parent == _PLATFORM_TEMP_PARENT().resolve()
+    assert scratch.name == "w" and scratch.parent.parent == _PLATFORM_TEMP_PARENT().resolve()
     assert str(scratch) in request["instructions"] and scratch.parent.as_posix() not in request["execution"]["auxiliaryWritableRoots"]
     repo = pathlib.Path(__file__).resolve().parents[1]
     evidence = evidence_directory(repo)  # the outer safe_test's durable destination, not tmp_path

@@ -630,12 +630,16 @@ def dialogue_text(entry: Mapping[str, Any]) -> str:
 
 def place_message_facts(entry: Mapping[str, Any]) -> str:
     """What the connector reported about an inbound place row's message (``presence_message_facts``), as its own
-    labelled block for a reader to set beside the row's words, never inside them; ``""`` for any other row. A cut
-    names the row's recorded context (``chat_chain.context_address``), which holds its message whole."""
+    labelled block for a reader to set beside the row's words, never inside them; ``""`` for any other row and for a
+    call's utterance, which keeps its opening's (``presence_call.call_utterance``). A cut names the row's recorded
+    context (``chat_chain.context_address``), which holds its message whole."""
     if not (entry.get("direction") == "in" and row_provenance(entry) == "place"):
         return ""
+    from ouroboros.presence_call import call_utterance
     from ouroboros.presence_message_facts import connector_facts, cut
 
+    if call_utterance(entry):
+        return ""
     message = _mapping(_mapping(entry.get("transport")).get("message"))
     source = ""
     if cut(message):

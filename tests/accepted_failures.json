@@ -50,6 +50,34 @@
       "platforms": [
         "windows"
       ]
+    },
+    {
+      "nodeid": "tests/test_live_stack_preparation.py::test_catchup_does_not_offer_its_own_speech_but_pending_mail_is_answered[False-openai-False]",
+      "issue": 2942,
+      "platforms": [
+        "windows"
+      ]
+    },
+    {
+      "nodeid": "tests/test_live_stack_preparation.py::test_catchup_does_not_offer_its_own_speech_but_pending_mail_is_answered[False-gemini-True]",
+      "issue": 2942,
+      "platforms": [
+        "windows"
+      ]
+    },
+    {
+      "nodeid": "tests/test_live_stack_preparation.py::test_catchup_does_not_offer_its_own_speech_but_pending_mail_is_answered[True-openai-False]",
+      "issue": 2942,
+      "platforms": [
+        "windows"
+      ]
+    },
+    {
+      "nodeid": "tests/test_live_stack_preparation.py::test_catchup_does_not_offer_its_own_speech_but_pending_mail_is_answered[True-gemini-True]",
+      "issue": 2942,
+      "platforms": [
+        "windows"
+      ]
     }
   ]
 }

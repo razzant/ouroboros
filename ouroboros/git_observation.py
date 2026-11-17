@@ -1,4 +1,4 @@
-"""Host Git observations: no index writes and content-confirmed changed paths."""
+"""Host Git observations: no index writes, content-confirmed changed paths, a private index that reads the disk."""
 
 from __future__ import annotations
 
@@ -104,3 +104,33 @@ def host_git_env(env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     result[f"GIT_CONFIG_KEY_{slot}"] = "diff.autoRefreshIndex"
     result[f"GIT_CONFIG_VALUE_{slot}"] = "false"
     return result
+
+
+def unhide_live_entries(git: Callable[..., bytes], present: Callable[[str], bool]) -> set[str]:
+    """Let a PRIVATE index copy read its entries from the disk, as the files' own readers do.
+
+    ``assume-unchanged`` and ``skip-worktree`` make Git answer from the index instead of the file. The first is
+    cleared on every entry, the second where ``present(path)`` finds the path (a link counts as itself), so a
+    later diff or ``update-index`` sees the live bytes; staged blobs and modes stay. An absent skip-worktree
+    entry (a sparse checkout's) keeps its flag and indexed blob; those paths are returned. The copy must keep
+    the real index's time: Git re-reads an entry not older than its index (racily clean), and a fresh time
+    would let a same-size edit pass as unchanged. ``git(*args, stdin=...)`` runs Git with the copy as
+    ``GIT_INDEX_FILE``, returning stdout bytes or raising."""
+    assumed, skipped, absent = [], [], set()
+    for item in git("ls-files", "-v", "-z").split(b"\0"):
+        tag, _, raw = item.partition(b" ")
+        if not raw:
+            continue
+        path = raw.decode("utf-8", errors="surrogateescape")
+        if tag[:1].islower():  # `ls-files -v` lowercases an assume-unchanged entry's tag
+            assumed.append(path)
+        if tag[:1] in (b"S", b"s"):
+            if present(path):
+                skipped.append(path)
+            else:
+                absent.add(path)
+    for option, paths in (("--no-assume-unchanged", assumed), ("--no-skip-worktree", skipped)):
+        if paths:
+            git("update-index", "-z", option, "--stdin",
+                stdin=b"".join(path.encode("utf-8", errors="surrogateescape") + b"\0" for path in paths))
+    return absent
