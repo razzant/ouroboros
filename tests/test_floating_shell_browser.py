@@ -212,6 +212,37 @@ def test_hidden_main_does_not_take_visible_projects_notice(shell_ui):
     assert _gap_heads_history(page, "#page-chat")["heads"]
 
 
+def test_a_jumped_project_returns_to_its_reference_with_the_ring_of_the_close(shell_ui):
+    """A reference opens its Project as a jump (DESIGN "Layers and dismissal"): Escape closes the room to the reference
+    with the keyboard's ring, as a Settings return does; ×, a pointer's close, returns there with none."""
+    page = shell_ui["new_page"](viewport={"width": 1087, "height": 744})
+    Transport(page, projects=[PROJECT], history={1: reading(14), 42: reading(14, room="Project")})
+    page.goto(shell_ui["url"])
+    page.wait_for_selector("#chat-input")
+    page.evaluate("""async (project) => {
+        const { projectReference } = await import('/static/modules/project_reference.js');
+        const button = projectReference(project);
+        button.id = 'jump-reference';
+        document.querySelector('#page-chat').append(button);
+    }""", {"id": PROJECT["id"], "name": PROJECT["name"]})
+    returned = """() => { const el = document.getElementById('jump-reference');
+        return {focused: el === document.activeElement, input: el.dataset.returnFocus || '',
+                ring: getComputedStyle(el).outlineStyle, layers: window.__ouroLayers.ids()}; }"""
+    for close, expected in (("Escape", {"focused": True, "input": "keyboard", "ring": "solid", "layers": []}),
+                            ("×", {"focused": True, "input": "pointer", "ring": "none", "layers": []})):
+        page.locator("#jump-reference").focus()
+        page.keyboard.press("Enter")
+        page.wait_for_function("() => /^page-return-\\d+,project$/.test(window.__ouroLayers.ids().join())")
+        page.wait_for_selector("#project-panel.open .chat-input")
+        if close == "Escape":
+            page.keyboard.press("Escape")
+        else:
+            page.locator("#project-panel-close").click()
+        page.wait_for_function("() => !document.body.classList.contains('project-panel-open')")
+        page.wait_for_function("() => document.activeElement?.id === 'jump-reference'")
+        assert page.evaluate(returned) == expected, close
+
+
 @pytest.mark.parametrize("chat_id,keyboard", [(1, False), (1, True), (42, False), (42, True)])
 def test_work_navigation_clears_persistent_history_error(shell_ui, chat_id, keyboard):
     page = shell_ui["new_page"](viewport={"width": 390, "height": 844}, has_touch=True)

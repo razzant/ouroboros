@@ -457,9 +457,9 @@ function syncNavigationState() {
         if (activeProjectId !== shownProjectId) layers.remove('project');
         if (activeProjectId) layers.push({ id: 'project', el: projectPanel, modal: covers,
             live: [projectPanelBackdrop, covers && !isStackLayout() ? primarySidebar : null].filter(Boolean),
-            onClose: () => {
+            onClose: (reason) => {
                 const jump = layers.returnPage();
-                return jump?.destination === `project:${activeProjectId}` ? jump.onClose() : closeProjectPanel();
+                return jump?.destination === `project:${activeProjectId}` ? jump.onClose(reason) : closeProjectPanel();
             }, focus: focusProjectRoom });
     }, { inertAfter: isStackLayout() ? settled : covers ? arrived : null });
     // The layer's inert release is registered first. A delayed read behind the drawer keeps its notice pending.
