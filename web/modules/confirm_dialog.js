@@ -8,7 +8,8 @@ let activeClose = null;
 /**
  * Render one caller-supplied typed detail disclosure. Values are always text;
  * callers cannot inject markup into the shared dialog.
- * @param {{summary?: string, rows?: Array<{label?: string, value?: string}>}|null} details
+ * @param {{summary?: string, rows?: Array<{label?: string, value?: string, authored?: boolean}>}|null} details
+ *   `authored`: the value is someone's own words (a place's name), which the page's translator leaves as written.
  */
 export function renderConfirmDialogDetails(details) {
     if (!details || typeof details !== 'object') return '';
@@ -19,7 +20,7 @@ export function renderConfirmDialogDetails(details) {
     const renderedRows = rows.map((row) => `
         <div class="confirm-dialog-detail-row">
             <dt>${escapeHtml(String(row.label ?? 'Detail'))}</dt>
-            <dd>${escapeHtml(String(row.value ?? ''))}</dd>
+            <dd${row.authored ? ' data-i18n-authored' : ''}>${escapeHtml(String(row.value ?? ''))}</dd>
         </div>`).join('');
     return `<details class="confirm-dialog-details ui-disclosure">
         <summary>${escapeHtml(String(details.summary ?? 'Show details'))}</summary>

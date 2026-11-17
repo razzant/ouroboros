@@ -1110,3 +1110,12 @@ test('clearing the field returns the place to inheriting: one write of the empty
     assert.deepEqual(requests[1], { model: GLM, expected_revision: start.revision + 1 });
     assert.match(body.textContent, /Model saved\./);
 });
+
+test('a spent allowance keeps the wake note from promising a wake (review r3)', () => {
+    const note = 'Its allowance for the last 24 hours is spent: nothing here starts a new wake until there is room in it again.';
+    const quiet = { cause: 'allowance', word: 'Waits · allowance spent', note, door: 'costs' };
+    const html = placeSheetBodyHtml({ ...community, quiet });
+    assert.match(html, /While its allowance is spent, nothing here starts a new wake\./);
+    assert.doesNotMatch(html, /these still wake it to read and think/, 'a Silent place no longer promises it wakes to read');
+    assert.match(placeSheetBodyHtml(community), /these still wake it to read and think/, 'with room it still does');
+});

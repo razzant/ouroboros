@@ -328,3 +328,13 @@ test('a progress wrapper is removed only with a known host opening', () => {
     assert.equal(hostRowDisplayText({ ...row, text: unknown }, '💬 translated unknown'), '💬 translated unknown');
     assert.equal(row.text, text);
 });
+
+test('the turn-on receipt at a $0 or spent allowance loses its mark like the ordinary one (review r3)', () => {
+    // consciousness_view.on_sentence opens the row; /bg (server.py) and the runtime control add «🧠 ».
+    const source = readFileSync(new URL('../../ouroboros/consciousness_view.py', import.meta.url), 'utf8');
+    assert.ok(source.includes('Consciousness on, but its allowance is $0.00') && source.includes('Consciousness on, but its allowance for the last 24 hours is spent'));
+    for (const type of ['command_reply', 'consciousness_notice']) {
+        const raw = '🧠 Consciousness on, but its allowance is $0.00: it cannot wake until you raise it in Costs.';
+        assert.equal(hostNoticeDisplayText(raw, type), raw.slice(raw.indexOf(' ') + 1));
+    }
+});
