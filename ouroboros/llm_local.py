@@ -109,7 +109,8 @@ class _LocalLaneMixin:
         preference = resolve_processing_preference(override=processing_preference)
         target = {"provider": "local", "resolved_model": "local-model", "usage_model": "local-model",
                   "processing_preference": preference, "context_window_tokens": evidence.get("context_window"),
-                  "context_window_confirmed": evidence.get("confirmed") is True}
+                  "context_window_confirmed": evidence.get("confirmed") is True,
+                  "window_instance_id": str(evidence.get("process_id") or "")}
         return target, kwargs
 
     def _finalize_local_candidate(self, target: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:

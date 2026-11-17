@@ -425,12 +425,14 @@ def test_delegate_wait_wakes_for_a_later_waking_arrival_and_leaves_the_passive_o
         assert _woke(ctx).startswith("mail:"), "the waking arrival ends the sleep"
         wait_once, calls = _observer(("no_progress", None))
         wake = json.loads(wake_now(ctx, "run-1", wait_once=wait_once).text)
-        assert calls == ["no_progress"] and _wake_ids(wake) == [loud]
+        assert calls == ["no_progress"] and _wake_ids(wake) == [], "a wake carries only loop controls"
         assert supervision.acknowledge_pending_wake(ctx, wake)
         acked = acknowledged_task_message_ids(focus[0], "author", attempt_key=1)
-        assert loud in acked and quiet not in acked
+        assert loud not in acked and quiet not in acked, "both stay the drain's"
         assert "Place event; context only" in _delivered(focus[0], ctx)
-        assert quiet in acknowledged_task_message_ids(focus[0], "author", attempt_key=1)
+        assert sorted(row["wake"] for row in ctx._presence_delivered) == [False, True]
+        acked = acknowledged_task_message_ids(focus[0], "author", attempt_key=1)
+        assert loud in acked and quiet in acked
     finally:
         lease.release()
 
@@ -453,12 +455,14 @@ def test_delegate_wait_still_wakes_for_genuine_input_beside_a_passive_arrival(fo
         assert woke and (genuine != "peer" or woke == "mail:peer") and (genuine != "deadline" or woke == "control:deadline")
         wait_once, calls = _observer(("no_progress", None))
         wake = json.loads(wake_now(ctx, "run-1", wait_once=wait_once, woke_by=woke).text)
-        expected = {"owner": ["owner-b"], "peer": ["peer-1"], "deadline": []}[genuine]
-        assert _wake_ids(wake) == expected
+        assert _wake_ids(wake) == [], "the input that woke it is the drain's, never the wake's"
         if genuine == "deadline":
             assert {"type": "deadline"} in wake["wake_events"] and calls == []
         assert supervision.acknowledge_pending_wake(ctx, wake)
         assert quiet not in acknowledged_task_message_ids(focus[0], "author", attempt_key=1)
+        if genuine != "deadline":
+            words = {"owner": "Use option B.", "peer": "tests done"}[genuine]
+            assert _delivered(focus[0], ctx).count(words) == 1, "the next drain delivers it once"
     finally:
         lease.release()
 
@@ -472,7 +476,10 @@ def test_delegate_wait_keeps_waking_for_place_mail_without_a_typed_fact(tmp_path
     assert _woke(ctx) == "mail:presence-turn"
     wait_once, calls = _observer(("no_progress", None))
     wake_out = json.loads(wake_now(ctx, "run-1", wait_once=wait_once).text)
-    assert calls == ["no_progress"] and _wake_ids(wake_out) == ["place-event:e1"]
+    assert calls == ["no_progress"] and _wake_ids(wake_out) == []
+    from ouroboros.owner_mailbox import drain_owner_entries
+
+    assert [row["msg_id"] for row in drain_owner_entries(tmp_path, "author", set(), 1)] == ["place-event:e1"]
 
 
 def test_delegate_wait_wakes_at_once_for_a_waking_arrival(focus):
@@ -482,7 +489,10 @@ def test_delegate_wait_wakes_at_once_for_a_waking_arrival(focus):
         assert _woke(ctx).startswith("mail:")
         wait_once, calls = _observer(("no_progress", None))
         wake = json.loads(wake_now(ctx, "run-1", wait_once=wait_once).text)
-        assert calls == ["no_progress"] and _wake_ids(wake) == [loud]
+        assert calls == ["no_progress"] and _wake_ids(wake) == []
+        _delivered(focus[0], ctx)
+        assert ctx._presence_delivered[-1]["wake"] is True and loud in acknowledged_task_message_ids(
+            focus[0], "author", attempt_key=1), "the drain delivered the arrival that woke it"
     finally:
         lease.release()
 

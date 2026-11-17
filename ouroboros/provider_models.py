@@ -120,6 +120,21 @@ def normalize_minimax_reasoning_effort(model: str, value: str) -> str:
     return MINIMAX_FLASH_EFFORT_ALIASES.get(value, value) if model == MINIMAX_FLASH_MODEL else value
 
 
+# Direct Anthropic models whose Messages API refuses thinking={"type": "disabled"} and names
+# another off state. Sonnet 5.5 400s on "disabled"; "between_tools" turns off up-front
+# thinking, and its progress notes between tool calls return as signed thinking blocks
+# (build-with-claude/thinking, read 2026-11-16; a direct send the same day answered that
+# 400). Other ids have no vouched alternate here: they keep "disabled" and their existing
+# repair. request_wire_contract.payload_effort reads each value back as "none".
+# Evidence and re-check policy: DEVELOPMENT "External facts".
+ANTHROPIC_THINKING_OFF_TYPES = {"claude-sonnet-5-5": "between_tools"}
+
+
+def anthropic_thinking_off_type(model: str) -> str:
+    """The native thinking type that carries a requested ``none`` for one exact direct model."""
+    return ANTHROPIC_THINKING_OFF_TYPES.get(str(model or "").strip(), "disabled")
+
+
 @dataclass(frozen=True)
 class KindSpec:
     """One API connection kind: its label, its fields in order as ``(row_field,
@@ -619,8 +634,10 @@ ZAI_DIRECT_DEFAULTS = {
 DEEPSEEK_DIRECT_DEFAULTS = {
     "main": "deepseek::deepseek-v4-pro",
     "heavy": "",
-    "light": "deepseek::deepseek-v4-flash",
-    "fallback": "deepseek::deepseek-v4-flash",
+    # The official current Flash alias (api-docs.deepseek.com/quick_start/pricing, read 2026-11-16: serves
+    # DeepSeek-V4.1-Flash-1017); a saved deepseek-v4-flash stays as written and keeps being accepted.
+    "light": "deepseek::deepseek-flash",
+    "fallback": "deepseek::deepseek-flash",
     # DeepSeek documents a FIRM 1M context on every v4 model (api-docs
     # 2026-08: "1M context, 384K max output" with no guaranteed-minimum
     # caveat), so the slot follows the OpenAI/Anthropic fill pattern rather
@@ -636,8 +653,8 @@ DEEPSEEK_DIRECT_DEFAULTS = {
 ANTHROPIC_DIRECT_DEFAULTS = {
     "main": "anthropic::claude-opus-5-5",
     "heavy": "",
-    "light": "anthropic::claude-sonnet-5",
-    "fallback": "anthropic::claude-sonnet-5",
+    "light": "anthropic::claude-sonnet-5-5",
+    "fallback": "anthropic::claude-sonnet-5-5",
     # Deep self-review is a real slot with a SHIPPED default; without a
     # per-provider value a direct-only install keeps an unreachable
     # OpenRouter-form id it has no credential for (v6.82.0).

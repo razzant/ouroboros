@@ -480,8 +480,9 @@ export function createChatInstance({
         }
     }
     let activeLiveGroupId = '';
-    let pendingReconnectSync = false;  // Set when a fromReconnect sync arrives while one is already in-flight.
-    const catchUp = createCatchUp(syncChatStatus);  // a return's or reconnect's read still out after its bound
+    // A return's or reconnect's read: status once out past its bound, ↓ Retry once it ends unconfirmed (shown only,
+    // as a hidden feed reads as at its end).
+    const catchUp = createCatchUp(() => { syncChatStatus(); if (isInstanceVisible()) updateScrollButton(); });
     let pendingRestartNotice = '';
     try {
         pendingRestartNotice = restartNoticeText(new URL(window.location.href).searchParams.get('_ouro_reason') || '');
@@ -2197,28 +2198,14 @@ export function createChatInstance({
     const MAIN_HYDRATION_MAX_DEFER_MS = 3500;
     function waitForHydrationWindow() {
         if (!isMain) return Promise.resolve();
-        if (hydrationGatePromise) return hydrationGatePromise;
-        hydrationGatePromise = new Promise((resolve) => {
+        return hydrationGatePromise ||= new Promise((resolve) => {
             const deadline = Date.now() + MAIN_HYDRATION_MAX_DEFER_MS;
-            const scheduleIdle = (callback) => (typeof requestIdleCallback === 'function'
-                ? requestIdleCallback(callback, { timeout: 1000 })
-                : setTimeout(callback, 50));
-            const attempt = () => {
-                if (destroyed) {
-                    resolve();
-                    return;
-                }
-                if (Date.now() < deadline
-                    && typeof isProjectOpening === 'function'
-                    && isProjectOpening()) {
-                    setTimeout(attempt, 200);
-                    return;
-                }
-                resolve();
-            };
-            scheduleIdle(attempt);
+            // Each look waits while a Project is still opening, until the bound; a destroyed room waits for nothing.
+            const attempt = () => (!destroyed && Date.now() < deadline && isProjectOpening?.()
+                ? setTimeout(attempt, 200) : resolve());
+            if (typeof requestIdleCallback === 'function') requestIdleCallback(attempt, { timeout: 1000 });
+            else setTimeout(attempt, 50);
         });
-        return hydrationGatePromise;
     }
 
     const historicalTerminals = new Map();
@@ -2489,21 +2476,7 @@ export function createChatInstance({
 
     async function syncHistory({ fromReconnect = false } = {}) {
         if (destroyed || leaving) return false;
-        if (historySyncPromise) {
-            // A reconnect joining an older read still owes a rebuild.
-            if (fromReconnect) {
-                pendingReconnectSync = true;
-                return historySyncPromise.then(() => {
-                    // One waiter consumes the queued rebuild; peers await it.
-                    if (pendingReconnectSync) {
-                        pendingReconnectSync = false;
-                        return syncHistory({ fromReconnect: true });
-                    }
-                    return historySyncPromise || lastHistorySyncSucceeded;
-                });
-            }
-            return historySyncPromise;
-        }
+        if (historySyncPromise) return historySyncPromise;
         historySyncPromise = (async () => {
             const startedVisit = visit;
             const abort = historyReadAbort = new AbortController();
@@ -2511,7 +2484,7 @@ export function createChatInstance({
             const cardsAtStart = new Set(liveCardRecords.keys());
             // Replay can refill the feed without moving the reader's intent.
             const followingAtStart = reading.stick, generationAtStart = reading.generation;
-            const landedAtStart = historyPager.arrivalsLanded();
+            const landedAtStart = historyPager.arrivalsLanded(), recovering = !lastHistorySyncSucceeded || catchUp.owed;
             try {
                 // No welcome until this read lands.
                 emptyWelcome?.historyPending();
@@ -2526,14 +2499,14 @@ export function createChatInstance({
                 }
                 if (data.recentVersion < recentApplied) return lastHistorySyncSucceeded;
                 const messages = Array.isArray(data.messages) ? data.messages : [];
-                const oldRecentIds = recentHistoryIds;
+                const oldRecentIds = retainedRecentIds();
                 const admitted = acceptRecentWindow(data, messages);
                 const pagerBeforeRecent = historyPager.getState();
-                // A reader in older history keeps the chain `Load more history` goes on from, the rows the newest read
-                // let go staying below; a shifted window re-anchors only a reader following the newest message.
-                const reader = readingHistory();
-                const rechainRecent = admitted && !reader && !data.reason_code && pagerBeforeRecent.initialized
-                    && !pagerBeforeRecent.canNewer && [...oldRecentIds].some(id => !recentHistoryIds.has(id));
+                // Older reading keeps its chain; a follower's healthy read restores the present, also after ↓ failed.
+                const reader = readingHistory(), returning = reading.returning;
+                const rechainRecent = admitted && !catchUp.owed && (!reader || returning) && pagerBeforeRecent.initialized
+                    && (returning || pagerBeforeRecent.away && (fromReconnect || recovering || pagerBeforeRecent.retryReturn)
+                        || !pagerBeforeRecent.canNewer && [...oldRecentIds].some(id => !recentHistoryIds.has(id)));
                 const result = historyPager.acceptRecent(data, rechainRecent && { fromReconnect });
                 if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect });
                 withStableViewport(() => releaseHistoryIds(!admitted || rechainRecent || reader
@@ -2588,8 +2561,6 @@ export function createChatInstance({
             } finally {
                 if (historyReadAbort === abort) historyReadAbort = null;
                 historySyncPromise = null;
-                // A reconnect caller waiting on the active promise owns replay of pendingReconnectSync above; its promise
-                // resolves only after the authoritative rebuild.
             }
         })();
         return historySyncPromise;
@@ -2604,13 +2575,13 @@ export function createChatInstance({
         shown: () => !destroyed && !leaving && !page.hidden && isInstanceVisible() });
     const readReceipt = createProjectReadReceipt({ onNote: sharedRead.sample,
         read: async (fresh, whole) => {
-            await (!fresh && initialHydrationPromise || historyPager.read({ whole }));
-            return lastHistorySyncSucceeded;
+            await (!fresh && (catchUp.reading || !catchUp.owed && initialHydrationPromise) || historyPager.read({ whole }));
+            return lastHistorySyncSucceeded && !catchUp.owed;
         },
         // A destroyed page reports hidden===false, hence the lifecycle flag.
         isShown: () => !destroyed && !leaving && !page.hidden,
         // A place still being restored is not where the reader is.
-        isReadingLatest: latest => !destroyed && !reading.pending && !replies.revealing && isInstanceVisible() && isAtNewestMessage(latest, {
+        isReadingLatest: latest => !destroyed && !catchUp.owed && !reading.pending && !replies.revealing && isInstanceVisible() && isAtNewestMessage(latest, {
             ...newestFacts, atBottom: () => isNearBottom() && !historyPager.getState().canNewer,
         }),
         onReadingLatest, arriving: () => reading.arriving, delivered: newestFacts.delivered,
@@ -2626,7 +2597,7 @@ export function createChatInstance({
         land: (latest, token) => reading.land(() => newestMessageOffset(latest, newestFacts), token),
     });
 
-    (async () => {
+    const opening = (async () => {
         // The owners below exist first: no read stands between an opening and the saved text.
         await null;
         if (!destroyed && preview.show()) { updateMessagesPadding(); reading.followAfterLayout(); }
@@ -2689,41 +2660,62 @@ export function createChatInstance({
         requestAnimationFrame(() => { loadReflowQueued = false; if (!destroyed) reading.reflow(); });
     }, true);
 
-    // Navigation plus one coalesced, non-live-region remote-activity bit.
+    // ↓: navigation, coalesced remote activity (not a live region), and busy/Retry for the present read (style.css).
     function updateScrollButton() {
         if (!scrollBottomBtn) return;
-        if (_hasNewActivity && isNearBottom(ACTUAL_BOTTOM_TOLERANCE_PX)) {
-            _hasNewActivity = false;
-        }
-        const label = _hasNewActivity
-            ? 'New activity — scroll to latest message'
+        _hasNewActivity &&= !isNearBottom(ACTUAL_BOTTOM_TOLERANCE_PX);
+        const busy = reading.returning;
+        const retry = historyWindow?.failed || catchUp.retry && !historyWindow?.waiting;
+        const label = busy ? 'Loading latest messages…' : retry ? 'Retry loading latest messages'
+            : _hasNewActivity ? 'New activity — scroll to latest message'
             : 'Scroll to latest message';
         scrollBottomBtn.setAttribute('aria-label', label);
         scrollBottomBtn.title = label;
+        scrollBottomBtn.setAttribute('aria-busy', String(busy));
         if (scrollActivityDot) scrollActivityDot.hidden = !_hasNewActivity;
-        scrollBottomBtn.classList.toggle('visible', isInstanceVisible() && (!isNearBottom() || (!reading.stick && historyWindow?.gaps)));
+        scrollBottomBtn.classList.toggle('visible', isInstanceVisible() && (busy || retry || !isNearBottom() || (!reading.stick && historyWindow?.gaps)));
     }
-    // The one way to the present: ↓, and a return to a room that followed it, unread at what arrived last.
+    // Freshness gates reads, not retained movement.
+    function presentHeld() {
+        return historyLoaded && !catchUp.owed && !historyWindow?.failed && !historyPager.getState().away && !historyWindow?.horizonGap;
+    }
+    // ↓ moves now. One claim owns the read and landing; new reading cancels it, repeated physical presses share it.
     async function showLatest({ arrive = false } = {}) {
-        const current = reading.claim(arrive === true);
-        if (historySyncPromise) await historySyncPromise;
-        await historyPager.whenIdle();
-        if (destroyed || !current()) return;
-        if (historyPager.getState().away || historyWindow?.horizonGap) {
-            if ((await historyPager.latest()).status !== 'applied') return;
-        }
-        if (destroyed || !current()) return;
-        reading.stick = true;
-        for (const record of liveCardRecords.values()) record.childDetailRead = undefined;
-        reading.followAfterLayout();
-        updateScrollButton();
-        historyControls.showNotice();
+        if (reading.returning && reading.arriving === null && !arrive) { reading.followAfterLayout(); return; }
+        const at = visit, claim = reading.claim(arrive === true);
+        const current = () => !destroyed && at === visit && claim();
+        historyPager.toPresent();
+        const needed = !presentHeld();
+        const follow = () => {
+            reading.stick = true;
+            for (const record of liveCardRecords.values()) record.childDetailRead = undefined;
+            reading.followAfterLayout();
+            historyControls.showNotice();
+        };
+        reading.wait(current, needed);
+        if (!arrive || !needed) follow();
+        if (!needed) return;
+        try {
+            const shared = catchUp.reading || historySyncPromise || !historyLoaded && opening.then(awaitInitialHydration);
+            await shared;
+            await catchUp.settled(current);
+            if (!current() || shared && !lastHistorySyncSucceeded) return;
+            if (!presentHeld() && (await historyPager.latest(current)).status !== 'applied') return;
+            await catchUp.settled(current);  // a reconnect during that read still owes feedback
+            if (current() && !catchUp.owed && arrive) follow();
+        } finally { reading.wait(current, false); }
     }
     scrollBottomBtn?.addEventListener('click', showLatest);
-    // A return: from the newest message to the present; from an older passage back there, ↓ marked, the rest unread
-    // (owner 2026-11-03). Leaving the screen keeps the place and stops a pending move.
-    const resume = (arrive = false) => ((reading.target || reading).stick === false
-        ? (_hasNewActivity ||= arrive, reading.position(), updateScrollButton()) : showLatest({ arrive }));
+    // A return keeps older reading, ↓ marked and newer messages unread (owner 2026-11-03). A follower restores its
+    // place while catching up. Leaving keeps that place and cancels the pending move.
+    function resume(arrive = false) {
+        if ((reading.target || reading).stick === false) {
+            _hasNewActivity ||= arrive; reading.position(); updateScrollButton(); return;
+        }
+        const returning = showLatest({ arrive });
+        reading.request(); // Restore following even on failure, without fresh read credit.
+        return returning;
+    }
     const keepPlace = () => { if (isInstanceVisible()) { reading.cancel(); reading.request(); } };
 
     // The composer's height once its reply strip moved (chat_reply.js `data-motion`): opening, the full strip
@@ -2845,6 +2837,8 @@ export function createChatInstance({
     let pagerRecent = {};
     let recentHasOrigins = false;
     let recentHistoryIds = new Set();
+    let beforePartialIds = null;
+    const retainedRecentIds = () => new Set([...recentHistoryIds, ...(beforePartialIds || [])]);
     let recentRequest = 0, recentApplied = 0;
     // Every read of this room (newest, a page, ↓, arrivals): a current one refused for authentication takes the saved text.
     async function fetchHistory(cursor, options = {}) {
@@ -2856,25 +2850,27 @@ export function createChatInstance({
             throw error;
         }
     }
-    // Both newest reads (the room's own, ↓'s `latest` page) are admitted here once: the saved preview follows.
+    // Admit each newest response once, including ↓; the preview follows it.
     function acceptRecentWindow(data, messages) {
         if (data.recentVersion <= recentApplied) return false;
         recentApplied = data.recentVersion;
+        const whole = catchUp.confirmWindow(data);
         preview.save(messages, data);
         // The newest admitted window (↓ too) owns the failure note.
-        historyControls.endRecent(data.reason_code ? new Error('Some saved history could not be loaded.') : null);
+        historyControls.endRecent(whole ? null : new Error('Some saved history could not be loaded.'), Boolean(data.page_cursor));
         recentCoverage = data.coverage ?? null;
         recentHasOrigins = messages.some(row => row.origin_projected);
         readReceipt.recent(data);
-        const ids = new Set(messages.flatMap(historyRowIds));
-        for (const id of recentHistoryIds) if (data.window?.truncated_by?.includes(`${id.split(':')[0]}_source_unavailable`)) ids.add(id);
-        recentHistoryIds = ids;
+        // Keep the rows held before the fault across a rechain; repeated partial windows replace one another.
+        if (whole) beforePartialIds = null;
+        else beforePartialIds ??= retainedHistoryIds();
+        recentHistoryIds = new Set(messages.flatMap(historyRowIds));
         return true;
     }
     const pendingHistoryEvictions = new Set();
     const historyNodes = (id) => Array.from(messagesDiv.querySelectorAll('[data-history-id]'))
         .filter(node => node.dataset.historyId === id);
-    const retainedHistoryIds = () => new Set([...recentHistoryIds,
+    const retainedHistoryIds = () => new Set([...retainedRecentIds(),
         ...[...pageHistoryIds.values()].flatMap(ids => [...ids])]);
     function isHistoryPageProtected(descriptor) {
         const ids = pageHistoryIds.get(descriptor.id) || new Set();
@@ -2961,9 +2957,9 @@ export function createChatInstance({
         fetchPage: fetchHistory,
         isAlive: () => !destroyed && !leaving,
         applyPage: (messages, descriptor) => {
-            pageHistoryIds.set(descriptor.id, new Set(messages.flatMap(historyRowIds)));
-            const oldRecentIds = recentHistoryIds;
+            const oldRecentIds = retainedRecentIds();
             const admitted = descriptor.direction === 'latest' && (acceptRecentWindow(descriptor, messages) || descriptor.rechained);
+            pageHistoryIds.set(descriptor.id, new Set(messages.flatMap(historyRowIds)));
             const archived = descriptor.direction !== 'recent' && descriptor.direction !== 'latest';
             if (!archived) pagerRecent = descriptor;
             applyHistoryMessages(messages, { ...descriptor, archived });
@@ -2988,7 +2984,7 @@ export function createChatInstance({
             readReceipt.arrived(window);
         },
         readNewest: syncHistory, newestInFlight: () => historySyncPromise,
-        canArrive: () => historyLoaded && lastHistorySyncSucceeded && !liveCardBound.isArmed(),
+        canArrive: () => historyLoaded && lastHistorySyncSucceeded && !catchUp.owed && !liveCardBound.isArmed(),
         isPageProtected: isHistoryPageProtected,
         onState: snapshot => syncLoadOlderControl(snapshot),
     });
@@ -3014,16 +3010,17 @@ export function createChatInstance({
             return historySyncPromise ? owned : syncHistory();
         }
         const snapshot = historyPager.getState();
+        // ↓'s own failed read is a fresh ↓, later reading supersedes it; a changed view reads the present in place.
+        if (snapshot.retryReturn) return showLatest();
         if (snapshot.error?.body?.reason_code === 'history_view_changed') {
             reading.cancel();
             return historyPager.latest();
         }
-        if (snapshot.error) return historyPager.retry();
-        return loadHistoryAtEdge('older');
+        return snapshot.error ? historyPager.retry() : loadHistoryAtEdge('older');
     }
-    // `Load more history` reads older messages, ↓ the present (owner, 2026-09-14 and 2026-10-05). Empty pages cross the
-    // server read ceiling: reading goes on until rows land or the chat ends. A grown room re-anchors unless its reader
-    // still walks its older chain; `current` guards each request.
+    // `Load more history` reads older, ↓ the present (owner 2026-09-14, 2026-10-05). Empty pages cross the server read
+    // ceiling: continue to rows or the chat's start. Growth re-anchors unless the reader walks the older chain;
+    // `current` guards each request.
     async function loadHistoryAtEdge(direction, current = () => true) {
         const { canNewer, canOlder } = historyPager.getState();
         if (direction === 'older' && current() && historyWindow?.horizonGap && !canNewer && !(canOlder && readingHistory())) {
@@ -3437,28 +3434,30 @@ export function createChatInstance({
         const restartNotice = pendingRestartNotice;
         wsHasConnectedOnce = true;
         updateMessagesPadding();
-        if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit);
         const settled = () => {
             if (destroyed || openedVisit !== visit) return;  // left meanwhile: a return opens again
-            catchUp.end();
+            catchUp.end(read);
             if (restartNotice && pendingRestartNotice === restartNotice) {
                 pendingRestartNotice = '';
                 addMessage(restartNotice, 'system', false, null, false, { ephemeral: true, systemType: 'reconnect' });
             }
             clearReloadParams();
         };
-        loadUiPreferences()
-            // A return's paint receipt may have read the newest page while preferences loaded (even a refused read
-            // counts). Share that work; a real reconnect still owes a read newer than any request it interrupted.
+        const read = loadUiPreferences()
+            // A return shares its paint receipt's newest read during preferences, even a refusal; a real reconnect owes
+            // a read newer than any it interrupted.
             .then(() => (destroyed || openedVisit !== visit ? false
                 : msg?.resumed && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
-                : isReconnect ? syncHistory({ fromReconnect: true }) : waitForHydrationWindow().then(awaitInitialHydration)))
+                : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, current: () => catchUp.reading === read })
+                    : waitForHydrationWindow().then(awaitInitialHydration)))
             .then(settled, settled);
+        if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit, read, readOnOpen);
     });
 
     // A disconnect: written sends not yet saved say so and the room shows the outage; away, which sends it doubts is
     // decided now (custody) and both are drawn on its return (`stay`).
     onWs('close', () => {
+        catchUp.cancel(recentRequest);
         if (leaving) { outageAway = [...outageAway || [], ...unconfirmed.written()]; return; }
         showOutage();
     });
@@ -3530,7 +3529,7 @@ export function createChatInstance({
         // stopped, neither shown nor read (its reader and playback are `closeTransient`'s); `stay` returns.
         leave: () => {
             if (leaving) return;
-            catchUp.cancel();  // its return reads, and says so, anew
+            catchUp.cancel(recentRequest);  // its return reads, and says so, anew
             // Left in an outage (down after the page's socket opened), it will not hear the reconnect that forgets a
             // readiness polled meanwhile. Before the first open there is none: that open keeps the boot read.
             if (ws.isConnected?.() === false && ws.previouslyConnected?.()) hostStart.forget();

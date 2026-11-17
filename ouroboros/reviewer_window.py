@@ -110,6 +110,7 @@ class ReviewerWindow:
     asserted_window_tokens: int = 0
     model_route: dict = field(default_factory=dict)
     window_record: Optional[WindowRecord] = None
+    capability_route: dict = field(default_factory=dict)
 
     @property
     def sizing_source(self) -> str:
@@ -136,7 +137,7 @@ class ReviewerWindow:
             value = 0  # No made-up provider size for a raw subscription.
         else:
             value = unknown_window
-        return SizedWindow(int(value), self.model_route, self.window_record)
+        return SizedWindow(int(value), self.model_route, self.window_record, self.capability_route)
 
 
 def reviewer_route(model_id: str, *, session: bool = False) -> tuple:
@@ -152,12 +153,13 @@ def reviewer_route(model_id: str, *, session: bool = False) -> tuple:
     keeps the record honest. The caller passes the ROW's configured kind; nothing
     sniffs the string."""
     from ouroboros.config import runtime_settings
-    from ouroboros.provider_models import capability_base_url, provider_for_model
+    from ouroboros.llm_routing import resolve_target
 
     if session:
         return SESSION_ROUTE_PROVIDER, ""
     model = str(model_id or "")
-    return provider_for_model(model), capability_base_url(model, runtime_settings())
+    identity = resolve_target(model, runtime_settings())["capability_route"]
+    return identity["provider"], identity["base_url"]
 
 
 def resolve_reviewer_window(
@@ -201,13 +203,25 @@ def resolve_reviewer_window(
         from ouroboros.config import DATA_DIR, runtime_settings
         from ouroboros.context_window import resolve_window, route_observation_scope
         from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY, model_role_option
-        from ouroboros.provider_models import review_model_uses_local
+        from ouroboros.provider_models import capability_base_url, provider_for_model, review_model_uses_local
 
         # A retrieving row never travels the local lane: its target is a harness
         # route, so the local-model predicate has nothing to say about it.
         if use_local is None:
             use_local = False if session else review_model_uses_local(model)
-        provider, base_url = reviewer_route(model, session=session)
+        from ouroboros.llm_routing import resolve_target
+        settings = runtime_settings()
+        if session:
+            target, identity = None, {"provider": SESSION_ROUTE_PROVIDER, "model": model, "base_url": ""}
+        elif use_local:
+            # The local lane never sends to the row's remote spelling: it keeps that spelling's fingerprint
+            # fields and resolves no connection, so an unavailable one cannot hide the served window.
+            target, identity = None, {"provider": provider_for_model(model), "model": model,
+                                      "base_url": capability_base_url(model, settings)}
+        else:
+            target = resolve_target(model, settings)
+            identity = target["capability_route"]
+        provider, base_url = identity["provider"], identity["base_url"]
         effective_provider = "local" if use_local else provider
         options = model_account_options(
             model, role=model_role, credential_profile_id=credential_profile_id,
@@ -228,7 +242,8 @@ def resolve_reviewer_window(
                 base_url=base_url,
                 use_local=use_local,
                 allow_fetch=allow_fetch,
-                options=options,
+                options=options, target=target,
+                **({"api_key": target.get("api_key", "")} if target is not None else {}),
             )
         ev = with_role_window(ev, asserted_window)
         options = {**(options or {}), **{key: getattr(ev, key) for key in (
@@ -236,8 +251,9 @@ def resolve_reviewer_window(
         scope = (route_fingerprint(provider=effective_provider, model=model, base_url=base_url,
                     options={"credential_profile_id": credential_profile_id} if credential_profile_id else None)
                  if session else route_observation_scope(dict(provider=effective_provider, model=model,
-                    base_url=base_url, options=options, use_local=use_local), runtime_settings()))
-        record = resolve_window(ev, 0, root=DATA_DIR, observation_fp=scope, bound=bool(scope))
+                    base_url=base_url, options=options, use_local=use_local), settings,
+                    target=None if use_local else target))
+        record = resolve_window(ev, 0, root=DATA_DIR, observation_fp=scope, bound=bool(scope), publish=False)
         limit = record.limiting
         return ReviewerWindow(
             window_tokens=record.boundary if limit else int(getattr(ev, "window_tokens", 0) or 0),
@@ -247,6 +263,7 @@ def resolve_reviewer_window(
             model=model,
             asserted_window_tokens=asserted_window,
             window_record=record,
+            capability_route=dict(identity) if not use_local and not session else {},
             model_route={
                 "source": str(getattr(ev, "source_id", "") or ""),
                 "model": model.partition("=")[2],
@@ -266,10 +283,12 @@ class SizedWindow(int):
     same observation instead of a cache-only lookup under the unbound route; a plain
     int (an older or substituted caller) carries none."""
 
-    def __new__(cls, value: int, model_route: Optional[dict] = None, window_record: Optional[WindowRecord] = None):
+    def __new__(cls, value: int, model_route: Optional[dict] = None, window_record: Optional[WindowRecord] = None,
+                capability_route: Optional[dict] = None):
         sized = super().__new__(cls, value)
         sized.model_route = dict(model_route or {})
         sized.window_record = window_record
+        sized.capability_route = dict(capability_route or {})
         return sized
 
 
@@ -285,6 +304,8 @@ def reviewer_input_limit(window: int, reserve: int) -> int:
 def observed_binding(window: Any, binding: Optional[dict]) -> dict:
     """``binding`` plus the account route ``window`` was observed on, unless one is already carried."""
     binding = dict(binding or {})
+    if getattr(window, "capability_route", None):
+        binding["capability_route"] = window.capability_route
     if not binding.get("model_route") and getattr(window, "model_route", None):
         binding["model_route"] = window.model_route
     return binding

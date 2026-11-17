@@ -283,7 +283,8 @@ def test_an_old_tick_wake_with_mail_is_delivered_once(tmp_path, reads):
     ctx, _limit = _nanny(tmp_path)
     _run(tmp_path, "run-1")
     assert write_owner_message(tmp_path, "Keep the old shape.", _NANNY, msg_id="old-mail")
-    events = ds._addressed_wakes(ctx, {})
+    events = [{"type": "addressed_message", "msg_id": "old-mail", "kind": "owner_text", "provenance": "owner",
+               "text": "Keep the old shape.", "ts": ""}]  # the tick put mail inside; a wake now carries controls only
     old = {"status": "progress", "run_id": "run-1", "wake_events": events, "supervision_wake_id": "tick-wake"}
     ds._save_state(ctx, {"run_id": "run-1", "status": "wake_pending", "pending_wake": {
         "wake_id": "tick-wake", "attempt_key": "1", "payload": old, "mailbox_ids": ["old-mail"],
@@ -523,7 +524,9 @@ def test_the_unknown_outcome_hold_parks_a_host_armed_sleep_and_its_wake_is_ackno
         tmp_path, monkeypatch, reads):
     """The hold buys no model call and holds no slot: with nothing ready the loop's round top (``round_top``) arms
     the task's own warm sleep on its leaves and parks it through the ordinary warm park; the next round top publishes
-    the wake, carries it whole as the receipt and acknowledges it synchronously before the resumed round is sent."""
+    the wake, carries it whole as the receipt and acknowledges it synchronously. That round goes back to its top
+    once (``"redrain"``), so mail that came after its drain joins the receipt in the resumed request; that top sends
+    the receipt and holds nothing, even when the latch's tombstone was not written (it may hold again after it)."""
     from ouroboros import delegate_hold, delegate_supervision as ds
 
     ctx, limit = _nanny(tmp_path)
@@ -547,11 +550,51 @@ def test_the_unknown_outcome_hold_parks_a_host_armed_sleep_and_its_wake_is_ackno
     [(reason, sleep)] = parks
     assert reason == "sleep" and sleep["mode"] == "warm" and sleep["run_wait"]["hold"] is True
     assert not getattr(ctx, "_model_sleep", None) and not ctx._owner_wait_requested, "the park ended the sleep"
-    assert top() == "resume" and len(parks) == 1
+    assert top() == "redrain" and len(parks) == 1
     receipt = limit.messages[-1]["content"]
     assert receipt.startswith("[DELEGATED LEAF WAKE / UNKNOWN-HOLD RESUME]") and '"status": "terminal"' in receipt
     assert _pending(ctx, "leaf")[0] == "" and _pending(ctx, "leaf")[1] in receipt, "acknowledged before dispatch"
     assert not ds.read_unknown_hold(ctx).get("run_id"), "the latch is a tombstone now"
+    assert top() == "", "the loop's next top drains, then sends the receipt"
+
+    _run(tmp_path, "leaf-2")
+    ds.write_unknown_hold(ctx, "leaf-2", {"run_ids": ["leaf-2"], "run_id": "leaf-2", "hold_cycles": 1})
+    _ended(tmp_path, "leaf-2")
+    real_write = delegate_hold.write_unknown_hold
+
+    def no_tombstone(ctx_, run_id, fields):
+        if not run_id:
+            raise OSError("controlled tombstone failure")
+        return real_write(ctx_, run_id, fields)
+
+    monkeypatch.setattr(delegate_hold, "write_unknown_hold", no_tombstone)
+    assert top() == "redrain" and ds.read_unknown_hold(ctx).get("run_id") == "leaf-2", "drains first, latch kept"
+    assert limit.messages[-1]["content"].startswith("[DELEGATED LEAF WAKE") and _pending(ctx, "leaf-2")[0] == ""
+    assert top() == "" and len(parks) == 1, "that top sends the receipt instead of holding again"
+
+
+def test_a_hold_resumed_on_owner_words_after_its_park_sleeps_again_on_its_next_latch(tmp_path, reads):
+    """The park marks the hold as parked; owner words at the next top resume it before its wake is read. The mark must
+    not outlive that resume: a later latch with nothing ready would read it as a woken park and publish a wake on no
+    source (``hold_wake(..., woke=True)``), buying a round on nothing."""
+    from ouroboros import delegate_hold, delegate_supervision as ds
+
+    ctx, limit = _nanny(tmp_path)
+    ctx.exact_model_route, ctx.task_metadata["configured_subagent"] = True, {"config_fingerprint": "fp"}
+    _run(tmp_path, "leaf")
+    tools, limit.messages, limit.drive_logs, limit.task_id = SimpleNamespace(_ctx=ctx), [], tmp_path, _NANNY
+    parks = []
+    ctx.owner_wait_callback = lambda _ctx, checkpoint: parks.append(checkpoint["reason"]) or "run:leaf"
+
+    def top(new_input=False):
+        return delegate_hold.round_top(tools, limit, {}, lambda *_a: None, new_input=new_input)
+
+    ds.write_unknown_hold(ctx, "leaf", {"run_ids": ["leaf"], "run_id": "leaf", "hold_cycles": 1})
+    assert top() == "park" and ctx._delegate_hold_parked is True
+    assert top(new_input=True) == "resume" and ctx._delegate_hold_parked is False, "the owner's words resumed it"
+    ds.write_unknown_hold(ctx, "leaf", {"run_ids": ["leaf"], "run_id": "leaf", "hold_cycles": 1})  # a new unknown
+    assert top() == "park" and len(parks) == 2, "nothing is ready: it sleeps again"
+    assert _pending(ctx, "leaf") == ("", ""), "no wake was published on nothing"
 
 
 def test_the_frozen_delegate_wait_contract_says_its_result_is_owed_to_the_next_request(tmp_path):

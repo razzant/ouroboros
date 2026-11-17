@@ -67,6 +67,10 @@ CLOSURE_FIELDS = ("closed_reason", "closed_at", "closed_by_task_id", "closed_act
 SECRET_FIELDS = ("secret_request", "secret_outcome", "secret_save")
 # The owner closes in one tap; a closure without the owner's words records this sentence.
 OWNER_CLOSE_REASON = "Closed by the owner without an answer."
+# A closure note no room can show: its card left no row in readable, stable history.
+DELIVERY_NO_TARGET = "no_target"
+# The host's own act when it delivers a late answer; a Project room's other live roots hear the words as the room's context.
+LATE_ANSWER_ROUTE_FACT = "Host fact: delivered in this room only; the host sent it to no work in another room."
 
 def current_question(block: Any) -> bool:
     """Unanswered remains current after its author finishes, until explicit closure."""
@@ -90,9 +94,12 @@ def delivery_dismissed(block: Any) -> bool:
 
 
 def question_delivery_settled(block: Any) -> bool:
-    """Typed delivery is authority; the old discharge stamp is a legacy fallback."""
+    """Typed delivery is authority; the old discharge stamp is a legacy fallback. A closure note
+    owed nowhere (``retire_closure_owed_nowhere``) is settled and never called delivered."""
     if not isinstance(block, dict):
         return False
+    if (block.get("delivery") or {}).get("state") == DELIVERY_NO_TARGET:
+        return True
     delivery = question_delivery_projection(block)
     return delivery["state"] == "delivered" if delivery else bool(block.get("discharged_at"))
 
@@ -470,6 +477,49 @@ def dismiss_unknown_delivery(drive_root: Any, task_id: str, *, quiz_id: str, req
 
     _mutate_projection(drive_root, task_id, mutate)
     return outcome
+
+
+def retire_closure_owed_nowhere(drive_root: Any, task_id: str, quiz_id: str) -> bool:
+    """An explicit closure whose card no room shows (the publication import found no witness in
+    readable, stable history) owes its note nowhere: the debt becomes ``no_target`` with
+    ``no_publication_target``, never ``delivered`` and never a guessed room; the closed record
+    stays. Only a closure whose attempt already found no address qualifies, once its author's letter is
+    settled: none is owed (the owner did not close it), it was written (``mailbox_at``), or no work can
+    ever hold it (the author's result is truly terminal, a status that never turns back). An answer keeps
+    its debt."""
+    retired: List[str] = []
+    letter_owed: List[bool] = []
+
+    def mutate(quizzes: Dict[str, Dict[str, Any]], author_gone: bool = False) -> Any:
+        block = quizzes.get(str(quiz_id))
+        delivery = dict((block or {}).get("delivery") or {})
+        if (not block or block.get("state") != STATE_CLOSED or "publication_chat_id" in block
+                or (delivery.get("kind"), delivery.get("state"), delivery.get("reason_code"))
+                != ("closure", "owed", "publication_address_unknown")):
+            return _KEEP
+        if not (author_gone or block.get("closed_actor") != "owner" or delivery.get("mailbox_at")):
+            letter_owed.append(True)
+            return _KEEP
+        delivery.update(state=DELIVERY_NO_TARGET, reason_code="no_publication_target", retired_at=utc_now_iso())
+        block["delivery"] = delivery
+        retired.append(str(quiz_id))
+        return True
+
+    _mutate_projection(drive_root, task_id, mutate)
+    if letter_owed and _result_truly_terminal(drive_root, task_id):
+        _mutate_projection(drive_root, task_id, lambda quizzes: mutate(quizzes, author_gone=True))
+    return bool(retired)
+
+
+def _result_truly_terminal(drive_root: Any, task_id: str) -> bool:
+    """A truly terminal result never runs again, so no closure letter can reach it; an unreadable one keeps the debt."""
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
+
+    try:
+        result = load_task_result(drive_root, task_id, strict=True) or {}
+    except Exception:
+        return False
+    return str(result.get("status") or "") in _TRULY_TERMINAL_STATUSES
 
 
 def mark_discharged(drive_root: Any, task_id: str, quiz_id: str) -> Dict[str, Any]:
@@ -903,8 +953,10 @@ def late_answer_model_text(drive_root: Any, late_answer: Any, owner_text: str) -
     read the canonical block on ``drive_root``.
     When neither authority can be read, the owner's words are delivered with
     one host line saying so — disclosed, never a silent loss of the card's
-    context. A message with no valid ``late_answer`` provenance is returned
-    unchanged."""
+    context. Either form ends with the host's fact of its own route (this room
+    only); a secret request's outcome never comes here, since it is never
+    forwarded as an owner turn. A message with no valid ``late_answer``
+    provenance is returned unchanged."""
     ref = late_answer_ref(late_answer)
     if ref is None:
         return owner_text
@@ -920,12 +972,13 @@ def late_answer_model_text(drive_root: Any, late_answer: Any, owner_text: str) -
             block = {}
     state = "which had finished" if block.get("answered_after_terminal") or block.get("delivery_after_terminal") else "which is not reading"
     head = f"[Late answer to a question asked by task {ref['task_id']}, {state}]\n"
+    fact = "\n" + LATE_ANSWER_ROUTE_FACT
     if isinstance(block, dict) and str(block.get("state") or "") == STATE_ANSWERED:
-        return head + recorded_answer_frame(block)
+        return head + recorded_answer_frame(block) + fact
     return (
         f"{head}{owner_text}\n"
         f"[Host note] This owner message answers quiz {ref['quiz_id']}; that card "
-        "could not be read, so only the owner's own words are shown."
+        "could not be read, so only the owner's own words are shown." + fact
     )
 
 

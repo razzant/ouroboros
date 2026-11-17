@@ -16,6 +16,7 @@ from ouroboros.gateway.task_decision import answer_decision
 from ouroboros.memory import Memory
 from ouroboros.owner_mailbox import cleanup_task_mailbox, drain_owner_entries
 from ouroboros.owner_quiz import quiz_states, record_asked
+from ouroboros.question_answers import MAILBOX_ROUTE_FACT
 from supervisor import message_bus, queue, state
 
 
@@ -258,7 +259,8 @@ def test_competing_answers_preserve_only_the_recorded_winner(runtime, monkeypatc
     assert not [row for row in messages if row.get("system_type") == "quiz_answer"]
     assert len([frame for frame in runtime.frames if frame.get("type") == "quiz_state"]) == 1
     [delivery] = drain_owner_entries(runtime.root, runtime.task["id"], include_acknowledged=True)
-    assert delivery["text"] == fact["text"]
+    assert delivery["text"] == f"{fact['text']}\n{MAILBOX_ROUTE_FACT}"  # only the letter states its route
+    assert MAILBOX_ROUTE_FACT not in fact["text"]
 
 
 def test_retry_heals_history_write_failure_from_the_winning_block(runtime, monkeypatch):
@@ -281,7 +283,7 @@ def test_retry_heals_history_write_failure_from_the_winning_block(runtime, monke
     [fact] = _facts(runtime)
     assert fact["quiz"]["answered_index"] == 0 and fact["quiz"]["comment"] == "Accepted"
     [mailbox] = drain_owner_entries(runtime.root, runtime.task["id"], include_acknowledged=True)
-    assert mailbox["text"] == fact["text"]
+    assert mailbox["text"] == f"{fact['text']}\n{MAILBOX_ROUTE_FACT}" and MAILBOX_ROUTE_FACT not in fact["text"]
 
 
 def test_answer_history_uses_canonical_root_and_project_binding(runtime):
@@ -297,7 +299,7 @@ def test_answer_history_uses_canonical_root_and_project_binding(runtime):
     assert fact["chat_id"] == project["chat_id"]
     assert not dialogue_test.log_rows(child / "logs" / "chat.jsonl")
     [mailbox] = drain_owner_entries(child, runtime.task["id"], include_acknowledged=True)
-    assert mailbox["text"] == fact["text"]
+    assert mailbox["text"] == f"{fact['text']}\n{MAILBOX_ROUTE_FACT}" and MAILBOX_ROUTE_FACT not in fact["text"]
 
 
 def test_history_recovers_evicted_answer_without_an_extra_bubble(runtime):

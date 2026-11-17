@@ -189,9 +189,9 @@ def refused_request_density(usage: Optional[Mapping[str, Any]], refused: Any, me
     count, or a route the round's ``measurement`` no longer measures (a rebind) measures nothing. Recovery
     receipts label it as refused input; it becomes neither an accepted anchor nor learned route density.
     """
-    from ouroboros.capability_evidence import _parse_ctx_requested
-
-    stated = _parse_ctx_requested(str((usage or {}).get("_last_llm_provider_message") or ""))[0]
+    from ouroboros.size_refusal import for_usage
+    fact = for_usage(usage)
+    stated = fact.requested if fact.units == "tokens" else 0
     estimate = int(getattr(refused, "prompt_tokens_bounded_estimate", 0) or 0)
     if stated <= 0 or estimate <= 0:
         return None
@@ -215,7 +215,7 @@ def cited_limit_refusal(usage: Dict[str, Any], refused: Any, measurement: Any, p
     """A client refusal no typed code explained (``untyped``) cites a number equal to a token limit declared for
     this route (``context_budget.cited_declared_limit``): recognition by number, stamped on the answer.
 
-    The declarations are the window record's own (``WindowRecord.declared``, never the compatibility capacity),
+    The declarations are the window record's own (including its separate serving-window statement),
     then the endpoint catalogue's for this model id (``pricing.declared_token_limits``). The matched one says what
     the number limits: an input cap, or a total that holds the reply. It may size this round's pass and teaches
     nothing (``context_window.UNTAUGHT_BASES``)."""
@@ -230,7 +230,8 @@ def cited_limit_refusal(usage: Dict[str, Any], refused: Any, measurement: Any, p
     record = getattr(plan, "window_record", None)
     cited = cited_declared_limit(  # every layer of the same attempt, earlier upstream attempts included
         answer.get("said") or (), int(getattr(refused, "max_completion_tokens", 0) or measurement.reply_allowance_tokens or 0),
-        {limit.tokens: (limit.kind, f"the window record ({limit.source})") for limit in (record.declared if record else ())},
+        {limit.tokens: (limit.kind, f"the window record ({limit.source})")
+         for limit in ((*record.declared, record.contradicted_by) if record else ()) if limit},
         lambda: declared_token_limits(str(getattr(plan, "provider", "") or ""), str(getattr(plan, "model", "") or "")))
     if cited is None:
         return False

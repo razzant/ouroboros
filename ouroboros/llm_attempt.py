@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 from ouroboros.anthropic_native_custody import is_replayed_native_content
 from ouroboros._usage_response import provider_answer, typed_values
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, size_refusal
+from ouroboros.llm_helper_window import _helper_attempt_context
 from ouroboros.request_wire_contract import physical_candidate_bytes as _canonical_candidate_bytes
 from ouroboros.request_wire_recovery import prepare_wire_payload_for_send
 from ouroboros.transport_custody import (  # noqa: F401 -- consumers import these two scopes through this module
@@ -209,6 +210,10 @@ def body_error_facts(error: Dict[str, Any], transient: bool) -> Dict[str, Any]:
     transient = transient and not size
     facts = answer.facts(size[2:] if size else ("", ""), basis=size[0] if size else "",
                          untyped=not size and not transient and answer.status in SIZE_REFUSAL_STATUSES)
+    from ouroboros.size_refusal import from_answer
+    numbers = from_answer(answer, answer.status)
+    if numbers is not None:
+        facts["size"] = numbers.to_json()
     sentence = facts.get("sentence", "")
     return {"code": error.get("code"), "type": error.get("type"), "message": sentence[:300],
             # A cut sentence says so: the owner's quote must not read this prefix as whole.
@@ -529,11 +534,16 @@ def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]
         physical.rendered_mode, "", request.max_completion_tokens,
         working_reserve_tokens=request.working_reserve_tokens)[1]
     reserve = max(reserve, request.working_reserve_tokens or 0)
-    if getattr(physical, "required_book_tokens", 0) and physical.rendered_mode == "nano":
-        reserve = max(reserve, int(request.max_completion_tokens or 0))  # the reply the view without the book keeps
+    # API JSON carries a wire maximum. Claudexor also seals JSON, but its
+    # max_completion_tokens is a logical reserve, not an engine payload field.
+    if (request.provider != "claudexor" and request.candidate_measurement_kind == "canonical_json_v1") or (
+            getattr(physical, "required_book_tokens", 0) and physical.rendered_mode == "nano"):
+        reserve = max(reserve, int(request.max_completion_tokens or 0))
     exact = request.prompt_tokens_exact is not None
     size = request.prompt_tokens_exact if exact else math.ceil(
         request.prompt_tokens_bounded_estimate * (physical.measurement_density or 1.0))
+    if not exact and physical.view_kind == "helper":
+        size = max(size, request.prompt_tokens_bounded_estimate)  # same raw floor as the reply policy
     free = window - reserve - size
     if free >= 0:
         return None  # only physical W gates; the owner target never vetoes a send
@@ -603,7 +613,7 @@ def _attempt_request(
         candidate_context_sha256=hashlib.sha256(context).hexdigest(),
         candidate_context_size_bytes=len(context),
         candidate_measurement_kind="canonical_json_v1",
-        physical_context=current_physical_attempt_context(),
+        physical_context=current_physical_attempt_context() or _helper_attempt_context(target, payload),
         route_is_loopback=is_loopback_base_url(target.get("base_url")),
         prompt_tokens_bounded_estimate=bounded_tokens,
         prompt_tokens_exact=measured.get("input_tokens"),
@@ -676,43 +686,32 @@ def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Di
     the field is never created. An exact shortfall is the typed local overflow before
     any send, carrying this candidate's facts; an estimate never refuses.
     """
-    from ouroboros.context_budget import LocalContextTooLargeError, exact_reply_shortfall, reply_allowance_tokens
-    from ouroboros.context_fit import bounded_prompt_tokens_for_payload
+    from ouroboros.context_budget import LocalContextTooLargeError
+    from ouroboros.llm_helper_window import window_reply_candidate
 
     context = current_physical_attempt_context()
+    helper = context is None
     field = next((key for key in ("max_completion_tokens", "max_tokens", "max_output_tokens")
                   if isinstance(payload.get(key), int) and not isinstance(payload.get(key), bool)), None)
     if field is not None:
         from ouroboros.response_limits import response_limit_for_target
         payload = {**payload, field: response_limit_for_target(target).ceiling(payload[field])}
-    if context is None or field is None or context.rendered_mode != "nano":
+    if field is None:
+        return payload
+    context = context or _helper_attempt_context(target, payload)
+    if context is None or context.rendered_mode != "nano":
         return payload
     window, measured = context.capacity_total_tokens, _exact_local_measurement(target, payload)
-    exact = bool(measured)
     if target.get("provider") == "local":
         window = target.get("context_window_tokens") if target.get("context_window_confirmed") else window
-    if exact:
-        raw = input_tokens = int(measured["input_tokens"])
-        window = measured.get("context_window") or window
-    else:
-        from ouroboros.request_wire_recovery import registered_source_payload
-
-        source = registered_source_payload(payload) or payload  # a re-finalized wire form counts as its source
-        raw = bounded_prompt_tokens_for_payload(
-            {key: source[key] for key in ("system", "messages", "tools", "functions") if key in source}, 0)
-        input_tokens = math.ceil(raw * float(getattr(context, "measurement_density", None) or 1.0))
-    frame = dict(caller_max_tokens=int(payload[field]), nano=True, input_tokens=input_tokens, window_tokens=window)
-    # A directly required handbook keeps the reply this candidate without it gets; the admission charges both.
-    book = int(getattr(context, "required_book_tokens", 0) or 0)
-    density = 1.0 if exact else float(getattr(context, "measurement_density", None) or 1.0)
-    candidate = {**payload, field: reply_allowance_tokens(owner_nano=context.profile == "owner_nano", exact=exact,
-                                                          **{**frame, "input_tokens": input_tokens - book},
-                                                          raw_input_tokens=raw - book / density)}
-    if exact and exact_reply_shortfall(**frame):
+    candidate, shortfall, input_tokens, window = window_reply_candidate(
+        payload, field, context, window, measured, helper=helper)
+    if shortfall:
         request = _attempt_request(target, candidate)
         error = LocalContextTooLargeError(
-            f"the local model's window of {int(window)} tokens leaves {int(window) - input_tokens} for the reply "
-            f"after {input_tokens} exact input tokens, below the floor of {min(frame['caller_max_tokens'], 8_192)}")
+            f"the model's window of {int(window)} tokens leaves {int(window) - input_tokens} for the reply "
+            f"after {input_tokens} exact input tokens, "
+            f"below the floor of {min(payload[field], 8_192)}")
         error.refused_candidate = refused_candidate_facts(
             request, input_tokens=input_tokens, context_window_tokens=int(window))
         raise error

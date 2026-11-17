@@ -606,9 +606,14 @@ test('a box gesture supersedes a ↓ still awaiting history; with nothing pendin
     f.reading.cancel();
     Object.assign(f.feed, { scrollHeight: 1000, scrollTop: 100, clientHeight: 400 });
     const current = f.reading.claim(); // ↓ pressed; its latest page is still loading
+    f.reading.wait(current);
+    f.reading.followAfterLayout(); f.frame(); f.frame();
+    assert.equal(f.feed.scrollTop, f.feed.scrollHeight, 'the retained end is already reached');
     assert.equal(current(), true);
     f.gesture({ type: 'wheel', deltaY: 1, target: text, timeStamp: 1000 }); f.frame();
     assert.equal(current(), false, 'reading on inside a box keeps the reader where they are');
+    assert.equal(f.reading.returning, false, 'the pending load loses its landing too');
+    assert.equal(f.reading.stick, false, 'a shared read must not follow after the pending return was cancelled');
     // With no ↓ waiting, box scrolling leaves layout already on its way alone.
     const generation = f.reading.generation;
     f.gesture({ type: 'wheel', deltaY: 1, target: text, timeStamp: 2000 }); f.frame();
@@ -643,6 +648,38 @@ test('an unread opening still owed yields to a box gesture after its claim reach
     assert.equal(f.reading.arriving, null, 'reading inside a box ends the opening still owed');
     f.feed.scrollTop = 100; f.reading.land(() => -50, token);
     assert.equal(f.feed.scrollTop, 100, 'its later landing moves no one');
+});
+
+test('↓ is drawn busy only while its own claim waits: a gesture or newer navigation ends it, a superseded end changes nothing', t => {
+    const previous = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = () => {};
+    t.after(() => { globalThis.requestAnimationFrame = previous; });
+    let drawn = 0, live = true;
+    const feed = { scrollTop: 0, scrollHeight: 1000, clientHeight: 400, clientWidth: 400, offsetWidth: 400 };
+    const reading = createChatReadingPosition({ feed, visible: () => true, alive: () => live, ready: () => true,
+        anchors: { serialize: () => null, capture: () => null, restore: () => true },
+        changed() {}, afterWrite() {}, activity() {}, updateButton() { drawn++; } });
+    const first = reading.claim();
+    reading.wait(first);
+    assert.deepEqual([reading.returning, drawn], [true, 1], 'drawn busy at once, before any read answers');
+    reading.cancel();  // the reader's own gesture
+    assert.deepEqual([reading.returning, drawn], [false, 2], 'and drawn idle the moment it is superseded');
+    reading.wait(first, false);
+    assert.equal(drawn, 2, 'its read settling later draws nothing');
+    const second = reading.claim();
+    reading.wait(second);
+    const third = reading.claim();  // another navigation, or ↓ pressed again as a fresh Retry
+    assert.equal(reading.returning, false);
+    reading.wait(third);
+    reading.wait(second, false);
+    assert.equal(reading.returning, true, 'an older ↓ settling leaves the newer one busy');
+    reading.wait(third, false);
+    assert.equal(reading.returning, false);
+    const fourth = reading.claim();
+    live = false;  // destroyed meanwhile
+    const before = drawn;
+    reading.wait(fourth);
+    assert.deepEqual([reading.returning, drawn], [false, before], 'a destroyed room is never drawn busy');
 });
 
 test('saved Review readiness distinguishes pending/error from confirmed absence and trails revisions', async () => {
@@ -754,3 +791,31 @@ test('a write between a feed box change and its reflow keeps a reader following 
     state.mutate(() => true);
     assert.deepEqual([state.stick, feed.scrollTop], [false, 300]);
 });
+
+for (const supersede of [false, true]) for (const readBack of [false, true]) {
+    test(`a return ${supersede ? 'superseded by ↓' : 'completed'} settles its box before ${readBack ? 'focus reads back' : 'more rows arrive'}`, t => {
+        const previous = globalThis.requestAnimationFrame, frames = [];
+        globalThis.requestAnimationFrame = fn => frames.push(fn);
+        t.after(() => { globalThis.requestAnimationFrame = previous; });
+        const frame = () => frames.splice(0).forEach(fn => fn());
+        const feed = { clientWidth: 390, offsetWidth: 390, clientHeight: 0, scrollHeight: 1000, top: 0,
+            get scrollTop() { return this.top; },
+            set scrollTop(value) { this.top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); } };
+        const state = createChatReadingPosition({ feed, visible: () => true, alive: () => true, ready: () => true,
+            changed() {}, afterWrite() {}, activity() {}, updateButton() {},
+            anchors: { capture: () => feed.scrollTop, restore: top => { feed.scrollTop = top; return true; }, serialize: () => null } });
+        state.request(); // resume restores a follower even before its read finishes
+        feed.clientHeight = 400;
+        state.reflow(); // resize arrives while that restoration owns positioning
+        if (supersede) { state.claim(); state.followAfterLayout(); }
+        frame(); frame();
+        assert.deepEqual([state.pending, feed.scrollTop], [false, 600]);
+        // Tab can scroll a focused disclosure into view without a wheel/PageUp intent.
+        if (readBack) { feed.scrollTop = 300; state.scroll(); }
+        state.mutate(() => { feed.scrollHeight += 100; });
+        const expected = [!readBack, readBack ? 300 : 700];
+        assert.deepEqual([state.stick, feed.scrollTop], expected, 'the settled box distinguishes later reading from following');
+        state.reflow();
+        assert.deepEqual([state.stick, feed.scrollTop], expected, 'the following reflow keeps the same place');
+    });
+}

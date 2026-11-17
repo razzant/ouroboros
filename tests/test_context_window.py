@@ -30,7 +30,7 @@ def test_a_request_under_way_reads_a_total_favourably_until_a_refusal_confirms_i
     """Two readings of one record: ``usable`` sizes a work's first start (a total always leaves the whole reserve);
     ``admitted`` is the line every question about a request that exists reads, in a round's frame as
     ``admitted_equivalent``. They differ only for a stated total nothing has proved to hold the reply."""
-    evidence = ce.CapabilityEvidence(1_000_000, "confirmed", source, "r")
+    evidence = ce.CapabilityEvidence(1_000_000, "confirmed", source, "r", ts=ce.utc_now_iso())
     for kind in (refusal or "").split(",") if refusal else ():  # at the stated number itself, or (+) at the server's
         record_observation(tmp_path, "r", refused=1_048_576 if kind.endswith("+") else 1_000_000,  # own a little above
                            kind=kind.rstrip("+"))

@@ -27,7 +27,9 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ouroboros.reviewer_slot_config import review_pool_state
-from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
+from ouroboros.settings_defaults import OPENROUTER_HELPER_DEFAULTS, OPENROUTER_REVIEW_DEFAULTS
+
+ROUTER_HELPERS = [model for _row_id, model, _use in OPENROUTER_HELPER_DEFAULTS]  # beside a reachable OpenRouter
 from tests._cases import chosen_rows
 
 
@@ -493,15 +495,15 @@ def test_re_posting_the_catalog_a_read_showed_is_not_a_catalog_change(
                                               for row in shown["candidate"]["items"]]}
     refused = client.post("/api/settings", json={SUBAGENTS_SETTING: edited})
     assert refused.status_code == 400 and refused.json()["code"] == "empty_review_pool", refused.text
-    assert judged == [5] and SUBAGENTS_SETTING not in json.loads(isolated_settings.read_text(encoding="utf-8"))
+    assert judged == [8] and SUBAGENTS_SETTING not in json.loads(isolated_settings.read_text(encoding="utf-8"))
 
     saved = client.post("/api/settings", json={SUBAGENTS_SETTING: shown["candidate"], "TOTAL_BUDGET": "25"})
     assert saved.status_code == 200, saved.text
-    assert judged == [5], "re-posting the shown catalog is no catalog change"
+    assert judged == [8], "re-posting the shown catalog is no catalog change"
     assert SUBAGENTS_SETTING not in json.loads(isolated_settings.read_text(encoding="utf-8"))
     shown = client.get("/api/settings").json()["_meta"]["available_subagents"]["candidate"]
     assert [row["route"]["target_id"] for row in shown["items"]] == [
-        "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", *OPENROUTER_REVIEW_DEFAULTS["triad"]]
+        "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", *ROUTER_HELPERS, *OPENROUTER_REVIEW_DEFAULTS["triad"]]
 
 
 def test_a_catalog_save_retires_the_stored_review_lanes(monkeypatch, isolated_settings):
@@ -908,12 +910,12 @@ def test_settings_get_reads_the_factory_reviewers_in_place_of_an_unsaved_api_can
     assert response.status_code == 200, response.text
     projection = response.json()["_meta"]["available_subagents"]
     assert projection["source"] == "configured"
-    # The never-configured catalog: the wizard's Auto helpers on Main and the distinct Light,
-    # then the factory reviewers — the unsaved API candidate never stands in for it.
+    # The never-configured catalog: the wizard's Auto helpers on Main, the distinct Light and the
+    # router's helpers, then the factory reviewers — the unsaved API candidate never stands in for it.
     items = projection["candidate"]["items"]
     assert [row["route"]["target_id"] for row in items] == [
-        "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", *OPENROUTER_REVIEW_DEFAULTS["triad"]]
-    assert [bool(row.get("review_eligible")) for row in items] == [False, False, True, True, True]
+        "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", *ROUTER_HELPERS, *OPENROUTER_REVIEW_DEFAULTS["triad"]]
+    assert [bool(row.get("review_eligible")) for row in items] == [False] * 5 + [True] * 3
     assert json.loads(isolated_settings.read_text(encoding="utf-8")) == original
 
 

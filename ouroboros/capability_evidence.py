@@ -25,6 +25,9 @@ from training metadata or the persistent probe cache.
 """
 
 from __future__ import annotations
+from ouroboros.server_window import (SOURCE_LOCAL_HEALTH, SOURCE_SERVER_METADATA, SOURCE_PROVIDER_METADATA,
+    MetadataWindow, physical_statement as _physical_statement, local_health_window as _local_health_window)
+
 
 from ouroboros.density_probe import (  # noqa: F401 — public compatibility surface
     cold_start_density_probe, DENSITY_PROBE_MAX_TOKENS, DENSITY_PROBE_EFFORT, DENSITY_PROBE_SYSTEM_PROMPT,
@@ -64,8 +67,6 @@ STATUS_ASSERTED = "asserted"
 STATUS_UNPROBEABLE = "unprobeable"
 STATUS_FAILED = "failed"
 
-SOURCE_PROVIDER_METADATA = "provider_metadata"
-SOURCE_LOCAL_HEALTH = "local_health"
 SOURCE_OWNER_ACK = "owner_ack"
 SOURCE_USER_SETTING = "user_setting"
 SOURCE_NONE = "none"
@@ -126,6 +127,12 @@ def _parse_ctx_requested(text: str) -> Tuple[int, int, int]:
     if reply and total > reply:
         return total - reply, reply, total
     stated = first(_CTX_INPUT_PATTERNS) or sum(int(n.replace(",", "")) for n in _CTX_INPUT_PART.findall(text))
+    if not (stated or reply or total):  # a server form the patterns above do not know (``size_refusal.FORMS``)
+        from ouroboros.size_refusal import form_numbers
+
+        found = form_numbers(text)
+        if found is not None and found.units == "tokens":
+            return found.requested, found.reply, 0
     return stated, reply, total
 
 
@@ -156,6 +163,10 @@ class CapabilityEvidence:
     window_kind: str = "total"  # metadata may explicitly state an input-only limit
     retired_ack: Dict[str, Any] = field(default_factory=dict)
     server_window: Dict[str, Any] = field(default_factory=dict)
+    window_read_id: str = ""
+    window_instance_id: str = ""
+    window_sequence: int = 0  # captured publication order, scoped to one observation route
+    window_sequence_route: str = ""
     read: str = ""  # this resolution's own metadata read (``answered``/``failed``/none): a receipt fact, never stored
 
     def to_json(self) -> Dict[str, Any]:
@@ -352,7 +363,7 @@ def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any]) 
             data = _load(drive_root)
             if data.get(kind, {}).get(fp) == value:
                 return True
-            if _later_statement(data.get(kind, {}).get(fp), value):
+            if not _physical_statement(value) and _later_statement(data.get(kind, {}).get(fp), value):
                 return False
             _drop_expired_probes(data)
             data.setdefault(kind, {})[fp] = value
@@ -394,7 +405,7 @@ def _drop_expired_probes(data: Dict[str, Any]) -> None:
             continue
         if parse_deadline_ts(str(record.get("ts") or "")) is None:
             continue  # unreadable timestamp: fail-closed, keep
-        age = _age_seconds(str(record.get("ts") or ""))
+        age = _probe_age(record)
         status = str(record.get("status") or "")
         if status == STATUS_CONFIRMED:
             if age > confirmed_max_age_sec:
@@ -423,6 +434,23 @@ def _age_seconds(ts: str) -> float:
     parsed = parse_deadline_ts(ts)
     age = (utc_now() - parsed).total_seconds() if parsed is not None else -1.0
     return age if age >= 0 else float("inf")
+
+
+def _probe_age(row: Dict[str, Any]) -> float:
+    if _physical_statement(row):
+        parsed = parse_deadline_ts(str(row.get("ts") or ""))
+        return max(0.0, (utc_now() - parsed).total_seconds()) if parsed else float("inf")
+    return _age_seconds(str(row.get("ts") or ""))
+
+
+def stamp_receipt(evidence, *, instance_id=""):
+    """New transport receipt, not a new claim: publication coalesces equal claims."""
+    from uuid import uuid4
+    if evidence.window_tokens > 0 and _physical_statement(evidence.to_json()):
+        evidence.window_read_id = uuid4().hex
+        evidence.window_instance_id = instance_id
+        evidence.stale = _probe_age(evidence.to_json()) > _CONFIRMED_TTL_SEC
+    return evidence
 
 
 # --- Measured tokenizer density -------------------------------------------------
@@ -826,6 +854,10 @@ def _cached_evidence(record: Dict[str, Any], fp: str, model: str, provider: str,
 
 
         window_kind=str(record.get("window_kind") or "total"),
+        window_read_id=str(record.get("window_read_id") or ""),
+        window_instance_id=str(record.get("window_instance_id") or ""),
+        window_sequence=int(record.get("window_sequence") or 0),
+        window_sequence_route=str(record.get("window_sequence_route") or ""),
     )
 
 
@@ -892,53 +924,21 @@ def _claudexor_metadata_evidence(model: str, base_url: str, headers: Any,
 def _openai_compatible_metadata_window(
     model: str, base_url: str, allow_fetch: bool, api_key: Optional[str] = None, *, provider: str = "", evidence_root=None,
 ) -> int:
-    """CW6 (v6.34.0): an OpenAI-compatible server (vLLM, Ollama, LM Studio, TGI, ...)
-    commonly publishes the per-model window in GET {base_url}/models — under
-    max_model_len / context_length / context_window. Best-effort, fail-closed to 0
-    (network/auth/parse error, no base_url, or hot-path allow_fetch=False all => 0).
+    """The window ``_openai_compatible_metadata_reading`` reads, as a number that names its source."""
+    window, source = _openai_compatible_metadata_reading(model, base_url, allow_fetch, api_key, provider=provider,
+                                                         evidence_root=evidence_root)
+    return MetadataWindow(window, source or SOURCE_PROVIDER_METADATA)
 
-    ``api_key`` may be passed by callers that already hold the key in scope (e.g.
-    the settings-save gate, which has the not-yet-persisted value in ``current``).
-    When omitted it is the key of the connection ``model`` names (``_route_api_key``)."""
+
+def _openai_compatible_metadata_reading(
+    model: str, base_url: str, allow_fetch: bool, api_key: Optional[str] = None, *, provider: str = "", evidence_root=None,
+) -> Tuple[int, str]:
+    """Read through the server owner, binding the key and persistence root here."""
     if not allow_fetch or not str(base_url or "").strip() or not str(model or "").strip():
-        return 0
-    try:
-        import httpx
-
-        if api_key is None:
-            api_key = _route_api_key(model)
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        from ouroboros.net_transport import verify_kwargs
-        resp = httpx.get(str(base_url).rstrip("/") + "/models", headers=headers, timeout=5.0, **verify_kwargs())
-        resp.raise_for_status()
-        payload = resp.json()
-        items = payload.get("data") if isinstance(payload, dict) else payload
-        if provider == "openai-compatible":  # MiniMax /models carries no modality field
-            from ouroboros.vision_routing import record_catalog_image_input
-            # Scoped to the key this request sent ("" = none), never one resolved after the response.
-            record_catalog_image_input(provider, base_url, items, source="the OpenAI-compatible gateway's /models",
-                                       api_key=api_key)
-        # The saved model is normally route-prefixed (e.g. ``openai-compatible::llama-3``)
-        # while /models lists the BARE id — match either spelling.
-        from ouroboros.provider_models import parse_model_route
-        wanted = {str(model), parse_model_route(model).model}
-        matched = [item for item in (items or []) if isinstance(item, dict)
-                   and str(item.get("id") or item.get("name") or "") in wanted]
-        from ouroboros.response_limits import positive_limit, record_metadata_limit
-        # A listing that was read is an observation even when it publishes no maximum.
-        record_metadata_limit(evidence_root or canonical_evidence_root(), provider=provider, model=model,
-            base_url=base_url, maximum=max((positive_limit(item.get("max_output_tokens")) for item in matched), default=0),
-            source="/models max_output_tokens")
-        for item in matched:
-            sources = [item, item.get("meta") if isinstance(item.get("meta"), dict) else {}]
-            for src in sources:
-                for key in ("max_model_len", "context_length", "context_window", "max_context_length"):
-                    val = src.get(key)
-                    if isinstance(val, (int, float)) and int(val) > 0:
-                        return int(val)
-        return 0
-    except Exception:
-        return 0
+        return 0, ""
+    from ouroboros.server_window import read_metadata_window
+    return read_metadata_window(model, base_url, _route_api_key(model) if api_key is None else api_key,
+                                provider=provider, evidence_root=evidence_root or canonical_evidence_root())
 
 
 def _route_api_key(model: str) -> str:
@@ -969,20 +969,11 @@ def _provider_metadata_window(
     # CW6: OpenAI-compatible /models probe (vLLM/Ollama/...) before falling to unprobeable.
     if p in {"openai-compatible", "minimax"}:
         window = _openai_compatible_metadata_window(model, base_url, allow_fetch, api_key=api_key, provider=p)
-        return window, utc_now_iso() if window else ""
+        source = getattr(window, "source", SOURCE_PROVIDER_METADATA)
+        return (int(window), utc_now_iso(), source) if window else (0, "")
     # GigaChat's /models (aget_models) lists model ids but does NOT publish a per-model
     # context window, so a gigachat route stays unprobeable (owner-ack path) — no probe.
     return 0, ""
-
-
-def _local_health_window(model: str) -> int:
-    """Confirmed window of the current serving instance; 0 says nothing about health."""
-    try:
-        from ouroboros.local_model import get_manager
-        evidence = get_manager().serving_context_evidence() or {}
-        return max(0, int(evidence.get("context_window") or 0)) if evidence.get("confirmed") is True else 0
-    except Exception:
-        return 0
 
 
 def _metadata_fetch_transport_failed(provider: str, model: str, use_local: bool) -> bool:
@@ -1036,18 +1027,18 @@ def _probe_window(
         # Stored local rows have no serving-instance binding and may contain
         # training metadata or an invented fallback. Keep them as history only.
         window = _local_health_window(model)
-        return CapabilityEvidence(
+        return stamp_receipt(CapabilityEvidence(
             window, STATUS_CONFIRMED if window > 0 else STATUS_UNPROBEABLE,
             SOURCE_LOCAL_HEALTH if window > 0 else SOURCE_NONE, fp, model, provider,
             ts=utc_now_iso(), detail="live serving window" if window > 0 else "serving window unknown",
-        ), "answered" if window > 0 else ""
+        ), instance_id=getattr(window, "instance_id", "")), "answered" if window > 0 else ""
 
     cached = data.get("probes", {}).get(fp)
     if subscription and not account_bound and str((cached or {}).get("status") or "") in _KNOWN_STATUS:
         # Model-only legacy evidence cannot certify any subscription account.
         cached = None
     if cached and not force:
-        age = _age_seconds(str(cached.get("ts") or ""))
+        age = _probe_age(cached)
         ttl = _CONFIRMED_TTL_SEC if cached.get("status") == STATUS_CONFIRMED else _FAILED_TTL_SEC
         if age <= ttl:
             return _cached_evidence(cached, fp, model, provider), ""
@@ -1080,11 +1071,13 @@ def _probe_window(
         _store_evidence(drive_root, "probes", ev.route_fp, ev.to_json())
         return ev, read
 
-    window, observed_at = _provider_metadata_window(provider, model, base_url, allow_fetch=allow_fetch, api_key=api_key)
+    window, observed_at, *stated = _provider_metadata_window(provider, model, base_url, allow_fetch=allow_fetch,
+                                                             api_key=api_key)  # a server's own read names its source
     if window > 0:
-        ev = CapabilityEvidence(window, STATUS_CONFIRMED, SOURCE_PROVIDER_METADATA, fp, model, provider,
+        ev = CapabilityEvidence(window, STATUS_CONFIRMED, (stated or [SOURCE_PROVIDER_METADATA])[0], fp, model, provider,
                                 ts=observed_at, stale=_age_seconds(observed_at) > _CONFIRMED_TTL_SEC,
                                 detail="provider metadata")
+        stamp_receipt(ev)
         _store_evidence(drive_root, "probes", fp, ev.to_json())
         return ev, "answered"
 
@@ -1185,7 +1178,7 @@ def _pinned_record(drive_root: Any, route: Dict[str, Any], fingerprint: str = ""
                             detail="recorded capacity of the pinned account (catalog unavailable)")
 
 
-def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, **route) -> CapabilityEvidence:
+def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, target: Optional[dict] = None, **route) -> CapabilityEvidence:
     """Resolve independent context and output facts; one owner's window ack cannot suppress output discovery.
 
     One catalog read serves both: a read that answered also states the output limit, and a read that failed (live, its
@@ -1210,7 +1203,8 @@ def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, **route) -> 
     read_failed, stated = read == "failed" or evidence.status == STATUS_FAILED, dict(evidence.response_limit or {})
     if is_known(evidence, require_fresh=True):
         evidence.server_window = dict(tokens=evidence.window_tokens, kind=evidence.window_kind,
-                                      source=evidence.source, observed_at=evidence.ts)
+                                      source=evidence.source, observed_at=evidence.ts, read_id=evidence.window_read_id,
+                                      instance_id=evidence.window_instance_id)
     lent = None  # the pin's own record after a failed read: that account's output is read only from its records
     if read_failed and route.get("allow_fetch", True):  # after the server's word: the pool's bound or the pin's record
         pool = _pool_bound(drive_root, evidence, route)
@@ -1230,7 +1224,7 @@ def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, **route) -> 
             **{key: str(options.get(key) or "") for key in (
                 "source_id", "credential_profile_id", "account_fingerprint")})
     evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route if lent is None else {
-        **route, "allow_fetch": False}, read_failed=read_failed, read=stated))  # this read's failure is never that account's
+        **route, "allow_fetch": False}, read_failed=read_failed, read=stated, target=target))  # this read's failure is never that account's
     evidence.read = read
     return evidence
 
@@ -1243,7 +1237,8 @@ def window_evidence(evidence: Any, record: Any) -> Tuple[str, str]:
     if limit is None:
         return "unknown", ""
     kind = "pool" if limit.source == "pool" else "live" if (getattr(evidence, "read", "") == "answered"
-                                                            and limit.source in {SOURCE_PROVIDER_METADATA, SOURCE_LOCAL_HEALTH}) else "recorded"
+                                                            and limit.source in {SOURCE_PROVIDER_METADATA, SOURCE_SERVER_METADATA,
+                                                                                    SOURCE_LOCAL_HEALTH}) else "recorded"
     return kind, str(limit.observed_at or "")
 
 

@@ -154,6 +154,8 @@ const navMainRow = primarySidebar?.querySelector('.nav-row-main');
 // The Projects list is the column's one scroller: rows that wait past an edge fade under it (style.css .scroll-fade-y).
 navProjectsList?.classList.add('scroll-fade-y');
 if (navProjectsList) bindScrollFade(navProjectsList);
+// A Project row holds messages past the shared cursor, less those read in another room (DESIGN "Unread").
+const projectUnread = (row) => unreadCount(row.visible_revision, state.projectSeenRevision?.[row.id], readAheadFor(row.chat_id)) > 0;
 // The Projects list (projects_nav.js): the feed's rows as renderProjectsNav decides them (with their state read's
 // generation and the state's complete set of Project rooms), and, when the owner asks, every older Project by its
 // name or by Show more; a row opens through openProjectPanel. Its own list reads and confirmed changes take their
@@ -166,7 +168,7 @@ const projectsNav = createProjectsNav({ header: navProjectsHeader, list: navProj
     reserved: () => state.projectChatIds, listableCount: () => state.projectListableCount,
     activeId: () => navState.activeProjectId, messagesRevision: () => state.projectMessagesRevision,
     readList: (options) => apiClient.projectList(options),
-    isUnread: (row) => unreadCount(row.visible_revision, state.projectSeenRevision?.[row.id], readAheadFor(row.chat_id)) > 0,
+    isUnread: projectUnread,
     onListRead: () => { mergeProjectSeenRevisions(); if (projectsNav.unreadRows().length) refreshSharedProjectSeen(); },
     onShown: () => { patchProjectActivityMarkers(); },
     open: (project, { pointer }) => openProjectPanel(project, { openOnly: true, pointer, map: true }), openMenu: openProjectMenu,
@@ -697,12 +699,8 @@ function hydrateOpenChatsFromState(data, snapshotRequestedAt) {
     for (const room of [mainChat, ...projectInstances.values()]) room?.hydrateStateSnapshot?.(data, snapshotRequestedAt);
 }
 
-// ---------------------------------------------------------------------------
-// Multi-project navigation + right thread panel (v6.32.0). Projects come from
-// /api/state; each opens as a chat instance bound to its project chat_id.
-// Navigation is one state machine now: page, project, and mobile drawer are
-// synchronized together so Utilities and Projects can't remain active at once.
-// ---------------------------------------------------------------------------
+// Project panels use registered chat_ids from /api/state. One navigation state owns page,
+// project and mobile drawer, so Utilities and Projects cannot be active together.
 // One Project room is on screen; the rooms left stay away, whole and quiet, and only what the host can give back is ever
 // let go (room_retire.js; owner 2026-11-03: a return in this page session finds the room as left, with an honest catch-up).
 
@@ -760,9 +758,12 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
     if (navState.activeProjectId === project.id) {
         if (map) layers.batch(() => pageNavigation.clear());
         if (closeDrawer && navState.mobileDrawerOpen) setMobileDrawerOpen(false);
-        if (!openOnly) layers.back('project-toggle');
-        else if (taskId && quizId) await revealProjectQuestion(freshProjectRow(project), projectInstances.get(project.id), taskId, quizId);
-        return;
+        if (!openOnly) { layers.back('project-toggle'); return; }
+        if (!latest && !(taskId && quizId)) return;
+        const inst = projectInstances.get(project.id);
+        // A notification also supersedes an older reveal and its paint in the room already on screen.
+        if (!(taskId && quizId)) { projectReveals.delete(project.id); cancelProjectPaint(project.id, inst); }
+        return landInProject(freshProjectRow(project), inst, { taskId, quizId, latest });
     }
     const origin = pageNavigation.capture();
     // The room is the registry's. A row that names its room is its caller's own answer (or the row pressed in the list)
@@ -829,21 +830,20 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
                 if (projectReveals.get(project.id) === reveal) projectReveals.delete(project.id);
             }
         }
-        // Once visible, the room returns where it was left; following the newest message, unread lands on what
-        // arrived last (DESIGN "Unread"); left reading older history, it is put back there (chat.js `resume`).
-        const unread = unreadCount(project.visible_revision, state.projectSeenRevision?.[project.id],
-            readAheadFor(project.chat_id)) > 0;
-        if (!(taskId && quizId)) void (latest ? inst.showLatest?.({ arrive: unread }) : inst.resume?.(unread));
-        // ACK the exact painted revision; chat.js owns the receipt and skips redundant reads.
-        if (taskId && quizId) await revealProjectQuestion(project, inst, taskId, quizId);
-        else {
-            // A plain reopen cancels any pending question reveal.
-            void inst.revealQuestion?.(taskId, quizId);
-            await acknowledgeProjectAfterPaint(project, inst, { forcePaint: !inst.hasPaintedHistory?.() });
-        }
+        await landInProject(project, inst, { taskId, quizId, latest, forcePaint: !inst.hasPaintedHistory?.() });
     } finally {
         projectPanelOpeningSince = 0;
     }
+}
+
+// Once visible, the room returns where it was left; following the newest message, unread lands on what arrived last
+// (DESIGN "Unread"); left reading older history, it is put back there (chat.js `resume`); a notification lands latest.
+async function landInProject(project, inst, { taskId, quizId, latest, forcePaint = false }) {
+    if (taskId && quizId) return revealProjectQuestion(project, inst, taskId, quizId);
+    void (latest ? inst?.showLatest?.({ arrive: projectUnread(project) }) : inst?.resume?.(projectUnread(project)));
+    void inst?.revealQuestion?.();  // a plain landing cancels any pending question reveal
+    // ACK the exact painted revision; chat.js owns the receipt and skips redundant reads.
+    await acknowledgeProjectAfterPaint(project, inst, { forcePaint });
 }
 
 // A Project named by its id alone (a reference, a portal, a completion row, a row older than the feed) opens its own
@@ -904,8 +904,10 @@ window.addEventListener('ouro:open-task', async ({ detail }) => {
     } catch { showToast(tr('consciousness.task_unavailable', 'This task is unavailable.'), 'warn'); }
 });
 
+// The registry's row for a Project: the sidebar's, unless the caller read a newer revision of it (a notification).
 function freshProjectRow(project) {
-    return lastProjectRows.find((row) => row.id === project.id) || project;
+    const row = lastProjectRows.find((row) => row.id === project.id);
+    return row && !(Number(project.visible_revision) > Number(row.visible_revision)) ? row : project;
 }
 
 // A question opened from Main is revealed BEFORE the read decision: landing on it
@@ -995,13 +997,11 @@ function renderProjectsNav(projects, projectChatIds, activityIndex = projectActi
     state.projectChatIds = new Set(completeChatIds.map(Number).filter(Boolean));
     // Every active Project is visible, including a newly-created empty room. Unread is a monotonic revision
     // comparison, never a timestamp race. The list's order is projects_nav.js's (pins, then the newest message).
-    const seenRevision = state.projectSeenRevision || {};
-    const isUnread = (p) => unreadCount(p.visible_revision, seenRevision[p.id], readAheadFor(p.chat_id)) > 0;
     const rows = all
         .filter(p => p && p.id && ['active', 'deleting'].includes(String(p.lifecycle || 'active')))
         .map(p => ({
             ...p,
-            _unread: String(p.lifecycle || 'active') === 'active' && isUnread(p),
+            _unread: String(p.lifecycle || 'active') === 'active' && projectUnread(p),
         }));
     if (rows.some(p => p.id === navState.activeProjectId && p.lifecycle === 'deleting')) {
         closeProjectPanel();
@@ -1137,7 +1137,7 @@ function mergeProjectSeenRevisions(cursors) {
     if (!Array.isArray(lastProjectRows)) return advanced;  // a read-ahead answer reaches here with no cursor moved
     let changed = false;
     for (const row of lastProjectRows) {
-        const unread = row._unread && unreadCount(row.visible_revision, state.projectSeenRevision[row.id], readAheadFor(row.chat_id)) > 0;
+        const unread = row._unread && projectUnread(row);
         if (row._unread !== unread) { row._unread = unread; changed = true; }
     }
     if (changed) paintProjectsNav();

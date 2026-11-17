@@ -921,31 +921,13 @@
     "id": "test_history_replay_resyncs_after_reconnect",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "isReconnect ? syncHistory({ fromReconnect: true })"
+    "value": "isReconnect ? historyPager.read({ fromReconnect: true, whole: true,"
   },
   {
     "id": "test_history_replay_resyncs_after_reconnect",
     "path": "web/modules/chat.js",
     "kind": "contains",
     "value": "scheduleHistorySync"
-  },
-  {
-    "id": "test_history_replay_resyncs_after_reconnect",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "let pendingReconnectSync = false;"
-  },
-  {
-    "id": "test_history_replay_resyncs_after_reconnect",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "pendingReconnectSync = true;"
-  },
-  {
-    "id": "test_history_replay_resyncs_after_reconnect",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "if (pendingReconnectSync)"
   },
   {
     "id": "test_sync_history_sweep_rederives_block_presence",

@@ -374,31 +374,45 @@ def test_an_unsettled_managed_allocation_never_retries_or_rolls_back_a_live_writ
     work.mkdir()
     domain = SimpleNamespace(work_roots=((str(work), str(work)),), staging_root=str(work))
     monkeypatch.setattr(work_domain, "_domain", lambda: domain)
-    made = []
+    made, injected = [], []
+
+    def owned(path):
+        """This fake domain's membership by path parts, on every host. The product compares POSIX spellings
+        (``work_domain._rest``), which a Windows path never has: ``_workspace`` would bypass the fake writer."""
+        path = pathlib.Path(os.path.abspath(path))
+        return path == work or work in path.parents
+
+    def unsettled(path):
+        injected.append(path)
+        raise work_domain.WorkDomainUnsettled("synthetic writer end unconfirmed")
 
     def mkdir(path, **_kwargs):
         path = pathlib.Path(path)
         path.mkdir()
         made.append(path)
         if (phase == "container" and path.name.startswith("obs-")) or (phase == "workspace" and path.name == "w"):
-            raise work_domain.WorkDomainUnsettled("synthetic writer end unconfirmed")
+            unsettled(path)
 
     def write(path, data, **kwargs):
         pathlib.Path(path).write_bytes(data)
         if phase == "marker":
-            raise work_domain.WorkDomainUnsettled("synthetic writer end unconfirmed")
+            unsettled(pathlib.Path(path))
 
     def forbidden(*args, **kwargs):
         raise AssertionError("an unsettled writer must not be removed before custody settles it")
 
+    monkeypatch.setattr(work_domain, "is_work", owned)
     monkeypatch.setattr(work_domain, "make_dirs", lambda path, **_kwargs: pathlib.Path(path).mkdir(parents=True, exist_ok=True))
     monkeypatch.setattr(work_domain, "make_dir", mkdir)
     monkeypatch.setattr(work_domain, "write_file", write)
     monkeypatch.setattr(work_domain, "remove", forbidden)
     monkeypatch.setattr(work_domain, "remove_empty_dir", forbidden)
     refused = _prepare(tmp_path, _Catalog(GRANTED), access="full")
+    assert len(injected) == 1, f"the {phase} fault must fire exactly once, through the fake writer: {injected}"
     assert not refused.roots and not refused.scratch and "unconfirmed" in refused.limitation
     [container] = [path for path in made if path.name.startswith("obs-")]
+    assert injected == [{"container": container, "marker": container / scratch.SCRATCH_MARKER,
+                         "workspace": container / "w"}[phase]], "the fault fired at the chosen phase's own path"
     assert container.is_dir(), "the single new allocation stays, not eight retries or a premature deletion"
     assert not _record(tmp_path / "data").exists()
     if phase != "container":

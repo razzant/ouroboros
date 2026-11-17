@@ -729,7 +729,8 @@ def test_a_legacy_writable_successor_read_uses_the_original_copy_and_captures_it
     assert failure.value.code == "credential_pool_exhausted"
     area = review_checking.seat_dir(drive, "task-1", "op-1") / "area.noindex"
     assert area.is_dir()
-    (area / "successor-output.txt").write_text("unique successor output\n")
+    # Exact bytes on every host: capture hashes raw content (no eol conversion), so text mode's CRLF would be kept.
+    (area / "successor-output.txt").write_bytes(b"unique successor output\n")
     token = record_legacy_successor(drive, checkpoints[0], started=started)
     reads = []
     monkeypatch.setattr(FakeGateway, "operations", lambda _s: [{"method": "POST", "path": "/v2/runs/lookup"}],

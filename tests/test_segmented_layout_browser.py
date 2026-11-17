@@ -175,10 +175,10 @@ def _check(strip: dict, count: int, *, desk: bool) -> list[str]:
         problems.append(f"wraps despite {strip['needed']:.1f}px of words fitting its {available:.1f}px row")
     if desk and name in DRAWN and fits:
         # An option is as wide as its word, never stretched to share the row. The word is measured on a canvas, which
-        # rounds text differently from layout by up to about a pixel on Linux (75.2 against 74.2 for 'Active'); a
-        # stretched option differs by tens of pixels.
+        # rounds text differently from layout on Linux WebKit, more for a longer word (75.2 against 74.2 for 'Active',
+        # 87.0 against 84.8 for 'Advises'); a stretched option differs by tens of pixels.
         for button in buttons:
-            if abs(button["width"] - max(button["touch"], button["word"])) > 2:
+            if abs(button["width"] - max(button["touch"], button["word"])) > 3:
                 problems.append(f"{button['label']!r} is {button['width']:.1f}px wide, its word {button['word']:.1f}px")
     return [f"{name}: {problem}" for problem in problems]
 

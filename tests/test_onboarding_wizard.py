@@ -564,7 +564,7 @@ def test_setup_contract_has_no_secret_values():
     deepseek_initial = deepseek_bootstrap["initialState"]
     assert deepseek_initial["providerProfile"] == "deepseek"
     assert deepseek_initial["mainModel"] == "deepseek::deepseek-v4-pro"
-    assert deepseek_initial["lightModel"] == "deepseek::deepseek-v4-flash"
+    assert deepseek_initial["lightModel"] == "deepseek::deepseek-flash"
 
 
 # --- The served page must not hand back a stored credential -----------------

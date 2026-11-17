@@ -11,7 +11,9 @@ delivered whole (``deliver_wake``).
 
 Ready sources answer at once; unacknowledged wakes replay their facts
 (``replay_of``) before sleeping. Owed delivery follows mail drain; durable wakes
-coalesce. Retained output precedes a run-detail read. Without a continuation
+coalesce. Mail wakes the sleep, but a wake carries only its loop controls: the
+round-top drain delivers the rest as its sender's words before the next request.
+Retained output precedes a run-detail read. Without a continuation
 owner the same sources are waited on in-process. There is no wait window or
 run-count cap; legacy ``wait_sec`` is inert.
 
@@ -43,7 +45,7 @@ from ouroboros import delegate_custody as custody
 from ouroboros.delegate_shared import _fail, delegate_result, refusal_host_code
 from ouroboros.delegate_feed import _TICK_SEC
 from ouroboros.owner_mailbox import (
-    KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_MODEL, KIND_TASK_MESSAGE, drain_owner_entries, place_arrival_wake,
+    KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_MODEL, KIND_TASK_MESSAGE, drain_owner_entries,
 )
 from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import utc_now_iso
@@ -458,6 +460,8 @@ def _coordination_wakes(
 
 
 def _addressed_wakes(ctx: Any, state: dict[str, Any]) -> list[dict[str, Any]]:
+    """The loop controls addressed to this work. Other mail wakes the sleep (``model_sleep.wake_reason``) and stays
+    unread here: the round-top drain gives the next request its sender's words, context or directives, once."""
     attempt = _attempt_key(ctx)
     seen = set()
     if str(state.get("mailbox_acknowledged_attempt_key") or "") == attempt:
@@ -474,23 +478,18 @@ def _addressed_wakes(ctx: Any, state: dict[str, Any]) -> list[dict[str, Any]]:
         str(getattr(ctx, "task_id", "") or ""),
         seen_ids=seen,
         attempt_key=attempt,
+        kinds=_LOOP_CONTROL_KINDS,
     )
     return [
         {
             "type": "addressed_message",
             "msg_id": str(entry.get("msg_id") or ""),
-            "kind": str(entry.get("kind") or "owner_text"),
+            "kind": str(entry.get("kind") or ""),
             "provenance": str(entry.get("provenance") or "owner"),
-            "source_task_id": str(entry.get("source_task_id") or ""),
-            "relayed_from_task_id": str(entry.get("relayed_from_task_id") or ""),
-            # The peer relation the drain projected (a PEER_RELATION_LABELS key): the sender's
-            # typed place, carried so a wake never signs a child or sibling as an
-            # ancestor or owner (the same fact the round-top prefix reads).
-            **({"relation": str(entry["relation"])} if str(entry.get("relation") or "") else {}),
             "text": str(entry.get("text") or ""),
             "ts": str(entry.get("ts") or ""),
         }
-        for entry in entries if place_arrival_wake(entry) is not False  # context only: unread for the drain
+        for entry in entries
     ]
 
 
@@ -784,11 +783,13 @@ def _record_terminal_acknowledged(ctx: Any, state: dict[str, Any], pending: dict
         })
 
 
-def stage_pending_wake_exposure(ctx: Any, delivered: Any) -> None:
+def stage_pending_wake_exposure(ctx: Any, delivered: Any, *, mail: bool = True) -> None:
     """Stage shown questions and mail in this attempt before saving their transcript.
 
     No mailbox/wake ACK or run answer occurs here. If the save fails but the
     transcript remains, exposure remains with it; cold replay is at least once.
+    ``mail=False``: a startup receipt's old wake shows its mail but leaves it unread for the first round-top
+    drain, which delivers it as its sender's words (a wake published since carries none).
     """
     try:
         payload = json.loads(delivered) if isinstance(delivered, str) else delivered
@@ -800,15 +801,15 @@ def stage_pending_wake_exposure(ctx: Any, delivered: Any) -> None:
         state = _load_state(ctx, run_id)
         pending = state.get("pending_wake") or {}
         if pending.get("wake_id") in _wake_ids(payload):
-            _record_exposure(ctx, payload, pending, run_id)
+            _record_exposure(ctx, payload, pending, run_id, mail=mail)
 
 
-def _record_exposure(ctx: Any, payload: Any, pending: dict[str, Any], run_id: str) -> None:
+def _record_exposure(ctx: Any, payload: Any, pending: dict[str, Any], run_id: str, *, mail: bool = True) -> None:
     from ouroboros.sleep_custody import record_question_notice
 
     wake = payload.get("wake", payload) if isinstance(payload, dict) else {}
     record_question_notice(ctx, (wake.get("questions") or []) if isinstance(wake, dict) else [])
-    if isinstance(wake, dict) and isinstance(wake.get("wake_events"), list):
+    if mail and isinstance(wake, dict) and isinstance(wake.get("wake_events"), list):
         seen_mail = getattr(ctx, "_loop_mailbox_seen_ids", None)
         if seen_mail is None:
             seen_mail = ctx._loop_mailbox_seen_ids = set()
@@ -1159,7 +1160,7 @@ def _replay(ctx: Any, run_ids: list[str]) -> tuple[Optional[ToolResult], dict[st
 
 def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questions: Any = None) -> ToolResult:
     """Publish one wake of the runs a wait selected and render it: the ONE wake record (``pending_wake``:
-    its mail, question and coordination ids) that the delivered text's acknowledgement retires. An earlier
+    its loop-control, question and coordination ids) that the delivered text's acknowledgement retires. An earlier
     wake still unacknowledged is returned instead (``_replay``). A terminal another collector is still
     retaining is read again on the body's beat until it is retained (the task's own cancel or deadline
     ends that); nothing else waits here."""
@@ -1245,7 +1246,7 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questio
         "wake_id": wake_id,
         "attempt_key": _attempt_key(ctx),
         "payload": payload,
-        "mailbox_ids": [
+        "mailbox_ids": [  # empty now that a wake carries only loop controls; an older body's wake kept its mail ids
             str(item.get("msg_id") or "") for item in wakes
             if str(item.get("msg_id") or "") and str(item.get("kind") or "") not in _LOOP_CONTROL_KINDS
         ],

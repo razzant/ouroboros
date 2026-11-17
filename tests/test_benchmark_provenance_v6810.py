@@ -109,6 +109,7 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "quiz_answer_unconfirmed": (False, "503 before any answer was recorded; not a task terminal or truncation"),
     "awaiting_recipient_read": (False, "question_answers.py: a recorded answer is in its living recipient's mailbox (paused or held too), read pending; a delivery fact on the question, never a task terminal"),
     "asker_not_reading": (False, "question_answers.py: no living asker or successor holds the answer, so it goes to named ingress in its room (the asker's live late-answer head, else a fresh head); a delivery fact, never a task terminal"),
+    "no_publication_target": (False, "owner_quiz.py: a closure note no room can show retires as no_target; a delivery fact on the closed question, never a task terminal"),
     "promotion_not_started": (False, "promotion_intent.py: boot reconciliation of a start_task intent proven never admitted; that separate work never ran (explicit retry), so nothing was truncated and it is never a trial root's code"),
     "migrating": (False, "gateway/_helpers.py: a write door (create, Cancel, Pause, Presence) answered 503 inside the boot import window of state/current.sqlite (retry); no task attempt was truncated"),
     "boot_changed": (False, "gateway/control.py: a command whose if_boot names an earlier boot.since reached a restarted server; HTTP 409 with accepted=false before anything was queued, never a task terminal"),

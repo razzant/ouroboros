@@ -97,6 +97,34 @@ test('migration shows a calm note and retries until history publishes without a 
     assert.equal(f.reads.length, 3, 'success stops migration retries');
 });
 
+test('↓ waits through a store upgrade instead of fading in and out as Retry; an ordinary failure still names Retry', async t => {
+    const f = fixture(t);
+    const arrow = globalThis.document.byId.get('chat-scroll-bottom');
+    const drawn = () => [arrow.classList.contains('visible'), arrow.getAttribute('aria-label')];
+    const quiet = [false, 'Scroll to latest message'];
+    const opened = f.instance.refreshHistory({ revision: 1 });
+    await settle(); f.reads[0].ok(page([row('chat:10', 'Painted answer')])); await opened;
+    assert.deepEqual(drawn(), quiet, 'the reader follows the newest message');
+    const upgrading = f.instance.refreshHistory({ revision: 2 });
+    await settle(); f.reads[1].http(503, 'migrating'); await upgrading;
+    assert.equal(f.note().textContent, 'Saved history is being upgraded…');
+    assert.deepEqual(drawn(), quiet, 'waiting is no error: ↓ names no Retry at the retained end');
+    await new Promise(resolve => setTimeout(resolve, 750));
+    assert.equal(f.reads.length, 3, 'the store is read again without an owner action');
+    assert.deepEqual(drawn(), quiet, 'and ↓ stays as it was while that read is out');
+    f.reads[2].http(503, 'migrating');
+    await settle();
+    assert.deepEqual(drawn(), quiet);
+    await new Promise(resolve => setTimeout(resolve, 750));
+    f.reads[3].ok(page([row('chat:10', 'Painted answer'), row('chat:20', 'Published answer')]));
+    await settle();
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:20'));
+    assert.deepEqual(drawn(), quiet);
+    const failing = f.instance.refreshHistory({ revision: 3 });
+    await settle(); f.reads[4].http(500); await failing;
+    assert.deepEqual(drawn(), [true, 'Retry loading latest messages'], 'an ordinary failed read still names Retry on ↓');
+});
+
 test('closing a migrating chat cancels its automatic retry', async t => {
     const f = fixture(t);
     const paint = f.instance.refreshHistory({ revision: 1 });

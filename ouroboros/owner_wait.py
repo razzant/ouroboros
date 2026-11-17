@@ -239,6 +239,8 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "wait_attention_cursors": cursors_json(getattr(ctx, "_wait_attention_cursors", None)),
         "held_owner_messages": dict(getattr(ctx, "_held_owner_messages", None) or {}),
         "open_relays": dict(getattr(ctx, "_open_relays", None) or {}),
+        # A first build that could not read its record: the relays it inherited, settled at the next read (``owner_relay``).
+        "held_state_seed": None if (seed := getattr(ctx, "_held_state_seed", None)) is None else sorted(seed),
         # Own routing acts still unconfirmed: a resumed turn reports their outcomes too.
         "unconfirmed_routing_acts": list(getattr(ctx, "unconfirmed_routing_acts", None) or []),
         "restart": {
@@ -1194,6 +1196,11 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     ctx._owner_directives = state["owner_directives"]
     ctx._held_owner_messages = dict(state.get("held_owner_messages") or {})
     ctx._open_relays = dict(state.get("open_relays") or {})
+    if "held_owner_messages" in state:  # the parked maps; still partial while a first build's seed is unsettled
+        seed = state.get("held_state_seed")
+        ctx._held_state_seed = None if seed is None else set(seed)
+        ctx._held_state_dirty = seed is not None or getattr(ctx, "_held_state_persisted", None) != (
+            ctx._held_owner_messages, ctx._open_relays)  # written at the next persist unless the record has them
     ctx.unconfirmed_routing_acts = [dict(act) for act in state.get("unconfirmed_routing_acts") or [] if isinstance(act, dict)]
     restart = state.get("restart") or {}
     request = restart.get("request") or {}
