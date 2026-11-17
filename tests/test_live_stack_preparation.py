@@ -267,6 +267,10 @@ def test_catchup_does_not_offer_its_own_speech_but_pending_mail_is_answered(host
                 run.provider.script.append(('say', 'Answer to the new room request.'))
             release.set()
             await run.wait(lambda: run.host.connection_number == 2)
+            # The call switches to the new connection before it writes the catch-up frame, and the provider reads
+            # that frame on another loop: wait for it before judging speech, so a slow loop is no false red, a missing
+            # frame still fails, and a turn the frame wrongly offered has started before the checks below.
+            await run.wait(lambda: any('A question already answered before the handoff.' in str(v) for v in run.wire.sent))
             await run.quiet()
             if mail:
                 await run.wait(lambda: 'Answer to the new room request.' in run.wire.spoken)
@@ -274,9 +278,6 @@ def test_catchup_does_not_offer_its_own_speech_but_pending_mail_is_answered(host
                 assert run.wire.spoken == ['Answer to the new room request.']
             else:
                 assert not run.wire.spoken, 'catching up our own answered conversation never offers another turn'
-            # The call switches to the new connection before it writes the catch-up frame, and the provider reads
-            # that frame on another loop: wait for it, so a slow loop is no false red and a missing frame still fails.
-            await run.wait(lambda: any('A question already answered before the handoff.' in str(v) for v in run.wire.sent))
         assert run.result[1]['execution_status'] == 'ok', run.result
     asyncio.run(scenario())
 
