@@ -105,8 +105,8 @@ def world(key: str, build: Callable[[pathlib.Path], None]) -> pathlib.Path:
 def _folder_times(template: pathlib.Path, destination: pathlib.Path) -> None:
     """Each copied folder gets its own time back (the evidence packer's stamp reads it). ``clonefile`` stamps the
     folders it makes with the time of the call; ``shutil.copytree`` gives a folder the time its parent's listing holds,
-    which on Windows lags behind a folder a file was deleted from until a handle on that folder closes: CPython 3.10's
-    stat by name opened one, 3.12's does not (#3633)."""
+    which on Windows can still be the time from before a file in it was deleted, until the folder itself is opened.
+    CPython 3.10's stat by name opened it; 3.12's opens it only when its by-name fast path is unavailable (#3633)."""
     for directory, _folders, _files in os.walk(template):
         seen = os.stat(directory)
         os.utime(destination / pathlib.Path(directory).relative_to(template), ns=(seen.st_atime_ns, seen.st_mtime_ns))
