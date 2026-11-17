@@ -170,13 +170,13 @@ def test_memory_step_passes_the_actual_window_and_current_transcript(tmp_path, m
 
         def reproject_for_route(*, window_tokens, known_window, ratio, output_reserve, admitted,
                                 tool_schemas, start_mode, current_messages, refused_tokens, measured_input_tokens,
-                                reasoning_effort):
+                                reasoning_effort, telling_floor):
             assert measured_input_tokens is None  # this fixture has no prepared-input anchor
             assert admitted is True  # a view under way is read at the line its own requests go out at
             assert reasoning_effort == "high"  # the round's effort: the request shape its measurement counted
             seen.append({"window": window_tokens, "known": known_window, "mode": start_mode,
                          "messages": list(current_messages), "schemas": list(tool_schemas),
-                         "reserve": output_reserve, "refused": refused_tokens})
+                         "reserve": output_reserve, "refused": refused_tokens, "telling": telling_floor})
             return plan("COARSE")
 
         p.reproject_for_route = reproject_for_route
@@ -191,7 +191,7 @@ def test_memory_step_passes_the_actual_window_and_current_transcript(tmp_path, m
     assert _coarsen_memory_view(context, fit) is True
     # Without a measured target the view saves the capacity deficit beyond the level it shows.
     assert seen == [{"window": 500_000, "known": True, "mode": "max", "messages": before,
-                     "schemas": [], "reserve": 65_536, "refused": 85_536}]
+                     "schemas": [], "reserve": 65_536, "refused": 85_536, "telling": False}]
     assert context.context_fit_plan.window_tokens == 500_000
     assert context.messages[0]["content"] == "COARSE" and context.messages[1:] == before[1:]
     assert context.tools._ctx.context_fit_plan is context.context_fit_plan
@@ -205,6 +205,8 @@ def test_memory_step_passes_the_actual_window_and_current_transcript(tmp_path, m
     unknown = replace(fit, measurement=replace(fit.measurement, capacity_total_tokens=None))
     _coarsen_memory_view(context, unknown)
     assert seen[-1]["window"] == 0 and seen[-1]["known"] is False and seen[-1]["refused"] == 85_536
+    _coarsen_memory_view(context, fit, telling_floor=True)  # a refusal's first pass stops a Max view at my tellings
+    assert seen[-1]["telling"] is True
 
 
 def test_fallback_chain_admits_an_overflow_after_the_passes_and_keeps_its_other_gates():
