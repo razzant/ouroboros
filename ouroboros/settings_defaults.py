@@ -151,6 +151,12 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # API route has no limit of the host's and a local model keeps three (``settings_scales.MODEL_CAP_KEY``); a
     # whole number limits both; <=0 limits neither.
     "OUROBOROS_MODEL_MAX_CONCURRENCY": "",
+    # How several accounts of one provider are spent when a connection is a POOL of
+    # ``members`` (provider_connections): "pool" rotates the members per call and each
+    # account keeps its own stream; "rotate" rotates too but admits ONE call at a time
+    # across the pool; "single" always spends the pool's first serveable member. An
+    # unknown or unreadable value reads as "pool".
+    "OUROBOROS_ACCOUNT_POOL_MODE": "pool",
     # The owner's interface language for this install: a BCP-47 tag ("ru", "pt-BR", "art-x-<slug>"
     # for an invented language); "" = not chosen, the English source renders. Written by
     # POST /api/ui/i18n/language, read live by the SPA and the Telegram skill, by the mind at its

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import multiprocessing
 import os
 import queue
@@ -578,3 +579,126 @@ def test_a_saved_shipped_three_reads_blank_once_and_the_next_save_ends_it(tmp_pa
     assert stored[KEY] == read and stored[MODEL_CAP_FORMAT_KEY] == 1
     config.save_settings({**config.load_settings(), KEY: 3})  # the owner types 3: from now on it is a choice
     assert config.load_settings()[KEY] == 3 and mc._cap(False) == 3
+
+
+# --- the account, not the model, is this queue's unit when the provider meters streams that way
+#
+# Two layers, because either can break alone: the digest tests pin the KEY the queue is filed
+# under, and the slot tests at the end hold a real slot and prove ADMISSION (a second model of
+# one account waits; another account does not). The slot tests stand under a chosen cap -- an
+# unchosen one leaves provider routes unlimited by design -- and pass the caller's deadline,
+# because this queue has no clock of its own.
+
+def _account_route(client_id: str) -> dict:
+    """A GigaChat route whose authorization key encodes one account (base64 client_id:secret)."""
+    return {"provider": "gigachat", "base_url": "https://g.invalid/v1",
+            "api_key": base64.b64encode(f"{client_id}:secret".encode()).decode()}
+
+
+def test_two_models_of_one_account_are_the_same_queue(isolated_queue, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_ACCOUNT_POOL_MODE", "pool")
+    route = _account_route("client-a")
+    keys = {mc._route_digest(model, False, dict(route))
+            for model in ("gigachat::GigaChat-3-Pro", "gigachat::GigaChat-3-Ultra")}
+    assert len(keys) == 1, "every model of one account draws on that account's one stream"
+
+
+def test_another_account_of_the_same_provider_is_another_queue(isolated_queue, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_ACCOUNT_POOL_MODE", "pool")
+    model = "gigachat::GigaChat-3-Pro"
+    keys = {mc._route_digest(model, False, _account_route(cid)) for cid in ("client-a", "client-b")}
+    assert len(keys) == 2, "a second account is a second stream, so it is a second queue"
+
+
+def test_a_provider_without_an_account_ceiling_keeps_the_model_in_the_key(isolated_queue, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_ACCOUNT_POOL_MODE", "pool")
+    route = {"provider": "openai", "base_url": "https://o.invalid/v1", "api_key": "fake-secret"}
+    keys = {mc._route_digest(model, False, dict(route)) for model in ("openai::one", "openai::two")}
+    assert len(keys) == 2, "with no declared ceiling the unit stays the model's own credential"
+
+
+def test_a_key_without_a_readable_account_keeps_the_credential_key(isolated_queue, monkeypatch):
+    # GigaChat's other ready group (user + password) encodes no account: with nothing to key
+    # on, the credential-and-model key stands instead of an invented account.
+    monkeypatch.setenv("OUROBOROS_ACCOUNT_POOL_MODE", "pool")
+    route = {"provider": "gigachat", "base_url": "https://g.invalid/v1", "user": "u", "password": "p"}
+    keys = {mc._route_digest(model, False, dict(route))
+            for model in ("gigachat::GigaChat-3-Pro", "gigachat::GigaChat-3-Ultra")}
+    assert len(keys) == 2
+
+
+def _hold_slot(route: dict, model: str, held: threading.Event, release: threading.Event) -> threading.Thread:
+    """Occupy one physical slot until `release`, the way a real send does."""
+
+    def run():
+        with mc.model_call_slot(model, route=route):
+            held.set()
+            release.wait(60)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread
+
+
+def _release_slot(holder: threading.Thread, release: threading.Event) -> None:
+    release.set()
+    holder.join(30)
+    assert not holder.is_alive()
+
+
+@pytest.fixture
+def chosen_cap(monkeypatch):
+    """Five streams of the owner's, so the provider's per-account ceiling is what binds."""
+    monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", "5")
+    monkeypatch.setenv("OUROBOROS_ACCOUNT_POOL_MODE", "pool")
+
+
+def test_two_models_of_one_account_share_its_single_stream(isolated_queue, chosen_cap):
+    route = _account_route("client-a")
+    held, release = threading.Event(), threading.Event()
+    holder = _hold_slot(route, "gigachat::GigaChat-3-Pro", held, release)
+    try:
+        assert held.wait(30)
+        with pytest.raises(mc.ModelSlotTimeout):
+            with mc.model_call_slot("gigachat::GigaChat-3-Ultra", route=route,
+                                    deadline_ts=time.time() + 1):
+                pass
+    finally:
+        _release_slot(holder, release)
+
+
+def test_another_account_of_the_same_provider_is_admitted_at_once(isolated_queue, chosen_cap):
+    held, release = threading.Event(), threading.Event()
+    holder = _hold_slot(_account_route("client-a"), "gigachat::GigaChat-3-Pro", held, release)
+    try:
+        assert held.wait(30)
+        with mc.model_call_slot("gigachat::GigaChat-3-Pro", route=_account_route("client-b"),
+                                deadline_ts=time.time() + 5):
+            pass
+    finally:
+        _release_slot(holder, release)
+
+
+def test_a_provider_without_an_account_ceiling_keeps_a_slot_per_model(isolated_queue, chosen_cap):
+    route = {"provider": "openai", "base_url": "https://o.invalid/v1", "api_key": "fake-secret"}
+    held, release = threading.Event(), threading.Event()
+    holder = _hold_slot(route, "openai::one", held, release)
+    try:
+        assert held.wait(30)
+        with mc.model_call_slot("openai::two", route=route, deadline_ts=time.time() + 5):
+            pass
+    finally:
+        _release_slot(holder, release)
+
+
+def test_a_key_without_a_readable_account_keeps_a_slot_per_model(isolated_queue, chosen_cap):
+    route = {"provider": "gigachat", "base_url": "https://g.invalid/v1", "user": "u", "password": "p"}
+    held, release = threading.Event(), threading.Event()
+    holder = _hold_slot(route, "gigachat::GigaChat-3-Pro", held, release)
+    try:
+        assert held.wait(30)
+        with mc.model_call_slot("gigachat::GigaChat-3-Ultra", route=dict(route),
+                                deadline_ts=time.time() + 5):
+            pass
+    finally:
+        _release_slot(holder, release)
