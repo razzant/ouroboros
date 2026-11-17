@@ -305,6 +305,27 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
     return HostSection("installed_skills", "\n".join(lines), "\n".join(operative), "list_skills")
 
 
+def _switch_fact(root: Any, observed: Any, authority: Any) -> str:
+    """The switch as a sentence while my places only hear (owner 15.11, 5A: on 7 Nov I read the bare key and told my
+    human the places work separately); nothing while it is on, unknown, or no place hears. The switch and the Panic
+    flag are read first, from the state this section already holds; the place store only when the fact can be said."""
+    from ouroboros.consciousness import STOP_SOURCE_KEY, panic_blocks_wake
+    from ouroboros.consciousness_view import mind_fact
+    from supervisor.state import control_value
+
+    try:
+        known, enabled = control_value(authority, "bg_consciousness_enabled")
+        panic = panic_blocks_wake(root)
+        if not (panic or (known and not enabled)):
+            return ""
+        from ouroboros.places import load_places
+        fact = mind_fact(load_places(root), enabled=bool(enabled) if known else None,
+                         stop_source=str(observed.values.get(STOP_SOURCE_KEY) or ""), panic=panic)
+    except Exception:
+        return ""
+    return f"\n\n{fact}" if fact else ""
+
+
 @timed_section("drive_state")
 def _drive_state_section(env: Any) -> str:
     """Typed projection of ``state/state.json`` + an on-demand pointer. Keys =
@@ -317,7 +338,8 @@ def _drive_state_section(env: Any) -> str:
             "budget_drift_pct", "budget_drift_alert", "last_owner_message_at")
     from supervisor.state import CONTROL_KEYS, RECOVERY_KEY, control_value, read_state
 
-    observed = read_state(env.drive_path("state/state.json").parent.parent)
+    root = env.drive_path("state/state.json").parent.parent
+    observed = read_state(root)
     raw = observed.values
     authority = observed.projection()
     projected = {k: (raw[k] if k not in CONTROL_KEYS or control_value(authority, k)[0]
@@ -330,7 +352,7 @@ def _drive_state_section(env: Any) -> str:
             + ((" Omitted keys: " + ", ".join(omitted) + ". Full raw source: "
                 "read_file(root='runtime_data', path='state/state.json').") if omitted else ""))
     heading = "## Drive state\n\n"
-    values = json.dumps(projected, ensure_ascii=False, indent=1, sort_keys=True, default=str)
+    values = json.dumps(projected, ensure_ascii=False, indent=1, sort_keys=True, default=str) + _switch_fact(root, observed, authority)
     operative = (heading + values + f"\n\nState authority: {observed.quality}; {observed.reason}. "
                  + f"Unknown controls: {', '.join(observed.unconfirmed) or 'none'}. "
                  + f"{len(omitted)} other state keys retained in the full source.")

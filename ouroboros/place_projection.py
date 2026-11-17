@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from ouroboros.places import (AUTHOR_OWNER, STATE_PAUSED, STATE_SILENT, PlaceError, confirmed_elsewhere, connect_place,
+from ouroboros.places import (AUTHOR_OWNER, STATE_SILENT, PlaceError, confirmed_elsewhere, connect_place,
                               place_records, place_summary, note_identity, migration_problems)
 
 log = logging.getLogger(__name__)
@@ -68,25 +68,25 @@ def said_once(label: str) -> str:
     return " · ".join(part for index, part in enumerate(parts) if not index or part != parts[index - 1])
 
 
-def consciousness_off(root) -> bool:
-    """Whether consciousness cannot focus in any place now (``presence_admission.focus_state`` is ``off``: the owner's
-    switch known Off or a pending Panic). A switch this read cannot know is no claim: intake stays closed on it, the
-    view says nothing."""
-    from ouroboros.presence_admission import focus_state
+def switch_state(root) -> str:
+    """The switch as a place's quiet line names it, from the reading intake folds (``presence_admission.switch_cause``:
+    ``on`` | ``off`` | ``panic`` | ``unknown``), so the words why a place is quiet follow its admission. A read that
+    fails is ``unknown``: no claim (intake stays closed on it, the view says nothing)."""
+    from ouroboros.presence_admission import switch_cause
     try:
-        return focus_state(root) == "off"
+        return switch_cause(root)
     except Exception:
         log.warning("Consciousness switch unreadable for the place views", exc_info=True)
-        return False
+        return "unknown"
 
 
 def place_view(root, place, *, declarations: list[dict] | None = None, allowance: dict | None = None,
-               brief: bool = False, records=None, off: bool | None = None, facts=None) -> dict[str, Any]:
+               brief: bool = False, records=None, facts=None, switch: str | None = None) -> dict[str, Any]:
     """Stored facts for status/launch; the owner surface also resolves connector capabilities. ``records`` is one
     ``places.place_records`` read shared by a list; its circle and description facts join the place here, the
-    circle's words only in a brief view (the list names them once, ``places_view``). ``off`` is one
-    ``consciousness_off`` read shared by a list (read here when absent): while it holds, a place that is not Paused
-    only hears, and its view says so as ``only_hears`` (derived on every read, never stored). ``facts`` is one
+    circle's words only in a brief view (the list names them once, ``places_view``). ``switch`` is one
+    ``switch_state`` read shared by a list (read here when absent): a full view says why the place is quiet now as
+    ``quiet`` (``consciousness_view.place_quiet``: derived on every read, never stored). ``facts`` is one
     ``place_arrivals.place_facts`` read shared by a list (rooms only for a brief one; read here when absent)."""
     from ouroboros.consciousness_allowance import allowance_window
     from ouroboros.place_arrivals import place_facts
@@ -96,8 +96,6 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
         allowance = allowance_window(root, allow_stale=True)
     records = place_records(root) if records is None else records
     result = dict(place_summary(place))
-    if (consciousness_off(root) if off is None else off) and place.state != STATE_PAUSED:
-        result["only_hears"] = True
     # Legacy notes predate ids; use stable content+ordinal ids without rewriting history.
     result["notes"] = [{**n, "note_id": note_identity(place.place_id, i, place.notes[i])}
                        for i, n in enumerate(result["notes"])]
@@ -122,6 +120,14 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
                       last_activity_at=max((str(room.get("last_at") or "") for room in rooms or []), default=""),
                       activity_coverage="captured_place_events", spent_24h_usd=spend)
         return result
+    # Why it is quiet now, by its one cause (owner 15.11, 5A): on its human's screens, never inside the place.
+    from ouroboros.consciousness_view import place_quiet
+    from ouroboros.runtime_limits import get_consciousness_autonomy
+    quiet = place_quiet(place.state, switch=switch_state(root) if switch is None else switch,
+                        autonomy=get_consciousness_autonomy(), allowance=str((allowance or {}).get("status") or ""),
+                        limit_usd=(allowance or {}).get("limit_usd"))
+    if quiet:
+        result["quiet"] = quiet
     result.update(label=said_once(place.label or place.provider),
                   rooms=rooms, unanswered=own["unanswered"] if rooms is not None else None,
                   last_activity_at=own["last_activity_at"],
@@ -160,11 +166,12 @@ def places_view(root) -> dict:
     from ouroboros.consciousness_allowance import allowance_window
     from ouroboros.place_arrivals import place_facts
     allowance = allowance_window(root, allow_stale=True) or {}
-    off = consciousness_off(root)
+    switch = switch_state(root)
     facts = place_facts(root, records.places.values())
-    return {"migration_problems": migration_problems(root),
-            "places": [place_view(root, p, declarations=declarations, allowance=allowance, records=records, off=off,
-                                  facts=facts) for p in records.places.values()],
+    from ouroboros.consciousness_view import connect_note
+    return {"migration_problems": migration_problems(root), "connect_note": connect_note(switch),
+            "places": [place_view(root, p, declarations=declarations, allowance=allowance, records=records,
+                                  facts=facts, switch=switch) for p in records.places.values()],
             "circles": [circle_summary(circle) for circle in records.circles],
             "connectors": [{"connector": r["skill"],
                             "label": r["label"], "icon": r.get("icon_spec") or {}, "destination": r["destination"],

@@ -527,30 +527,35 @@ test('Active · Silent · Paused in one control; the note says what the chosen s
     assert.match(placeSheetBodyHtml(mail), /Away from this place: no wakes, no actions\. Still connected; reported events are saved\./);
 });
 
-test('while consciousness is off the sheet says the place only hears: Active\'s note and Silent\'s wake note', () => {
-    // Owner 06.11: «Lives here: listens, wakes…» stayed on every sheet for the 28 hours Off left the places hearing.
-    const off = (place) => ({ ...place, onlyHears: true });
+test('a cause that keeps the place quiet is said under the strip with its door; Silent keeps its card', () => {
+    // Owner 06.11: «Lives here: listens, wakes…» stayed on every sheet for the 28 hours Off left the places hearing;
+    // owner 15.11 (5A): one cause in the host's words, the door where it is changed, the stored choice kept chosen.
+    const note = 'Consciousness is off: it only hears here, and nothing here wakes it until you turn it on.';
+    const off = (place) => ({ ...place, quiet: { cause: 'off', word: 'Hears only · consciousness off', note, door: 'consciousness' } });
     const active = placeSheetBodyHtml(off(slack));
-    assert.match(active, /<p class="place-state-note">Consciousness is off: it only hears here\.<\/p>/);
+    assert.match(active, new RegExp(`<p class="place-state-note">${note.replace(/\./g, '\\.')} <button[^>]*data-place-act="open-consciousness"[^>]*>Consciousness ›</button></p>`));
     assert.doesNotMatch(active, /Lives here: listens/);
     // «A checked kind calls it here at once» stays the rule; the exception under it says Off suspends it, as Paused does.
     assert.match(active, /While consciousness is off, nothing here wakes it\./);
     assert.doesNotMatch(placeSheetBodyHtml(slack), /While consciousness is off/);
-    // Beside it the one way to Start: the door to Dashboard › Consciousness, never a second Start; only while Off.
-    assert.match(active, /data-place-act="open-consciousness"[^>]*>Consciousness ›</);
-    assert.doesNotMatch(active, /data-place-act="start"|>Start</);
+    // One door to the switch, never a second switch; only while a cause holds.
+    assert.equal((active.match(/open-consciousness/g) || []).length, 1);
+    assert.doesNotMatch(active, /data-place-act="start"|>Start<|>Turn on</);
     assert.doesNotMatch(placeSheetBodyHtml(slack), /open-consciousness/);
+    const spent = placeSheetBodyHtml({ ...slack, quiet: { cause: 'allowance', word: 'Waits · allowance spent', note: 'Its allowance…', door: 'costs' } });
+    assert.match(spent, /data-place-act="open-costs"[^>]*>Costs ›</);
+    assert.doesNotMatch(spent, /While consciousness is off/, 'only the switch and Panic suspend the wakes here');
     const silent = placeSheetBodyHtml(off(community));
     assert.match(silent, /While consciousness is off, nothing here wakes it\./);
     assert.doesNotMatch(silent, /these still wake it to read and think/);
     assert.match(silent, /class="place-silent-card"/, 'what Silent blocks is still said, once');
-    assert.doesNotMatch(silent, /class="place-state-note"/);
-    // With the switch on the stored choice says what it does; the host's fact is a strict boolean.
+    assert.match(silent, /class="place-state-note">Consciousness is off/);
+    // With nothing keeping it quiet the stored choice says what it does; the host's cause needs its words.
     assert.match(placeSheetBodyHtml(slack), /Lives here: listens, wakes when its list says so, speaks and acts\./);
     assert.match(placeSheetBodyHtml(community), /Silent: these still wake it to read and think/);
     assert.doesNotMatch(placeSheetBodyHtml(community), /While consciousness is off/);
-    assert.deepEqual([true, 'true', undefined].map((only_hears) => normalizePlace({ place_id: 'x', state: 'active', only_hears }).onlyHears),
-        [true, false, false]);
+    assert.equal(normalizePlace({ place_id: 'x', state: 'active', quiet: { cause: 'off' } }).quiet, null);
+    assert.equal(normalizePlace({ place_id: 'x', state: 'active', quiet: { cause: 'off', word: 'w', note: 'n', door: 'consciousness' } }).quiet.word, 'w');
 });
 
 test('with no kind checked the sheet promises neither a wake nor silence: Active\'s note and the list\'s own line', () => {
@@ -574,7 +579,7 @@ test('with no kind checked the sheet promises neither a wake nor silence: Active
     const paused = placeSheetBodyHtml(none(mail));
     assert.match(paused, /While this place is Paused, nothing here wakes it\./);
     assert.doesNotMatch(paused, /No kind is checked/);
-    const off = placeSheetBodyHtml({ ...none(slack), onlyHears: true });
+    const off = placeSheetBodyHtml({ ...none(slack), quiet: { cause: 'off', word: 'Hears only · consciousness off', note: 'Consciousness is off: it only hears here, and nothing here wakes it until you turn it on.', door: 'consciousness' } });
     assert.match(off, /While consciousness is off, nothing here wakes it\./);
     assert.doesNotMatch(off, /No kind is checked|Lives here/);
     assert.doesNotMatch(placeSheetBodyHtml(slack), /No kind is checked/);

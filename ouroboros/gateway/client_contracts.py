@@ -618,7 +618,7 @@ class PlaceSummary(TypedDict):
     conversation_id: str
     label: str
     state: Literal["active", "silent", "paused"]
-    only_hears: NotRequired[bool]  # derived per read: true while consciousness is off (or Panic) and the place not Paused
+    quiet: NotRequired[Dict[str, str]]  # derived per read: {cause, word, note, door} while a cause keeps it quiet (5A)
     wakes: List[Dict[str, str]]
     notes: List[Dict[str, str]]
     owner_accounts: List[Dict[str, str]]

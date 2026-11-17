@@ -259,7 +259,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/health": Shape("200:HealthResponse"),
     "GET /api/contract": Shape("200:GatewayContractResponse"),
     "GET /api/state": Shape("200:StateResponse 500:ErrorResponse", query="bindings_since"),
-    "GET /api/consciousness": Shape("200:json 503:json", note="status/detail, appointment_at, live_wake_held, live_wake_hold, allowance_status/open_rows/room_after, model_route, spend by cause, places_brief; RecentWakesView: recent_wakes: RecentWake[] | null, recent_wakes_coverage names the shared 50-wake/48 h cap or read failure; full Places use /api/places"),
+    "GET /api/consciousness": Shape("200:json 503:json", note="?switch=on|off: SwitchPreview {to, lines, places[{place_id, label, state, people}]} read at the press; else status/detail, position/gloss, appointment_at, live_wake_held, live_wake_hold, allowance_status/open_rows/room_after, model_route, spend by cause, places_brief; RecentWakesView: recent_wakes: RecentWake[] | null, recent_wakes_coverage names the shared 50-wake/48 h cap or read failure; full Places use /api/places"),
     "GET /onboarding": Shape("200:html", query="builtin", note="selected setup or builtin wizard; builtin=1 forces builtin"),
     "GET /api/onboarding": Shape("200:html 204:empty", note="204: a ready provider exists, no setup needed"),
     "GET /api/onboarding/bootstrap": Shape("200:OnboardingBootstrapResponse", note="read-only; writes nothing"),
@@ -326,7 +326,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/owner/skills/{skill}/attest-review": Shape(
         "200,409:SkillReviewResponse 400:ErrorResponse", "SkillRevisionRequest",
         note=f"the owner's review verdict; 409 when refused (ok false); {_IN_LANE}"),
-    "GET /api/places": Shape("200:json", note="Places, CircleSummary circles once and installed connector declarations; §12 Places"),
+    "GET /api/places": Shape("200:json", note="Places (each with its quiet cause when one holds), CircleSummary circles once, installed connector declarations and connect_note; §12 Places"),
     "GET /api/places/{place_id}/rooms": Shape("200:PlaceRoomsResponse 404,503:ErrorResponse", note="lazy indexed captured-room discovery; history uses /api/chat/history"),
     "POST /api/places": Shape("200:json 400,409:json", "PlaceConnectRequest", note="connect from a declared connector; an Add's words land with a new place, 409 place_exists names a connected one"),
     "POST /api/places/{place_id}": Shape("200:json 400,409:json", "PlaceUpdateRequest", note="atomic owner-authored place choices, its circle and description included"),
