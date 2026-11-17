@@ -61,7 +61,7 @@
       <h1 id="hero-title" class="display">
         <span class="line"><span>An AI agent</span></span>
         <span class="line"><span>on your computer.</span></span>
-        <span class="line red" id="hero-power" aria-hidden="true" data-lines="It rewrites its own code.|It runs a swarm of agents.|It sees your screen.|It lives in your Telegram.|It remembers."><span>It rewrites its own code.</span></span>
+        <span class="line red" id="hero-power" aria-hidden="true" data-lines="It rewrites its own code.|It runs a swarm of agents.|It sees your screen.|It lives in your Telegram.|It remembers."><span class="power">It rewrites its own code.</span></span>
         <span class="visually-hidden">It rewrites its own code.</span>
       </h1>
       <div class="hero-actions">
@@ -69,8 +69,12 @@
         <a class="pill ghost big" href="#swarm">See it work ↓</a>
       </div>
       <p class="hero-note">Open source · MIT · Mac (Apple silicon), Windows, Linux · also Docker, CLI and Telegram</p>
-      <figure class="hero-shot" aria-hidden="true"><img src="/ui/hero-swarm-dark.webp" alt="" width="2000" height="1563" fetchpriority="high"></figure>
-      <div class="ticker" aria-hidden="true"><div class="ticker-track"><span>Swarms Codex, Claude Code, Cursor, Antigravity</span><i></i><span>Talks to you by voice</span><i></i><span>Lives in Telegram and Slack</span><i></i><span>One memory, every room</span><i></i><span>Thinks between your messages</span><i></i><span>Rewrites its own code</span><i></i><span>Open source</span><i></i></div></div>
+      <div class="stack" aria-hidden="true">
+        <figure class="win w-back"><img src="/ui/widgets-light.webp" alt="" width="1800" height="1013" fetchpriority="high"></figure>
+        <figure class="win w-front"><img src="/ui/game-card-light.webp" alt="" width="1800" height="1013" fetchpriority="high"></figure>
+        <figure class="win w-phone"><img src="/ui/phone-answered-light.webp" alt="" width="780" height="1688"></figure>
+      </div>
+      <div class="ticker" aria-hidden="true"><div class="ticker-track"><span>Swarms Codex, Claude Code, Cursor, Antigravity</span><i></i><span>Talks to you by voice</span><i></i><span>Lives in Telegram and Slack</span><i></i><span>One memory, every room</span><i></i><span>Thinks between your messages</span><i></i><span>Rewrites its own code</span><i></i><span>Everything is a plugin</span><i></i><span>Open source</span><i></i></div></div>
     </header>
 
     <!-- ============ PROOF ============ -->
@@ -80,8 +84,8 @@
         <li><b>86.74%</b><span>Terminal-Bench 2.1 · #1 self-reported, model-matched</span></li>
         <li><b>90.69%</b><span>OSWorld-Verified</span></li>
         <li><b>#1</b><span>CL-Bench · reward 0.2301</span></li>
+        <li><b>89%</b><span>of its 17k commits are authored by Ouroboros itself</span></li>
         <li><b>1.7k</b><span>GitHub stars</span></li>
-        <li><b>125</b><span>releases of itself</span></li>
         <li><b>MIT</b><span>open source since 16 Feb 2026</span></li>
       </ul>
       <p class="proof-note reveal">Self-reported, model-matched runs from summer 2026, with public runs and full traces: on the same model it leads Claude Code, Codex, Cursor and Hermes. <a href="/benchmarks/">Evidence table →</a></p>
@@ -89,36 +93,36 @@
 
     <!-- ============ SWARM ============ -->
     <section class="frame black feature" id="swarm" aria-labelledby="swarm-title">
-      <h2 id="swarm-title" class="display reveal">Use a<br><span class="red">swarm.</span></h2>
+      <h2 id="swarm-title" class="display words reveal">Use a<br><span class="red">swarm.</span></h2>
       <div class="copy reveal">
         <p>One task, as many helpers as it needs. Ouroboros sends Codex, Claude Code, Cursor and Antigravity to work as sessions on your own subscriptions, nests them, reads what they bring back and stays responsible for the answer.</p>
         <ul class="logos" aria-label="Coding agents Ouroboros runs as helpers"><li data-logo="codex">Codex</li><li data-logo="claude">Claude Code</li><li data-logo="cursor">Cursor</li><li data-logo="antigravity">Antigravity</li></ul>
       </div>
-      <figure class="shot tilt-left reveal"><img src="/ui/swarm-tree-light.webp" alt="The desktop app: a work card for a billing migration with seven nested helpers, each naming the coding agent and model that runs it" loading="lazy" width="1800" height="1497"></figure>
+      <figure class="shot f-tree lean tilt-left reveal"><img src="/ui/swarm-tree-light.webp" alt="The desktop app: a work card for a billing migration with seven nested helpers, each naming the coding agent and model that runs it" loading="lazy" width="1800" height="1497"></figure>
       <div class="pair reveal">
-        <figure class="shot small"><img src="/ui/quotas-dark.webp" style="--zoom:1.5;--ox:62%;--oy:30%" alt="The Quotas widget: the connected Codex accounts, their windows and the one serving now" loading="lazy" width="1800" height="1013"><figcaption><b>The next account takes over.</b> When one subscription runs out, the next one continues.</figcaption></figure>
-        <figure class="shot small"><img src="/ui/review-dark.webp" style="--zoom:1.6;--ox:52%;--oy:42%" alt="A finished task with its result review: three reviewers on three models, none of them the lead" loading="lazy" width="1800" height="1013"><figcaption><b>Other models review the result.</b> Three reviewers, none of them the lead.</figcaption></figure>
+        <figure class="shot f-16x10"><img src="/ui/quotas-dark.webp" style="--zoom:1.32;--ox:58%;--oy:6%" alt="The Quotas widget: tabs for Cursor, Codex, Claude and Antigravity accounts, the connected Codex accounts with their windows and the one serving now" loading="lazy" width="1800" height="1013"><figcaption><b>The next account takes over.</b> When one subscription runs out, the next one continues.</figcaption></figure>
+        <figure class="shot f-43"><img src="/ui/review-dark.webp" style="--zoom:1.7;--ox:52%;--oy:44%" alt="A finished task with its result review: three reviewers on three models, none of them the lead" loading="lazy" width="1800" height="1013"><figcaption><b>Other models review the result.</b> Three reviewers, none of them the lead.</figcaption></figure>
       </div>
     </section>
 
     <!-- ============ CALL ============ -->
     <section class="frame white feature" id="call" aria-labelledby="call-title">
-      <h2 id="call-title" class="display reveal">Talk to it.<br><span class="red">Show it your screen.</span></h2>
+      <h2 id="call-title" class="display words reveal">Talk to it.<br><span class="red">Show it your screen.</span></h2>
       <div class="copy reveal">
         <p>A live call inside the app: it listens, thinks and answers, and can watch your screen or camera while you talk. What you said lands in the same memory as the chat.</p>
         <ul class="chips" aria-label="Voice engines"><li>Gemini Live</li><li>Grok Voice</li><li>OpenAI realtime</li></ul>
       </div>
-      <figure class="shot stage reveal"><img src="/ui/call-stage-dark.webp" alt="A call in progress inside the app: Ouroboros speaking, a live waveform, Mute, Show and End controls" loading="lazy" width="1800" height="754"></figure>
+      <figure class="shot f-window full lean reveal"><img src="/ui/call-big-light.webp" alt="The whole app during a call: the chat, and the wide call view with Ouroboros speaking, a live waveform and the Mute, Show and End controls" loading="lazy" width="1800" height="1013"></figure>
     </section>
 
     <!-- ============ PLACES ============ -->
     <section class="frame black feature" id="places" aria-labelledby="places-title">
-      <h2 id="places-title" class="display reveal">Lives where<br><span class="red">you talk.</span></h2>
+      <h2 id="places-title" class="display words reveal">Lives where<br><span class="red">you talk.</span></h2>
       <div class="copy reveal">
         <p>Telegram, Slack, email, GitHub. It answers colleagues in its own name, keeps each place's own notes, and sends you a private report when something needs you.</p>
       </div>
       <div class="places-visual reveal">
-        <figure class="shot"><img src="/ui/circles-dark.webp" style="--zoom:1.3;--ox:60%;--oy:22%" alt="The Circles page: Telegram, a Slack workspace, an email inbox, a GitHub repository and a family group, each with its state" loading="lazy" width="1800" height="1013"></figure>
+        <figure class="shot f-16x10"><img src="/ui/circles-dark.webp" style="--zoom:1.28;--ox:56%;--oy:18%" alt="The Circles page: Telegram, a Slack workspace, an email inbox, a GitHub repository and a family group, each with its platform icon and state" loading="lazy" width="1800" height="1013"></figure>
         <figure class="phone"><img src="/ui/phone-places-dark.webp" alt="The same app on a phone in Telegram: the list of projects and places" loading="lazy" width="780" height="1688"></figure>
       </div>
     </section>
@@ -127,64 +131,64 @@
     <section class="frame white feature twin" id="memory" aria-labelledby="memory-title">
       <div class="twin-col">
         <div class="copy reveal">
-          <h2 id="memory-title" class="display small">It remembers.<br><span class="red">In its own words.</span></h2>
+          <h2 id="memory-title" class="display small words reveal">It remembers.<br><span class="red">In its own words.</span></h2>
           <p>Open conversations stay verbatim; closed matters become pages it wrote, with the quotations checked. Knowledge sits on shelves, notes link to each other, and one memory spans every room and channel.</p>
         </div>
-        <figure class="shot reveal"><img src="/ui/memory-knowledge-light.webp" style="--zoom:1.35;--ox:62%;--oy:42%" alt="The Memory Atlas: rooms, a knowledge shelf with linked notes, marks and identity with its versions" loading="lazy" width="1800" height="1013"></figure>
+        <figure class="shot f-43 reveal"><img src="/ui/memory-knowledge-light.webp" style="--zoom:1.42;--ox:60%;--oy:40%" alt="The Memory Atlas: rooms, a knowledge shelf with linked notes, marks and identity with its versions" loading="lazy" width="1800" height="1013"></figure>
       </div>
       <div class="twin-col">
         <div class="copy reveal">
-          <h2 class="display small">It thinks between<br><span class="red">your messages.</span></h2>
+          <h2 class="display small words reveal">It thinks between<br><span class="red">your messages.</span></h2>
           <p>Advises, acts or evolves: you set the level. It wakes at night on its own schedule, reads what arrived, prepares, and tells you only what matters.</p>
         </div>
-        <figure class="shot reveal"><img src="/ui/consciousness-light.webp" style="--zoom:1.35;--ox:62%;--oy:38%" alt="Dashboard, Consciousness: Thinking, the autonomy levels Advises, Acts and Evolves, and its own wakes of the night" loading="lazy" width="1800" height="1013"></figure>
+        <figure class="shot f-43 reveal"><img src="/ui/consciousness-light.webp" style="--zoom:1.42;--ox:62%;--oy:36%" alt="Dashboard, Consciousness: Thinking, the autonomy levels Advises, Acts and Evolves, and its own wakes of the night" loading="lazy" width="1800" height="1013"></figure>
       </div>
     </section>
 
     <!-- ============ MAKES THINGS ============ -->
     <section class="frame black feature" id="makes" aria-labelledby="makes-title">
-      <h2 id="makes-title" class="display reveal">Make it<br><span class="red">a skill.</span></h2>
+      <h2 id="makes-title" class="display words reveal">Make it<br><span class="red">a skill.</span></h2>
       <div class="copy reveal">
         <p>“Make me a Doom-style shooter I can play right here.” Done, playable in the chat card. A chart becomes a widget, a 43-paper research becomes a table, an image gets drawn. Whatever it makes, one click keeps it.</p>
       </div>
-      <figure class="shot tilt-left reveal"><img src="/ui/game-card-dark.webp" style="--zoom:1.25;--ox:50%;--oy:50%" alt="A chat card with a playable Doom-style corridor shooter Ouroboros wrote, with the buttons Make it a skill and Close" loading="lazy" width="1800" height="1013"></figure>
+      <figure class="shot f-43 lean tilt-right reveal"><img src="/ui/game-card-dark.webp" style="--zoom:1.5;--ox:50%;--oy:52%" alt="A chat card with a playable Doom-style corridor shooter Ouroboros wrote, with the buttons Make it a skill and Close" loading="lazy" width="1800" height="1013"></figure>
       <div class="pair reveal">
-        <figure class="shot small"><img src="/ui/widgets-dark.webp" style="--zoom:1.35;--ox:60%;--oy:45%" alt="The Widgets board: a spend chart, a quotas meter and a notes card kept from chat answers" loading="lazy" width="1800" height="1013"><figcaption><b>Keep it on Widgets.</b> A board of living cards it made.</figcaption></figure>
-        <figure class="shot small"><img src="/ui/research-dark.webp" style="--zoom:1.5;--ox:55%;--oy:48%" alt="A research answer: 43 papers read, three ways swarms coordinate and where each breaks, with sources" loading="lazy" width="1800" height="1013"><figcaption><b>43 papers. One answer.</b> With the sources it read.</figcaption></figure>
+        <figure class="shot f-16x10"><img src="/ui/research-dark.webp" style="--zoom:1.6;--ox:56%;--oy:54%" alt="A research answer: 43 papers read, three ways swarms coordinate and where each breaks, with sources" loading="lazy" width="1800" height="1013"><figcaption><b>43 papers. One answer.</b> With the sources it read.</figcaption></figure>
+        <figure class="shot f-square"><img src="/ui/widgets-dark.webp" style="--zoom:1.55;--ox:38%;--oy:40%" alt="The Widgets board: a spend chart, a quotas meter and a notes card kept from chat answers" loading="lazy" width="1800" height="1013"><figcaption><b>Keep it on Widgets.</b> A board of living cards it made.</figcaption></figure>
       </div>
     </section>
 
     <!-- ============ EVOLUTION ============ -->
     <section class="frame white feature" id="evolution" aria-labelledby="evolution-title">
-      <h2 id="evolution-title" class="display reveal">It rewrites<br><span class="red">its own code.</span></h2>
+      <h2 id="evolution-title" class="display words reveal">It rewrites<br><span class="red">its own code.</span></h2>
       <div class="copy reveal">
         <p>Evolution campaigns change its implementation: code, prompts, tools, memory. Every change is reviewed by other models, checked, and kept in Git history. The constitution it wrote for itself sets the limits.</p>
         <p class="links"><a href="https://github.com/razzant/ouroboros/blob/ouroboros/BIBLE.md">Read the constitution</a><a href="/history/first-48-hours/">The first 48 hours</a></p>
       </div>
-      <figure class="shot tilt-right reveal"><img src="/ui/evolution-light.webp" style="--zoom:1.3;--ox:64%;--oy:42%" alt="Dashboard, Evolution: a running campaign with its direction and progress, and the history of how Ouroboros changed" loading="lazy" width="1800" height="1013"></figure>
+      <figure class="shot f-wide lean tilt-left reveal"><img src="/ui/evolution-light.webp" style="--zoom:1.5;--ox:66%;--oy:38%" alt="Dashboard, Evolution: a running campaign with its direction and progress, and the history of how Ouroboros changed" loading="lazy" width="1800" height="1013"></figure>
     </section>
 
     <!-- ============ MODELS ============ -->
     <section class="frame black feature" id="models" aria-labelledby="models-title">
-      <h2 id="models-title" class="display reveal">Any model.<br><span class="red">Your accounts.</span></h2>
+      <h2 id="models-title" class="display words reveal">Any model.<br><span class="red">Your accounts.</span></h2>
       <div class="copy reveal">
         <p>For the mind: Codex, Claude, Gemini, Grok, DeepSeek, OpenRouter or a local GGUF model. For the coding helpers: Codex, Claude Code, Cursor and Antigravity subscriptions. Several keys per provider, exact pins, processing tiers, costs and cache in plain numbers.</p>
       </div>
-      <figure class="shot tilt-left reveal"><img src="/ui/model-sheet-dark.webp" style="--zoom:1.55;--ox:46%;--oy:72%" alt="The model sheet in the composer: models with their source, context window and price" loading="lazy" width="1800" height="1013"></figure>
+      <figure class="shot f-16x10 lean tilt-right reveal"><img src="/ui/accounts-dark.webp" style="--zoom:1.5;--ox:58%;--oy:34%" alt="Settings, Accounts: subscriptions to Codex, Claude Code, Cursor and Antigravity that take turns, and API keys" loading="lazy" width="1800" height="1013"></figure>
       <div class="pair reveal">
-        <figure class="shot small"><img src="/ui/accounts-dark.webp" style="--zoom:1.5;--ox:56%;--oy:34%" alt="Settings, Accounts: Codex 20 of 20 in rotation, Claude Code, Cursor and Antigravity" loading="lazy" width="1800" height="1013"><figcaption><b>Subscriptions, not only keys.</b> Codex runs the mind; Claude Code, Cursor and Antigravity run helpers.</figcaption></figure>
-        <figure class="shot small"><img src="/ui/card-chart-dark.webp" style="--zoom:1.4;--ox:42%;--oy:46%" alt="A chat card with this week's spend by model, as a chart and a table" loading="lazy" width="1800" height="1013"><figcaption><b>Money in plain numbers.</b> Spend, tasks and cache hits by model.</figcaption></figure>
+        <figure class="shot f-tall"><img src="/ui/model-sheet-dark.webp" style="--zoom:1.75;--ox:46%;--oy:72%" alt="The model sheet in the composer: models with their source, context window and price, and the processing tier" loading="lazy" width="1800" height="1013"><figcaption><b>Pick the exact route.</b> Model, source, window, price and tier in one sheet.</figcaption></figure>
+        <figure class="shot f-square"><img src="/ui/card-chart-dark.webp" style="--zoom:1.45;--ox:40%;--oy:46%" alt="A chat card with this week's spend by model, as a chart and a table" loading="lazy" width="1800" height="1013"><figcaption><b>Money in plain numbers.</b> Spend, tasks and cache hits by model.</figcaption></figure>
       </div>
     </section>
 
     <!-- ============ EVERYWHERE + THE REST ============ -->
     <section class="frame white feature" id="everywhere" aria-labelledby="everywhere-title">
-      <h2 id="everywhere-title" class="display reveal">Everywhere<br><span class="red">you are.</span></h2>
+      <h2 id="everywhere-title" class="display words reveal">Everywhere<br><span class="red">you are.</span></h2>
       <div class="copy reveal">
         <p>One agent and one memory across the desktop app, the phone, your chat apps and the terminal. The interface translates itself into your language.</p>
       </div>
       <div class="surfaces reveal">
-        <figure class="shot"><img src="/ui/main-answered-light.webp" alt="The desktop app on macOS: the morning exchange in Main Chat" loading="lazy" width="1800" height="1013"><figcaption><b>Desktop.</b> macOS, Windows, Linux.</figcaption></figure>
+        <figure class="shot f-window"><img src="/ui/main-answered-light.webp" alt="The desktop app on macOS: the morning exchange in Main Chat" loading="lazy" width="1800" height="1013"><figcaption><b>Desktop.</b> macOS, Windows, Linux.</figcaption></figure>
         <figure class="phone-col"><img class="phone-img" src="/ui/phone-answered-light.webp" alt="The same chat on a phone, in Telegram or a browser" loading="lazy" width="780" height="1688"><figcaption><b>Phone.</b> Telegram Mini App or a browser.</figcaption></figure>
         <figure class="term"><pre><code><span class="prompt">$</span> ouroboros run --start \
   --workspace ~/code/shop \
@@ -207,9 +211,24 @@
       </ul>
     </section>
 
+    <!-- ============ PLUGINS ============ -->
+    <section class="frame black plugins" id="plugins" aria-labelledby="plugins-title">
+      <h2 id="plugins-title" class="display words reveal">Don't like a part?<br><span class="red">Swap it. It's all plugins.</span></h2>
+      <p class="lead reveal">The core stays small. Skills, widgets, connectors, voice engines, review panels and MCP tools are plugins with reviewed manifests: install one from OuroborosHub, write your own in an afternoon, or ask Ouroboros to write it for itself. Your install stays yours across updates.</p>
+      <ul class="kinds reveal" aria-label="What a plugin can be">
+        <li><b>Skills</b><span>Tools, workflows and instructions it learns to use.</span></li>
+        <li><b>Widgets</b><span>Living cards on its board, from a chart to a game.</span></li>
+        <li><b>Connectors</b><span>Telegram, Slack, email, GitHub: the places it lives in.</span></li>
+        <li><b>Voice engines</b><span>Gemini Live, Grok Voice, OpenAI realtime, or yours.</span></li>
+        <li><b>Review panels</b><span>Which models judge the plan and the result.</span></li>
+        <li><b>MCP tools</b><span>Any server, loaded when a task needs it.</span></li>
+      </ul>
+      <p class="links reveal"><a href="https://github.com/razzant/OuroborosHub">Browse OuroborosHub →</a><a href="https://github.com/razzant/ouroboros/blob/ouroboros/docs/CREATING_SKILLS.md">Write a skill →</a></p>
+    </section>
+
     <!-- ============ INSTALL ============ -->
-    <section class="frame black install" id="install" aria-labelledby="install-title">
-      <h2 id="install-title" class="display">Get it.</h2>
+    <section class="frame white install" id="install" aria-labelledby="install-title">
+      <h2 id="install-title" class="display words reveal">Get it.</h2>
       <div class="install-grid reveal">
         <a class="os-card" href="/install/"><b>macOS</b><span>Apple silicon · .dmg</span></a>
         <a class="os-card" href="/install/"><b>Windows</b><span>x64 · .zip</span></a>

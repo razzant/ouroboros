@@ -1,9 +1,12 @@
 document.documentElement.classList.add("has-js");
 
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+const finePointer = window.matchMedia("(hover: hover) and (pointer: fine)");
+const motionPaused = () => document.body.classList.contains("motion-paused");
 
 /* The hero's third line cycles through what the agent does. One font size fits the longest phrase on one row;
-   on a phone the phrases wrap instead. Without JS or with reduced motion it stays on one phrase. */
+   on a phone the phrases wrap instead. Both spans of a swap share one grid cell, so nothing is clipped and
+   nothing moves below. Without JS or with reduced motion the line stays on one phrase. */
 function fitPower(host, lines) {
   host.style.fontSize = "";
   if (window.innerWidth <= 700) return;
@@ -26,24 +29,28 @@ function initHeroPower() {
   window.addEventListener("resize", () => fitPower(host, lines), { passive: true });
   if (reducedMotion.matches || lines.length < 2) return;
   let index = 0;
-  let paused = false;
-  host.addEventListener("mouseenter", () => { paused = true; });
-  host.addEventListener("mouseleave", () => { paused = false; });
+  let hovered = false;
+  host.addEventListener("mouseenter", () => { hovered = true; });
+  host.addEventListener("mouseleave", () => { hovered = false; });
   const swap = () => {
-    if (paused || document.hidden || document.body.classList.contains("motion-paused")) return;
-    const leaving = host.querySelector("span:last-child");
+    if (hovered || document.hidden || motionPaused()) return;
+    const leaving = host.querySelector("span.power");
     index = (index + 1) % lines.length;
     const next = document.createElement("span");
+    next.className = "power swap-in";
     next.textContent = lines[index];
-    leaving.classList.add("swap-out");
-    leaving.addEventListener("animationend", () => leaving.remove(), { once: true });
+    if (leaving) {
+      leaving.className = "power swap-out";
+      const drop = () => leaving.remove();
+      leaving.addEventListener("animationend", drop, { once: true });
+      window.setTimeout(drop, 700);
+    }
     host.appendChild(next);
-    next.className = "swap-in";
   };
-  window.setTimeout(() => window.setInterval(swap, 2800), 2400);
+  window.setTimeout(() => window.setInterval(swap, 3000), 2600);
 }
 
-/* One control pauses the ticker and the cycling line (WCAG 2.2.2); it appears only when motion runs. */
+/* One control pauses the ticker, the cycling line and the floating windows (WCAG 2.2.2); it appears only when motion runs. */
 function initMotionToggle() {
   const button = document.querySelector(".motion");
   if (!button || reducedMotion.matches) return;
@@ -76,6 +83,32 @@ function initPlatformLabel() {
   else label.textContent = "";
 }
 
+/* Section titles rise word by word when they come on screen. */
+function splitWords() {
+  document.querySelectorAll(".display.words").forEach((title) => {
+    let i = 0;
+    const wrap = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const parts = node.textContent.split(/(\s+)/);
+        const frag = document.createDocumentFragment();
+        parts.forEach((part) => {
+          if (!part) return;
+          if (/^\s+$/.test(part)) { frag.appendChild(document.createTextNode(part)); return; }
+          const w = document.createElement("span");
+          w.className = "w";
+          w.style.setProperty("--i", String(i++));
+          w.textContent = part;
+          frag.appendChild(w);
+        });
+        node.replaceWith(frag);
+      } else if (node.nodeType === Node.ELEMENT_NODE && node.tagName !== "BR") {
+        [...node.childNodes].forEach(wrap);
+      }
+    };
+    [...title.childNodes].forEach(wrap);
+  });
+}
+
 function initReveal() {
   const items = [...document.querySelectorAll(".reveal")];
   if (reducedMotion.matches || !("IntersectionObserver" in window)) {
@@ -92,22 +125,54 @@ function initReveal() {
   items.forEach((item) => observer.observe(item));
 }
 
-/* The hero window drifts slower than the page while the hero is on screen. */
-function initParallax() {
-  const shot = document.querySelector(".hero-shot");
-  if (!shot || reducedMotion.matches) return;
+/* The hero's fan of windows leans toward the pointer and drifts slower than the page. */
+function initHeroStack() {
+  const stack = document.querySelector(".stack");
+  const hero = document.querySelector(".hero");
+  if (!stack || !hero || reducedMotion.matches) return;
+  let mx = 0;
+  let my = 0;
+  let scroll = 0;
   let ticking = false;
-  const update = () => {
+  const paint = () => {
     ticking = false;
-    const y = Math.min(window.scrollY, window.innerHeight);
-    shot.style.transform = `translateY(${(y * 0.12).toFixed(1)}px) rotate(-3deg)`;
+    stack.style.setProperty("--mx", mx.toFixed(3));
+    stack.style.setProperty("--my", my.toFixed(3));
+    stack.style.setProperty("--drift", `${(scroll * 0.1).toFixed(1)}px`);
   };
+  const ask = () => { if (!ticking) { ticking = true; requestAnimationFrame(paint); } };
+  if (finePointer.matches) {
+    hero.addEventListener("pointermove", (event) => {
+      const rect = hero.getBoundingClientRect();
+      mx = ((event.clientX - rect.left) / rect.width - 0.5) * 2;
+      my = ((event.clientY - rect.top) / rect.height - 0.5) * 2;
+      ask();
+    }, { passive: true });
+    hero.addEventListener("pointerleave", () => { mx = 0; my = 0; ask(); });
+  }
   window.addEventListener("scroll", () => {
-    if (ticking) return;
-    ticking = true;
-    requestAnimationFrame(update);
+    scroll = Math.min(window.scrollY, window.innerHeight);
+    ask();
   }, { passive: true });
-  update();
+  paint();
+}
+
+/* A window shot leans a little toward the pointer; touch screens keep it still. */
+function initShotTilt() {
+  if (reducedMotion.matches || !finePointer.matches) return;
+  document.querySelectorAll(".shot.lean").forEach((shot) => {
+    shot.addEventListener("pointermove", (event) => {
+      const rect = shot.getBoundingClientRect();
+      const x = ((event.clientX - rect.left) / rect.width - 0.5) * 2;
+      const y = ((event.clientY - rect.top) / rect.height - 0.5) * 2;
+      shot.style.setProperty("--tx", `${(x * 5).toFixed(2)}deg`);
+      shot.style.setProperty("--ty", `${(-y * 4).toFixed(2)}deg`);
+    }, { passive: true });
+    shot.addEventListener("pointerleave", () => {
+      shot.style.removeProperty("--tx");
+      shot.style.removeProperty("--ty");
+    });
+  });
 }
 
 /* Logos of the agents it calls: the product's own marks (Simple Icons / SVGL), monochrome. */
@@ -134,10 +199,12 @@ function initLogos() {
   });
 }
 
+splitWords();
 initHeroPower();
+initMotionToggle();
 initTicker();
 initPlatformLabel();
 initReveal();
-initMotionToggle();
-initParallax();
+initHeroStack();
+initShotTilt();
 initLogos();
