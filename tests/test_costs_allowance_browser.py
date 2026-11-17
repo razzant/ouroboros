@@ -410,7 +410,8 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                 expect(chip.locator(".cx-chip-mark")).to_have_attribute("data-hue", "owner", timeout=30_000)
                 chip.click()
                 shade = page.locator("#page-chat .cx-shade")
-                expect(shade.locator(".cx-state")).to_contain_text("stopped at the allowance it had left")
+                expect(shade.locator(".cx-state")).to_have_text("Also on its own")  # the switch's position
+                expect(shade.locator(".cx-state-note")).to_contain_text("stopped at the allowance it had left")
                 expect(shade.locator(".cx-state-note")).to_contain_text("Resume keeps that limit, so it pauses again")
                 costs = shade.locator(".cx-door", has_text="Costs ›")
                 expect(costs).to_be_visible()
