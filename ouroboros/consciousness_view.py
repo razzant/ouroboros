@@ -293,8 +293,9 @@ def on_sentence(at: str, places, autonomy: str = "", daily_usd: Any = None, allo
     if daily_usd == 0:
         head = "Consciousness on, but its allowance is $0.00: it cannot wake until you raise it in Costs."
     elif allowance == "exhausted":
-        head = ("Consciousness on, but its allowance for the last 24 hours is spent: it wakes once there is room in it "
-                "again; Costs shows when.")
+        head = "Consciousness on, but its allowance for the last 24 hours is spent: it wakes once there is room in it again."
+    elif allowance == "allowance_unknown":
+        head = "Consciousness on, but its spending could not be read: it wakes once it can be read and there is room."
     else:
         head = f"Consciousness on: Ouroboros also acts on its own; next wake at {at}."
     return " ".join([head, *rest])
@@ -319,7 +320,7 @@ QUIET = {
     "off": ("Hears only · consciousness off", "Consciousness is off: it only hears here, and nothing here wakes it until "
             "you turn it on.", "consciousness"),
     "allowance": ("Waits · allowance spent", "Its allowance for the last 24 hours is spent: nothing here starts a new wake "
-                  "until there is room in it again; Costs shows when.", "costs"),
+                  "until there is room in it again.", "costs"),
     "advises": ("Replies wait for you · Advises", "Advises: it reads and thinks here; what it would say waits for you in "
                 "its conversation here.", "consciousness"),
 }

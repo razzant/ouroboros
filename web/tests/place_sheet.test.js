@@ -1112,7 +1112,7 @@ test('clearing the field returns the place to inheriting: one write of the empty
 });
 
 test('a spent allowance keeps the wake note from promising a wake (review r3)', () => {
-    const note = 'Its allowance for the last 24 hours is spent: nothing here starts a new wake until there is room in it again; Costs shows when.';
+    const note = 'Its allowance for the last 24 hours is spent: nothing here starts a new wake until there is room in it again.';
     const quiet = { cause: 'allowance', word: 'Waits · allowance spent', note, door: 'costs' };
     const html = placeSheetBodyHtml({ ...community, quiet });
     assert.match(html, /While its allowance is spent, nothing here starts a new wake\./);

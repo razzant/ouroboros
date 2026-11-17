@@ -90,8 +90,11 @@ test('an answer the preview cannot read, or one that never ends, is never «no p
         }
         globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ lines: ['x'], places: [{ place_id: 'b', label: 'Big', state: 'active', people: 2000, people_capped: true }] }) });
         assert.equal((await readSwitchPreview('off')).places[0].atLeast, true);
-        // Rows the client cannot identify are an unreadable list, never «no place» (review r3).
-        globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ lines: ['x'], places: [{ label: 'Lab', state: 'active' }] }) });
+        // A row with its name keeps its place in the details; a row with neither id nor name makes the list
+        // unreadable, never «no place» or a silently shorter list (reviews r3, r4).
+        globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ lines: ['x'], places: [{ place_id: 'lab', label: 'Lab', state: 'active' }, { label: 'Ops', state: 'active' }] }) });
+        assert.deepEqual((await readSwitchPreview('off')).places.map((row) => row.label), ['Lab', 'Ops']);
+        globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ lines: ['x'], places: [{ place_id: 'lab', label: 'Lab' }, { state: 'active' }] }) });
         await assert.rejects(readSwitchPreview('off'));
         // A preview that never answers ends at its lifetime (here shortened), so the switch is never held.
         globalThis.fetch = (_url, init) => new Promise((_resolve, reject) => {

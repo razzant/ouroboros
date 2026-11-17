@@ -120,7 +120,7 @@ def test_the_quiet_note_says_what_it_does_here_now_and_promises_only_waking():
     # has no reset at all: only the owner opens it (review r1).
     spent = V.place_quiet("active", switch="on", allowance="exhausted", limit_usd=3.0)
     assert spent["note"] == ("Its allowance for the last 24 hours is spent: nothing here starts a new wake until there is room "
-                             "in it again; Costs shows when.") and spent["door"] == "costs"
+                             "in it again.") and spent["door"] == "costs"  # Costs may not be able to say when (review r4)
     zero = V.place_quiet("active", switch="on", allowance="exhausted", limit_usd=0.0)
     assert zero["note"] == "Its allowance is $0.00: nothing here starts a new wake until you raise it in Costs."
     assert zero["door"] == "costs"
@@ -388,13 +388,18 @@ def test_a_saved_panic_stays_named_after_a_restart(tmp_path, monkeypatch):
     assert clock._saved_stop_source() == "panic"
     saved.pop("bg_consciousness_stop_source")
     assert clock._saved_stop_source() == "agent_tool"
+    saved["bg_consciousness_stop_source"] = "owner"  # a Panic waiting to be saved outranks an older saved stop (review r4)
+    monkeypatch.setattr("ouroboros.consciousness.panic_blocks_wake", lambda _root: True)
+    assert clock._saved_stop_source() == "panic"
 
 
 def test_the_receipt_names_no_wake_while_the_window_is_spent():
     stored = [SimpleNamespace(place_id="a", label="Lab", state="active", provider="slack")]
     spent = V.on_sentence("15:14", stored, "act", 3.0, "exhausted")
     assert spent.startswith("Consciousness on, but its allowance for the last 24 hours is spent: it wakes once there is "
-                            "room in it again; Costs shows when.") and "next wake" not in spent
+                            "room in it again.") and "next wake" not in spent
+    unread = V.on_sentence("15:14", stored, "act", 3.0, "allowance_unknown")
+    assert unread.startswith("Consciousness on, but its spending could not be read") and "next wake" not in unread
 
 
 def test_the_endpoint_index_names_the_switch_query():

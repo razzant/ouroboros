@@ -674,10 +674,10 @@ class BackgroundConsciousness:
         except Exception:
             log.debug("consciousness: places unreadable for the start sentence", exc_info=True)
             places = None
-        try:  # a spent window names no wake (review r3); a read that fails says the ordinary next wake
-            allowance = str(self._allowance_view(time.time()).get("status") or "")
+        try:  # a spent or unreadable window names no wake (review r3, r4): read now, not the status view's cache
+            allowance = str(self._allowance_view(time.time(), fresh=True).get("status") or "")
         except Exception:
-            allowance = ""
+            allowance = "allowance_unknown"
         return on_sentence(at, places, get_consciousness_autonomy(), get_consciousness_daily_usd(), allowance) + note
 
     def stop(self, source: str = "") -> str:
@@ -748,6 +748,8 @@ class BackgroundConsciousness:
         """Who stopped it: the confirmed saved source (a Panic stays named after a restart, and a later stop of an
         already stopped clock does not rename it), else this process's own stop."""
         try:
+            if panic_blocks_wake(self._drive_root):  # a Panic waiting to be saved outranks an older saved stop (review r4)
+                return PANIC_STOP
             from supervisor.state import control_value, read_state
             known, source = control_value(read_state(self._drive_root).projection(), STOP_SOURCE_KEY)
             if known and source:

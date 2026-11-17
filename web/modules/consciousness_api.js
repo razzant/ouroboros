@@ -268,8 +268,8 @@ export async function readSwitchPreview(to, { lifetimeMs = SWITCH_PREVIEW_LIFETI
     }
     // `places: null` is the host's «could not be read»: the switch still asks, with the host's lines.
     const places = data.places === null ? null : data.places.map((row) => ({ id: text(row?.place_id), label: text(row?.label),
-        state: text(row?.state), people: count(row?.people), atLeast: row?.people_capped === true })).filter((row) => row.id);
-    if (places && data.places.length && !places.length) throw new Error('The switch preview named no readable place.');
+        state: text(row?.state), people: count(row?.people), atLeast: row?.people_capped === true })).filter((row) => row.id || row.label);
+    if (places && places.length < data.places.length) throw new Error('The switch preview named a place it could not read.');
     return { lines: data.lines.map(text).filter(Boolean), places };
 }
 
