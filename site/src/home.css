@@ -214,6 +214,8 @@ body.motion-paused .ticker-track { animation-play-state: paused; }
 .shot img { width: 100%; height: auto; }
 /* a capture that goes on below its frame fades out instead of being sliced */
 .shot.fade img { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 72px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 72px), transparent); }
+/* a full-width strip; on a phone it shows its left end and, under it, its right end (the second image) */
+.shot.strip .rest { display: none; }
 .shot.lean { transform: perspective(1400px) rotateY(var(--tx)) rotateX(var(--ty)); transition: transform .5s var(--ease); }
 .shot.tilt-left { --tx: -8deg; --ty: 3deg; }
 .shot.tilt-right { --tx: 8deg; --ty: 3deg; }
@@ -246,7 +248,7 @@ body.motion-paused .ticker-track { animation-play-state: paused; }
 .term .prompt { color: var(--red-text); }
 .languages { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
 .languages li { border-radius: 12px; overflow: hidden; box-shadow: var(--shadow-paper); }
-.languages img { aspect-ratio: 1120 / 300; object-fit: cover; object-position: top left; }
+.languages img { width: 100%; height: auto; }
 .rest { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
 .rest li { display: flex; flex-direction: column; gap: 6px; padding: 20px 20px 22px; border-radius: var(--radius); background: var(--paper-soft); }
 .rest b { font-size: 20px; font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; }
@@ -296,7 +298,8 @@ body.motion-paused .ticker-track { animation-play-state: paused; }
 /* ---------- pause control ---------- */
 .motion { position: fixed; right: 16px; bottom: 16px; z-index: 60; min-height: 36px; padding: 0 14px; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 999px; background: rgba(11, 11, 12, 0.82); color: #fff; font: 600 13px/1 var(--font); cursor: pointer; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); box-shadow: 0 2px 8px rgba(0, 0, 0, .35); }
 .motion[hidden] { display: none; }
-.motion:focus-visible { outline-color: #fff; }
+/* the control floats over black, white and crimson frames: a white ring inside a dark one shows on all three */
+.motion:focus-visible { outline: 2px solid #fff; outline-offset: 2px; box-shadow: 0 0 0 6px var(--ink); }
 section[tabindex="-1"]:focus { outline: none; }
 
 @media (prefers-reduced-motion: reduce) {
@@ -344,8 +347,10 @@ section[tabindex="-1"]:focus { outline: none; }
 }
 @media (max-width: 700px) {
   .hero .line.red > span, html.has-js .hero .line.red > span { white-space: normal; font-size: 1em !important; }
-  /* a wide strip keeps its left part at a readable size instead of shrinking whole */
+  /* a wide strip keeps a readable size: its left end, then its right end, each fading toward the part left out */
   .shot.strip img { aspect-ratio: 3 / 2; object-fit: cover; object-position: left top; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent); }
+  .shot.strip .rest { display: block; margin-top: 2px; object-position: right top; -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 56px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 56px), transparent); }
+  .shot.strip.fade .rest { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 56px), transparent), linear-gradient(to bottom, #000 calc(100% - 72px), transparent); -webkit-mask-composite: source-in; mask-image: linear-gradient(to left, #000 calc(100% - 56px), transparent), linear-gradient(to bottom, #000 calc(100% - 72px), transparent); mask-composite: intersect; }
 }
 @media (max-width: 600px) {
   .numbers { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
@@ -400,7 +405,7 @@ section[tabindex="-1"]:focus { outline: none; }
 .rules-grid > * { min-width: 0; }
 .rules .copy p { margin: 0; font-size: clamp(17px, 1.5vw, 21px); line-height: 1.4; max-width: 520px; }
 .rules .copy .fine { margin-top: 16px; font-size: 15px; color: rgba(255, 255, 255, 0.86); }
-.note { border-radius: var(--radius); background: var(--white); color: var(--ink); padding: 20px 26px 24px; box-shadow: 0 30px 90px rgba(60, 0, 8, 0.35); transform: rotate(1.2deg); }
+.note { border-radius: var(--radius); background: var(--white); color: var(--ink); padding: 20px 26px 24px; box-shadow: 0 30px 90px rgba(60, 0, 8, 0.35); }
 .note header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 12px; margin-bottom: 6px; border-bottom: 1px solid rgba(11, 11, 12, 0.08); }
 .note header b { font-size: 16px; font-weight: 800; letter-spacing: -0.02em; }
 .note header span { font-size: 12px; font-weight: 600; color: rgba(11, 11, 12, 0.64); }
@@ -414,7 +419,7 @@ section[tabindex="-1"]:focus { outline: none; }
 .frame .pane.tg .m p { margin: 2px 0 0; color: #fff; }
 .pane.tg .m time { color: rgba(255, 255, 255, 0.72); }
 .pane.tg .m mark { background: rgba(255, 90, 106, 0.2); color: #ffb3ba; }
-.ava.mom { background: #1f8f5f; }
+.ava.mom { background: #197a50; }
 .ava.you { background: #2b6be0; }
 .held { display: flex; align-items: center; gap: 8px; margin: 16px 0 0; padding-top: 12px; border-top: 1px solid rgba(11, 11, 12, 0.08); font-size: 13px; font-weight: 800; }
 .frame .pane.slack .held { color: var(--red-deep); }
@@ -426,5 +431,4 @@ section[tabindex="-1"]:focus { outline: none; }
 @media print { .has-js .scenes.reveal .m { opacity: 1 !important; transform: none !important; } }
 @media (max-width: 900px) {
   .rules-grid, .scenes { grid-template-columns: minmax(0, 1fr); }
-  .note { transform: none; }
 }

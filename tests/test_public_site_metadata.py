@@ -236,6 +236,12 @@ def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
             with Image.open(SITE / "public" / image["src"][1:]) as capture:
                 assert capture.size == (int(image.get("width", 0)), int(image.get("height", 0))), image["src"]
     assert {p.name for p in (DOCS / "assets").glob("home-*")} == set(re.findall(r'"/assets/(home-[^"]+)"', served))
+    # the served page is this source built: apart from the two bundle lines the build rewrites, they read the same
+    lines = [
+        [line.strip() for line in page.splitlines() if line.strip() and "/src/home." not in line and "/assets/home-" not in line]
+        for page in (html, served)
+    ]
+    assert lines[0] == lines[1]
     card = (REPO / "assets" / "og-preview.png").read_bytes()
     assert (DOCS / "assets" / "og-preview.png").read_bytes() == card
     expected = f"{ORIGIN}/assets/og-preview.png?v={hashlib.sha256(card).hexdigest()[:10]}"
