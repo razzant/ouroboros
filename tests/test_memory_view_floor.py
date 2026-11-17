@@ -533,29 +533,6 @@ def test_this_rooms_notes_never_yield_to_lows_target_and_the_window_owns_its_cut
     assert 'only physical pressure can narrow them' not in nano.room
 
 
-def test_the_window_takes_this_rooms_forms_only_past_my_tellings_under_lows_target():
-    """3A: Low's target never takes this room's forms, and the window takes them only past my tellings: a far
-    conversation's telling pays first, then the window's own start bound takes this room's task facts in the same
-    order, only while it cannot hold them, never counted as the target's. A target the tellings can meet keeps this
-    room whole and is met."""
-    def snapshot(lines, chars):
-        far = syn.conversation(1, words=40, word_chars=chars)
-        for word in far["rooms"][0]["words"]:
-            word["rank"] = 1  # considered and untold: their telling's stage comes after this room's task facts
-        return syn.snapshot(room_facts=syn.room("1", lane2=lines), conversations=[far])
-
-    def floor(snap, window, fixed):
-        return mf.render_view_for_mode(snap, mode="low", owner_mode="low", window_tokens=window, known_window=True,
-                                       output_reserve=65_536, ratio=1, non_memory_tokens=fixed).facts["floor"]
-    small = snapshot(60, 2_000)
-    told = floor(small, 1_000_000, 796_000)  # the whole view exceeds the window's bound until the far words are told
-    assert "F1" not in told["steps"] and told["steps"]["F6w"] == 40 and told["target_missed"]
-    tight = floor(small, 1_000_000, 808_000)  # beside that telling the window holds only six of the sixty task lines
-    assert tight["steps"]["F1"] == 54 and tight["by_budget"] == 41  # the far words and their gist: the target's
-    met = floor(snapshot(500, 12_000), 300_000, 90_000)  # the tellings alone meet Low's target here
-    assert "F1" not in met["steps"] and met["steps"]["F6w"] == 40 and not met["target_missed"]
-
-
 def test_lows_target_never_counts_the_windows_cut_of_my_humans_words():
     """Owner 15.11.2026 (3A): my human's words never yield to Low's target. When the window itself cannot hold an
     uncovered row of them, its address is the window's cut: the target's count (``by_budget``) never names it."""

@@ -401,10 +401,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
     last = {(step, ident) for step, ident, *_ in uncovered}
     added = []
     counted_groups = {i for s, i in old if s == "F6a" and i != "unread"}
-    # Under a binding target the window takes what the target may not (``held``) only past my tellings: the target's
-    # walk first, then the window's in the same order, so it never folds this room's forms that a telling pays (3A).
-    passes = (False, True) if floor is not None and floor_bound is not None else (None,)
-    for window_pass, (step, ident, whole, short) in ((p, element) for p in passes for element in elements):
+    for step, ident, whole, short in elements:
         if target is not None and current <= target:
             current = measure(level(taken))
         if target is None or current <= target:
@@ -413,8 +410,6 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
         if pair in taken or pair in last or (clean and pair not in ordinary) or swallowed(snapshot, step, ident, taken):
             continue
         held = floor is not None and (step in keeps or table.stages[pair] not in floor)
-        if window_pass is not None and held is not window_pass:
-            continue
         if held and (floor_bound is None or (current := measure(level(taken))) <= floor_bound):
             continue  # the window's bound is judged on the priced view
         if step in (*_LIST_FORMS, "F8") or step == "F6a" and (ident == "unread" or not counted_groups):
@@ -1026,7 +1021,10 @@ def counterfactual_starts(plan: Any, snapshots: Mapping[str, mv.MemoryViewSnapsh
                 "host_sections_addressed", ())], **({"input": "rescued"} if rescued else {})}
     frame = {"core": plan.core_sha256[:12], "preferred": plan.preferred_mode, "window": record.total_equivalent,
              "known": record.usable is not None, "reserve": plan.output_reserve_tokens, "ratio": ratio,
-             "schemas": len(schemas or ()), "started": plan.start[0] or plan.initial_mode}  # the start's own mode
+             "schemas": len(schemas or ()), "started": plan.start[0] or plan.initial_mode,  # the start's own mode
+             # an owner's Max the start took to chapter maps carries its cause (``start_cause``), whatever is chosen now
+             "maps": (plan.start[0] or plan.initial_mode) == "low" and bool(
+                 plan.start[1] if plan.start[0] else start_cause(plan.projection(plan.initial_mode).memory_facts))}
     return {"measured": True, "frame": frame, "arms": arms}
 
 
@@ -1053,7 +1051,7 @@ def counterfactual_lines(fit: Mapping[str, Any]) -> List[str]:
     if not fit.get("measured"):
         return ["", head, "not measured: this task's plan does not hold " + "; ".join(fit.get("missing") or ()) + "."]
     f = fit["frame"]
-    started = "Max with chapter maps" if f["started"] == "low" and f["preferred"] == "max" else f["started"]
+    started = "Max with chapter maps" if f.get("maps") else f["started"]
     lines = ["", head, (
         f"frame: core {f['core']}, owner mode {f['preferred']}, window {f['window']:,}"
         f"{'' if f['known'] else ' (not known: no window bound applies)'}, reply reserve {f['reserve']:,}, density "

@@ -76,11 +76,10 @@ def memory_facts(plan, mode, messages=()):
         line = (f"memory: story {blocks.get('story_tokens', 0):,} ({floor.pages_text(pages)}) + rooms "
                 f"{blocks.get('room_tokens', 0):,}")
     else:
-        lowered = "Nano, for the window" if mode == "nano" else floor.MAPS  # the frame this view is in, as its mode row says
         line = "Max room in this captured build: " + floor.measure_text(room, parts=True, pages=pages) + {
             "held": "; Max held" + (f" by cuts {', '.join(room['cuts'])}" if room["cuts"] else ""),
-            "crowded": f"; {lowered}",
-            "route": f"; {lowered}, a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here",
+            "crowded": f"; {floor.MAPS}",
+            "route": f"; {floor.MAPS}, a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here",
         }[room["cause"]]
     shown = floor.addressed_text((receipt.get("floor") or {}).get("steps") or {})
     line += (f"; shown only by address: {shown}" if shown else "") + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting)
