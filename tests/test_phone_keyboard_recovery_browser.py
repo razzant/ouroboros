@@ -276,8 +276,11 @@ def test_a_short_keyboard_under_telegrams_fullscreen_band_keeps_history_the_comp
         # when they show, "+" and Send) is reached, none covered.
         assert fit['folded'] == fullscreen and fit['capsules'] == (0 if fullscreen else 4), (state, fit)
         assert fit['keyboard'] and fit['focused'] and fit['unreached'] == [], (state, fit)
-        assert fit['controls'] >= ((6 if project_room else 5) if fullscreen else (7 if project_room else 6)), (state, fit)
-        assert fit['barTop'] >= band, f'Telegram keeps its Close and ⋯ band: {state} {fit}'
+        # In fullscreen the room's bar is Telegram's row (DESIGN "Telegram's shared row"): the consciousness chip is a row of
+        # the work list and a Project's × gives way to Telegram's Back, so the bar holds the room's capsule and Panic; its
+        # capsules stand in the row under the status bar (47), never above it.
+        assert fit['controls'] >= (4 if fullscreen else (7 if project_room else 6)), (state, fit)
+        assert fit['barTop'] >= (47 if fullscreen else 0), f'the bar stands under the status bar: {state} {fit}'
         # A line of the newest message's words in view (its text's line boxes), and its foot.
         assert fit['foot'] and fit['words'] >= 1, (state, fit)
         assert 33 <= fit['field'] <= fit['cap'] + 1 and fit['sideways'] <= 0, (state, fit)
@@ -337,7 +340,7 @@ def test_an_open_capsule_in_a_low_keyboard_room_keeps_the_bar_in_reach_and_folds
     opened, closed = measured['open'], measured['closed']
     assert (opened['folded'], opened['open'], opened['focused'], opened['keyboard']) == (False, True, True, True), opened
     # The capsule's hint never covers the room's bar: Panic (and a Project's ×) reached at their centres, Send in view.
-    assert opened['barUnreached'] == [] and opened['barTop'] >= 93 and opened['send'] <= height, opened
+    assert opened['barUnreached'] == [] and opened['barTop'] >= 47 and opened['send'] <= height, opened
     assert (closed['open'], closed['focused'], closed['keyboard']) == (False, True, True), closed
     # Closed in the short room, the row folds again with no scroll; just above it the row stays.
     assert closed['folded'] == (height == 250) and closed['unreached'] == [] and closed['send'] <= height, closed

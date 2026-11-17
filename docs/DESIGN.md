@@ -3490,7 +3490,7 @@ the leading control (Ouroboros's picture at a room or a section's list, Back on 
 its status, then a room's consciousness chip and Panic; a page's tabs stand at the top of the page, never as a
 second header row, and Files' location and its actions return above the list (below). The name wins over the
 status word, which a short row drops whole after its start step, keeping its mark, and Main's title ellipsizes
-before its chip or Panic yields.
+before its chip or Panic yields (in Telegram's fullscreen the row is Telegram's: "Telegram's shared row").
 A Project's name keeps one line inside its capsule, at the controls' size and weight (`--type-body`, 600), and ends
 in an ellipsis, so its capsule keeps the bar's height (owner 2026-11-01, A·14; it replaces the second line of
 2026-10-28). The name keeps its own direction, so a right-to-left interface still shows a Latin name's start. The
@@ -3520,7 +3520,7 @@ name's capsule opens the work list without a caret, since Telegram's ⌄ stands 
 whole or not at all, as the status word does, so a narrow phone may show the status mark alone. The consciousness chip
 becomes a row of the work list (below). The room's and the drawer's × give way to Telegram's Back, which closes them
 (both are layers); the work list and the consciousness sheet hang under the row at the page's width. With the keyboard
-up the bar stays in the row.
+up the bar stays in the row, in the page's flow as every keyboard room's bar is.
 
 ### A room's edges
 
@@ -3530,9 +3530,12 @@ ends it is darkened and blurred under what floats over it, one material top and 
 colour at 72 % at the edge, 36 % at 48 %, 10 % at 78 %, none at the far end), mirrored at the top over the bar's height
 and 24 px more; and under it an 18 px blur, full under the bar's capsules and a phone's clock and fading out over the
 32 px below them (on the desk 48 px of 64, so a card's own buttons just under the bar never read as its second row),
-and under the composer fading out over its top 32 px. The blur belongs to the edge, not to a chip, so it applies in
-both themes. With the keyboard up the composer stands in the page's flow and the transcript's bottom fades over the
-shell's 32 px edge instead of ending on a line over the chips. On a dark room a room bar's capsules are the composer
+and under the composer fading out over its top 32 px; at the top both are one layer of the bar, so the desktop window's
+title-band strip keeps its own. A note or the search sheet standing right under the bar is the next floating layer
+there, and the edge ends with the bar. The blur belongs to the edge, not to a chip, so it applies in both themes. With the
+keyboard up the composer stands in the page's flow and the transcript's bottom fades over the shell's 32 px edge
+instead of ending on a line over the chips; the newest row keeps that edge clear below it, so only what scrolls away
+fades. On a dark room a room bar's capsules are the composer
 chips' glass (the capsule's veil over a blur of what passes under it), on the desk as on a phone; light keeps white
 capsules at the top as at the bottom. Panic keeps its ink above 4.5:1 on that glass over the reddest card: a lighter
 ink over a light veil, still glass beside its neighbours.
@@ -3567,7 +3570,7 @@ and, during a campaign, `Evolution ›`
 the title and status share one floating capsule (`--chip-float`, non-shrinking
 mark and caret with inline inset), and each command is its own floating capsule
 (owner 21.10). No band, mask or clip is drawn under or between them, so the capsules float over the transcript
-(owner 2026-11-01). A failure or approximation note hangs under the bar; a page
+(owner 2026-11-01); at the edge the transcript under them is darkened and blurred ("A room's edges"). A failure or approximation note hangs under the bar; a page
 has no caption line, its sidebar row and its tabs name it.
 
 ### Doors and containers
@@ -3633,7 +3636,8 @@ Telegram's swipe-down so lists scroll, shows
 Telegram's Back while a layer is open and its Close otherwise, gives Telegram's
 header and bottom bar the room's colour, follows Telegram's light or dark as the
 System appearance, and respects Telegram's safe areas on all four sides
-(`web/modules/host_telegram.js`). Everything else is the same page.
+(`web/modules/host_telegram.js`). In fullscreen a room's bar is Telegram's row ("Telegram's shared row"); everything
+else is the same page.
 
 Enforcement: `tests/test_design_system_gate_browser.py` visits every registered
 page and Settings' home and pages in WebKit and Chromium at 320, 360, 390, a Telegram-like

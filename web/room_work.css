@@ -203,6 +203,8 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-extras > .cx-chip .cx-chip-label { display: inline; margin-inline-end: auto; }
 .rw-extras > .cx-chip .cx-chip-glyph { display: none; }
 .rw-extras > .cx-chip .cx-chip-word:not([hidden]) { display: inline; color: var(--text-meta); }
+/* A word's whole width, read for one moment in the same task (room_work.js cuts): nothing paints between. */
+.rw-measure-whole { min-width: max-content !important; }
 .rw-extras .chat-budget-word { display: inline; }
 .rw-extras .chat-budget-text { font-size: var(--type-body); color: var(--text-meta); }
 .rw-extras .chat-budget-bar { display: none; }

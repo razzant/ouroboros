@@ -299,7 +299,9 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         if (restoreFocus && chip.isConnected && !chip.hidden) {
             // A chip that is a row of the room's folded work list (Telegram's shared row) has no box on the
             // screen: focus returns to the room's capsule that opened that list.
-            const capsule = chip.getClientRects().length ? null : bar.querySelector('.rw-trigger:not([hidden])');
+            // A list still folding is inert already: its rows take no focus either.
+            const away = !chip.getClientRects().length || Boolean(chip.closest('[inert], [hidden]'));
+            const capsule = away ? bar.querySelector('.rw-trigger:not([hidden])') : null;
             (capsule || chip).focus({ preventScroll: true });
         }
     }

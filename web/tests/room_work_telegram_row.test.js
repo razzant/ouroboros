@@ -66,3 +66,69 @@ test('in Telegram\'s shared row the consciousness chip is a row of the work list
         restoreDom(prior);
     }
 });
+
+test('the bar follows Telegram\'s fullscreen when the host tells it, and a room destroyed in the row gives the chip back', () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let work = null;
+    const heard = new Map();
+    const realAdd = globalThis.window.addEventListener;
+    try {
+        globalThis.window.addEventListener = (type, fn) => { heard.set(type, fn); };
+        const doc = globalThis.document;
+        const root = doc.documentElement;
+        const { page, header, group, chip, badge, messages } = mountMain(doc, mount);
+        Object.assign(root.dataset, { telegramFullscreen: 'expanded', layout: 'stack' });
+        work = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true },
+            reading: { stick: true, cancel() {}, scroll() {} },
+            works: () => reconcileWorkState(emptyWorkState(), { supervisor_ready: true, ...projection(1, [], room('online')) }, 1),
+            liveCardRecords: new Map(), pendingSubmissions: new Map() });
+        const extras = header.querySelector('.rw-extras');
+        assert.equal(chip.parentNode, group, 'not in fullscreen: the chip is the bar\'s capsule');
+        assert.ok(heard.has('ouro:host-chrome'), 'the room listens to the host');
+        root.dataset.telegramFullscreen = 'active';
+        heard.get('ouro:host-chrome')();
+        assert.equal(chip.parentNode, extras, 'the host said fullscreen: the chip is a row of the work list');
+        // A Project's bar outlives its rooms: a room destroyed while the chip is its row gives the chip back first.
+        work.destroy();
+        work = null;
+        assert.equal(chip.parentNode, group, 'the destroyed room\'s list never takes the bar\'s chip with it');
+    } finally {
+        globalThis.window.addEventListener = realAdd;
+        work?.destroy?.();
+        restoreDom(prior);
+    }
+});
+
+test('in the shared row Main\'s title shows whole or not at all; elsewhere it keeps its ellipsis', () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let work = null;
+    const heard = new Map();
+    const realAdd = globalThis.window.addEventListener;
+    try {
+        globalThis.window.addEventListener = (type, fn) => { heard.set(type, fn); };
+        const doc = globalThis.document;
+        const root = doc.documentElement;
+        const { page, header, badge, messages } = mountMain(doc, mount);
+        const titleRow = header.querySelector('.app-page-title-row');
+        const title = doc.createElement('h1');
+        title.className = 'app-page-title';
+        title.textContent = 'Main Chat';
+        titleRow.appendChild(title);
+        // The title's box is narrower than its words: the row would cut it.
+        Object.defineProperty(title, 'scrollWidth', { get: () => 75 });
+        Object.defineProperty(title, 'clientWidth', { get: () => 40 });
+        Object.assign(root.dataset, { telegramFullscreen: 'active', layout: 'stack' });
+        work = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true },
+            reading: { stick: true, cancel() {}, scroll() {} },
+            works: () => reconcileWorkState(emptyWorkState(), { supervisor_ready: true, ...projection(1, [], room('online')) }, 1),
+            liveCardRecords: new Map(), pendingSubmissions: new Map() });
+        assert.equal(titleRow.dataset.title, 'off', 'a title the shared row would cut is not shown at all');
+        root.dataset.telegramFullscreen = 'expanded';
+        heard.get('ouro:host-chrome')();
+        assert.equal(titleRow.dataset.title, undefined, 'outside the shared row the title keeps its ellipsis');
+    } finally {
+        globalThis.window.addEventListener = realAdd;
+        work?.destroy?.();
+        restoreDom(prior);
+    }
+});

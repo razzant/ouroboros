@@ -58,6 +58,13 @@ EDGES = """() => {
         projectBar: px(document.querySelector('.project-panel-bar'), 'paddingTop'),
         sideways: document.scrollingElement.scrollWidth - innerWidth};
 }"""
+# A room's bar in Telegram's shared row (DESIGN "Telegram's shared row"): its box, its reserves for Telegram's two
+# controls, and whether the room's own × is drawn.
+ROW = """(sel) => { const bar = document.querySelector(sel); const s = getComputedStyle(bar);
+    const close = document.querySelector('.project-panel.open .project-panel-close');
+    return {top: parseFloat(s.paddingTop), height: bar.getBoundingClientRect().height,
+        start: parseFloat(s.paddingLeft), end: parseFloat(s.paddingRight),
+        closeShown: !!(close && close.getClientRects().length && getComputedStyle(close).display !== 'none')}; }"""
 # Where the closed drawer's painted part begins on screen (its translate and its clip): never beside an inset room.
 DRAWER_SHOWS_FROM = r"""() => {
     const s = document.getElementById('primary-sidebar'), r = s.getBoundingClientRect();
@@ -74,8 +81,11 @@ def test_fullscreen_is_asked_once_acknowledged_only_by_telegram_and_an_exit_is_n
     calls = page.evaluate(CALLS)
     assert calls.count('requestFullscreen') == 1 and calls.index('expand') < calls.index('requestFullscreen'), calls
     edges = page.evaluate(EDGES)
-    # The stack header clears the device's and Telegram's top (5 px chrome inset + 47 + 46); the sides are the shell's.
-    assert edges['app'] == {'left': 20, 'right': 12} and edges['header'] == 98 and edges['sideways'] <= 0, edges
+    # The room's bar is Telegram's row: it starts under the status bar (47) and is the row's height (46), clear of
+    # Telegram's Close (no layer open) and its ⌄ ··· (owner 17.11 1A); the sides are the shell's.
+    assert edges['app'] == {'left': 20, 'right': 12} and edges['header'] == 47 and edges['sideways'] <= 0, edges
+    main_row = page.evaluate(ROW, '#page-chat .app-page-header')
+    assert main_row['height'] == 93 and main_row['start'] == 124 and main_row['end'] == 102, main_row
     assert edges['room']['left'] == 20 and edges['room']['right'] == 12, edges
     assert edges['composer'] == 34, 'the composer keeps the bottom inset'
     shot(page, f'telegram-fullscreen-main-{shell_ui["engine"]}')  # before the edge check: a failure keeps its frame
@@ -94,6 +104,9 @@ def test_fullscreen_is_asked_once_acknowledged_only_by_telegram_and_an_exit_is_n
     rest(page)
     project = page.evaluate(EDGES)
     assert project['project']['left'] == 20 and project['project']['right'] == 12, project
+    # An open room is a layer: Telegram draws its Back, the bar keeps that narrower reserve and the room's × gives way.
+    project_row = page.evaluate(ROW, '.project-panel.open .project-panel-bar')
+    assert project_row['top'] == 47 and project_row['start'] == 104 and not project_row['closeShown'], project_row
     assert page.evaluate(DRAWER_SHOWS_FROM) >= 19.5
     assert page.evaluate("getComputedStyle(document.querySelector('.project-panel')).boxShadow") == 'none', \
         'no shadow of the docked panel falls into the inset'
@@ -110,6 +123,9 @@ def test_fullscreen_is_asked_once_acknowledged_only_by_telegram_and_an_exit_is_n
     page.wait_for_function("() => document.documentElement.dataset.telegramFullscreen === 'expanded'")
     page.wait_for_timeout(300)
     assert page.evaluate(CALLS).count('requestFullscreen') == 1
+    # Out of fullscreen the bar is the page's own again: no reserve for Telegram's row, and the room's × is drawn.
+    expanded_row = page.evaluate(ROW, '.project-panel.open .project-panel-bar')
+    assert expanded_row['start'] not in (104, 124) and expanded_row['closeShown'], expanded_row
     facts(f'telegram-fullscreen-edges-{shell_ui["engine"]}', {'main': edges, 'drawer': drawer, 'project': project,
                                                               'keyboard': keyboard, 'calls': page.evaluate(CALLS)})
 

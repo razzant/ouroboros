@@ -12381,45 +12381,49 @@ html[data-telegram-fullscreen][data-layout="docked"] .sidebar-head { padding-top
    composer's own darkening (.chat-input-area), mirrored at the top over the bar's height and the composer's 24 px, and
    under it an 18 px blur, full under the bar's capsules (and under a phone's clock) and fading out below them, as iOS
    draws the edge under its floating bars. On every layout: a phone's browser, Telegram's fullscreen row, the desk. */
-:is(.chat-page-header, .project-panel-bar)::before {
-    content: "";
-    position: absolute;
-    inset: 0 0 auto 0;
-    height: calc(100% + 24px);
-    z-index: -1;
-    pointer-events: none;
-    background: linear-gradient(
-        180deg,
-        rgba(var(--shell-rgb), 0.72) 0%,
-        rgba(var(--shell-rgb), 0.36) 48%,
-        rgba(var(--shell-rgb), 0.10) 78%,
-        rgba(var(--shell-rgb), 0.00) 100%
-    );
-}
-/* The blur: its own layer over the darkening, a scroll edge rather than a chip, so blurred in both themes. */
-:is(.chat-page-header, .project-panel-bar)::after {
-    content: "";
-    position: absolute;
-    inset: 0 0 auto 0;
-    height: calc(100% + 32px);
-    z-index: -1;
-    pointer-events: none;
-    -webkit-backdrop-filter: blur(18px);
-    backdrop-filter: blur(18px);
-    -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 calc(100% - 32px), transparent 100%);
-    mask-image: linear-gradient(180deg, #000 0%, #000 calc(100% - 32px), transparent 100%);
+:is(.chat-page-header, .project-panel-bar) {
+    --edge-reach: 32px;
+    --edge-fade: 32px;
 }
 /* On the desk the bar is shorter than Telegram's row while a card's own buttons are the capsules' size: a card's
    «Turn into project» or «Stop…» just past a short blur read as a second row of the bar. The blur reaches further there
    and fades longer; the darkening keeps its length. */
-html[data-layout="docked"] :is(.chat-page-header, .project-panel-bar)::after {
-    height: calc(100% + 64px);
-    -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 calc(100% - 48px), transparent 100%);
-    mask-image: linear-gradient(180deg, #000 0%, #000 calc(100% - 48px), transparent 100%);
+html[data-layout="docked"] :is(.chat-page-header, .project-panel-bar) {
+    --edge-reach: 64px;
+    --edge-fade: 48px;
+}
+/* A note or the search sheet standing right under the bar (Main's history note, a Project's status note, Search in a
+   chat) is the next floating layer there: the edge ends with the bar, so the note's words are never darkened or blurred. */
+#page-chat:is(:has(> .chat-page-note > :not([hidden])), :has(.chat-find:not([hidden]))) .chat-page-header,
+.project-panel:has(.chat-panel-statusbar:not(:empty)) .project-panel-bar {
+    --edge-reach: 0px;
+}
+/* One layer: the darkening over the bar's height and 24 px (its stops at 48 %, 78 % and 100 % of that length), and the
+   blur under it to --edge-reach below the bar, fading over its last --edge-fade. (The bar's ::after is the desktop
+   window's title-band strip, :root[data-window-chrome="integrated"].) A scroll edge, not a chip: blurred in both themes. */
+:is(.chat-page-header, .project-panel-bar)::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: calc(100% + var(--edge-reach));
+    z-index: -1;
+    pointer-events: none;
+    background: linear-gradient(
+        180deg,
+        rgba(var(--shell-rgb), 0.72) 0,
+        rgba(var(--shell-rgb), 0.36) calc((100% - var(--edge-reach) + 24px) * 0.48),
+        rgba(var(--shell-rgb), 0.10) calc((100% - var(--edge-reach) + 24px) * 0.78),
+        rgba(var(--shell-rgb), 0.00) calc(100% - var(--edge-reach) + 24px)
+    );
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+    -webkit-mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - var(--edge-fade)), transparent 100%);
+    mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - var(--edge-fade)), transparent 100%);
 }
 /* The bottom: what passes under the composer is blurred over its darkening, less and less over the composer's top 32 px.
    With the keyboard up the composer stands in the page's flow, nothing passes under it, and the transcript's own bottom
-   fades over the shell's 32 px edge instead of ending on a line over the chips. */
+   fades over the shell's 32 px edge instead of ending on a line over the chips; the newest row keeps that edge clear
+   below it, so only what scrolls away fades. */
 body:not(.keyboard-open) :is(#chat-input-area, .chat-input-area)::before {
     content: "";
     position: absolute;
@@ -12433,6 +12437,7 @@ body:not(.keyboard-open) :is(#chat-input-area, .chat-input-area)::before {
 }
 body.keyboard-open #page-chat.active #chat-messages,
 body.keyboard-open .chat-instance-panel .chat-messages {
+    padding-bottom: var(--scroll-fade-edge, 32px);
     -webkit-mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - var(--scroll-fade-edge, 32px)), transparent 100%);
     mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - var(--scroll-fade-edge, 32px)), transparent 100%);
 }
@@ -12489,25 +12494,21 @@ html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-head
 html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-header, .project-panel-bar) .app-page-title-row { padding-inline: 11px 2px; }
 html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-header, .project-panel-bar) .chat-header-btn { padding-inline: 12px; }
 /* Main's title goes whole or not at all here (room_work.js fitWord). */
-.chat-page-header .app-page-title-row[data-title="off"] > .app-page-title { display: none; }
-/* Telegram's Back closes the open room and the open drawer (both layers.js layers), so their own × is not drawn under it;
-   the drawer's head keeps only the top inset, its card right under Telegram's row. */
-html[data-telegram-fullscreen="active"][data-layout="stack"][data-telegram-back="back"] .project-panel-close { display: none; }
-html[data-telegram-fullscreen="active"][data-layout="stack"][data-telegram-back="back"] .drawer-head {
+html[data-telegram-fullscreen="active"][data-layout="stack"] .chat-page-header .app-page-title-row[data-title="off"] > .app-page-title { display: none; }
+/* Telegram's Back closes the open room and the open drawer (both layers.js layers, so Telegram shows its Back whenever
+   either is open), so their own × is not drawn in the shared row; the drawer's head keeps only the top inset, its card
+   right under Telegram's row. Keyed on the row itself, not on Back's flag, so nothing jumps while a layer closes. */
+html[data-telegram-fullscreen="active"][data-layout="stack"] .project-panel-close { display: none; }
+html[data-telegram-fullscreen="active"][data-layout="stack"] .drawer-head {
     min-height: 0;
     padding: var(--inset-top) 0 var(--space-2);
 }
-html[data-telegram-fullscreen="active"][data-layout="stack"][data-telegram-back="back"] .nav-drawer-close { display: none; }
-/* With the keyboard up the bar stays in Telegram's row and floats as it does while reading; the transcript runs under it
-   from the screen's top, cleared by the bar's measured reserve. */
+html[data-telegram-fullscreen="active"][data-layout="stack"] .nav-drawer-close { display: none; }
+/* With the keyboard up the bar stays Telegram's row, in the page's flow as every keyboard room's bar is (a note keeps its
+   place under it, the composer's room is measured with it); its edge softens the transcript's top below it. */
 html[data-telegram-fullscreen="active"][data-layout="stack"] body.keyboard-open #page-chat.active .chat-page-header,
 html[data-telegram-fullscreen="active"][data-layout="stack"] body.keyboard-open .project-panel .project-panel-bar {
-    position: absolute; top: 0; left: 0; right: 0;
     padding-top: var(--tg-row-top); padding-bottom: 0;
-}
-html[data-telegram-fullscreen="active"][data-layout="stack"] body.keyboard-open #page-chat.active #chat-messages,
-html[data-telegram-fullscreen="active"][data-layout="stack"] body.keyboard-open .chat-instance-panel .chat-messages {
-    padding-top: calc(var(--chat-header-reserve, 56px) + var(--chat-find-reserve, 0px));
 }
 /* The work list and the consciousness sheet opened from its row hang under Telegram's row at the page's width, as the
    list hangs under the page's own bar on a phone (consciousness.css would end the sheet under Panic). */

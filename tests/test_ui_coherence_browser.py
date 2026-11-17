@@ -76,18 +76,28 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
         assert metrics["gap"] == pytest.approx(12, abs=0.5), metrics
         assert metrics["below"] == pytest.approx(12, abs=0.5), metrics
     header = page.locator(".chat-page-header")
-    paint = header.evaluate("""el => { const s = getComputedStyle(el), b = getComputedStyle(el, '::before'),
-        a = getComputedStyle(el, '::after');
-        return {mask: s.maskImage, overflow: s.overflow, background: s.backgroundColor, darkening: b.backgroundImage,
-            darkeningEvents: b.pointerEvents, blur: a.backdropFilter, blurEvents: a.pointerEvents,
-            dark: document.documentElement.dataset.theme !== 'light'}; }""")
+    edge = """el => { const s = getComputedStyle(el), b = getComputedStyle(el, '::before'), a = getComputedStyle(el, '::after');
+        return {mask: s.maskImage, overflow: s.overflow, background: s.backgroundColor, bar: el.getBoundingClientRect().height,
+            darkening: b.backgroundImage, blur: b.backdropFilter, fade: b.maskImage, reach: parseFloat(b.height),
+            events: b.pointerEvents, strip: a.pointerEvents, stripHeight: parseFloat(a.height),
+            dark: document.documentElement.dataset.theme !== 'light'}; }"""
+    paint = header.evaluate(edge)
     assert paint["mask"] == "none" and paint["overflow"] == "visible", paint
-    # No band: the bar paints nothing of its own (#2193) and menus still escape it. Under its capsules it lays the
-    # composer's darkening, mirrored, and a blur that fades out below them (DESIGN "A room's edges", owner 17.11 1A);
-    # neither takes a press.
+    # No band: the bar paints nothing of its own (#2193) and menus still escape it. Under its capsules one layer lays
+    # the composer's darkening, mirrored, and a blur that fades out below them, further on the desk (DESIGN "A room's
+    # edges", owner 17.11 1A, 3A); it takes no press.
     assert paint["background"] == "rgba(0, 0, 0, 0)", paint
     assert "linear-gradient" in paint["darkening"] and "0.72" in paint["darkening"], paint
-    assert "blur" in paint["blur"] and paint["darkeningEvents"] == "none" == paint["blurEvents"], paint
+    assert "blur" in paint["blur"] and "linear-gradient" in paint["fade"] and paint["events"] == "none", paint
+    assert paint["reach"] == pytest.approx(paint["bar"] + (64 if width >= 1000 else 32), abs=1), paint
+    # The desktop window's title-band strip keeps the bar's ::after (style.css :root[data-window-chrome]): the edge
+    # never takes its box, and the strip still takes presses for the title bar.
+    page.evaluate("document.documentElement.dataset.windowChrome = 'integrated'")
+    chrome = header.evaluate(edge)
+    page.evaluate("delete document.documentElement.dataset.windowChrome")
+    assert chrome["reach"] == pytest.approx(chrome["bar"] + (64 if width >= 1000 else 32), abs=1), chrome
+    assert "blur" in chrome["blur"], chrome
+    assert chrome["strip"] == "auto" and chrome["events"] == "none", chrome
     backing = header.locator('.app-page-title-row').evaluate("""el => {
         const s = getComputedStyle(el), channels = s.backgroundColor.match(/[0-9.]+/g).map(Number);
         return {alpha: channels[3] ?? 1, blur: s.backdropFilter, shadow: s.boxShadow};

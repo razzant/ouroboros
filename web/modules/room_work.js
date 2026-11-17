@@ -782,17 +782,16 @@ export function createRoomWork({
     let fittedWord = null, fittedWidth = null, fitNeeded = false;
     // Whether a box that ellipsizes its line cuts it, to the fraction of a pixel: an ellipsis shows for any overflow,
     // while scrollWidth rounds a word a fraction too wide down to its box (a "Sendi…" measured as fitting on a 393 pt
-    // phone). The box's whole width is read by letting it take that width for a moment, in the same task, so nothing
-    // paints between.
+    // phone). The box's whole width is read by letting it take that width for a moment (room_work.css .rw-measure-whole),
+    // in the same task, so nothing paints between.
     function cuts(box) {
         if (!box) return false;
         if (box.scrollWidth > box.clientWidth + 1) return true;
         if (!box.getClientRects?.().length) return false;
         const given = box.getBoundingClientRect().width;
-        const before = box.style.minWidth;
-        box.style.minWidth = 'max-content';
+        box.classList.add('rw-measure-whole');
         const whole = box.getBoundingClientRect().width;
-        box.style.minWidth = before;
+        box.classList.remove('rw-measure-whole');
         return whole > given + 0.01;
     }
     function fitWord() {
@@ -809,9 +808,7 @@ export function createRoomWork({
         if (mainTitle && cuts(mainTitle)) {
             titleRow.dataset.title = 'off';
             delete trigger.dataset.word;
-            if (cut() || trigger.scrollWidth > trigger.clientWidth + 1 || titleRow.scrollWidth > titleRow.clientWidth + 1) {
-                trigger.dataset.word = 'off';
-            }
+            if (cut()) trigger.dataset.word = 'off';
         }
         if (chip && roomCoversMain({ root: doc.documentElement }) && cuts(name)) {
             chip.dataset.fit = 'mark';
@@ -1241,8 +1238,11 @@ export function createRoomWork({
             sizer?.disconnect();
             for (const dispose of disposers.splice(0)) dispose();
             openHost?.removeAttribute('data-rw-open');
-            // The badge returns where the product put it; this module's nodes go.
+            // The badge returns where the product put it, and the consciousness chip to its bar (a Project's bar outlives
+            // its rooms); this module's nodes go.
             if (badgeParent?.isConnected) badgeParent.insertBefore(statusBadge, badgeNext?.parentNode === badgeParent ? badgeNext : null);
+            const listedChip = extras.querySelector('.cx-chip');
+            if (listedChip) chipHome()?.prepend(listedChip);
             trigger.remove();
             (shadeAnchor || surface).remove();
             back.remove();
