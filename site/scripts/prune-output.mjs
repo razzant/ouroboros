@@ -1,8 +1,8 @@
 // Runs after `vite build`. The build keeps ../docs (it also holds the handbook), so the files of earlier builds
 // would stay beside the new ones. This removes, from docs/assets, a hashed bundle that nothing built still loads,
 // and from docs/ui and docs/fonts, a file that has left site/public.
-// A bundle is kept when a built page names it or a kept bundle names it (an imported chunk), and a file that
-// site/public/assets also holds is never removed: those are the published files with stable names.
+// A bundle is kept when a built page, a published file with a stable name or another kept bundle names it (an
+// imported chunk). A file that site/public/assets also holds is one of those stable files and is never removed.
 import { readdir, readFile, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +35,12 @@ const built = await names(assetsDir);
 const stable = new Set(await names(join(siteRoot, "public", "assets")));
 const loaded = new Set();
 const unread = await Promise.all((await pages(outRoot)).map((page) => readFile(page, "utf8")));
+for (const name of built) {
+  if (stable.has(name) && /\.(?:js|css)$/.test(name)) {
+    loaded.add(name);
+    unread.push(await readFile(join(assetsDir, name), "utf8"));
+  }
+}
 while (unread.length) {
   const text = unread.pop();
   for (const name of built) {

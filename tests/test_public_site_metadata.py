@@ -229,7 +229,7 @@ def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
     served = (DOCS / "index.html").read_text(encoding="utf-8")
     css = (SITE / "src" / "home.css").read_text(encoding="utf-8")
     referenced = {image["src"][1:] for image in _tags(html, "img") if image.get("src", "").startswith("/ui/")}
-    referenced |= {link["href"][1:] for link in _tags(html, "link") if link.get("href", "").startswith("/fonts/")}
+    referenced |= {link["href"][1:] for link in _tags(html, "link") if link.get("href", "").startswith(("/fonts/", "/ui/"))}
     referenced |= set(re.findall(r"""url\(["']?/(fonts/[^)"']+)""", css))
     assert referenced
     for rel in sorted(referenced):
@@ -247,7 +247,11 @@ def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
         for image in shown:
             with Image.open(SITE / "public" / image["src"][1:]) as capture:
                 assert capture.size == (int(image.get("width") or 0), int(image.get("height") or 0)), image["src"]
-    assert {p.name for p in (DOCS / "assets").glob("home-*")} == set(re.findall(r'"/assets/(home-[^"]+)"', served))
+    scripts = [tag.get("src", "") for tag in _tags(served, "script") if tag.get("type") == "module"]
+    styles = [tag.get("href", "") for tag in _tags(served, "link") if tag.get("rel") == "stylesheet"]
+    assert len(scripts) == 1 and re.fullmatch(r"/assets/home-[\w-]+\.js", scripts[0]), scripts
+    assert len(styles) == 1 and re.fullmatch(r"/assets/home-[\w-]+\.css", styles[0]), styles
+    assert {p.name for p in (DOCS / "assets").glob("home-*")} == {scripts[0].rsplit("/", 1)[1], styles[0].rsplit("/", 1)[1]}
     # the served page is this source built: apart from the two bundle lines the build rewrites, they read the same
     lines = [
         [line.strip() for line in page.splitlines() if line.strip() and "/src/home." not in line and "/assets/home-" not in line]

@@ -214,7 +214,7 @@ body.motion-paused .ticker-track { animation-play-state: paused; }
 .shot img { width: 100%; height: auto; }
 /* a capture that goes on below its frame fades out instead of being sliced */
 .shot.fade img { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 72px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 72px), transparent); }
-/* a full-width strip; on a phone it shows its left end and, under it, its right end (the second image) */
+/* a full-width strip; on a phone it folds in two: the second image shows the part right of the fold */
 .shot.strip .rest { display: none; }
 .shot.lean { transform: perspective(1400px) rotateY(var(--tx)) rotateX(var(--ty)); transition: transform .5s var(--ease); }
 .shot.tilt-left { --tx: -8deg; --ty: 3deg; }
@@ -347,10 +347,10 @@ section[tabindex="-1"]:focus { outline: none; }
 }
 @media (max-width: 700px) {
   .hero .line.red > span, html.has-js .hero .line.red > span { white-space: normal; font-size: 1em !important; }
-  /* a wide strip keeps a readable size: its left end, then its right end, each fading toward the part left out */
-  .shot.strip img { aspect-ratio: 3 / 2; object-fit: cover; object-position: left top; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent); }
-  .shot.strip .rest { display: block; margin-top: 2px; object-position: right top; -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 56px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 56px), transparent); }
-  .shot.strip.fade .rest { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 56px), transparent), linear-gradient(to bottom, #000 calc(100% - 72px), transparent); -webkit-mask-composite: source-in; mask-image: linear-gradient(to left, #000 calc(100% - 56px), transparent), linear-gradient(to bottom, #000 calc(100% - 72px), transparent); mask-composite: intersect; }
+  /* a wide strip keeps a readable size: it folds in two at --cut, its left part above its right part */
+  .shot.strip img { aspect-ratio: calc(var(--ar, 3) * var(--cut, .5)); object-fit: cover; object-position: left top; -webkit-mask-image: none; mask-image: none; }
+  .shot.strip .rest { display: block; margin-top: 2px; aspect-ratio: calc(var(--ar, 3) * (1 - var(--cut, .5))); object-position: right top; }
+  .shot.strip.fade .rest { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 72px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 72px), transparent); }
 }
 @media (max-width: 600px) {
   .numbers { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
