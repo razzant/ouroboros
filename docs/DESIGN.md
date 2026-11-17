@@ -3596,8 +3596,9 @@ Inside Telegram the page announces readiness, fills the screen (fullscreen if gr
 and disables swipe-down so lists scroll. Telegram owns Back while a layer is open, Close otherwise; the page
 then draws no Back. Its bars take the room's colour; System appearance follows Telegram's theme. Safe areas apply
 on all sides (`web/modules/host_telegram.js`). Fullscreen sections share one title baseline beside the drawer
-picture and one action, 12px clear of both host buttons (108px, 100px safe sides). The rail stays below.
-Rooms keep their bar placement.
+picture and one action, 12px clear of both host buttons (108px, 100px safe sides). Below 416px that row cannot hold
+the name beside the action, so the action takes the line under it and the name stays whole, ending in an ellipsis
+only at the host's buttons. The rail stays below. Rooms keep their bar placement.
 
 Enforcement: `tests/test_design_system_gate_browser.py` visits every registered
 page and Settings' home and pages in WebKit and Chromium at 320, 360, 390, a Telegram-like
