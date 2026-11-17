@@ -1,0 +1,131 @@
+name: PR 3674 exact window on one Mac
+
+on:
+  push:
+    branches:
+      - qa/pr3674-window-capture-01
+
+permissions:
+  contents: read
+
+jobs:
+  window:
+    if: >-
+      github.repository == 'razzant/ouroboros' && github.event.created &&
+      !github.event.deleted && github.run_attempt == 1
+    runs-on: macos-15
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The pushed commit carries this workflow only; test the exact product revision.
+          ref: 2e6fc38dd8a3cdf0cda5eaaa605275e6df911050
+          persist-credentials: false
+      - name: Prepare the public prior seed and detached rollback checkout
+        shell: bash
+        run: |
+          exec >/dev/null 2>&1
+          test "$(git rev-parse HEAD)" = 2e6fc38dd8a3cdf0cda5eaaa605275e6df911050
+          test "$(git rev-parse 'HEAD^{tree}')" = 83493f3a8a1f5353c03f63be40d12c262d0f829b
+          public_repo=https://github.com/razzant/ouroboros.git
+          git fetch --no-tags --depth=1 "$public_repo" d955baded9cc8ec896754349edab079807ced11a
+          git fetch --no-tags --depth=1 "$public_repo" e471e380e6de1e7f728e0fffbb4457667422ebf4
+          old_core="$RUNNER_TEMP/old-core"
+          old_sha=e758a2190298d9890b1f26e632f63775d0b33d55
+          test ! -e "$old_core"
+          git init --quiet "$old_core"
+          git -C "$old_core" fetch --no-tags --depth=1 "$public_repo" "$old_sha"
+          git -C "$old_core" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$old_core" rev-parse HEAD)" = "$old_sha"
+          old_status=$(git -C "$old_core" status --porcelain=v1 --untracked-files=all)
+          test -z "$old_status"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.10'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+          enable-cache: false
+      - name: Install the repository's locked runtime, desktop bridge and test dependencies
+        id: dependencies
+        shell: bash
+        run: |
+          export UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/window3674-venv"
+          uv sync --locked --no-install-project --extra desktop --extra browser --group dev \
+            --python "$pythonLocation/bin/python" >/dev/null 2>&1
+
+      - name: Run units, rollback and the opt-in native cases sequentially
+        shell: bash
+        run: |
+          umask 077
+          python="$RUNNER_TEMP/window3674-venv/bin/python"
+          # safe_test makes its own private short directory for nested macOS Unix sockets.
+          "$python" -I -S scripts/safe_test.py --temp-parent /tmp \
+            --evidence-dir "$RUNNER_TEMP/window3674-private" --timeout 3900 -- \
+            "$python" -m tests._run_window_capture_acceptance --disposable-desktop \
+            --rollback-checkout "$RUNNER_TEMP/old-core" "$RUNNER_TEMP/window3674.status" >/dev/null 2>&1
+
+      - name: Report case outcomes and numeric observations
+        if: always()
+        shell: bash
+        run: |
+          python3 -I -S - "$RUNNER_TEMP/window3674.status" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          if not path.is_file():
+              print("rollback NOT_RUN")
+              print("native NOT_RUN")
+              sys.exit(1)
+          cases = {"permission", "unit", "rollback", "rollback_never_connected", "rollback_saved_connection",
+                   "native", "occluded", "independent_lifecycle",
+                   "stdin_eof", "finish", "immediate_stop", "window_gone"}
+          outcomes = {"GRANTED", "DENIED", "UNAVAILABLE", "PASS", "FAIL", "NOT_RUN", "INCOMPLETE"}
+          fields = set("passed failed skipped collected expected pytest_exit server_pid server_birth_s server_birth_us "
+                       "worker_pid worker_birth_s worker_birth_us frame_seq stop_http worker_gone server_gone "
+                       "target_app_alive fresh_session_idle model_target_pixels model_occluder_pixels "
+                       "stream_target_pixels stream_occluder_pixels one_shot_target_pixels one_shot_occluder_pixels "
+                       "before_close_target_pixels before_close_occluder_pixels display_target_pixels "
+                       "display_occluder_pixels overlap_points2 repaint_seq_delta window_stop_confirmed "
+                       "transport_server_gone release_confirmed target_window_visible task_completed "
+                       "task_cancelled eof_exit desktop_ready display_overlap_pixels one_shot_overlap_pixels "
+                       "discovery_processes discovery_tool_calls display_mapping_preserved idle_after_loss_ms "
+                       "terminal_roundtrip_ms stop_age_ms".split())
+          seen = {}
+          try:
+              lines = path.read_text(encoding="ascii").splitlines()
+          except (OSError, UnicodeError):
+              sys.exit("unreadable status file")
+          for line in lines:
+              items = line.split()
+              if len(items) < 2 or items[0] not in cases or items[0] in seen or items[1] not in outcomes:
+                  sys.exit("invalid outcome")
+              for item in items[2:]:
+                  key, _, value = item.partition("=")
+                  if key not in fields or not re.fullmatch(r"[0-9]{1,16}", value):
+                      sys.exit("invalid measurement")
+              print(*items)
+              seen[items[0]] = items[1]
+          if "rollback" not in seen:
+              print("rollback INCOMPLETE")
+          if "native" not in seen:
+              print("native", "NOT_RUN" if seen.get("permission") != "GRANTED" else "INCOMPLETE")
+          sys.exit(0 if seen.keys() == cases and seen["permission"] == "GRANTED"
+                   and all(seen[k] == "PASS" for k in cases - {"permission"}) else 1)
+          PY
+
+      - name: Check size limits against the reviewed base and verify documentation
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        shell: bash
+        run: |
+          umask 077
+          p="$RUNNER_TEMP/window3674-venv/bin/python"
+          "$p" -I -S scripts/safe_test.py --temp-parent /tmp --evidence-dir "$RUNNER_TEMP/window3674-gates" --timeout 300 -- \
+            env OURO_SIZE_RATCHET_BASE_REF=d955baded9cc8ec896754349edab079807ced11a "$p" -m pytest -o addopts= -q -m size_ratchet \
+            tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py tests/test_smoke.py >/dev/null 2>&1 && size=0 || size=$?
+          "$p" -I -S scripts/safe_test.py --temp-parent /tmp --evidence-dir "$RUNNER_TEMP/window3674-docs" --timeout 300 -- \
+            "$p" -m pytest -o addopts= -q tests/test_docs_sync.py >/dev/null 2>&1 && docs=0 || docs=$?
+          printf 'size exit=%d; docs exit=%d\n' "$size" "$docs"
+          test "$size" = 0 && test "$docs" = 0
