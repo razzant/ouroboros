@@ -12413,6 +12413,13 @@ html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-
     html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-toolbar > button:last-child, .logs-clear-list) { position: relative; inset: auto; }
     html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-title, .app-page-lead-title) { right: var(--telegram-header-end); }
 }
+/* Below the host's row a rail and the actions that left the row share lines in flow: an action that does not fit
+   beside the tabs starts the next line, so no action, the last or another (Skills' Update), stands over a tab. */
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header:has(> .app-page-toolbar):has(> .app-page-title-block .app-tab-strip) {
+    display: flex; flex-wrap: wrap; align-items: center; row-gap: var(--space-2);
+}
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-title-block { flex: 1 1 auto; min-width: 0; }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-toolbar { margin-inline-start: auto; }
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="page"] > .app-page-header .app-page-title { display: none; }
 /* Two panes of an automatic view hold a page too: its name, not the place's, stands in the host's row. One column of
    it is the list alone: the page's name and controls are not shown over it (the row shows the place). */
