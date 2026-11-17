@@ -196,9 +196,6 @@ export function createChatInstance({
     const page = document.createElement('div');
     page.id = asPanel ? `panel-${idPrefix}` : 'page-chat';
     page.className = asPanel ? 'chat-instance-panel' : 'page active';
-    // Build A is the candidate default: the transcript owns the fade at both edges. The owner can shoot today's
-    // crisp top by setting one attribute on this room root (`data-room-top="crisp"`).
-    page.dataset.roomTop = 'fade';
     // A Project panel's bar comes from app.js (page_header.js); the instance seeds only its status badge.
     const headerHtml = asPanel
         ? `<div class="chat-panel-statusbar"><span id="chat-status" class="status-badge offline">Connecting…</span></div>`
@@ -239,8 +236,6 @@ export function createChatInstance({
 
     const byId = (suffix) => page.querySelector(`[id="${idPrefix}-${suffix}"]`);
     const messagesDiv = byId('messages');
-    messagesDiv.classList.add('scroll-fade-y');
-    const disposeFeedFade = bindScrollFade(messagesDiv);
     const input = byId('input');
     const inputArea = byId('input-area');
     const statusBadge = byId('status');
@@ -3584,7 +3579,6 @@ export function createChatInstance({
             focusPanel?.removeEventListener('keydown', showFocus);
             chatResizeObserver?.disconnect();
             chatResizeObserver = null;
-            disposeFeedFade();
             historyResyncScheduler.cancel();
             preview.destroy();
             for (const id of liveCardRecords.keys()) disposeLiveCard(id);

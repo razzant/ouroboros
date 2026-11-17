@@ -3,14 +3,48 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { bindScrollFade, revealPastFade } from '../modules/scroll_fade.js';
 
-test('room fades cover the floating chrome only while content waits there; crisp preserves its alternative', () => {
+// A room's feed carries no fade (DESIGN principle 9, owner 21.10): what darkens content under its glass is the
+// bar's and the composer's own drawing. A mask on the feed would also make it one stacking context and drop the
+// lazy-load margin of the photos inside it. Every other scroller keeps the shared fade.
+const ROOM_FEED = /(?:#chat-messages|\.chat-messages)(?![\w-])/;
+function topLevel(text, separator) {  // split outside parentheses, so `:is(a, b) .c` keeps its group
+    const parts = [];
+    let depth = 0, start = 0;
+    [...text].forEach((char, index) => {
+        if (char === '(') depth += 1;
+        else if (char === ')') depth -= 1;
+        else if (!depth && separator.test(char)) { parts.push(text.slice(start, index)); start = index + 1; }
+    });
+    return [...parts, text.slice(start)].map((part) => part.trim()).filter(Boolean);
+}
+function roomFeedFades(css) {
+    css = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const found = [];
+    for (const [, selectors, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        const subjects = topLevel(selectors, /,/).map((one) => topLevel(one, /[\s>+~]/).at(-1));
+        const masked = /(?:^|[;\s])(?:-webkit-)?mask(?:-image)?\s*:(?!\s*none\b)|--scroll-fade-/.test(body);
+        if (/data-room-top/.test(selectors) || (masked && subjects.some((subject) => ROOM_FEED.test(subject)))) {
+            found.push(selectors.trim());
+        }
+    }
+    return found;
+}
+
+test("a room's feed carries no fade or room-top switch, while the shared fade still masks every other scroller", () => {
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
-    const room = css.slice(css.indexOf('/* Room edges use'), css.indexOf('.page-header .spacer'));
-    assert.match(room, /\[data-scroll-above\][^{]*\{[^}]*--scroll-fade-top: calc\(var\(--chat-header-reserve, 56px\) \+ var\(--scroll-fade-edge\)\)/);
-    assert.match(room, /\[data-scroll-below\][^{]*\{[^}]*--scroll-fade-bottom: var\(--chat-input-reserve, 108px\)/);
-    assert.match(room, /--scroll-fade-bottom-clear: calc\(var\(--chat-input-reserve, 108px\) - var\(--scroll-fade-edge\)\)/);
-    assert.match(css, /\.scroll-fade-y \{[^}]*--scroll-fade-bottom-clear: 0px/);
-    assert.match(room, /\[data-room-top="crisp"\][^{]*\{[^}]*mask-image: none/);
+    assert.deepEqual(roomFeedFades(css), []);
+    assert.match(css, /\.scroll-fade-y \{[^}]*\bmask-image: linear-gradient\(/, 'the shared fade itself stays');
+    for (const broken of [
+        ':is(#chat-messages, .chat-messages)[data-scroll-above] { --scroll-fade-top: 88px; }',
+        '#page-chat .chat-messages { mask-image: linear-gradient(transparent, black); }',
+        '[data-room-top="crisp"] .chat-messages { mask-image: none; }',
+    ]) assert.equal(roomFeedFades(broken).length, 1, broken);
+    const allowed = `.scroll-fade-y { mask-image: linear-gradient(180deg, transparent 0, black 32px); }
+        .chat-live-timeline.scroll-fade-y[data-scroll-above] { --scroll-fade-top: 32px; }
+        .chat-messages .chat-mirror-text { mask-image: linear-gradient(black, transparent); }
+        :is(#chat-messages, .chat-messages) > .chat-bubble { -webkit-mask-image: linear-gradient(black, transparent); }
+        .project-panel .chat-messages:focus-visible { background-image: linear-gradient(red, red); }`;
+    assert.deepEqual(roomFeedFades(allowed), [], 'a card or line inside the feed may still fade on its own');
 });
 
 function fixture() {

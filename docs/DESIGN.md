@@ -120,7 +120,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    read from one snapshot and written one way; a new part appears only when the old one cannot do
    the job, and then replaces it everywhere.
 
-9. **Moving content never ends on a line.** Content fades past stationary bars, strips, sheet heads, menus and the full composer, including its capsule line. The shared edge appears only while content waits beyond it; nothing opaque covers it. Floating controls use one glass; the Widgets board keeps crisp edges (owner 20.10).
+9. **Moving content never ends on a line.** Content fades past stationary bars, strips, sheet heads and menus. The shared edge appears only while content waits beyond it; nothing opaque covers it. Floating controls use one glass; the Widgets board keeps crisp edges (owner 20.10), and a room's feed carries no fade (owner 21.10).
 
 **Seed (light | dark)**
 
@@ -3482,8 +3482,8 @@ band, actions end it, at one height and shape. Controls share the content's lead
 location reveals its folder without widening the rail. Section headings follow
 “A section with pages”; a Project shows its name.
 An empty band draws nothing. Its scroller reaches the window's top; its first row starts below the macOS band,
-which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10); moving content
-fades by principle 9. Empty band space still drags the window. In stack layout the header is one row of 44px controls,
+which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10), as a room's feed
+does (owner 21.10); other moving content fades by principle 9. Empty band space still drags the window. In stack layout the header is one row of 44px controls,
 a page's 18px below a browser's top: one leading control (the picture on a room or section list, the round Back when
 owed), destination name, status, then a room's consciousness chip and Panic. Tabs or filters occupy one line below;
 chip rails run to the page's edges (a desk's Logs fades its rail short of Clear), with no outer events panel on a phone. A short row drops the status word whole after its start step, keeping its mark; Main's title ellipsizes before
@@ -3532,8 +3532,8 @@ and, during a campaign, `Evolution ›`
 `/review`'s picker). In Main and Project, the bar has no continuous backing strip:
 the title and status share one floating capsule (`--chip-float`, non-shrinking
 mark and caret with inline inset), and each command is its own floating capsule
-(owner 21.10). No opaque band is drawn under or between them; the feed uses the shared edge fade while the
-capsules stay glass. A failure or approximation note hangs under the bar; a page
+(owner 21.10). No band, mask or clip is drawn under or between them, so the capsules float over the transcript
+(owner 2026-11-01). A failure or approximation note hangs under the bar; a page
 has no caption line, its sidebar row and its tabs name it.
 
 ### Doors and containers
