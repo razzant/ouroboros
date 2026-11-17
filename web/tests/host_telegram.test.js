@@ -315,3 +315,21 @@ test('a page without the stamp waits for a late SDK tag but binds only on Telegr
     assert.equal(w.timers.length, 0);
     adapter.dispose();
 });
+
+test('a change of Telegram\'s fullscreen tells the page (ouro:host-chrome), so the room\'s bar can join or leave its row', () => {
+    const sdk = fakeSdk({ version: '8.0' });
+    const w = fakeWorld({ sdk });
+    const told = [];
+    w.win.Event = class { constructor(type) { this.type = type; } };
+    w.win.dispatchEvent = (event) => { told.push(event.type); return true; };
+    const adapter = createTelegramHost({ win: w.win, doc: w.doc, layers: w.stack, theme: w.theme });
+    adapter.bind();
+    const before = told.filter((type) => type === 'ouro:host-chrome').length;
+    sdk.app.isFullscreen = true;
+    sdk.fire('fullscreenChanged');
+    assert.equal(told.filter((type) => type === 'ouro:host-chrome').length, before + 1, 'fullscreen on is told');
+    sdk.app.isFullscreen = false;
+    sdk.fire('fullscreenChanged');
+    assert.equal(told.filter((type) => type === 'ouro:host-chrome').length, before + 2, 'and fullscreen off');
+    adapter.dispose();
+});
