@@ -87,7 +87,8 @@ def test_offset_fraction_uses_microseconds_without_rounding(digits):
     "2026-07-01T00:00:00." + "1" * 100_013 + "+25:00:30.5",
     "2026-W27-8T00:00:00.1234567", "2026-0701T00:00:00.1234567",
     "2026-07-01T00:00:00.", "2026-07-01T00:00:00.1234567+00:00:30.",
-])
+# The test id names the long run: pytest puts the node id in PYTEST_CURRENT_TEST, longer than Windows admits.
+], ids=lambda value: value.replace("1" * 100_013, "1x100013"))
 def test_unrecognized_or_incomplete_dates_are_not_invented_or_clipped(value):
     assert mv._minute(value) == value
 
