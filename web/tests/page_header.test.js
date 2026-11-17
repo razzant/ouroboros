@@ -94,6 +94,13 @@ test('Telegram sections keep a visible drawer control and one title baseline ins
     assert.match(telegram, /> \.app-page-leading \{[^}]*display: flex;/);
     assert.match(telegram, /:is\(\.app-page-title, \.app-page-lead-title\) \{/);
     assert.doesNotMatch(telegram, /> \.app-page-leading \{ display: none;/);
+    // Below the width that holds the name (4rem) beside the row's last action, the action leaves the row and the name
+    // keeps its place to the host's buttons (at 320 and 350 px it was 0px wide); the row's own width decides, in CSS.
+    assert.match(telegram, /> \.app-page-header \{\n    position: relative;\n    container: tgrow \/ inline-size;/);
+    const narrow = telegram.slice(telegram.indexOf('@container tgrow (max-width: calc(328px + 4rem - 0.02px)) {'));
+    assert.ok(telegram.includes('@container tgrow (max-width: calc(328px + 4rem - 0.02px)) {'), 'the row\'s own query');
+    assert.match(narrow.slice(0, narrow.indexOf('\n}')), /:is\(\.app-page-toolbar > button:last-child, \.logs-clear-list\) \{ position: static; \}[\s\S]*:is\(\.app-page-title, \.app-page-lead-title\) \{ right: var\(--telegram-header-end\); \}/);
+    assert.match(telegram, /:is\(\.app-page-toolbar > button:last-child, \.logs-clear-list\) \{\n    position: absolute;/, 'a wide row keeps the action in it');
     // A page's name takes the host row's one title slot: a page alone, and two panes of an automatic view; a list
     // alone (the automatic view in one column) keeps the place's name.
     const hide = (view) => `.section-place[data-section-view="${view}"] > .app-page-header .app-page-title { display: none; }`;

@@ -12370,6 +12370,7 @@ html[data-telegram-fullscreen][data-layout="docked"] .sidebar-head { padding-top
    One action ends that row; rails and further actions keep their nodes below. Rooms keep their placement. */
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header {
     position: relative;
+    container: tgrow / inline-size;
     --telegram-header-start: 108px;
     --telegram-header-end: 100px;
     --touch-target-min: 44px;
@@ -12406,6 +12407,13 @@ html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-
 }
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-toolbar > button:last-child, .logs-clear-list) {
     position: absolute; top: var(--telegram-row-top); right: var(--telegram-header-end); grid-area: auto;
+}
+/* The row keeps the name at least 4rem beside that action: 156px before it (the host's 108px, ☰ and its gap), 196px
+   after (the host's 100px and the action's 96px), less the row's 24px of padding. Narrower, the action keeps its node
+   below with the others and the name takes the row up to the host's buttons, ellipsizing there. */
+@container tgrow (max-width: calc(328px + 4rem - 0.02px)) {
+    html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-toolbar > button:last-child, .logs-clear-list) { position: static; }
+    html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-title, .app-page-lead-title) { right: var(--telegram-header-end); }
 }
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="page"] > .app-page-header .app-page-title { display: none; }
 /* Two panes of an automatic view hold a page too: its name, not the place's, stands in the host's row. One column of
