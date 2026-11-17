@@ -69,6 +69,10 @@ def test_memory_or_schemas_that_take_the_books_room_are_measured_without_advice(
     line = memory_facts(plan, "low")
     assert f"beside a Max room of {fact['allowance']:,}; Max with chapter maps, for the window; " in line
     assert not any(words in line for words in ("may bring", "Folding", "failure"))
+    # A start that protected words took on to Nano is named in the mode its facts row shows, never Max.
+    nano = dataclasses.replace(plan, nano_projection=dataclasses.replace(plan.nano_projection,
+                                                                         memory_facts=plan.low_projection.memory_facts))
+    assert f"beside a Max room of {fact['allowance']:,}; Nano, for the window; " in memory_facts(nano, "nano")
     # The fact rides in the receipt the task trace keeps, and a selection keeps the start's frame.
     assert mf.trace_facts(plan.low_projection.memory_facts)["max_room"] == fact
     selected = mf.select_view(plan, "low", [])

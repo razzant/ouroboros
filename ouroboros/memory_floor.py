@@ -401,7 +401,10 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
     last = {(step, ident) for step, ident, *_ in uncovered}
     added = []
     counted_groups = {i for s, i in old if s == "F6a" and i != "unread"}
-    for step, ident, whole, short in elements:
+    # Under a binding target the window takes what the target may not (``held``) only past my tellings: the target's
+    # walk first, then the window's in the same order, so it never folds this room's forms that a telling pays (3A).
+    passes = (False, True) if floor is not None and floor_bound is not None else (None,)
+    for window_pass, (step, ident, whole, short) in ((p, element) for p in passes for element in elements):
         if target is not None and current <= target:
             current = measure(level(taken))
         if target is None or current <= target:
@@ -410,6 +413,8 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
         if pair in taken or pair in last or (clean and pair not in ordinary) or swallowed(snapshot, step, ident, taken):
             continue
         held = floor is not None and (step in keeps or table.stages[pair] not in floor)
+        if window_pass is not None and held is not window_pass:
+            continue
         if held and (floor_bound is None or (current := measure(level(taken))) <= floor_bound):
             continue  # the window's bound is judged on the priced view
         if step in (*_LIST_FORMS, "F8") or step == "F6a" and (ident == "unread" or not counted_groups):
@@ -445,11 +450,6 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
             counted_groups.add(ident)
     current = measure(level(taken))
     current = restore(snapshot, table, taken, added, target, current, level, measure, view_tokens)
-    if forced and floor_bound is not None and target is not None and floor_bound > target:
-        # What only the window took past the target's floor comes back while the window's own start bound holds it:
-        # a target the rest of the request already exceeds never keeps the window's cut (3A)
-        current = restore(snapshot, table, taken, [item for item in added if item[0] in forced and item[0] in taken],
-                          floor_bound, current, level, measure, view_tokens)
     # A Max view floored at my tellings keeps my human's words while its books are whole: when the window cannot
     # hold it, the books go to chapter maps first (the next frame), and only there may the window take them (4A).
     physical = None if floor is not None and floor_bound is None else allowances.get("physical")

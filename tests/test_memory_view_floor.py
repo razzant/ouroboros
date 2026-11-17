@@ -533,22 +533,27 @@ def test_this_rooms_notes_never_yield_to_lows_target_and_the_window_owns_its_cut
     assert 'only physical pressure can narrow them' not in nano.room
 
 
-def test_what_only_the_window_took_comes_back_while_the_windows_own_bound_holds_it():
-    """3A: Low's target never takes this room's forms. Where the window's own start bound took this room's task facts
-    before my telling of a far conversation paid that bound, they come back while it holds them, though the rest of the
-    request alone exceeds Low's target; a window that still cannot hold them keeps its cut, never counted as the target's."""
-    far = syn.conversation(1, words=40, word_chars=2_000)
-    for word in far["rooms"][0]["words"]:
-        word["rank"] = 1  # considered and untold: their telling comes after this room's task facts in the walk
-    snap = syn.snapshot(room_facts=syn.room("1", lane2=60), conversations=[far])
+def test_the_window_takes_this_rooms_forms_only_past_my_tellings_under_lows_target():
+    """3A: Low's target never takes this room's forms, and the window takes them only past my tellings: a far
+    conversation's telling pays first, then the window's own start bound takes this room's task facts in the same
+    order, only while it cannot hold them, never counted as the target's. A target the tellings can meet keeps this
+    room whole and is met."""
+    def snapshot(lines, chars):
+        far = syn.conversation(1, words=40, word_chars=chars)
+        for word in far["rooms"][0]["words"]:
+            word["rank"] = 1  # considered and untold: their telling's stage comes after this room's task facts
+        return syn.snapshot(room_facts=syn.room("1", lane2=lines), conversations=[far])
 
-    def floor(fixed):
-        return mf.render_view_for_mode(snap, mode="low", owner_mode="low", window_tokens=1_000_000, known_window=True,
+    def floor(snap, window, fixed):
+        return mf.render_view_for_mode(snap, mode="low", owner_mode="low", window_tokens=window, known_window=True,
                                        output_reserve=65_536, ratio=1, non_memory_tokens=fixed).facts["floor"]
-    back = floor(796_000)  # the whole view exceeds the window's bound until the far words are told
-    assert "F1" not in back["steps"] and back["steps"]["F6w"] == 40 and back["target_missed"]
-    kept = floor(808_000)  # beside that telling the window still holds only six of the sixty task lines
-    assert kept["steps"]["F1"] == 54 and kept["by_budget"] == 41  # the far words and their gist: the target's
+    small = snapshot(60, 2_000)
+    told = floor(small, 1_000_000, 796_000)  # the whole view exceeds the window's bound until the far words are told
+    assert "F1" not in told["steps"] and told["steps"]["F6w"] == 40 and told["target_missed"]
+    tight = floor(small, 1_000_000, 808_000)  # beside that telling the window holds only six of the sixty task lines
+    assert tight["steps"]["F1"] == 54 and tight["by_budget"] == 41  # the far words and their gist: the target's
+    met = floor(snapshot(500, 12_000), 300_000, 90_000)  # the tellings alone meet Low's target here
+    assert "F1" not in met["steps"] and met["steps"]["F6w"] == 40 and not met["target_missed"]
 
 
 def test_lows_target_never_counts_the_windows_cut_of_my_humans_words():
