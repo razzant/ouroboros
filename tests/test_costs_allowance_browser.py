@@ -393,9 +393,9 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
             for (width, _height, theme), page in pages.items():
                 _costs(page, url)
                 page.locator("[data-costs-consciousness]").click()
-                headline = page.locator(".consciousness-headline")
-                expect(headline).to_contain_text("Wake-up wake-held stopped at the allowance it had left when it "
-                                                 "started ($2.99).", timeout=30_000)
+                headline = page.locator(".consciousness-headline")  # the switch's position and the owner's mark
+                expect(page.locator(".consciousness-headline-state")).to_contain_text(
+                    "Wake-up wake-held stopped at the allowance it had left when it started ($2.99).", timeout=30_000)
                 assert headline.locator(".status-mark").get_attribute("data-hue") == "owner"
                 expect(page.locator(".consciousness-headline-note")).to_have_text(
                     "Resume keeps that limit, so it pauses again while its known spend is at it, and a higher allowance "
