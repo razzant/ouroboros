@@ -472,7 +472,7 @@ def test_review_blob_batch_uses_file_and_keeps_whitespace_and_missing_specs(tmp_
                 "tests/test space.py": "def test_space():\n    pass\n"}
     for path, text in contents.items():
         (repo / path).parent.mkdir(exist_ok=True)
-        (repo / path).write_text(text, encoding="utf-8")
+        (repo / path).write_text(text, encoding="utf-8", newline="\n")
     _git(repo, "add", "tests")
     specs = [":tests/test_plain.py"] * 16000 + [":tests/test space.py", ":missing"]
     expected_input = (":tests/test_plain.py\n" * 16000 + ":missing\n").encode()
