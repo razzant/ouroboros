@@ -93,7 +93,7 @@ test('server status alone owns the headline even with finished or active rows in
         ['wake_failed', 'The last wake-up failed.'], ['wake_rejected', 'The last wake-up was refused.'],
         ['wake_paused', 'The last wake-up returned while paused.'], ['disabled', '2 places are heard, not answered.'],
         ['waiting_for_first_conversation', 'No owner chat is bound yet; the first conversation binds it.']]) {
-        assert.deepEqual(headlineView({ ...full(), status, detail }), { text: detail, position: '', moving: false });
+        assert.deepEqual(headlineView({ ...full(), status, detail, position: '' }), { text: detail, position: '', moving: false });
     }
     assert.equal(headlineView({ ...full(), status: 'thinking' }).moving, true);
 });
@@ -305,7 +305,7 @@ test('while the full snapshot is not served, /api/state still gives the status; 
     });
     try {
         await controller.refresh();
-        assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /dashboard-hero-kicker">Consciousness</);
+        assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /dashboard-hero-kicker">Consciousness · when Ouroboros acts</);
         assert.equal(reads, 0);
         assert.equal(mount.regions.has('[data-cx-places]'), false);
         assert.match(mount.regions.get('[data-cx-wakes]').innerHTML, /does not report its recent wakes yet/);

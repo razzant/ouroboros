@@ -40,23 +40,23 @@ test('a turn sends the same /bg after a yes, nothing after a no, and asks nothin
     let asked = 0;
     const yes = async () => { asked += 1; return true; };
     const no = async () => { asked += 1; return false; };
-    assert.equal(await turnConsciousness('off', { ws, read: async () => PREVIEW, confirm: yes }), true);
+    assert.equal(await turnConsciousness('off', { ws, read: async () => PREVIEW, ask: yes }), true);
     assert.deepEqual(sent.pop(), { type: 'command', cmd: '/bg stop', ui_control: { name: 'consciousness_toggle' } });
-    assert.equal(await turnConsciousness('on', { ws, read: async () => PREVIEW, confirm: no }), false);
+    assert.equal(await turnConsciousness('on', { ws, read: async () => PREVIEW, ask: no }), false);
     assert.equal(sent.length, 0, 'a no sends nothing');
-    assert.equal(await turnConsciousness('on', { ws, read: async () => ({ lines: [], places: [] }), confirm: no }), true);
+    assert.equal(await turnConsciousness('on', { ws, read: async () => ({ lines: [], places: [] }), ask: no }), true);
     assert.deepEqual(sent.pop(), { type: 'command', cmd: '/bg start', ui_control: { name: 'consciousness_toggle' } });
     assert.equal(asked, 2, 'no question where nothing is named');
     // A preview read that fails never holds the switch: the dialog asks without it.
-    assert.equal(await turnConsciousness('off', { ws, read: async () => { throw new Error('down'); }, confirm: yes }), true);
+    assert.equal(await turnConsciousness('off', { ws, read: async () => { throw new Error('down'); }, ask: yes }), true);
     assert.equal(sent.pop().cmd, '/bg stop');
     // The caller hears when the read is over, before any question (its button stops saying «Reading…»).
     const order = [];
     await turnConsciousness('off', { ws, read: async () => { order.push('read'); return PREVIEW; },
-        onRead: () => order.push('onRead'), confirm: async () => { order.push('ask'); return false; } });
+        onRead: () => order.push('onRead'), ask: async () => { order.push('ask'); return false; } });
     assert.deepEqual(order, ['read', 'onRead', 'ask']);
     // Places the host could not read are not «no places»: it asks before the turn.
-    assert.equal(await turnConsciousness('on', { ws, read: async () => ({ lines: ['Where it may answer could not be read.'], places: null }), confirm: no }), false);
+    assert.equal(await turnConsciousness('on', { ws, read: async () => ({ lines: ['Where it may answer could not be read.'], places: null }), ask: no }), false);
     assert.equal(asked, 4);
     assert.equal(sent.length, 0);
 });

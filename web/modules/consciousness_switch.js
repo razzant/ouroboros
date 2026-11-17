@@ -44,12 +44,12 @@ export function switchDialog(to, preview) {
 
 /** Ask, when there is something to name, and send `/bg start|stop`; true when the command was sent. `onRead` is called
  *  once the preview is read (or failed), before any question: the caller's button stops saying «Reading…». */
-export async function turnConsciousness(to, { ws, read = readSwitchPreview, confirm = openConfirmDialog, onRead } = {}) {
+export async function turnConsciousness(to, { ws, read = readSwitchPreview, ask = openConfirmDialog, onRead } = {}) {
     let preview = null;
     try { preview = await read(to); } catch { preview = null; }
     onRead?.();
     const dialog = switchDialog(to, preview);
-    if (dialog && !(await confirm(dialog))) return false;
+    if (dialog && !(await ask(dialog))) return false;
     if (!ws?.send) return false;
     ws.send({ type: 'command', cmd: `/bg ${to === 'off' ? 'stop' : 'start'}`, ui_control: { name: 'consciousness_toggle' } });
     return true;
