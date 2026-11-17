@@ -550,9 +550,9 @@ def _list_projects(ctx: ToolContext, limit: int = 50, closed: Optional[bool] = N
         pid = str(p.get("id") or "")
         name = str(p.get("name") or pid)
         last = str(p.get("last_active_at") or p.get("created_at") or "")
-        active = " · running" if p.get("has_thread_activity") else ""
         closure = json.dumps(p.get("closed", False), ensure_ascii=False)
-        lines.append(f"- {pid} — {name}{active} · last_active_at={last} · closed={closure}")
+        # No liveness word: the registry's activity flag records that a room ever held work, not that work runs now.
+        lines.append(f"- {pid} — {name} · last_active_at={last} · closed={closure}")
     if len(rows) > limit:
         args = [f"start={start + limit}", f"limit={limit}", f"oldest_first={oldest_first!r}"]
         if closed is not None:

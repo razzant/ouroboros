@@ -6929,6 +6929,9 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
 .dashboard-row-mark[hidden] { display: none; }
 @container sectionplace (min-width: 40rem) {
     .dashboard-shell .dashboard-body { padding-inline-start: var(--space-4); }
+    /* An automatic page beside the list is shown by ui.css's shared rule, which draws a pane as a grid: the Dashboard's
+       pane stays the flex column its panels fill (below), as on a chosen page. */
+    .dashboard-shell[data-section-view="auto"] > .dashboard-panels { display: flex; }
     /* The chosen list row names its pane; the heading remains available to readers. */
     .section-lead-page > [data-dashboard-lead-name],
     #page-settings[data-settings-depth="1"] .section-lead-page > [data-settings-lead-name] {

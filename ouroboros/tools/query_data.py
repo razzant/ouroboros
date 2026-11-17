@@ -41,7 +41,7 @@ _FILES = {"review_ledger": "state/review_ledger/{id}.json", "advisory_review": "
           "storage": "state/storage_measurement.json",  # the last two finished counts (installation-wide) + removers + disk
           "knowledge_history": "memory/knowledge_history.jsonl",  # global knowledge writes, bodies left out
           "update_letter": "state/update_letter.json",  # the description with its whole range qualification
-          "update_material": "state/update_material.json",  # the offered range's commits, rows and read recipe
+          "update_material": "state/update_material.json",  # the retained range's commits, rows and read recipe
           **{name + "_log": f"logs/{name}.jsonl" for name in ("supervisor", "events", "tools", "store_sites")}}
 _ID_KINDS = {"task_result", "run", "review_ledger", "skill_state", "verification_receipts"}
 # op=blob reads the observability CAS by digest. The digest in a task-source handle's name is that file's own

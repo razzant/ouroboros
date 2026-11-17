@@ -674,7 +674,7 @@ test('returning to a Settings level preserves its history entry, including a ref
 });
 
 test('the automatic Dashboard view keeps its focused rail through both width crossings before any callback', (t) => {
-    const { mount, window, document } = setup(t);
+    const { mount, window } = setup(t);
     const content = new NodeStub(); content.id = 'content'; mount.append(content);
     window.CSS = { supports: () => true };
     window.ouroLayout = { layout: 'docked' };
@@ -690,9 +690,12 @@ test('the automatic Dashboard view keeps its focused rail through both width cro
     const shell = dashboard.page.querySelector('.dashboard-shell');
     const header = dashboard.page.querySelector('.app-page-header');
     const list = dashboard.page.querySelector('.dashboard-tabs');
-    const row = list.querySelector('[data-dashboard-tab="costs"]');
     const band = () => ['data-empty', 'data-controls'].map((name) => header.hasAttribute(name));
-    row.focus();
+    // The stub moves focus only when code calls focus(), so no claim about the focused row is made here: a browser keeps
+    // it while the rail stays drawn, and that is the 'auto' view and the same mounted list asserted below (the sheets
+    // draw the rail in 'auto' at every width: tests/test_shell_layout_static.py
+    // ::test_an_automatic_section_page_keeps_its_list_when_the_container_narrows_before_javascript). Back's return of
+    // the focus to the chosen row is the test 'a page explicitly chosen beside the Dashboard list survives narrowing'.
     try {
         for (const [layout, pixels] of [['stack', 390], ['docked', 1000], ['stack', 390]]) {
             width = pixels;
@@ -701,7 +704,6 @@ test('the automatic Dashboard view keeps its focused rail through both width cro
             window.ouroLayout.layout = layout;
             window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout } }));
             assert.equal(dashboard.page.querySelector('.dashboard-tabs'), list, 'the same list stays mounted');
-            assert.equal(document.activeElement, row);
             observers.forEach(fn => fn([{ target: dashboard.page }]));
             assert.equal(shell.dataset.sectionView, 'auto', 'the later observer keeps the automatic view');
             assert.deepEqual(band(), [false, false], 'the band carries no measured fact: the two-pane query decides it is empty');
@@ -717,7 +719,6 @@ test('the automatic Dashboard view keeps its focused rail through both width cro
         }
         layers.get('dashboard-level').onClose();
         assert.equal(shell.dataset.sectionView, 'auto', 'Back restores the list and its automatic page on a desk');
-        assert.equal(document.activeElement, row);
     } finally { dashboard.destroy(); }
 });
 
@@ -924,23 +925,26 @@ test('a root font that moves the two panes\' 40rem repaints the Dashboard: the p
     const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
     const stack = new Map();
     const dashboard = initDashboard({ state, layers: { push: layer => stack.set(layer.id, layer), remove: id => stack.delete(id) } });
+    const said = () => [dashboard.page.dataset.sectionView, [...stack.keys()], stack.get('dashboard-level')?.back.label];
     assert.equal(dashboard.page.dataset.sectionView, 'auto', '735 px hold the list beside a page at 16 px');
+    dashboard.activateTab('costs');
+    assert.deepEqual(said(), ['page', [], undefined], 'a page chosen beside the list has no Back: the list is the way to it');
     // The browser's font grows to 20 px: 40rem is 800 px, so the sheets draw one column while the box keeps its width.
-    // The pane, which loses the list beside it, says so: the list comes back instead of a page with no way to it.
+    // The pane, which loses the list beside it, says so: the page now stands alone and gains the round Back to the
+    // list, instead of a page with no way to it. Only the pane's observer can say it: the place's box kept its width.
     font = 20;
     const pane = dashboard.page.querySelector('.dashboard-panels');
     const heard = (box) => observers.find((observer) => observer.seen.includes(box));
     assert.ok(heard(pane), 'the pane is watched');
+    assert.deepEqual(said(), ['page', [], undefined], 'nothing moves before the pane is heard');
     heard(pane).fn([{ target: pane }]);
-    assert.equal(dashboard.page.dataset.sectionView, 'auto', 'one column shows the list');
-    dashboard.activateTab('costs');
-    assert.deepEqual([dashboard.page.dataset.sectionView, stack.size], ['page', 1], 'a page opened from it leads back');
-    // Back to 16 px: the list's rows shrink (the pane alone may not move while the list stands alone), two panes again.
+    assert.deepEqual(said(), ['page', ['dashboard-level'], 'Dashboard'], 'one column: the page that replaced the list leads back to it');
+    // Back to 16 px: two panes again. The list comes back beside the page as its rail, and its observer says so.
     font = 16;
     const list = dashboard.page.querySelector('.dashboard-tabs');
     assert.ok(heard(list), 'the list is watched');
     heard(list).fn([{ target: list }]);
-    assert.deepEqual([dashboard.page.dataset.sectionView, stack.size], ['page', 0], 'beside the list again, without Back');
+    assert.deepEqual(said(), ['page', [], undefined], 'beside the list again, without Back');
     dashboard.destroy();
 });
 

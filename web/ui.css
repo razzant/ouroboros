@@ -158,7 +158,7 @@
     --control-h: 34px;
     --control-h-sm: 28px;
     --control-h-float: 30px;
-    --page-header-row-h: max(var(--window-chrome-top, 0px), calc(var(--control-h-float) + 36px));
+    --page-header-row-h: calc(var(--control-h-float) + 36px);  /* the desktop shell's measured band: style.css */
     --control-pad-x: var(--space-4);
     --control-pad-y: 0px;
     --control-radius: var(--pill-radius);
