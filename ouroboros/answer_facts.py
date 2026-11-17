@@ -7,7 +7,9 @@ never cited or rendered as their words. Every model-facing text of an answer is 
 label is: "your text" to the task that asked, "the text of task <asker>" to any other reader (a Continue successor,
 a late-answer head, a relayed or carried quote, consciousness, a reviewer, the room's history row). The chat bubble
 keeps ``{n}. {label}`` (``owner_quiz.late_answer_owner_text``): display only. Words typed beside a press stay their
-words, verbatim. Nothing here reads what a press without words meant: the host states who wrote what, and when.
+words, verbatim. Where a run's own corpus is in hand (its drain, ``arrival_notes``), a press without words also
+names their last own words in this work by time and address (``last_own_words``), never guessed. Nothing here reads
+what a press without words meant: the host states who wrote what, and when.
 """
 
 from __future__ import annotations
@@ -97,3 +99,14 @@ def row_words(row: Any) -> str:
         return press_record(owner_text(row), answered_card_source(row)[1])
     return owner_text(row)
 
+
+def last_own_words(ctx: Any) -> str:
+    """The host line naming my human's last own words in this run's corpus by time and address (the door's stamp for
+    the opening message), or "" when the corpus holds none or does not record both for the last: never a guess."""
+    from ouroboros.owner_words import OWNER_WORD_SOURCES, _dated_directives, _item_time, row_ref
+
+    last = ("", "")
+    for item, ts, reference, _door in _dated_directives(ctx):
+        if item.get("source") in OWNER_WORD_SOURCES:
+            last = (ts or _item_time(item), reference or row_ref(item))
+    return f"[Host fact: their last own words in this work: {last[0]} ({last[1]})]" if all(last) else ""

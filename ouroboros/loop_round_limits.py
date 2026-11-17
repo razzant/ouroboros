@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros import task_pacing
 from ouroboros.context import build_incoming_user_content
-from ouroboros.context_budget import OWNER_WORDS_KIND, WHOLE_CATEGORY
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND, WHOLE_CATEGORY
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY
@@ -128,9 +128,12 @@ def _drain_incoming_messages(
     between delivers it again instead of losing it. Non-content controls are
     acknowledged at once. ``place_live_runs`` (the round top alone, never a delivery
     close, a forced finalization or a live call): my human's rows the host's placement at receipt
-    left are placed into the sessions it holds open (``place_rows_into_runs``), each once.
+    left are placed into the sessions it holds open (``place_rows_into_runs``), each once. The last row of my
+    human's this drain delivers closes with the host's arrival lines (``arrival_notes.mark_arrival``).
     """
     controls: Dict[str, Any] = {}
+    arrivals: List[int] = []  # positions of my human's rows this drain delivered (typed, never merged)
+    pressed = False  # one of them is a press without words
 
     def ack_saved(entry: Dict[str, Any]) -> None:
         if not acknowledge_transcript_entry(drive_root, task_id, entry) or event_queue is None:
@@ -173,6 +176,7 @@ def _drain_incoming_messages(
                 _loop()._append_or_merge_user_content(
                     messages, _loop()._owner_marked_content(owner_content), slot=owner_ctx, kind=OWNER_WORDS_KIND,
                 )
+                arrivals.append(len(messages) - 1)
             else:
                 _loop()._record_owner_directive(
                     owner_ctx, source="direct_incoming", content=injected, origin=_arrival(),
@@ -183,6 +187,7 @@ def _drain_incoming_messages(
                 _loop()._append_or_merge_user_message(
                     messages, _loop()._owner_marked_content(injected), slot=owner_ctx, kind=OWNER_WORDS_KIND,
                 )
+                arrivals.append(len(messages) - 1)
         except queue.Empty:
             break
 
@@ -199,8 +204,11 @@ def _drain_incoming_messages(
                 if entry.get("host_carried") and getattr(owner_ctx, "_task_acceptance_sealed_fence_token", None):
                     _owner_msg_seen.discard(entry.get("msg_id"))  # a sealed close leaves a carried row as unread mail
                     continue
+                start = len(messages)
                 if shown := inject_relay(owner_ctx, entry, messages):  # rows addressed to this work, read by no round
                     controls["owner_carried_addressed"] = controls.get("owner_carried_addressed", []) + shown
+                arrivals += [at for at in range(start, len(messages))
+                             if messages[at].get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND]  # its quoted rows
                 delivered = True
                 ack_content(entry)
                 continue
@@ -273,6 +281,8 @@ def _drain_incoming_messages(
                     entry, task_id, event_queue,
                     lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx, kind=words),
                 )
+                if provenance == "place_event" and (arrival.get("confirmed_words") or arrival.get("owner_words")):
+                    arrivals.append(len(messages) - 1)  # my human's words, from their confirmed account
                 if provenance == "system" and isinstance(entry.get("review_feedback"), dict) and messages:
                     messages[-1].setdefault("review_feedback", []).append(dict(entry["review_feedback"]))
                 ack_content(entry)
@@ -292,10 +302,11 @@ def _drain_incoming_messages(
                 _loop()._record_owner_directive(owner_ctx, source="owner_mailbox", origin=_arrival(received=entry.get("ts")),
                     content=dmsg, msg_id=str(entry.get("msg_id") or ""))
                 _loop()._append_or_merge_user_message(messages, dmsg, slot=owner_ctx, kind=OWNER_WORDS_KIND)
+                arrivals.append(len(messages) - 1)
                 ack_content(entry)
                 continue
             if kind == KIND_QUIZ_ANSWER:
-                from ouroboros.answer_facts import answer_source
+                from ouroboros.answer_facts import answer_source, wordless_press
                 from ouroboros.owner_quiz import late_answer_owner_text
                 from ouroboros.owner_words import answered_card_reply
                 delivery = entry.get("quiz_delivery") or {}
@@ -312,6 +323,8 @@ def _drain_incoming_messages(
                     lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx,
                                                                        kind=OWNER_WORDS_KIND),
                 )
+                arrivals.append(len(messages) - 1)
+                pressed = pressed or wordless_press(answer)
                 ack_content(entry)
                 continue
             # A LATE quiz answer: the owner's row and this entry's text are the
@@ -332,7 +345,7 @@ def _drain_incoming_messages(
                                                   entry.get("card_press"), dmsg)
             owner_content = _owner_content({**entry, "text": model_msg}, drive_root, task_id)
             from ouroboros.answer_facts import row_source
-            from ouroboros.owner_words import answered_card_reply, answered_card_source, reply_target
+            from ouroboros.owner_words import OWNER_PRESS, answered_card_reply, answered_card_source, reply_target
 
             chats = str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root  # the room's rows
             held = _stamp_owner_delivery(  # the chat row is held first: its corpus row names the same room and time
@@ -343,6 +356,7 @@ def _drain_incoming_messages(
                 ts=str(entry.get("ts") or ""),
             )
             source = row_source(entry, "owner_mailbox")  # a late answer's press without words is an act
+            pressed = pressed or source == OWNER_PRESS
             _loop()._record_owner_directive(
                 owner_ctx,
                 source=source,
@@ -364,6 +378,7 @@ def _drain_incoming_messages(
                 messages, _loop()._owner_marked_content(owner_content),
                 slot=owner_ctx, kind=OWNER_WORDS_KIND,
             )
+            arrivals.append(len(messages) - 1)
             ack_content(entry)
             if event_queue is not None:
                 try:
@@ -374,6 +389,9 @@ def _drain_incoming_messages(
                     })
                 except Exception:
                     pass
+    if arrivals:  # my human's words or press reached this work: the host's facts close the last row of theirs
+        from ouroboros.arrival_notes import mark_arrival
+        mark_arrival(owner_ctx, messages, arrivals, pressed=pressed)
     if owner_ctx is not None:  # the catch-up of the host's carriage at receipt: every live member below, each row once
         from ouroboros.owner_relay import carry_to_members
         grown = len(getattr(owner_ctx, "_owner_directives", None) or []) > before_rows

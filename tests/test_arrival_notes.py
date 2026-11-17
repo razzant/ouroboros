@@ -1,0 +1,96 @@
+"""At my human's arrival the host names the working-view notes in view (core-interpretation repair, Ф4).
+
+When their words or a press reach a work whose view holds notes the mind authored through ``compact_context`` folds,
+the delivered row closes with one host line naming each note (unit id, write time or "not recorded", first line).
+Both directions in each test: the line comes with my human's row and a note in view; it does not come without a
+note, for a row that is not theirs, or on an earlier row; every earlier message keeps its bytes.
+"""
+from __future__ import annotations
+
+import copy
+import json
+import queue
+from types import SimpleNamespace
+
+from tests.test_compaction import _note
+
+WORDS = "Use the March numbers"
+
+
+def _drain(tmp_path, messages, ctx=None, *texts):
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+
+    incoming = queue.Queue()
+    for index, text in enumerate(texts or (WORDS,)):
+        incoming.put({"text": text, "client_message_id": f"c{index}", "ts": f"2026-11-17T10:0{index}:00+00:00"})
+    _drain_incoming_messages(messages, incoming, tmp_path, "work", None, set(), owner_ctx=ctx or SimpleNamespace())
+    return messages
+
+
+def _unit_id(messages, index):
+    from ouroboros import context_compaction as cc
+
+    return next(unit.unit_id for unit in cc.context_units(messages, scope="dialogue") if unit.start == index)
+
+
+def test_an_arrival_names_the_notes_in_view_and_changes_no_earlier_message(tmp_path):
+    goal = _note(tmp_path, "Goal: keep the reply short.\nThe owner wants one paragraph.", "goal")
+    dated = copy.deepcopy(_note(tmp_path, "Decided: send on Friday.", "dated"))
+    dated["content"][0]["_context_capsule"]["written_at"] = "2026-11-13T22:40:12+03:00"
+    view = [{"role": "user", "content": "Draft the reply"}, goal, dated, {"role": "assistant", "content": "Drafted."}]
+    before = json.dumps(view, sort_keys=True)
+    _drain(tmp_path, view)
+    assert json.dumps(view[:4], sort_keys=True) == before  # append only: earlier messages keep their bytes
+    assert view[-1]["content"] == (
+        f"[Message from my human]: {WORDS}\n[Host fact: your working-view notes in view now: {_unit_id(view, 1)}, "
+        f"written not recorded, «Goal: keep the reply short.»; {_unit_id(view, 2)}, written 2026-11-13 19:40 UTC, "
+        "«Decided: send on Friday.»]")
+
+
+def test_no_note_in_view_and_a_row_not_my_humans_add_no_line(tmp_path):
+    from ouroboros.arrival_notes import notes_in_view
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_mailbox import write_task_message
+
+    plain = _drain(tmp_path, [{"role": "user", "content": "Draft the reply"}])
+    assert plain[-1]["content"] == f"[Message from my human]: {WORDS}"
+    note = _note(tmp_path, "Goal: keep the reply short.", "goal")
+    view = [{"role": "user", "content": "Brief"}, note]
+    assert write_task_message(tmp_path, "Use the Q3 numbers only", "work", source_task_id="root-1", msg_id="pm-1")
+    _drain_incoming_messages(view, queue.Queue(), tmp_path, "work", None, set(), owner_ctx=SimpleNamespace())
+    assert view[-1]["content"].endswith("Use the Q3 numbers only") and "working-view notes" not in json.dumps(view)
+    host = copy.deepcopy(note)  # a host source view is the host's projection, not a note of the mind's
+    host["content"][0]["_context_capsule"].update(authorship="host", retention="source_view")
+    assert notes_in_view([host]) == [] and len(notes_in_view([note])) == 1
+
+
+def test_two_rows_of_my_human_in_one_drain_close_once_on_the_last(tmp_path):
+    view = [{"role": "user", "content": "Brief"}, _note(tmp_path, "Goal: keep the reply short.", "goal")]
+    _drain(tmp_path, view, None, "First", "Second")
+    assert view[-2]["content"] == "[Message from my human]: First"
+    assert view[-1]["content"].startswith("[Message from my human]: Second\n[Host fact: your working-view notes")
+
+
+def _press(tmp_path, ctx, block):
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, write_owner_message
+
+    assert write_owner_message(tmp_path, "[Owner quiz answer] quiz q7", ctx.task_id, msg_id="quiz_answer:asker:q7",
+                               kind=KIND_QUIZ_ANSWER,
+                               quiz_delivery={"task_id": "asker", "quiz_id": "q7", "answer_snapshot": block})
+    messages = [{"role": "user", "content": "Brief"}]
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
+    return messages[-1]["content"]
+
+
+def test_a_press_without_words_names_their_last_own_words_when_the_corpus_dates_them(tmp_path):
+    card = {"quiz_id": "q7", "question": "Publish?", "state": "answered", "options": ["Publish it"], "answered_index": 0}
+    said = {"source": "direct_incoming", "content": "Keep it short", "client_message_id": "c0", "chat_id": "1",
+            "ts": "2026-11-13T17:13:00+00:00"}
+    dated = SimpleNamespace(task_id="dated", _owner_directives=[dict(said)])
+    assert _press(tmp_path, dated, card).endswith(
+        "\n[Host fact: their last own words in this work: 2026-11-13T17:13:00+00:00 (chat 1 / c0)]")
+    worded = SimpleNamespace(task_id="worded", _owner_directives=[dict(said)])  # words beside a press: theirs, no line
+    assert "last own words" not in _press(tmp_path, worded, {**card, "comment": "but after lunch"})
+    silent = SimpleNamespace(task_id="silent", _owner_directives=[])  # no words of theirs on record: nothing guessed
+    assert "last own words" not in _press(tmp_path, silent, card)

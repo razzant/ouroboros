@@ -254,6 +254,7 @@ D20 = "Presence"
 "ouroboros/context_runtime_facts.py" = "D03"
 "ouroboros/context_budget.py" = "D03"
 "ouroboros/context_compaction.py" = "D03"
+"ouroboros/arrival_notes.py" = "D03"  # the working-view notes in view, named when the owner's words or press arrive
 "ouroboros/context_source_view.py" = "D03"
 "ouroboros/context_fit.py" = "D03"
 "ouroboros/context_anchor.py" = "D03"  # this conversation's own size anchor and accepted-input floor
