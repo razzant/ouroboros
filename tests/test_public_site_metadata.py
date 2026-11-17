@@ -200,11 +200,16 @@ def test_rating_publication_is_complete_and_source_bound():
         assert image in readme and (REPO / image).is_file()
 
 
+def _images(page: str) -> list[dict[str, str]]:
+    """Every ``<img>`` of a page as its attributes, whatever their order."""
+    return [dict(re.findall(r'([\w:-]+)="([^"]*)"', tag)) for tag in re.findall(r"<img\b[^>]*>", page)]
+
+
 def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
     """Every capture and font the home page or its stylesheet names ships byte-identically in site/public and in
-    docs/, neither copy keeps an orphan, every capture declares its real pixel size, docs/ holds exactly the home
-    bundles the served page loads, and the social card's cache-busting hash is the card's own content hash on every
-    page that names the card, in the sources and in the served copies."""
+    docs/, neither copy keeps an orphan, every capture on the source and on the served page declares its real pixel
+    size, docs/ holds exactly the home bundles the served page loads, and the social card's cache-busting hash is the
+    card's own content hash on every indexable page that names the card, in the sources and in the served copies."""
     import hashlib
 
     from PIL import Image
@@ -224,24 +229,26 @@ def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
         fonts = {p.relative_to(root).as_posix() for p in (root / "fonts").glob("*.woff2")}
         assert fonts == {rel for rel in referenced if rel.startswith("fonts/")}, root
         assert "SIL OPEN FONT LICENSE" in (root / "fonts" / "LICENSE-Inter.txt").read_text(encoding="utf-8")
-    sized = re.findall(r'<img src="/(ui/[^"]+)"[^>]*? width="(\d+)" height="(\d+)"', html)
-    assert len(sized) == html.count('<img src="/ui/')
-    for rel, width, height in sized:
-        with Image.open(SITE / "public" / rel) as capture:
-            assert capture.size == (int(width), int(height)), rel
+    for page in (html, served):
+        shown = [image for image in _images(page) if image.get("src", "").startswith("/ui/")]
+        assert {image["src"][1:] for image in shown} == {rel for rel in referenced if rel.startswith("ui/")}
+        for image in shown:
+            with Image.open(SITE / "public" / image["src"][1:]) as capture:
+                assert capture.size == (int(image.get("width", 0)), int(image.get("height", 0))), image["src"]
     assert {p.name for p in (DOCS / "assets").glob("home-*")} == set(re.findall(r'"/assets/(home-[^"]+)"', served))
     card = (REPO / "assets" / "og-preview.png").read_bytes()
     assert (DOCS / "assets" / "og-preview.png").read_bytes() == card
-    digest = hashlib.sha256(card).hexdigest()[:10]
-    naming = [
-        page
-        for root in (SITE, DOCS)
-        for page in (root / "index.html", *sorted(root.glob("*/index.html")))
-        if "og-preview.png" in page.read_text(encoding="utf-8")
-    ]
+    expected = f"{ORIGIN}/assets/og-preview.png?v={hashlib.sha256(card).hexdigest()[:10]}"
+    public = SITE / "public"
+    sources = list(INDEXABLE.values())
+    copies = [DOCS / source.relative_to(public if public in source.parents else SITE) for source in sources]
+    naming = [page for page in (*sources, *copies) if "og-preview.png" in page.read_text(encoding="utf-8")]
     assert SITE / "index.html" in naming and DOCS / "index.html" in naming
     for page in naming:
-        assert re.findall(r"og-preview\.png(\?v=[0-9a-f]*)?", page.read_text(encoding="utf-8")) == [f"?v={digest}"] * 2, page
+        text = page.read_text(encoding="utf-8")
+        cards = re.findall(r'<meta (?:property="og:image"|name="twitter:image") content="([^"]*)"', text)
+        assert cards == [expected, expected], page
+        assert text.count("og-preview.png") == 2, page
 
 
 def test_readme_and_benchmark_page_keep_claim_values_in_sync():

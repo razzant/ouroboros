@@ -4,28 +4,23 @@ const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const finePointer = window.matchMedia("(hover: hover) and (pointer: fine)");
 const motionPaused = () => document.body.classList.contains("motion-paused");
 const still = () => reducedMotion.matches || motionPaused();
+const motionReady = () => document.documentElement.classList.contains("motion-ready");
 
-/* The hero's third line cycles through what the agent does. One font size fits the longest phrase on one row;
-   on a phone the phrases wrap instead. Both spans of a swap share one grid cell, so nothing is clipped and
-   nothing moves below. Without JS or with reduced motion the line stays on one phrase. */
+/* The hero's third line cycles through what the agent does. Every phrase also sits unseen in the line (the sizers),
+   so CSS alone reserves the tallest one; from 701px up one font size fits the longest phrase on one row. Both spans
+   of a swap share one grid cell. Without the script, or with reduced motion, the line stays on its first phrase. */
 function fitPower(host, lines) {
-  host.style.minHeight = "";
-  const narrow = window.innerWidth <= 700;
-  host.style.fontSize = narrow ? "" : "1em";
+  if (window.innerWidth <= 700) { host.style.fontSize = ""; return; }
+  host.style.fontSize = "1em";
   const probe = document.createElement("span");
-  probe.style.cssText = narrow
-    ? `position:absolute;visibility:hidden;left:0;top:0;width:${host.clientWidth}px;white-space:normal`
-    : "position:absolute;visibility:hidden;white-space:nowrap;left:-9999px;top:0";
+  probe.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;left:-9999px;top:0";
   host.appendChild(probe);
   let widest = 0;
-  let tallest = 0;
   lines.forEach((text) => {
     probe.textContent = text;
     widest = Math.max(widest, probe.scrollWidth);
-    tallest = Math.max(tallest, probe.offsetHeight);
   });
   probe.remove();
-  if (narrow) { host.style.minHeight = `${tallest}px`; return; }
   const available = host.clientWidth;
   const scale = widest > available && available > 0 ? Math.max(0.5, available / widest * 0.995) : 1;
   host.style.fontSize = `${scale}em`;
@@ -34,27 +29,19 @@ function fitPower(host, lines) {
 function initHeroPower() {
   const host = document.getElementById("hero-power");
   if (!host) return;
-  const lines = (host.dataset.lines || "").split("|").map((s) => s.trim()).filter(Boolean);
+  const lines = [...host.querySelectorAll(".sizer")].map((s) => s.textContent.trim()).filter(Boolean);
   if (!lines.length) return;
   fitPower(host, lines);
   window.addEventListener("resize", () => fitPower(host, lines), { passive: true });
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => fitPower(host, lines));
-  if (reducedMotion.matches || lines.length < 2) return;
+  if (lines.length < 2) return;
   let index = 0;
   let hovered = false;
   let timer = 0;
-  const settle = () => {
-    window.clearInterval(timer);
-    timer = 0;
-    const spans = [...host.querySelectorAll("span.power")];
-    spans.slice(0, -1).forEach((s) => s.remove());
-    if (spans.length) spans[spans.length - 1].className = "power";
-  };
-  reducedMotion.addEventListener("change", (event) => { if (event.matches) settle(); });
   host.addEventListener("mouseenter", () => { hovered = true; });
   host.addEventListener("mouseleave", () => { hovered = false; });
   const swap = () => {
-    if (hovered || document.hidden || motionPaused()) return;
+    if (hovered || document.hidden || still() || !motionReady()) return;
     const leaving = host.querySelector("span.power");
     index = (index + 1) % lines.length;
     const next = document.createElement("span");
@@ -68,14 +55,28 @@ function initHeroPower() {
     }
     host.appendChild(next);
   };
-  window.setTimeout(() => { if (!reducedMotion.matches) timer = window.setInterval(swap, 3000); }, 2600);
+  /* one timer, started and stopped with the visitor's motion preference */
+  const start = () => { if (!timer && !reducedMotion.matches) timer = window.setInterval(swap, 3000); };
+  const stop = () => {
+    window.clearInterval(timer);
+    timer = 0;
+    const spans = [...host.querySelectorAll("span.power")];
+    spans.slice(0, -1).forEach((s) => s.remove());
+    if (spans.length) spans[spans.length - 1].className = "power";
+  };
+  reducedMotion.addEventListener("change", (event) => { if (event.matches) stop(); else start(); });
+  window.setTimeout(start, 2600);
 }
 
-/* One control pauses the ticker, the cycling line and the floating windows (WCAG 2.2.2); it appears only when motion runs. */
+/* One control pauses the ticker, the cycling line and the floating windows (WCAG 2.2.2). Endless motion runs only
+   while this control is shown: the class motion-ready switches it on, and reduced motion takes both away. */
 function initMotionToggle() {
   const button = document.querySelector(".motion");
   if (!button) return;
-  const sync = () => { button.hidden = reducedMotion.matches; };
+  const sync = () => {
+    button.hidden = reducedMotion.matches;
+    document.documentElement.classList.toggle("motion-ready", !reducedMotion.matches);
+  };
   sync();
   reducedMotion.addEventListener("change", sync);
   button.addEventListener("click", () => {

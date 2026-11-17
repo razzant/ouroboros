@@ -63,7 +63,7 @@
       <h1 id="hero-title" class="display">
         <span class="line"><span>An AI agent</span></span>
         <span class="line"><span>on your computer.</span></span>
-        <span class="line red" id="hero-power" aria-hidden="true" data-lines="It rewrites its own code.|It runs a swarm of agents.|It sees your screen.|It joins your team's Slack.|It remembers."><span class="power">It rewrites its own code.</span></span>
+        <span class="line red" id="hero-power" aria-hidden="true"><span class="power">It rewrites its own code.</span><span class="sizer">It rewrites its own code.</span><span class="sizer">It runs a swarm of agents.</span><span class="sizer">It sees your screen.</span><span class="sizer">It joins your team's Slack.</span><span class="sizer">It remembers.</span></span>
         <span class="visually-hidden">It rewrites its own code.</span>
       </h1>
       <div class="hero-actions">
@@ -90,7 +90,7 @@
         <li><b>1.7k</b><span>GitHub stars</span></li>
         <li><b>MIT</b><span>open source since 16 Feb 2026</span></li>
       </ul>
-      <p class="proof-note reveal">Self-reported results from summer 2026, with public runs and full traces: state of the art on Terminal-Bench 2.1, OSWorld-Verified and CL-Bench. In the model-matched Terminal-Bench pairs it leads Claude Code, Codex, Cursor and Hermes; on SWE-bench Pro and GAIA it is on par with Codex CLI and Claude Code. <a href="/benchmarks/">Evidence table →</a></p>
+      <p class="proof-note reveal">Self-reported results from summer 2026, with public runs and full traces: state of the art on Terminal-Bench 2.1, OSWorld-Verified and CL-Bench. In the model-matched Terminal-Bench pairs it leads Claude Code, Codex, Cursor and Hermes; on SWE-bench Pro it ties Codex CLI, and on GAIA it is level with Claude Code. <a href="/benchmarks/">Evidence table →</a></p>
     </section>
 
     <!-- ============ SWARM ============ -->
@@ -111,7 +111,7 @@
     <section class="frame white feature" id="call" aria-labelledby="call-title">
       <h2 id="call-title" class="display words reveal">Talk to it.<br><span class="red">Show it your screen.</span></h2>
       <div class="copy reveal">
-        <p>A live call inside the app: it listens, thinks and answers, and where the app or browser can capture it, it watches your screen or camera while you talk. What you said lands in the same memory as the chat.</p>
+        <p>A live call inside the app: it listens, thinks and answers. One button shows it your screen or camera, where the app or browser can capture them. What you said lands in the same memory as the chat.</p>
         <ul class="chips" aria-label="Voice engines"><li>Gemini Live</li><li>Grok Voice</li><li>OpenAI realtime</li></ul>
       </div>
       <figure class="shot full lean reveal"><img src="/ui/call-big-light.webp" alt="The whole app during a call: the chat, and the wide call view with Ouroboros speaking, a live waveform and the Mute, Show and End controls" loading="lazy" width="1800" height="1013"></figure>
@@ -154,8 +154,8 @@
       <h2 id="rules-title" class="display words reveal">Your rules.<br><span class="ink">It keeps them.</span></h2>
       <div class="rules-grid">
         <div class="copy reveal">
-          <p>Write standing rules in your own words, for everything or for one chat. Ouroboros reads them every time, and a second model, the Safety Supervisor, reads them again before actions. What breaks a rule is stopped before it has any effect, and the serious cases wait for your word.</p>
-          <p class="fine">Rules for one chat live with that place. A team's administrator can add organization rules on top.</p>
+          <p>Write standing rules in your own words, for everything or for one chat. Ouroboros reads them every time, and a second model, the Safety Supervisor, reads them before actions. An action it flags is sent back before it has any effect, and a clear breach of your rule waits for your answer.</p>
+          <p class="fine">Rules for one chat live with that place, and a team's administrator can add organization rules on top. Work that is already running keeps the rules it started with. These are the defaults: you choose how much is checked, and in Cyber Pro mode a flag is advice.</p>
         </div>
         <article class="note reveal" aria-label="Illustrative rules on demo data">
           <header><b>Your rules</b><span>Settings · saved</span></header>
@@ -179,9 +179,9 @@
           <header><b>Main Chat</b><span class="where">You · Friday 18:02 · rule 2</span></header>
           <ol class="msgs">
             <li class="m" style="--i:2"><i class="ava you" aria-hidden="true">Y</i><div><b>You</b><time>18:02</time><p>Just deploy it. It's a tiny fix.</p></div></li>
-            <li class="m" style="--i:3"><i class="ava ou" aria-hidden="true"><img src="/assets/icon_1024.png" alt="" width="28" height="28"></i><div><b>Ouroboros</b><time>18:02</time><p>It's Friday. Your rule says no, even if you beg. The fix is ready and tested; say “override” if you mean it, or I ship it Monday at 09:00.</p></div></li>
+            <li class="m" style="--i:3"><i class="ava ou" aria-hidden="true"><img src="/assets/icon_1024.png" alt="" width="28" height="28"></i><div><b>Ouroboros</b><time>18:02</time><p>It's Friday. Your rule says no, even if you beg. The fix is ready and tested: it ships Monday at 09:00, unless you approve it today.</p></div></li>
           </ol>
-          <p class="held"><i aria-hidden="true"></i>Held by the Safety Supervisor before any effect · your rule 2</p>
+          <p class="held"><i aria-hidden="true"></i>Held by the Safety Supervisor before any effect · waits for your answer</p>
         </article>
       </div>
       <p class="convo-note reveal">Illustrative conversations on demo data.</p>
@@ -213,8 +213,8 @@
       </div>
       <figure class="shot lean tilt-right reveal"><img src="/ui/game-play-dark.webp" alt="A chat card with a playable Doom-style corridor shooter Ouroboros wrote, with the buttons Make it a skill and Close" loading="lazy" width="1584" height="1232"></figure>
       <div class="pair reveal">
-        <figure class="shot" style="--ar:1.205"><img src="/ui/research-answer-dark.webp" alt="A research answer: 43 papers and 6 codebases read, three ways swarms coordinate and a table of where each breaks" loading="lazy" width="1514" height="1256"><figcaption><b>43 papers. One answer.</b> With the sources it read.</figcaption></figure>
-        <figure class="shot" style="--ar:0.93"><img src="/ui/widget-spend-dark.webp" alt="A widget kept from a chat answer: this week's spend by model, with totals, a chart and a table" loading="lazy" width="1176" height="1264"><figcaption><b>Keep it on Widgets.</b> A board of living cards it made.</figcaption></figure>
+        <figure class="shot" style="--ar:1.205"><img src="/ui/research-answer-dark.webp" alt="A research answer: 43 papers and 6 codebases read, three ways swarms coordinate and a table of where each breaks" loading="lazy" width="1514" height="1256"><figcaption><b>43 papers. One answer.</b> Three approaches, and where each one breaks.</figcaption></figure>
+        <figure class="shot" style="--ar:0.93"><img src="/ui/widget-spend-dark.webp" alt="A widget kept from a chat answer: this week's spend by model, with totals, a chart and a table" loading="lazy" width="1176" height="1264"><figcaption><b>Keep it on Widgets.</b> A card from the chat stays on its board.</figcaption></figure>
       </div>
     </section>
 
@@ -237,7 +237,7 @@
       <figure class="shot lean tilt-right reveal"><img src="/ui/accounts-panel-dark.webp" alt="Settings, Accounts: subscriptions to Codex, Claude Code, Cursor and Antigravity that take turns, and API keys" loading="lazy" width="1484" height="1236"></figure>
       <div class="pair reveal">
         <figure class="shot" style="--ar:0.799"><img src="/ui/model-sheet-cut-dark.webp" alt="The model sheet in the composer: models with their source, context window and price, and the processing tier" loading="lazy" width="952" height="1192"><figcaption><b>Pick the exact route.</b> Model, source, window, price and tier in one sheet.</figcaption></figure>
-        <figure class="shot" style="--ar:1.11"><img src="/ui/spend-card-dark.webp" alt="A chat card with this week's spend by model, as a chart and a table" loading="lazy" width="1572" height="1416"><figcaption><b>Money in plain numbers.</b> Spend, tasks and cache hits by model.</figcaption></figure>
+        <figure class="shot" style="--ar:1.11"><img src="/ui/spend-card-dark.webp" alt="A chat card with this week's spend by model, as a chart and a table" loading="lazy" width="1572" height="1416"><figcaption><b>Money in plain numbers.</b> Spend and tasks by model, and the cache-hit rate.</figcaption></figure>
       </div>
     </section>
 
@@ -266,7 +266,7 @@
         <li><b>Browses</b><span>A built-in browser for research and checks, with sources kept.</span></li>
         <li><b>Keeps a schedule</b><span>A digest every Friday, a check every night: each run reports what it did.</span></li>
         <li><b>Shares an answer</b><span>As text, a picture or an offline page.</span></li>
-        <li><b>Stops at your budget</b><span>Paid work stops at the limits you set, in total and per task.</span></li>
+        <li><b>Stops at your budget</b><span>New paid work stops once known spend reaches your limit, in total or for one task.</span></li>
         <li><b>Android, experimentally</b><span>The whole runtime on a Magisk-rooted ARM64 phone.</span></li>
       </ul>
     </section>
@@ -274,7 +274,7 @@
     <!-- ============ PLUGINS ============ -->
     <section class="frame black plugins" id="plugins" aria-labelledby="plugins-title">
       <h2 id="plugins-title" class="display words reveal">Don't like a part?<br><span class="red">Swap it.</span></h2>
-      <p class="lead reveal">Plugin-first: the core stays small, and the rest plugs in. Skills, widgets, connectors, voice engines, chat controls and MCP tools are plugins, reviewed before they can be enabled. Install one from OuroborosHub, write your own, or ask Ouroboros to write it for itself. A plugin survives every update.</p>
+      <p class="lead reveal">Plugin-first: the core stays small, and the rest plugs in. Skills, widgets, connectors, voice engines, chat controls and MCP tools are plugins. A skill runs after a review, or once you accept it yourself. Install one from OuroborosHub, write your own, or ask Ouroboros to write it for itself. What you install or write stays through every update.</p>
       <ul class="kinds reveal" aria-label="What a plugin can be">
         <li><b>Skills</b><span>Tools, workflows and instructions it learns to use.</span></li>
         <li><b>Widgets</b><span>Living cards on its board, from a chart to a game.</span></li>

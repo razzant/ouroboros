@@ -134,6 +134,8 @@ a:focus-visible, button:focus-visible { outline: 3px solid var(--red); outline-o
 .hero .line:nth-child(2) > span { animation-delay: .08s; }
 .hero .line.red { display: grid; }
 .hero .line.red > span { grid-area: 1 / 1; animation-delay: .16s; }
+/* every phrase sits unseen in the same cell, so the line is as tall as its tallest phrase before any script runs */
+.hero .line.red > .sizer { visibility: hidden; animation: none; pointer-events: none; user-select: none; }
 html.has-js .hero .line.red > span { white-space: nowrap; }
 /* before the script fits it (and without scripts) the line is already sized for its longest phrase: 11.5em wide at full size */
 @media (min-width: 701px) { .hero .line.red { font-size: min(1em, calc((100vw - 2 * var(--gutter)) * 0.085)); } }
@@ -158,17 +160,21 @@ html.has-js .hero .line.red > span { white-space: nowrap; }
 }
 .win { position: absolute; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow-night); background: #111; transform-style: preserve-3d; will-change: transform; }
 .win img { width: 100%; height: 100%; object-fit: cover; object-position: top left; }
-.win.w-back { left: 10%; top: 0; width: 64%; aspect-ratio: 16 / 9; transform: translate3d(0, 0, -140px) rotateY(calc(-14deg + var(--mx) * 4deg)) rotateX(calc(7deg - var(--my) * 3deg)); animation: float 9s ease-in-out infinite; }
-.win.w-front { left: 38%; top: 16%; width: 58%; aspect-ratio: 16 / 9; transform: translate3d(0, 0, 60px) rotateY(calc(-9deg + var(--mx) * 6deg)) rotateX(calc(4deg - var(--my) * 4deg)); animation: float 11s ease-in-out infinite reverse; }
+.win.w-back { left: 10%; top: 0; width: 64%; aspect-ratio: 16 / 9; transform: translate3d(0, 0, -140px) rotateY(calc(-14deg + var(--mx) * 4deg)) rotateX(calc(7deg - var(--my) * 3deg)); }
+.win.w-front { left: 38%; top: 16%; width: 58%; aspect-ratio: 16 / 9; transform: translate3d(0, 0, 60px) rotateY(calc(-9deg + var(--mx) * 6deg)) rotateX(calc(4deg - var(--my) * 4deg)); }
 .win.w-front img { transform: scale(1.22); transform-origin: 56% 54%; }
-.win.w-phone { left: 2%; top: 22%; width: 14.5%; aspect-ratio: 390 / 844; border-radius: 26px; transform: translate3d(0, 0, 120px) rotateY(calc(16deg + var(--mx) * 5deg)) rotateX(calc(2deg - var(--my) * 3deg)); animation: float 8s ease-in-out infinite; animation-delay: -3s; }
+.win.w-phone { left: 2%; top: 22%; width: 14.5%; aspect-ratio: 390 / 844; border-radius: 26px; transform: translate3d(0, 0, 120px) rotateY(calc(16deg + var(--mx) * 5deg)) rotateX(calc(2deg - var(--my) * 3deg)); }
 @keyframes float { 0%, 100% { translate: 0 0; } 50% { translate: 0 -10px; } }
-body.motion-paused .win { animation-play-state: paused; }
+/* motion that never ends runs only once the pause control is in place (the script sets motion-ready) */
+html.motion-ready .win.w-back { animation: float 9s ease-in-out infinite; }
+html.motion-ready .win.w-front { animation: float 11s ease-in-out infinite reverse; }
+html.motion-ready .win.w-phone { animation: float 8s ease-in-out infinite; animation-delay: -3s; }
+body.motion-paused .win.w-back, body.motion-paused .win.w-front, body.motion-paused .win.w-phone { animation-play-state: paused; }
 .hero .ticker { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; }
 
 .ticker { height: 56px; overflow: hidden; background: var(--red); color: var(--white); font-weight: 800; font-size: clamp(15px, 1.5vw, 20px); letter-spacing: -0.02em; }
 .ticker-track { display: flex; align-items: center; gap: 0; height: 100%; width: max-content; }
-html.has-js .ticker-track { animation: ticker 46s linear infinite; }
+html.motion-ready .ticker-track { animation: ticker 46s linear infinite; }
 .ticker-track span { padding: 0 24px; white-space: nowrap; }
 .ticker-track i { width: 6px; height: 6px; border-radius: 50%; background: var(--white); opacity: .8; flex: none; }
 @keyframes ticker { to { transform: translateX(-50%); } }
@@ -296,7 +302,7 @@ section[tabindex="-1"]:focus { outline: none; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .hero .line > span, .hero .line.red > span.swap-in, .hero .line.red > span.swap-out { animation: none; opacity: 1; transform: none; }
-  html.has-js .ticker-track, .win, .win.w-back, .win.w-front, .win.w-phone { animation: none; }
+  html.motion-ready .ticker-track, html.motion-ready .win.w-back, html.motion-ready .win.w-front, html.motion-ready .win.w-phone { animation: none; }
   .has-js .reveal, .has-js .shot.reveal, .has-js .shot.lean.reveal { opacity: 1; transform: none; transition: none; }
   .has-js .display.words .w { opacity: 1; transform: none; transition: none; }
   .stack { transform: none; }
@@ -337,11 +343,9 @@ section[tabindex="-1"]:focus { outline: none; }
   .site-footer a { display: inline-block; padding: 6px 0; }
 }
 @media (max-width: 700px) {
-  .hero .line.red { display: block; min-height: 1.8em; position: relative; }
   .hero .line.red > span, html.has-js .hero .line.red > span { white-space: normal; font-size: 1em !important; }
   /* a wide strip keeps its left part at a readable size instead of shrinking whole */
   .shot.strip img { aspect-ratio: 3 / 2; object-fit: cover; object-position: left top; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent); }
-  .hero .line.red > span.swap-out { position: absolute; left: 0; top: 0; }
 }
 @media (max-width: 600px) {
   .numbers { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
