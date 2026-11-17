@@ -95,11 +95,11 @@ def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = N
         header += "[Metadata unavailable; the complete original Markdown follows.]\n"
     if note.archive_error:
         header += f"[Archive metadata invalid; kept active: {note.archive_error}.]\n"
-    if shelves:
+    if shelves and not start_char:  # link facts once, on a read from the note's start, not on every range page
         links = {}
         try:
             outgoing = knowledge_store.knowledge_links(note)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             links["unavailable"] = type(exc).__name__
             outgoing = ()
         for link in outgoing:

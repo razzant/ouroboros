@@ -32,8 +32,9 @@ def test_partial_reads_reconstruct_exact_note_with_one_revision(tmp_path):
         body = result[meta["knowledge_body_start"]:]
         assert body == text[start:end]
         header = result[:meta["knowledge_body_start"]]
-        assert '[Knowledge links] {"unwritten": [{"scope": "global", "topic": "unwritten"}]}' in header
-        assert '[Knowledge backlinks (readable shelves now)] [{"scope": "global", "topic": "source", "state": "active"}]' in header
+        facts = ('[Knowledge links] {"unwritten": [{"scope": "global", "topic": "unwritten"}]}',
+                 '[Knowledge backlinks (readable shelves now)] [{"scope": "global", "topic": "source", "state": "active"}]')
+        assert all((fact in header) == (start == 0) for fact in facts)  # once, on the page from the note's start
         parts.append(body)
         assert json.loads(result.splitlines()[0].removeprefix("[Knowledge source] ")) == source
     assert "".join(parts) == text

@@ -527,6 +527,26 @@ def test_read_shows_outgoing_link_facts_and_keeps_unlinked_notes_identical(tmp_p
     assert set(tmp_path.rglob("*")) == {target.shelf.parent, target.shelf, *before, plain.path}
 
 
+def test_link_facts_ride_a_read_from_the_start_and_survive_odd_spellings_and_unresolvable_names(tmp_path):
+    """Range pages after the first carry no link lines; an entity- or backslash-spelled link still joins as a
+    backlink; a link whose resolution raises an OS error names its outgoing links unavailable, never fails the read."""
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    target = address(tmp_path, "a&b")
+    target.shelf.mkdir(parents=True)
+    target.path.write_text("Target with an ampersand.\n", encoding="utf-8")
+    address(tmp_path, "entity").path.write_text("[x](<a&amp;b.md>)\n", encoding="utf-8")
+    address(tmp_path, "escaped").path.write_text("[y](a\\&b.md)\n", encoding="utf-8")
+    whole = tools._knowledge_read(ctx, "a&b")
+    assert "[Knowledge backlinks (readable shelves now)] " in whole
+    assert '"topic": "entity"' in whole and '"topic": "escaped"' in whole
+    assert "[Knowledge backlinks" not in tools._knowledge_read(ctx, "a&b", start_char=3)
+    assert "[Knowledge backlinks" in tools._knowledge_read(ctx, "a&b", start_char=0)
+    long_name = address(tmp_path, "long-link")
+    long_name.path.write_text("[far](" + "n" * 300 + ".md)\nBody kept.\n", encoding="utf-8")
+    reply = tools._knowledge_read(ctx, "long-link")
+    assert reply.endswith(long_name.path.read_text(encoding="utf-8")) and '"unavailable": "OSError"' in reply
+
+
 def test_read_backlinks_join_exact_addresses_only_on_readable_shelves(tmp_path, monkeypatch):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path / "child", project_id="shelf-call")
     ctx.budget_drive_root = str(tmp_path)
