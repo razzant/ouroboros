@@ -1018,6 +1018,9 @@ html[data-layout="stack"] .resize-handle { display: none; }
 
 #page-files > :is(.app-page-header, .files-band) { position: relative; z-index: 2; pointer-events: none; }
 #page-files > :is(.app-page-header, .files-band) :is(button, input) { pointer-events: auto; }
+/* A location that scrolls takes the pointer whole, so a sideways wheel on a separator moves it as on a name; the band's
+   other empty parts stay the list's. */
+#page-files > :is(.app-page-header, .files-band) .files-breadcrumb:is([data-scroll-start], [data-scroll-end]) { pointer-events: auto; }
 .files-layout .files-sidebar[data-scroll-above] { --scroll-fade-top-clear: var(--files-band-h); --scroll-fade-top: calc(var(--files-band-h) + var(--scroll-fade-edge)); }
 .files-preview { padding-top: var(--files-band-h); }
 

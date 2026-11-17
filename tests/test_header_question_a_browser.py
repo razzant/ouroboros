@@ -568,6 +568,16 @@ def _location(page, names):
     page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
 
 
+# The last separator wholly in the location's view, and whether a pointer there lands on the location.
+SEPARATOR = """() => { const strip = document.querySelector('#page-files .app-page-lead > .files-breadcrumb');
+    const box = strip.getBoundingClientRect();
+    const r = [...strip.querySelectorAll('.files-crumb-sep')].map(n => n.getBoundingClientRect())
+        .filter(b => b.width > 0 && b.left >= box.left && b.right <= box.right).at(-1);
+    if (!r) return null;
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    return { x, y, hit: strip.contains(document.elementFromPoint(x, y)) }; }"""
+
+
 @pytest.mark.parametrize('width', [720, 1060])
 def test_files_location_keeps_every_folder_reachable_in_the_bar(engine_ui, width):
     # The bar is one row, so a location longer than its start scrolls there, as a tab strip does: it rests at its
@@ -587,9 +597,16 @@ def test_files_location_keeps_every_folder_reachable_in_the_bar(engine_ui, width
             assert not rest['cut'] or rest['ellipsis'] == 'ellipsis', rest
             if rest['hidden'] > 1:
                 assert rest['overflow'] in ('auto', 'scroll') and rest['fades'] == ['data-scroll-start'], rest
-            # A sideways wheel (a trackpad's swipe) scrolls the location to its start and back.
+            # A sideways wheel (a trackpad's swipe) scrolls the location to its start and back, from a separator as from
+            # a name: the band passes other presses to the list, but a location that scrolls takes the pointer whole.
             trail = page.locator('#page-files .app-page-lead > .files-breadcrumb')
-            trail.hover()
+            sep = page.evaluate(SEPARATOR)
+            if rest['hidden'] > 1:
+                assert sep and sep['hit'], ('a wheel on a separator reaches the location', sep)
+            if sep:
+                page.mouse.move(sep['x'], sep['y'])
+            else:
+                trail.hover()
             page.mouse.wheel(-4000, 0)
             page.wait_for_function("el => el.scrollLeft <= 1", arg=trail.element_handle())
             page.wait_for_function(f"() => ({LOCATION})().seen[0]")
