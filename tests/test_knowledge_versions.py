@@ -188,10 +188,15 @@ def test_a_digest_era_row_says_its_text_is_not_stored(tmp_path):
 def test_a_version_reads_back_exactly_in_ranges_and_as_its_outline(tmp_path):
     ctx = context(tmp_path)
     target = address(tmp_path)
-    first = store.write_knowledge_note(target, RIVER).current
+    first = store.write_knowledge_note(target, RIVER + "[Old gap](old-gap.md)\n").current
     second = store.write_knowledge_note(target, "", "edit", first.revision,
-                                        edits=[{"old_str": "## Мост\n\nСтарый мост.\n\n### Опоры\n\nДве.\n\n", "new_str": ""}]).current
+                                        edits=[{"old_str": "## Мост\n\nСтарый мост.\n\n### Опоры\n\nДве.\n\n", "new_str": ""},
+                                               {"old_str": "[Old gap](old-gap.md)", "new_str": "[New gap](new-gap.md)"}]).current
+    store.write_knowledge_note(address(tmp_path, "later-source"), "[Now](notes/река.md)\n")
     old = tools._knowledge_read(ctx, TOPIC, version=first.revision)
+    assert '[Knowledge links] {"unwritten": [{"scope": "global", "topic": "notes/old-gap"}]}' in old
+    assert '[Knowledge backlinks (readable shelves now)] [{"scope": "global", "topic": "later-source", "state": "active"}]' in old
+    assert '"topic": "notes/new-gap"' in tools._knowledge_read(ctx, TOPIC)
     assert old.endswith(first.text) and "Earlier version, not the current note" in old
     assert f"The current revision is {second.revision}" in old and "focus unknown (overwrite; reason: not recorded)" in old
     assert tools._knowledge_read(ctx, TOPIC, version=first.revision, start_char=3, end_char=40).endswith(first.text[3:40])
