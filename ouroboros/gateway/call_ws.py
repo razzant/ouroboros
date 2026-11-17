@@ -8,10 +8,14 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from ouroboros import call_protocol as cp
-from ouroboros.call_peers import CallPeerError, LiveCallHub, close_hub, get_hub
+from ouroboros.call_peers import MIX_FRAME_MS, CallPeerError, LiveCallHub, close_hub, get_hub
 from ouroboros.gateway.call_contracts import PEER_CONTROLS
 from ouroboros.gateway.schema import validate_ingress
 SOCKET_POLL_SECONDS = .01
+# A microphone frame the hub refused waits for the mixer, which frees room a 20 ms tick at a time. A shorter retry
+# only spins: Windows' monotonic clock ticks every 15.6 ms, and asyncio fires a timer due within one tick at once,
+# so a 10 ms retry ran thousands of times a second and starved the call it waited on (#3633).
+INPUT_RETRY_SECONDS = 2 * MIX_FRAME_MS / 1000
 SOCKET_SEND_TIMEOUT_SECONDS = 5.0
 
 def refusal(code: str, status: int = 400, error: str = "") -> JSONResponse:
@@ -113,7 +117,7 @@ async def serve_peer(websocket: WebSocket, hub: LiveCallHub, *, role: str,
                         except CallPeerError as exc:
                             if exc.code != "input_backpressure":
                                 raise
-                            await asyncio.sleep(SOCKET_POLL_SECONDS)
+                            await asyncio.sleep(INPUT_RETRY_SECONDS)
                 continue
             message = _control(event.get("text") or "")
             if sender is None:
