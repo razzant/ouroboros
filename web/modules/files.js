@@ -171,8 +171,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     function showPane(view, focusTarget = null) {
         const focused = document.activeElement;
         const active = focused === document.body && lastFocus?.isConnected ? lastFocus : focused;
-        // Back is the shell's, in the page's header: asked before the layer it belongs to can take it away.
-        const inFiles = page.contains(active);
+        const inFiles = page.contains(active);  // Back is the shell's, in the header: asked before its layer goes
         const changed = layoutEl.dataset.filesView !== view;
         layoutEl.dataset.filesView = view;
         placeStatus();
