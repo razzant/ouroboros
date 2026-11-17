@@ -833,9 +833,10 @@ def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: 
 # start budget. Running views narrow only under physical pressure or a refusal.
 HOST_STEPS = ("runtime", "review_pool", "review_continuity", "installed_skills",
               "drive_state", "world", "subagents", "architecture_map", "development_map")
-# Host forms an owner's mode target never takes while the window's own start bound holds the request: my WORLD map
-# shortens only for the window (memory audit 15.11.2026, F7), still before memory when the window needs it.
-TARGET_SPARED = ("world",)
+# Host forms only the window's own start bound takes: my WORLD map stays whole while that bound holds the request with
+# memory at its shortest forms, whatever soft frame the start has (memory audit 15.11.2026, F7); when the bound cannot
+# hold it, it still steps before memory.
+WINDOW_ONLY = ("world",)
 
 
 def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, root, task_id, allowance=None,
@@ -866,9 +867,8 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     Every frame begins from what was shown (``previous``) and pays what that frame
     still owes (``context_fit._view_projections``): steps an abandoned Max trial took
     never reach Low, and books that paid a deficit leave no host step to pay it again.
-    Under an owner's mode target (``budget_mode``) a ``TARGET_SPARED`` section steps only while the request with memory
-    at its shortest forms (``shortest``) exceeds ``window_bound``, the window's own start bound: the target never
-    shortens it.
+    A ``WINDOW_ONLY`` section steps only while the request with memory at its shortest forms (``shortest``) exceeds
+    ``window_bound``, the window's own start bound: neither an owner's target nor the start's own room shortens it.
     """
     if measure is None or not window or not root or not task_id:
         return list(previous), saving
@@ -905,9 +905,9 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
             fits = sent_least <= physical
         if part.section_id in WHOLE_OR_OUTLINE_STEPS and fits and (soft or initial - current >= excess):
             continue  # an outline is a physical step, never a start-room or slack choice
-        spared = part.section_id in TARGET_SPARED and budget_mode
+        spared = part.section_id in WINDOW_ONLY
         if spared and window_bound is not None and sent_least <= window_bound:
-            continue  # the window's start bound holds it beside memory's shortest forms: a target never shortens it
+            continue  # the window's start bound holds it beside memory's shortest forms: no soft frame shortens it
         try:
             row = (retain or retain_section)(part, root=root, task_id=task_id)
         except (OSError, ValueError):
