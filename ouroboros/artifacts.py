@@ -16,7 +16,7 @@ from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 from ouroboros.artifact_storage import clone_file, temporary_sibling
-from ouroboros.utils import atomic_write_json, read_json_dict, update_json_locked, write_bytes_atomic
+from ouroboros.utils import atomic_write_json, file_identity, read_json_dict, update_json_locked, write_bytes_atomic
 from ouroboros.headless import ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_READY, SCRATCH_MANIFEST_NAME, task_artifacts_dir
 from ouroboros.outcome_receipt_store import is_verification_receipts_path
 from ouroboros.task_custody import fence_publication
@@ -1151,8 +1151,7 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
     source_path = pathlib.Path(path) if isinstance(path, (str, os.PathLike)) else None
     digest, size = sha256(), 0
     def identity(observation: os.stat_result) -> tuple:
-        return (observation.st_dev, observation.st_ino, observation.st_size,
-                observation.st_mtime_ns, observation.st_ctime_ns)
+        return file_identity(observation)
     from ouroboros.store import open_for_read  # a held store file keeps its locks (no new descriptor to close)
 
     # Reject pipes/devices before opening: the descriptor check alone comes too

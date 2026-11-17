@@ -639,11 +639,13 @@ def test_a_look_whose_answer_crosses_a_fresh_switch_keeps_asking_for_its_pixels(
                 second = await successor(world, first)
             else:
                 await asyncio.wait_for(world.entered.wait(), 2)
+                world.opening = asyncio.Event()  # the resume waits for this scenario however fast the loop reconnects
                 first.emit('resumable', handle='covering')
                 first.emit('closed', resumable=True, transport_loss=True, reason='transport_lost')
                 await until(lambda: not call.connected.is_set() and call.resume)
                 world.stale_resume = True  # promised, and refused only once the output's turn has passed
                 world.release.set()
+                world.opening.set()
                 await until(lambda: len(host.sessions) == 2)
                 second = host.sessions[1]
                 second.emit('ready', **READY)

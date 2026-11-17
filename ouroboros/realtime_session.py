@@ -39,6 +39,11 @@ async def joined(awaitable):
             await asyncio.shield(task)
         except asyncio.CancelledError as exc:
             cancelled = exc
+    # Not a second result(): from CPython 3.11 that resets the error's traceback, which the first awaiter
+    # of the same task still carries, so its report would point here instead of where the error began.
+    error = None if task.cancelled() else task.exception()
+    if error is not None:
+        raise error
     result = task.result()
     if cancelled is not None:
         raise cancelled
