@@ -1477,8 +1477,9 @@ html[data-layout="docked"] .app-page-header[data-lead] {
     -webkit-mask-image: linear-gradient(to right, transparent, black var(--band-fade-start), black calc(100% - var(--band-fade-end)), transparent);
     mask-image: linear-gradient(to right, transparent, black var(--band-fade-start), black calc(100% - var(--band-fade-end)), transparent);
 }
-/* At the residual room floor the same row scrolls, so Paste cannot squeeze the folder rail to zero. */
-html[data-layout="docked"] .app-page-header[data-lead][data-return] { grid-template-columns: minmax(14rem, 1fr) auto; }
+/* With a return the folder rail keeps 14rem, or 40% of a narrow band (a tablet's column keeps Refresh in it); at the
+   residual room floor the same row scrolls, so Paste cannot squeeze the rail to zero. */
+html[data-layout="docked"] .app-page-header[data-lead][data-return] { grid-template-columns: minmax(min(14rem, 40%), 1fr) auto; }
 html[data-layout="docked"] .app-page-header[data-lead]::-webkit-scrollbar { display: none; }
 html[data-layout="docked"] .app-page-header[data-scroll-start] { --band-fade-start: var(--space-4); }
 html[data-layout="docked"] .app-page-header[data-scroll-end] { --band-fade-end: var(--space-4); }
