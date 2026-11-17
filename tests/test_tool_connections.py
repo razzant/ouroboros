@@ -534,6 +534,7 @@ def test_a_child_gateway_takes_only_mcp_names_and_a_nano_child_keeps_loading_phy
     """An extension left out by a route limit loads physically; so does MCP on a default Nano child."""
     from ouroboros import extension_loader, provider_models
     from ouroboros import loop as loop_module
+    from ouroboros.tool_policy import route_tool_limit_notice, usable_selectors
 
     _servers()
     registry = _child_registry(tmp_path, monkeypatch, profile="readonly")
@@ -545,6 +546,8 @@ def test_a_child_gateway_takes_only_mcp_names_and_a_nano_child_keeps_loading_phy
         })
     monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: True)
     initial = initial_tool_schemas(registry)
+    pinned = "mcp_slack__history"
+    initial.sort(key=lambda schema: schema["function"]["name"] == pinned)  # the schema to displace
     limit = len(initial) - 1
     registry._ctx.active_model = "openai::gpt-fixture"
     monkeypatch.setitem(provider_models.PROVIDER_TOOL_SCHEMA_LIMITS, "openai", limit)
@@ -557,6 +560,15 @@ def test_a_child_gateway_takes_only_mcp_names_and_a_nano_child_keeps_loading_phy
     assert "These MCP schemas are not added" in receipt
     assert "Call schemas loaded" in receipt and f"{ext}. The next request carries" in receipt
     assert len(resident) == limit and ext in _names(resident) and lookup not in _names(resident)
+    assert f"leaves out: {pinned}." in receipt
+    notice = route_tool_limit_notice(registry._ctx.active_model, limit, len(initial), [pinned],
+                                     selectors=usable_selectors(registry, resident))
+    assert "shows an MCP schema" in notice and pinned in notice
+    before = json.dumps(resident)
+    shown = registry.execute("enable_tools", {"tools": pinned})
+    assert f"## {pinned}" in shown and "Channel history." in shown
+    assert pinned not in _names(resident) and json.dumps(resident) == before
+    assert "enable_tools can show or load a selected schema" in receipt
 
     nano = _child_registry(tmp_path, monkeypatch, profile="readonly", mode="nano")
     nano_resident = initial_tool_schemas(nano, context_mode="nano")

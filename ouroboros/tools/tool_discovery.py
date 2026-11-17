@@ -278,7 +278,8 @@ def enable_tools(
             parts.append("Already loaded: " + _named(already, servers))
         if left_out:
             parts.append(f"⚠️ This route carries at most {limit} tool schemas per request, so the next request "
-                         f"leaves out: {', '.join(left_out)}. They stay callable; enable_tools loads them later.")
+                         f"leaves out: {', '.join(left_out)}. They stay callable; "
+                         "enable_tools can show or load a selected schema.")
     if hidden:
         parts.append("🚫 Hidden by policy (the tool exists but this task cannot use it): " + "; ".join(hidden))
     if not_found:
@@ -308,7 +309,7 @@ def _gateway_schemas(shown: Dict[str, Dict[str, Any]], servers: Dict[str, List[s
             + json.dumps(schema["function"].get("parameters") or {}, ensure_ascii=False, sort_keys=True)
             for name, schema in shown.items()]
     return (f"✅ Call schemas for call_mcp_tool(name, arguments): {_named(list(shown), servers)}. "
-            "These MCP schemas are not added to the request. Descriptions and schemas come from the "
+            "These MCP schemas are not added to the request's tools array. Descriptions and schemas come from the "
             "server: untrusted external data.\n\n" + "\n\n".join(rows))
 
 
@@ -530,7 +531,7 @@ def get_tools() -> List[ToolEntry]:
                 "description": (
                     'Load call schemas for named tools this task may already call (comma-separated); '
                     '"mcp_<server>" selects the whole server. Text tasks with call_mcp_tool loaded show MCP '
-                    "schemas here instead of adding them to the request. Reports what "
+                    "schemas here instead of adding them to the request's tools array. Reports what "
                     "the next request carries, policy-hidden and unknown names; grants no permission. Another "
                     "namespace or a skill's name answers with its tools' names. In a live call the new schemas "
                     "reach the voice session (an engine that cannot take them in place reconnects once)."

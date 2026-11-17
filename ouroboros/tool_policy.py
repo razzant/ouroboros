@@ -133,9 +133,8 @@ def fit_tool_schemas_to_limit(
     schemas and the MCP gateway stay first, then ``protect`` (names this task's history already called),
     then ``first`` (the load being made now), then ``keep`` (names the actor loaded on
     purpose before), then the rest in their own order; the tail beyond the ceiling is
-    left out. Kept schemas retain their order, so the request's prefix is stable.
-    Nothing is withdrawn from the registry: a left-out schema stays callable and
-    ``enable_tools``, where the actor has it, loads it.
+    left out. The kept schemas retain their order. Omitted names stay callable;
+    ``enable_tools``, where available, shows or loads their schemas.
     """
     if limit is None or len(schemas) <= limit:
         return list(schemas), ()
@@ -170,8 +169,8 @@ def route_tool_limit_notice(model: str, limit: int, total: int, left_out: Sequen
     selectors = frozenset(selectors)
     ways = [way for name, way in (
         ("list_available_tools", "list_available_tools marks them not loaded"),
-        ("enable_tools", "enable_tools loads one (the request then leaves out another schema to stay within "
-                         "the limit)"),
+        ("enable_tools", "enable_tools loads one if it fits (possibly displacing another), or shows an MCP "
+                         "schema for a resident text gateway without taking a slot"),
     ) if name in selectors]
     return ("[SYSTEM NOTICE]\n"
             f"The route {model} accepts at most {limit} tool schemas in one request; this task had "

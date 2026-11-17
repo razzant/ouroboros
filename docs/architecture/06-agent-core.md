@@ -795,7 +795,7 @@ Nonce binds the predecessor before effects: replay rejoins, drift refuses, anoth
 
 `working_checkpoint.py` saves one `source_handles/working/` state per attempt via `owner_wait.continuation_state` (format: PERSISTENCE; save boundaries/atomicity: module docstring). `owner_wait.governing_continuation` selects owner wait, exact pause, then working recovery; invalid sources never fall through. Restore precedes startup receipt minus restored mail. Startup/tool wakes stage exposure before save (unsaved mail: the module docstring).
 
-At `owner_wait.rebind_restored_route` every restore captures its start anew; `continuation_tools.py` adopts the fresh profile's tools plus current definitions of frozen-only, loaded and ceiling-left names only if the system or saved-tools digest differs from `transcript_prefix._baseline` or none exists (fitting, absent names, residency, notes: its docstring); recovered bytes stay frozen.
+`owner_wait.rebind_restored_route` recaptures each start. `continuation_tools.py` reconciles tools when `transcript_prefix._baseline` is missing or mismatched, or a fresh profile supplies a missing gateway. It fits fresh tools and current definitions of saved, loaded and ceiling-left names against history; recovered bytes stay frozen.
 
 `worker_health` (same-ID crash) and `workers.kill_workers` (planned successors) freeze `_working_recovery` before queueing; load retires the rolling file; failed freezes keep a gap. Invariant 31 binds replay. Delegated runs stay facts; saved candidates buy no generation. A `task_reaper` timeout queues no successor. Reads verify lineage bytes, own store first (PERSISTENCE).
 
