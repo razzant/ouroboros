@@ -307,16 +307,20 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
 
 def _switch_fact(root: Any, observed: Any, authority: Any) -> str:
     """The switch as a sentence while my places only hear (owner 15.11, 5A: on 7 Nov I read the bare key and told my
-    human the places work separately); nothing while it is on, unknown, or no place hears."""
+    human the places work separately); nothing while it is on, unknown, or no place hears. The switch and the Panic
+    flag are read first, from the state this section already holds; the place store only when the fact can be said."""
     from ouroboros.consciousness import STOP_SOURCE_KEY, panic_blocks_wake
     from ouroboros.consciousness_view import mind_fact
     from supervisor.state import control_value
 
     try:
-        from ouroboros.places import load_places
         known, enabled = control_value(authority, "bg_consciousness_enabled")
+        panic = panic_blocks_wake(root)
+        if not (panic or (known and not enabled)):
+            return ""
+        from ouroboros.places import load_places
         fact = mind_fact(load_places(root), enabled=bool(enabled) if known else None,
-                         stop_source=str(observed.values.get(STOP_SOURCE_KEY) or ""), panic=panic_blocks_wake(root))
+                         stop_source=str(observed.values.get(STOP_SOURCE_KEY) or ""), panic=panic)
     except Exception:
         return ""
     return f"\n\n{fact}" if fact else ""

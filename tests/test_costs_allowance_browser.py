@@ -109,17 +109,19 @@ def _write_unrelated(page, data_dir: Path, posts: list, days: int) -> dict:
 
 
 def _switch(page, url: str, on: bool) -> None:
-    """Consciousness on or off through the Consciousness tab's own Start/Stop (this isolated server's switch)."""
+    """Consciousness on or off through the Consciousness tab's own switch (this isolated server has no place, so the
+    turn asks nothing); the headline names the switch's position by meaning (owner 15.11, 5A)."""
     from playwright.sync_api import expect
 
     _costs(page, url)
     page.locator("[data-costs-consciousness]").click()
     summary = page.locator("[data-cx-summary]")
-    expect(summary).to_contain_text("Consciousness · o", timeout=30_000)
+    expect(summary).to_contain_text("Consciousness · when Ouroboros acts", timeout=30_000)
     toggle = page.locator('[data-cx-act="toggle"]')
-    if toggle.inner_text() == ("Start" if on else "Stop"):
+    if toggle.inner_text() == ("Turn on" if on else "Turn off"):
         toggle.click()
-    expect(summary).to_contain_text(f"Consciousness · {'on' if on else 'off'}", timeout=30_000)
+    expect(summary.locator(".consciousness-headline")).to_contain_text(
+        "Also on its own" if on else "Only when you write to it", timeout=30_000)
 
 
 def _fits(page) -> None:

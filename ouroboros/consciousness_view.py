@@ -220,7 +220,8 @@ def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str 
     ``places`` (stored places or view rows; ``None`` unread), ``people`` (``recent_people``; ``None`` unread),
     ``circles`` (place id → its circle's name), ``autonomy`` and ``daily_usd`` (turning on), ``running`` (turning off:
     the state line's live wake and own tasks). ``{"to", "lines", "places"}``: one sentence a line and every place the
-    turn concerns with its people, for the dialog's details. A fact absent says nothing."""
+    turn concerns with its people, for the dialog's details (``None`` when the places could not be read: the app still
+    asks, with these lines). A fact absent says nothing."""
     if to == "off":
         hearing = None if places is None else _ranked([p for p in places if _place_fact(p)["state"] != "paused"],
                                                       people, circles)
@@ -231,7 +232,7 @@ def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str 
             lines += [f"{_count(len(hearing), 'place')} will be heard, not answered: {_named(hearing)}.",
                       _people_line(people)]
         lines += [_running_line(running), "Your chats, your tasks and the schedules you asked for keep working."]
-        return {"to": "off", "lines": [line for line in lines if line], "places": hearing or []}
+        return {"to": "off", "lines": [line for line in lines if line], "places": hearing}
     facts = _ranked(places or (), people, circles)
     active = [fact for fact in facts if fact["state"] == "active"]
     silent = [fact for fact in facts if fact["state"] == "silent"]
@@ -245,10 +246,12 @@ def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str 
             lines.append(f"It may answer in {_count(len(active), 'place')}: {_named(active)}.")
     if silent and daily_usd != 0:
         lines.append(f"In {_count(len(silent), 'Silent place')} it only reads.")
+    if places is None:
+        lines.append("Where it may answer could not be read.")
     if active or silent:
         lines.append("What arrived while it was off waits; at its first wake it sees what is unread there and decides what "
                      "to read and answer.")
-    return {"to": "on", "lines": lines, "places": active + silent}
+    return {"to": "on", "lines": lines, "places": None if places is None else active + silent}
 
 
 def read_switch_preview(drive_root, to: str, running=None) -> dict:
@@ -270,7 +273,8 @@ def read_switch_preview(drive_root, to: str, running=None) -> dict:
     people = None
     if places:
         try:
-            people = recent_people(drive_root, [p.place_id for p in places if p.state != "paused"], days=PEOPLE_DAYS)
+            people = recent_people(drive_root, [p.place_id for p in places if p.state != "paused"], days=PEOPLE_DAYS,
+                                   services={p.place_id: p.provider for p in places})
         except Exception:
             log.warning("Recent people unreadable for the switch preview", exc_info=True)
     return switch_preview(to, places, people=people, circles=circles, autonomy=get_consciousness_autonomy(),
@@ -300,22 +304,26 @@ def status_reply(described: dict) -> str:
 
 # Why a place is quiet, by its one cause, first match wins (the Panic or the switch before the place's own word, the
 # allowance before the level): ``word`` for its row, ``note`` for its sheet, ``door`` where the cause is changed.
+# A note promises only waking (what turning it on, or room in the allowance, brings): a Silent or Advises place still
+# sends nothing then, so no note says it will answer.
 QUIET = {
-    "panic": ("Hears only · Panic", "Panic turned consciousness off: it only hears here and answers nothing until you "
-              "turn it on.", "consciousness"),
-    "off": ("Hears only · consciousness off", "Consciousness is off: it only hears here and answers nothing until you "
-            "turn it on.", "consciousness"),
+    "panic": ("Hears only · Panic", "Panic turned consciousness off: it only hears here, and nothing here wakes it until "
+              "you turn it on.", "consciousness"),
+    "off": ("Hears only · consciousness off", "Consciousness is off: it only hears here, and nothing here wakes it until "
+            "you turn it on.", "consciousness"),
     "allowance": ("Waits · allowance spent", "Its allowance for the last 24 hours is spent: what arrives here waits until "
-                  "{at}, then it reads it.", "costs"),
+                  "there is room in it again; Costs shows when.", "costs"),
     "advises": ("Replies wait for you · Advises", "Advises: it reads and thinks here; what it would say waits for you in "
                 "its conversation here.", "consciousness"),
 }
+# A $0 allowance has no reset to wait for: only the owner's change opens it.
+ZERO_ALLOWANCE = "Its allowance is $0.00: what arrives here waits until you raise it in Costs."
 
 
-def place_quiet(state: str, *, switch: str, autonomy: str = "", allowance: str = "", resets_at: str = "") -> dict | None:
+def place_quiet(state: str, *, switch: str, autonomy: str = "", allowance: str = "", limit_usd: Any = None) -> dict | None:
     """``{cause, word, note, door}`` when a place that would speak is quiet for a cause beyond its own stored word, else
-    ``None``. ``switch``: "on" | "off" | "panic" | "unknown" (no claim); ``allowance``: the window's status. A Paused
-    place says Paused and a Silent one Silent: their own words already say it."""
+    ``None``. ``switch``: "on" | "off" | "panic" | "unknown" (no claim); ``allowance``: the window's status and
+    ``limit_usd`` its daily limit. A Paused place says Paused and a Silent one Silent: their own words already say it."""
     if state == "paused" or switch == "unknown":
         return None
     if switch in ("panic", "off"):
@@ -327,8 +335,9 @@ def place_quiet(state: str, *, switch: str, autonomy: str = "", allowance: str =
     else:
         return None
     word, note, door = QUIET[cause]
-    return {"cause": cause, "word": word, "door": door,
-            "note": note.format(at=_clock_of(resets_at) if resets_at else "its reset")}
+    if cause == "allowance" and isinstance(limit_usd, (int, float)) and limit_usd <= 0:
+        note = ZERO_ALLOWANCE
+    return {"cause": cause, "word": word, "door": door, "note": note}
 
 
 def connect_note(switch: str) -> str:
@@ -468,11 +477,11 @@ def off_sentence(places) -> str:
     one read of the place store, None when it could not be read; a Paused place does not hear either."""
     said = "Consciousness off: Ouroboros acts only when you write to it."
     if places is None:
-        return said + " Its places are heard, not answered, until you turn it on."
+        return said + " Its places are heard, not answered."
     hearing = [fact for fact in map(_place_fact, places) if fact["state"] != "paused"]
     if not hearing:
         return said
-    return said + f" {heard_sentence(places)[:-1]}, until you turn it on."
+    return said + f" {heard_sentence(places)}"
 
 
 def stopping_words(task_ids, *, wake: str, rows: dict, authors, places) -> str:

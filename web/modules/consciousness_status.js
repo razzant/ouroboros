@@ -16,7 +16,7 @@
  * `/api/state` snapshot the room already reads.
  */
 import { headlineView } from './consciousness_dashboard.js';
-import { switchActionWords, turnConsciousness } from './consciousness_switch.js';
+import { switchActionWords, switchReadingWords, turnConsciousness } from './consciousness_switch.js';
 import { failureText, normalizeConsciousness, readConsciousness, readPlaces } from './consciousness_api.js';
 import { allowanceMove, allowanceText, clockText, consciousnessMark, deadlineWords, splitWakes, wakePhaseText } from './consciousness_words.js';
 import { fmt, tr } from './i18n.js';
@@ -186,7 +186,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         money.hidden = !allowance;
         const on = snapshot.enabled === true;
         toggle.hidden = snapshot.enabled === null;
-        toggle.textContent = switchActionWords(on);
+        toggle.textContent = pending === 'read' ? switchReadingWords() : switchActionWords(on);
         toggle.disabled = Boolean(pending) || !ws?.send || !connected();
         costsDoor.hidden = !allowanceMove(snapshot);
         evolutionDoor.hidden = !view.evolving;
@@ -315,10 +315,11 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         if (toggle.disabled || !view || pending) return;
         // The one switch: it names what changes first (consciousness_switch.js), then sends the Dashboard's /bg.
         const to = view.snapshot.enabled ? 'off' : 'on';
-        pending = to === 'off' ? 'stop' : 'start';
-        pendingAt = Number.POSITIVE_INFINITY;  // a state answer during the question keeps the button waiting
+        pending = 'read';  // «Reading…» while the preview is read
+        pendingAt = Number.POSITIVE_INFINITY;  // a state answer during the read or the question keeps the button waiting
         paintShade();
-        if (!(await turn(to, { ws }))) { pending = ''; if (!destroyed) paintShade(); return; }
+        const onRead = () => { pending = to === 'off' ? 'stop' : 'start'; if (!destroyed) paintShade(); };
+        if (!(await turn(to, { ws, onRead }))) { pending = ''; if (!destroyed) paintShade(); return; }
         pendingAt = Date.now();
         paintShade();
         // The runtime applies the command on its own clock: the room's next state answer shows it.

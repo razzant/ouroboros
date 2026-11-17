@@ -28,6 +28,10 @@ test('the dialog names what changes, one sentence a line, every place behind its
     // Nothing to name: no dialog. A preview that could not be read still asks, and says so.
     assert.equal(switchDialog('off', { lines: ['Ouroboros will act only when you write to it.'], places: [] }), null);
     assert.equal(switchDialog('off', null).body, 'What it would change could not be read.');
+    // The host could not read the places (`places: null`): the dialog still asks, with the host's lines, no details.
+    const unread = switchDialog('off', { lines: ['Ouroboros will act only when you write to it.', 'Its places will be heard, not answered.'], places: null });
+    assert.equal(unread.body, 'Ouroboros will act only when you write to it.\nIts places will be heard, not answered.');
+    assert.equal(unread.details, null);
 });
 
 test('a turn sends the same /bg after a yes, nothing after a no, and asks nothing where nothing is named', async () => {
@@ -46,4 +50,13 @@ test('a turn sends the same /bg after a yes, nothing after a no, and asks nothin
     // A preview read that fails never holds the switch: the dialog asks without it.
     assert.equal(await turnConsciousness('off', { ws, read: async () => { throw new Error('down'); }, confirm: yes }), true);
     assert.equal(sent.pop().cmd, '/bg stop');
+    // The caller hears when the read is over, before any question (its button stops saying «Reading…»).
+    const order = [];
+    await turnConsciousness('off', { ws, read: async () => { order.push('read'); return PREVIEW; },
+        onRead: () => order.push('onRead'), confirm: async () => { order.push('ask'); return false; } });
+    assert.deepEqual(order, ['read', 'onRead', 'ask']);
+    // Places the host could not read are not «no places»: it asks before the turn.
+    assert.equal(await turnConsciousness('on', { ws, read: async () => ({ lines: ['Where it may answer could not be read.'], places: null }), confirm: no }), false);
+    assert.equal(asked, 4);
+    assert.equal(sent.length, 0);
 });

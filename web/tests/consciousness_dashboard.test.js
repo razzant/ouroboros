@@ -167,6 +167,8 @@ test('a state that cannot wake wears its failure mark and offers Restart; starti
     // A Start/Stop on its way says so and waits; nothing else on the card changes.
     assert.match(summaryHtml(fromState(), { toggling: 'stop' }), /data-cx-act="toggle" data-enabled="1" disabled>Turning off…</);
     assert.match(summaryHtml({ ...fromState(), enabled: false }, { toggling: 'start' }), /disabled>Turning on…</);
+    // While the turn's preview is read (seconds on a large install) the button says so, never a silent pause.
+    assert.match(summaryHtml(fromState(), { toggling: 'read' }), /data-cx-act="toggle" data-enabled="1" disabled>Reading…</);
     assert.match(summaryHtml(fromState()), /class="btn btn-default btn-sm" data-cx-act="toggle"/, 'the neutral small capsule');
 });
 

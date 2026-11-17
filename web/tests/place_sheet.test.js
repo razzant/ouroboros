@@ -530,7 +530,7 @@ test('Active · Silent · Paused in one control; the note says what the chosen s
 test('a cause that keeps the place quiet is said under the strip with its door; Silent keeps its card', () => {
     // Owner 06.11: «Lives here: listens, wakes…» stayed on every sheet for the 28 hours Off left the places hearing;
     // owner 15.11 (5A): one cause in the host's words, the door where it is changed, the stored choice kept chosen.
-    const note = 'Consciousness is off: it only hears here and answers nothing until you turn it on.';
+    const note = 'Consciousness is off: it only hears here, and nothing here wakes it until you turn it on.';
     const off = (place) => ({ ...place, quiet: { cause: 'off', word: 'Hears only · consciousness off', note, door: 'consciousness' } });
     const active = placeSheetBodyHtml(off(slack));
     assert.match(active, new RegExp(`<p class="place-state-note">${note.replace(/\./g, '\\.')} <button[^>]*data-place-act="open-consciousness"[^>]*>Consciousness ›</button></p>`));

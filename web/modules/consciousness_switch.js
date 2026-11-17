@@ -13,6 +13,9 @@ export const SWITCH_ACTIONS = Object.freeze({
     off: { act: 'Turn off', keep: 'Keep on', title: 'Turn off consciousness?' },
 });
 
+/** A button's words while the preview is read (on a large install the first read takes seconds: no silent pause). */
+export const switchReadingWords = () => tr('consciousness.switch.reading', 'Reading…');
+
 /** The button's words for a switch whose state is `enabled` (true | false). */
 export const switchActionWords = (enabled) => tr(`consciousness.switch.${enabled ? 'off' : 'on'}`,
     SWITCH_ACTIONS[enabled ? 'off' : 'on'].act);
@@ -23,7 +26,7 @@ const peopleWords = (n) => (n === null || n === undefined ? '' : fmt(n === 1 ? '
 /** The dialog for a preview, or null when there is nothing to name (no place concerns the turn). */
 export function switchDialog(to, preview) {
     const words = SWITCH_ACTIONS[to];
-    if (preview && !preview.places.length) return null;
+    if (preview && Array.isArray(preview.places) && !preview.places.length) return null;
     // One sentence a line (the dialog's paragraph keeps line breaks).
     const body = preview ? preview.lines.join('\n') : tr('consciousness.switch.unread', 'What it would change could not be read.');
     // Every place the turn concerns, the busiest first: the week's people in the short column, the place's name in the
@@ -39,10 +42,12 @@ export function switchDialog(to, preview) {
     };
 }
 
-/** Ask, when there is something to name, and send `/bg start|stop`; true when the command was sent. */
-export async function turnConsciousness(to, { ws, read = readSwitchPreview, confirm = openConfirmDialog } = {}) {
+/** Ask, when there is something to name, and send `/bg start|stop`; true when the command was sent. `onRead` is called
+ *  once the preview is read (or failed), before any question: the caller's button stops saying «Reading…». */
+export async function turnConsciousness(to, { ws, read = readSwitchPreview, confirm = openConfirmDialog, onRead } = {}) {
     let preview = null;
     try { preview = await read(to); } catch { preview = null; }
+    onRead?.();
     const dialog = switchDialog(to, preview);
     if (dialog && !(await confirm(dialog))) return false;
     if (!ws?.send) return false;

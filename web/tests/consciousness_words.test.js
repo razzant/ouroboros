@@ -93,6 +93,7 @@ test('Activity refresh keeps the host sentence as its only clock and names own t
         const text = mount.querySelector('[data-activity-section="background"]').textContent;
         const said = override.detail.replace(/\.$/, '');  // inside the row's «·» list, without its closing period
         assert.equal(text.split(said).length - 1, 1);
+        assert.equal(text.includes(override.detail), false, 'the row\'s list carries the sentence without its period');
         assert.doesNotMatch(text.replace(said, ''), /\d\d:\d\d|[Dd]ue|since|[Nn]ext wake/);
         assert.match(text, /own tasks 1\/2/);
     }

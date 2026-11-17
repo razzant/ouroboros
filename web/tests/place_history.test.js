@@ -63,7 +63,7 @@ function mount(f, options = {}, currentPlace = place) {
 test('the conversation\'s state card says why a place is quiet in the host\'s words; Paused keeps its words', () => {
     // Owner 06.11: Off left 28 places hearing while every card still said it «hears, wakes, speaks and acts here»;
     // owner 15.11 (5A): the same one cause the row and the sheet say.
-    const note = 'Consciousness is off: it only hears here and answers nothing until you turn it on.';
+    const note = 'Consciousness is off: it only hears here, and nothing here wakes it until you turn it on.';
     const quiet = { cause: 'off', word: 'Hears only · consciousness off', note, door: 'consciousness' };
     const off = (state, extra = { quiet }) => placeHistoryState(normalizePlace({ ...rawPlace(), state, ...extra }));
     assert.equal(off('active'), note);

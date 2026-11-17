@@ -453,11 +453,12 @@ _SINCE = ("SELECT json_extract(body,'$.sender_session_id') AS actor, json_extrac
 PEOPLE_ROW_CAP = 2000  # per place: a busier week says «at least»
 
 
-def recent_people(root, place_ids, *, days: int, now: float | None = None) -> dict | None:
+def recent_people(root, place_ids, *, days: int, now: float | None = None, services: dict | None = None) -> dict | None:
     """The people who wrote in these places in the last ``days`` (the switch's preview: «how many people wrote there
     lately»): ``{"by_place": {id: n}, "total": distinct across places, "capped": bool}``, or ``None`` when the index is
-    unreadable. One index range per place, at most ``PEOPLE_ROW_CAP`` newest rows each (``capped`` then); the same
-    filter as ``account_candidates``: no bots, no connected account's own imports, no chat or anonymous actor."""
+    unreadable. ``services`` (place id → its service) keeps the same raw sender id on two services two people. One
+    index range per place, at most ``PEOPLE_ROW_CAP`` newest rows each (``capped`` then); the same filter as
+    ``account_candidates``: no bots, no connected account's own imports, no chat or anonymous actor."""
     import time as _time
     from datetime import datetime, timezone
 
@@ -471,7 +472,8 @@ def recent_people(root, place_ids, *, days: int, now: float | None = None) -> di
             capped = capped or len(rows) >= PEOPLE_ROW_CAP
             people = {person["platform_actor_id"] for person in _people(rows, limit=None)}
             by_place[place_id] = len(people)
-            everyone |= people
+            service = str((services or {}).get(place_id) or "")
+            everyone |= {(service, actor) for actor in people}
     return {"by_place": by_place, "total": len(everyone), "capped": capped}
 
 

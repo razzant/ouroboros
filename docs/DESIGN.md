@@ -2195,9 +2195,9 @@ install with no place). The headline card says the gloss over the position, the 
 switch as “Turn off” / “Turn on”. Every turn in the app (this card, the chip's Shade, Activity's row) is one part
 (`consciousness_switch.js`): before turning either way (the owner chose both, 17.11), when the install has places, a
 dialog names what changes from the install's facts: the busiest places by name and how many, the people who wrote
-there in the last 7 days, what stops at once and what keeps working, every place behind its one disclosure. With no
-place to name the turn goes at once; a preview that cannot be read does not hold the switch (the dialog says so and
-still offers the turn). Turning on says where it may answer and that at its first wake it sees what is unread there
+there in the last 7 days, what stops at once and what keeps working, every place behind its one disclosure. While the preview is read the
+button says “Reading…” (on a large install the first read takes seconds). With no place to name the turn goes at once;
+a preview or a place list that cannot be read does not hold the switch (the dialog says so and still offers the turn). Turning on says where it may answer and that at its first wake it sees what is unread there
 and decides what to read and answer. The words are the host's (`consciousness_view`): the app shows them from the
 server's answers, and the /bg replies (every surface, headless included) and the mind's own fact come from there too.
 

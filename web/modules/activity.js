@@ -33,7 +33,7 @@ import { markView, statusMarkHtml } from './status_mark.js';
 import { whenLabel } from './storage_format.js';
 import { showToast } from './toast.js';
 import { normalizeConsciousness } from './consciousness_api.js';
-import { switchActionWords, turnConsciousness } from './consciousness_switch.js';
+import { switchActionWords, switchReadingWords, turnConsciousness } from './consciousness_switch.js';
 import { autonomyOf } from './consciousness_autonomy.js';
 import { allowanceText } from './consciousness_words.js';
 
@@ -797,7 +797,9 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 showToast(...keptStopToast(receipt, name));
             } else if (act === 'bg-toggle') {
                 // The one switch (consciousness_switch.js): it names what changes, then sends the Dashboard's /bg.
-                if (await turnConsciousness(btn.dataset.enabled === '1' ? 'off' : 'on', { ws })) {
+                const label = btn.textContent;
+                btn.textContent = switchReadingWords();  // the preview read can take seconds on a large install
+                if (await turnConsciousness(btn.dataset.enabled === '1' ? 'off' : 'on', { ws, onRead: () => { btn.textContent = label; } })) {
                     await new Promise((resolve) => setTimeout(resolve, 400));
                 }
             }

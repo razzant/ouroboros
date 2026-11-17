@@ -16,7 +16,7 @@ import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, modelRouteWor
 import { mountChatMarkdown, enhanceChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { confirmAndSendRestart, costPresentationDetail } from './chat_activity.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { switchActionWords, turnConsciousness } from './consciousness_switch.js';
+import { switchActionWords, switchReadingWords, turnConsciousness } from './consciousness_switch.js';
 import { openCircles, openPlaceSheet } from './place_sheet.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { CODECS, GUARDED_WRITERS, WRITERS } from './settings_controls.js';
@@ -119,7 +119,7 @@ export function summaryHtml(snapshot, { hasSocket = true, toggling = '', details
     const roots = countedRootsParts(snapshot);
     const mark = consciousnessMark(snapshot);
     const markHtml = mark.shape === 'none' ? '' : statusMarkHtml('consciousness-mark', mark);
-    const busy = toggling ? (toggling === 'stop' ? 'Turning off…' : 'Turning on…') : '';
+    const busy = { read: switchReadingWords(), stop: 'Turning off…', start: 'Turning on…' }[toggling] || '';
     const toggle = snapshot.enabled === null ? '' : `<button type="button" class="btn btn-default btn-sm" data-cx-act="toggle" data-enabled="${snapshot.enabled ? '1' : '0'}"${hasSocket && !busy ? '' : ' disabled'}>${busy || escapeHtml(switchActionWords(snapshot.enabled))}</button>`;
     // It cannot wake until Ouroboros starts again: the next step is beside the words that say so.
     const restart = snapshot.enabled && snapshot.status === 'stopped'
@@ -416,7 +416,11 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
             // Activity row and the chip's Shade); the button says it is on its way until the read after the runtime's
             // beat paints the state it reached.
             const to = button.dataset.enabled === '1' ? 'off' : 'on';
-            if (!(await turnConsciousness(to, { ws }))) return;
+            toggling = 'read';  // «Reading…» while the preview is read; a poll meanwhile keeps it
+            toggledAt = Number.POSITIVE_INFINITY;
+            paint();
+            const sent = await turnConsciousness(to, { ws, onRead: () => { toggling = ''; paint(); } });
+            if (!sent) { toggling = ''; paint(); return; }
             toggling = to === 'off' ? 'stop' : 'start';
             toggledAt = Date.now();
             paint();

@@ -58,7 +58,7 @@ def test_turning_off_with_no_place_names_nothing_and_an_unread_store_claims_no_c
     empty = V.switch_preview("off", [])
     assert empty["places"] == [] and not any("place" in line for line in empty["lines"])  # the app asks nothing then
     unread = V.switch_preview("off", None)
-    assert "Its places will be heard, not answered." in unread["lines"] and unread["places"] == []
+    assert "Its places will be heard, not answered." in unread["lines"] and unread["places"] is None  # the app still asks
     quiet = V.switch_preview("off", PLACES, people={"by_place": {}, "total": 0, "capped": False})
     assert not any("people" in line for line in quiet["lines"])  # no one wrote: no sentence about people
 
@@ -78,8 +78,9 @@ def test_turning_on_says_where_it_may_answer_and_what_happens_to_what_waited():
 
 def test_the_bg_replies_say_the_same_facts_after_the_turn():
     stored = [SimpleNamespace(place_id=p["place_id"], label=p["label"], state=p["state"], provider=p["provider"]) for p in PLACES]
+    # It promises no answer after the turn: a Silent place still sends nothing then (review r1).
     assert V.off_sentence(stored) == ("Consciousness off: Ouroboros acts only when you write to it. 5 places are heard, "
-                                      "not answered, until you turn it on.")
+                                      "not answered.")
     assert V.off_sentence([]) == "Consciousness off: Ouroboros acts only when you write to it."
     assert "Its places are heard, not answered" in V.off_sentence(None)
     on = V.on_sentence("15:14", stored, "act")
@@ -95,26 +96,33 @@ def test_the_bg_replies_say_the_same_facts_after_the_turn():
     ("active", "on", "full", "exhausted", "allowance"),
     ("silent", "on", "full", "exhausted", "allowance"),
     ("active", "on", "observe", "available", "advises"),
-    ("active", "on", "observe", "exhausted", "allowance"),  # nothing is read before the window resets
+    ("active", "on", "observe", "exhausted", "allowance"),  # nothing wakes it before there is room again
     ("silent", "on", "observe", "available", None),  # Silent already holds: its own word says it
     ("active", "on", "full", "available", None),  # it speaks: not quiet
     ("paused", "off", "full", "available", None),  # Paused says Paused
     ("active", "unknown", "full", "available", None),  # an unknown switch is no claim
 ])
 def test_a_place_is_quiet_for_one_cause_first_match_wins(state, switch, autonomy, allowance, cause):
-    quiet = V.place_quiet(state, switch=switch, autonomy=autonomy, allowance=allowance,
-                          resets_at="2026-11-17T16:20:00+00:00")
+    quiet = V.place_quiet(state, switch=switch, autonomy=autonomy, allowance=allowance, limit_usd=20.0)
     assert (quiet or {}).get("cause") == cause
     if quiet:
         assert quiet["word"] and quiet["note"] and quiet["door"] in ("consciousness", "costs")
 
 
-def test_the_quiet_note_says_what_it_does_here_now_and_until_when():
+def test_the_quiet_note_says_what_it_does_here_now_and_promises_only_waking():
+    # Off promises the wake, never an answer: a Silent (or Advises) place still sends nothing once it is on (review r1).
     off = V.place_quiet("silent", switch="off")
-    assert "answers nothing until you turn it on" in off["note"] and off["word"] == "Hears only · consciousness off"
+    assert off["note"] == "Consciousness is off: it only hears here, and nothing here wakes it until you turn it on."
+    assert off["word"] == "Hears only · consciousness off" and "answer" not in off["note"]
     assert "waits for you in its conversation here" in V.place_quiet("active", switch="on", autonomy="observe")["note"]
-    spent = V.place_quiet("active", switch="on", allowance="exhausted", resets_at="")
-    assert "until its reset" in spent["note"] and spent["door"] == "costs"
+    # A spent allowance names no clock (the oldest spend leaving the window need not leave room) and no read; a $0 one
+    # has no reset at all: only the owner opens it (review r1).
+    spent = V.place_quiet("active", switch="on", allowance="exhausted", limit_usd=3.0)
+    assert spent["note"] == ("Its allowance for the last 24 hours is spent: what arrives here waits until there is room "
+                             "in it again; Costs shows when.") and spent["door"] == "costs"
+    zero = V.place_quiet("active", switch="on", allowance="exhausted", limit_usd=0.0)
+    assert zero["note"] == "Its allowance is $0.00: what arrives here waits until you raise it in Costs."
+    assert zero["door"] == "costs"
 
 
 def test_connecting_a_place_says_the_truth_for_the_switch_as_it_stands():
@@ -193,3 +201,80 @@ def test_the_level_names_are_the_web_strips_own_words():
     source = (Path(__file__).resolve().parents[1] / "web/modules/consciousness_autonomy.js").read_text(encoding="utf-8")
     pairs = dict(re.findall(r"value: '(\w+)', label: '(\w+)'", source))
     assert pairs == V.LEVEL_NAMES
+
+
+def test_places_that_could_not_be_read_are_not_no_places(tmp_path, monkeypatch):
+    """A place store this read cannot open says so, and the app still asks (``places: None``); no places at all asks
+    nothing (``places: []``)."""
+    off, on = V.switch_preview("off", None), V.switch_preview("on", None)
+    assert off["places"] is None and "Its places will be heard, not answered." in off["lines"]
+    assert on["places"] is None and "Where it may answer could not be read." in on["lines"]
+    assert V.switch_preview("off", [])["places"] == [] and V.switch_preview("on", [])["places"] == []
+    assert "Where it may answer could not be read." not in V.switch_preview("on", [])["lines"]
+
+    import ouroboros.places as places_module
+
+    def unreadable(_root):
+        raise OSError("places.json unreadable")
+
+    monkeypatch.setattr(places_module, "place_records", unreadable)
+    assert V.read_switch_preview(tmp_path, "off")["places"] is None
+
+
+def test_the_preview_route_reads_the_turn_and_a_plain_read_stays_the_panel(tmp_path, monkeypatch):
+    """``GET /api/consciousness?switch=off|on`` answers the turn's preview (never cached), turning off with the state
+    line's running work; any other value is the panel's ordinary read."""
+    import asyncio
+    import json
+
+    from starlette.requests import Request
+
+    from ouroboros.gateway.state import api_consciousness
+
+    asked = []
+
+    def preview(root, to, running=None):
+        asked.append((root, to, running))
+        return {"to": to, "lines": [f"turn {to}"], "places": []}
+
+    monkeypatch.setattr(V, "read_switch_preview", preview)
+    line = {"status": "sleeping", "live_wake_task_id": "w1"}
+    app = SimpleNamespace(state=SimpleNamespace(drive_root=tmp_path, describe_bg_consciousness_state=lambda _on: line,
+                                                describe_consciousness=None))
+
+    def get(query):
+        return asyncio.run(api_consciousness(Request({"type": "http", "query_string": query, "app": app})))
+
+    off = get(b"switch=off")
+    assert json.loads(off.body) == {"to": "off", "lines": ["turn off"], "places": []}
+    assert off.headers["cache-control"] == "no-store"
+    on = get(b"switch=on")
+    assert json.loads(on.body)["to"] == "on"
+    assert asked == [(tmp_path, "off", line), (tmp_path, "on", None)]
+    assert get(b"switch=maybe").status_code == 503 and len(asked) == 2  # the panel's own read, no preview
+
+
+def test_recent_people_reads_at_most_its_cap_per_place_and_says_so(tmp_path, monkeypatch):
+    """A busy place is read to ``PEOPLE_ROW_CAP`` newest rows, and the count then says «at least» (``capped``); the
+    same raw id on two services is two people."""
+    from datetime import datetime
+
+    import ouroboros.place_arrivals as arrivals
+    from ouroboros import dialogue_store as ds
+
+    def arrival(pid, actor, ts, provider="slack"):
+        ds.append(tmp_path, "chat", {
+            "ts": ts, "direction": "in", "type": "place_arrival", "chat_id": 9, "text": "hi", "source": f"presence:{provider}",
+            "sender_label": actor, "sender_session_id": actor, "client_message_id": f"{pid}:{actor}:{ts}",
+            "place_id": pid, "transport": {"provider": provider, "actor": {"platform_actor_id": actor, "is_bot": False}}})
+
+    for minute in range(5):
+        arrival("busy", f"U{minute}", f"2026-11-17T10:0{minute}:00+00:00")
+    arrival("gh", "U0", "2026-11-17T10:00:00+00:00", provider="github")
+    now = datetime.fromisoformat("2026-11-17T12:00:00+00:00").timestamp()
+    monkeypatch.setattr(arrivals, "PEOPLE_ROW_CAP", 3)
+    people = arrivals.recent_people(tmp_path, ["busy", "gh"], days=7, now=now,
+                                    services={"busy": "slack", "gh": "github"})
+    assert people == {"by_place": {"busy": 3, "gh": 1}, "total": 4, "capped": True}
+    assert V._people_line(people) == "At least 4 people wrote there in the last 7 days."
+

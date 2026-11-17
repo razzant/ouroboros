@@ -69,20 +69,12 @@ def said_once(label: str) -> str:
 
 
 def switch_state(root) -> str:
-    """The switch as a place's quiet line names it: ``panic`` (a Panic waits, or Panic turned it off), ``off`` (the
-    owner's switch, or the mind's own stop), ``on``, ``unknown`` (a switch this read cannot know is no claim: intake
-    stays closed on it, the view says nothing)."""
-    from ouroboros.consciousness import PANIC_STOP, STOP_SOURCE_KEY, panic_blocks_wake
-    from supervisor.state import control_is, control_value, read_state
+    """The switch as a place's quiet line names it, from the reading intake folds (``presence_admission.switch_cause``:
+    ``on`` | ``off`` | ``panic`` | ``unknown``), so the words why a place is quiet follow its admission. A read that
+    fails is ``unknown``: no claim (intake stays closed on it, the view says nothing)."""
+    from ouroboros.presence_admission import switch_cause
     try:
-        if panic_blocks_wake(root):
-            return "panic"
-        projection = read_state(root).projection()
-        if control_is(projection, "bg_consciousness_enabled", True):
-            return "on"
-        if not control_value(projection, "bg_consciousness_enabled")[0]:
-            return "unknown"
-        return "panic" if projection.get(STOP_SOURCE_KEY) == PANIC_STOP else "off"
+        return switch_cause(root)
     except Exception:
         log.warning("Consciousness switch unreadable for the place views", exc_info=True)
         return "unknown"
@@ -133,7 +125,7 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     from ouroboros.runtime_limits import get_consciousness_autonomy
     quiet = place_quiet(place.state, switch=switch_state(root) if switch is None else switch,
                         autonomy=get_consciousness_autonomy(), allowance=str((allowance or {}).get("status") or ""),
-                        resets_at=str((allowance or {}).get("resets_at") or ""))
+                        limit_usd=(allowance or {}).get("limit_usd"))
     if quiet:
         result["quiet"] = quiet
     result.update(label=said_once(place.label or place.provider),

@@ -257,9 +257,10 @@ export async function readConsciousness(init = {}) {
  *  `{lines, places: [{id, label, state, people}]}` in the host's words; a failed read throws. */
 export async function readSwitchPreview(to, init = {}) {
     const data = object(await fetchJson(`/api/consciousness?switch=${encodeURIComponent(to)}`, { cache: 'no-store', ...init })) || {};
+    // `places: null` is the host's «could not be read»: the switch still asks, with the host's lines.
     return { lines: list(data.lines).map(text).filter(Boolean),
-        places: list(data.places).map((row) => ({ id: text(row?.place_id), label: text(row?.label), state: text(row?.state),
-            people: count(row?.people) })).filter((row) => row.id) };
+        places: data.places === null ? null : list(data.places).map((row) => ({ id: text(row?.place_id), label: text(row?.label),
+            state: text(row?.state), people: count(row?.people) })).filter((row) => row.id) };
 }
 
 /** The status the Dashboard falls back to when the full snapshot cannot be read: `/api/state`. */

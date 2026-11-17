@@ -1005,10 +1005,10 @@ def test_start_and_stop_flip_the_flag_and_stop_arms_a_graceful_stop_of_a_live_wa
 
 @pytest.mark.parametrize("stored,said", [
     ((("active", "active"), ("silent", "silent"), ("paused", "paused")),
-     "Consciousness off: Ouroboros acts only when you write to it. 2 places are heard, not answered, until you turn it on."),
-    ((("silent", "silent"),), "Consciousness off: Ouroboros acts only when you write to it. 1 place is heard, not answered, until you turn it on."),
+     "Consciousness off: Ouroboros acts only when you write to it. 2 places are heard, not answered."),
+    ((("silent", "silent"),), "Consciousness off: Ouroboros acts only when you write to it. 1 place is heard, not answered."),
     ((("paused", "paused"),), "Consciousness off: Ouroboros acts only when you write to it."),
-    (None, "Consciousness off: Ouroboros acts only when you write to it. Its places are heard, not answered, until you turn it on."),
+    (None, "Consciousness off: Ouroboros acts only when you write to it. Its places are heard, not answered."),
 ])
 def test_off_says_how_many_places_are_heard_until_it_is_turned_on(clock, monkeypatch, stored, said):
     """Owner 06.11: he pressed Off to stop one place's replies, and nothing said that every place that is not Paused

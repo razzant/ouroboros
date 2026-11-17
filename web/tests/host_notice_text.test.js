@@ -271,7 +271,7 @@ test('command, plan and paused-evolution producer variants are covered', () => {
 test('the switch-off row from /bg stop and from the mind\'s own toggle loses its mark like every consciousness notice', () => {
     // consciousness_view.off_sentence opens the row (owner 09.11); /bg (server.py) and the runtime control add «🧠 ».
     assert.ok(readFileSync(new URL('../../ouroboros/consciousness_view.py', import.meta.url), 'utf8').includes('Consciousness off: Ouroboros acts only when you write to it'));
-    const raw = '🧠 Consciousness off: Ouroboros acts only when you write to it. 2 places are heard, not answered, until you turn it on. Stopping now: its wake-up.';
+    const raw = '🧠 Consciousness off: Ouroboros acts only when you write to it. 2 places are heard, not answered. Stopping now: its wake-up.';
     for (const [path, type] of [['server.py', 'command_reply'], ['supervisor/events_runtime_controls.py', 'consciousness_notice']]) {
         assert.ok(readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8').includes('f"🧠 {result}'));
         assert.equal(hostNoticeDisplayText(raw, type), raw.slice('🧠 '.length));

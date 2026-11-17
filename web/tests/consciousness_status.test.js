@@ -128,6 +128,7 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
         const tabs = [];
         let reads = 0;
         let refreshed = 0;
+        let releaseRead = () => {};
         const status = createConsciousnessStatus({
             bar, ws: { send: (frame) => { sent.push(frame); return { status: 'sent' }; }, isConnected: () => true },
             openDashboardTab: (tab) => tabs.push(tab), refreshState: () => { refreshed += 1; },
@@ -138,7 +139,10 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
                 ] });
             },
             // The one switch with an install that has no place to name: no question, the same /bg (owner 15.11, 5A).
-            turn: (to, options) => turnConsciousness(to, { ...options, read: async () => ({ lines: [], places: [] }) }),
+            // Its read is held open once, to see the button say so while it reads.
+            turn: (to, options) => turnConsciousness(to, { ...options, read: () => new Promise((resolve) => {
+                releaseRead = () => resolve({ lines: [], places: [] });
+            }) }),
         });
         assert.equal(status.chip.hidden, true, 'nothing is said before the first answer');
         status.update({ accounting: { available: false } });
@@ -169,6 +173,10 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
 
         toggle.click();
         await new Promise((resolve) => setTimeout(resolve, 0));  // the switch reads what it would change first
+        assert.deepEqual([toggle.textContent, toggle.disabled, sent.length], ['Reading…', true, 0],
+            'a read that takes seconds is never a silent pause');
+        releaseRead();
+        await new Promise((resolve) => setTimeout(resolve, 0));
         assert.deepEqual(sent, [{ type: 'command', cmd: '/bg stop', ui_control: { name: 'consciousness_toggle' } }],
             'Turn off is the Dashboard\'s own command, not typed owner text');
         assert.equal(toggle.disabled, true, 'it waits for the readback');
