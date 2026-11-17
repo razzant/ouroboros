@@ -400,9 +400,9 @@ def test_bodies_pay_the_excess_memory_the_slack_and_books_wait_for_a_further_ref
     second pass, after a further refusal."""
     import ouroboros.loop as loop
 
-    calls, sizes, floors = [], [], []
-    monkeypatch.setattr(lmc, "_coarsen_memory_view", lambda _ctx, _fit, *, saving=None, slack=0, telling_floor=False: (
-        calls.append(("floor", saving, slack)) or floors.append(telling_floor) or True))
+    calls, sizes = [], []
+    monkeypatch.setattr(lmc, "_coarsen_memory_view", lambda _ctx, _fit, *, saving=None, slack=0: (
+        calls.append(("floor", saving, slack)) or True))
     monkeypatch.setattr(lmc, "_reproject_actual_overflow_low",
                         lambda ctx: calls.append(("books",)) or setattr(ctx, "active_context_mode", "low"))
     monkeypatch.setattr(loop, "_measure_round_main_fit", lambda _ctx, **_kw: _fit(sizes.pop(0)))
@@ -436,7 +436,6 @@ def test_bodies_pay_the_excess_memory_the_slack_and_books_wait_for_a_further_ref
     known = SimpleNamespace(measurement=SimpleNamespace(**{**vars(unsized.measurement), "capacity_deficit_tokens": 18_887}))
     assert lmc._apply_refusal_pass(_ctx(), first, known, None) is True
     assert calls[-1] == ("floor", 18_887, 0)  # no target, but a known window's deficit sizes memory (no slack here)
-    assert floors == [True, True, False, True]  # the first pass stops a Max view at my tellings, memory's rest not (4A)
 
 
 def test_a_failed_candidates_walk_keeps_the_rounds_refusal_and_the_conversation_facts():

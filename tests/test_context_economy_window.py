@@ -258,25 +258,6 @@ def _long_tail(plan):
         {"role": "tool", "tool_call_id": "big", "content": _LONG_TAIL_CONTENT}]  # ~150K: past the Low target
 
 
-def test_a_rebind_that_narrows_a_shown_view_keeps_the_telling_floor(tmp_path, monkeypatch):
-    """The one order (owner 15.11.2026, 4A; consilium 17.11): a rebind that narrows a shown Max view for a smaller
-    window keeps the floor of a refusal's first pass, memory to my tellings, then the books to chapter maps, then
-    memory's rest (that walk: ``test_memory_pays_down_to_its_tellings_and_the_books_go_before_anything_below``)."""
-    from ouroboros import context_fit
-    from tests.test_memory_view_modes import _built
-
-    seen, real = [], context_fit.ContextFitPlan.reproject_for_route
-
-    def spy(self, **kwargs):
-        seen.append(kwargs.get("telling_floor", False))
-        return real(self, **kwargs)
-
-    monkeypatch.setattr(context_fit.ContextFitPlan, "reproject_for_route", spy)
-    _core, plan = _built(tmp_path / "w", monkeypatch)
-    low = plan(1_000_000, preferred="low", tool_schemas=[])
-    _rebind(monkeypatch, tmp_path / "a", low, _long_tail(low), window=400_000, ratio=1.2)
-    assert seen and seen[-1] is True
-
 
 def test_a_rebind_keeps_the_sent_view_on_a_smaller_fitting_window_and_unfolds_nothing(tmp_path, monkeypatch):
     from tests.test_memory_view_modes import _built
@@ -438,10 +419,7 @@ def test_a_route_handover_fits_the_view_in_the_effort_its_next_send_carries(tmp_
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path / "evidence")
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     monkeypatch.setattr(route_choice, "round_route", lambda *_a, **_kw: None)  # no Settings follow
-    # Memory with detail above my tellings (other conversations): a narrowing pays there and Max keeps its books;
-    # below a telling the books would go first (owner 15.11.2026, 4A), which this case does not test.
-    snap = syn.snapshot(room_facts=syn.room("1"), conversations=[syn.conversation(i, words=10) for i in range(12)],
-                        story=syn.pages(10, 2_000))
+    snap = syn.snapshot(room_facts=syn.room("1"), conversations=[], story=syn.pages(10, 2_000))
     core = cf.ContextCore("Core", "BIBLE", "# Architecture\n\n" + "Whole source book. " * 2_000, "", "Identity", "Facts",
                           json.dumps("Assignment. " + "Retained evidence. " * 14_000), False,
                           memory_view_json=mv.snapshot_json(snap))
@@ -1079,13 +1057,10 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
     assert tool_ctx.memory_view_facts is kept and trace[VIEW_TRACE_KEY] == kept
 
 
-@pytest.mark.parametrize("past,books", [(500, "whole"), (20_000, "maps")])
-def test_memory_pays_down_to_its_tellings_and_the_books_go_before_anything_below(main_call, monkeypatch, tmp_path,
-                                                                                past, books):
-    """06.11 and the one order of 15.11 (4A; consilium 17.11): when memory's detail down to its tellings can pay
-    what the owner's words passed the window's send ceiling by (`past` the stated number less the reply floor),
-    memory alone narrows and Max keeps its whole books (29.10); when only memory below a telling could, the books
-    go to chapter maps first, in the same first pass, and the work stays Max with chapter maps."""
+def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(main_call, monkeypatch, tmp_path):
+    """06.11, the other side of the low fold below: when memory's detail can pay what the owner's words passed the
+    window's send ceiling by (20,000 past the stated number less the reply floor), memory alone narrows and Max
+    keeps its whole books (29.10)."""
     from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
     from ouroboros import memory_floor as mf
     from ouroboros.memory_view import snapshot_json
@@ -1103,17 +1078,15 @@ def test_memory_pays_down_to_its_tellings_and_the_books_go_before_anything_below
     windows["account-a"] = window = math.ceil((full + roomy.output_reserve_tokens) * 4 / 3) + 4_000
     built = plan(window)
     words = "Owner, while you worked: keep the old API alive. "
-    owner = {"role": "user", "content": words * math.ceil((window - full - NANO_MIN_HEADROOM_TOKENS + past) * 4 / len(words))}
+    owner = {"role": "user", "content": words * math.ceil((window - full - NANO_MIN_HEADROOM_TOKENS + 20_000) * 4 / len(words))}
     ctx.messages[:] = [*built.messages_for("max"), owner]
     gateway.results = [_answer(ROUTE, {"role": "assistant", "content": "Kept."})]
     gateway.dispatch = ["response_received"]
     tools._ctx.memory_view_facts = mf.trace_facts(built.projection("max").memory_facts)
     text, _usage, _trace = _run(ctx, tools, events, built)
     rows = _drained(events)
-    assert text == "Kept." and len(gateway.creates) == 1
-    assert tools._ctx.active_context_mode == ("max" if books == "whole" else "low")  # "low": Max's chapter-map frame
-    assert [(row.get("effective_mode"), row.get("books")) for row in rows
-            if row.get("checkpoint_kind") == "context_memory_coarsened"] == [("max", books)]
+    assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "max"
+    assert [row.get("effective_mode") for row in rows if row.get("checkpoint_kind") == "context_memory_coarsened"] == ["max"]
     assert "context_fit_low_retry" not in [row.get("checkpoint_kind") for row in rows]
 
 

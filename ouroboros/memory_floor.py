@@ -737,7 +737,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                          kept: Optional[mv.FloorLevel] = None, saving: int = 0, boundary_tokens: Optional[int] = None,
                          working_reserve_tokens: Optional[int] = None,
                          measure_text: Optional[Callable[[str, str], int]] = None,
-                         start_work: bool = False, telling_floor: bool = False,
+                         start_work: bool = False,
                          max_room: Optional[Mapping[str, Any]] = None, stated_window_tokens: Optional[int] = None,
                          shortest: bool = False, level: Optional[mv.FloorLevel] = None) -> ViewFit:
     """One mode's projection, the floor decided once.
@@ -753,9 +753,6 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     ``shortest``: where this walk ends when only uncovered owner rows are left to address, with its
     completed receipt -- what a start's host walk judges beside the window (``_host_steps``).
     ``level``: such a walk's level again, without walking, its receipt priced beside this request's host forms.
-    ``telling_floor``: a shown Max view narrowed by a refusal's first pass stops at my tellings too, so the books
-    go to chapter maps before memory goes below a telling (owner 15.11.2026, 4A; consilium 17.11.2026); a later
-    pass takes memory's rest.
     A level is priced from the snapshot's pieces, never by drawing it; ``measure_text(story_chars, room_chars)`` prices
     the two memory texts of a whole request (by default their own tokens).
     """
@@ -774,7 +771,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     # start bound may. A miss of the target is its own fact. Nano's number still governs all memory (owner 11.10, 13.10).
     binds = kept is None and target is not None and owner_mode == "low" and (window is None or target < window)
     floor, keeps = ((TARGET_FLOOR, TARGET_KEEPS) if binds else (TELLING_STAGES, frozenset())  # the one order (4A)
-                    if mode == "max" and (kept is None or start_work or telling_floor) else (None, frozenset()))
+                    if mode == "max" and (kept is None or start_work) else (None, frozenset()))
     size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
     room_bound = allowances["window"] if binds else allowances["margin"]  # a target's miss is its own fact, below
     uncovered = uncovered_owner_rows(snapshot)

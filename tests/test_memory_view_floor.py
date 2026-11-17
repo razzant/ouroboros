@@ -553,16 +553,14 @@ def test_lows_target_never_counts_the_windows_cut_of_my_humans_words():
 
 
 def test_a_max_view_keeps_my_humans_words_while_its_books_are_whole():
-    """The one order (owner 15.11.2026, 4A; consilium 17.11): a Max view floored at my tellings, at a start or in a
-    refusal's first pass, never turns my human's words into addresses beside whole books; when the window cannot hold
-    it the books go to chapter maps first, and only that frame lets the window take them."""
+    """The one order at a start (owner 15.11.2026, 4A; consilium 17.11): a Max start floored at my tellings never turns
+    my human's words into addresses beside whole books; when the window cannot hold it the books go to chapter maps
+    first, and only that frame lets the window take them."""
     rows = [{**syn.spoken(i, "human", 8_000), "owner_side": True} for i in range(3)]
     snap = syn.snapshot(room_facts=syn.room("1", lane1=rows))
     frame = dict(window_tokens=80_000, known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=10_000)
     start = mf.render_view_for_mode(snap, mode="max", owner_mode="max", **frame)
     assert "F7" not in start.facts["floor"]["steps"]
-    held = mf.render_view_for_mode(snap, mode="max", owner_mode="max", kept=mv.FULL_VIEW, telling_floor=True, **frame)
-    assert "F7" not in held.facts["floor"]["steps"]
     maps = mf.render_view_for_mode(snap, mode="low", owner_mode="max", lowered_from="max", **frame)
     assert maps.facts["floor"]["steps"].get("F7")  # the chapter-map frame: the window may take the oldest
 

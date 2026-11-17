@@ -139,8 +139,7 @@ class ContextFitPlan:
                             refused_tokens: int = 0, select_mode: Optional[str] = None,
                             measured_input_tokens: Optional[int] = None, start_work: bool = False,
                             slack_tokens: int = 0, room_if_narrowed: bool = False,
-                            admitted: bool = False, reasoning_effort: str = "",
-                            telling_floor: bool = False) -> "ContextFitPlan":
+                            admitted: bool = False, reasoning_effort: str = "") -> "ContextFitPlan":
         """Fit shown bytes; the prepared envelope's raw estimate includes its signed size difference.
 
         The measurement belongs to this candidate, includes tools and excludes the reply; withholding an image can shrink it.
@@ -157,7 +156,6 @@ class ContextFitPlan:
         forms pay; the mode and a whole-or-outline section pay the measured excess alone. A view that fits is never
         touched, at a restore and on a place that holds no copy of it too: nothing is taken on the guess that the
         work will reach its wall (owner, 30 Sep 2026). ``start_work`` is a first send's own room and Max decision (voice).
-        ``telling_floor``: a refusal's first memory pass, which stops a Max view at my tellings (``memory_floor``).
         """
         from dataclasses import replace
 
@@ -214,7 +212,7 @@ class ContextFitPlan:
                     window_tokens=frame, known_window=known_window, output_reserve=output_reserve, ratio=ratio,
                     window_record=own, admitted=admitted,  # each mode's frame is read off the window (its reserve differs)
                     envelope_overhead_tokens=overhead, provider=self.provider, reasoning_effort=reasoning_effort,
-                    start_work=start_work, telling_floor=telling_floor,
+                    start_work=start_work,
                     resident=True, current_messages=current_messages,  # actual running tail, enable_tools included
                     kept={mode: memory_floor.kept_level(snapshot, self.projection(mode).memory_facts) if snapshot else None
                           for mode in memory_floor.MODES},
@@ -864,7 +862,6 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                       select: Optional[str] = None, kept_sections: Optional[Mapping[str, Iterable[Mapping]]] = None,
                       working_reserve_tokens: Optional[int] = None, window_record: Optional[WindowRecord] = None, work_room_levels: int = 1,
                       envelope_overhead_tokens: int = 0, start_work: bool = False, slack: int = 0, retain: Any = None,
-                      telling_floor: bool = False,
                       admitted: bool = False, provider: str = "", reasoning_effort: str = "",
                       sized: Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]] = None,
                       nano_base: Optional[Tuple[str, ...]] = None,
@@ -939,7 +936,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             known_window=known_window, output_reserve=output_reserve, ratio=ratio, non_memory_tokens=fixed,
             # The Max room as the receipt settles it (``with_max_room`` decides its cause), so the floor note of a
             # start memory lowered names what holds the room.
-            lowered_from=preferred if selected != preferred else None, start_work=start_work, telling_floor=telling_floor,
+            lowered_from=preferred if selected != preferred else None, start_work=start_work,
             max_room=floor.with_max_room({}, room_fact, selected).get("max_room"),
             tool_names=None if tool_schemas is None else sent.chosen, working_reserve_tokens=working_reserve_tokens,
             stated_window_tokens=stated.get(selected),  # the note names the window as stated, never the admitted frame
