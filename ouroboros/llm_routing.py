@@ -32,6 +32,7 @@ from ouroboros.provider_models import (
     resolve_zai_base_url,
     normalize_anthropic_model_id,
     normalize_model_identity,
+    openai_api_surface,
     parse_claudexor_model,
     parse_model_route,
     resolve_minimax_base_url,
@@ -147,6 +148,20 @@ def resolve_target(model: str, settings: Optional[Dict[str, Any]] = None, *,
 _DIRECT_LANE = {"supports_openrouter_extensions": False, "supports_generation_cost": False}
 
 
+def _create_fn(client: Any, target: Dict[str, Any]) -> Any:
+    """The SDK method this target's API takes: Responses for a connection on it, else Chat Completions."""
+    from ouroboros.openai_responses import responses_route
+
+    return client.responses.create if responses_route(target) else client.chat.completions.create
+
+
+def _reply_dict(response: Any, target: Dict[str, Any]) -> Dict[str, Any]:
+    """The reply body the normalizer reads; a Responses reply keeps exactly the fields its wire carried."""
+    from ouroboros.openai_responses import response_body, responses_route
+
+    return response_body(response) if responses_route(target) else response.model_dump()
+
+
 def _remote_http_client(target: Dict[str, Any], *, async_client: bool = False) -> Tuple[Any, Dict[str, str]]:
     """The keepalive client and default headers for ``target``'s SDK client.
 
@@ -169,8 +184,16 @@ def _kind_target(provider: str, get: Any, connection: str, configured: Any, *,
                  api_key_override: Optional[str], openrouter_base_url: str) -> Dict[str, Any]:
     """One kind's transport facts from its connection's fields (``get``)."""
     if provider == "openai":
+        # The connection's own API (``api_surface``): a never-chosen one keeps Chat Completions; an unreadable
+        # value refuses before any send ($0), never guessed from the model and never retried on the other API.
+        try:
+            surface = openai_api_surface(get("api_surface", ""))
+        except ValueError:
+            from ouroboros.llm_attempt import ConnectionUnavailable
+
+            raise ConnectionUnavailable(f"openai@{connection}" if connection else "openai", "invalid_api_surface")
         return {"api_key": get("api_key", ""), "base_url": "https://api.openai.com/v1", "default_headers": {},
-                **_DIRECT_LANE}
+                "api_surface": surface, **_DIRECT_LANE}
     if provider == "anthropic":
         return {"api_key": get("api_key", ""), "base_url": "https://api.anthropic.com/v1", "default_headers": {},
                 "contract_headers": {"anthropic-version": "2023-06-01"}, **_DIRECT_LANE}
@@ -339,13 +362,13 @@ class _ProviderRoutingMixin:
                     kwargs["timeout"] = self._no_proxy_timeout(timeout)
                 prompt_cache_ttl = self._normalize_payload_cache_ttl(target, kwargs)
                 resp = self._create_chat_completion_with_retries(
-                    _oa_client.chat.completions.create,
+                    _create_fn(_oa_client, target),
                     kwargs,
                     target,
                 )
                 # Skip cost fetch here; it would re-enter OS proxy lookup.
                 return self._normalize_remote_response(
-                    resp.model_dump(),
+                    _reply_dict(resp, target),
                     target,
                     skip_cost_fetch=True,
                     prompt_cache_ttl=prompt_cache_ttl,
@@ -375,12 +398,12 @@ class _ProviderRoutingMixin:
             kwargs["timeout"] = getattr(client, "timeout", None)
         prompt_cache_ttl = self._normalize_payload_cache_ttl(target, kwargs)
         resp = self._create_chat_completion_with_retries(
-            client.chat.completions.create,
+            _create_fn(client, target),
             kwargs,
             target,
         )
         return self._normalize_remote_response(
-            resp.model_dump(),
+            _reply_dict(resp, target),
             target,
             prompt_cache_ttl=prompt_cache_ttl,
             wire_completion=resp,

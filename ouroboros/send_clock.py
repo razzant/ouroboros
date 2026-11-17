@@ -185,14 +185,22 @@ def _tail_note(messages: List[Any], notes: List[str]) -> Tuple[Optional[str], Li
     return None, rest
 
 
+def _rows_key(payload: Any) -> str:
+    """Where a physical body keeps its conversation: ``messages`` (Chat, Messages) or Responses ``input``."""
+    if isinstance(payload, dict) and not isinstance(payload.get("messages"), list) and isinstance(payload.get("input"), list):
+        return "input"
+    return "messages"
+
+
 def split_clock_note(payload: Any) -> Tuple[Optional[str], Any]:
     """``(line, payload without it)`` for a line this call stamped, else ``(None, payload)``."""
     scope = _SCOPE.get()
-    messages = payload.get("messages") if isinstance(payload, dict) else None
+    key = _rows_key(payload)
+    messages = payload.get(key) if isinstance(payload, dict) else None
     if scope is None or not isinstance(messages, list):
         return None, payload
     note, rest = _tail_note(messages, scope.notes)
-    return (None, payload) if note is None else (note, {**payload, "messages": rest})
+    return (None, payload) if note is None else (note, {**payload, key: rest})
 
 
 def record_candidate(raw_sha256: Optional[str], note: Optional[str]) -> None:
@@ -212,7 +220,8 @@ def stamp_clock_note(payload: Dict[str, Any], *, blocks: bool = False) -> Dict[s
     input payload is not mutated.
     """
     scope = _SCOPE.get()
-    messages = payload.get("messages") if isinstance(payload, dict) else None
+    key = _rows_key(payload)
+    messages = payload.get(key) if isinstance(payload, dict) else None
     if scope is None or scope.policy is None or not isinstance(messages, list):
         return payload
     _found, rest = _tail_note(messages, scope.notes)
@@ -223,5 +232,5 @@ def stamp_clock_note(payload: Dict[str, Any], *, blocks: bool = False) -> Dict[s
             and isinstance(last.get("content"), list)):
         rest[-1] = {**last, "content": [*last["content"], {"type": "text", "text": note}]}
     else:
-        rest.append({"role": "user", "content": note})
-    return {**payload, "messages": rest}
+        rest.append({"role": "user", "content": note})  # a Responses ``input`` takes the same user message
+    return {**payload, key: rest}

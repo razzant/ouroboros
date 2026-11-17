@@ -835,20 +835,32 @@ def _carrying(key: str, base: list) -> list:
 
 
 @pytest.mark.parametrize("key", sorted(HOST_ONLY_MESSAGE_KEYS))
-def test_no_send_path_carries_a_host_only_field(key):
+def test_no_send_path_carries_a_host_only_field(key, monkeypatch):
     from ouroboros import llm_claudexor
+    from tests.test_openai_responses import MODEL, _body, _install, _message
 
     assert len(_SEND_PATH_CASES) == 6
+    ordinary = json.dumps({"nested": [{key: "USER-DATA-MARK"}]})
+    user_data = [{"role": "user", "content": ordinary}]
     wires = {}
     for case in _SEND_PATH_CASES:
         spec = copy.deepcopy(case["spec"])
-        spec["call"]["kwargs"]["messages"] = _carrying(key, spec["call"]["kwargs"]["messages"])
+        spec["call"]["kwargs"]["messages"] = _carrying(key, spec["call"]["kwargs"]["messages"] + user_data)
         observed = _observe(spec)
         assert observed.get("sends") and "raised" not in observed, case["id"]
         wires[case["id"]] = json.dumps(observed["sends"], ensure_ascii=False)
-    claudexor = _carrying(key, [{"role": "user", "content": "Hi."}])
+    claudexor = _carrying(key, [{"role": "user", "content": "Hi."}] + user_data)
     wires["claudexor"] = json.dumps(llm_claudexor._request(
         {"source": "codex", "resolved_model": "fixture"}, claudexor, None, {}))
+    client = LLMClient(api_key="openai-fixture-key")
+    sent = _install(monkeypatch, client, [_body(_message("Done.", "final_answer"))])
+    messages = _carrying(key, user_data)
+    original = copy.deepcopy(messages)
+    client.chat(messages=messages, model=MODEL, tools=[])
+    assert len(sent) == 1 and sent[0]["input"]  # the actual responses.create input, past the shared dispatch
+    assert messages == original
+    wires["openai.responses"] = json.dumps(sent[0]["input"], ensure_ascii=False)
     for path, wire in wires.items():
         assert "HOST-ONLY-MARK" not in wire, (key, path)
         assert key == "cache_control" or f'"{key}"' not in wire, (key, path)  # a cache mark is translated, not carried
+        assert json.dumps(ordinary)[1:-1] in wire, (key, path)  # same names in opaque user JSON stay byte-identical

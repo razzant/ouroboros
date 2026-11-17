@@ -181,10 +181,10 @@ def _api_route_model(row: ConfiguredReviewerSlot) -> Tuple[str, Optional[str]]:
         return "", configured
     if configured.startswith("openai/"):
         if provider_has_credentials("openai") and not legacy_openai_base():
-            from ouroboros.provider_models import OPENAI_DIRECT_DEFAULTS
+            from ouroboros.provider_connections import direct_provider_defaults
 
-            slug = configured.split("/", 1)[1]
-            return "", (OPENAI_DIRECT_DEFAULTS["deep_self_review"] if slug.endswith("-pro")
+            slug = configured.split("/", 1)[1]  # the built-in connection's own profile names its default
+            return "", (direct_provider_defaults("openai")["deep_self_review"] if slug.endswith("-pro")
                         else "openai::" + slug)
         return f"no OpenRouter or direct OpenAI credentials for {configured}", None
     return f"no {provider_for_model(configured)} credentials for {configured}", None

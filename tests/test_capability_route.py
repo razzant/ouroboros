@@ -163,8 +163,9 @@ def test_main_probe_does_not_resolve_again_after_metadata_returns(tmp_path, monk
         'OPENAI_API_KEY': 'fixture'}, {'OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_BASE_URL', 'OPENAI_API_KEY'}),
     ('openai-compatible::fixture', {'OPENAI_COMPATIBLE_BASE_URL': 'http://127.0.0.1:18080/v1',
         'OPENAI_COMPATIBLE_API_KEY': 'fixture'}, {'OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_COMPATIBLE_API_KEY'}),
+    # Direct OpenAI dispatch reads its key and its connection's API (``OPENAI_API_SURFACE``: Chat or Responses body).
     ('openai::fixture', {'OPENAI_BASE_URL': 'http://127.0.0.1:18080/v1',
-        'OPENAI_API_KEY': 'fixture'}, {'OPENAI_API_KEY'}),
+        'OPENAI_API_KEY': 'fixture'}, {'OPENAI_API_KEY', 'OPENAI_API_SURFACE'}),
 ])
 def test_target_snapshot_preserves_the_dispatch_read_observer(model, settings, fields):
     from ouroboros.deployment_policy import _Reads

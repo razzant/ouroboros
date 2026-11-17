@@ -683,3 +683,187 @@ def test_other_finishes_leave_text_the_plain_final(tmp_path, loop_env, no_sleep,
     result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
     assert (result, llm.calls) == (CUT_TEXT, 1)
     assert recovery.UNFINISHED_KEY not in usage and "forced_finalization" not in trace
+
+
+# ------------------------------------------------------------------ provider-stated usability (Responses terminals)
+
+COMMENTARY = {"response_finish_reason": "commentary", "response_status": "completed"}
+
+
+def _reply(text, facts, **message):
+    return {"role": "assistant", "content": text, **message}, {"prompt_tokens": 9, "completion_tokens": 7, "cost": 0.0,
+                                                               **facts}
+
+
+def test_completed_commentary_continues_ordinary_rounds_until_the_final(tmp_path, loop_env, no_sleep):
+    """Healthy intermediate progress is no cut and no episode: each commentary is kept as written (a progress
+    update, no host notice, no cap) and the next send is an ordinary round; two in a row reach the final."""
+    llm, notes = _ScriptedLLM(_reply("Reading the files first.", COMMENTARY), _reply("Still comparing.", COMMENTARY),
+                              OK_RESPONSE), []
+    result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, notes))
+    assert result == "done" and llm.calls == 3
+    third = llm.requests[2]["messages"]
+    kept = [row["content"] for row in third if row.get("role") == "assistant"]
+    assert kept == ["Reading the files first.", "Still comparing."]
+    assert not [row for row in third if row.get("role") == "user" and "[SYSTEM NOTICE]" in str(row.get("content"))]
+    assert llm.requests[1]["messages"][:len(llm.requests[0]["messages"])] == llm.requests[0]["messages"]
+    assert {"Reading the files first.", "Still comparing."} <= {str(note).strip() for note in notes}
+    assert recovery.UNFINISHED_KEY not in usage and "forced_finalization" not in trace
+    assert [row["round"] for row in _events(tmp_path, "llm_round")] == [1, 2, 3]
+
+
+
+def test_an_owner_stop_after_commentary_ends_the_turn_with_no_further_call(tmp_path, loop_env, no_sleep):
+    """Commentary continues as an ordinary round, so the round top's existing controls still decide first: the
+    owner's Stop arriving after a commentary ends the turn at that boundary with zero further model calls and no
+    tool — the commentary stays a kept progress update, never the delivered answer, and no cut episode opens."""
+    from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
+    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+
+    class _StopAfterCommentary(_ScriptedLLM):
+        def chat(self, **kwargs):
+            reply = super().chat(**kwargs)
+            if self.calls == 1:  # the owner presses Stop while the commentary round is answering
+                assert write_owner_message(tmp_path, REASON_OWNER_STOPPED_DIRECT_TURN, "t-exhaust-loop",
+                                           kind=KIND_FINALIZE_NOW)
+            return reply
+
+    from ouroboros.outcomes import derive_loop_outcome
+
+    words = "Reading the files first.\nFINAL ANSWER: draft"  # a marker inside progress is no answer
+    llm, notes = _StopAfterCommentary(_reply(words, COMMENTARY), OK_RESPONSE), []
+    kwargs = _loop_kwargs(tmp_path, llm, notes)
+    result, usage, trace = run_llm_loop(**kwargs)
+    assert llm.calls == 1 and "Reading the files first." not in str(result)
+    assert usage["reason_code"] == REASON_OWNER_REQUESTED_FINALIZATION and kwargs["tools"]._ctx._skip_post_task_synthesis
+    assert {"role": "assistant", "content": words} in kwargs["tools"]._ctx.messages
+    assert words in {str(note).strip() for note in notes}
+    assert "best_valid_final_answer" not in trace and derive_loop_outcome(result, usage, trace)["final_answer"] == ""
+    assert recovery.UNFINISHED_KEY not in usage and recovery.KEY not in usage
+    assert [row["round"] for row in _events(tmp_path, "llm_round")] == [1]  # the stopped boundary bought no round
+
+
+@pytest.mark.parametrize(("facts", "latched"), [
+    (COMMENTARY, ""),
+    ({"response_finish_reason": "max_output_tokens", "response_status": "incomplete"}, ""),
+    ({"response_finish_reason": "length"}, ""),
+    ({"response_finish_reason": "stop", "response_status": "completed"}, "draft"),  # an ordinary final still latches
+])
+def test_only_a_reply_eligible_as_a_final_latches_its_marker(tmp_path, loop_env, no_sleep, facts, latched):
+    """The FINAL ANSWER latch is what a deadline, a budget end or a Stop publishes when the last text names none
+    (``outcomes.selected_final_answer``, ``loop_budget``): a commentary or a cut keeps its words as progress and
+    latches nothing, so a later marker-less final publishes no draft; a completed final latches as before."""
+    from ouroboros.outcomes import derive_loop_outcome
+
+    llm = _ScriptedLLM(_reply("Checked the inputs.\nFINAL ANSWER: draft", facts), OK_RESPONSE)
+    result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
+    assert (trace.get("best_valid_final_answer") or "") == latched
+    if latched:
+        assert llm.calls == 1 and derive_loop_outcome(result, usage, trace)["final_answer"] == latched
+    else:
+        assert (result, llm.calls) == ("done", 2) and derive_loop_outcome(result, usage, trace)["final_answer"] == ""
+
+
+@pytest.mark.parametrize(("boundary", "reason"), [("deadline", "deadline_local"), ("budget", "budget_exhausted")])
+def test_a_commentary_marker_is_no_answer_at_a_deadline_or_a_budget_end(tmp_path, loop_env, no_sleep, monkeypatch,
+                                                                       boundary, reason):
+    """The rails that publish the latch with no further send: the task deadline passes while a completed commentary
+    carrying a FINAL ANSWER line answers (``_forced_final_answer``'s elapsed window), or money refuses the next
+    dispatch before it is sent (``_handle_budget_exceeded``, whose latched fallback once returned the draft). Either
+    ends the work on that one provider send, and neither its result, the selected answer nor the latch holds it."""
+    import datetime
+
+    import ouroboros.usage_accounting as accounting
+    from ouroboros.outcomes import derive_loop_outcome, selected_final_answer
+
+    words = "Reading the files first.\nFINAL ANSWER: draft"
+    kwargs = _loop_kwargs(tmp_path, None, [])
+    tool_ctx = kwargs["tools"]._ctx
+
+    class _Boundary(_ScriptedLLM):
+        refused = 0
+
+        def chat(self, **chat_kwargs):
+            if self.calls and boundary == "budget":  # admission refuses the next dispatch: nothing is sent
+                self.refused += 1
+                raise accounting.BudgetExceeded("root budget closed", limit_scope="root", root_task_id="t-exhaust-loop")
+            reply = super().chat(**chat_kwargs)
+            if boundary == "deadline":  # the deadline passes while this commentary round is answering
+                passed = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=5)
+                tool_ctx.task_metadata = {**tool_ctx.task_metadata, "deadline_at": passed.isoformat()}
+            return reply
+
+    # The ledger's own fact that the commentary was a physical send (the scripted client writes none), as the
+    # budget rail's existing tests state it; with none, a refused first dispatch is replay-safe and raises instead.
+    monkeypatch.setattr(accounting, "usage_breakdown", lambda *_a, **_k: {"physical_calls": 1, "integrity_degraded": False})
+    llm = kwargs["llm"] = _Boundary(_reply(words, COMMENTARY), OK_RESPONSE)
+    result, usage, trace = run_llm_loop(**kwargs)
+    assert llm.calls == 1 and llm.refused == (boundary == "budget") and usage["reason_code"] == reason
+    assert {"role": "assistant", "content": words} in tool_ctx.messages  # kept as progress, never delivered
+    assert "draft" not in str(result) and "best_valid_final_answer" not in trace
+    assert selected_final_answer(result, trace) == "" and derive_loop_outcome(result, usage, trace)["final_answer"] == ""
+
+
+@pytest.mark.parametrize("reason", ["max_messages", "steered", None])
+def test_an_unsuitable_incomplete_terminal_with_text_or_a_call_is_never_a_result(tmp_path, loop_env, no_sleep, reason):
+    """``status=incomplete`` for a reason other than the output limit makes neither its text (valid JSON here) nor
+    its call a result: it reads as a reply without usable output, so the round's ordinary retry asks again and
+    nothing of it is delivered, kept or executed."""
+    unusable = _reply('{"verdict": "PASS"}', {"response_finish_reason": reason, "response_status": "incomplete"},
+                      tool_calls=[{"id": "c1", "type": "function", "function": {"name": "shell", "arguments": "{}"}}])
+    llm = _ScriptedLLM(unusable, OK_RESPONSE)
+    result, _usage, _trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
+    assert result == "done" and llm.calls == 2
+    assert all(row.get("role") not in {"assistant", "tool"} for row in llm.requests[1]["messages"])
+    events = _events(tmp_path, "llm_empty_response") + _events(tmp_path, "provider_incomplete_response")
+    assert [row["finish_reason"] for row in events] == [reason]
+
+
+def test_an_incomplete_content_filter_with_text_is_the_providers_refusal(tmp_path, no_sleep, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "")
+    cut = _reply('{"verdict": "PASS"}', {"response_finish_reason": "content_filter", "response_status": "incomplete"})
+    llm = _ScriptedLLM(cut, ({"role": "assistant", "content": "summary"}, {"prompt_tokens": 1}))
+    result, usage, _trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
+    assert "PASS" not in str(result) and "PASS" not in json.dumps(llm.requests[-1]["messages"])
+    assert [row["finish_reason"] for row in _events(tmp_path, "provider_content_refusal")] == ["content_filter"]
+    assert usage["terminal_provider_notice"]  # the round ended on the provider's refusal, said as such
+
+
+@pytest.mark.parametrize("preamble", [False, True])
+def test_a_completed_responses_refusal_is_the_providers_refusal_sent_once(tmp_path, no_sleep, preamble):
+    """A completed Response carrying the model's typed refusal, alone or after a commentary preamble, reaches the
+    round as the provider's content refusal through the real adapter: one send, its own event in its own words,
+    never a retried empty reply nor intermediate progress."""
+    from tests.test_openai_responses import REFUSAL, _body, _message, _normalize
+
+    msg, usage = _normalize(_body(*([_message("Let me look first.", "commentary")] if preamble else []), REFUSAL))
+    llm, totals = _ScriptedLLM((msg, usage), OK_RESPONSE), {}
+    assert _call(llm, tmp_path, totals)[0] is None
+    assert llm.calls == 1 and no_sleep == [] and _events(tmp_path, "llm_empty_response") == []
+    [row] = _events(tmp_path, "provider_content_refusal")
+    assert (row["finish_reason"], row["provider_message"]) == ("refusal", REFUSAL["content"][0]["refusal"])
+    assert totals["_last_llm_error_kind"] == "content_filter" and totals["reason_code"] == "provider_content_refusal"
+
+
+def test_an_output_limit_incomplete_keeps_the_existing_cut_recovery(tmp_path, loop_env, no_sleep):
+    cut = _reply(CUT_TEXT, {"response_finish_reason": "max_output_tokens", "response_status": "incomplete"})
+    llm = _ScriptedLLM(cut, OK_RESPONSE)
+    result, usage, _trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
+    assert result == "done" and llm.calls == 2
+    second = llm.requests[1]["messages"]
+    kept = second.index({"role": "assistant", "content": CUT_TEXT})
+    assert "(finish_reason=max_output_tokens)" in second[kept + 1]["content"]
+
+
+def test_forced_finals_read_intermediate_and_unusable_terminals_as_incomplete():
+    from ouroboros.loop_llm_call import forced_response_is_incomplete
+
+    assert forced_response_is_incomplete({"finish_reason_present": True, "finish_reason": "commentary"})
+    assert forced_response_is_incomplete({"finish_reason_present": True, "finish_reason": "steered",
+                                          "response_status": "incomplete"})
+    assert not forced_response_is_incomplete({"finish_reason_present": True, "finish_reason": "stop",
+                                              "response_status": "completed"})
+    assert not forced_response_is_incomplete({"finish_reason_present": True, "finish_reason": "max_output_tokens",
+                                              "response_status": "incomplete"}, completion_request=True)

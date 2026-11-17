@@ -505,6 +505,7 @@ def test_setup_contract_groups_rarely_used_providers():
     assert {field["settingKey"]: field["group"] for field in fields} == {
         "OPENROUTER_API_KEY": "primary",
         "OPENAI_API_KEY": "primary",
+        "OPENAI_API_SURFACE": "more",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY": "more",
         "GIGACHAT_CREDENTIALS": "more",
         "GIGACHAT_USER": "more",
@@ -1072,3 +1073,30 @@ def test_onboarding_rejects_malformed_connection_draft_without_partial_settings(
 def test_named_connection_needs_an_enabled_endpoint_for_remote_access(row):
     prepared, error = prepare_onboarding_settings({**_base_payload(), "OUROBOROS_CONNECTIONS": [row]}, {})
     assert prepared == {} and error == "Connect Codex, an API provider, or a local model before continuing."
+
+
+def test_onboarding_seeds_a_new_openai_key_on_responses_and_keeps_an_existing_choice():
+    """A key new to this install starts on Responses; a key the install already had keeps the API it ran (Chat
+    when never chosen), and a client that does not send the field never clears a saved one."""
+    from ouroboros.settings_setup_contract import derive_provider_profile
+
+    payload = {**_base_payload(), "OPENAI_API_KEY": "sk-openai-1234567890"}
+    prepared, error = prepare_onboarding_settings(payload, {})
+    assert error is None and prepared["OPENAI_API_SURFACE"] == "responses"
+    assert derive_provider_profile(prepared) == "openai-responses"
+    prepared, error = prepare_onboarding_settings(payload, {"OPENAI_API_KEY": "sk-openai-1234567890"})
+    assert error is None and prepared["OPENAI_API_SURFACE"] == ""
+    assert derive_provider_profile(prepared) == "openai"
+    kept, error = prepare_onboarding_settings(payload, {"OPENAI_API_KEY": "sk-openai-1234567890",
+                                                        "OPENAI_API_SURFACE": "responses"})
+    assert error is None and kept["OPENAI_API_SURFACE"] == "responses"
+    refused, error = prepare_onboarding_settings({**payload, "OPENAI_API_SURFACE": "auto"}, {})
+    assert refused == {} and error == "OpenAI API must be chat_completions or responses."
+
+
+def test_the_responses_profile_is_offered_beside_the_unchanged_chat_profile():
+    bootstrap = build_setup_bootstrap({}, "desktop")
+    assert bootstrap["modelDefaults"]["openai"]["main"] == "openai::gpt-5.6-terra"
+    assert (bootstrap["modelDefaults"]["openai-responses"]["main"], bootstrap["modelDefaults"]["openai-responses"]["light"],
+            bootstrap["modelDefaults"]["openai-responses"]["fallback"]) == (
+        "openai::gpt-6.1-terra", "openai::gpt-6-luna", "openai::gpt-6.1-sol")

@@ -775,16 +775,16 @@ def run_llm_loop(
             tool_calls = msg.get("tool_calls") or []
             tools._ctx._request_wire_custom_receipts = accumulated_usage.pop(CUSTOM_RECEIPTS_USAGE_KEY, ())
             content = msg.get("content")
-            _latch_final_answer_marker(llm_trace, content, current_tool_calls=tool_calls)
+            output_recovery.latch_final_marker(limit_ctx, msg)  # a commentary or a cut is never the answer to fall back on
             # Every metered response counts as nanny progress; its delegate verb requests
             # anchor here, before the batch's saves or a park (a cold tail replays none).
             _note_nanny_delegate_activity(tools._ctx, round_idx, accumulated_usage, tool_calls)
             if not tool_calls:
-                final_result = _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, assistant_message=msg)
+                final_result = (None if output_recovery.intermediate_reply(limit_ctx, msg, emit_progress)
+                                else _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, assistant_message=msg))
                 if final_result is None:
-                    # Unfinished: the loop continues and keeps spending, so it
-                    # rejoins the SAME budget tail a tool round does. A ready
-                    # answer returns above and buys no extra wrap-up.
+                    # Unfinished or intermediate (commentary): the loop keeps spending on the SAME budget tail
+                    # a tool round does. A ready answer returns above and buys no extra wrap-up.
                     pending_no_tool_budget = True
                     continue
                 return final_result

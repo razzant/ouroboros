@@ -2837,7 +2837,7 @@ instead, and let the status text carry the claim.
 
 ## 7. Onboarding density
 
-Accounts is the common connection surface for subscriptions and API keys. An API key is a row of its provider (the built-in Default, then the keys added with Add key) in the account-row anatomy: name and status, a meta line naming the roles that use it, Test, its on/off and Remove (on Default it clears the key). A role names the key it uses; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host while retaining the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
+Accounts is the common connection surface for subscriptions and API keys. An API key is a §6 row of its provider (the built-in Default, then keys added with Add key): name and status, a meta line naming its roles, Test, its on/off and Remove (on Default it clears the key); an OpenAI key's API strip (Chat Completions · Responses; new keys start on Responses) is what Test uses. A role names its key; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host, keeping the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
 Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role reads as a current choice (§7 "Settings") and opens one compact
 Source / Model / Account row to change it. Under Main, Settings (not the wizard or a wait
@@ -2888,8 +2888,7 @@ asks again with the new facts. The outcome note says the stop and the start apar
 Context details show the server-built sourced window line: "set in Settings"
 labels a manual value; the Clear confirmation button removes the route acknowledgement.
 Account changes withdraw old metadata during pending or failed catalog reads.
-Unknown stays unknown. Catalog updates preserve the edited field and caret
-without assigning a model. `model_roles.js` and `model_roles.css` own the shared
+Unknown stays unknown. `model_roles.js` and `model_roles.css` own the shared
 Settings/wizard editor.
 
 A source is chosen, never spelled. Every surface that assigns a model — the
@@ -2925,7 +2924,7 @@ subagent id, while a session row retrieves with its native tools. Session Access
 uses the catalog's existing select: Full system access (default), Workspace write,
 or Read only. Writable reviewers check worktrees; their outputs remain
 evidence without product integration. Access never changes delivery. Catalog refreshes
-preserve the edited value, focus, selection and scroll position. Returning to a
+preserve the edited value, caret, focus, selection and scroll position, assigning no model. Returning to a
 reviewer's previous source restores that source's model/account draft; a new
 source starts without another source's pin.
 

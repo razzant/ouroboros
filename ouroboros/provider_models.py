@@ -47,6 +47,9 @@ ZAI_PLAN_ENDPOINTS: dict[str, str] = {
     "coding": "https://api.z.ai/api/coding/paas/v4",
 }
 ZAI_DEFAULT_PLAN = "payg"
+# An OpenAI connection's API (``api_surface``): its wire profile name per choice. A never-chosen one is
+# Chat Completions, the API every saved and environment-only connection ran (``openai_api_surface``).
+OPENAI_API_SURFACES: dict[str, str] = {"chat_completions": "chat.completions", "responses": "responses"}
 
 
 def resolve_zai_base_url(plan: str = "") -> str:
@@ -155,7 +158,7 @@ class KindSpec:
 # owner-facing order (OpenRouter first: an unprefixed model id routes through it).
 PROVIDER_KINDS: dict[str, KindSpec] = {
     "openrouter": KindSpec("OpenRouter", (("api_key", "OPENROUTER_API_KEY", True),)),
-    "openai": KindSpec("OpenAI", (("api_key", "OPENAI_API_KEY", True),)),
+    "openai": KindSpec("OpenAI", (("api_key", "OPENAI_API_KEY", True), ("api_surface", "OPENAI_API_SURFACE", False))),
     "anthropic": KindSpec("Anthropic", (("api_key", "ANTHROPIC_API_KEY", True),)),
     "deepseek": KindSpec("DeepSeek", (("api_key", "DEEPSEEK_API_KEY", True),)),
     "zai": KindSpec("Z.ai (GLM)", (("api_key", "ZAI_API_KEY", True), ("plan", "ZAI_PLAN", False))),
@@ -584,10 +587,16 @@ OPENAI_DIRECT_DEFAULTS = {
     # api.openai.com, `gpt-5.6-sol-pro` on /v1/chat/completions -> 404; the pro
     # reasoning mode exists only on /v1/responses as `reasoning.mode="pro"` (200),
     # and passing `reasoning` to /v1/chat/completions -> 400 "Unknown parameter".
-    # Every LLM call in llm.py is a chat.completions call, so an owner's pinned
-    # `-pro` slug lands here too (deep_self_review.deep_review_route).
+    # No send of ours carries `reasoning.mode`, so an owner's pinned `-pro` slug
+    # lands here too (deep_self_review.deep_review_route).
     "deep_self_review": "openai::gpt-5.6-sol",
 }
+# An OpenAI connection explicitly on Responses (``api_surface``; a never-chosen one runs Chat and keeps the
+# table above): GPT-6.1 tools work only there (reasoning guide and model pages, 16.11.2026). Deep review takes
+# plain Sol 6.1, whose official page states the 1,050,000-token window that review sizes against.
+OPENAI_RESPONSES_DIRECT_DEFAULTS = {**OPENAI_DIRECT_DEFAULTS, "main": "openai::gpt-6.1-terra",
+                                    "light": "openai::gpt-6-luna", "fallback": "openai::gpt-6.1-sol",
+                                    "deep_self_review": "openai::gpt-6.1-sol"}
 
 CLOUDRU_DIRECT_DEFAULTS = {
     "main": "cloudru::zai-org/GLM-4.7",
@@ -841,11 +850,21 @@ def capability_base_url(model: str, settings: Mapping[str, Any] | None = None) -
 
 
 _KIND_CHOICES = {("minimax", "region"): (MINIMAX_REGION_ENDPOINTS, "global_en or cn_zh"),
-                 ("zai", "plan"): (ZAI_PLAN_ENDPOINTS, "payg or coding")}
+                 ("zai", "plan"): (ZAI_PLAN_ENDPOINTS, "payg or coding"),
+                 ("openai", "api_surface"): (OPENAI_API_SURFACES, "chat_completions or responses")}
+
+
+def openai_api_surface(value: Any) -> str:
+    """An OpenAI connection's API: '' (never chosen) is the Chat Completions it always ran; a closed choice
+    as written; anything else raises ``ValueError``, never a surface guessed from a model or a fallback."""
+    text = str(value or "").strip().lower() or "chat_completions"
+    if text not in OPENAI_API_SURFACES:
+        raise ValueError(f"OpenAI API surface must be chat_completions or responses, not {str(value)!r}")
+    return text
 
 
 def choice_error(kind: str, field: str, value: Any) -> str:
-    """Why ``value`` is not one of a kind field's closed choices (MiniMax region, Z.ai plan), or ''."""
+    """Why ``value`` is not one of a kind field's closed choices (MiniMax region, Z.ai plan, OpenAI API), or ''."""
     choices = _KIND_CHOICES.get((kind, field))
     text = str(value or "").strip().lower()
     return f"must be {choices[1]}" if choices and text and text not in choices[0] else ""

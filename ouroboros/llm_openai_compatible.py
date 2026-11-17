@@ -22,6 +22,9 @@ from ouroboros.llm_attempt import (
     openai_family_route, supports_message_cache_control,
 )
 from ouroboros.llm_messages import project_declared_system_prefix
+from ouroboros.openai_responses import (
+    REPLY_FACT_KEYS, attach_reply_facts, completion_view, responses_payload, responses_route,
+)
 from ouroboros.usage_accounting import UsageScope, usage_scope
 from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS
 from ouroboros.llm_capability_policy import (
@@ -155,6 +158,9 @@ class _OpenAICompatibleLaneMixin:
         # a caption or a marker was decided by the send policy (vision_routing),
         # never by this builder from a model name.
         messages = _project_openai_family_system(target, messages)
+        if responses_route(target):  # the connection's own API: the same options in a Responses body
+            return self._responses_kwargs(target, messages, max_tokens, tool_choice, temperature, tools,
+                                          response_format, cache_affinity, stream)
         # Official direct OpenAI Chat uses the current completion-token carrier:
         # provider-wide; model names are not capability authority across routes.
         direct_openai = provider == "openai"
@@ -422,6 +428,19 @@ class _OpenAICompatibleLaneMixin:
             self._cache_declared_system_context(messages, kwargs)
         return kwargs
 
+    def _responses_kwargs(self, target: Dict[str, Any], messages: List[Dict[str, Any]], max_tokens: int,
+                          tool_choice: Any, temperature: Optional[float], tools: Optional[List[Dict[str, Any]]],
+                          response_format: Optional[Dict[str, Any]], cache_affinity: str, stream: bool) -> Dict[str, Any]:
+        """One direct OpenAI Responses body: the same sanitized tools, effort, affinity key and processing as Chat."""
+        model = str(target.get("usage_model") or target.get("resolved_model") or "")
+        kwargs = responses_payload(
+            target, messages, effort=target["requested_reasoning_effort"], max_tokens=max_tokens,
+            tool_choice=tool_choice, temperature=temperature, response_format=response_format, stream=stream,
+            tools=[{k: v for k, v in tool.items() if k != "cache_control"} for tool in self._sanitize_chat_completion_tools(tools)],
+            cache_identity=self._prompt_cache_identity(model, messages) or self._explicit_cache_affinity_identity(model, cache_affinity))
+        apply_processing_preference(target, kwargs)
+        return kwargs
+
     def _normalize_remote_response(
         self,
         resp_dict: Dict[str, Any],
@@ -430,8 +449,16 @@ class _OpenAICompatibleLaneMixin:
         prompt_cache_ttl: Optional[str] = None,
         wire_completion: Any = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Normalize a reply without generation lookup; skip_cost_fetch also skips tariffs."""
+        """Normalize a reply without generation lookup; skip_cost_fetch also skips tariffs.
+
+        A Responses reply is read through ``openai_responses.completion_view`` and leaves with its exact items
+        and terminal facts attached (``attach_reply_facts``); every other step is the one Chat takes."""
+        responses_facts = None
+        if responses_route(target):
+            resp_dict, responses_facts = completion_view(resp_dict)
         usage = dict(resp_dict.get("usage") or {})
+        for host_key in REPLY_FACT_KEYS:  # host-owned terminal facts: a provider usage extension never sets them
+            usage.pop(host_key, None)
         # What the reply consumed (a BYOK reply: gateway charge + provider-billed share).
         usage["cost"], cost_invalid, cost_basis = reported_price(usage, resp_dict.get("total_cost_usd"))
         usage.pop("cost_invalid", None)  # Host fact, never a provider usage extension.
@@ -643,6 +670,8 @@ class _OpenAICompatibleLaneMixin:
             usage["reasoning_pin"] = _pin_note
         from ouroboros.openai_chat_dispatch import normalize_direct_openai_completion
 
+        if responses_facts is not None:
+            msg, usage = attach_reply_facts(msg, usage, responses_facts, target)
         msg, usage = normalize_direct_openai_completion(msg, usage, wire_completion)
         _custom_receipts = usage.get("_request_wire_custom_receipts", ())
         finalize_wire_response(msg, usage, custom_receipts=_custom_receipts)
