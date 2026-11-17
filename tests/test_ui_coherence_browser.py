@@ -76,17 +76,26 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
         assert metrics["gap"] == pytest.approx(12, abs=0.5), metrics
         assert metrics["below"] == pytest.approx(12, abs=0.5), metrics
     header = page.locator(".chat-page-header")
-    paint = header.evaluate("""el => ({mask:getComputedStyle(el).maskImage,
-        overflow:getComputedStyle(el).overflow, background:getComputedStyle(el).backgroundColor,
-        before:getComputedStyle(el,'::before').content})""")
+    paint = header.evaluate("""el => { const s = getComputedStyle(el), b = getComputedStyle(el, '::before'),
+        a = getComputedStyle(el, '::after');
+        return {mask: s.maskImage, overflow: s.overflow, background: s.backgroundColor, darkening: b.backgroundImage,
+            darkeningEvents: b.pointerEvents, blur: a.backdropFilter, blurEvents: a.pointerEvents,
+            dark: document.documentElement.dataset.theme !== 'light'}; }""")
     assert paint["mask"] == "none" and paint["overflow"] == "visible", paint
-    # The full-width fade gave way to individually backed capsules (#2193); menus still escape the bar.
-    assert paint["background"] == "rgba(0, 0, 0, 0)" and paint["before"] in ("none", "normal"), paint
+    # No band: the bar paints nothing of its own (#2193) and menus still escape it. Under its capsules it lays the
+    # composer's darkening, mirrored, and a blur that fades out below them (DESIGN "A room's edges", owner 17.11 1A);
+    # neither takes a press.
+    assert paint["background"] == "rgba(0, 0, 0, 0)", paint
+    assert "linear-gradient" in paint["darkening"] and "0.72" in paint["darkening"], paint
+    assert "blur" in paint["blur"] and paint["darkeningEvents"] == "none" == paint["blurEvents"], paint
     backing = header.locator('.app-page-title-row').evaluate("""el => {
         const s = getComputedStyle(el), channels = s.backgroundColor.match(/[0-9.]+/g).map(Number);
         return {alpha: channels[3] ?? 1, blur: s.backdropFilter, shadow: s.boxShadow};
     }""")
-    assert backing["alpha"] >= 0.98 and "blur" in backing["blur"] and backing["shadow"] != "none", backing
+    # On a dark room the capsules are the composer chips' glass, a light veil over a blur (owner 15.11, 17.11 3A);
+    # light keeps them white as the composer's.
+    assert "blur" in backing["blur"] and backing["shadow"] != "none", backing
+    assert (backing["alpha"] < 0.2) if paint["dark"] else (backing["alpha"] >= 0.98), backing
     page.locator("#chat-messages").evaluate("el=>el.scrollTop=0")
     setup_browser.capture(page, f"shell-chat-actions-{width}")
     page.locator("#chat-messages").evaluate("el=>el.scrollTop=160")

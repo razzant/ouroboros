@@ -785,7 +785,9 @@ export function createRoomWork({
     // phone). The box's whole width is read by letting it take that width for a moment, in the same task, so nothing
     // paints between.
     function cuts(box) {
-        if (!box?.getClientRects?.().length) return false;
+        if (!box) return false;
+        if (box.scrollWidth > box.clientWidth + 1) return true;
+        if (!box.getClientRects?.().length) return false;
         const given = box.getBoundingClientRect().width;
         const before = box.style.minWidth;
         box.style.minWidth = 'max-content';
