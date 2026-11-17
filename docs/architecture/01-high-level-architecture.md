@@ -190,6 +190,8 @@ ouroboros/ — agent core and shared runtime (§6)
   synthesis_cost_text.py — task_summary cost fields
   llm.py — multi-provider LLM routing (OpenRouter, OpenAI, compatible, Cloud.ru, MiniMax, DeepSeek, Z.ai, GigaChat, Anthropic); conversations stay function-shaped, exact-route adaptation lives in the request-wire leaves (§6 Context fitting; §7 Direct-provider routes)
   llm_routing.py, llm_attempt.py, llm_messages.py, llm_capability_policy.py, llm_fallback.py, llm_pricing.py, llm_openai_compatible.py, llm_anthropic.py, llm_gigachat.py, llm_local.py, llm_claudexor.py, llm_substitution.py — leaves of `llm.py`: routing, attempt candidates and cache policy, transcript shaping, capability policy, the recovery ladder, price catalogs, one wire lane each, served-model substitution (§6 Caller-owned subscription model calls)
+  llm_helper_window.py — helper windows and replies (§6)
+  server_window.py, size_refusal.py, window_learning.py — windows, refusal numbers, retries (§6)
   llm_stream.py — SSE assembly inside one physical attempt (§6 Streams and transport waits)
   send_clock.py — Main preparation clocks and physical-candidate binding
   net_transport.py — shared httpx transport: TCP keepalive and the owner's extra-CA bundle every first-party client trusts (§7 `OUROBOROS_EXTRA_CA_BUNDLE`)

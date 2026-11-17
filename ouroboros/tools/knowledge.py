@@ -273,7 +273,8 @@ def _residency(note: knowledge_store.KnowledgeNote, delta: dict | None = None) -
                if knowledge_store.outline_keeps_summary(note.metadata.get("type"))
                else "Main, tasks, wakes and Presence; a tight window and a helper's or session's start show only its address and title")
     where = f"the global knowledge index ({loaders})" if note.address.scope == "global" else project
-    return f"Residency: its summary ({len(note.summary)} chars) is shown in {where}; {tail}"
+    return (f"Residency: its summary ({len(note.summary)} chars) is shown in {where} from each context's next build; "
+            f"works already running keep the view they started with; {tail}")
 
 
 def _capture_previous(ctx: ToolContext, note: knowledge_store.KnowledgeNote) -> dict:
@@ -465,7 +466,8 @@ def get_tools() -> List[ToolEntry]:
                 "Create, revise, append, revert or reversibly archive durable Markdown understanding. YAML carries type, "
                 "optional title and an authored summary; unknown metadata survives. Each active summary stays resident in "
                 "the index's whole view (a global note's in every room and place I work in, a project note's in that "
-                "project), never in a Safety check; body text never replaces it. Under physical window pressure, the outline names every active "
+                "project), never in a Safety check; body text never replaces it. A write does not refresh a context already built: a work "
+                "already running keeps the index it started with. Under physical window pressure, the outline names every active "
                 "topic and keeps type person summaries; others remain readable with knowledge_list. A summary names the "
                 "note's enduring scope and when to open it, and is not a dated log of the latest edit. "
                 "mode is required and has no default; a call without it writes nothing. "

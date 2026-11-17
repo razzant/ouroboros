@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 _UNREAD_PAYLOAD = object()
@@ -331,6 +331,17 @@ _ANSWER_WALK_LIMIT = 400  # nodes and JSON scans of one answer: a parser bound, 
 
 
 @dataclass(frozen=True)
+class AnswerObject:
+    """One object and its place in the received answer; never serialized into usage."""
+    value: Dict[str, Any]
+    parent: int
+    speaker: str
+    history: bool
+    sentences: Tuple[str, ...]
+    codes: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ProviderAnswer:
     """What each party in a provider's answer said (``provider_answer``): the current path outermost first, then
     earlier upstream attempts of the same request (``history``)."""
@@ -339,6 +350,8 @@ class ProviderAnswer:
     said: Tuple[Tuple[str, str, bool], ...] = ()  # (speaker, sentence, history)
     codes: Tuple[Tuple[str, str, bool], ...] = ()  # (speaker, code or type value, history)
 
+    objects: Tuple[AnswerObject, ...] = field(default=(), repr=False, compare=False)  # structural fields, read once with the sentences
+
     def own_codes(self) -> List[str]:
         return [code for _speaker, code, history in self.codes if not history]
 
@@ -346,6 +359,19 @@ class ProviderAnswer:
         """``(speaker, sentence)`` of the deepest party on the current path: an upstream's words, not its wrapper's."""
         own = [(speaker, text) for speaker, text, history in self.said if not history]
         return next((row for row in own if row[0] == own[-1][0]), ("", ""))
+
+    def recognized_objects(self, speaker: str, sentence: str, code: str) -> List[Dict[str, Any]]:
+        """The quoted current object's subtree, excluding sibling diagnostics and earlier attempts."""
+        root = next((i for i, obj in enumerate(self.objects) if not obj.history and obj.speaker == speaker
+                     and (sentence in obj.sentences if sentence else code in obj.codes)), None)
+        if root is None:
+            return []
+        selected, values = {root}, []
+        for i, obj in enumerate(self.objects):
+            if not obj.history and (i == root or obj.parent in selected):
+                selected.add(i)
+                values.append(obj.value)
+        return values
 
     def facts(self, quoted: Tuple[str, str] = ("", ""), **recognition: Any) -> Dict[str, Any]:
         """This answer for the owner line and the mind that continues, sanitized: the quoted ``speaker`` and
@@ -377,6 +403,7 @@ def provider_answer(source: Any) -> ProviderAnswer:
     """
     said: List[Tuple[str, str, bool]] = []
     codes: List[Tuple[str, str, bool]] = []
+    objects = []
     left = [_ANSWER_WALK_LIMIT]
 
     def opened(text: str) -> Tuple[List[Any], str]:
@@ -399,18 +426,19 @@ def provider_answer(source: Any) -> ProviderAnswer:
                               and " " in opened(value)[1])
             for key, value in node.items())
 
-    def walk(node: Any, speaker: str, history: bool, lists_are_history: bool) -> None:
+    def walk(node: Any, speaker: str, history: bool, lists_are_history: bool, parent: int = -1) -> None:
         left[0] -= 1
         if left[0] <= 0:
             return
         if isinstance(node, list):
             for item in node:
-                walk(item, speaker, history or lists_are_history, lists_are_history)
+                walk(item, speaker, history or lists_are_history, lists_are_history, parent)
             return
         if isinstance(node, str):
             node = {"": node}
         if not isinstance(node, dict):
             return
+        index, said_start, code_start = len(objects), len(said), len(codes)
         if isinstance(node.get("provider_name"), str) and node["provider_name"].strip():
             speaker = node["provider_name"].strip()
         inner = []
@@ -425,8 +453,11 @@ def provider_answer(source: Any) -> ProviderAnswer:
                 inner.extend((document, None) for document in documents)
             elif isinstance(value, (dict, list)):
                 inner.append((value, lists_are_history))
+        objects.append(AnswerObject(node, parent, speaker, history,
+                                    tuple(row[1] for row in said[said_start:]),
+                                    tuple(row[1] for row in codes[code_start:])))
         for value, rule in inner:  # an opened document applies the history rule to itself
-            walk(value, speaker, history, states(value) if rule is None else rule)
+            walk(value, speaker, history, states(value) if rule is None else rule, index)
 
     def read(payload: Any) -> Optional[int]:
         top = payload["error"] if isinstance(payload, dict) and isinstance(payload.get("error"), (dict, str)) else payload
@@ -443,7 +474,7 @@ def provider_answer(source: Any) -> ProviderAnswer:
         status = read(source)
     for rows in (said, codes):
         rows.sort(key=lambda row: row[2])  # the current path first, then earlier attempts
-    return ProviderAnswer(status, tuple(dict.fromkeys(said)), tuple(dict.fromkeys(codes)))
+    return ProviderAnswer(status, tuple(dict.fromkeys(said)), tuple(dict.fromkeys(codes)), tuple(objects))
 
 
 def typed_values(exc: Any, answer: ProviderAnswer) -> List[str]:

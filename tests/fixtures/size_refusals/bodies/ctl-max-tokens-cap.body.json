@@ -1,0 +1,1 @@
+{"error": {"message": "max_tokens: 100000 > 32768, which is the maximum allowed number of output tokens for model-x", "type": "invalid_request_error"}}

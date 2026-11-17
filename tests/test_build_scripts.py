@@ -1300,6 +1300,46 @@ def test_spec_collects_the_chrome_for_testing_payload_verbatim_only_on_macos(mac
 
 
 @pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
+def test_spec_runs_windows_analysis_on_a_thread_with_a_stack_this_os_accepts():
+    """The Windows build's Analysis runs on a deep-stack thread (7.11.0 tag build: 0xC00000FD). This runs the spec's
+    own wrapper with a stand-in Analysis on every OS, Windows included, so a stack size the OS refuses fails here."""
+    import ast
+    import threading
+
+    spec = _pkg_read("Ouroboros.spec")
+    wrapper = next(node for node in ast.parse(spec).body
+                   if isinstance(node, ast.FunctionDef) and node.name == "_analysis_on_a_deep_stack")
+    assert "(_analysis_on_a_deep_stack if _is_windows else Analysis)(" in spec
+
+    def deep(depth):
+        return 0 if depth == 0 else 1 + deep(depth - 1)
+
+    class Analysis:
+        def __init__(self, *args, **kwargs):
+            self.args, self.kwargs, self.depth = args, kwargs, deep(4000)
+
+    class Refused:
+        def __init__(self, *args, **kwargs):
+            raise ValueError("the analysis failed")
+
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(limit * 5)  # what the spec does for its own process
+    try:
+        for stand_in in (Analysis, Refused):
+            namespace = {"Analysis": stand_in}
+            exec(compile(ast.Module(body=[wrapper], type_ignores=[]), "Ouroboros.spec", "exec"), namespace)
+            if stand_in is Analysis:
+                made = namespace["_analysis_on_a_deep_stack"](["launcher.py"], noarchive=False)
+                assert (made.args, made.kwargs, made.depth) == ((["launcher.py"],), {"noarchive": False}, 4000)
+            else:
+                with pytest.raises(ValueError, match="the analysis failed"):
+                    namespace["_analysis_on_a_deep_stack"]()
+            assert threading.stack_size() == 0, "the default thread stack size is restored"
+    finally:
+        sys.setrecursionlimit(limit)
+
+
+@pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
 def test_launcher_retains_cross_platform_runtime_hooks():
     launcher_source = _pkg_read("launcher.py")
     assert "find_embedded_python" in launcher_source

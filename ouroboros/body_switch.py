@@ -34,6 +34,7 @@ the adoption is confirmed from what this process loaded, never from a later
 read of HEAD.
 """
 import contextlib
+import itertools
 import json
 import os
 import stat
@@ -174,11 +175,17 @@ def _states(root, rows, tracked):
     """``(blob id, kind)`` of what is on disk at each switch path (``(None, None)`` absent).
 
     Regular files go through ``git hash-object`` so the repository's own clean
-    filters apply: an untouched CRLF checkout still equals its blob.
+    filters apply: an untouched CRLF checkout still equals its blob. Their paths
+    ride argv, never ``--stdin-paths``: Git answers each path as it reads, and on a
+    spent macOS pipe budget both sides can wait past the timeout
+    (``work_domain._stdin_source``). Each argv holds paths of ONE ``_CHUNK`` group
+    of rows, the groups ``_index_states`` and ``_dirty`` already pass, so it is
+    never longer than theirs. No call hashes more than ``_CHUNK`` files. A group
+    with a newline in a name keeps one call and timeout per file, as before.
     """
     states, regular = {}, []
     switch_paths = {row["path"] for row in rows}
-    for row in rows:
+    for row_index, row in enumerate(rows):
         full = os.path.join(root, row["path"])
         try:
             mode = os.lstat(full).st_mode
@@ -191,16 +198,18 @@ def _states(root, rows, tracked):
         elif stat.S_ISDIR(mode):
             states[row["path"]] = _dir_state(root, row["path"], switch_paths)
         else:
-            regular.append((row["path"], _file_mode("100755" if mode & stat.S_IXUSR else "100644", tracked)))
+            kind = _file_mode("100755" if mode & stat.S_IXUSR else "100644", tracked)
+            regular.append((row["path"], kind, row_index // _CHUNK))
     for start in range(0, len(regular), _CHUNK):
-        chunk = [path for path, _kind in regular[start:start + _CHUNK]]
-        if any("\n" in path for path in chunk):
-            hashes = [_git(root, "hash-object", "--", path)[1].decode().strip() for path in chunk]
+        group = regular[start:start + _CHUNK]
+        if any("\n" in path for path, _kind, _rows in group):
+            batches = [[entry] for entry in group]
         else:
-            data = "\n".join(chunk).encode("utf-8", "surrogateescape") + b"\n"
-            hashes = _git(root, "hash-object", "--stdin-paths", data=data)[1].decode().split()
-        for (path, kind), sha in zip(regular[start:start + _CHUNK], hashes):
-            states[path] = (sha, kind)
+            batches = [list(batch) for _rows, batch in itertools.groupby(group, key=lambda entry: entry[2])]
+        for batch in batches:
+            hashes = _git(root, "hash-object", "--", *[path for path, _kind, _rows in batch])[1].decode().split()
+            for (path, kind, _rows), sha in zip(batch, hashes):
+                states[path] = (sha, kind)
     return states
 
 

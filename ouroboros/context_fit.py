@@ -612,7 +612,8 @@ def _context_route(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]
         )
         route["account_pin"] = str(model_account_options(route["model"], role=role, settings=settings,
                                                          credential_profile_id=account)["credential_profile_id"])
-    route["window_observation_fp"] = route_observation_scope(route, settings)
+    from ouroboros.response_limits import bind_context_route
+    bind_context_route(route, settings)
     return route, settings
 
 
@@ -628,7 +629,8 @@ def resolve_context_fit_route(
     actual operation receipts when it rebinds. A manual role window is an owner
     sizing assertion only; it neither changes the provider nor writes a scope ack.
     """
-    from ouroboros.capability_evidence import probe, with_role_window
+    from ouroboros.capability_evidence import with_role_window
+    from ouroboros.response_limits import probe_context_route
     from ouroboros.config import DATA_DIR
     from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY, model_role_option
 
@@ -638,22 +640,15 @@ def resolve_context_fit_route(
     # receipt) is read as that account, its fingerprint checked.
     carried = (route["provider"] == "claudexor" and bool(route["options"].get("account_fingerprint"))
                and bool(task.get("model_route_preferred")))
-    evidence = probe(
-        DATA_DIR,
-        provider=route["provider"],
-        model=route["model"],
-        base_url=route["base_url"],
-        use_local=route["use_local"],
-        allow_fetch=allow_fetch,
-        force=bool(task.get("route_read_again")),  # the horizon guard's repeat of its own failed early read
-        options=route["options"] or None,
+    evidence = probe_context_route(
+        DATA_DIR, route, task=task, allow_fetch=allow_fetch,
         **({"ask": {"source_id": route["options"]["source_id"], "credential_profile_id": route["account_pin"]}}
            if carried else {}),
     )
     if route["provider"] == "claudexor" and getattr(evidence, "account_fingerprint", ""):  # the account receipts name
         route["options"] = {**route["options"], **{key: getattr(evidence, key) for key in (
             "source_id", "credential_profile_id", "account_fingerprint")}}
-        route["window_observation_fp"] = route_observation_scope(route, settings)
+        route["window_observation_fp"] = route_observation_scope(route, settings, target=route.get("_resolved_target"))
     window = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, route["model_role"],
                                    settings=settings))
     return route, with_role_window(evidence, window)
@@ -664,6 +659,8 @@ def _route_key(task: Dict[str, Any]) -> Optional[str]:
     account), or None: another route's evidence needs no engine question beside the build."""
     try:
         route = _context_route(task)[0]
+        # The retained dispatch snapshot is not another part of the engine's question.
+        route.pop("_resolved_target", None)
         return json.dumps(route, sort_keys=True, default=str) if route.get("provider") == "claudexor" else None
     except Exception:
         return None
@@ -720,7 +717,7 @@ class RouteQuestion:
                 if self.error is not None:
                     raise self.error
                 return self.answer
-        return timed("fit.route", self.resolver, task, allow_fetch=allow_fetch)
+        return timed("fit.route", self.resolver, {**task, "route_start_read": True}, allow_fetch=allow_fetch)
 
     def again(self, task: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
         """The same question at the fit's usual point (the horizon guard). When the early answer came from a read that

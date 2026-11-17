@@ -750,9 +750,9 @@ def test_the_overflow_terminal_names_the_book_and_what_fits_without_it():
     assert "directly requires the whole development handbook (~51,000 tokens)" in text
     assert "without it the input is ~139,000 against 174,464 usable" in text
     assert "larger window" in text and "Context mode" in text and "without this requirement" in text
-    # The Continue it names is the terminal cause's: a host forecast gets none, the book's known unfit gets it.
+    # Both provider refusals and host context_overflow forecasts now offer Continue; it keeps the required book.
     forecast = {**usage, "reason_code": "context_overflow"}
-    assert "a Continue keeps it" in text and "a Continue keeps it" not in provider_terminal_fallback_text(forecast, **flags)
+    assert "a Continue keeps it" in text and "a Continue keeps it" in provider_terminal_fallback_text(forecast, **flags)
     assert "a Continue keeps it" in provider_terminal_fallback_text({**forecast, REQUIRED_BOOK_UNFIT_KEY: True}, **flags)
     # A restored Max primary holds the book with no addition (0): the refusing candidate's own facts still stand.
     assert provider_terminal_fallback_text({**usage, "_context_required_book_tokens": 0}, **flags) == text
