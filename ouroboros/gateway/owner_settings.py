@@ -396,10 +396,12 @@ def record_settings_change(request: Request | None, changes: Optional[Dict[str, 
 _CONTEXT_MODE_NAMES = {"max": "Max", "low": "Low", "nano": "Nano"}
 
 
-def record_context_mode_change(request: Request, project_id: str, requested: str, old: str, new: str) -> None:
+def record_context_mode_change(request: Request, project_id: str, requested: str, old: str, new: str, *,
+                               at: str | None = None) -> None:
     """Record a committed context-mode save: its ``owner_api_action`` (``action="context_mode"``) and, when the
     room's mode changed, the owner act's one System receipt in that room (``context_mode_changed``), dated by its
-    own time: old → new, which work it reaches and who changed it when the request declared that. The composer's
+    commit's time (``at``, taken inside the settings lock, so racing saves keep their order): old → new, which work it
+    reaches and who changed it when the request declared that. The composer's
     capsule tells the human; the room's history is what tells the mind at its next start there, so the receipt is
     posted whatever surface declared the save. No change, no row; neither step can unsave the mode."""
     owner_audit(request, "context_mode", {"project_id": project_id, "context_mode": requested, "previous_context_mode": old})
@@ -422,7 +424,7 @@ def record_context_mode_change(request: Request, project_id: str, requested: str
         text = (f"Context mode of this room: {_CONTEXT_MODE_NAMES.get(old, old)} → {_CONTEXT_MODE_NAMES.get(new, new)}. "
                 "Work started from now uses it; work already running keeps the mode it started with."
                 + (f" {actor}" if actor else ""))
-        message_bus.send_with_budget(int(chat), text, role="system", system_type="context_mode_changed")
+        message_bus.send_with_budget(int(chat), text, ts=at, role="system", system_type="context_mode_changed")
     except Exception:
         log.warning("Context mode saved; its System row failed", exc_info=True)
 

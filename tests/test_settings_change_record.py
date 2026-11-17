@@ -295,6 +295,8 @@ def test_a_context_mode_change_leaves_its_room_one_dated_row_and_a_repeat_or_a_f
     assert answer.status_code == 200, answer.text
     old = answer.json()["changes"]["OUROBOROS_CONTEXT_MODE"]["old"].capitalize()
     assert test_client.post("/api/owner/context-mode", json={"mode": "huge"}).status_code == 400  # refused: no row
+    stamps = [kwargs.pop("ts") for _args, kwargs in rows]  # each dated at its commit, inside the settings lock
+    assert all(isinstance(stamp, str) and stamp[:4].isdigit() for stamp in stamps) and stamps == sorted(stamps)
     assert [(args, kwargs) for args, kwargs in rows] == [
         ((1, f"Context mode of this room: Max → Low. {reach}"), typed),
         ((77, f"Context mode of this room: Low → Max. {reach}"), typed),
