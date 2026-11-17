@@ -258,6 +258,26 @@ def _long_tail(plan):
         {"role": "tool", "tool_call_id": "big", "content": _LONG_TAIL_CONTENT}]  # ~150K: past the Low target
 
 
+def test_a_rebind_that_narrows_a_shown_view_keeps_the_telling_floor(tmp_path, monkeypatch):
+    """The one order (owner 15.11.2026, 4A; consilium 17.11): a rebind that narrows a shown Max view for a smaller
+    window keeps the floor of a refusal's first pass, memory to my tellings, then the books to chapter maps, then
+    memory's rest (that walk: ``test_memory_pays_down_to_its_tellings_and_the_books_go_before_anything_below``)."""
+    from ouroboros import context_fit
+    from tests.test_memory_view_modes import _built
+
+    seen, real = [], context_fit.ContextFitPlan.reproject_for_route
+
+    def spy(self, **kwargs):
+        seen.append(kwargs.get("telling_floor", False))
+        return real(self, **kwargs)
+
+    monkeypatch.setattr(context_fit.ContextFitPlan, "reproject_for_route", spy)
+    _core, plan = _built(tmp_path / "w", monkeypatch)
+    low = plan(1_000_000, preferred="low", tool_schemas=[])
+    _rebind(monkeypatch, tmp_path / "a", low, _long_tail(low), window=400_000, ratio=1.2)
+    assert seen and seen[-1] is True
+
+
 def test_a_rebind_keeps_the_sent_view_on_a_smaller_fitting_window_and_unfolds_nothing(tmp_path, monkeypatch):
     from tests.test_memory_view_modes import _built
 
