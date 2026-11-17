@@ -506,6 +506,12 @@ def test_the_tool_schemas_count_in_the_floor_of_every_mode(tmp_path):
     # Unsent book forms share the selected start view, including its resident schema allowance.
 
 
+def _without_reader(schemas):
+    """The request leaves memory_read out: Nano's standing set carries it wherever the request has room and a contract
+    permits it, so these cue tests take the case a route's schema ceiling makes, the one their note describes."""
+    return [schema for schema in schemas if schema["function"]["name"] != "memory_read"]
+
+
 @pytest.mark.parametrize("actor,owner", [("child", "max"), ("child", "nano"), ("root", "max"),
                                          ("child_without_selector", "max")])
 def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkeypatch, actor, owner):
@@ -536,7 +542,7 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
         registry._ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent")
     if actor == "child_without_selector":
         registry._ctx.task_contract = {"disabled_tools": ["enable_tools"]}
-    schemas = initial_tool_schemas(registry, context_mode=owner)
+    schemas = _without_reader(initial_tool_schemas(registry, context_mode=owner))
     core = context._capture_context_core(env, memory, task, None, None)
 
     def plan(window):
@@ -569,7 +575,7 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
     # This receipt explains the reader path; it does not invite a sealing act.
     assert "chronicle_write kind=page" not in floor
     if actor == "child_without_selector":
-        assert sent == ("compact_context", "list_available_tools")
+        assert "enable_tools" not in sent and {"compact_context", "list_available_tools", "finish_task"} <= set(sent)
         assert floor.rstrip().endswith("(memory_read was not among my tools when this view was rendered; "
                                        "list_available_tools shows what this task can call)")
     else:
@@ -615,7 +621,7 @@ def test_an_owners_nano_that_cuts_nothing_names_its_reader_path_and_a_selection_
     if actor == "child_without_selector" or not permitted:
         registry._ctx.task_contract = {"disabled_tools": ["enable_tools" if permitted else "memory_read"]}
     assert registry._is_local_readonly_subagent() is not root  # each actor is the role its name says
-    schemas = initial_tool_schemas(registry, context_mode="nano")
+    schemas = _without_reader(initial_tool_schemas(registry, context_mode="nano"))
     sent = list(select_tool_schemas(schemas, context_mode="nano").schemas)
     names = [schema["function"]["name"] for schema in sent]
     catalog = [schema["function"]["name"] for schema in registry.schemas()]
@@ -701,10 +707,12 @@ def test_a_schema_only_change_leaves_the_nano_cue_true_of_the_view_it_was_render
     registry = ToolRegistry(repo_dir=tmp_path / "registry", drive_root=tmp_path / "registry")
     registry._ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent")
     registry._ctx.task_contract = {"disabled_tools": ["enable_tools"]}
-    schemas = initial_tool_schemas(registry, context_mode="nano")
+    assert "memory_read" in [s["function"]["name"] for s in initial_tool_schemas(registry, context_mode="nano")]
+    schemas = _without_reader(initial_tool_schemas(registry, context_mode="nano"))
     sent = list(select_tool_schemas(schemas, context_mode="nano").schemas)
     names = [schema["function"]["name"] for schema in sent]
-    assert names == ["compact_context", "list_available_tools"]
+    assert "enable_tools" not in names and "memory_read" not in names  # finish_task is resident from the start
+    assert {"compact_context", "list_available_tools", "finish_task"} <= set(names)
     evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=10_000_000)
     plan = context._build_context_fit_plan(env, context._capture_context_core(env, memory, task, None, None), task,
         preferred_mode="nano", tool_schemas=schemas,

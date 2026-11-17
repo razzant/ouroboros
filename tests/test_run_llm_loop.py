@@ -532,7 +532,9 @@ def test_run_llm_loop_injects_subagent_handoff_before_final_text(tmp_path, monke
     assert "get_task_result" in second_text
     assert sum(row.get("role") == "assistant" and row.get("content") == "premature final"
                for row in seen_second_request["messages"]) == 1
-    assert ("Selected completion was held" if explicit else "No completion selection was made") in second_text
+    # One-shot finish facts leave the next answer fresh: it is delivered as written, no selection is demanded.
+    assert "Your next answer is delivered as written, so make it the whole answer." in second_text
+    assert "Selected completion was held" not in second_text and "No completion selection was made" not in second_text
 
 def test_run_llm_loop_appends_orphan_note_when_finalizing_with_unhandled_child(tmp_path, monkeypatch):
     """D#7 / P5: the subagent handoff reminder fires once per CHANGE (not every round, not

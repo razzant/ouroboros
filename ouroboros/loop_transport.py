@@ -832,12 +832,15 @@ def last_assistant_text(messages: List[Dict[str, Any]]) -> str:
     """Last real assistant text already produced this task — salvaged into the
     terminal answer when provider-death prevents a fresh final response, so
     useful work is never silently discarded (workspace files persist on disk
-    regardless)."""
+    regardless). A reply's display projection stands for its history bytes: reasoning is never salvaged, and a reply
+    of reasoning alone yields to earlier visible text (or to none: the host's notice)."""
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
+    from ouroboros.llm_messages import DISPLAY_KEY
 
     for m in reversed(messages or []):
         if isinstance(m, dict) and m.get("role") == "assistant" and not m.get(HOST_CONTEXT_KIND_KEY):
-            content = m.get("content")
+            display = m.get(DISPLAY_KEY)
+            content = display.get("text") if isinstance(display, dict) else m.get("content")
             if isinstance(content, str) and content.strip():
                 return content
     return ""

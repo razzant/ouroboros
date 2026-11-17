@@ -609,8 +609,11 @@ class LLMClient(
 
         msg = dict(msg)
         msg["tool_calls"] = tool_calls
-        # Preserve reasoning text for loop progress; None/empty remains falsy.
-        msg["content"] = reasoning or None
+        # The calls are the reply; its reasoning is the model's, kept for progress in the portable ``reasoning`` that
+        # the outbound scrubber drops.
+        msg["content"] = None
+        if reasoning:
+            msg["reasoning"] = reasoning
         log.info("Parsed %d local tool call(s) from text output", len(tool_calls))
         return msg
 

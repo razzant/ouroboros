@@ -1244,7 +1244,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
         from ouroboros.task_finalization import build_completion_observations
 
         observations = build_completion_observations(
-            env.drive_root, {**task, "started_at": existing.get("started_at")}, llm_trace,
+            env.drive_root, {**task, "started_at": existing.get("started_at")}, llm_trace, final_text=text,
         )
         task_contract = build_task_contract(task)
         task = {**task, "task_contract": task_contract}
