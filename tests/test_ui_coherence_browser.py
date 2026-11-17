@@ -83,15 +83,18 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
             dark: document.documentElement.dataset.theme !== 'light'}; }"""
     paint = header.evaluate(edge)
     assert paint["mask"] == "none" and paint["overflow"] == "visible", paint
-    # No band: the bar paints nothing of its own (#2193) and menus still escape it. Under its capsules one layer lays
-    # the composer's darkening, mirrored, and a blur that fades out below them, further on the desk (DESIGN "A room's
-    # edges", owner 17.11 1A, 3A); it takes no press.
+    # Mask the decorative layer, never the bar or its menu. These reads check CSS, not rendered pixels.
     assert paint["background"] == "rgba(0, 0, 0, 0)", paint
     assert "linear-gradient" in paint["darkening"] and "0.72" in paint["darkening"], paint
-    assert "blur" in paint["blur"] and "linear-gradient" in paint["fade"] and paint["events"] == "none", paint
-    # The edge reaches below the bar, further on the desk. This history read left Main's note under the bar: a later
-    # sibling at the bar's own level, it paints over the edge as the capsules do, so its words stay sharp.
-    reach = 64 if width >= 1000 else 32
+    assert "blur(12px)" in paint["blur"] and "linear-gradient" in paint["fade"] and paint["events"] == "none", paint
+    # Both gradients end transparent toward the transcript; 180deg is the default (omitted in computed CSS).
+    clear_end = ", rgba(0, 0, 0, 0) 100%)"
+    assert paint["fade"].startswith(("linear-gradient(rgb(", "linear-gradient(180deg,")) and paint["fade"].endswith(clear_end), paint
+    assert "0.5" in paint["fade"] and "0.14" in paint["fade"], paint
+    # The edge reaches one compact length below the bar on every layout, the desk included. This history read left
+    # Main's note under the bar: a later sibling at the bar's own level, it paints over the edge as the capsules do,
+    # so its words stay sharp.
+    reach = 32
     assert paint["reach"] == pytest.approx(paint["bar"] + reach, abs=1), paint
     # The transcript's first row clears the bar and its edge (style.css --chat-top-reserve), not only the bar and note.
     feed_top = page.locator("#chat-messages").evaluate("el => parseFloat(getComputedStyle(el).paddingTop)")
@@ -110,6 +113,20 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
     assert chrome["reach"] == pytest.approx(chrome["bar"] + reach, abs=1), chrome
     assert "blur" in chrome["blur"], chrome
     assert chrome["strip"] == "auto" and chrome["events"] == "none", chrome
+    # The composer's edge mirrors the bar's: the same authored tail from below, a 12 px blur, and no press taken.
+    composer = page.locator("#chat-input-area").evaluate(
+        "el => { const b = getComputedStyle(el, '::before');"
+        " return {content: b.content, mask: b.maskImage, blur: b.backdropFilter, events: b.pointerEvents}; }")
+    assert composer["content"] == '""' and composer["events"] == "none", composer
+    assert composer["mask"].startswith("linear-gradient(0deg,") and composer["mask"].endswith(clear_end), composer
+    assert "blur(12px)" in composer["blur"] and "0.5" in composer["mask"] and "0.14" in composer["mask"], composer
+    # With the keyboard up the top edge ends with the bar and the composer draws no edge at all (style.css).
+    page.evaluate("document.body.classList.add('keyboard-open')")
+    keyboard = header.evaluate(edge)
+    composer_gone = page.locator("#chat-input-area").evaluate("el => getComputedStyle(el, '::before').content")
+    page.evaluate("document.body.classList.remove('keyboard-open')")
+    assert keyboard["reach"] == pytest.approx(keyboard["bar"], abs=1), keyboard
+    assert composer_gone == "none", composer_gone
     backing = header.locator('.app-page-title-row').evaluate("""el => {
         const s = getComputedStyle(el), channels = s.backgroundColor.match(/[0-9.]+/g).map(Number);
         return {alpha: channels[3] ?? 1, blur: s.backdropFilter, shadow: s.boxShadow};
