@@ -9,8 +9,8 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | domain | name | modules | proposed |
 |---|---|---:|---:|
 | D01 | Agent core & main loop | 67 | 0 |
-| D02 | LLM client, routing & providers | 49 | 0 |
-| D03 | Context assembly, fit & compaction | 40 | 0 |
+| D02 | LLM client, routing & providers | 50 | 0 |
+| D03 | Context assembly, fit & compaction | 43 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 58 | 0 |
 | D06 | Review stack | 101 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 26 | 0 |
-| **total** | | **1052** | **0** |
+| **total** | | **1056** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -290,6 +290,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/llm_claudexor.py`
 - `ouroboros/llm_fallback.py`
 - `ouroboros/llm_gigachat.py`
+- `ouroboros/llm_helper_window.py`
 - `ouroboros/llm_local.py`
 - `ouroboros/llm_messages.py`
 - `ouroboros/llm_observability.py`
@@ -368,8 +369,11 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/response_limits.py`
 - `ouroboros/review_history_view.py`
 - `ouroboros/section_floor.py`
+- `ouroboros/server_window.py`
+- `ouroboros/size_refusal.py`
 - `ouroboros/tool_result_record.py`
 - `ouroboros/tools/compact_context.py`
+- `ouroboros/window_learning.py`
 
 ### D04 — Tool execution: registry, access & typed results
 
