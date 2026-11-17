@@ -200,6 +200,74 @@ def test_rating_publication_is_complete_and_source_bound():
         assert image in readme and (REPO / image).is_file()
 
 
+def _tags(page: str, name: str) -> list[dict[str, str]]:
+    """The attributes of every ``<name>`` tag of a page, as an HTML parser reads them."""
+    from html.parser import HTMLParser
+
+    found: list[dict[str, str]] = []
+
+    class Collector(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if tag == name:
+                found.append({key: value or "" for key, value in attrs})
+
+    Collector().feed(page)
+    return found
+
+
+def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
+    """Every capture and font the home page or its stylesheet names ships byte-identically in site/public and in
+    docs/, neither copy keeps an orphan, every capture on the source and on the served page declares its real pixel
+    size, docs/ holds exactly the home bundles the served page loads, the served page is its source built, and every
+    indexable page that names the social card, like its served copy, carries one og:image and one twitter:image whose
+    cache-busting hash is the card's own content hash."""
+    import hashlib
+
+    from PIL import Image
+
+    html = (SITE / "index.html").read_text(encoding="utf-8")
+    served = (DOCS / "index.html").read_text(encoding="utf-8")
+    css = (SITE / "src" / "home.css").read_text(encoding="utf-8")
+    referenced = {image["src"][1:] for image in _tags(html, "img") if image.get("src", "").startswith("/ui/")}
+    referenced |= {link["href"][1:] for link in _tags(html, "link") if link.get("href", "").startswith("/fonts/")}
+    referenced |= set(re.findall(r"""url\(["']?/(fonts/[^)"']+)""", css))
+    assert referenced
+    for rel in sorted(referenced):
+        assert (SITE / "public" / rel).is_file(), rel
+        assert (SITE / "public" / rel).read_bytes() == (DOCS / rel).read_bytes(), rel
+    for root in (SITE / "public", DOCS):
+        captures = {p.relative_to(root).as_posix() for p in (root / "ui").glob("*.webp")}
+        assert captures == {rel for rel in referenced if rel.startswith("ui/")}, root
+        fonts = {p.relative_to(root).as_posix() for p in (root / "fonts").glob("*.woff2")}
+        assert fonts == {rel for rel in referenced if rel.startswith("fonts/")}, root
+        assert "SIL OPEN FONT LICENSE" in (root / "fonts" / "LICENSE-Inter.txt").read_text(encoding="utf-8")
+    for page in (html, served):
+        shown = [image for image in _tags(page, "img") if image.get("src", "").startswith("/ui/")]
+        assert {image["src"][1:] for image in shown} == {rel for rel in referenced if rel.startswith("ui/")}
+        for image in shown:
+            with Image.open(SITE / "public" / image["src"][1:]) as capture:
+                assert capture.size == (int(image.get("width") or 0), int(image.get("height") or 0)), image["src"]
+    assert {p.name for p in (DOCS / "assets").glob("home-*")} == set(re.findall(r'"/assets/(home-[^"]+)"', served))
+    # the served page is this source built: apart from the two bundle lines the build rewrites, they read the same
+    lines = [
+        [line.strip() for line in page.splitlines() if line.strip() and "/src/home." not in line and "/assets/home-" not in line]
+        for page in (html, served)
+    ]
+    assert lines[0] == lines[1]
+    card = (REPO / "assets" / "og-preview.png").read_bytes()
+    assert (DOCS / "assets" / "og-preview.png").read_bytes() == card
+    expected = f"{ORIGIN}/assets/og-preview.png?v={hashlib.sha256(card).hexdigest()[:10]}"
+    public = SITE / "public"
+    pairs = [(source, DOCS / source.relative_to(public if public in source.parents else SITE)) for source in INDEXABLE.values()]
+    naming = [pair for pair in pairs if any("og-preview.png" in page.read_text(encoding="utf-8") for page in pair)]
+    assert (SITE / "index.html", DOCS / "index.html") in naming
+    for pair in naming:
+        for page in pair:
+            metas = _tags(page.read_text(encoding="utf-8"), "meta")
+            assert [meta.get("content") for meta in metas if meta.get("property") == "og:image"] == [expected], page
+            assert [meta.get("content") for meta in metas if meta.get("name") == "twitter:image"] == [expected], page
+
+
 def test_readme_and_benchmark_page_keep_claim_values_in_sync():
     readme = (REPO / "README.md").read_text(encoding="utf-8")
     page = (SITE / "benchmarks" / "index.html").read_text(encoding="utf-8")
