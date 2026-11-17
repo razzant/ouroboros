@@ -91,7 +91,8 @@ def switch_cause(drive_root: Path) -> str:
         return "on"
     if not control_value(projection, "bg_consciousness_enabled")[0]:
         return "unknown"
-    return "panic" if projection.get(STOP_SOURCE_KEY) == PANIC_STOP else "off"
+    known, source = control_value(projection, STOP_SOURCE_KEY)  # an unconfirmed source names no Panic
+    return "panic" if known and source == PANIC_STOP else "off"
 
 
 def focus_state(drive_root: Path) -> str:

@@ -33,7 +33,7 @@ from tests.test_ui_smoke_playwright import (
 from tests.ui_console_errors import PageErrors
 from ouroboros.test_environment import isolated_environment, owned_process_temp
 from ouroboros.test_evidence import keep_startup_log
-from ouroboros.consciousness_view import FIRST_RUN
+from ouroboros.consciousness_view import FIRST_RUN, first_run_words
 
 pytestmark = [pytest.mark.ui_browser]
 
@@ -50,6 +50,8 @@ ROW = '[data-consciousness-offer] .consciousness-offer-row'
 STARTED = "Consciousness on: Ouroboros also acts on its own"
 # The switch's first-run words are the host's (consciousness_view.FIRST_RUN, owner 15.11, 5A).
 SWITCH_WORDS = f"{FIRST_RUN['gloss']} {FIRST_RUN['choice']} {FIRST_RUN['meaning']}"
+_ADVISES = first_run_words("observe")  # Advises answers nowhere: its first-run words say so (review r3)
+ADVISES_WORDS = f"{_ADVISES['gloss']} {_ADVISES['choice']} {_ADVISES['meaning']}"
 WHERE = "Change the allowance in Dashboard › Costs. Its other settings, and its switch, are in Dashboard › Consciousness."
 DEFAULT_ROW = (f"Consciousness {SWITCH_WORDS} Autonomy: Acts. Also acts on its own: starts work, runs commands, speaks and "
                "acts in places. It does not change itself. Up to $20.00 a day in recorded spending. Subscription quota is "
@@ -324,7 +326,7 @@ def test_markerless_install_offers_its_own_limits_and_an_unticked_finish_sends_n
                 _to_summary(page, pro=False)
                 expect(page.locator(ROW)).to_be_visible()
                 assert _text(page, ROW) == (
-                    f"Consciousness {SWITCH_WORDS} Autonomy: Advises. On its own it studies, keeps its memory and tells you; "
+                    f"Consciousness {ADVISES_WORDS} Autonomy: Advises. On its own it studies, keeps its memory and tells you; "
                     "it changes nothing outside. Up to $5.00 a day in recorded spending. Subscription quota is separate. At "
                     f"most 1 of its own tasks at once. {WHERE}")
                 page.screenshot(path=str(out / f"markerless-summary-{engine}-{theme}.png"), full_page=True)

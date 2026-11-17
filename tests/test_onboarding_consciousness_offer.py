@@ -50,7 +50,7 @@ def test_offered_exactly_while_setup_has_never_completed():
 def test_the_limits_are_the_runtime_readers_values(monkeypatch):
     for key in ("OUROBOROS_CONSCIOUSNESS_AUTONOMY", "OUROBOROS_CONSCIOUSNESS_DAILY_USD", "OUROBOROS_CONSCIOUSNESS_MAX_TASKS"):
         monkeypatch.delenv(key, raising=False)
-    from ouroboros.consciousness_view import FIRST_RUN
+    from ouroboros.consciousness_view import FIRST_RUN, first_run_words
 
     assert consciousness_offer({}) == {"offered": True, "enabled": None, "autonomy": "act", "dailyUsd": 20.0, "maxTasks": 2,
                                        "words": FIRST_RUN}  # the switch's words for a first run (owner 15.11, 5A)
@@ -58,7 +58,9 @@ def test_the_limits_are_the_runtime_readers_values(monkeypatch):
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "0")
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_MAX_TASKS", "0")
     assert consciousness_offer({}, enabled=False) == {
-        "offered": True, "enabled": False, "autonomy": "observe", "dailyUsd": 0.0, "maxTasks": 0, "words": FIRST_RUN}
+        "offered": True, "enabled": False, "autonomy": "observe", "dailyUsd": 0.0, "maxTasks": 0,
+        "words": first_run_words("observe")}  # Advises answers nowhere: its first-run words say so (review r3)
+    assert "answers in places" not in first_run_words("observe")["meaning"]
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_AUTONOMY", "bogus")  # the reader's own fallback, not a new level
     assert consciousness_offer({})["autonomy"] == "act"
     assert consciousness_offer({}, enabled="yes")["enabled"] is None

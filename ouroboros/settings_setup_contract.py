@@ -535,12 +535,12 @@ def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None) -> di
         get_consciousness_autonomy, get_consciousness_daily_usd, get_consciousness_max_tasks,
     )
 
-    from ouroboros.consciousness_view import FIRST_RUN
+    from ouroboros.consciousness_view import first_run_words
 
     return {"offered": not _string(settings.get(ONBOARDING_COMPLETED_KEY)),
             "enabled": enabled if isinstance(enabled, bool) else None,
             "autonomy": get_consciousness_autonomy(), "dailyUsd": get_consciousness_daily_usd(),
-            "maxTasks": get_consciousness_max_tasks(), "words": dict(FIRST_RUN)}
+            "maxTasks": get_consciousness_max_tasks(), "words": first_run_words(get_consciousness_autonomy())}
 
 
 def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False,
