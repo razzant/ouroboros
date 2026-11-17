@@ -1167,25 +1167,37 @@ def _recorded_test_seconds(paths: list[str]) -> tuple[float, int] | None:
 
 def _blob_texts(root: pathlib.Path, specs: list[str]) -> dict[str, str | None]:
     """The text of every git object spec (`rev:path`, `:path`), None where it is missing or absent from a
-    partial clone (never fetched): one `git cat-file --batch` for all of them (a spec holding whitespace is
-    read with its own `git show`)."""
+    partial clone (never fetched): one `git cat-file --batch` for all of them (a spec holding whitespace, or
+    every spec when the batch input cannot be prepared, is read with its own `git show`)."""
     from ouroboros.reference_books import _OFFLINE_GIT, _git_bytes
 
     texts: dict[str, str | None] = {}
     batched = [spec for spec in specs if not any(char.isspace() for char in spec)]
-    for spec in specs:
-        if spec not in batched:
-            raw = _git_bytes(root, "--no-optional-locks", "show", spec)
-            texts[spec] = None if raw is None else raw.decode("utf-8", "replace")
-    if not batched:
-        return texts
+    out = b""
+    inputs = contextlib.ExitStack()
     try:
-        done = subprocess.run(["git", "--no-optional-locks", "cat-file", "--batch"], cwd=str(root), timeout=120,
-                              input="".join(spec + "\n" for spec in batched).encode("utf-8"), capture_output=True,
-                              env={**os.environ, **_OFFLINE_GIT})
-        out = done.stdout if done.returncode == 0 else b""
-    except (OSError, subprocess.SubprocessError):
-        out = b""
+        if batched:
+            try:
+                source = inputs.enter_context(tempfile.TemporaryFile())
+                source.write("".join(spec + "\n" for spec in batched).encode("utf-8"))
+                source.seek(0)
+            except OSError:
+                batched = []  # only unstarted preparation falls back; a started batch is never repeated
+        for spec in specs:
+            if spec not in batched:
+                raw = _git_bytes(root, "--no-optional-locks", "show", spec)
+                texts[spec] = None if raw is None else raw.decode("utf-8", "replace")
+        if batched:
+            try:
+                done = subprocess.run(["git", "--no-optional-locks", "cat-file", "--batch"], cwd=str(root),
+                                      timeout=120, stdin=source, capture_output=True,
+                                      env={**os.environ, **_OFFLINE_GIT})
+                out = done.stdout if done.returncode == 0 else b""
+            except (OSError, subprocess.SubprocessError):
+                out = b""
+    finally:
+        with contextlib.suppress(OSError):
+            inputs.close()  # a failed buffered write may fail again on close
     position = 0
     for spec in batched:  # `<oid> <type> <size>\n<bytes>\n`, or `<spec> missing\n`, in input order
         end = out.find(b"\n", position)

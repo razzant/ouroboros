@@ -380,3 +380,138 @@ def test_collect_repo_sync_state_uses_rescue_bounded_capture(monkeypatch):
     assert ["git", "status", "--porcelain"] in calls
     assert ["git", "remote"] in calls
     assert ["git", "log", "--oneline", "origin/ouroboros..HEAD"] in calls
+
+
+@pytest.mark.parametrize("payload,text", [(None, False), (b"", False), (b"\x00\xff\r\n" * 40000, False),
+                                          ("", True)],
+                         ids=["inherit", "empty-bytes", "binary-160k", "empty-text"])
+def test_git_bytes_stdin_is_a_rewound_file_until_wait_and_str_keeps_its_pipe(monkeypatch, tmp_path, payload, text):
+    import os
+    import stat
+    from ouroboros.tools import shell_process
+    from tests.test_tracked_tree_containment import fake_tree_read
+
+    sources = []
+    empty = "" if text else b""
+    piped = payload if text else None  # str stays Popen's own text input; bytes are already in the file
+
+    class Child:
+        pid = 12345
+        returncode = 0
+        stdin = stdout = stderr = None
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self, input=None, timeout=None):
+            assert input == piped and timeout == 5.0, "a prepared file is never written again"
+            assert self in shell_process._active_subprocesses
+            assert not sources or not sources[0].closed
+            return empty, empty
+
+    child = Child()
+    fake_tree_read(monkeypatch, child, remains=False)
+
+    def start(_factory, _cmd, **kwargs):
+        source = kwargs["stdin"]
+        if payload is None or text:
+            assert source == (None if payload is None else subprocess.PIPE), "None inherits; str keeps its pipe"
+        else:
+            sources.append(source)
+            assert stat.S_ISREG(os.fstat(source.fileno()).st_mode) and source.tell() == 0
+            assert os.read(source.fileno(), len(payload) + 1) == payload
+        return child
+
+    monkeypatch.setattr(shell_process, "contained_popen", start)
+    assert git_ops._run_git_process_bounded(["git", "cat-file", "--batch"], timeout=5,
+        cwd=tmp_path, text=text, input_data=payload) == (0, empty, empty)
+    assert all(source.closed for source in sources)
+    assert child not in shell_process._active_subprocesses
+
+
+@pytest.mark.parametrize("stage", ["create", "write", "seek", "seek_and_close", "start", "stop", "timeout",
+                                   "interrupt"])
+def test_prepared_git_stdin_closes_on_failure_without_retry(monkeypatch, tmp_path, stage):
+    import io
+    from ouroboros import platform_layer
+    from ouroboros.tools import shell_process
+    from tests.test_tracked_tree_containment import fake_tree_read
+
+    sources, starts, killed = [], [], []
+    failure = OSError("temp " + stage)
+
+    class Source(io.BytesIO):
+        def write(self, value):
+            if stage == "write":
+                raise failure
+            return super().write(value)
+
+        def seek(self, offset, *args):
+            if stage in {"seek", "seek_and_close"}:
+                raise failure
+            return super().seek(offset, *args)
+
+        def close(self):
+            was_closed = self.closed
+            super().close()
+            if stage == "seek_and_close" and not was_closed:
+                raise OSError("failed write flushes again at close")
+
+    def temporary(**kwargs):
+        if stage == "create":
+            raise failure
+        source = Source()
+        sources.append(source)
+        return source
+
+    class Child:
+        pid = 12345
+        returncode = None
+        stdin = stdout = stderr = None
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self, input=None, timeout=None):
+            assert input is None and not sources[0].closed
+            if stage == "interrupt":
+                raise KeyboardInterrupt("interrupted")
+            if timeout == 5:
+                raise subprocess.TimeoutExpired(["git"], timeout)
+            return b"", b""  # the tail read after the kill
+
+        def wait(self, timeout):
+            assert timeout == 10 and not sources[0].closed
+            raise subprocess.TimeoutExpired(["git"], timeout)
+
+    child = Child()
+    fake_tree_read(monkeypatch, child, remains=None)
+
+    def start(*args, **kwargs):
+        starts.append(kwargs)
+        if stage == "start":
+            raise failure
+        return child
+
+    monkeypatch.setattr(git_ops.tempfile, "TemporaryFile", temporary)
+    monkeypatch.setattr(shell_process, "contained_popen", start)
+    monkeypatch.setattr(platform_layer, "kill_process_tree", lambda proc: killed.append(proc))
+    if stage == "stop":
+        monkeypatch.setattr(shell_process, "_panic_requested", True)
+    try:
+        def call():
+            return git_ops._run_git_process_bounded(["git", "cat-file", "--batch"],
+                                                    timeout=5, cwd=tmp_path, text=False, input_data=b"request\n")
+        if stage == "interrupt":
+            with pytest.raises(KeyboardInterrupt, match="interrupted"):
+                call()
+            assert killed == [child] and child in shell_process._active_subprocesses
+        elif stage == "timeout":
+            assert call()[0] == git_ops.FETCH_TIMEOUT_RC and killed == [child]
+        else:
+            rc, out, err = call()
+            assert rc == 127 and out == b"" and err
+        assert len(starts) == int(stage in {"start", "timeout", "interrupt"})
+        assert all(source.closed for source in sources)
+    finally:
+        shell_process._active_subprocesses.discard(child)
