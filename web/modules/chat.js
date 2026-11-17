@@ -2754,8 +2754,10 @@ export function createChatInstance({
                 // The bar's own height places the note under it; the transcript clears both.
                 const bar = Math.ceil(pageHeader.offsetHeight || 0);
                 const note = pageNote?.offsetParent ? Math.ceil(pageNote.offsetHeight || 0) : 0;
+                // The bar's frosted edge reaches below it (style.css "A room's edges"): the first row and a landing clear it.
+                const edge = Math.ceil(parseFloat(globalThis.getComputedStyle?.(pageHeader)?.getPropertyValue?.('--edge-reach')) || 0);
                 changed = layout.setProperty('--chat-header-bar', `${bar}px`);
-                changed = layout.setProperty('--chat-header-reserve', `${Math.max(56, bar + note)}px`) || changed;
+                changed = layout.setProperty('--chat-header-reserve', `${Math.max(56, bar + note + edge)}px`) || changed;
             }
             if (inputArea && messagesDiv) {
                 const reserve = Math.max(92, Math.ceil(composerHeightAtRest()) + 16);

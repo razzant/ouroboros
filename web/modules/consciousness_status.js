@@ -95,8 +95,9 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     glyph.innerHTML = controlIcon('brain', 18);
     const word = element('span', 'cx-chip-word');
     const mark = createStatusMark(doc, 'cx-chip-mark');
-    // Its name, shown where the chip lies as a row of the room's work list (Telegram's shared row, room_work.js).
-    const label = element('span', 'cx-chip-label', 'Consciousness');
+    // Its name, shown where the chip lies as a row of the room's work list (Telegram's shared row, room_work.js), whose
+    // authored subtree the language overlay skips: the name is translated here.
+    const label = element('span', 'cx-chip-label', tr('consciousness.row', 'Consciousness'));
     chip.append(glyph, label, word, mark);
     const titleBlock = bar.querySelector('.app-page-title-block');
     if (titleBlock) titleBlock.after(chip);
@@ -248,7 +249,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         if (destroyed || !open) return;
         if (place) {
             close({ restoreFocus: false });
-            openSheet(place, { returnFocus: chip });
+            openSheet(place, { returnFocus: returnTarget() });
             return;
         }
         if (!failed && doc.activeElement === door) { coverageNote.tabIndex = -1; coverageNote.focus(); }
@@ -296,14 +297,13 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         delete chip.dataset.open;
         bar.removeAttribute('data-cx-shade');
         foldAway();
-        if (restoreFocus && chip.isConnected && !chip.hidden) {
-            // A chip that is a row of the room's folded work list (Telegram's shared row) has no box on the
-            // screen: focus returns to the room's capsule that opened that list.
-            // A list still folding is inert already: its rows take no focus either.
-            const away = !chip.getClientRects().length || Boolean(chip.closest('[inert], [hidden]'));
-            const capsule = away ? bar.querySelector('.rw-trigger:not([hidden])') : null;
-            (capsule || chip).focus({ preventScroll: true });
-        }
+        if (restoreFocus && chip.isConnected && !chip.hidden) returnTarget().focus({ preventScroll: true });
+    }
+    // Where a return to the chip lands: the chip, or, while it is a row of the room's work list that is folded or still
+    // folding (Telegram's shared row; a folding list is inert already), the room's capsule that opened that list.
+    function returnTarget() {
+        const away = !chip.getClientRects().length || Boolean(chip.closest('[inert], [hidden]'));
+        return (away && bar.querySelector('.rw-trigger:not([hidden])')) || chip;
     }
 
     const disposers = [];

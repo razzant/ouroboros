@@ -12422,8 +12422,8 @@ html[data-layout="docked"] :is(.chat-page-header, .project-panel-bar) {
 }
 /* The bottom: what passes under the composer is blurred over its darkening, less and less over the composer's top 32 px.
    With the keyboard up the composer stands in the page's flow, nothing passes under it, and the transcript's own bottom
-   fades over the shell's 32 px edge instead of ending on a line over the chips; the newest row keeps that edge clear
-   below it, so only what scrolls away fades. */
+   fades over 12 px instead of ending on a line over the chips; the newest row keeps that edge clear below it, so only
+   what scrolls away fades, and a short keyboard room keeps a line of the newest message and its foot. */
 body:not(.keyboard-open) :is(#chat-input-area, .chat-input-area)::before {
     content: "";
     position: absolute;
@@ -12437,9 +12437,9 @@ body:not(.keyboard-open) :is(#chat-input-area, .chat-input-area)::before {
 }
 body.keyboard-open #page-chat.active #chat-messages,
 body.keyboard-open .chat-instance-panel .chat-messages {
-    padding-bottom: var(--scroll-fade-edge, 32px);
-    -webkit-mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - var(--scroll-fade-edge, 32px)), transparent 100%);
-    mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - var(--scroll-fade-edge, 32px)), transparent 100%);
+    padding-bottom: var(--space-3);
+    -webkit-mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - var(--space-3)), transparent 100%);
+    mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - var(--space-3)), transparent 100%);
 }
 /* A room bar's capsules are the composer chips' glass in the dark theme (the capsule's veil over a blur of what passes
    under it), on the desk as on a phone; light keeps white capsules at the top as at the bottom. Panic keeps its ink
@@ -12517,4 +12517,10 @@ html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-head
     top: calc(var(--tg-row-top) + var(--tg-row-h) + var(--space-1));
     left: var(--space-3); right: var(--space-3);
     width: auto;
+}
+/* Main's sheets stand in the viewport, so they keep Telegram's side insets as the room does; a Project panel's transform
+   makes it their box, already inside them. */
+html[data-telegram-fullscreen="active"][data-layout="stack"] .chat-page-header .rw-shade-anchor > .rw-surface {
+    left: calc(var(--space-3) + var(--tg-safe-area-inset-left, 0px));
+    right: calc(var(--space-3) + var(--tg-safe-area-inset-right, 0px));
 }

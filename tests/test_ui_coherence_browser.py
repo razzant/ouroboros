@@ -89,15 +89,24 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
     assert paint["background"] == "rgba(0, 0, 0, 0)", paint
     assert "linear-gradient" in paint["darkening"] and "0.72" in paint["darkening"], paint
     assert "blur" in paint["blur"] and "linear-gradient" in paint["fade"] and paint["events"] == "none", paint
-    assert paint["reach"] == pytest.approx(paint["bar"] + (64 if width >= 1000 else 32), abs=1), paint
+    # This history read left Main's note under the bar: the edge ends with the bar, so the note's words stay sharp; with
+    # the note gone the edge reaches below the bar, further on the desk.
+    reach = 64 if width >= 1000 else 32
+    note_parts = "#page-chat > .chat-page-note > *"
+    assert page.locator(note_parts).count() and page.locator("#page-chat > .chat-page-note").is_visible()
+    assert paint["reach"] == pytest.approx(paint["bar"], abs=1), paint
+    page.evaluate(f"document.querySelectorAll('{note_parts}').forEach((node) => {{ node.hidden = true; }})")
+    paint = header.evaluate(edge)
+    assert paint["reach"] == pytest.approx(paint["bar"] + reach, abs=1), paint
     # The desktop window's title-band strip keeps the bar's ::after (style.css :root[data-window-chrome]): the edge
     # never takes its box, and the strip still takes presses for the title bar.
     page.evaluate("document.documentElement.dataset.windowChrome = 'integrated'")
     chrome = header.evaluate(edge)
     page.evaluate("delete document.documentElement.dataset.windowChrome")
-    assert chrome["reach"] == pytest.approx(chrome["bar"] + (64 if width >= 1000 else 32), abs=1), chrome
+    assert chrome["reach"] == pytest.approx(chrome["bar"] + reach, abs=1), chrome
     assert "blur" in chrome["blur"], chrome
     assert chrome["strip"] == "auto" and chrome["events"] == "none", chrome
+    page.evaluate(f"document.querySelectorAll('{note_parts}').forEach((node) => {{ node.hidden = false; }})")
     backing = header.locator('.app-page-title-row').evaluate("""el => {
         const s = getComputedStyle(el), channels = s.backgroundColor.match(/[0-9.]+/g).map(Number);
         return {alpha: channels[3] ?? 1, blur: s.backdropFilter, shadow: s.boxShadow};
