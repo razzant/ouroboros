@@ -12404,9 +12404,13 @@ html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-
     position: absolute; top: var(--telegram-row-top); right: var(--telegram-header-end); grid-area: auto;
 }
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="page"] > .app-page-header .app-page-title { display: none; }
-/* Two panes of an automatic view hold a page too: its name, not the place's, stands in the host's row. */
+/* Two panes of an automatic view hold a page too: its name, not the place's, stands in the host's row. One column of
+   it is the list alone: the page's name and controls are not shown over it (the row shows the place). */
 @container sectionplace (min-width: 40rem) {
     html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="auto"] > .app-page-header .app-page-title { display: none; }
+}
+@container sectionplace (max-width: calc(40rem - 0.02px)) {
+    html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="auto"] > .app-page-header .app-page-lead { display: none; }
 }
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-title-block { display: block; grid-area: title; }
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-page-title-row { display: contents; }
