@@ -448,3 +448,40 @@ test('the letter rides the existing render path and never writes the verdict sur
         assert.ok(!applyFn.includes(forbidden), `applyUpdate must not contain ${forbidden}`);
     }
 });
+
+
+test('a level check after apply writes the retained update, not an older description', () => {
+    for (const channel of ['stable', 'qa', 'development']) {
+        const recent = { base_sha: 'b'.repeat(40), target_sha: 'c'.repeat(40),
+            update_channel: channel, target_ref: `managed/${channel}` };
+        const status = { ...CURRENT, current_sha: recent.target_sha, running_sha: recent.target_sha,
+            checked_target_sha: recent.target_sha, update_channel: channel, target_ref: recent.target_ref,
+            letter: letter({ relation: 'applied', description_current: false,
+                checked_key: { ...recent, base_sha: recent.target_sha }, material: { key: recent } }) };
+        const view = updateLetterView(status);
+        assert.deepEqual(view.write.key, recent);
+        assert.equal(view.write.mode, 'write');
+        assert.equal(view.write.label, 'Write description');
+        assert.equal(view.label, 'Earlier update');
+        assert.match(view.note, /covers an earlier update/);
+        assert.equal(view.markdown, letter().text);
+        const empty = updateLetterView({ ...status, letter: { ...status.letter, text: '', state: 'none' } });
+        assert.equal(empty.state, 'empty');
+        assert.deepEqual(empty.write.key, recent);
+        // Before restart, disk consumed the target but the serving range remains non-empty.
+        const waiting = { ...status, running_sha: recent.base_sha,
+            letter: { ...status.letter, checked_key: recent, material: null } };
+        assert.deepEqual(updateLetterView(waiting).write.key, recent);
+        // A merged install has its own HEAD, but consumes the same checked official target.
+        assert.deepEqual(updateLetterView({ ...status, running_sha: 'd'.repeat(40),
+            letter: { ...status.letter, checked_key: { ...recent, base_sha: 'd'.repeat(40) } } }).write.key,
+            recent);
+        // A new pending offer always wins; another channel's retained material never does.
+        const pending = { ...status, available: true, latest_sha: 'd'.repeat(40),
+            checked_target_sha: 'd'.repeat(40), letter: { ...status.letter,
+                checked_key: { ...recent, base_sha: recent.target_sha, target_sha: 'd'.repeat(40) } } };
+        assert.equal(updateLetterView(pending).write.key.target_sha, 'd'.repeat(40));
+        assert.equal(updateLetterView({ ...status, update_channel: 'other' }).write.mode, 'rewrite');
+        assert.equal(updateLetterView({ ...status, checked_target_sha: 'e'.repeat(40) }).write.mode, 'rewrite');
+    }
+});

@@ -717,3 +717,30 @@ def test_main_can_read_an_ambiguous_target_only_patch_and_save_what_it_found(tmp
     diff = reg.execute_result("vcs_read", {"action": "diff", "root": "system_repo", "base": base, "head": target,
                                            "stat": True})
     assert diff.status == "ok" and "panel.txt" in diff.text, diff.text[:300]
+
+
+@pytest.mark.parametrize("channel", ["stable", "qa", "development"])
+@pytest.mark.parametrize("text", ["older description", ""])
+def test_consumed_material_remains_requestable_after_level_check(door, tmp_path, channel, text):
+    recent = {**_key(base=TARGET, target=NEWER), "update_channel": channel}
+    _offer(door.root, state="ready" if text else "none", text=text, revision=2,
+           checked_key={**recent, "base_sha": NEWER}, material={"key": recent, "text_bytes": 123})
+    before = ul.read_record(door.root)
+    # A passive read after apply retains prose and never starts another author.
+    view = ul.project_letter_for_panel({"running_sha": NEWER, "checked_target_sha": NEWER}, drive_root=door.root)
+    assert view is not None, "retained material still offers Write when no description was ever requested"
+    assert view["text"] == text and view["material"]["key"] == recent
+    assert door.pending == []
+    response = _request(door, base=TARGET, target=NEWER)
+    assert response.status_code == 200, response.text
+    task_id = response.json()["task_id"]
+    assert response.json()["key"] == recent
+    assert f"{TARGET}..{NEWER}" in door.pending[-1]["text"]
+    assert ul.read_record(door.root)["text"] == before["text"]
+    saved = ul.save_description("latest changes", TARGET, NEWER, 2,
+        author={"task_id": task_id, "model": "test"}, drive_root=door.root)
+    assert saved["outcome"] == "saved" and saved["key"] == recent
+    _finish(door.root, task_id, "completed")
+    # Another retained-material write never prevents explicitly rewriting the saved text.
+    historical = _request(door, mode="rewrite", base=TARGET, target=NEWER)
+    assert historical.status_code == 200

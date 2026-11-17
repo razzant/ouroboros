@@ -37,8 +37,8 @@ _DESCRIPTION = (
     "where a message does not say what changed. text is Markdown in your human's language, as long and as "
     "structured as the change needs; text_file={path, root} saves instead a Markdown file you wrote, trimmed "
     "like text (addressed as in read_file). base_sha/target_sha name the exact range the text describes: the range "
-    "the last check offered, the saved description's own range, or the range of your human's request "
-    "(query_data(op='json', kind='update_letter'): checked_key, key, request.key). expected_revision is that "
+    "the check or retained material offered, the saved text's own, or your human's request "
+    "(query_data(op='json', kind='update_letter'): checked_key, material.key, key, request.key). expected_revision is that "
     "record's revision (0 when it has none); a newer save is refused, never overwritten, so read it and decide."
 )
 

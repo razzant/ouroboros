@@ -767,3 +767,59 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     shot("05-long-from-list")
     from_list = letter("long-from-list")
     assert from_list["more"] == "Read all" and from_list["content"] > from_list["height"] > 0, from_list
+
+
+@pytest.mark.parametrize("channel", ["stable", "qa", "development"])
+def test_applied_update_button_admits_retained_range(subscription_ui, door, tmp_path, channel):
+    """Real SPA button → gateway → admitted task after a level check kept older prose."""
+    from ouroboros import update_letter as ul
+    from tests.test_update_description import TARGET, NEWER, _request, _finish
+
+    ui = subscription_ui
+    recent = {"base_sha": TARGET, "target_sha": NEWER, "update_channel": channel,
+              "target_ref": {"development": "managed/ouroboros", "qa": "managed/ouroboros-stable",
+                             "stable": "managed/main"}[channel]}
+    _offer(door.root, state="ready", text="Older update: widgets and sharing.", revision=23,
+           checked_key={**recent, "base_sha": NEWER}, material={"key": recent, "text_bytes": 123})
+    status = {**_status(FIXTURE["small"], {}), "available": False, "check_ok": True,
+              "current_sha": NEWER, "running_sha": NEWER, "latest_sha": "", "checked_target_sha": NEWER,
+              "current_version": "7.11.1-alpha.0", "update_channel": channel, "target_ref": recent["target_ref"]}
+    calls = []
+
+    def respond(route):
+        path = urlparse(route.request.url).path
+        if path == "/api/update/description":
+            posted = json.loads(route.request.post_data)
+            calls.append(posted)
+            response = door.client.post(path, json=posted)
+            route.fulfill(status=response.status_code, content_type="application/json", body=response.text)
+        else:
+            projected = ul.project_letter_for_panel(status, drive_root=door.root)
+            route.fulfill(content_type="application/json", body=json.dumps({**status, "letter": projected}))
+
+    page = ui["new_page"](viewport={"width": 1422, "height": 1058}, color_scheme="dark")
+    page.route_web_socket("**/ws", lambda socket: socket.send(json.dumps({"type": "heartbeat"})))
+    page.route("**/api/update/status", respond)
+    page.route("**/api/update/check", respond)
+    page.route("**/api/update/description", respond)
+    page.goto(ui["url"] + "/")
+    page.click('[data-nav-page="dashboard"]')
+    page.click('[data-dashboard-tab="updates"]')
+    button = page.locator("#updates-letter-write")
+    button.wait_for()
+    assert button.inner_text() == "Write description"
+    assert page.locator("#updates-letter-label").inner_text() == "Earlier update"
+    assert "Older update" in page.locator("#updates-letter-body").inner_text()
+    output = diagnostic_directory(tmp_path, "update-range", publish=True)
+    page.screenshot(path=str(output / f"{channel}-retained.png"))
+    assert door.pending == [] and calls == []
+    button.click()
+    page.wait_for_function("document.querySelector('#updates-letter-write').disabled")
+    assert calls == [{"mode": "write", "base_sha": TARGET, "target_sha": NEWER}]
+    [task] = door.pending
+    assert task["metadata"]["update_description"]["key"] == recent
+    assert f"{TARGET}..{NEWER}" in task["text"]
+    assert ul.read_record(door.root)["text"] == "Older update: widgets and sharing."
+    # The public API still lets an owner intentionally rephrase the retained historical text.
+    _finish(door.root, task["id"], "completed")
+    assert _request(door, mode="rewrite").status_code == 200

@@ -632,14 +632,15 @@ def _safe_text(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 def legal_ranges(record: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
-    """The ranges a description may name: the one the last check offered, the shown
-    description's own (a rephrase, an applied update's included), and the one the owner's
-    latest request named. Anything else would label text with a range nobody offered."""
+    """Ranges already offered: the last check, retained material, shown text and request.
+    A level check is empty; retained material still names the update just consumed."""
     record = record or {}
     provenance, text, _last_good = shown_letter(record)
     request = record.get("request") if isinstance(record.get("request"), dict) else {}
     keys: List[Dict[str, str]] = []
-    for key in map(_range_key, (record.get("checked_key"), provenance.get("key") if text else None, request.get("key"))):
+    material = record.get("material") if isinstance(record.get("material"), dict) else {}
+    for key in map(_range_key, (record.get("checked_key"), material.get("key"),
+                                provenance.get("key") if text else None, request.get("key"))):
         if key and not any(_same_range(known, key["base_sha"], key["target_sha"]) for known in keys):
             keys.append(key)
     return keys
@@ -722,8 +723,7 @@ def request_description(mode: str, base_sha: str, target_sha: str, *, admit: Cal
         raise ValueError("mode must be write or rewrite")
     with _REQUEST_FLIGHT:
         current = read_record(drive_root) or {}
-        provenance, text, _last_good = shown_letter(current) if current else ({}, "", None)
-        offered = [_range_key(current.get("checked_key")), _range_key(provenance.get("key")) if text else None]
+        offered = legal_ranges({**current, "request": None})
         key = next((k for k in offered if k and _same_range(k, base_sha, target_sha)), None)
         if key is None:
             return {"outcome": "range_not_offered", "legal_ranges": [k for k in offered if k]}
@@ -928,7 +928,7 @@ def project_letter(
         return None
     provenance, text, last_good = shown_letter(record)
     if record.get("state") in ("none", None, ""):
-        if not _range_key(record.get("checked_key")) and not request:
+        if not legal_ranges(record) and not request:
             return None
         provenance, text = {}, ""
     key = provenance.get("key") if isinstance(provenance.get("key"), dict) else {}
