@@ -120,7 +120,7 @@ def _journal_position(handle: Any, offset: int) -> dict:
 
 
 def knowledge_changes(root: Any, boundary: Any, gaps: set) -> tuple[list, Any]:
-    """Other foci's captures since accepted byte positions, in each journal's append order.
+    """Other foci's changed pages since accepted byte positions, in first-write order per journal.
 
     The first observation baselines existing journals; an accepted empty map sees new ones from zero.
     Only a fixed ending check precedes unread bytes; unchanged journals are never opened. Invalid
@@ -162,7 +162,7 @@ def knowledge_changes(root: Any, boundary: Any, gaps: set) -> tuple[list, Any]:
                     continue
                 if _journal_position(handle, prior["offset"]) != prior:
                     raise ValueError("accepted journal ending changed")
-                changes = []
+                changes = {}
                 while handle.tell() < end:
                     start = handle.tell()
                     line = handle.readline(end - handle.tell())
@@ -182,11 +182,17 @@ def knowledge_changes(root: Any, boundary: Any, gaps: set) -> tuple[list, Any]:
                     if isinstance(focus, Mapping) and focus.get("role") == "consciousness":
                         continue
                     facts = row_facts(row)
-                    changes.append(("knowledge_change", None,
-                        f"- knowledge {scope}/{topic}: {facts['mode']}, {facts['ts']}; by {focus_text(focus)}; "
-                        f"knowledge_read(topic={topic!r}, scope={scope!r}, version={facts['revision']!r})"))
+                    page = changes.setdefault(topic, {"count": 0, "first": facts["ts"], "writers": {}})
+                    page["count"] += 1
+                    page["writers"][focus_text(focus)] = None
+                    page["latest"] = facts
                 current[scope] = _journal_position(handle, end)
-                events.extend(changes)
+                for topic, page in changes.items():
+                    latest, count = page["latest"], page["count"]
+                    events.append(("knowledge_change", None,
+                        f"- knowledge {scope}/{topic}: {count} write{'s' if count != 1 else ''}; "
+                        f"by {', '.join(page['writers'])}; first {page['first']}; last {latest['ts']}; "
+                        f"knowledge_read(topic={topic!r}, scope={scope!r}, version={latest['revision']!r})"))
         except (OSError, ValueError) as exc:
             where = reset_gap or f"knowledge changes unreadable ({scope}): {source}"
             action = "accepted position retained" if scope in current else "journal skipped"

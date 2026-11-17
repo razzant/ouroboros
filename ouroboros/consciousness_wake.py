@@ -6,16 +6,11 @@ priority, what happened since the last ACCEPTED wake: chat-chain positions in ap
 producer provenance, each row whole under its host-known author and exact address; runner failures; the rows that
 announce a transition), the transitions task results record, by identity, announced or not (a task's terminal, a
 card's closed state: an orphan sweep, a lost ``task_done``, an expired card), and the memory journal records after the
-accepted sequence (``memory_inventory.memory_changes``), other foci's knowledge writes (``knowledge_versions``),
+accepted sequence (``memory_inventory.memory_changes``), other foci's changed knowledge pages (``knowledge_versions``),
 each with author and exact read (open memory is the view's), then every answerable owner card. The wake accepts a chat
 position, task transition identities (``_transitions_since``, kept in ``consciousness_transitions``), memory sequence
 and knowledge byte positions, never the alarm's finish time, so facts written during a wake or backdated reach the next
 one; a wake never activates the journal.
-``bind_wake_observation`` stores the whole observation as an exact source under the registered wake; a request that
-cannot fit it gets its composition, window, coverage and that pointer with my human's card answers whole (their other
-words are in my view), else the bare pointer (``overview_text``; first build: ``context_input_selection.rescued_start``;
-rounds: ``loop_model_call``).
-``wake_task_metadata`` is the wake's origin/authority envelope for ``handle_wake_direct`` (``consciousness_authority``).
 """
 
 from __future__ import annotations
@@ -427,7 +422,7 @@ _KIND_WORDS = {  # (one, many)
     "card_state": ("card closed unanswered", "cards closed unanswered"),
     "outstanding_card": ("outstanding card", "outstanding cards"),
     "memory_change": ("memory change", "memory changes"),
-    "knowledge_change": ("knowledge change", "knowledge changes"),
+    "knowledge_change": ("changed knowledge page", "changed knowledge pages"),
     "presence_observation": ("retained Presence observation", "retained Presence observations"),
     "history_import": ("imported earlier Presence message (counted, not listed: room history, not an arrival)",
                        "imported earlier Presence messages (counted, not listed: room history, not arrivals)"),
