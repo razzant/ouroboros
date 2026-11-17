@@ -27,7 +27,12 @@ def test_role_budget_is_one_frame_and_reply_is_charged_once():
                                 output_reserve_tokens=65_536, non_memory_tokens=0)
     assert actual["margin"] == 175_000 and actual["physical"] == 200_000
     unknown = mf.floor_allowances(window_tokens=None, output_reserve_tokens=65_536, non_memory_tokens=10)
-    assert unknown == {"margin": None, "physical": None, "budget": None}
+    assert unknown == {"margin": None, "physical": None, "window": None, "budget": None}
+    # The window's own start bound beside an owner target: what a target may never cross for it (owner 15.11, 3A).
+    low = mf.floor_allowances(window_tokens=1_000_000, output_reserve_tokens=65_536, non_memory_tokens=10_000,
+                              target_tokens=cb.OWNER_LOW_TARGET_TOKENS)
+    assert low["budget"] == low["margin"] == 250_000 - 65_536 - 10_000 - 31_250
+    assert low["window"] == 1_000_000 - 65_536 - 10_000 - 125_000 and low["physical"] == 1_000_000 - 65_536 - 10_000
 
 
 def test_story_openings_precede_untold_current_replies():
@@ -151,6 +156,31 @@ def test_other_conversations_fold_their_words_then_a_group_to_its_line_and_only_
     level = mf.fit_memory_view(snapshot, frame(tokens(snapshot) - 1_000))  # the oldest words fold first, alone
     taken = dict(level.addressed)
     assert set(taken) == {"F6w"} and taken["F6w"] == tuple(ident for step, ident in order if step == "F6w")[:len(taken["F6w"])]
+
+
+def test_an_owner_target_keeps_every_conversation_by_its_line_and_only_the_window_counts_them():
+    """Owner 15.11.2026 (3A): a Low target the rest of the request alone exceeds leaves every conversation its line (one
+    per conversation, with its gist and address), records the miss as its own fact and names it; the count of
+    conversations, the window's last rung, comes only when the window's own start bound needs it."""
+    from ouroboros import memory_view_conversations as conversations
+
+    groups = [syn.conversation(i, notes=1, words=3, word_chars=2_000) for i in range(164)]
+    snapshot = syn.snapshot(conversations=groups)
+
+    def low(window, fixed=300_000):  # 300,000 before any memory: a 250,000 target cannot be met
+        return mf.render_view_for_mode(snapshot, mode="low", owner_mode="low", window_tokens=window, known_window=True,
+                                       output_reserve=65_536, ratio=1, non_memory_tokens=fixed)
+    missed = low(1_000_000)
+    steps, floor = dict(missed.level.addressed), missed.facts["floor"]
+    assert "F6a" not in steps and len(steps["F6g"]) == 164 and floor["target_missed"] is True
+    assert all(conversations.identity_line(group) in missed.room for group in groups)
+    assert "Low's target (250,000 tokens) is not met at this start" in missed.note and "shortest forms" not in missed.note
+    shortest = tokens(snapshot, missed.level)  # every conversation by its line: the floor a target may not cross
+    window = (shortest + 300_000 + 65_536) * 8 // 7 - 2_000  # its start bound cannot hold one line per conversation
+    counted = low(window)
+    assert dict(counted.level.addressed).get("F6a") and counted.facts["floor"]["target_missed"] is True
+    fits = low(1_000_000, fixed=10_000)  # a target with room: memory yields only what the target asks
+    assert fits.facts["floor"]["target_missed"] is False and "F6a" not in dict(fits.level.addressed)
 
 
 def test_giveback_keeps_a_reply_prefix_and_never_returns_kept_choices():
@@ -456,16 +486,28 @@ def test_notes_aggregate_only_when_all_the_label_lines_still_do_not_fit():
     assert mf.fit_memory_view(snap, frame(10**9), kept=level) == level
 
 
-def test_note_forms_are_attributed_to_the_owner_target():
+def test_this_rooms_notes_never_yield_to_lows_target_and_the_window_owns_its_cut():
+    """SPEC 2.13 (owner 15.11.2026, 3A): this room does not yield to Low's target. The owner's Low target leaves this
+    room's note whole and records its miss; a window whose own start bound cannot hold it shortens it, and the target's
+    count (``by_budget``) never names that cut. Nano's number still takes it and owns that cut (owner 11.10, 13.10)."""
     snap = syn.snapshot(room_facts=syn.room(notes=1))
     snap.room['notes'][0]['text'] = 'Held meaning. ' + 'detail ' * 1000
     level = mf.fit_memory_view(snap, {'margin': 0, 'budget': 0, 'physical': 500})
     assert dict(level.steps)['F8'] == 1 and level.by_budget > 0
-    fit = mf.render_view_for_mode(snap, mode='nano', owner_mode='nano', window_tokens=1000000,
-        known_window=True, output_reserve=65536, ratio=1, non_memory_tokens=66000)
-    room, facts = fit.room, fit.facts
-    assert 'only physical pressure can narrow them' not in room
-    assert facts['floor']['steps']['F8'] == 1 and facts['floor']['by_budget'] > 0
+
+    def fit(mode, window, fixed):
+        return mf.render_view_for_mode(snap, mode=mode, owner_mode=mode, window_tokens=window,
+            known_window=True, output_reserve=65536, ratio=1, non_memory_tokens=fixed)
+    roomy = fit('low', 1_000_000, 250_000)  # the rest of the request alone exceeds Low's 250,000
+    assert 'F8' not in roomy.facts['floor']['steps'] and roomy.facts['floor']['target_missed']
+    assert "Low's target (250,000 tokens) is not met at this start" in roomy.note
+    tight = fit('low', 300_000, 250_000)  # the window's own start bound cannot hold the note
+    assert tight.facts['floor']['steps']['F8'] == 1 and tight.facts['floor']['by_budget'] == 0
+    assert 'only physical pressure can narrow them' not in tight.room
+    nano = fit('nano', 1_000_000, 66_000)  # Nano's number takes the note and owns the cut
+    assert nano.facts['floor']['steps']['F8'] == 1 and nano.facts['floor']['by_budget'] > 0
+    assert not nano.facts['floor']['target_missed'] and "target (" not in nano.note
+    assert 'only physical pressure can narrow them' not in nano.room
 
 
 def test_short_notes_still_have_selectable_forms_and_a_saving_aggregate():

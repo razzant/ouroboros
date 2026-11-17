@@ -45,6 +45,24 @@ def test_notes_fold_when_an_owner_nano_target_is_smaller(tmp_path, monkeypatch):
     assert all(note['id'] in shown.system_content_json for note in snap.room['notes'])
 
 
+def test_this_rooms_notes_stay_whole_for_an_owner_low_target(tmp_path, monkeypatch):
+    """This room does not yield to Low's target (owner 15.11.2026, 3A): the owner's Low target leaves this room's
+    notes whole, led or not, and records that it is missed; only the window may shorten them. Nano's number still
+    folds them (the test above)."""
+    from tests import _memory_scale_fixture as scale
+    for led in (False, True):
+        snap = scale.snapshot()
+        for note in snap.room['notes'] if led else ():
+            note['lead_rule'] = 1
+        plan = scale.build(tmp_path, monkeypatch, snap=snap, window=1000000, reserve=None, mode='low')
+        shown = plan.projection(plan.initial_mode)
+        floor = shown.memory_facts['floor']
+        assert floor['budget_allowance_tokens'] is not None and floor['target_missed']
+        assert 'F8' not in floor['steps'] and 'F8a' not in floor['steps']
+        text = "\n".join(block["text"] for block in json.loads(shown.system_content_json))
+        assert all(note['text'] in text for note in snap.room['notes'])
+
+
 def _core(mature):
     spoken = [syn.spoken(i, "ouroboros", 4_000) for i in range(24)]
     snap = syn.snapshot(role="consciousness", story=syn.pages(103 if mature else 2, 200),

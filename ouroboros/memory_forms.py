@@ -16,6 +16,11 @@ STAGES = ("remote_events", "remote_told", "remote_unread", "remote_gists", "task
           "remote_mine", "remote_people", "remote_all", "work_final", "remote_last", "story_ordinary",
           "story_openings", "room_emergency", "task_only", "protected_replies", "remote_count", "story_count",
           "unread_count", "physical_rows", "room_ranges", "owner")
+# My shortest telling of the whole horizon: before ``story_openings`` every source keeps my telling or its
+# conversation's line; from there on a form is an opening, an address, a range or a count (owner 15.11.2026, 3A, 4A).
+TELLING_STAGES = frozenset(STAGES[:STAGES.index("story_openings")])
+# This room's own forms, which an owner's mode target never takes (SPEC 2.13: "this room does not yield to a target").
+ROOM_STEPS = frozenset({"F1", "F2", "F4", "F7p", "F7a", "F8", "F8a"})
 
 
 def _catalogue(snapshot):
@@ -202,7 +207,8 @@ class Selection:
             if lower in self.pairs and not any(p in self.pairs for p in self.lower.get(lower, ())):
                 self._visible(lower, True)
 
-    def level(self, ladder, by_budget=0, budget=False):
+    def level(self, ladder, by_budget=0, budget=False, forced=()):
+        """``forced``: pairs the window took past a target's floor, which the target's count never names."""
         addressed, new = [], self.new_count
         for step in ladder:
             ids = self.by_step.get(step)
@@ -215,6 +221,8 @@ class Selection:
                 whole = self.table.ids[step]
                 self.ordered[step] = whole if len(ids) == len(whole) else tuple(sorted(ids, key=self.table.positions[step].__getitem__))
             addressed.append((step, self.ordered[step]))
+        shown = {step: set(ids) for step, ids in addressed} if forced else {}
+        new -= sum(i in shown.get(s, ()) and (s, i) not in self.old for s, i in forced)
         return mv.FloorLevel(tuple(addressed), by_budget=by_budget + (new if budget else 0))
 
 

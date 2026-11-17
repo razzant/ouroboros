@@ -26,7 +26,8 @@ from ouroboros import memory_view as mv
 from ouroboros import memory_view_conversations as conversations
 from ouroboros import memory_view_legacy as legacy
 from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ordinary_pairs, normalized, swallowed,
-                                    form_counts, holding_room, Selection, supersedes, WorkPrices, restore)
+                                    form_counts, holding_room, Selection, supersedes, WorkPrices, restore,
+                                    TELLING_STAGES, ROOM_STEPS)
 from ouroboros.memory_form_facts import holding_lines, telling_emergency, physical_floor
 from ouroboros.chat_chain import parse_address
 from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
@@ -181,7 +182,7 @@ def floor_allowances(*, window_tokens: Optional[int], output_reserve_tokens: Opt
     physical = context_budget.request_context_budget(window_tokens=window_tokens, **frame)
     start = context_budget.request_context_budget(window_tokens=window_tokens, target_tokens=target_tokens, **frame)
     return {"margin": start["with_margin_tokens"], "physical": physical["without_margin_tokens"],
-            "budget": start["with_margin_tokens"] if target_tokens else None}
+            "window": physical["with_margin_tokens"], "budget": start["with_margin_tokens"] if target_tokens else None}
 
 
 def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: Iterable[str], *, story: int, fixed: int,
@@ -248,6 +249,9 @@ def crowded_by_memory(fact: Optional[Mapping[str, Any]]) -> bool:
 
 
 REQUIRED_BOOK_WHOLE = " (this task's directly required handbook stays whole)"
+# What the owner's Low target may take (``render_view_for_mode``, owner 15.11.2026, 3A): other conversations and my
+# story down to my telling; this room and my human's words not at all. The rest only the window's own start bound takes.
+TARGET_FLOOR, TARGET_KEEPS = TELLING_STAGES, ROOM_STEPS
 ROUTE_FACT = ("its window cannot hold the books beside my core, assignment, reply reserve and the work's room (needs "
               "{need:,} > {window:,}: {parts}); folding memory or dropping tool schemas cannot make room here.")
 
@@ -353,9 +357,14 @@ def required_book_note(*, lowered: bool, book_tokens: int, free: Optional[int], 
 @timed_section("fit.walk")
 def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Optional[int]], *,
                     kept: mv.FloorLevel = mv.FULL_VIEW, saving: int = 0,
-                    measure: Optional[Callable[[mv.FloorLevel], int]] = None) -> mv.FloorLevel:
+                    measure: Optional[Callable[[mv.FloorLevel], int]] = None,
+                    floor: Optional[frozenset] = None, floor_bound: Optional[int] = None,
+                    keeps: frozenset = frozenset()) -> mv.FloorLevel:
     """One ordered walk, then give back new cuts that fit. Previously chosen forms stay selected. A level is priced
-    from the snapshot's pieces (``render_view_for_mode``'s ``measure``, by default its story and room characters)."""
+    from the snapshot's pieces (``render_view_for_mode``'s ``measure``, by default its story and room characters).
+    ``floor``: the stages this walk may take for its bound (``keeps``: steps it may not take at all); any other form
+    is taken only while the view exceeds ``floor_bound`` (the window's own start bound), never with no such bound,
+    and a target's count (``by_budget``) never names it."""
     table = _elements(snapshot)
     elements = table.priced
     work_prices = WorkPrices(snapshot.room or {}, elements, view_tokens)
@@ -370,8 +379,10 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
     target = min(bound if bound is not None else current, current - saving) if saving else bound
     budget = allowances.get("budget") is not None and allowances.get("budget") == bound
 
+    forced = set()  # what only the window's bound took past the floor
+
     def level(selected):
-        return selected.level(LADDER, kept.by_budget, budget)
+        return selected.level(LADDER, kept.by_budget, budget, forced)
 
     ordinary = ordinary_pairs(snapshot, table.listed)
     # The same minimum ordinary view prices the clean-start guard and both Max decisions.
@@ -389,6 +400,9 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
         pair = step, ident
         if pair in taken or pair in last or (clean and pair not in ordinary) or swallowed(snapshot, step, ident, taken):
             continue
+        held = floor is not None and (step in keeps or table.stages[pair] not in floor)
+        if held and (floor_bound is None or (current := measure(level(taken))) <= floor_bound):
+            continue  # the window's bound is judged on the priced view
         if step in (*_LIST_FORMS, "F8") or step == "F6a" and (ident == "unread" or not counted_groups):
             extra = [pair] + ([("F8", i) for i in table.ids.get("F8", ()) if ("F8", i) not in taken] if step == "F8a" else [])
             before = measure(level(taken))
@@ -401,6 +415,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
                     taken.discard(added_pair)
                 continue
             delta, current = before - actual, actual
+            forced.update(extra if held else ())
         else:
             if step == "F6g" or step == "F6a":
                 key = ident.split(":", 1)[1] if ident.startswith(("all:", "last:", "events:")) else ident
@@ -415,6 +430,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
                 continue
             current -= delta
             taken.add(pair)
+            forced.update([pair] if held else ())
         added.append((pair, delta))
         if step == "F6a" and ident != "unread":
             counted_groups.add(ident)
@@ -726,15 +742,28 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                                   work_room_levels=snapshot.spec.work_room_levels, boundary_tokens=boundary_tokens)
     if kept is not None and not start_work:
         allowances = {**allowances, "margin": allowances["physical"]}
+    # Owner 15.11.2026 (3A): Low's target never takes memory below my shortest telling of the whole horizon and never
+    # takes this room; only the window's own start bound may. A miss of the target is its own fact. Nano's number
+    # still governs all memory (owner 11.10 and 13.10).
+    binds = kept is None and target is not None and owner_mode == "low" and (window is None or target < window)
+    floor, keeps = (TARGET_FLOOR, TARGET_KEEPS) if binds else (None, frozenset())
     size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
+    room_bound = allowances["window"] if binds else allowances["margin"]
     uncovered = uncovered_owner_rows(snapshot)
+    def total(level, note):  # the whole request with this view and its receipt, as the target counts it
+        return math.ceil((non_memory_tokens + measure_text(mv.story_chars(snapshot, level),
+                                                           mv.room_chars(snapshot, level, floor_note=note))) * ratio) + reserve
     def receipt(level):
         note = floor_note(level, window_tokens=named, mode=mode, target_tokens=target, lowered_from=lowered_from,
                           tool_names=tool_names, budget_mode=owner_mode, max_room=max_room, snapshot=snapshot)
-        if allowances["margin"] is not None and size(level) > allowances["margin"]:
+        if binds and (need := total(level, note)) > target:
+            note += (f"\nLow's target ({target:,} tokens) is not met at this start: this request needs "
+                     f"about {need:,} with my memory at its shortest telling of the whole horizon, "
+                     f"{math.ceil(non_memory_tokens * ratio) + reserve:,} with no memory at all.")
+        if room_bound is not None and size(level) > room_bound:
             gone = dict(level.addressed)
             held = [f"F7:{ident}" for step, ident, *_ in uncovered if ident not in gone.get(step, ())]
-            owners = held and size(level_with(snapshot, level, held, owner_note=True)) <= allowances["margin"]
+            owners = held and size(level_with(snapshot, level, held, owner_note=True)) <= room_bound
             note += "\nStart room is smaller than requested: " + (
                 "uncovered owner words remain in view; only physical pressure can turn their oldest rows into named addresses."
                 if owners else "what my memory shows even in its shortest forms exceeds it.")
@@ -743,16 +772,18 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     measure_text = measure_text or (lambda story_chars, room_chars: tokens_of(story_chars) + tokens_of(room_chars))
     def measure(level):  # the two texts this level adds to a request, its receipt included
         return measure_text(mv.story_chars(snapshot, level), mv.room_chars(snapshot, level, floor_note=receipt(level)))
+    walk = dict(kept=kept or mv.FULL_VIEW, measure=measure, floor=floor, keeps=keeps,
+                floor_bound=allowances["window"] if binds else None)
     if shortest and level is None:  # A saving no form can pay takes every form in walk order; no physical bound
-        level = fit_memory_view(snapshot, {**allowances, "physical": None}, kept=kept or mv.FULL_VIEW, saving=math.inf,
-                                measure=measure)  # stops it before owner rows.
+        level = fit_memory_view(snapshot, {**allowances, "physical": None}, saving=math.inf, **walk)  # stops it before owner rows.
     elif level is None:
-        level = fit_memory_view(snapshot, allowances, kept=kept or mv.FULL_VIEW, saving=saving, measure=measure)
+        level = fit_memory_view(snapshot, allowances, saving=saving, **walk)
     facts = view_facts(snapshot, level, window_tokens=named, mode=mode, allowances=allowances,
                        target_tokens=target, lowered_from=lowered_from)
-    bound = allowances["margin"]
+    bound, note = allowances["margin"], receipt(level)
     facts["floor"]["ordinary_unfit"] = bound is not None and measure(ordinary_level(snapshot)) > bound
-    return ViewFit(snapshot, level, receipt(level), facts)
+    facts["floor"]["target_missed"] = binds and total(level, note) > target
+    return ViewFit(snapshot, level, note, facts)
 
 
 TRACE_FIELDS = ("role", "room_id", "floor", "story_status", "max_room", "host_sections_addressed")  # what a task trace keeps of a view receipt
