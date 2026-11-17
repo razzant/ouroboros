@@ -623,6 +623,10 @@ test('a sync nested in a jump\'s batch keeps its motion: the covered room turns 
     // A nested sync that names no motion (null) applies at once, as its own commit would.
     w.layers.batch(() => w.layers.batch(() => w.layers.remove('project'), { inertAfter: null }));
     assert.equal(w.content.inert, false);
+    // Even inside a jump that named a motion still under way: the nested sync's explicit null is the commit's.
+    w.layers.batch(() => w.layers.batch(() => w.layers.push({ id: 'project', el: w.panel, modal: true, onClose() {} }),
+        { inertAfter: null }), { inertAfter: new Promise(() => {}) });
+    assert.equal(w.content.inert, true, 'inert at once, though the outer motion never ends');
     w.layers.destroy();
 });
 
