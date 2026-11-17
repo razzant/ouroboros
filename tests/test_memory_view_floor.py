@@ -511,6 +511,25 @@ def test_this_rooms_notes_never_yield_to_lows_target_and_the_window_owns_its_cut
     assert 'only physical pressure can narrow them' not in nano.room
 
 
+def test_lows_target_never_counts_the_windows_cut_of_my_humans_words():
+    """Owner 15.11.2026 (3A): my human's words never yield to Low's target. When the window itself cannot hold an
+    uncovered row of them, its address is the window's cut: the target's count (``by_budget``) never names it."""
+    rows = [{**syn.spoken(0, "human", 200_000), "owner_side": True}]
+    snap = syn.snapshot(room_facts=syn.room("1", lane1=rows))
+    fit = mf.render_view_for_mode(snap, mode="low", owner_mode="low", window_tokens=300_000, known_window=True,
+                                  output_reserve=65_536, ratio=1, non_memory_tokens=210_000)
+    floor = fit.facts["floor"]
+    assert floor["steps"]["F7"] == 1 and floor["target_missed"]  # 24,464 left beside the rest: the window's cut
+    assert floor["by_budget"] == 0
+    # At the boundary the range the window adds is priced as the window's too: four rows and the range fit the
+    # physical room exactly, so a fifth row keeps its words (Astra's case).
+    rows = [{**syn.spoken(i, "human", 8_000), "owner_side": True} for i in range(8)]
+    snap = syn.snapshot(room_facts=syn.room("1", lane1=rows))
+    edge = mf.render_view_for_mode(snap, mode="low", owner_mode="low", window_tokens=300_000, known_window=True,
+                                   output_reserve=65_536, ratio=1, non_memory_tokens=225_983).facts["floor"]
+    assert (edge["steps"]["F7"], edge["steps"]["F7a"], edge["by_budget"]) == (4, 1, 0)
+
+
 def test_short_notes_still_have_selectable_forms_and_a_saving_aggregate():
     snap = syn.snapshot(room_facts=syn.room(notes=20))
     addresses = [f'F8:{note["id"]}' for note in snap.room['notes']]

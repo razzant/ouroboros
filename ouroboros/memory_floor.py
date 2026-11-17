@@ -442,6 +442,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
             break
         if (step, ident) not in taken:
             taken.add((step, ident))
+            forced.update([(step, ident)] if floor is not None else ())  # the window's cut, never a floored target's
             current = measure(level(taken))
             if current > physical:
                 form = ("F7a", str((snapshot.room or {})['room_id']))
@@ -449,11 +450,15 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
                     continue
                 had_form = form in taken
                 taken.add(form)
+                marked = floor is not None and not had_form and form not in forced
+                forced.update([form] if marked else ())  # priced as the window's cut, its receipt included
                 after = measure(level(taken))
                 if after < current:
                     current = after
                 elif not had_form:
                     taken.discard(form)
+                    if marked:
+                        forced.discard(form)
     return level(taken)
 
 
@@ -758,7 +763,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                           tool_names=tool_names, budget_mode=owner_mode, max_room=max_room, snapshot=snapshot)
         if binds and (need := total(level, note)) > target:
             note += (f"\nLow's target ({target:,} tokens) is not met at this start: this request needs "
-                     f"about {need:,} with my memory at its shortest telling of the whole horizon, "
+                     f"about {need:,} with my memory in its shortest tellings, "
                      f"{math.ceil(non_memory_tokens * ratio) + reserve:,} with no memory at all.")
         if room_bound is not None and size(level) > room_bound:
             gone = dict(level.addressed)
