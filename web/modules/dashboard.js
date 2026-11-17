@@ -334,7 +334,9 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
         pressedAgain: () => { level = false; paint(); },
         capture() {
             const tab = state.dashboardActiveSubtab, opened = level;
-            return { label: DASHBOARD_TABS.find((item) => item.value === tab)?.label || 'Dashboard',
+            const label = DASHBOARD_TABS.find((item) => item.value === tab)?.label;
+            // Named as Settings names its levels: the section, then the page (a return reads "Back to Dashboard › Costs").
+            return { label: label || 'Dashboard', title: label ? `Dashboard › ${label}` : 'Dashboard',
                 restore() { level = opened; showTab(tab); paint(); } };
         },
         destroy() {

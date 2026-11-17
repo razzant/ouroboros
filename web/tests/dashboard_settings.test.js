@@ -740,6 +740,8 @@ test('the Dashboard owns only its list level; a jump keeps its return while its 
     assert.deepEqual([...stack.keys()], [], 'a jump has no second list Back');
     assert.equal(jump.back.label, 'Settings', 'its section choices leave the return alone');
     const saved = dashboard.capture();
+    // A return names the section, then its page, as Settings does ("Back to Dashboard › Logs").
+    assert.deepEqual([saved.label, saved.title], ['Logs', 'Dashboard › Logs']);
     dashboard.activateTab('activity');
     saved.restore();
     assert.equal(state.dashboardActiveSubtab, 'logs');

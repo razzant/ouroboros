@@ -68,7 +68,7 @@ export function capturePagePlace({ state, navState, settingsControls, dashboardC
         : state.dashboardActiveSubtab === 'logs' && page === 'dashboard' ? logsControls?.captureReading() : null;
     const label = project?.name || settings?.label || dashboard?.label || (page === 'chat' ? 'Main' : pageLabel(page));
     return { key: project ? `project:${projectId}` : settings ? `settings:${state.settingsPath}`
-        : dashboard ? `dashboard:${state.dashboardActiveSubtab}` : page, label, title: settings?.title || label,
+        : dashboard ? `dashboard:${state.dashboardActiveSubtab}` : page, label, title: settings?.title || dashboard?.title || label,
         retains: settings?.retains, release: settings?.release,
         restore() {
             commitPage(page, { reveal: true, enter: () => {
