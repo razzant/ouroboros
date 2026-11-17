@@ -115,8 +115,11 @@ def test_ui_publish_stale_card_reaches_selected_preflight_and_task(
                 # real identity. A fake HTTP success cannot prove this boundary.
                 assert page.request.get(f"{url}/api/tasks/{task_id}").status == 200
                 page.click('[data-nav-page="chat"]')
-                visible_task = page.locator(f'#page-chat .chat-live-card[data-task-id="{task_id}"]')
-                visible_task.wait_for(state="visible", timeout=30_000)
+                # The mock model answers without a tool, and a turn that ran no tool and finished Done leaves no
+                # activity block (DESIGN "Conversation activity block"): Main shows the task as its reply, which
+                # carries the task's id, live and from history after a reload.
+                visible_task = page.locator(f'#page-chat .chat-bubble.assistant[data-task-id="{task_id}"]')
+                visible_task.wait_for(state="visible", timeout=60_000)
                 page.reload(wait_until="domcontentloaded")
                 visible_task.wait_for(state="visible", timeout=30_000)
             finally:
