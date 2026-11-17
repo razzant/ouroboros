@@ -367,7 +367,9 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                 page.keyboard.press("Escape")
                 menu.wait_for(state="detached", timeout=10_000)
 
-                # The stable Chat DOM owns the deterministic viewport-flip proof.
+                # The stable Chat DOM owns the deterministic viewport-flip proof. The feed fades out under the
+                # composer, which stands over it (DESIGN principle 9: the feed's own mask), so the lowest a card
+                # can be pressed is just above the composer's top.
                 page.evaluate(
                     """
                     () => {
@@ -375,14 +377,17 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                             '.chat-live-card[data-task-id="live-root"]',
                         );
                         window.__s3OriginalLiveStyle = live.getAttribute('style');
+                        const composer = document.getElementById('chat-input-area').getBoundingClientRect();
                         Object.assign(live.style, {
                             position: 'fixed', left: '16px', right: 'auto',
-                            bottom: '8px', top: 'auto', margin: '0', zIndex: '6',
+                            bottom: `${innerHeight - composer.top + 8}px`, top: 'auto', margin: '0', zIndex: '6',
                         });
                     }
                     """,
                 )
-                trigger.click()
+                # Pressed where it is drawn: the masked feed holds the card, so a scroll into view would move it.
+                box = trigger.bounding_box()
+                page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
                 menu.wait_for(state="visible", timeout=10_000)
                 _assert_menu_geometry(_menu_metrics(page, menu, trigger), placement="above")
                 page.screenshot(
@@ -455,6 +460,9 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                             '.chat-live-card[data-task-id="live-root"]',
                         );
                         window.__s3ShortLiveStyle = live.getAttribute('style');
+                        // 150px is nearly all composer, which stands over the masked feed: it is set aside here so
+                        // the card can be pressed at all (restored below).
+                        document.getElementById('chat-input-area').style.visibility = 'hidden';
                         Object.assign(live.style, {
                             position: 'fixed', left: '8px', right: 'auto',
                             top: '0px', bottom: 'auto', width: '304px',
@@ -524,6 +532,7 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                         );
                         if (window.__s3ShortLiveStyle === null) live.removeAttribute('style');
                         else live.setAttribute('style', window.__s3ShortLiveStyle);
+                        document.getElementById('chat-input-area').style.removeProperty('visibility');
                     }
                     """,
                 )
