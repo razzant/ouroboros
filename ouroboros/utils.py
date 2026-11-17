@@ -394,10 +394,16 @@ _JSON_SNAPSHOTS: Dict[str, tuple] = {}
 _RACY_NS = 2_000_000_000
 
 
+def change_stamp_ns(st: Any, *, windows: bool = os.name == "nt") -> int:
+    """``st_ctime_ns`` as every stat call reports it. On Windows CPython 3.12+ ``os.fstat`` gives the
+    change time there and ``os.stat``/``lstat``/``scandir`` the creation time (``st_birthtime_ns``)."""
+    return getattr(st, "st_birthtime_ns", st.st_ctime_ns) if windows else st.st_ctime_ns
+
+
 def file_identity(st: Any) -> tuple:
     """What every write changes: a rename-replace is a new inode, an in-place write a new change
-    time (``st_ctime_ns``, which no ``utime`` sets back on POSIX; Windows reports creation time)."""
-    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    time (which no ``utime`` sets back on POSIX; Windows reports creation time)."""
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, change_stamp_ns(st))
 
 
 def json_snapshot(path: pathlib.Path, *, strict: bool = False) -> Optional[Dict[str, Any]]:

@@ -170,9 +170,17 @@ def _recorded_scratch(record: pathlib.Path, row: Dict[str, Any]) -> pathlib.Path
         problem = _marker_matches(path, recorded)
         if problem:
             raise ScratchIdentityMismatch(record, path, recorded, problem, basis="marker")
-    elif [seen.st_dev, seen.st_ino] != recorded:
+    elif not _legacy_identity_matches(seen, recorded):
         raise ScratchIdentityMismatch(record, path, recorded, [seen.st_dev, seen.st_ino])
     return path
+
+
+def _legacy_identity_matches(seen: Any, recorded: List[int], *, windows: bool = os.name == "nt") -> bool:
+    """A schema-1 ``[st_dev, st_ino]``. On Windows CPython 3.12+ reports the volume's 64-bit serial; a record
+    made under 3.10 holds its low 32 bits, the serial that Python reported then."""
+    if [seen.st_dev, seen.st_ino] == recorded:
+        return True
+    return windows and [seen.st_dev & 0xFFFFFFFF, seen.st_ino] == recorded
 
 
 def recorded_scratch(record: pathlib.Path) -> pathlib.Path:

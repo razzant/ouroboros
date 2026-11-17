@@ -502,6 +502,7 @@ def _entry_kind(target: pathlib.Path, rel: str) -> str:
     try:
         for part in rel.split("/")[:-1]:
             if stat.S_ISLNK((here := here / part).lstat().st_mode):
+                here.stat()  # a looping link is unknown everywhere; Windows (3.12+) calls a path through it absent
                 path.lstat()  # through the link: absent, or unknown when it cannot be reached (a loop)
                 return "beyond_link"
         mode = path.lstat().st_mode

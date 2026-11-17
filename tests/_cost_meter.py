@@ -78,6 +78,11 @@ import threading
 import urllib.parse
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+try:
+    import _winapi  # Windows only
+except ImportError:
+    _winapi = None
+
 BOUNDARY: contextvars.ContextVar = contextvars.ContextVar("cost_boundary", default=None)
 # ``vm_steps`` counts every instruction (``_w_connect``). SQLite calls a progress handler of period N at multiples of
 # N of each prepared statement's own instruction count, a phase the statement carries across its executions, the
@@ -416,6 +421,16 @@ def _w_os_open(path, flags, *args, **kwargs):
     return fd
 
 
+def _w_copyfile2(existing, new, flags, *args, **kwargs):
+    """From CPython 3.12 ``shutil.copy2`` copies with ``CopyFile2`` on Windows and opens nothing in Python: the
+    source counts as the ``open`` that copy2 is known by everywhere else."""
+    result = _ORIG["_winapi.CopyFile2"](existing, new, flags, *args, **kwargs)  # a refusal falls back to an io.open
+    meter = _ACTIVE
+    if meter is not None:
+        meter.add("open", path=existing, category=meter.category(existing))
+    return result
+
+
 def _w_os_read(fd, n, *args, **kwargs):
     data = _ORIG["os.read"](fd, n, *args, **kwargs)
     meter = _ACTIVE
@@ -638,6 +653,7 @@ _MODULE_PATCHES = (
     (json, "loads", "json.loads", _w_json_loads), (json, "dumps", "json.dumps", _w_json_dumps),
     (sqlite3, "connect", "sqlite3.connect", _w_connect),
     (sqlite3, "Row", "sqlite3.Row", _CountedRow),
+    *(((_winapi, "CopyFile2", "_winapi.CopyFile2", _w_copyfile2),) if _winapi is not None else ()),
 )
 _ACCESSOR = getattr(pathlib, "_NormalAccessor", None)
 _ACCESSOR_PATCHES = (("stat", _w_stat), ("scandir", _w_scandir), ("listdir", _w_listdir),

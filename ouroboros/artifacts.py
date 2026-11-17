@@ -16,7 +16,7 @@ from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 from ouroboros.artifact_storage import clone_file, temporary_sibling
-from ouroboros.utils import atomic_write_json, read_json_dict, update_json_locked, write_bytes_atomic
+from ouroboros.utils import atomic_write_json, file_identity, read_json_dict, update_json_locked, write_bytes_atomic
 from ouroboros.headless import ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_READY, SCRATCH_MANIFEST_NAME, task_artifacts_dir
 from ouroboros.outcome_receipt_store import is_verification_receipts_path
 from ouroboros.task_custody import fence_publication
@@ -1150,9 +1150,6 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
     """
     source_path = pathlib.Path(path) if isinstance(path, (str, os.PathLike)) else None
     digest, size = sha256(), 0
-    def identity(observation: os.stat_result) -> tuple:
-        return (observation.st_dev, observation.st_ino, observation.st_size,
-                observation.st_mtime_ns, observation.st_ctime_ns)
     from ouroboros.store import open_for_read  # a held store file keeps its locks (no new descriptor to close)
 
     # Reject pipes/devices before opening: the descriptor check alone comes too
@@ -1173,8 +1170,8 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
             size += len(chunk)
             if size > before.st_size:
                 raise OSError(f"artifact source size changed during read: {path}")
-        if (identity(before) != identity(os.fstat(handle.fileno()))
-                or (source_path is not None and identity(before) != identity(source_path.stat()))):
+        if (file_identity(before) != file_identity(os.fstat(handle.fileno()))
+                or (source_path is not None and file_identity(before) != file_identity(source_path.stat()))):
             raise OSError(f"artifact source changed during read: {path}")
     result = {"size": size, "sha256": digest.hexdigest()}
     if size != before.st_size:
@@ -1182,11 +1179,11 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
     expected = expected if isinstance(expected, dict) else {}
     if expected.get("immutable") and (not isinstance(expected.get("size"), int) or not expected.get("sha256")):
         raise ArtifactIdentityError(f"immutable artifact is missing its capture identity: {path}",
-                                    source_path=source_path, source_stamp=identity(before))
+                                    source_path=source_path, source_stamp=file_identity(before))
     for key in ("size", "sha256"):
         if expected.get(key) not in (None, "") and expected[key] != result[key]:
             raise ArtifactIdentityError(f"artifact source failed {key} verification: {path}",
-                                        source_path=source_path, source_stamp=identity(before))
+                                        source_path=source_path, source_stamp=file_identity(before))
     return result
 
 
