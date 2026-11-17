@@ -123,8 +123,10 @@ def knowledge_changes(root: Any, boundary: Any, gaps: set) -> tuple[list, Any]:
     """Other foci's captures since accepted byte positions, in each journal's append order.
 
     The first observation baselines existing journals; an accepted empty map sees new ones from zero.
-    Only a fixed ending check precedes the unread bytes. Unchanged journals are never opened; a gap
-    keeps that journal's cursor (a failed first baseline stays unaccepted). This reader writes nothing.
+    Only a fixed ending check precedes unread bytes; unchanged journals are never opened. Invalid
+    complete rows are disclosed and skipped; missing/shortened journals drop/re-baseline their cursor.
+    Baselines succeed per journal; an unfinished tail waits while its complete prefix advances.
+    Other unreadable positions stay put. This reader writes nothing.
     """
     root, previous = Path(root), boundary or {}
     current, events = dict(previous), []
@@ -138,27 +140,42 @@ def knowledge_changes(root: Any, boundary: Any, gaps: set) -> tuple[list, Any]:
         journals[scope] = root / "projects" / scope.removeprefix("project:") / JOURNAL_NAME
     for scope, journal in sorted(journals.items()):
         prior = previous.get(scope, {"offset": 0, "check": hashlib.sha256(b"").hexdigest()})
+        source, reset_gap = journal.relative_to(root), ""
         try:
             try:
                 end = journal.stat().st_size
             except FileNotFoundError:
-                end = 0
-            if end < prior["offset"]:
-                raise ValueError("accepted journal is missing or shortened")
+                if scope in current:
+                    del current[scope]
+                    gaps.add(f"knowledge journal missing ({scope}): {source}; cursor dropped")
+                continue
             if end == prior["offset"]:
                 continue
+            if end < prior["offset"]:
+                del current[scope]
+                reset_gap = f"knowledge journal shortened ({scope}): {source}, {prior['offset']} → {end} bytes"
             with journal.open("rb") as handle:
-                if boundary is None:
+                if boundary is None or reset_gap:
                     current[scope] = _journal_position(handle, end)
+                    if reset_gap:
+                        gaps.add(f"{reset_gap}; re-baselined at current end")
                     continue
                 if _journal_position(handle, prior["offset"]) != prior:
                     raise ValueError("accepted journal ending changed")
                 changes = []
                 while handle.tell() < end:
+                    start = handle.tell()
                     line = handle.readline(end - handle.tell())
+                    if not line.endswith(b"\n"):
+                        gaps.add(f"knowledge changes unreadable ({scope}): {source}, bytes {start}..{handle.tell()} "
+                                 f"(end exclusive); incomplete row pending; position stops at {start}")
+                        end = start
+                        break
                     row = _parse(line)
-                    if not line.endswith(b"\n") or not isinstance(row, dict):
-                        raise ValueError("incomplete or invalid journal row")
+                    if not isinstance(row, dict):
+                        gaps.add(f"knowledge journal gap ({scope}): {source}, bytes {start}..{handle.tell()} "
+                                 "(end exclusive); invalid row skipped")
+                        continue
                     topic, focus = row.get("topic"), row.get("focus")
                     if not _belongs(row, SimpleNamespace(topic=topic, scope=scope)):
                         continue
@@ -171,9 +188,9 @@ def knowledge_changes(root: Any, boundary: Any, gaps: set) -> tuple[list, Any]:
                 current[scope] = _journal_position(handle, end)
                 events.extend(changes)
         except (OSError, ValueError) as exc:
-            gaps.add(f"knowledge changes unreadable ({scope}): {exc}; accepted position retained")
-            if boundary is None:
-                return [], None
+            where = reset_gap or f"knowledge changes unreadable ({scope}): {source}"
+            action = "accepted position retained" if scope in current else "journal skipped"
+            gaps.add(f"{where}: {exc}; {action}")
     return events, current
 
 

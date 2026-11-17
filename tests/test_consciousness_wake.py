@@ -374,6 +374,115 @@ def test_empty_knowledge_baseline_keeps_the_wake_text_and_observes_the_first_lat
     assert _observe(tmp_path, boundary=later.boundary).full_text() == unchanged_text
 
 
+@pytest.mark.parametrize("scope", ["global", "project:fixture-recovery"])
+@pytest.mark.parametrize("damage", [b'{"torn":', b'not JSON\n', b'[]\n', b'\xff\n'])
+def test_a_wake_reads_both_sides_of_a_broken_knowledge_row_and_names_it_once(tmp_path, scope, damage):
+    from ouroboros import knowledge, knowledge_versions
+    from ouroboros.tools.knowledge import _knowledge_read
+    from ouroboros.tools.registry import ToolContext
+    from tests._knowledge_history_shared import printed_call
+
+    target = knowledge.resolve_knowledge_address(tmp_path, "recovery", scope)
+    a = knowledge.write_knowledge_note(target, "# A\n").current
+    accepted, _task = _bind(tmp_path, _observe(tmp_path), "wake-before-damage")
+    b = knowledge.write_knowledge_note(target, "# B\n", expected_revision=a.revision).current
+    journal = knowledge_versions.journal_path(target)
+    intact = journal.read_bytes()
+    c = knowledge.write_knowledge_note(target, "# C\n", expected_revision=b.revision).current
+    journal.write_bytes(intact + damage)
+    d = knowledge.write_knowledge_note(target, "# D\n", expected_revision=c.revision).current
+    skipped_end = len(intact) + len(damage) + (not damage.endswith(b"\n"))
+    raw = journal.read_bytes()
+    assert raw[skipped_end - 1:skipped_end] == b"\n"  # the real writer separates a torn record
+
+    observed = _observe(tmp_path, boundary=accepted)
+    calls = [printed_call(line.split("; ")[-1])[1] for line in _lines(observed)]
+    assert calls == [{"topic": "recovery", "scope": scope, "version": note.revision} for note in (b, d)]
+    ctx = ToolContext(repo_dir=REPO, drive_root=tmp_path, task_id="fixture-reader")
+    assert all(_knowledge_read(ctx, **args).endswith(note.text) for args, note in zip(calls, (b, d)))
+    assert len(observed.gaps) == 1
+    gap = observed.gaps[0]
+    assert str(journal.relative_to(tmp_path)) in gap and f"bytes {len(intact)}..{skipped_end}" in gap
+    assert "invalid row skipped" in gap and observed.full_text().count(gap) == 1
+    assert observed.boundary["knowledge"][scope]["offset"] == len(raw)
+    assert journal.read_bytes() == raw  # reading does not repair or rewrite the journal
+    retry = _observe(tmp_path, boundary=accepted)
+    assert retry.events == observed.events and retry.gaps == observed.gaps  # unaccepted: still owed
+    committed, _task = _bind(tmp_path, observed, "wake-after-damage")
+    again = _observe(tmp_path, boundary=committed)
+    assert again.events == () and not again.gaps
+    e = knowledge.write_knowledge_note(target, "# E\n", expected_revision=d.revision).current
+    complete_end = journal.stat().st_size
+    with journal.open("ab") as stream:
+        stream.write(b'{"unfinished":')
+    later = _observe(tmp_path, boundary=committed)
+    assert len(later.events) == 1 and e.revision in later.full_text()
+    assert len(later.gaps) == 1 and gap not in later.gaps and "incomplete row pending" in later.gaps[0]
+    assert later.boundary["knowledge"][scope]["offset"] == complete_end
+
+
+@pytest.mark.parametrize("fault", ["missing", "shortened", "empty"])
+def test_a_lost_knowledge_journal_is_named_once_and_later_writes_are_seen(tmp_path, fault):
+    import shutil
+    from ouroboros import knowledge, knowledge_versions
+
+    scope = "project:fixture-returning"
+    target = knowledge.resolve_knowledge_address(tmp_path, "returning", scope)
+    a = knowledge.write_knowledge_note(target, "# Before\n").current
+    journal = knowledge_versions.journal_path(target)
+    prefix = journal.read_bytes()
+    b = knowledge.write_knowledge_note(target, "# Accepted\n", expected_revision=a.revision).current
+    healthy = knowledge.resolve_knowledge_address(tmp_path, "healthy", "global")
+    first = knowledge.write_knowledge_note(healthy, "# Before\n").current
+    accepted, _task = _bind(tmp_path, _observe(tmp_path), "wake-before-loss")
+    if fault == "missing":
+        shutil.rmtree(target.shelf.parent)
+    else:
+        journal.write_bytes(prefix if fault == "shortened" else b"")
+    changed = knowledge.write_knowledge_note(healthy, "# After\n", expected_revision=first.revision).current
+
+    observed = _observe(tmp_path, boundary=accepted)
+    assert len(observed.events) == 1 and changed.revision in observed.full_text()
+    assert len(observed.gaps) == 1 and scope in observed.gaps[0]
+    assert str(journal.relative_to(tmp_path)) in observed.gaps[0]
+    if fault == "missing":
+        assert scope not in observed.boundary["knowledge"] and "cursor dropped" in observed.gaps[0]
+    else:
+        assert observed.boundary["knowledge"][scope]["offset"] == journal.stat().st_size
+        assert "shortened" in observed.gaps[0] and "re-baselined" in observed.gaps[0]
+    assert scope in accepted["knowledge"]  # observation never mutates its accepted input
+    committed, _task = _bind(tmp_path, observed, "wake-after-loss")
+    again = _observe(tmp_path, boundary=committed)
+    assert again.events == () and not again.gaps
+    returned = knowledge.write_knowledge_note(target, "# Returned\n",
+        expected_revision=None if fault == "missing" else b.revision).current
+    later = _observe(tmp_path, boundary=committed)
+    assert len(later.events) == 1 and returned.revision in later.full_text() and not later.gaps
+
+
+def test_one_unpositionable_knowledge_journal_does_not_block_the_other_baselines(tmp_path):
+    from ouroboros import knowledge, knowledge_versions
+
+    scopes = ("global", "project:fixture-idle", "project:fixture-working")
+    targets = [knowledge.resolve_knowledge_address(tmp_path, "baseline", scope) for scope in scopes]
+    notes = [knowledge.write_knowledge_note(target, f"# Before: {scope}\n").current
+             for scope, target in zip(scopes, targets)]
+    idle = knowledge_versions.journal_path(targets[1])
+    idle.write_bytes(idle.read_bytes()[:-1])
+    first = _observe(tmp_path)
+    assert first.events == () and len(first.gaps) == 1
+    accepted, _task = _bind(tmp_path, first, "wake-partial-baseline")
+    assert set(accepted.get("knowledge", {})) == {scopes[0], scopes[2]}
+    assert "project:fixture-idle" in first.gaps[0] and "journal skipped" in first.gaps[0]
+    for index in (0, 2):
+        assert accepted["knowledge"][scopes[index]]["offset"] == knowledge_versions.journal_path(targets[index]).stat().st_size
+    changed = [knowledge.write_knowledge_note(targets[index], f"# After: {scopes[index]}\n",
+               expected_revision=notes[index].revision).current for index in (0, 2)]
+    later = _observe(tmp_path, boundary=accepted)
+    assert len(later.events) == 2 and all(note.revision in later.full_text() for note in changed)
+    assert all(note.revision not in later.full_text() for note in notes)  # the other shelves did baseline
+
+
 def test_every_event_of_the_window_is_observed_without_a_count_cut(tmp_path):
     """No ten-line window, no four-card cap, no 512 KB human tail: all of it, in append order."""
     since = T0 - 3600
