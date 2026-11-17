@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from ouroboros.consciousness_view import describe_consciousness_state
+from tests.test_design_system_gate_browser import open_nav
 from tests.test_room_work_browser import PROJECT, Transport, activity, progress, reading
 from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
 from tests.test_window_chrome_browser import record
@@ -200,8 +201,12 @@ def test_hidden_main_does_not_take_visible_projects_notice(shell_ui):
     assert edge["heads"] and "gaps" in edge["note"], edge
     # On a phone the Project covers Main whole, so Main still reads nothing (5e72b85224) and has no gap to tell yet.
     assert 1 not in reads, reads
+    # The reference was a jump from Settings (DESIGN "Layers and dismissal"): the room's × returns there; Main is
+    # then chosen in the drawer.
     page.click("#project-panel-close")
     page.wait_for_function("!document.body.classList.contains('project-panel-open')")
+    page.wait_for_selector("#page-settings.active")
+    open_nav(page, "chat")
     page.wait_for_function("document.querySelector('#page-chat .chat-load-older-note')?.textContent.includes('gaps')")
     assert _room_notices(page) == [], "Main shown after the Project tells its gap at its head, never as a notice"
     assert _gap_heads_history(page, "#page-chat")["heads"]

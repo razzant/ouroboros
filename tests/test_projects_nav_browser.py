@@ -435,14 +435,17 @@ def test_reference_beyond_both_caps_opens_its_own_room_and_a_superseded_or_faile
     expect()(title).to_have_text(b["name"])
     settle(page)
     assert not reads_of(reads, "/api/chat/history", chat_id=str(a["chat_id"]))
-    # A close or another page while a lookup waits: the late answer opens nothing.
+    # A close or another page while a lookup waits: the late answer opens nothing. B was reached by a jump from the
+    # deep room, so its × returns there, and the deep room's × to Main (DESIGN "Layers and dismissal").
     click_reference(page, a)
     until(page, lambda: len(control["held_lookups"]) == 1)
     page.locator('#project-panel-close').click()
-    expect()(page.locator('#project-panel')).to_be_hidden()
+    expect()(title).to_have_text(deep["name"])
     ui["forward_get"](control["held_lookups"].pop(0))
     page.evaluate("0")
     settle(page)
+    expect()(title).to_have_text(deep["name"])
+    page.locator('#project-panel-close').click()
     expect()(page.locator('#project-panel')).to_be_hidden()
     assert not reads_of(reads, "/api/chat/history", chat_id=str(a["chat_id"]))
     control["hold_lookups"] = False
