@@ -222,7 +222,7 @@ def payload_effort(payload: Mapping[str, Any]) -> str:
         if effort:
             return effort
     thinking = payload.get("thinking")
-    if isinstance(thinking, Mapping) and str(thinking.get("type") or "").lower() == "disabled":
+    if isinstance(thinking, Mapping) and str(thinking.get("type") or "").lower() in {"disabled", "between_tools"}:
         return "none"
     extra_body = payload.get("extra_body")
     if not isinstance(extra_body, Mapping):

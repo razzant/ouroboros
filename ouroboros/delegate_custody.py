@@ -1576,7 +1576,6 @@ from ouroboros.delegate_custody_reconcile import (  # noqa: E402, F401 -- intent
     _reconcile_each,
     _reconcile_one,
     _recover_pending_invocation,
-    _retire_recovered_registration,
     open_runs,
     pending_invocations,
     reconcile_orphaned_runs,

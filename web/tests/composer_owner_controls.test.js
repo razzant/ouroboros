@@ -998,7 +998,8 @@ function layRow(m, { width, values, names = { model: 30, subagents: 70, context:
         : m.row.dataset.ownerCompact === 'values' ? Math.min(values[kind], cap()) : values[kind]);
     const nameWidth = (kind) => (els[kind].dataset.nameFit === 'off' ? 0 : names[kind]);
     const capsuleWidth = (kind) => GLYPH + nameWidth(kind) + valueWidth(kind);
-    const total = () => kinds.reduce((sum, kind) => sum + capsuleWidth(kind), 0) + gap * Math.max(0, kinds.length - 1);
+    const total = () => kinds.reduce((sum, kind) => sum + capsuleWidth(kind), 0)
+        + (typeof gap === 'function' ? gap() : gap) * Math.max(0, kinds.length - 1);
     m.row.getBoundingClientRect = () => ({ top: 0, bottom: 32, left: 0, right: width, width, height: 32 });
     for (const kind of kinds) {
         const last = kind === kinds.at(-1);
@@ -1037,6 +1038,34 @@ test('the model keeps its value: where the cap would cut it, Subagents, Context 
     assert.deepEqual(line.said(), ['values', undefined, '74px']);
     m.controls.destroy();
     assert.deepEqual([m.row.dataset.ownerCompact, m.row.dataset.ownerGlyphs], [undefined, undefined]);
+});
+
+test('folded touch rings give their reach spacing back before Model is cut, and regain it as the row grows', () => {
+    const store = createModelCatalogStore({ readCatalog: async () => ({ items: [] }), readPreferences: async () => ({}) });
+    const styles = new Map();
+    const m = mountPair({ subagents: true, model: { store }, win: { ...hoverWindow(false), getComputedStyle: node => styles.get(node) || {} } });
+    const gap = () => m.row.dataset.ownerGlyphs && !m.row.dataset.ownerTight ? 12 : 8;
+    styles.set(m.row, { get columnGap() { return `${gap()}px`; } });
+    const values = { model: 83, subagents: 120, context: 120, effort: 120 };
+    const steps = [
+        [900, undefined, undefined, undefined, '', 8],
+        [260, 'true', 'true', undefined, '', 12],
+        [250, 'true', 'true', 'true', '', 8],
+        [230, 'values', 'true', 'true', '69px', 8],
+        [250, 'true', 'true', 'true', '', 8],
+        [260, 'true', 'true', undefined, '', 12],
+        [900, undefined, undefined, undefined, '', 8],
+    ];
+    for (const [width, compact, glyphs, tight, cap, pitch] of steps) {
+        const line = layRow(m, { width, values, gap });
+        m.controls.syncState({});
+        assert.deepEqual([...line.said(), m.row.dataset.ownerTight, gap()], [compact, glyphs, cap, tight, pitch], `${width}px`);
+        assert.ok(line.total() <= width, `${width}px keeps one line`);
+    }
+    layRow(m, { width: 250, values, gap });
+    m.controls.syncState({});
+    m.controls.destroy();
+    assert.equal(m.row.dataset.ownerTight, undefined, 'destroy retires the tight spacing too');
 });
 
 test('a row without the model keeps the fit it had: names, then the widest values cut, never glyphs alone', () => {

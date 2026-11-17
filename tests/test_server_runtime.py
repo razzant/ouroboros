@@ -414,7 +414,7 @@ def test_apply_runtime_provider_defaults_keeps_new_triad_on_openrouter():
 
     assert not changed
     assert changed_keys == []
-    assert normalized["OUROBOROS_MODEL"] == "google/gemini-3.8-flash"
+    assert normalized["OUROBOROS_MODEL"] == SETTINGS_DEFAULTS["OUROBOROS_MODEL"]
     assert normalized["OUROBOROS_MODEL_LIGHT"] == SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"]
     assert normalized["OUROBOROS_MODEL_FALLBACKS"] == SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"]
     # ABI 7.0 (ABI-10): the comma keys are retired settings — a defaults-only

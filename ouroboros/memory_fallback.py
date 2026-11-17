@@ -648,7 +648,8 @@ def _part_input(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, b
             continue
         period = memory_inventory.record_period(store, member, units, records=cache["period_records"])
         span = period.span or {}
-        dated = (f"{span.get('start') or '?'} → {span.get('end') or '?'}{period.note()}"
+        dated = (f"{memory_inventory.minute(span.get('start') or '?')} → "
+                 f"{memory_inventory.minute(span.get('end') or '?')}{period.note()}"
                  + ("; incomplete" if span.get("incomplete") else "")) if span else "unknown"
         author, moved = member.get("author") or {}, memory_inventory.transfer_words(member)
         blocks.append(f"### {member['kind']} {member['id']} — by {memory_inventory.record_byline(member)}"

@@ -93,12 +93,13 @@ under the copy's `.review-evidence/`, whose retention applies no cache, binary, 
 ignore filter. Where the route's catalog row
 negotiates `accessControl.auxiliaryWritableRoots` (never a guess from a harness name or
 write mechanism) and the start is an Agent `workspace_write` one, the host makes the run's
-exact short scratch under `test_environment.session_scratch_parent()` (`/var/tmp/obs-<random>`
-on macOS/Linux, resolved physically), with its path/inode record in the ungranted task drive at
-`task_drives/<task>/session_scratch_owners/<snapshot>/scratch.json`; a reviewer seat keeps its
-`session_scratch_owners/seat-<seat>/scratch.json` in its own home. The cache's `uv`/`pip`/`npm` folders
-and scratch are real directories outside every Git
-tree and never reached through a link. The host adds only these exact directories as
+short scratch at `<container>/w`, under `test_environment.session_scratch_parent()` (`/var/tmp/obs-<random>`
+on macOS/Linux). The ungranted container's regular nonce marker and recorded address identify it;
+whole-folder restoration there inherits its holder and cleanup. Its record is
+`task_drives/<task>/session_scratch_owners/<snapshot>/scratch.json`, or a reviewer's
+`session_scratch_owners/seat-<seat>/scratch.json` in its seat home. Legacy path/inode records remain unchanged.
+Scratch and cache `uv`/`pip`/`npm` folders are real, outside Git, never reached through a link.
+The host adds only these workspaces, never containers, markers or records, as
 `execution.auxiliaryWritableRoots`; the binding, a seat's checking text and the facts then
 name that scratch instead of the default parent (`workspace_preflight.session_service_directories`).
 A `full` Agent start, whose rights already reach such a folder, gets the same owned scratch with nothing
@@ -107,9 +108,9 @@ Every naming declares it disposable before use (`delegate_start_instructions.DIS
 captured, released when its task ends (`workspace_preflight.release_finished_scratch`) or its seat copy goes
 (`session_scratch.release_seat_scratch`), nothing
 reinstalled for a later session. That is a purpose and an owner, not a promise of byte-for-byte reproduction.
-The native profile's existing temporary-directory permissions are unchanged. Directory grants do
-not grant IPC or process inspection: a blocked check stays unverified, with its command and
-diagnostics retained. After inspecting the candidate, the integrating mind may run it through
+Native profile rights are unchanged; the managed allocator makes only new container/marker metadata
+service-readable, without widening the workspace grant. IPC or process inspection may still refuse;
+keep its command and diagnostics. After inspecting the candidate, the integrating mind may run it through
 existing host tools under its own authority. This runs candidate code with ordinary OS-user rights;
 safe_test isolates environment and process custody, not the OS. No automatic Full, network change,
 new verifier or weakened check follows from a refusal.
@@ -122,8 +123,8 @@ drive may already have retired. A continuation binds its own start's rights; one
 task need not reuse prior scratch; a new start replaces scratch removed by OS aging, never a
 directory with a different identity. The drive's custody trash removal retires short scratch
 too. Retention markers, unreadable/replaced ownership or failed removal keep the trash and
-pointer; they may require manual resolution, not just another pass. A hard kill before record publication may leave an
-unrecorded empty temp directory. No temp-root sweep or retry-time fallback is provided. A review
+pointer; they may need manual resolution. A hard kill before record publication can leave an
+unrecorded container with marker and workspace. No temp-root sweep or retry fallback is provided. A review
 thread, whose turns carry geometry only, claims no grant.
 Capture keeps files new there since the baseline, untracked, staged or committed, out of
 the result commit, disclosed, and retains them whole beside it before the copy is
@@ -182,9 +183,11 @@ rides separately as the private snapshot (for `in_place`, the target itself) in
 `execution.workspaceRoot`. That registration
 is the USER'S identity, not a disposable snapshot: it is marked `project_persistent`
 (`delegate_registration_policy.persistent_registration` — stable execution workspace
-plus `workspace_write`), and every retire path honours the marker — settlement, the
-orphan sweep, recovered-invocation refusals, and the pre-run refusal path. The ownership
-duty is discharged durably (`PROJECT_RETIRED` with `project_kept: true`) without
+plus `workspace_write`), and retirement honours the marker at settlement and proven-unsent
+preparation. An error answering an entered POST preserves the registration: accepted-work
+lookup may bind its run or job for ordinary observation and settlement; a failed or missing
+lookup proves no non-admission. The ownership duty is discharged durably
+(`PROJECT_RETIRED` with `project_kept: true`) without
 deleting the project, and any persistent sharer makes the shared project undeletable for
 its non-persistent siblings. Durable records written before the marker existed fall back
 to the immutable stored request (`execution.workspaceRoot` + `access`) at recovery time
@@ -585,7 +588,7 @@ and pending work. Saved cognition defers pending replay; other recovery first re
 creating, the saved binding's accepted work (`delegate_accepted.py`; live and paused owners too;
 admitted apart from replay, a process Stop halting both) and binds it once: no STARTED is published
 outside the actor decision lock, and a run only its process holds records money only on that row.
-Only a plain miss, never a typed refusal, may replay that binding, its store rule unchanged.
+Automatic replay needs a plain miss and admitting-store receipt; explicit retry keeps its store rule.
 Recovered custody carries the original request time and cap separately from STARTED publication:
 review continuation and copy retention use that window, so late collection grants no fresh time.
 Root-direct recovery uses the same path.

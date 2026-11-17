@@ -26,6 +26,7 @@ from ouroboros.configured_subagents import (
     resolve_settings_subagent_candidate,
 )
 from ouroboros.server_runtime import apply_runtime_provider_defaults
+from ouroboros.settings_defaults import OPENROUTER_HELPER_DEFAULTS
 
 
 def _row(row_id: str = "builder", **overrides):
@@ -600,6 +601,8 @@ def test_settings_legacy_singleton_uses_the_canonical_linear_compiler(
         ("primary-builder", "claude=claude-opus-5", "owner-account"),
         ("fast-scout", "openai/gpt-5.6-luna", ""),
         ("independent-perspective", "openai/gpt-5.6-sol", ""),
+        # The draft's configured OpenRouter adds its helpers (owner, 2026-11-16).
+        *((row_id, model, "") for row_id, model, _use in OPENROUTER_HELPER_DEFAULTS),
         ("legacy-heavy", "owner/custom-heavy", ""),
     ]
     assert all(row.name == "" for row in resolution.config.items)
@@ -612,6 +615,7 @@ def test_settings_legacy_singleton_uses_the_canonical_linear_compiler(
         "primary-builder",
         "fast-scout",
         "independent-perspective",
+        *(row_id for row_id, _model, _use in OPENROUTER_HELPER_DEFAULTS),
     ]
 
 

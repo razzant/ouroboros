@@ -22,19 +22,18 @@ def default_temp_parent() -> Path:
     on macOS, 108 on Linux): rooted in an inherited, already nested TMPDIR, a nested forkserver
     or manager address outgrew it (#2110). Other platforms keep their temporary directory.
 
-    The parent of preflight, commit-admission and safe_test roots, whose deliberately retained
-    trees have no ownership record: the OS cleaners of ``/tmp`` are still their only remover."""
+    The parent of preflight, commit-admission and safe_test roots. New task-owned kept preflight
+    containers have an ownership record; unrecorded roots still have only the OS's temp cleaners."""
     return Path("/tmp") if _short_temp_platform() else Path(tempfile.gettempdir())
 
 
 def session_scratch_parent() -> Path:
     """Where a writable session's recorded scratch (``workspace_preflight._session_scratch``) lives:
     ``/var/tmp`` on macOS and Linux, four bytes longer than ``default_temp_parent()`` and still
-    inside the socket bound (the deepest nested layout measures 95 of 104 bytes under
-    ``/private/var/tmp``), and outside both macOS cleaners (``tmp_cleaner`` ages only ``/tmp``;
-    the boot ``dirs_cleaner`` swaps out ``/tmp``) and Linux ``tmpfs``: its holder's release is the
-    one remover of a recorded scratch, never a day count or a reboot. Other platforms keep their
-    temporary directory."""
+    inside the socket bound (a nested ``w/`` layout binds at 97 of 104 bytes under
+    ``/private/var/tmp``), outside the macOS ``/tmp`` cleaners and Linux ``tmpfs``. Host release
+    follows its holder, not age; system policy can still age ``/var/tmp`` (see PERSISTENCE).
+    Other platforms keep their temporary directory."""
     return Path("/var/tmp") if _short_temp_platform() else Path(tempfile.gettempdir())
 
 
@@ -95,6 +94,24 @@ def without_launch_descriptors(env: dict) -> dict[str, str]:
 # retention is in place, so a surviving process never loses the directory it writes into.
 RETENTION_MARKER = "OUROBOROS_RETAINED.txt"
 SCRATCH_MARKER = "OUROBOROS_TEST_SCRATCH.txt"
+# Logical ownership is outside the workspace handed to a session or a top-level gate.
+SCRATCH_CONTAINER_MARKER = ".ouroboros-scratch"
+SCRATCH_WORKSPACE = "w"
+
+
+def new_scratch_identity(container) -> dict:
+    """Identity issued only by a fresh allocator; never infer a nonce from an existing folder."""
+    return {"schema_version": 2, "path": str(container), "nonce": os.urandom(16).hex()}
+
+
+def write_scratch_marker(container, nonce) -> None:
+    """Publish a new local allocation's marker, before any workspace is handed out."""
+    with (Path(container) / SCRATCH_CONTAINER_MARKER).open("xb") as stream:
+        stream.write((nonce + "\n").encode("ascii"))
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 # Explicit diagnostic destinations accepted by existing test producers. They
 # carry output paths, not provider/configuration or test-selection authority.
 DIAGNOSTIC_OUTPUT_KEYS = (
@@ -289,12 +306,23 @@ def owned_process_temp():
     return temp
 
 
-def gate_root() -> Path:
+def gate_root(*, evidence=None) -> Path:
     """One gate run's fresh root. A gate a test run starts lives beneath that run's owner, whose release
     covers what it leaves, and short: the deepest listener stays inside AF_UNIX's limit. A top-level
-    gate's ``obs-`` name is what a record of a kept root requires (``test_evidence.record_kept_scratch``).
+    gate has the same ``obs-*`` container and outside marker as session scratch; its per-run evidence
+    carries the issued identity to ``test_evidence.finish_gate``, never a later read of an unknown folder.
     Debug retention holds the root before anything runs (a test's folder goes unless its root is held)."""
-    root = Path(owned_process_temp() or tempfile.mkdtemp(prefix="obs-preflight-", dir=default_temp_parent())).resolve()
+    nested = owned_process_temp()
+    if nested is not None:
+        root = nested.resolve()  # its outer owner already holds and releases the entire allocation
+    else:
+        container = Path(tempfile.mkdtemp(prefix="obs-preflight-", dir=default_temp_parent())).resolve()
+        identity = new_scratch_identity(container)
+        write_scratch_marker(container, identity["nonce"])
+        root = container / SCRATCH_WORKSPACE
+        root.mkdir()
+        if evidence is not None:
+            evidence["scratch_ownership"] = identity
     if os.environ.get("OUROBOROS_PREFLIGHT_KEEP") == "1":
         retain_tree(root, "explicit preflight debug retention")
     return root

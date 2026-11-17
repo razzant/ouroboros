@@ -271,7 +271,7 @@ def test_menu_pin_reorders_keyed_rows_without_opening_or_reading_across_reload_a
     row(page, "older").locator('.nav-project-kebab').focus()
     page.keyboard.press("Enter")
     expect()(menu(page)).to_be_visible()
-    assert menu(page).locator('[role=menuitem]').all_inner_texts() == ["Pin", "Rename…", "Delete project…"]
+    assert menu(page).locator('[role=menuitem]').all_inner_texts() == ["Pin", "Rename…", "Working folder…", "Delete project…"]
     assert page.evaluate("document.activeElement.dataset.prm") == "pin"
     page.screenshot(path=str(evidence / f"menu-pin-{ui['tag']}.png"), animations="disabled")
     page.keyboard.press("Enter")

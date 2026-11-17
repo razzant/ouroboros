@@ -579,7 +579,7 @@ def test_an_orphan_replay_adopts_the_job_bound_while_its_post_waited(tmp_path, m
                "primaryHarness": "some-route", "maxSeconds": 120}
     assert c.record_start_requested(tmp_path, task_id="t-family", invocation_id=token, idempotency_key=token,
                                     request=request, project_id="", project_owned=False, route="some-route",
-                                    store_identity_unproven=False)
+                                    store_identity_unproven=False, daemon_store_id=engine.store)
     job = engine.accept(token, request, run=False)
 
     def returned_owner_reads(job_id):
@@ -633,7 +633,8 @@ def test_a_creating_replay_rechecks_stop_after_lookup(tmp_path, monkeypatch, sto
     token = "legacy-missed-start"
     assert c.record_start_requested(tmp_path, run_id="", task_id="gone-owner", invocation_id=token,
                                     idempotency_key=token, request={"prompt": "work", "primaryHarness": "some-route"},
-                                    route="some-route", project_id="", project_owned=False)
+                                    route="some-route", project_id="", project_owned=False,
+                                    daemon_store_id=engine.store)  # receipt-bound replay; this test varies Stop
     stopped = False
     lookup = engine._lookup
 

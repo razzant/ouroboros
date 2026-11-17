@@ -705,7 +705,11 @@ def test_the_owners_stop_outranks_a_pause_only_an_unbound_start_holds(tmp_path, 
 
     engine.may_start = True
     outcomes = dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=engine, replay_pending=lambda: True)
-    assert engine.starts == ["inv-1"] and engine.cancels == ["run-bound"], outcomes
+    assert engine.starts == [] and engine.cancels == [], outcomes
+    assert outcomes[0]["reason"] == "invocation_store_unproven"  # Stop doesn't license a legacy unknown POST
+    _run(tmp_path, run_id="run-bound", invocation_id="inv-1")  # accepted work is bound later, without a new POST
+    dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=engine)
+    assert engine.starts == [] and engine.cancels == ["run-bound"]
     # A stopped root takes no new Pause, and its work offers none: Stop owns what remains.
     assert request_owner_pause("root-1", request_id="later") == {"ok": False, "error": "task_not_live"}
     assert all(control["action"] != "pause" for work in _works(tmp_path) for control in work["controls"])

@@ -173,7 +173,7 @@ def backfill(root, should_stop):
     return {"state": "done", "items": done}
 
 
-def replay_store_unproven(record: Dict[str, Any], serving_store_id: Any) -> str:
+def replay_store_unproven(record: Dict[str, Any], serving_store_id: Any, *, require_identity: bool = False) -> str:
     """Why a recorded invocation key must not be re-sent to the serving store now, or "".
 
     Claudexor keeps idempotency keys inside each store's own database, so only the store that
@@ -183,8 +183,13 @@ def replay_store_unproven(record: Dict[str, Any], serving_store_id: Any) -> str:
     is not replayed into a named store; ``handshake_store_id``, only the store its handshake saw,
     refuses a store that differs from it and never proves admission. A row naming the store it
     is for (``daemon_store_id``, as a review continuation names the stopped run's admitting store)
-    replays only while the serving store is that one; a row naming none keeps the earlier replay.
-    A refusal decides nothing about whether the first POST started a run."""
+    replays only while the serving store is that one. ``require_identity`` is the automatic sweep's
+    rule: no admitting-store receipt, no replay, including legacy or identity-less rows after their
+    owner ended. Explicit retries retain their earlier identity-less replay contract by default.
+    A refusal decides nothing about whether the first POST started a run; a positive lookup can
+    still bind it without replay through either consumer."""
+    if require_identity and (record.get("store_identity_unproven") is True or not record.get("daemon_store_id")):
+        return "the admitting store is unproven; an automatic sweep cannot replay this unknown POST"
     if record.get("store_identity_unproven") is True:
         # Engines naming no identity retain legacy single-store replay. A handshake observed before
         # an unknown POST cannot certify its admission: the store may have changed before that POST.
