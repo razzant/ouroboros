@@ -12380,24 +12380,15 @@ html[data-telegram-fullscreen][data-layout="docked"] .app-page-header[data-lead]
 html[data-telegram-fullscreen][data-layout="docked"] .project-panel-bar { padding-top: calc(10px + var(--inset-top)); }
 html[data-telegram-fullscreen][data-layout="docked"] .sidebar-head { padding-top: calc(var(--space-4) + var(--inset-top)); }
 
-/* ---- A room's edges and Telegram's shared row (owner 15.11 «прозрачную шапку… полупрозрачными как остальные кнопки…
-   градиент затемнения по нашей библии… и в десктопе», his choice 17.11 «1A 2A 3A»; DESIGN "A room's edges") -------------
-   The transcript runs to the top of the room under its bar and under the composer, as it always has; nothing masks it.
-   At both ends it is darkened and blurred under what floats over it, one material for the top and the bottom: the
-   composer's own darkening (.chat-input-area), mirrored at the top over the bar's height and the composer's 24 px, and
-   under it an 18 px blur, full under the bar's capsules (and under a phone's clock) and fading out below them, as iOS
-   draws the edge under its floating bars. On every layout: a phone's browser, Telegram's fullscreen row, the desk. */
-/* The room declares its edge, so its bar's layer and its transcript's first row read one length. */
+/* ---- A room's edges and Telegram's shared row (DESIGN: A room's edges) ----
+   Keep scrolling card actions from reading as header controls. Only the edge material is masked; the transcript
+   stays sharp outside it. Layout and read tracking use the same reach. Both layers taper gently to transparent. */
 :is(#page-chat, .project-panel) {
     --edge-reach: 32px;
     --edge-fade: 32px;
-}
-/* On the desk the bar is shorter than Telegram's row while a card's own buttons are the capsules' size: a card's
-   «Turn into project» or «Stop…» just past a short blur read as a second row of the bar. The blur reaches further there
-   and fades longer; the darkening keeps its length. */
-html[data-layout="docked"] :is(#page-chat, .project-panel) {
-    --edge-reach: 64px;
-    --edge-fade: 48px;
+    --edge-mask: #000 calc(100% - var(--edge-fade)),
+        rgba(0, 0, 0, 0.5) calc(100% - var(--edge-fade) * 0.52),
+        rgba(0, 0, 0, 0.14) calc(100% - var(--edge-fade) * 0.22), transparent 100%;
 }
 /* What floats right under the bar lies over its edge, as its capsules do: Main's history note and a room's search sheet
    come after the bar at its own level, so they paint over it, never blurred. A Project's status note stands in its flow
@@ -12413,9 +12404,7 @@ body.keyboard-open :is(#page-chat.active, .project-panel) {
 :is(#page-chat, .chat-instance-panel) {
     --chat-top-reserve: max(var(--chat-header-reserve, 56px), var(--chat-header-bar, 56px) + var(--edge-reach, 0px));
 }
-/* One layer: the darkening over the bar's height and 24 px (its stops at 48 %, 78 % and 100 % of that length), and the
-   blur under it to --edge-reach below the bar, fading over its last --edge-fade. (The bar's ::after is the desktop
-   window's title-band strip, :root[data-window-chrome="integrated"].) A scroll edge, not a chip: blurred in both themes. */
+/* The bar's ::after remains available to the native title-band hit target. */
 :is(.chat-page-header, .project-panel-bar)::before {
     content: "";
     position: absolute;
@@ -12426,29 +12415,26 @@ body.keyboard-open :is(#page-chat.active, .project-panel) {
     background: linear-gradient(
         180deg,
         rgba(var(--shell-rgb), 0.72) 0,
-        rgba(var(--shell-rgb), 0.36) calc((100% - var(--edge-reach) + 24px) * 0.48),
-        rgba(var(--shell-rgb), 0.10) calc((100% - var(--edge-reach) + 24px) * 0.78),
-        rgba(var(--shell-rgb), 0.00) calc(100% - var(--edge-reach) + 24px)
+        rgba(var(--shell-rgb), 0.36) 48%,
+        rgba(var(--shell-rgb), 0.10) 78%,
+        rgba(var(--shell-rgb), 0.00) 100%
     );
-    -webkit-backdrop-filter: blur(18px);
-    backdrop-filter: blur(18px);
-    -webkit-mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - var(--edge-fade)), transparent 100%);
-    mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - var(--edge-fade)), transparent 100%);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    -webkit-mask-image: linear-gradient(180deg, var(--edge-mask));
+    mask-image: linear-gradient(180deg, var(--edge-mask));
 }
-/* The bottom: what passes under the composer is blurred over its darkening, less and less over the composer's top 32 px.
-   With the keyboard up the composer stands in the page's flow and nothing passes under it, so the room draws no edge
-   there either: the transcript ends over the composer as it always has, and a short keyboard room keeps a line of the
-   newest message and its foot. */
+/* With the keyboard up the composer stands in flow; there is no transcript behind it to blur. */
 body:not(.keyboard-open) :is(#chat-input-area, .chat-input-area)::before {
     content: "";
     position: absolute;
     inset: 0;
     z-index: -1;
     pointer-events: none;
-    -webkit-backdrop-filter: blur(18px);
-    backdrop-filter: blur(18px);
-    -webkit-mask-image: linear-gradient(0deg, #000 0%, #000 calc(100% - 32px), transparent 100%);
-    mask-image: linear-gradient(0deg, #000 0%, #000 calc(100% - 32px), transparent 100%);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    -webkit-mask-image: linear-gradient(0deg, var(--edge-mask));
+    mask-image: linear-gradient(0deg, var(--edge-mask));
 }
 /* A room bar's capsules are the composer chips' glass in the dark theme (the capsule's veil over a blur of what passes
    under it), on the desk as on a phone; light keeps white capsules at the top as at the bottom. Panic keeps its ink

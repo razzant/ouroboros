@@ -3538,12 +3538,11 @@ up the bar stays in the row, in the page's flow as every keyboard room's bar is.
 The transcript runs to the room's top under the bar and to its bottom under the composer; nothing masks it. At both
 ends it is darkened and blurred under what floats over it, one material top and bottom (owner 15.11 «прозрачную шапку…
 градиент затемнения по нашей библии… и в десктопе», his choice 17.11 1A, 3A): the composer's darkening (the room's
-colour at 72 % at the edge, 36 % at 48 %, 10 % at 78 %, none at the far end), mirrored at the top over the bar's height
-and 24 px more; and under it an 18 px blur, full under the bar's capsules and a phone's clock and fading out over the
-32 px below them (on the desk 48 px of 64, so a card's own buttons just under the bar never read as its second row;
-the transcript's first row and every landing clear that reach, and a row under it is not read yet),
-and under the composer fading out over its top 32 px; at the top both are one layer of the bar, so the desktop window's
-title-band strip keeps its own. A note or the search sheet right under the bar floats over the edge as the capsules
+colour at 72 % at the edge, 36 % at 48 %, 10 % at 78 %, none at the far end), mirrored at the top. A 12 px blur
+keeps scrolling card actions distinct from the floating controls. It is full behind the capsules and phone clock,
+then tapers to clear within 32 px below the bar on every layout. The composer has the same soft transition inside
+its top 32 px. The first row and every landing clear the header's reach; a row under it is not read yet. The top
+effect uses one layer, separate from the desktop title-band strip. A note or the search sheet floats above it as the capsules
 do (a Project's status note, in its flow, stands below it). The blur belongs to the edge, not to a chip, so it applies in
 both themes. With the keyboard up the bar and the composer stand in the page's flow and nothing passes under either: the
 room draws neither edge, and a short keyboard room keeps a line of the newest message and its foot. On a dark room a room bar's capsules are the composer
