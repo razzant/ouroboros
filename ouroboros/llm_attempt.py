@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional
 from ouroboros.anthropic_native_custody import is_replayed_native_content
 from ouroboros._usage_response import provider_answer, typed_values
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, size_refusal
-from ouroboros.llm_helper_window import _helper_attempt_context
+from ouroboros.llm_helper_window import _helper_attempt_context, helper_context_for, priced_for
 from ouroboros.request_wire_contract import physical_candidate_bytes as _canonical_candidate_bytes
 from ouroboros.request_wire_recovery import prepare_wire_payload_for_send
 from ouroboros.transport_custody import (  # noqa: F401 -- consumers import these two scopes through this module
@@ -210,8 +210,8 @@ def body_error_facts(error: Dict[str, Any], transient: bool) -> Dict[str, Any]:
     transient = transient and not size
     facts = answer.facts(size[2:] if size else ("", ""), basis=size[0] if size else "",
                          untyped=not size and not transient and answer.status in SIZE_REFUSAL_STATUSES)
-    from ouroboros.size_refusal import from_answer
-    numbers = from_answer(answer, answer.status)
+    from ouroboros.size_refusal import answer_fact
+    numbers = answer_fact(answer, answer.status)  # an excluded quotation keeps a numberless fact, as ``stamp``
     if numbers is not None:
         facts["size"] = numbers.to_json()
     sentence = facts.get("sentence", "")
@@ -613,7 +613,7 @@ def _attempt_request(
         candidate_context_sha256=hashlib.sha256(context).hexdigest(),
         candidate_context_size_bytes=len(context),
         candidate_measurement_kind="canonical_json_v1",
-        physical_context=current_physical_attempt_context() or _helper_attempt_context(target, payload),
+        physical_context=current_physical_attempt_context() or helper_context_for(target, payload),
         route_is_loopback=is_loopback_base_url(target.get("base_url")),
         prompt_tokens_bounded_estimate=bounded_tokens,
         prompt_tokens_exact=measured.get("input_tokens"),
@@ -668,10 +668,10 @@ def _finalized_physical_candidate(
     if fresh_clock:
         physical = refresh_wire_clock(physical, api_surface=api_surface)
     physical = bound_reply_allowance(target, physical)
-    return prepare_wire_payload_for_send(
+    return priced_for(prepare_wire_payload_for_send(  # the context priced here serves its request too
         {**target, "contract_headers": processing_contract_headers(target, physical)},
         physical, api_surface=api_surface, logical_payload=payload,
-    )
+    ), None, source=physical)
 
 
 def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -700,14 +700,14 @@ def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Di
         return payload
     context = context or _helper_attempt_context(target, payload)
     if context is None or context.rendered_mode != "nano":
-        return payload
+        return priced_for(payload, context) if helper else payload  # only a context built here is bound
     window, measured = context.capacity_total_tokens, _exact_local_measurement(target, payload)
     if target.get("provider") == "local":
         window = target.get("context_window_tokens") if target.get("context_window_confirmed") else window
     candidate, shortfall, input_tokens, window = window_reply_candidate(
         payload, field, context, window, measured, helper=helper)
     if shortfall:
-        request = _attempt_request(target, candidate)
+        request = _attempt_request(target, priced_for(candidate, context) if helper else candidate)
         error = LocalContextTooLargeError(
             f"the model's window of {int(window)} tokens leaves {int(window) - input_tokens} for the reply "
             f"after {input_tokens} exact input tokens, "
@@ -715,7 +715,7 @@ def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Di
         error.refused_candidate = refused_candidate_facts(
             request, input_tokens=input_tokens, context_window_tokens=int(window))
         raise error
-    return candidate
+    return priced_for(candidate, context) if helper else candidate
 
 
 def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptRequest, *, prepare=None):

@@ -136,7 +136,39 @@ for _pkg in ('tree_sitter', 'tree_sitter_language_pack'):
         print(f'WARNING: could not collect {_pkg} for bundling ({_exc}); polyglot '
               'structural extraction will degrade visibly unless the dep is importable at runtime.')
 
-a = Analysis(
+
+def _analysis_on_a_deep_stack(*args, **kwargs):
+    """Run PyInstaller's Analysis on a thread whose 128 MiB stack fits the recursion limit raised above.
+
+    The analysis recurses once per nested import. On Windows the main thread's C stack ran out before that limit at
+    7.11.0's import depth: the tag build ended right after hook-uvicorn with 0xC00000FD (stack overflow) and no
+    Python error. On a thread with room for the raised limit a still deeper graph ends as a RecursionError again.
+    CPython on Windows takes a thread stack below 256 MiB only (`THREAD_MAX_STACKSIZE` is an exclusive bound), and it
+    commits the whole stack, so 128 MiB: about 26 KiB for each of the 5000 frames the limit allows.
+    """
+    import threading
+
+    box = {}
+
+    def run():
+        try:
+            box["analysis"] = Analysis(*args, **kwargs)
+        except BaseException as exc:  # handed back to the spec's own thread below
+            box["error"] = exc
+
+    previous = threading.stack_size(128 * 1024 * 1024)
+    try:
+        worker = threading.Thread(target=run, name="pyinstaller-analysis")
+        worker.start()
+    finally:
+        threading.stack_size(previous)
+    worker.join()
+    if "error" in box:
+        raise box["error"]
+    return box["analysis"]
+
+
+a = (_analysis_on_a_deep_stack if _is_windows else Analysis)(
     ['launcher.py'],
     pathex=[],
     binaries=_extra_binaries,
