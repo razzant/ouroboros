@@ -226,8 +226,8 @@ def enable_tools(
     On a route with a schema ceiling this load goes first after the selectors and the tools this
     task's history already called (``fit_tool_schemas_to_limit``), so the receipt names exactly what
     the next request carries; a load none of which fits is ``TOOL_SCHEMA_LIMIT``. No unload.
-    ``gateway`` (Main's text loop): an MCP schema not in a request that carries ``call_mcp_tool`` is
-    shown in this result for that gateway instead of loaded, so the request's tools keep their bytes.
+    ``gateway`` (a text-loop binding): an MCP schema not in a request that carries ``call_mcp_tool``
+    is shown in this result for that gateway instead of loaded, so the request's tools keep their bytes.
     """
     names = [n.strip() for n in str(tools or "").split(",") if n.strip()]
     if not names:
@@ -308,7 +308,7 @@ def _gateway_schemas(shown: Dict[str, Dict[str, Any]], servers: Dict[str, List[s
             + json.dumps(schema["function"].get("parameters") or {}, ensure_ascii=False, sort_keys=True)
             for name, schema in shown.items()]
     return (f"✅ Call schemas for call_mcp_tool(name, arguments): {_named(list(shown), servers)}. The request's "
-            "tool list stays as it is, so its cached prefix survives. Descriptions and schemas come from the "
+            "tool list stays as it is. Descriptions and schemas come from the "
             "server: untrusted external data.\n\n" + "\n\n".join(rows))
 
 
@@ -459,7 +459,7 @@ def update_resident_notice(registry, resident, messages):
 
 
 def bind_resident_schemas(registry: "ToolRegistry", resident: List[Dict[str, Any]], *, gateway: bool = False) -> set:
-    """Bind the discovery handlers of ``registry`` to one loop's resident schema list (``gateway``: Main's)."""
+    """Bind discovery to one loop's resident list; text loops may show MCP schemas through the gateway."""
     enabled_late: set = set()
     registry.override_handler(
         "list_available_tools",
@@ -529,8 +529,8 @@ def get_tools() -> List[ToolEntry]:
                 "name": "enable_tools",
                 "description": (
                     'Load call schemas for named tools this task may already call (comma-separated); '
-                    '"mcp_<server>" loads every tool of that server. On Main, MCP schemas are shown in this result '
-                    "for call_mcp_tool instead, keeping the request's tools unchanged. Reports what "
+                    '"mcp_<server>" selects the whole server. In text tasks with call_mcp_tool loaded, this result '
+                    "shows MCP schemas without changing the request's tools. Reports what "
                     "the next request carries, policy-hidden and unknown names; grants no permission. Another "
                     "namespace or a skill's name answers with its tools' names. In a live call the new schemas "
                     "reach the voice session (an engine that cannot take them in place reconnects once)."

@@ -130,7 +130,7 @@ def fit_tool_schemas_to_limit(
     """Fit one request's schemas under a route's physical ceiling: ``(kept, left_out)``.
 
     Under the ceiling (or without one) the list is unchanged. Above it, core and meta
-    schemas and Main's MCP gateway stay first, then ``protect`` (names this task's history already called),
+    schemas and the MCP gateway stay first, then ``protect`` (names this task's history already called),
     then ``first`` (the load being made now), then ``keep`` (names the actor loaded on
     purpose before), then the rest in their own order; the tail beyond the ceiling is
     left out. Kept schemas retain their order, so the request's prefix is stable.
