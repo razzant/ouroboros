@@ -12517,19 +12517,3 @@ html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-head
     left: var(--space-3); right: var(--space-3);
     width: auto;
 }
-/* The consciousness chip as a row of the work list: the same flat row as Restart and the budget beside it, its name and
-   its next wake shown, its mark at the row's end. */
-.rw-extras > .cx-chip.ui-chrome-control {
-    display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: var(--space-3);
-    width: 100%; height: auto; min-height: var(--touch-target-min); padding: 0 var(--space-3);
-    border-radius: var(--radius-inner); background: transparent; box-shadow: none;
-    -webkit-backdrop-filter: none; backdrop-filter: none;
-    color: var(--text-primary); font-size: var(--type-body); font-weight: 400; text-align: start;
-}
-.cx-chip-label { display: none; }
-.rw-extras > .cx-chip .cx-chip-label { display: inline; margin-inline-end: auto; }
-.rw-extras > .cx-chip .cx-chip-glyph { display: none; }
-.rw-extras > .cx-chip .cx-chip-word:not([hidden]) { display: inline; color: var(--text-meta); }
-@media (hover: hover) {
-    .rw-extras > .cx-chip.ui-chrome-control:hover { background: var(--rw-hover); }
-}

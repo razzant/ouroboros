@@ -187,7 +187,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
    lie flat here, the budget saying its name and its amount, and an empty slot takes no room. */
 .rw-extras { display: flex; flex-direction: column; gap: 2px; padding: 0 var(--space-2) var(--space-3); }
 .rw-extras:empty { display: none; }
-.rw-extras > :is(.chat-header-btn, .chat-budget-pill).ui-chrome-control {
+.rw-extras > :is(.chat-header-btn, .chat-budget-pill, .cx-chip).ui-chrome-control {
     display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: var(--space-3);
     width: 100%; height: auto; min-height: var(--touch-target-min); padding: 0 var(--space-3);
     border-radius: var(--radius-inner); background: transparent; box-shadow: none;
@@ -195,8 +195,14 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     color: var(--text-primary); font-size: var(--type-body); font-weight: 400; text-align: start;
 }
 @media (hover: hover) {
-    .rw-extras > :is(.chat-header-btn, .chat-budget-pill).ui-chrome-control:hover { background: var(--rw-hover); }
+    .rw-extras > :is(.chat-header-btn, .chat-budget-pill, .cx-chip).ui-chrome-control:hover { background: var(--rw-hover); }
 }
+/* In Telegram's shared row the consciousness chip is one of these rows too (room_work.js placeChip), before Restart and
+   the budget: its name, then its next wake and its mark at the row's end; the brain stays the bar's. */
+.cx-chip-label { display: none; }
+.rw-extras > .cx-chip .cx-chip-label { display: inline; margin-inline-end: auto; }
+.rw-extras > .cx-chip .cx-chip-glyph { display: none; }
+.rw-extras > .cx-chip .cx-chip-word:not([hidden]) { display: inline; color: var(--text-meta); }
 .rw-extras .chat-budget-word { display: inline; }
 .rw-extras .chat-budget-text { font-size: var(--type-body); color: var(--text-meta); }
 .rw-extras .chat-budget-bar { display: none; }
