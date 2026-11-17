@@ -247,13 +247,13 @@ def test_nano_selected_schedule_lead_stands_without_other_delegation_leads(subte
         with subtests.test(profile=profile):
             from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
             from ouroboros.tool_connections import connection_views
-            from ouroboros.tool_policy import NANO_SCHEMA_META_NAMES, initial_tool_schemas
+            from ouroboros.tool_policy import NANO_RESIDENT_SCHEMA_NAMES, initial_tool_schemas
 
             registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
             registry._ctx.task_constraint = _PROFILES[profile]
             schemas = initial_tool_schemas(registry, context_mode="nano", schema_names=["schedule_subagent"])
             names = {schema["function"]["name"] for schema in schemas}
-            assert "schedule_subagent" in names and names <= {"schedule_subagent", *NANO_SCHEMA_META_NAMES}, names
+            assert "schedule_subagent" in names and names <= {"schedule_subagent", *NANO_RESIDENT_SCHEMA_NAMES}, names
             function = next(schema["function"] for schema in schemas if schema["function"]["name"] == "schedule_subagent")
             custom = next(tool["custom"]["description"] for tool in project_function_tools_to_openai_custom(schemas).wire_tools()
                           if tool["custom"]["name"] == "schedule_subagent")

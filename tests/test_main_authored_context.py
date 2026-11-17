@@ -356,12 +356,13 @@ def test_main_schema_only_view_uses_the_active_envelope(main_loop, monkeypatch, 
     f.ctx.context_fit_plan = replace(f.ctx.context_fit_plan, preferred_mode=mode, initial_mode=mode,
         nano_projection=replace(f.ctx.context_fit_plan.max_projection, mode="nano"))
     f.messages = f.ctx.context_fit_plan.messages_for(mode)
-    f.run([call("compact_context", {"working_note": "", "schema_names": ["read_file"]}, "schemas"),
+    # A tool outside Nano's standing work set (``tool_policy.NANO_RESIDENT_SCHEMA_NAMES``) arrives only when named.
+    f.run([call("compact_context", {"working_note": "", "schema_names": ["query_code"]}, "schemas"),
            {"content": "done"}])
     before = {s["function"]["name"] for s in f.inputs[0]["tools"]}
     after = {s["function"]["name"] for s in f.inputs[1]["tools"]}
     if mode == "nano":
-        assert "read_file" not in before and "read_file" in after
+        assert "query_code" not in before and "query_code" in after
         assert f.ctx._context_view_receipt["status"] == "applied"
     else:
         assert before == after and f.ctx._context_view_receipt["status"] == "no_op"

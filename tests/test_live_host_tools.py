@@ -21,7 +21,8 @@ def test_lower_mode_keeps_enabled_tools_and_rebinds_discovery(host_world):
         assert session.selected.mode == 'max'
         assert names(json.loads(session.selected.tools_json)) == names(host.tools.schemas()) | host.call_tools.keys()
     async def narrow(session):
-        expected = names(initial_tool_schemas(host.tools, context_mode='nano')) | host.call_tools.keys() | {'read_file'}
+        expected = (names(initial_tool_schemas(host.tools, context_mode='nano', standing=False))
+                    | host.call_tools.keys() | {'read_file'})
         assert session.selected.mode == 'nano'
         assert names(json.loads(session.selected.tools_json)) == expected
         # Discovery must now append to the same schema list that the host seals.

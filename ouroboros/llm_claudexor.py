@@ -265,7 +265,8 @@ def cache_key_for_model(model: str) -> str:
 
 
 def _request(target: dict, messages: list, tools: list | None, parameters: dict) -> dict:
-    from ouroboros.llm_messages import _MessageShapingMixin, project_declared_system_prefix, HOST_ONLY_MESSAGE_KEYS
+    from ouroboros.llm_messages import (DISPLAY_KEY, _MessageShapingMixin, project_declared_system_prefix,
+                                        HOST_ONLY_MESSAGE_KEYS)
 
     target["requested_reasoning_effort"] = parameters.get("reasoning_effort")
     for name in ("response_format", "allow_server_web_search", "bypass_response_cache"):
@@ -278,6 +279,7 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
     prepared = project_declared_system_prefix(target, scrub_native_custody(_MessageShapingMixin._normalize_system_message_placement(messages)))
     for message in prepared:
         for name in ("_context_capsule", "acceptance_observation", "_acceptance_observation", "review_feedback",
+                     DISPLAY_KEY,
                      "reasoning", "reasoning_details", "reasoning_content", "response_id", "stop_reason", "_stable_prefix_blocks",
                      HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, TOOL_RESULT_RECORD_KEY, REVIEW_HISTORY_MESSAGE_KEY,
                      REVIEW_CONTEXT_INDEX_KEY, "_review_image_id", "cache_control"):  # the seal's row mark too

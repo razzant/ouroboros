@@ -95,7 +95,8 @@
         "returned": {
           "message": {
             "role": "assistant",
-            "content": "deciding",
+            "content": null,
+            "reasoning": "deciding",
             "tool_calls": [
               {
                 "id": "call_local_0",

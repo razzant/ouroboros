@@ -987,6 +987,8 @@ def _publish_model_forced_candidate(
 ) -> Optional[DeliveryCandidate]:
     """Publish forced model text, retaining an unchanged current answer's binding."""
 
+    from ouroboros.delivery_facts import noted, show_replaced_answer
+
     tools = getattr(ctx, "tools", None)
     if tools is None:
         return None
@@ -996,6 +998,8 @@ def _publish_model_forced_candidate(
             ctx, llm_trace, current, control=f"forced_preserve:{reason_code}",
             reason_code=degraded_reason or reason_code,
         )
+    prior = getattr(tools._ctx, "_delivery_candidate", None)  # an answer one-shot facts returned is shown, not lost
+    was_noted = noted(prior)
     candidate = _loop()._replace_delivery_candidate(
         tools,
         ctx,
@@ -1010,6 +1014,8 @@ def _publish_model_forced_candidate(
     candidate.degraded_reason = degraded_reason or reason_code
     _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
     ctx.delivery_candidate = candidate
+    if getattr(ctx, "emit_progress", None) is not None:
+        show_replaced_answer(prior, was_noted, candidate, ctx.emit_progress, llm_trace)
     return candidate
 
 

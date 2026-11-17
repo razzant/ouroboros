@@ -18,11 +18,18 @@ from __future__ import annotations
 from typing import Any
 
 
-def _first_contact(ctx: Any) -> bool:
-    """No tool call stands in this task's history: the start's own tool set is still the only one the actor saw."""
+def _nano_tools(ctx: Any) -> list:
+    """The schema list a request rebound into Nano sends: this actor's base (standing work set or live-call selectors),
+    plus every tool this task's history already called and every tool it loaded (``enable_tools``), where current
+    policy permits it, so each call in history keeps its schema and a loaded tool stays loaded (``continuation_tools``
+    keeps them the same way). Nothing else of the old envelope stays."""
     from ouroboros.continuation_tools import history_tool_names
+    from ouroboros.tool_policy import initial_tool_schemas, nano_standing
 
-    return not history_tool_names(ctx.messages)
+    loaded = set(getattr(ctx.tools._ctx, "_actor_loaded_tool_names", ()) or ())
+    names = sorted(history_tool_names(ctx.messages) | loaded)
+    return initial_tool_schemas(ctx.tools, context_mode="nano", schema_names=names,
+                                standing=nano_standing(ctx.tools._ctx))
 
 
 def learn_window_from_refusal(ctx: Any, loop: Any) -> bool:
@@ -51,11 +58,10 @@ def learn_window_from_refusal(ctx: Any, loop: Any) -> bool:
     ctx.context_fit_plan, ctx.active_context_mode = loop._rebind_context_fit_plan(
         plan, ctx.tools, ctx.messages, model=ctx.active_model, use_local=ctx.active_use_local, start_mode=mode,
         tool_schemas=ctx.tool_schemas, model_role=ctx.model_role or getattr(plan, "model_role", "") or "main")
-    if ctx.active_context_mode == "nano" and mode != "nano" and _first_contact(ctx):
-        # The same tool set a start in Nano sends (``loop.run_llm_loop``): nothing has used the others yet.
-        from ouroboros.tool_policy import initial_tool_schemas
+    if ctx.active_context_mode == "nano" and mode != "nano":
+        # At first contact the same set a start in Nano sends; mid-task also the schemas its history called.
         from ouroboros.transcript_prefix import rewrite_view
 
-        ctx.tool_schemas[:] = initial_tool_schemas(ctx.tools, context_mode="nano")
+        ctx.tool_schemas[:] = _nano_tools(ctx)
         rewrite_view(ctx.tools._ctx, ctx.task_id, "size_refusal_nano_tools", scope="tools")
     return bool(ctx.messages) and ctx.messages[0] != shown
