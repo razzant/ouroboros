@@ -32,6 +32,73 @@ def body(reply):
     return reply.split("\n\n", 1)[1]
 
 
+def test_knowledge_changes_skip_unchanged_journals_and_read_only_the_appended_window(tmp_path, monkeypatch):
+    target = address(tmp_path)
+    first = store.write_knowledge_note(target, "# Earlier\n" + "old body\n" * 2000).current
+    journal = versions.journal_path(target)
+    gaps = set()
+    events, baseline = versions.knowledge_changes(tmp_path, None, gaps)
+    assert events == [] and not gaps and baseline["global"]["offset"] == journal.stat().st_size
+    original_open, original_parse, opened, parsed = type(journal).open, versions._parse, [], []
+
+    def opening(path, *args, **kwargs):
+        if path == journal:
+            opened.append(path)
+        return original_open(path, *args, **kwargs)
+
+    def parsing(line):
+        parsed.append(line)
+        return original_parse(line)
+
+    with monkeypatch.context() as spy:
+        spy.setattr(type(journal), "open", opening)
+        assert versions.knowledge_changes(tmp_path, baseline, gaps) == ([], baseline)
+        assert opened == []
+    # Appended later with an older stamp: publication position, never timestamp, orders this window.
+    later = {"topic": TOPIC, "publication": "source_capture", "mode": "edit", "ts": "2000-01-01T00:00:00Z",
+             "address": {"scope": "global"}, "focus": {"role": "main", "room_id": "fixture-room"},
+             "new_sha256": first.revision, "new_content": first.text}
+    with journal.open("ab") as stream:
+        stream.write((json.dumps(later) + "\n").encode("utf-8"))
+    with monkeypatch.context() as spy:
+        spy.setattr(type(journal), "open", opening)
+        spy.setattr(versions, "_parse", parsing)
+        changes, accepted = versions.knowledge_changes(tmp_path, baseline, gaps)
+    assert opened == [journal] and len(parsed) == len(changes) == 1 and not gaps
+    assert "edit, 2000-01-01T00:00:00Z; by main room_id=fixture-room" in changes[0][2]
+    assert f"version={first.revision!r}" in changes[0][2]
+    assert accepted["global"]["offset"] == journal.stat().st_size
+    assert versions.knowledge_changes(tmp_path, accepted, gaps) == ([], accepted)
+
+
+@pytest.mark.parametrize("fault", ["ending_changed", "shortened", "missing", "unfinished"])
+def test_knowledge_journal_gaps_keep_the_accepted_position_and_intact_journals_continue(tmp_path, fault):
+    target = address(tmp_path)
+    first = store.write_knowledge_note(target, "# First\n").current
+    journal = versions.journal_path(target)
+    gaps = set()
+    _, baseline = versions.knowledge_changes(tmp_path, None, gaps)
+    second = store.write_knowledge_note(target, "# Second\n", expected_revision=first.revision).current
+    good = journal.read_bytes()
+    if fault == "ending_changed":
+        end = baseline["global"]["offset"]
+        journal.write_bytes(good[:end - 2] + b" \n" + good[end:])
+    elif fault == "shortened":
+        journal.write_bytes(b"{}\n")
+    elif fault == "missing":
+        journal.unlink()
+    else:
+        journal.write_bytes(good[:-1])
+    changes, retained = versions.knowledge_changes(tmp_path, baseline, gaps)
+    assert changes == [] and retained == baseline
+    assert any("knowledge changes unreadable (global)" in gap and "accepted position retained" in gap for gap in gaps)
+    journal.write_bytes(good)
+    gaps.clear()
+    changes, accepted = versions.knowledge_changes(tmp_path, retained, gaps)
+    assert len(changes) == 1 and f"version={second.revision!r}" in changes[0][2] and not gaps
+    assert accepted["global"]["offset"] == len(good)
+
+
 def test_outline_ranges_read_back_exactly_their_sections(tmp_path):
     ctx = context(tmp_path)
     note = store.write_knowledge_note(address(tmp_path), RIVER).current
