@@ -17,7 +17,7 @@ import pytest
 
 from ouroboros.context_input_selection import wake_input_checkpoint, wake_projection_inputs, whole_wake_input
 from tests.test_consciousness_wake import T0, _chat, _iso, _observe, _owner
-from tests.test_wake_observation_fit import FULL, WAKE, _ctx, _first_build, _record_events, _start_wake
+from tests.test_wake_observation_fit import FULL, WAKE, _ctx, _first_build, _record_events, _sized, _start_wake
 
 LARGE = "An ordinary paragraph of the owner's answer. " * 600
 
@@ -100,9 +100,9 @@ def test_a_round_after_a_pointer_start_never_swaps_an_unfit_projection_back(tmp_
                   wake={**WAKE, "projection_text": projection, "pointer_text": pointer})
     ctx.context_fit_plan = replace(ctx.context_fit_plan, user_content_json=json.dumps(whole))
     assert _project_wake_input(ctx) is False and ctx.messages[1]["content"] == pointer
-    ctx.context_fit_plan = replace(ctx.context_fit_plan, window_tokens=180_000)
+    ctx.context_fit_plan = _sized(ctx.context_fit_plan, window_tokens=180_000)
     assert _project_wake_input(ctx) is True and ctx.messages[1]["content"] == projection
-    ctx.context_fit_plan = replace(ctx.context_fit_plan, window_tokens=500_000)
+    ctx.context_fit_plan = _sized(ctx.context_fit_plan, window_tokens=500_000)
     assert _project_wake_input(ctx) is True and ctx.messages[1]["content"] == whole
     assert [(event["checkpoint_kind"], event["form"]) for event in events] == [
         ("wake_input_by_source", "projection"), ("wake_input_inline", "whole")]
