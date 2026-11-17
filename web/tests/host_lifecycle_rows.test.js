@@ -108,6 +108,11 @@ test('a Max start whose books went to chapter maps stays Max on the capsule and 
     const old = row({ effective_mode: 'low', books: undefined, cause: 'memory' });
     assert.equal(taskCheckpointLabel(old),
         `Context starts in a smaller mode. ${causeOf({ preferred_at_send: 'max', applied: 'low', cause: 'memory' }, 'max')}`);
+    // Low chosen meanwhile: the running work stayed Max and only its books moved, never "moved to Max".
+    const moved = contextShown({ state: 'now', modes: ['max'], latest: { applied: 'max', books: 'maps',
+        cause: 'after_start', preferred_at_send: 'max', observed_at: at } }, 'low');
+    assert.equal(moved.differs, true);
+    assert.ok(moved.fact.text.startsWith('The work moved to chapter maps after it started.'), moved.fact.text);
     // Whole books in Max add nothing to today's closed capsule.
     const whole = contextShown({ state: 'now', modes: ['max'],
         latest: { applied: 'max', books: 'whole', preferred_at_send: 'max', observed_at: at } }, 'max');

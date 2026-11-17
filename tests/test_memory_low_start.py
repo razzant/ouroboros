@@ -41,7 +41,7 @@ def sent(monkeypatch):
 def test_a_start_memory_lowered_to_low_says_so_without_numbers_or_advice():
     line = low_start_line(_plan(_room()), "low", "rootA")
     assert line == ("Task rootA started in Max with chapter maps: my memory, even in its shortest tellings, did not fit "
-                    "beside the full books.")
+                    "beside the whole books.")
     assert not any(char.isdigit() for char in line) and len(line.splitlines()) == 1  # numbers stay in the task's facts
     assert not any(word in line for word in ("may bring", "should", "must", "fold", "episode", "again"))
 

@@ -442,7 +442,9 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
             counted_groups.add(ident)
     current = measure(level(taken))
     current = restore(snapshot, table, taken, added, target, current, level, measure, view_tokens)
-    physical = allowances.get("physical")
+    # A Max view floored at my tellings keeps my human's words while its books are whole: when the window cannot
+    # hold it, the books go to chapter maps first (the next frame), and only there may the window take them (4A).
+    physical = None if floor is not None and floor_bound is None else allowances.get("physical")
     for step, ident, _whole, _short in uncovered:
         if physical is None or current <= physical:
             break

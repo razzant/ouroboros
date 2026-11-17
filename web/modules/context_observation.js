@@ -202,7 +202,9 @@ export function contextShown(observation, preferred) {
             label: maps ? fmt(obs.state === 'now' ? 'Context: Max now, chapter maps' : 'Context: Max last, chapter maps', {}) : '',
             fact: text ? { word: when.word, text } : null };
     }
-    const sentence = [causeOf(obs.latest, preferred), when.time, note].filter(Boolean).join(' ');
+    // Max whose books went to chapter maps stays Max whatever mode is chosen now: its maps sentence, never a mode move.
+    const why = mode === 'max' && obs.latest?.books === 'maps' ? mapsOf(obs.latest.cause) : causeOf(obs.latest, preferred);
+    const sentence = [why, when.time, note].filter(Boolean).join(' ');
     return { actual: mode, word, lit: [mode], differs: true,
         label: fmt(obs.state === 'now' ? 'Context: {word} now, {chosen} chosen' : 'Context: {word} last, {chosen} chosen', { word: said(mode), chosen }),
         fact: { word: when.word, text: sentence } };

@@ -98,7 +98,7 @@ def low_start_line(plan, mode, task_id):
     if receipt.get("role") in DELEGATED_FOCUS_ROLES or not floor.crowded_by_memory(room):
         return ""
     maps = "Max with chapter maps" + (floor.REQUIRED_BOOK_WHOLE if room.get("book_required") else "")
-    return f"Task {task_id} started in {maps}: my memory, even in its shortest tellings, did not fit beside the full books."
+    return f"Task {task_id} started in {maps}: my memory, even in its shortest tellings, did not fit beside the whole books."
 
 
 def low_start_episode(root, plan, mode, task_id, send):
