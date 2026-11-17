@@ -833,7 +833,7 @@ def _presend_context_fit(ctx: _RoundModelCallContext | None = None, admitted: Op
             REFUSED_CANDIDATE_KEY: refused, "_last_llm_error_kind": "context_overflow", "reason_code": "context_overflow",
             "_last_llm_error": "No result room in the final candidate; pre-send size recovery.",
             "_last_llm_provider_message": "", "_last_llm_status_code": None, "_last_llm_provider_code": "",
-            "_last_llm_provider_fields": {}, "_last_llm_provider_answer": {}, "_last_llm_provider_message_cut": False,
+            "_last_llm_provider_fields": {}, "_last_llm_provider_answer": {}, "_last_llm_provider_message_cut": False, "_last_llm_size_refusal": None,
         })
         ctx.accumulated_usage["_last_llm_failure"] = {"model": ctx.active_model, "failure_code": "context_overflow",
                                                     "error": ctx.accumulated_usage["_last_llm_error"]}
@@ -1363,6 +1363,9 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
     if isinstance(ctx.accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict):
         _emit_overflow_retry_skipped(ctx, "round_holds_unresolved_attempt")
         return msg, cost, ctx.active_context_mode
+    if not refused:  # a provider's refusal stating its window in tokens: the route learns it, the plan is rebound (P1)
+        from ouroboros.window_learning import learn_window_from_refusal
+        learn_window_from_refusal(ctx, _loop())
     # A wake's stored-source delivery, or the view the refusal's route rebind narrowed: model-free, already applied,
     # it earns the first retry (memory then keeps what that view kept unless this candidate is refused too).
     prepared = (WAKE_DELIVERY_STEP if _project_wake_input(ctx, overflowed=True)
@@ -1391,20 +1394,15 @@ def _refusal_window(ctx: _RoundModelCallContext, fit: Any,
     stands. The slack is the owner's return-after-fold eighth (L33 2=A) of the stated window,
     else of the known window, else of the larger of the reading and the largest input accepted here.
     """
-    from ouroboros.capability_evidence import _parse_ctx_limit_number, _parse_ctx_requested
     from ouroboros.context_fit import reclaim_low_water_margin
+    from ouroboros.size_refusal import refusal_measure
 
     measurement = fit.measurement
-    message, cited = str(ctx.accumulated_usage.get("_last_llm_provider_message") or ""), ctx.accumulated_usage.get("_last_llm_provider_answer") or {}
-    stated = _parse_ctx_limit_number(message) or cited.get("limit") or None  # a cited declared limit sizes this pass
+    stated, reply, provider_size = refusal_measure(ctx.accumulated_usage, measurement.reply_allowance_tokens)
     sent = int(getattr(refused, "prompt_tokens_bounded_estimate", 0) or 0)  # the refused attempt's own bytes, in this
     sent = math.ceil(sent * measurement.measurement_density) if sent else 0  # measurement's units, never a rebound view
     # The provider's own count of the refused request beats the estimate when it states both; a stated limit
     # beside a COLD estimate measures nothing (chars/4 under-counts code and Cyrillic): unknown, as before.
-    stated_input, stated_reply, stated_total = _parse_ctx_requested(message) if stated else (0, 0, 0)
-    # A cited input cap already excludes the reply: it is not subtracted again.
-    reply = 0 if cited.get("limit_kind") == "input" else stated_reply or measurement.reply_allowance_tokens
-    provider_size = stated_input or max(0, stated_total - reply)  # a bare total already holds its reply
     if stated and not provider_size and measurement.anchor_input_tokens is None:
         stated = None
     size = provider_size or sent or measurement.estimated_input_tokens

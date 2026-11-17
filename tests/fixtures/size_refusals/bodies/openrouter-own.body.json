@@ -1,0 +1,1 @@
+{"error": {"message": "This endpoint's maximum context length is 80000 tokens. However, you requested about 98192 tokens (89000 of text input, 1000 of tool input, 8192 in the output). Please reduce the length of either one, or use the \"middle-out\" transform to compress your prompt automatically.", "code": 400}, "user_id": "user_x"}

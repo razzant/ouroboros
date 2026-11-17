@@ -1,0 +1,1 @@
+{"object": "list", "data": [{"id": "qwen3.5-9b", "object": "model", "type": "llm", "publisher": "qwen", "arch": "qwen3", "compatibility_type": "gguf", "quantization": "Q8_0", "state": "loaded", "max_context_length": 262144, "loaded_context_length": 80000}, {"id": "gemma-4-12b", "object": "model", "type": "llm", "state": "not-loaded", "max_context_length": 131072}]}

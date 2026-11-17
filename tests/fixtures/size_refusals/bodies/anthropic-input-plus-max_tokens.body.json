@@ -1,0 +1,1 @@
+{"type": "error", "error": {"type": "invalid_request_error", "message": "input length and `max_tokens` exceed context limit: 75000 + 8192 > 80000, decrease input length or `max_tokens` and try again"}, "request_id": "req_x"}

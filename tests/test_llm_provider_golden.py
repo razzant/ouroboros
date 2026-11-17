@@ -686,6 +686,38 @@ def _load_cases() -> List[Dict[str, Any]]:
 _CASES = _load_cases()
 
 
+_CARRIER_ENDPOINT = "http://127.0.0.1:19876/carrier-only-sentinel"
+_WIRE_CASES = [case for case in _CASES if case['id'] in {
+    'openrouter.dispatch.happy_path', 'openai.dispatch.happy_path',
+    'compatible.dispatch.happy_path', 'cloudru.dispatch.happy_path',
+    'minimax.dispatch.happy_path', 'anthropic.dispatch.happy_path',
+    'gigachat.dispatch.happy_path', 'gigachat.dispatch.async_thread_offload',
+    'anthropic.payload.async_thread_offload', 'fallback.async.preserves_tools',
+    'fallback.async.no_proxy_client',
+}]
+
+
+@pytest.mark.parametrize('case', _WIRE_CASES, ids=lambda case: case['id'])
+def test_capability_carrier_never_enters_provider_wire_or_attempt_ledger(monkeypatch, case):
+    from ouroboros import llm_routing
+    resolve = llm_routing.resolve_target
+    seen = []
+
+    def with_metadata(*args, **kwargs):
+        target = resolve(*args, **kwargs)
+        target['capability_route']['dispatch_base_url'] = _CARRIER_ENDPOINT
+        seen.append(target)
+        return target
+
+    monkeypatch.setattr(llm_routing, 'resolve_target', with_metadata)
+    observed = _observe(case['spec'])
+    assert seen, 'the real dispatch must receive a target carrying the snapshot'
+    assert observed == case['expected']
+    serialized = json.dumps(observed)
+    assert 'capability_route' not in serialized
+    assert _CARRIER_ENDPOINT not in serialized
+
+
 def test_golden_fixture_ids_are_unique_and_documented():
     ids = [case["id"] for case in _CASES]
     assert len(ids) == len(set(ids)), "duplicate golden case id"

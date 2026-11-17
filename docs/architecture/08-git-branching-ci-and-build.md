@@ -14,6 +14,7 @@ Secret-free `post-merge.yml` coalesces `ouroboros` pushes: affected Linux/WAL an
 
 | Tier | Jobs | Trust boundary |
 |---|---|---|
+| Context PRs | `context-gate.yml` | Keyless `scripts/context_gate.py` |
 | Read-only checks | `lint` (ruff F, ESLint, Pages), `shard-plan` → `quick-test` (PERSIST, 3 shards), `sqlite-floor` (SQLite 3.37.2), `betterleaks-platform-smoke`, `benchmark-methodology` | `lint` gates releases; it and `benchmark-methodology` also run on tags, the rest on dispatch. No provider secrets |
 | Android source/build proof | `android-test` | `release` runs and tags; `android/tests`, release tests and disposable-key APK compilation; no publisher secrets |
 | Android emulator proof | `android-emulator-smoke` | Tags or verified `android/` changes; install/start and same-UID PackageInstaller readback on an x86_64 API matrix; no publisher secrets |

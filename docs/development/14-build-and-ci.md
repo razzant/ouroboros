@@ -44,9 +44,11 @@ A test starts a real process only for a claim that lives at the process boundary
 
 ### The local battery entry point
 
+Context PR checks: `python scripts/context_gate.py`.
+
 `python scripts/run_tests.py` (`make test`) runs the full Node/default Python battery; pytest arguments focus it. `--selected [--base REF]` (default `HEAD`) prints the commit selector's tier/rule/module count and runs both passes. Scope travels in the run's inventory plugin (`preflight_inventory.launch_args`), not argv (Windows' 32,767-character limit). `--extra-test PATH`/`--full-tests` widen with `--test-reason`. Missing required Node is red `NOT_RUN`, no hermetic proof minted. Workers: the CPU count within measured memory, less other live runs' slots in the ledger `<temp parent>/ouroboros-test-slots-<uid>.noindex/<pid>.json` (`test_parallelism.SlotLease`) and one per unleased `pytest`/`node --test` root; floor one; a run waits only while the kernel confirms critical memory pressure, never for slots; the runner names both. A battery first warms its bytecode prefix (`ouroboros/test_bytecode.py`), read by every session, write ban kept.
 
-The battery runs the gate's two passes (above); its groups go longest-first by the durations table (`OUROBOROS_TEST_DURATIONS`, PERSISTENCE). `--evidence-dir DIR` sets each pass's `--ci-evidence-dir`; selected runs add `selection.json` and full inventory JSONL. Never export through `PYTEST_ADDOPTS`: nested pytest could overwrite parent results.
+`--evidence-dir DIR` sets each pass's `--ci-evidence-dir`; selected runs add `selection.json` and full inventory JSONL. Never export through `PYTEST_ADDOPTS`: nested pytest could overwrite parent results.
 
 ### Safe local verification and dirty browser candidates
 

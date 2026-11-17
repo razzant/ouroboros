@@ -927,8 +927,8 @@ def _record_llm_call_error(
         ctx.accumulated_usage["_last_llm_reset_at"] = classification.reset_at
     else:
         ctx.accumulated_usage.pop("_last_llm_reset_at", None)
-    from ouroboros.loop_transport import stamp_owner_provider_message
-    stamp_owner_provider_message(ctx.accumulated_usage, error, classification)  # the event above keeps the diagnostic provider_message
+    from ouroboros.size_refusal import stamp_failure
+    stamp_failure(ctx.accumulated_usage, error, classification)  # the event above keeps the diagnostic provider_message
     for key, value in (("_last_llm_status_code", classification.status_code),
                        ("_last_llm_provider_code", classification.provider_code)):
         if value:
@@ -1181,7 +1181,7 @@ def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated
     for stale in ("_last_llm_error", "_last_llm_error_kind", "_last_llm_failure", "_acting_route_failure", "_last_llm_retry_same_request",
                   "_last_llm_status_code", "_last_llm_provider_code", "_last_llm_provider_message",
                   "_last_llm_provider_fields", "_last_llm_provider_answer", "_last_llm_provider_message_cut", "_last_llm_resource_refusal",
-                  "_last_llm_output_exhausted", "_last_llm_attempt_custody"):
+                  "_last_llm_output_exhausted", "_last_llm_attempt_custody", "_last_llm_size_refusal"):
         accumulated_usage.pop(stale, None)
     receipts = pop_custom_validation_receipts(usage, msg.get("tool_calls") or [])
     accumulated_usage.pop(CUSTOM_RECEIPTS_USAGE_KEY, None)
