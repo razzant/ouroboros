@@ -39,7 +39,10 @@ test('Skills keeps its return and tabs at the leading edge, with one extra line 
 test('a section band has the same inset without native chrome and one leading edge with or without a return', () => {
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
     const ui = readFileSync(new URL('../ui.css', import.meta.url), 'utf8');
-    assert.match(ui, /--page-header-row-h: max\(var\(--window-chrome-top, 0px\), calc\(var\(--control-h-float\) \+ 36px\)\)/);
+    // Without the desktop shell's attribute the band is the browser inset; ui.css never reads the shell's geometry
+    // (tests/test_launcher_window_chrome.py keeps that geometry under the attribute).
+    assert.match(ui, /--page-header-row-h: calc\(var\(--control-h-float\) \+ 36px\);/);
+    assert.doesNotMatch(ui.replace(/\/\*[\s\S]*?\*\//g, ''), /window-chrome/);
     assert.match(css, /:root\[data-window-chrome="integrated"\] \{[^}]*--page-header-row-h: max\(var\(--control-h-float\), var\(--window-chrome-top\)\);/,
         'a measured native band still follows Interface size; only an absent band needs the browser inset');
     assert.match(css, /\.app-page-header\[data-lead\] \{[^}]*min-height: var\(--page-header-row-h\)/);
