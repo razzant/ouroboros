@@ -781,10 +781,13 @@ def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: 
 # start budget. Running views narrow only under physical pressure or a refusal.
 HOST_STEPS = ("runtime", "review_pool", "review_continuity", "installed_skills",
               "drive_state", "world", "subagents", "architecture_map", "development_map")
+# Host forms an owner's mode target never takes while the window's own start bound holds the request: my WORLD map
+# shortens only for the window (memory audit 15.11.2026, F7), still before memory when the window needs it.
+TARGET_SPARED = ("world",)
 
 
 def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, root, task_id, allowance=None,
-                shortest=None, budget_mode=None, slack=0, bare=None, retain=None):
+                shortest=None, budget_mode=None, slack=0, bare=None, retain=None, window_bound=None):
     """First steps of mode_views, using the same physical allowance as memory.
 
     Producers own meaning; this walk selects only explicit smaller views. Retained
@@ -811,6 +814,9 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     Every frame begins from what was shown (``previous``) and pays what that frame
     still owes (``context_fit._view_projections``): steps an abandoned Max trial took
     never reach Low, and books that paid a deficit leave no host step to pay it again.
+    Under an owner's mode target (``budget_mode``) a ``TARGET_SPARED`` section steps only while the request with memory
+    at its shortest forms (``shortest``) exceeds ``window_bound``, the window's own start bound: the target never
+    shortens it.
     """
     if measure is None or not window or not root or not task_id:
         return list(previous), saving
@@ -843,15 +849,19 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         if (bound is None or current <= bound) and initial - current >= saving:
             break
         if fits is None:
-            fits = (shortest(addressed, physical) if shortest else current) <= physical
+            sent_least = shortest(addressed, physical) if shortest else current  # memory at its shortest forms
+            fits = sent_least <= physical
         if part.section_id in WHOLE_OR_OUTLINE_STEPS and fits and (soft or initial - current >= excess):
             continue  # an outline is a physical step, never a start-room or slack choice
+        spared = part.section_id in TARGET_SPARED and budget_mode
+        if spared and window_bound is not None and sent_least <= window_bound:
+            continue  # the window's start bound holds it beside memory's shortest forms: a target never shortens it
         try:
             row = (retain or retain_section)(part, root=root, task_id=task_id)
         except (OSError, ValueError):
             log.warning("Host section capture unavailable; keeping %s whole", part.section_id, exc_info=True)
             continue
-        start_room = (budget_mode or True) if soft and fits else False
+        start_room = (not spared and budget_mode or True) if soft and fits else False  # spared: the window's own room
         short = relocated_text(part, row["reader"], start_room=start_room)
         saved = view_tokens(part.full_text) - view_tokens(short)
         if saved <= 0:

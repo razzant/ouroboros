@@ -3481,12 +3481,12 @@ band, actions end it, at one height and shape. Controls share the content's lead
 location reveals its folder without widening the rail. Section headings follow
 “A section with pages”; a Project shows its name.
 An empty band draws nothing. Its scroller reaches the window's top; its first row starts below the macOS band,
-which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10), as a room's feed
-does (owner 21.10); other moving content fades by principle 9. Empty band space still drags the window. In stack layout the header is one row of 44px controls,
+which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10), while a room's
+feed passes under its bar's frosted edge ("A room's edges"); other moving content fades by principle 9. Empty band space still drags the window. In stack layout the header is one row of 44px controls,
 a page's 18px below a browser's top: one leading control (the picture on a room or section list, the round Back when
 owed), destination name, status, then a room's consciousness chip and Panic. Tabs or filters occupy one line below;
 chip rails run to the page's edges (a desk's Logs fades its rail short of Clear), with no outer events panel on a phone. A short row drops the status word whole after its start step, keeping its mark; Main's title ellipsizes before
-its chip or Panic yields.
+its chip or Panic yields (in Telegram's fullscreen a room's row is Telegram's: "Telegram's shared row").
 A Project's name keeps one line inside its capsule, at the controls' size and weight (`--type-body`, 600), and ends
 in an ellipsis, so its capsule keeps the bar's height (owner 2026-11-01, A·14; it replaces the second line of
 2026-10-28). The name keeps its own direction, so a right-to-left interface still shows a Latin name's start. The
@@ -3504,13 +3504,48 @@ keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has it
 it; another page keeps it too (a return says whether the file changed meanwhile); another file or folder asks. The folder's status stands over the list (audit №7, owner
 2026-10-28T22:09Z).
 
+### Telegram's shared row
+
+In Telegram's fullscreen Telegram draws its own Back (or Close) and its ⌄ ··· in a row under the status bar. As on the
+Mac, where a room's bar stands level with the traffic lights, a room's bar is that row (owner 11.11 «шапка управления
+кривовата», 15.11 «просто передвинуть кнопки эти наверх», 17.11 1A): it starts under the status bar, takes the row's
+height, keeps clear of Telegram's two controls and centres its capsules on theirs, at the composer's height with the
+touch reach. Telegram reports the row's height but not its controls' widths, so the bar keeps a reserve for each
+(`html[data-telegram-back]` says whether Telegram draws its Back or its Close, `web/modules/host_telegram.js`). The
+name's capsule opens the work list without a caret, since Telegram's ⌄ stands in the same row; Main's title shows
+whole or not at all, as the status word does, so a narrow phone may show the status mark alone (from 360 px; at
+320 px even the mark is cut). The consciousness chip
+becomes a row of the work list (below). The room's and the drawer's × give way to Telegram's Back, which closes them
+(both are layers); the work list and the consciousness sheet hang under the row at the page's width. With the keyboard
+up the bar stays in the row, in the page's flow as every keyboard room's bar is.
+
+### A room's edges
+
+The transcript runs to the room's top under the bar and to its bottom under the composer; nothing masks it. At both
+ends it is darkened and blurred under what floats over it, one material top and bottom (owner 15.11 «прозрачную шапку…
+градиент затемнения по нашей библии… и в десктопе», his choice 17.11 1A, 3A): the composer's darkening (the room's
+colour at 72 % at the edge, 36 % at 48 %, 10 % at 78 %, none at the far end), mirrored at the top over the bar's height
+and 24 px more; and under it an 18 px blur, full under the bar's capsules and a phone's clock and fading out over the
+32 px below them (on the desk 48 px of 64, so a card's own buttons just under the bar never read as its second row;
+the transcript's first row and every landing clear that reach, and a row under it is not read yet),
+and under the composer fading out over its top 32 px; at the top both are one layer of the bar, so the desktop window's
+title-band strip keeps its own. A note or the search sheet right under the bar floats over the edge as the capsules
+do (a Project's status note, in its flow, stands below it). The blur belongs to the edge, not to a chip, so it applies in
+both themes. With the keyboard up the bar and the composer stand in the page's flow and nothing passes under either: the
+room draws neither edge, and a short keyboard room keeps a line of the newest message and its foot. On a dark room a room bar's capsules are the composer
+chips' glass (the capsule's veil over a blur of what passes under it), on the desk as on a phone; light keeps white
+capsules at the top as at the bottom. Panic keeps its ink above 4.5:1 on that glass over the reddest card: a lighter
+ink over a light veil, still glass beside its neighbours.
+
 ### A room's bar is the law of places
 
 A room's bar is the law of places (owner 24.10): it holds what has a state and the emergency exit, and a
 command lives under the capsule of the state it changes; there is no ⋯ and no More. Main's bar holds its status,
 the consciousness chip, Restart, Panic and the budget; whenever the bar itself is narrow, on a phone or in a
 narrow window, Restart and the budget are the work list's last rows `Restart` and `Budget` — the same controls,
-placed by the bar's width. A Project's bar holds its name and status, the same chip and Panic
+placed by the bar's width. In Telegram's shared row the consciousness chip joins them as the row `Consciousness`, its
+next wake and mark beside the name, before Restart and the budget (owner 17.11, 2A).
+A Project's bar holds its name and status, the same chip and Panic
 (`web/modules/chat_header.js`); the chip leads the end group, so a status word never moves it. The chip is
 the brain and a future next attempt's time (the allowance reset when exhausted, or the sooner retry a changed limit brings),
 or `since HH:MM` only for `due` (appointment, `due` if unknown), with the `still` mark.
@@ -3532,7 +3567,7 @@ and, during a campaign, `Evolution ›`
 the title and status share one floating capsule (`--chip-float`, non-shrinking
 mark and caret with inline inset), and each command is its own floating capsule
 (owner 21.10). No band, mask or clip is drawn under or between them, so the capsules float over the transcript
-(owner 2026-11-01). A failure or approximation note hangs under the bar; a page
+(owner 2026-11-01); at the edge the transcript under them is darkened and blurred ("A room's edges"). A failure or approximation note hangs under the bar; a page
 has no caption line, its sidebar row and its tabs name it.
 
 ### Doors and containers
@@ -3597,7 +3632,7 @@ then draws no Back. Its bars take the room's colour; System appearance follows T
 on all sides (`web/modules/host_telegram.js`). Fullscreen sections share one title baseline beside the drawer
 picture and one action, 12px clear of both host buttons (108px, 100px safe sides). Below 416px that row cannot hold
 the name beside the action, so the action takes the line under it and the name stays whole, ending in an ellipsis
-only at the host's buttons. The rail stays below. Rooms keep their bar placement.
+only at the host's buttons. The rail stays below. A room's bar is Telegram's row itself ("Telegram's shared row").
 
 Enforcement: `tests/test_design_system_gate_browser.py` visits every registered
 page and Settings' home and pages in WebKit and Chromium at 320, 360, 390, a Telegram-like

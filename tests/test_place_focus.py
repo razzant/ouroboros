@@ -558,6 +558,55 @@ def test_focus_frame_states_provider_facts_and_mentions_never_a_verdict(focus, f
         assert words not in rendered, words
 
 
+def test_focus_names_the_speakers_pages_by_exact_key_never_authority(focus):
+    """SPEC §2.3, step 1: the admission stamps the speaker's exact key and the addresses of the global notes whose
+    authored ``keys`` list it, never the page itself; the frame replays that stamp byte for byte; a key grants nothing."""
+    from ouroboros import knowledge as store
+    from ouroboros.presence_context import focus_frame_sources, frame_focus_content
+    root, place, admission, event = focus
+    key, reader = {"provider": "chat", "namespace": "a", "id": "person"}, "knowledge_read(topic={!r}, scope='global')".format
+
+    def admit(admitted=admission, **actor):
+        task = _build_task(replace(admitted, allowance={"status": "available", "remaining_usd": 2}), replace(
+            event, actor={"platform_actor_id": "person", "display_name": "Pat Quill", **actor}), drive_root=root, staged_files=())
+        rendered = frame_focus_content(task, "hello")
+        line = next(line for line in rendered.splitlines() if line.startswith("- the person (host facts): "))
+        return task["metadata"]["focus"]["actor"], rendered, line, task
+
+    def page(topic, *keys):
+        assert store.write_knowledge_note(store.resolve_knowledge_address(root, topic, "global"),
+                                          f"---\ntype: person\nkeys: {json.dumps(list(keys))}\n---\n# Pat's page\n").ok
+
+    page("people/by-name", {**key, "id": "Pat Quill"})  # a display name never joins
+    actor, _rendered, line, _task = admit()
+    assert actor["key"] == key and actor["page"] == "no global knowledge note lists this key in its keys frontmatter"
+    assert line == "- the person (host facts): " + json.dumps(actor, ensure_ascii=False)
+    page("people/pat", {"provider": "mail", "namespace": "", "id": "pat@example.org"}, key)
+    memory = {path: path.read_bytes() for path in (root / "memory").rglob("*") if path.is_file()}
+    actor, rendered, line, _task = admit()
+    assert actor["page"] == reader("people/pat") and "pages" not in actor and actor["owner_confirmed"] is False
+    assert "Pat's page" not in rendered  # its address, not its text
+    assert {path: path.read_bytes() for path in (root / "memory").rglob("*") if path.is_file()} == memory  # read only
+    page("clients/pat", key)
+    actor, rendered, _line, task = admit()
+    assert actor["pages"] == [reader("clients/pat"), reader("people/pat")] and "page" not in actor  # never merged or ranked
+    # The stamp is the admission's: after a page changes, the recorded frame still re-renders byte for byte.
+    target = store.resolve_knowledge_address(root, "clients/pat", "global")
+    assert store.write_knowledge_note(target, "", "archive", expected_revision=store.read_knowledge_note(target).revision,
+                                      reason="a duplicate").ok
+    assert focus_frame_sources(task["metadata"], rendered) is not None
+    # A later admission names the archived page apart; an unverified address labels what it found.
+    actor, _rendered, line, _task = admit(authenticated=False)
+    assert (actor["page"], actor["archived_pages"], actor["matched_by"]) == (
+        reader("people/pat"), [reader("clients/pat")], "an unverified address")
+    assert line.endswith('"matched_by": "an unverified address"}; authenticated: no') and actor["owner_confirmed"] is False
+    # Ownership comes from the place's confirmed account alone; the key facts stand beside it unchanged.
+    confirmed = replace(admission, place=p.edit_place(root, place.place_id, "confirm_owner_account", author="owner",
+                                                      platform_actor_id="person"))
+    owner, _rendered, _line, _task = admit(confirmed)
+    assert owner["owner_confirmed"] is True and (owner["key"], owner["page"]) == (key, reader("people/pat"))
+
+
 @pytest.mark.parametrize("shape", ["slack", "generic", "directory"])
 def test_focus_frame_renders_the_connector_thread_snapshot_with_marks_and_a_named_omission(focus, monkeypatch, shape):
     from ouroboros import config

@@ -228,6 +228,15 @@ def arrival_conversation(conversation, source=None) -> dict:
     return facts
 
 
+def arrival_actor(root, event) -> dict:
+    """A later arrival's actor with the speaker facts its focus frame would state (``knowledge.speaker_pages``)."""
+    from ouroboros.knowledge import speaker_pages
+
+    return {**dict(event.actor), **speaker_pages(root, event.provider, event.account_id,
+                                                 str(event.actor.get("platform_actor_id") or event.actor.get("id") or ""),
+                                                 unverified=event.actor.get("authenticated") is False)}
+
+
 def _arrival_source(root, task: dict, event) -> dict:
     """The arrival's exact recorded facts, retained once with the existing focus source (its room row's
     dedup record holds the pointer, so ``chat_history`` and ``memory_read`` rows show it too), as a
@@ -275,7 +284,7 @@ def _arrival_append(root, drive, recipient: str, task: dict, event, wake: bool, 
     # Provenance from the arrival's own author as the places confirm it now, never from the focus that hands it on
     # (a stranger's line handed on stays context) and never a verdict about whom it is for; the drain reads it again.
     confirmed_words = "" if reaction else place_confirmed_words(owner_event_now(root, place_id, event), event.text, event.message)
-    text = json.dumps({"actor": dict(event.actor), "event": event.text, **_non_speech(event, reaction),
+    text = json.dumps({"actor": arrival_actor(root, event), "event": event.text, **_non_speech(event, reaction),
                        "source_event_id": event.source_event_id, "conversation_key": event.conversation_key,
                        "message": dict(event.message), "conversation": arrival_conversation(event.conversation, source),
                        **({"context_source_ref": source} if source else {}),

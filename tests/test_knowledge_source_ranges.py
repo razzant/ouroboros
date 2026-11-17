@@ -9,10 +9,11 @@ from ouroboros.tools.tool_result import _install_tool_result_sidecar, _published
 
 
 def test_partial_reads_reconstruct_exact_note_with_one_revision(tmp_path):
-    text = "---\ntype: note\nsummary: Authored understanding.\n---\n\n" + "αβγ\r\n" * 40
+    text = "---\ntype: note\nsummary: Authored understanding.\n---\n\n[Gap](unwritten.md)\n" + "αβγ\r\n" * 40
     path = tmp_path / "memory/knowledge/person.md"
     path.parent.mkdir(parents=True)
     path.write_bytes(text.encode())
+    (path.parent / "source.md").write_text("[Person](person.md)\n", encoding="utf-8")
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
     parts = []
     for start, end in [(0, 80), (80, len(text))]:
@@ -30,6 +31,10 @@ def test_partial_reads_reconstruct_exact_note_with_one_revision(tmp_path):
         assert (source["start_char"], source["end_char"]) == (start, end)
         body = result[meta["knowledge_body_start"]:]
         assert body == text[start:end]
+        header = result[:meta["knowledge_body_start"]]
+        facts = ('[Knowledge links] {"unwritten": [{"scope": "global", "topic": "unwritten"}]}',
+                 '[Knowledge backlinks (readable shelves now)] [{"scope": "global", "topic": "source", "state": "active"}]')
+        assert all((fact in header) == (start == 0) for fact in facts)  # once, on the page from the note's start
         parts.append(body)
         assert json.loads(result.splitlines()[0].removeprefix("[Knowledge source] ")) == source
     assert "".join(parts) == text

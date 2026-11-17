@@ -148,6 +148,26 @@ def test_a_notes_navigation_is_parsed_once_per_content(tmp_path, monkeypatch):
     assert "Second" in store.knowledge_index_view(address) and len(parses) == 3  # the writer's index read it
 
 
+def test_a_notes_keys_ride_its_navigation_row_read_once_per_content(tmp_path, monkeypatch):
+    from ouroboros import utils
+
+    monkeypatch.setattr(utils, "_RACY_NS", -2_000_000_000)  # as above: trust notes as written on every clock
+    authored = [{"provider": "chat", "namespace": "T-ONE", "id": "U-VELA", "label": "work, since spring"}]
+    address = _shelf(tmp_path, {"vela": "---\nsummary: Vela\nkeys: [{provider: chat, namespace: T-ONE, id: U-VELA, "
+                                         "label: 'work, since spring'}]\n---\n# Vela\n", "beta": "# Beta\nBody.\n"})
+    vela, page = store.resolve_knowledge_address(tmp_path, "vela"), "knowledge_read(topic='vela', scope='global')"
+    parses = _navigation_parses(monkeypatch)
+    index = store.knowledge_index_view(address)
+    assert len(parses) == 2 and store._navigation_row(vela)["keys"] == authored  # exactly as authored
+    assert store.speaker_pages(tmp_path, "chat", "T-ONE", "U-VELA")["page"] == page and len(parses) == 2  # rows reused
+    # A key-only revision leaves the resident index byte for byte, and the next lookup sees it, parsed once.
+    added = ("---\nsummary: Vela\nkeys: [{provider: chat, namespace: T-ONE, id: U-VELA}, "
+             "{provider: mail, namespace: '', id: vela@example.org}]\n---\n# Vela\n")
+    assert store.write_knowledge_note(vela, added, expected_revision=store.read_knowledge_note(vela).revision).ok
+    assert len(parses) == 3 and store.knowledge_index_view(address) == index
+    assert store.speaker_pages(tmp_path, "mail", "", "vela@example.org")["page"] == page and len(parses) == 3
+
+
 @pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX change time; Windows st_ctime is the creation "
                     "time, so an edit restoring size and mtime keeps the identity (utils.json_snapshot's rule)")
 def test_an_in_place_edit_that_restores_size_and_mtime_is_parsed_again(tmp_path, monkeypatch):
