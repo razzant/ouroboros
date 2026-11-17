@@ -1380,7 +1380,7 @@ test('a minted row names its origin, and a copy keeps the mark but never the ori
     editor.destroy();
 });
 
-test('two marked rows on one engine are a repeat; a twin only one of which reviews is still a copy slip', () => {
+test('same-engine twins preserve runtime origins; unminted twins need both Reviewer marks', () => {
     const twins = (first, second) => validateAvailableSubagentsSetting(setting([
         apiRow({ subagent_id: 'one', ...first }), apiRow({ subagent_id: 'two', ...second }),
     ]), { uniqueEngines: true });
@@ -1388,7 +1388,24 @@ test('two marked rows on one engine are a repeat; a twin only one of which revie
     assert.deepEqual(twins({ review_eligible: true, minted_from: 'review_lane' }, {}), [],
         'a review row minted beside the owner delegation row is no slip');
     assert.match(twins({ review_eligible: true }, {})[0], /^Subagent 2 runs the same engine as Subagent 1 — .* mark both as Reviewer for a repeated review, or remove it\.$/);
-    assert.match(twins({ review_eligible: true, minted_from: 'factory_default' }, { minted_from: 'review_lane' })[0], /same engine as Subagent 1/);
+    // Match validate_unique_engines: migration can mint both an old review seat
+    // and a helper (or two helpers). Either birth marker permits the pair.
+    for (const [first, second] of [
+        [{ review_eligible: true, minted_from: 'factory_default' }, { minted_from: 'review_lane' }],
+        [{ minted_from: 'review_lane' }, { review_eligible: true, minted_from: 'review_lane' }],
+        [{ minted_from: 'review_lane' }, { minted_from: 'review_lane' }],
+    ]) {
+        assert.deepEqual(twins(first, second), []);
+        const rows = setting([apiRow({ subagent_id: 'one', ...first }), apiRow({ subagent_id: 'two', ...second })]);
+        assert.doesNotMatch(rowMeta(rows.items[1], { ...QUIET_STATE, setting: rows }, []).text, /same engine/);
+        const dom = accessEditorDom();
+        const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
+        editor.load(setting([...rows.items, poolReviewer()]));
+        dom.row(1).querySelector('[data-subagent-field="recommended_use"]').emit('input', 'Updated purpose.');
+        assert.deepEqual(editor.validate(), []);
+        assert.equal(editor.setting.items[1].minted_from, second.minted_from);
+        editor.destroy();
+    }
     assert.equal(reviewTwinAllowed({ review_eligible: true }, { review_eligible: true }), true);
     assert.equal(reviewTwinAllowed({}, {}), false);
 
