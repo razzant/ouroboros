@@ -944,6 +944,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             root=core.section_root, task_id=core.section_task_id, bare=lambda forms: measure(selected, sent, forms),
             allowance=host_allowances["margin" if kept is None or start_work else "physical"],
             budget_mode=selected if kept is None and target and target < window else None,
+            window_bound=floor.floor_allowances(window_tokens=window if known_window else None, output_reserve_tokens=reserve,
+                non_memory_tokens=0, calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)["margin"],
             **({"retain": retain} if retain is not None else {}))
         fixed = measure(selected, sent, section_views(sections[selected], receipts))
         allowances = floor.floor_allowances(window_tokens=window if known_window else None,
