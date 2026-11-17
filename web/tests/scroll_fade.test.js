@@ -117,3 +117,29 @@ test('keyboard focus clears the fade, while pointer focus and focus handed back 
     f.listeners.get('focusin')({ target: row });
     assert.equal(f.scroller.scrollTop, 188, 'the row clears the 32px top fade before focus is visible');
 });
+
+test('keyboard focus handed back to the row it left stays where it stood; a row that moved meanwhile comes clear', () => {
+    const f = fixture();
+    f.scroller.ownerDocument.defaultView.getComputedStyle = () => ({ getPropertyValue: () => '32px' });
+    let top = 20;  // a reader's opener under the top fade, half above the box
+    const row = { getBoundingClientRect: () => ({ top, bottom: top + 30 }), matches: selector => selector === ':focus-visible' };
+    const other = { getBoundingClientRect: () => ({ top: 60, bottom: 70 }), matches: () => true };
+    f.scroller.contains = (node) => node === row || node === other || node === f.scroller;
+    f.scroller.getBoundingClientRect = () => ({ top: 0, bottom: 100 });
+    f.scroller.scrollTop = 200;
+    bindScrollFade(f.scroller);
+    // The reader opened from the row takes the focus; Escape closes it and hands the focus back (a keyboard's).
+    f.listeners.get('focusout')({ target: row });
+    f.listeners.get('focusin')({ target: row });
+    assert.equal(f.scroller.scrollTop, 200, 'the opener returns at the same place: the chat does not move');
+    // A row the list moved while its menu was open (a project pinned to the top) is revealed on the keyboard's return.
+    f.listeners.get('focusout')({ target: row });
+    top = -400;
+    f.listeners.get('focusin')({ target: row });
+    assert.equal(f.scroller.scrollTop, -232, 'the moved row clears the top fade');
+    // Another row reached by the keyboard is revealed as before.
+    f.scroller.scrollTop = 200; top = 20;
+    f.listeners.get('focusout')({ target: other });
+    f.listeners.get('focusin')({ target: row });
+    assert.equal(f.scroller.scrollTop, 188);
+});

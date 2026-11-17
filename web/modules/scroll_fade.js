@@ -52,12 +52,26 @@ export function bindScrollFade(scroller, { axis = 'y', region = '' } = {}) {
     const schedule = () => {
         if (!disposed && frame === null) frame = win.requestAnimationFrame(update);
     };
+    // Where a row stood in the box when focus left it: focus handed back to that row, which has not moved since (a
+    // reader or menu closed by a key, a copy done), leaves the scroller where the owner put it, as the closing promised
+    // (DESIGN "Document reading": focus returns to the opener at the same place).
+    let left = null;
+    const offset = (node) => node.getBoundingClientRect()[axis === 'x' ? 'left' : 'top']
+        - scroller.getBoundingClientRect()[axis === 'x' ? 'left' : 'top'];
+    const onBlur = (event) => {
+        const row = event.target;
+        left = row && row !== scroller && scroller.contains?.(row) ? { row, at: offset(row) } : null;
+    };
     const onFocus = (event) => {
         // Only focus the keyboard can see is brought clear of the fade. A pointer's focus precedes its click (moving the
         // pressed row would lose the release), and focus handed back after a pointer's menu or dialog must not drag the
-        // list after a row that moved meanwhile (a pinned project's row going to the top).
-        if (event.target && event.target !== scroller && event.target.matches?.(':focus-visible') && scroller.contains?.(event.target)) {
-            revealPastFade(scroller, event.target, { axis });
+        // list after a row that moved meanwhile (a pinned project's row going to the top). A row the keyboard gets back
+        // where it stood stays there; one that moved meanwhile is brought clear.
+        const row = event.target;
+        const unmoved = left?.row === row && Math.abs(offset(row) - left.at) < 1;
+        left = null;
+        if (row && row !== scroller && !unmoved && row.matches?.(':focus-visible') && scroller.contains?.(row)) {
+            revealPastFade(scroller, row, { axis });
         }
         schedule();
     };
@@ -74,6 +88,7 @@ export function bindScrollFade(scroller, { axis = 'y', region = '' } = {}) {
     mutations.observe(scroller, { childList: true });
     scroller.addEventListener('scroll', schedule, { passive: true });
     scroller.addEventListener('focusin', onFocus);
+    scroller.addEventListener('focusout', onBlur);
     observeContent();
     const dispose = () => {
         disposed = true;
@@ -82,6 +97,8 @@ export function bindScrollFade(scroller, { axis = 'y', region = '' } = {}) {
         mutations.disconnect();
         scroller.removeEventListener('scroll', schedule);
         scroller.removeEventListener('focusin', onFocus);
+        scroller.removeEventListener('focusout', onBlur);
+        left = null;
         if (activeBindings.get(scroller) === dispose) activeBindings.delete(scroller);
     };
     activeBindings.set(scroller, dispose);
