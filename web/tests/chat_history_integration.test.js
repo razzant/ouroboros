@@ -1671,14 +1671,23 @@ test('a disconnect while ↓ reads, the socket still down: retained return stays
     assert.equal(atBottom(f), true);
 });
 
-// ↓ gives up its own read when the room's read it shares fails, ordinarily or refused by an upgrade: the next healthy
-// read restores a follower's present chain, and a reader who moved on keeps place and chain.
-for (const [title, failure, readOn] of [
-    ['↓ sharing the room\'s own read of the present names its Retry when that read fails, with no absence owed',
-        { httpStatus: 503, body: { error: 'History source unavailable' } }, false],
+// ↓ gives up its own read when the room's read it shares fails, ordinarily or refused by an upgrade. Partial or
+// source-refused 200s in between leave the present unconfirmed; the read that confirms it restores a follower's present
+// chain, and a reader who moved on keeps place and chain.
+const failedRead = { httpStatus: 503, body: { error: 'History source unavailable' } };
+const cutShort = { ...present(row('chat:903', 'Part of the answer')),
+    window: { complete: false, truncated_by: ['quota', 'chat_projection_failed'] } };
+const sourceRefused = { messages: [row('chat:900', 'Newest saved message')], has_more: true, page_cursor: null, next_cursor: null,
+    reason_code: 'history_source_unavailable', window: { complete: false, truncated_by: ['history_source_unavailable'] } };
+for (const [title, failure, between, readOn] of [
+    ['↓ sharing the room\'s own read of the present names its Retry when that read fails, with no absence owed', failedRead, [], false],
     ['↓ sharing the room\'s own read of the present that an upgrade refuses waits; the next healthy read restores the chain',
-        upgrading, false],
-    ['a reader who moves on after ↓ shared a refused read keeps place and chain through the next healthy read', upgrading, true],
+        upgrading, [], false],
+    ['after ↓ shared a failed read, a partial read leaves the chain to the next whole read', failedRead, [cutShort], false],
+    ['after ↓ shared a failed read, repeated partial reads leave the chain to the next whole read', failedRead, [cutShort, cutShort], false],
+    ['after ↓ shared a failed read, a source-refused read leaves the chain to the next whole read', failedRead, [sourceRefused], false],
+    ['a reader who moves on after ↓ shared a refused read keeps place and chain through partial and whole reads',
+        upgrading, [cutShort], true],
 ]) test(title, async (t) => {
     const f = await awayRoom(t);
     const recent = held();
@@ -1697,9 +1706,15 @@ for (const [title, failure, readOn] of [
         failure === upgrading ? 'Scroll to latest message' : 'Retry loading latest messages', 'an upgrade waits, a failure names Retry');
     if (readOn) readUp(f);
     const kept = f.messages.scrollTop;
+    let revision = 50;
+    for (const unconfirmed of between) {
+        f.respond(unconfirmed);
+        await f.instance.refreshHistory({ revision: ++revision });
+        await drain();
+    }
     f.respond(present(row('chat:901', 'Arrived while away')));
-    // An ordinary healthy read of the present: no ↓, reconnect or failure of ↓'s own.
-    await f.instance.refreshHistory({ revision: 51 });
+    // An ordinary read that confirms the present: no ↓, reconnect or failure of ↓'s own.
+    await f.instance.refreshHistory({ revision: ++revision });
     await drain();
     assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:901'));
     if (readOn) assert.equal(f.messages.scrollTop, kept, 'the reader\'s place stays');

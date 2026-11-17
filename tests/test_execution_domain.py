@@ -460,7 +460,8 @@ def test_the_sweep_replays_and_settles_each_engines_work_only_through_that_engin
     started(drive, "run-w", engine_ref=ref, store=STORE)
     body = {"prompt": "p", "scope": {"kind": "project", "root": str(env.work)}}
     assert custody.record_start_requested(drive, run_id="", task_id="gone", idempotency_key="k", invocation_id="inv-w",
-                                          request=body, project_id="", route="r", engine_ref=ref)
+                                          request=body, project_id="", route="r", engine_ref=ref,
+                                          daemon_store_id=STORE)  # receipt-bound replay stays in its work engine
     seen = {"owned": [], "work": []}
 
     def engine(name, store, engine_ref):

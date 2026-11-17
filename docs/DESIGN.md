@@ -570,8 +570,9 @@ scrolling and dragging.
 pill's corners tightening; the name and divider yield first), last scrolling inside
 itself, faded where levels hide. A closed line too narrow drops the names, then
 ellipsizes the longest values; before that cut reaches Model's value, Subagents, Context and Effort
-fold to their glyphs, which still say their values, and
-only then is Model's value cut. All is measured, so no breakpoint (`web/modules/capsule_fit.js`).
+fold to their glyphs, which still say their values; folded under a coarse pointer they stand at their 44 px reach
+apart, and if that line still wraps they take the ordinary gap, where neighbouring reaches may meet by at most 6 px,
+before Model's value is cut (owner 10.11; council 16.11). All is measured, so no breakpoint (`web/modules/capsule_fit.js`).
 
 **It opens in place.** Beside the others the strip grows by its width. Alone, its
 glass grows from the closed capsule to the whole line in 300 ms on the iOS sheet
@@ -3569,7 +3570,8 @@ element (the Reviews door's), so a control's `::after` stays the recipe's; a row
 that wraps on a phone (a question's recovery, an account's actions) and a strip of
 chips that scrolls gives its controls the minimum as their own height, so no
 reach covers a neighbour or is clipped (audit №4, owner 2026-10-28T22:09Z); so do a
-disclosure's summary and a field. In a capsule's open levels on a narrow phone a value
+disclosure's summary and a field. One exception, the folded composer row's last step before Model is cut ("Composer
+owner controls"). In a capsule's open levels on a narrow phone a value
 keeps only its drawn height. Nothing that acts is hidden until hover
 there (a Project row's menu is reached by its long press).
 No page scrolls sideways at any width; only code, tables and a bar's

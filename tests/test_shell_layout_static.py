@@ -117,6 +117,9 @@ def test_folded_rings_leave_each_others_touch_reach():
     rings = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] {')
     assert "--composer-glyph-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));" in rings
     assert "column-gap: var(--composer-glyph-gap);" in rings
+    # Only a measured tight line gives up the extra reach; both states share the chips' matching give-back below.
+    tight = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"][data-owner-tight] {')
+    assert "--composer-glyph-gap: var(--composer-row-gap);" in tight
     # The chips slot gives back that same wider gap, or a folded row with chips would wrap onto a second line.
     chips = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips {')
     assert "margin-inline-start: calc(-1 * var(--composer-glyph-gap));" in chips
@@ -129,6 +132,17 @@ def test_logs_use_the_space_below_clear_for_the_long_filter_word():
     logs = _block(css, "@container dashboard (max-width: 27.75rem) {")
     assert "grid-column: 4; grid-row: 1;" in _block(logs, ".logs-filters > .logs-inline-clear {")
     assert "grid-column: 3 / -1;" in _block(logs, ".logs-filters > .filter-chip:nth-child(6) {")
+
+
+def test_an_automatic_section_page_keeps_its_list_when_the_container_narrows_before_javascript():
+    css = _read("web/ui.css")
+    two = _block(css, "@container sectionplace (min-width: 40rem) {")
+    assert '.section-shell[data-section-view="auto"] > .section-pane { display: grid; }' in two
+    assert '.section-place[data-section-view="auto"] .section-lead-page { display: flex; }' in two
+    # Only an explicit page hides the rail; auto shows the list immediately below the two-pane query.
+    assert '.section-shell[data-section-view="page"] > .section-rail,\n.section-shell:is([data-section-view="home"], [data-section-view="auto"]) > .section-pane { display: none; }' in css.replace(two, "")
+    phone = _block(_read("web/style.css"), SECTION_PAGE_ALONE)
+    assert '#page-dashboard[data-section-view="auto"] > .app-page-header .app-page-lead { display: none; }' in phone
 
 
 def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_list():
@@ -155,7 +169,7 @@ def test_a_touch_window_names_a_sections_two_columns_in_its_one_header_row():
     title = _block(two, f"{header} .app-page-title-row {{")
     assert "position: absolute;" in title and "clip-path: inset(50%);" in title
     assert f"{header} .app-page-lead {{ grid-area: lead; min-height: var(--touch-target-min); }}" in two
-    lead = _block(two, 'html[data-layout="stack"] .section-place[data-section-view="page"] .section-lead {')
+    lead = _block(two, 'html[data-layout="stack"] .section-place:is([data-section-view="page"], [data-section-view="auto"]) .section-lead {')
     assert "margin-inline-start: 0;" in lead
     assert ("grid-template-columns: calc(var(--section-rail-w) - var(--section-rail-end) - var(--space-3) - 44px - var(--space-2)) minmax(0, 1fr);") in lead
     assert '"leading title toolbar" "lead lead lead"' not in _read("web/settings.css")

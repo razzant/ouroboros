@@ -1010,13 +1010,14 @@ def test_recovered_pending_invocation_object_carries_the_shape(tmp_path, monkeyp
         max_seconds=60, request=body, project_id="p", project_owned=False,
         route="r", root_task_id="t-a", parent_task_id="", snapshot_id="snap1",
         execution_root="/x/exec", baseline_sha="b1", target_root="/x/target",
-        authority_source="skill_payload", resource_ref=ref)
+        authority_source="skill_payload", resource_ref=ref, daemon_store_id="fixture-store")
     record = custody.pending_invocations(drive)[0]
     monkeypatch.setattr(custody, "_reconcile_one", lambda *_a, **_k: {"ok": True})
 
     class _Gw:
+        store_identity = "fixture-store"  # the recorded receipt's store, while this test varies granted shape
         def start_run(self, request, *, idempotency_key=""):
-            return {"runId": "run-rec"}
+            return {"runId": "run-rec", "storeId": self.store_identity}
 
     custody._recover_pending_invocation(drive, _Gw(), record)
     obj = custody._CUSTODY["run-rec"]

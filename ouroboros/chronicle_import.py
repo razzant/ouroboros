@@ -101,7 +101,8 @@ def _stated(value: Any) -> bool:
 
 def _iso(value: Any) -> bool:
     """An ISO date or null. ``fromisoformat`` takes any one character between date and time, a line break included;
-    readers print these dates as they are, so only a printable one keeps a header one line."""
+    a reader prints one it cannot read as a date as it is (``memory_inventory.minute``), so only a printable one keeps
+    a header one line."""
     from ouroboros.deadline_utils import parse_deadline_ts
 
     return value is None or isinstance(value, str) and value.isprintable() and value == value.strip() and (

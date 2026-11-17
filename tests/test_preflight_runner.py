@@ -992,7 +992,7 @@ def _pin_preflight_root(monkeypatch, temp_root):
     """Pin only the gate's scratch root; its evidence and lane logs keep their own directories."""
     from ouroboros import preflight_runner
 
-    monkeypatch.setattr(preflight_runner, "gate_root", lambda: temp_root)
+    monkeypatch.setattr(preflight_runner, "gate_root", lambda **_kwargs: temp_root)
 
 
 @pytest.fixture

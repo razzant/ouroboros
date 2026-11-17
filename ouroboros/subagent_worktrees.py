@@ -43,7 +43,7 @@ from ouroboros.utils import atomic_write_json, fsync_folder, utc_now_iso, write_
 from ouroboros.config import DATA_DIR, get_subagent_worktree_root
 from ouroboros.retention import age_cutoff, get_gc_retention_days
 from ouroboros.unindexed import copy_path  # new checkouts are born where desktop search skips them
-from ouroboros import owner_keep, work_domain, worktree_removal
+from ouroboros import git_observation, owner_keep, work_domain, worktree_removal
 
 log = logging.getLogger(__name__)
 
@@ -599,8 +599,8 @@ def snapshot_commit(source: Path, *, message: str, parent: str = "",
     unchanged file cost one ``lstat``) stages every tracked path and every
     untracked file Git does not ignore. ``assume-unchanged`` is cleared,
     and ``skip-worktree`` too for a path that is on disk, so neither hides an
-    edit; an absent ``skip-worktree`` entry keeps its indexed blob (sparse
-    checkouts stay correct). An untracked nested repository, a folder Git cannot
+    edit (``git_observation.unhide_live_entries``); an absent ``skip-worktree`` entry
+    keeps its indexed blob (sparse checkouts stay correct). An untracked nested repository, a folder Git cannot
     open, a SQLite WAL index (shared memory) and a special file are left out and
     named, and so, at a result capture, is a gitlink folder the run filled. The commit's
     parent is ``parent`` or the source's HEAD (none on an unborn branch).
@@ -623,26 +623,9 @@ def snapshot_commit(source: Path, *, message: str, parent: str = "",
             work_domain.copy_file(real_index, index)
         else:
             _git_env(source, "read-tree", "--empty", env=env)
-        listed = _git_env(source, "ls-files", "-v", "-z", env=env).stdout.split(b"\0")
-        assumed, skipped, absent = [], [], set()
-        for item in listed:
-            tag, _, raw = item.partition(b" ")
-            if not raw:
-                continue
-            rel = raw.decode("utf-8", errors="surrogateescape")
-            if tag[:1].islower():  # `ls-files -v` lowercases an assume-unchanged entry's tag
-                assumed.append(rel)
-            if tag[:1] in (b"S", b"s"):
-                if work_domain.lexists(source / rel):
-                    skipped.append(rel)
-                else:
-                    absent.add(rel)
-        if assumed:
-            _git_env(source, "update-index", "-z", "--no-assume-unchanged", "--stdin", env=env,
-                     input_bytes=_nul_input(assumed))
-        if skipped:
-            _git_env(source, "update-index", "-z", "--no-skip-worktree", "--stdin", env=env,
-                     input_bytes=_nul_input(skipped))
+        absent = git_observation.unhide_live_entries(
+            lambda *args, stdin=b"": _git_env(source, *args, env=env, input_bytes=stdin).stdout,
+            lambda rel: work_domain.lexists(source / rel))
         stage: List[str] = []
         dropped: List[str] = []
         prefix = held_out.strip("/") + "/" if held_out.strip("/") else ""

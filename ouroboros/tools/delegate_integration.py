@@ -210,8 +210,8 @@ def _validated_invocation(drive: Any, retry_token: str, task_id: str,
                            retry_of=retry_token, run_id=record["run_id"])
     if record["state"] == "failed_definite":
         return None, _fail("delegate_start", "invocation_definitely_refused",
-                           "That invocation was definitively refused by the daemon; its "
-                           "id is retired. Start a new run with a plain "
+                           "That invocation is recorded as definitively refused (failed_definite); "
+                           "its id is retired. Start a new run with a plain "
                            "delegate_start(subagent_id=..., prompt=...).",
                            retry_of=retry_token)
     body = record.get("request")
@@ -245,7 +245,6 @@ def _accepted_retry(drive: Any, retry_token: str, record: Dict[str, Any]) -> Opt
     leaving the replay path and its unchanged send rule.
     """
     from ouroboros.delegate_accepted import NO_REPLAY, recover
-    from ouroboros.delegate_shared import delegate_result
     from ouroboros.execution_domain import start_engine
 
     try:
@@ -266,14 +265,34 @@ def _accepted_retry(drive: Any, retry_token: str, record: Dict[str, Any]) -> Opt
             "The engine answered for this start, but no run could be bound to it now, so nothing was re-sent: "
             "its outcome stays unknown and the invocation pending. This is no evidence that it started nothing.",
             retry_of=retry_token, pending_invocation_id=retry_token, lookup=read)
+    return _accepted_result(held, read, retry_token, record.get("request"), (
+        "The engine had already accepted this invocation's start; its run is now in custody and nothing was "
+        "re-sent. Poll with delegate_wait; the run's own claims are evidence to check, not a verified result."))
+
+
+def accepted_refused_start(drive: Any, gateway: Any, invocation_id: str, error: BaseException,
+                           request: Any) -> Optional[ToolResult]:
+    """A start whose POST the engine answered with an error: the run it nonetheless accepted, read and bound
+    once on the start's own gateway (``delegate_accepted.accepted_after_refusal``), answered as started; else
+    ``None`` and the start keeps its pending token, registration and snapshot, its outcome unknown."""
+    from ouroboros.delegate_accepted import accepted_after_refusal
+
+    held, read = accepted_after_refusal(drive, gateway, invocation_id, error)
+    return None if held is None else _accepted_result(held, read, invocation_id, request, (
+        "The engine answered this start with an error, yet it had accepted the start: its run is now in custody "
+        "and nothing was sent again. Poll with delegate_wait; the run's own claims are evidence to check."))
+
+
+def _accepted_result(held: Any, read: Dict[str, Any], invocation_id: str, request: Any, note: str) -> ToolResult:
+    """The started result of the run custody bound for ``invocation_id`` from the engine's own read."""
+    from ouroboros.delegate_shared import delegate_result
+
+    scope = (request.get("scope") if isinstance(request, dict) else None) or {}
     return delegate_result({
-        "status": "started", "run_id": held.run_id, "invocation_id": retry_token, "idempotent_recovery": True,
+        "status": "started", "run_id": held.run_id, "invocation_id": invocation_id, "idempotent_recovery": True,
         "recovered_without_start": True, "custody_durable": True, "route": held.route_id, "model": held.model,
         "effort": held.effort or "", "access": held.access, "mode": held.mode, "isolation": held.isolation or "envelope",
-        "root": held.execution_root or str(((record.get("request") or {}).get("scope") or {}).get("root") or ""),
-        "lookup": read,
-        "note": ("The engine had already accepted this invocation's start; its run is now in custody and nothing was "
-                 "re-sent. Poll with delegate_wait; the run's own claims are evidence to check, not a verified result."),
+        "root": held.execution_root or str(scope.get("root") or ""), "lookup": read, "note": note,
     })
 
 

@@ -48,7 +48,7 @@ def _publish(root, *records):
 
 
 def _came(root, ident):
-    """``transfer_words`` of a stored transfer: its local publication date, never its source's."""
+    """``transfer_words`` keeps the source's date-only precision beside the local publication date."""
     day = ChronicleStore(root).get(ident)["ts"][:10]
     return f'transferred {day} by "operator-one" with "transfer-script 1.0", task "move0001"; written 2026-08-10'
 
@@ -134,7 +134,8 @@ def test_unknown_fields_and_an_old_writer_are_kept_as_they_are_stated(tmp_path):
     assert mi.transfer_words(store.get("t-blank")) == (
         f"transferred {store.get('t-blank')['ts'][:10]} by operator not recorded with tool not recorded, "
         "task not recorded; written date not stated")
-    assert mi.transfer_words(store.get("t-half")).endswith("; written 2026-08-10 12:00:00+00:00")  # as its source says
+    assert mi.transfer_words(store.get("t-half")).endswith("; written 2026-08-10 12:00")  # its source's, in minutes
+    assert store.get("t-half")["metadata"]["legacy_written_at"] == "2026-08-10 12:00:00+00:00"  # stored as it says
     assert mi.record_period(store, store.get("t-blank"), {}) == mi.Period(None, -1, "stated")
     blank_line = next(line for line in mv.render_story(_view(tmp_path)).split("\n") if line.startswith("#### t-blank"))
     assert blank_line.startswith('#### t-blank — period not stated by its source — "Chapter t-blank" — '
@@ -227,7 +228,7 @@ def test_transfer_period_is_stated_with_and_without_ready_units_across_readers(t
     for entry in entries:
         assert (entry["source_period"], entry["period_basis"], entry["period_bases"]) == (STATED, "stated", ["stated"])
     header = _memory_read(_ctx(tmp_path), node_id=record["id"]).split("\n")[0]
-    assert "; stated period 2026-07-01T00:00:00+00:00–2026-07-31T00:00:00+00:00; " in header
+    assert "; stated period 2026-07-01 00:00 → 2026-07-31 00:00; " in header  # the view's form (period_text)
     assert "(stated by its source)" in mv.render_story(_view(tmp_path))
 
 
@@ -598,7 +599,7 @@ def test_memory_read_and_the_extension_reader_carry_the_transfer_beside_its_unch
     node = _memory_read(_ctx(tmp_path), node_id="t-one")
     head = node.split("\n")[0]
     assert f"; {BYLINE}; " in head and f"; {_came(tmp_path, 't-one')}; " in head
-    assert "stated period 2026-07-01T00:00:00+00:00–2026-07-31T00:00:00+00:00" in head
+    assert "stated period 2026-07-01 00:00 → 2026-07-31 00:00" in head
     assert "\ntext:\nChapter words.\n" in node + "\n" and "retained source: memory_read(source_ref=" in node
     document = memory_reader.read_memory(tmp_path, "document", {"address": {"kind": "record", "id": "t-one"}})
     assert document["text"] == "Chapter words." and document["stored"]["author"] == SIGNED
