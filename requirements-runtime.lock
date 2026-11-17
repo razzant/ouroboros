@@ -41,7 +41,8 @@ lxml==6.1.1
 mcp==1.30.0
 openai==2.53.0
 packaging==26.3
-pillow==12.3.0
+pillow==12.3.0 ; python_full_version < '3.11'
+pillow==13.0.0 ; python_full_version >= '3.11'
 pip==26.2.1
 playwright==1.62.0
 playwright-stealth==2.0.3

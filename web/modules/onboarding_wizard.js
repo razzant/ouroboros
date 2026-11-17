@@ -25,9 +25,9 @@ import { accountRowFacts } from './harness_accounts.js';
 import { createStarterSkillsRow } from './onboarding_starter_skills.js';
 import { createConsciousnessOffer } from './onboarding_consciousness.js';
 import { createConnectionsEditor } from './settings_connections.js';
-import { PROVIDER_CARDS, providerSettingsCard } from './settings_provider_cards.js';
+import { PROVIDER_CARDS, createFlatKeyChoices, providerSettingsCard } from './settings_provider_cards.js';
 import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
-import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_policy.js';
+import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './settings_policy.js';
 
 (() => {
         // The served wizard document needs its own menu-key binding.
@@ -130,9 +130,12 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         markStepEdited();
     } });
 
+    // A built-in key's choice (OpenAI's API) stands under its field and joins the draft (settings_provider_cards.js).
+    const keyChoices = createFlatKeyChoices({ state, initial: INITIAL_STATE, providerFields: PROVIDER_FIELDS, onChange: () => markStepEdited(),
+        held: (kind, key) => checkerUses(bootstrap.deployment, kind) || checkerReads(bootstrap.deployment, key) });
     function draftSettings() {
-        return onboardingSettingsDraft({ state, providerFields: PROVIDER_FIELDS,
-            budgetFields: BUDGET_FIELDS, modelSlots: MODEL_SLOTS, trim });
+        return { ...onboardingSettingsDraft({ state, providerFields: PROVIDER_FIELDS,
+            budgetFields: BUDGET_FIELDS, modelSlots: MODEL_SLOTS, trim }), ...keyChoices.draft() };
     }
     const openedDraft = draftSettings();  // the access the install had saved when the wizard opened
 
@@ -218,7 +221,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
     }
 
     function loadModelRoles() {  // a Main still on a key that does not serve, among several named ones, asks which (#2969)
-        const { choice } = connectionDefaults(MODEL_DEFAULTS, activeProviderProfile(), draftSettings(), PROVIDER_PROFILES, state.mainModel);
+        const { choice } = connectionDefaults(MODEL_DEFAULTS, activeProviderProfile(), draftSettings(), PROVIDER_PROFILES, state.mainModel, keyChoices.profileOf);
         modelRoles.load({ ...draftSettings(), _meta: { main_connection_choice: ours('mainModel') ? choice : null } }, { ...SETUP_CONTRACT,
             modelSlots: MODEL_SLOTS.map((slot) => ({ ...slot, settingsToggleId: '' })) });
     }
@@ -248,11 +251,11 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
     // the collapsed "More options" disclosure; everything else stays in the
     // always-visible access grid. Inputs are mounted in the DOM either way.
     function primaryProviderFields() {
-        return PROVIDER_FIELDS.filter((field) => field.group !== 'more');
+        return PROVIDER_FIELDS.filter((field) => field.group !== 'more' && !keyChoices.owns(field));
     }
 
     function moreProviderFields() {
-        return PROVIDER_FIELDS.filter((field) => field.group === 'more' && !field.settingKey.startsWith('OPENAI_COMPATIBLE_'));
+        return PROVIDER_FIELDS.filter((field) => field.group === 'more' && !field.settingKey.startsWith('OPENAI_COMPATIBLE_') && !keyChoices.owns(field));
     }
 
     function hasMoreProviderValue() {
@@ -398,7 +401,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         if (localMain && ours('visionModel')) state.visionModel = proposedModels.visionModel = '';  // Vision follows a local Main
         if (hasModelSubscription()) return;
         const main = ours('mainModel') ? '' : state.mainModel;
-        const { defaults } = connectionDefaults(MODEL_DEFAULTS, activeProviderProfile(), draftSettings(), PROVIDER_PROFILES, main);
+        const { defaults } = connectionDefaults(MODEL_DEFAULTS, activeProviderProfile(), draftSettings(), PROVIDER_PROFILES, main, keyChoices.profileOf);
         for (const [key, name] of [['mainModel', 'main'], ['lightModel', 'light'], ['visionModel', 'vision'], ['fallbackModel', 'fallback']]) {
             if (ours(key)) state[key] = proposedModels[key] = name === 'vision' && localMain ? '' : defaults[name] || '';
         }
@@ -597,7 +600,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
             ['deepseekKey', 'DeepSeek'], ['minimaxKey', 'MiniMax'], ['cloudruKey', 'Cloud.ru'],
             ['openaiKey', 'OpenAI', compatible.legacy && compatible.baseUrl ? `configured · also used by the legacy address ${compatible.baseUrl}` : ''],
             ['openrouterKey', 'OpenRouter'],
-        ].filter(([key]) => trim(state[key])).map(([, label, value]) => [label, value || 'configured']);
+        ].filter(([key]) => trim(state[key])).map(([key, label, value]) => [label, [value || 'configured', ...keyChoices.words(key)].join(' · ')]);
         rows.splice(1, 0, ...(hasLocalModel() ? [
             ['Local source', trim(state.localSource) + (trim(state.localFilename) ? ` / ${trim(state.localFilename)}` : '')],
             ['Local routing', localRoutingLabel(state.localRoutingMode)],
@@ -680,6 +683,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                 </div>
                 <input id="${escapeHtml(id)}" class="ui-control" type="${escapeHtml(type)}"${fixed || note ? ` aria-describedby="${escapeHtml(id)}-help"` : ''} placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(state[stateKey])}"${fixed ? ' readonly' : ''}>
                 ${fixed || note ? `<div id="${escapeHtml(id)}-help" class="${fixed ? 'wizard-inline-note' : 'field-note ui-field-help'}" data-checker-field="${fixed ? '1' : ''}">${escapeHtml(fixed || note)}</div>` : ''}
+                ${keyChoices.html(settingKey)}
             </div>
             `;
         }
@@ -1120,6 +1124,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
     }
 
     function bindProvidersStep() {
+        keyChoices.bind(root);
         const panel = root.querySelector('[data-settings-panel="providers"]');
         if (panel) {
             const mountedConnections = JSON.stringify(state.connections || []);

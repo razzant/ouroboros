@@ -6,10 +6,16 @@ from ouroboros.outcomes import normalize_outcome_axes
 
 
 def completion_facts(root, task_id: str, task: dict, result: dict, event: dict) -> dict:
-    """Freeze these facts with the owed delivery, before live or history projection."""
+    """Freeze these facts with the owed delivery, before live or history projection; ``place_origin`` too, the one its
+    Main portal has once the census lists the work no more (``subagent_messages.place_origin``, by value)."""
+    from ouroboros.subagent_messages import place_origin
+
     axes = {key: value for source in (event, result)
             for key, value in (source.get("outcome_axes") or {}).items() if isinstance(value, dict)}
     facts = {"outcome_axes": normalize_outcome_axes({**event, **result, "outcome_axes": axes})}
+    metadata = {**task, **result}.get("metadata")
+    if isinstance(metadata, dict) and (origin := place_origin(metadata)):
+        facts["place_origin"] = origin
     reply = origin_reply(root, task_id, {**task, **result}) or origin_reply(root, task_id)
     if not reply:
         from ouroboros.projects_registry import project_binding_for_task

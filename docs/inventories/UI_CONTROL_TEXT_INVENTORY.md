@@ -5,7 +5,7 @@ it: `docs/DESIGN.md` "References and actions". Rows are sorted by text so that t
 the same thing sit together: when your diff adds a row, read its neighbours.
 
 334 controls with fixed text in 303 rows, 200 distinct texts;
-223 more controls build their text at run time and are not listed.
+224 more controls build their text at run time and are not listed.
 
 ## Fixed control text
 
@@ -322,7 +322,7 @@ An owner intent that has a door is raised by exactly one module (`ouro:open-proj
 
 | event | raised by |
 |---|---|
-| `ouro:dashboard-subtab-shown` | modules/dashboard.js ×2 |
+| `ouro:dashboard-subtab-shown` | modules/dashboard.js ×3 |
 | `ouro:extension-settings-mounted` | modules/settings_extension_forms.js ×2 |
 | `ouro:language-changed` | modules/i18n.js |
 | `ouro:layout-changed` | theme.js |

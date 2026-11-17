@@ -36,12 +36,21 @@ def test_effective_catalog_and_dispatch_withhold_mutation_execution_and_delegati
         assert result is not None and result.status == "blocked", name
 
 
+def test_the_review_seat_is_a_family_the_shared_openrouter_key_serves():
+    """The review step reads the CI's shared OpenRouter key, which the vendors of every routes-key canary refuse."""
+    from tests.provider_contract_ci import OPENROUTER_ROUTES_KEY_ENV, _OPENROUTER_CANARIES
+    refused = {canary.model.split("/", 1)[0] for canary in _OPENROUTER_CANARIES
+               if canary.credential_env == OPENROUTER_ROUTES_KEY_ENV}
+    assert {"openai", "google", "anthropic"} <= refused, refused
+    assert smoke._REVIEW_MODEL.lstrip("~").split("/", 1)[0] not in refused, (smoke._REVIEW_MODEL, refused)
+
+
 def test_two_paid_cycles_and_finite_author_window_are_the_live_consumers_budget():
     settings = author_settings(smoke._REVIEW_MODEL)
     assert REVIEW_CYCLES == smoke._REVIEW_WAVES == settings["OUROBOROS_REVIEW_MAX_CYCLES"] == 2
     assert settings["OUROBOROS_RUNTIME_MODE"] == "advanced"
     assert "OUROBOROS_REVIEW_ENFORCEMENT" not in settings  # retired: the lane reads the verdict itself
-    assert smoke._REVIEW_MODEL == "deepseek/deepseek-v4.1-flash"
+    assert smoke._REVIEW_MODEL == "z-ai/glm-5.3"
     assert settings["OUROBOROS_MODEL"] == settings["OUROBOROS_MODEL_LIGHT"] == smoke._REVIEW_MODEL
     roster = json.loads(settings["OUROBOROS_SUBAGENTS"])
     assert roster["enabled"] is True and len(roster["items"]) == 1

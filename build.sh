@@ -35,6 +35,8 @@ if [ ! -f "python-standalone/bin/python3" ]; then
     echo "Run first: bash scripts/download_python_standalone.sh"
     exit 1
 fi
+# A python-standalone left from an earlier pin would ship again: check it before installing anything.
+python-standalone/bin/python3 scripts/check_python_build.py
 
 # Bundle the official notarized Node.js runtime the Claudexor pin names, so node-runtime skills work in
 # the packaged app (Homebrew node is code-signing-killed by macOS). Always re-verified: a reused tree's
@@ -52,13 +54,12 @@ echo "--- Verifying bundled Betterleaks runtime ---"
 python-standalone/bin/python3 -m ouroboros.betterleaks_runtime install \
     --build-output betterleaks-standalone
 
-echo "--- Installing launcher dependencies ---"
+echo "--- Exporting launcher dependencies ---"
 BUILD_REQUIREMENTS="$(mktemp "${TMPDIR:-/tmp}/ouroboros-build-requirements.XXXXXX")"
 DESKTOP_REQUIREMENTS="$(mktemp "${TMPDIR:-/tmp}/ouroboros-desktop-requirements.XXXXXX")"
 trap 'rm -f "$BUILD_REQUIREMENTS" "$DESKTOP_REQUIREMENTS"' EXIT
 uv export --locked --no-dev --extra browser --extra desktop --extra build \
     --no-emit-project --no-hashes --no-annotate --output-file "$BUILD_REQUIREMENTS"
-uv pip install --python python3 -q -r "$BUILD_REQUIREMENTS"
 
 echo "--- Installing agent dependencies into python-standalone ---"
 uv pip install --python python-standalone/bin/python3 -q -r requirements-runtime.lock
@@ -156,6 +157,13 @@ python3 scripts/build_repo_bundle.py --source-branch "$MANAGED_SOURCE_BRANCH"
 
 rm -rf build dist
 
+# PyInstaller freezes the launcher with a venv of the interpreter the app ships, as build_linux.sh
+# does, so the frozen launcher and the embedded server run one pinned Python.
+BUILD_VENV="build/macos-pyinstaller-venv"
+python-standalone/bin/python3 -m venv "$BUILD_VENV"
+BUILD_PYTHON="$BUILD_VENV/bin/python"
+uv pip install --python "$BUILD_PYTHON" -q -r "$BUILD_REQUIREMENTS"
+
 # Compile before Ouroboros.spec prunes the standalone headers. Both the ABI and
 # library must come from the interpreter this entry will host, not build Python.
 echo "--- Compiling the macOS source-launcher entry ---"
@@ -172,11 +180,11 @@ xcrun clang -std=c11 -Wall -Wextra -Werror -mmacosx-version-min=12.0 \
     -Wl,-rpath,@executable_path/../Frameworks/python-standalone/lib -o build/macos/ouroboros-shell
 
 echo "--- Running PyInstaller ---"
-python3 -m PyInstaller Ouroboros.spec --clean --noconfirm
+"$BUILD_PYTHON" -m PyInstaller Ouroboros.spec --clean --noconfirm
 
 echo "--- Installing the macOS source-launcher entry ---"
 cp build/macos/ouroboros-shell "$APP_PATH/Contents/MacOS/ouroboros-shell"
-# The standalone executable may be static (3.10.22). Use its explicitly bundled
+# The standalone executable may be statically linked. Use its explicitly bundled
 # library, matching the headers and stdlib, not an incidental top-level dependency.
 test -f "$APP_PATH/Contents/Frameworks/python-standalone/lib/$SHELL_PY_LIB"
 

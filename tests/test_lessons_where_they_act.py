@@ -119,6 +119,12 @@ def test_a_write_says_where_the_note_now_sits(tmp_path):
     assert "summary (22 chars) is shown in the global knowledge index" in person
     assert "and the outline a tight window, a helper and a session start with" in person
     assert "show only its address and title" not in person and "helpers do not load it" not in person
+    # The type is read as a family; a summarized note outside it hears, at the act, what would keep its summary.
+    family = tools._knowledge_write(ctx, topic="people/bo", scope="global", mode="overwrite",
+                                    content="---\ntype: person-note\nsummary: Answers in the evening.\n---\nBo.\n")
+    assert "and the outline a tight window, a helper and a session start with" in family
+    assert "(a note typed person or person-… keeps its summary there)" in summarized
+    assert "keeps its summary there" not in family and "keeps its summary there" not in person
 
 
 def test_the_frozen_reflection_log_renders_nowhere(tmp_path):

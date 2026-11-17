@@ -478,8 +478,8 @@ Enter as a line break.
 ### Composer owner controls
 
 Each composer saves its room's **Model**, **Subagents**, **Context** and **Effort** through the owner endpoints,
-in that order after Ouroboros's picture, with Model first. Main supplies a one-time copy of the last three to new Projects;
-later changes stay in their room. A room's Model is never copied: it follows Main until the room chooses,
+in that order after Ouroboros's picture, with Model first. Main supplies a one-time copy of Subagents and Effort to new
+Projects, whose Context starts at Max; later changes stay in their room. A room's Model is never copied: it follows Main until the room chooses,
 and says so (name `Main`, value Main's model); a choice stays with its room.
 Readback comes from Main state or the named Project, never another room. Saves apply
 to new participants; running work retains its choices through Resume. A refusal
@@ -1343,10 +1343,7 @@ preference when it opens and on every reconnect; there is no file watcher.
   Details never exceed summary size; inline labels stay semibold at row size.
   Task-attributed uncommitted work: one short fact; exact paths and HEAD in Details.
   Failed scans say unknown; zero adds no line. Done stays Done; no adoption/publication claim.
-  Owner 2026-10-25 17:22:09, quiz `3766b0a01ce14dec9a17adee2488bdcf`:
-  “A — короткий факт сразу, файлы в Details”.
-  What an evolution cleanup moved takes the same shape (owner 2026-11-01, quiz
-  `fb45adf3fd631b7fcc9b0c0d678d5094`): one short fact on the card; the repository, stash,
+  What an evolution cleanup moved takes the same shape: one short fact on the card; the repository, stash,
   branch and restore command in its Details row, which stands alone only where no card
   exists. It names what Git did, never whose bytes they were or how long Git keeps them.
   A failed stash command is read back like any other: the row names what it saved or that
@@ -2243,11 +2240,11 @@ its own, and without one they use the consciousness model; the head names it onl
 name's line cannot hold (a long model name, a long circle name) goes under the name, at the line's end, and
 wraps there; a row's facts wrap the same way, and nothing is ever wider than the head or the row.
 
-A row: mark, the place's own name, service, state word (with “· consciousness off” and the muted dot while Off
-leaves a place that is not Paused only hearing), readiness only when not simply on, the
-last captured event (“no captured event”, never “no activity”), its model only when the place
-overrides, and the optional description,
-ellipsized: its own field, empty until written, never a note's first line; purpose, not a rule.
+A row: mark, the place's own name, service, state word (on a place not Paused, the muted dot with
+“· consciousness off” while Off leaves it only hearing, or that no kind is checked), readiness only when
+not simply on, the last captured event (“no captured event”, never “no activity”), its model only when the place
+overrides, and the optional description, ellipsized: its own field, empty until written, never a note's
+first line; purpose, not a rule.
 
 Add asks “What is this place, and what am I here for?” (its first note) and the optional
 description, then where: each connector says its state with Connect, “Choose where” or “Enable in
@@ -2301,18 +2298,19 @@ Sheet/reader use status labels over manifest labels; otherwise core words stay. 
 declared labels/settings.
 Bot messages both wake and permit hearing bots. Other events are own-wake observations;
 the mind decides what to read, so the sheet must not promise exhaustive reading.
-While Off the host's `only_hears` replaces what would claim a wake: Active's note says “Consciousness is off: it
-only hears here.”, the wake note (Active or Silent) “While consciousness is off, nothing here wakes it.” with the door `Consciousness ›` (Dashboard › Consciousness, where Start is; no second Start), and the
-conversation's state card “Active, consciousness off: it only hears here.” (Silent alike). Paused keeps its words.
+While Off the host's `only_hears` replaces what would claim a wake: the state note and the conversation's state
+card say it only hears here, the wake note that nothing here wakes it, with the door `Consciousness ›` (Dashboard ›
+Consciousness, where Start is; no second Start). With no kind checked Active's note claims no wake; the wake note
+and state card say an ongoing conversation can still wake it (owner 16.11: the full repair). Paused keeps its words.
 Conflicts: “Changed elsewhere; your text is kept”. Resave uses fresh facts.
 
 Reader out rows say “as {label}”/“as you”. Heard chips accompany reasons with
 sheet labels or fact words; hide `any_message`. Whole held replies follow System,
-authored and labelled “held, unchecked”. A reaction adds one meta line, “Reaction: …”,
-with a translated prefix and the authored `place_history.reaction` summary, and no
-bubble of its own (owner decision 2026-10-30: reactions are context only and wake
-nothing). Words a receipt sent beside it stay its speech; failed and uncertain receipts
-and the late notice while Silent keep their System rows. Missing fields add nothing.
+authored and labelled “held, unchecked”. A reaction or wordless fact (`place_history.reaction`, `non_text`)
+adds one meta line, a translated prefix (“Reaction: …”) before its authored words, no bubble:
+reactions are context only and wake nothing. Words a receipt sent beside it stay its speech; failed and uncertain
+receipts and the late notice while Silent keep their System rows. An unrecorded author is said so; other missing
+fields add nothing.
 
 ### Voice controls
 
@@ -2527,7 +2525,7 @@ One positive task-local tool-call count joins that line and remains after Done
 (owner 22.10, A). Subagents are not aggregated. Rounds (usable solve responses)
 and known zero calls stay in Details, making no work or footer row; missing
 counts stay absent. Session nanny counts appear only in `Supervision` (footer and
-Details), apart from unreported executor counts. Portals keep one count. Model provenance, origin and a finished card's update time stay in Details. A root's Details add `Spent on` and `Ran on`, its read-time cost breakdown by purpose and by the route that
+Details), apart from unreported executor counts. Portals keep one count. Model provenance, origin and a finished card's update time stay in Details; work a place started adds one meta line under a root's or Main portal's name: the place unless the name is it, what called it in its connector's declared words, and who (owner 16.11, 1). A root's Details add `Spent on` and `Ran on`, its read-time cost breakdown by purpose and by the route that
 served the rows: each line in the card's money words beside the model calls, sessions and tokens the ledger
 recorded, a part it did not record absent; the main line keeps its one amount (owner 02.09). Money
 there is ONE line whose wording carries its openness and never renders an
@@ -2839,7 +2837,7 @@ instead, and let the status text carry the claim.
 
 ## 7. Onboarding density
 
-Accounts is the common connection surface for subscriptions and API keys. An API key is a row of its provider (the built-in Default, then the keys added with Add key) in the account-row anatomy: name and status, a meta line naming the roles that use it, Test, its on/off and Remove (on Default it clears the key). A role names the key it uses; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host while retaining the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
+Accounts is the common connection surface for subscriptions and API keys. An API key is a §6 row of its provider (the built-in Default, then keys added with Add key): name and status, a meta line naming its roles, Test, its on/off and Remove (on Default it clears the key); an OpenAI key's API strip (Chat Completions · Responses; new keys start on Responses) is what Test uses. A role names its key; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host, keeping the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
 Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role reads as a current choice (§7 "Settings") and opens one compact
 Source / Model / Account row to change it. Under Main, Settings (not the wizard or a wait
@@ -2890,8 +2888,7 @@ asks again with the new facts. The outcome note says the stop and the start apar
 Context details show the server-built sourced window line: "set in Settings"
 labels a manual value; the Clear confirmation button removes the route acknowledgement.
 Account changes withdraw old metadata during pending or failed catalog reads.
-Unknown stays unknown. Catalog updates preserve the edited field and caret
-without assigning a model. `model_roles.js` and `model_roles.css` own the shared
+Unknown stays unknown. `model_roles.js` and `model_roles.css` own the shared
 Settings/wizard editor.
 
 A source is chosen, never spelled. Every surface that assigns a model — the
@@ -2927,7 +2924,7 @@ subagent id, while a session row retrieves with its native tools. Session Access
 uses the catalog's existing select: Full system access (default), Workspace write,
 or Read only. Writable reviewers check worktrees; their outputs remain
 evidence without product integration. Access never changes delivery. Catalog refreshes
-preserve the edited value, focus, selection and scroll position. Returning to a
+preserve the edited value, caret, focus, selection and scroll position, assigning no model. Returning to a
 reviewer's previous source restores that source's model/account draft; a new
 source starts without another source's pin.
 
@@ -3483,12 +3480,12 @@ band, actions end it, at one height and shape. Controls share the content's lead
 location reveals its folder without widening the rail. Section headings follow
 “A section with pages”; a Project shows its name.
 An empty band draws nothing. Its scroller reaches the window's top; its first row starts below the macOS band,
-which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10), as a room's feed
-does (owner 21.10); other moving content fades by principle 9. Empty band space still drags the window. In stack layout the header is one row of 44px controls,
+which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10), while a room's
+feed passes under its bar's frosted edge ("A room's edges"); other moving content fades by principle 9. Empty band space still drags the window. In stack layout the header is one row of 44px controls,
 a page's 18px below a browser's top: one leading control (the picture on a room or section list, the round Back when
 owed), destination name, status, then a room's consciousness chip and Panic. Tabs or filters occupy one line below;
 chip rails run to the page's edges (a desk's Logs fades its rail short of Clear), with no outer events panel on a phone. A short row drops the status word whole after its start step, keeping its mark; Main's title ellipsizes before
-its chip or Panic yields.
+its chip or Panic yields (in Telegram's fullscreen a room's row is Telegram's: "Telegram's shared row").
 A Project's name keeps one line inside its capsule, at the controls' size and weight (`--type-body`, 600), and ends
 in an ellipsis, so its capsule keeps the bar's height (owner 2026-11-01, A·14; it replaces the second line of
 2026-10-28). The name keeps its own direction, so a right-to-left interface still shows a Latin name's start. The
@@ -3506,13 +3503,48 @@ keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has it
 it; another page keeps it too (a return says whether the file changed meanwhile); another file or folder asks. The folder's status stands over the list (audit №7, owner
 2026-10-28T22:09Z).
 
+### Telegram's shared row
+
+In Telegram's fullscreen Telegram draws its own Back (or Close) and its ⌄ ··· in a row under the status bar. As on the
+Mac, where a room's bar stands level with the traffic lights, a room's bar is that row (owner 11.11 «шапка управления
+кривовата», 15.11 «просто передвинуть кнопки эти наверх», 17.11 1A): it starts under the status bar, takes the row's
+height, keeps clear of Telegram's two controls and centres its capsules on theirs, at the composer's height with the
+touch reach. Telegram reports the row's height but not its controls' widths, so the bar keeps a reserve for each
+(`html[data-telegram-back]` says whether Telegram draws its Back or its Close, `web/modules/host_telegram.js`). The
+name's capsule opens the work list without a caret, since Telegram's ⌄ stands in the same row; Main's title shows
+whole or not at all, as the status word does, so a narrow phone may show the status mark alone (from 360 px; at
+320 px even the mark is cut). The consciousness chip
+becomes a row of the work list (below). The room's and the drawer's × give way to Telegram's Back, which closes them
+(both are layers); the work list and the consciousness sheet hang under the row at the page's width. With the keyboard
+up the bar stays in the row, in the page's flow as every keyboard room's bar is.
+
+### A room's edges
+
+The transcript runs to the room's top under the bar and to its bottom under the composer; nothing masks it. At both
+ends it is darkened and blurred under what floats over it, one material top and bottom (owner 15.11 «прозрачную шапку…
+градиент затемнения по нашей библии… и в десктопе», his choice 17.11 1A, 3A): the composer's darkening (the room's
+colour at 72 % at the edge, 36 % at 48 %, 10 % at 78 %, none at the far end), mirrored at the top over the bar's height
+and 24 px more; and under it an 18 px blur, full under the bar's capsules and a phone's clock and fading out over the
+32 px below them (on the desk 48 px of 64, so a card's own buttons just under the bar never read as its second row;
+the transcript's first row and every landing clear that reach, and a row under it is not read yet),
+and under the composer fading out over its top 32 px; at the top both are one layer of the bar, so the desktop window's
+title-band strip keeps its own. A note or the search sheet right under the bar floats over the edge as the capsules
+do (a Project's status note, in its flow, stands below it). The blur belongs to the edge, not to a chip, so it applies in
+both themes. With the keyboard up the bar and the composer stand in the page's flow and nothing passes under either: the
+room draws neither edge, and a short keyboard room keeps a line of the newest message and its foot. On a dark room a room bar's capsules are the composer
+chips' glass (the capsule's veil over a blur of what passes under it), on the desk as on a phone; light keeps white
+capsules at the top as at the bottom. Panic keeps its ink above 4.5:1 on that glass over the reddest card: a lighter
+ink over a light veil, still glass beside its neighbours.
+
 ### A room's bar is the law of places
 
 A room's bar is the law of places (owner 24.10): it holds what has a state and the emergency exit, and a
 command lives under the capsule of the state it changes; there is no ⋯ and no More. Main's bar holds its status,
 the consciousness chip, Restart, Panic and the budget; whenever the bar itself is narrow, on a phone or in a
 narrow window, Restart and the budget are the work list's last rows `Restart` and `Budget` — the same controls,
-placed by the bar's width. A Project's bar holds its name and status, the same chip and Panic
+placed by the bar's width. In Telegram's shared row the consciousness chip joins them as the row `Consciousness`, its
+next wake and mark beside the name, before Restart and the budget (owner 17.11, 2A).
+A Project's bar holds its name and status, the same chip and Panic
 (`web/modules/chat_header.js`); the chip leads the end group, so a status word never moves it. The chip is
 the brain and a future next attempt's time (the allowance reset when exhausted, or the sooner retry a changed limit brings),
 or `since HH:MM` only for `due` (appointment, `due` if unknown), with the `still` mark.
@@ -3534,7 +3566,7 @@ and, during a campaign, `Evolution ›`
 the title and status share one floating capsule (`--chip-float`, non-shrinking
 mark and caret with inline inset), and each command is its own floating capsule
 (owner 21.10). No band, mask or clip is drawn under or between them, so the capsules float over the transcript
-(owner 2026-11-01). A failure or approximation note hangs under the bar; a page
+(owner 2026-11-01); at the edge the transcript under them is darkened and blurred ("A room's edges"). A failure or approximation note hangs under the bar; a page
 has no caption line, its sidebar row and its tabs name it.
 
 ### Doors and containers
@@ -3599,7 +3631,7 @@ then draws no Back. Its bars take the room's colour; System appearance follows T
 on all sides (`web/modules/host_telegram.js`). Fullscreen sections share one title baseline beside the drawer
 picture and one action, 12px clear of both host buttons (108px, 100px safe sides). Below 416px that row cannot hold
 the name beside the action, so the action takes the line under it and the name stays whole, ending in an ellipsis
-only at the host's buttons. The rail stays below. Rooms keep their bar placement.
+only at the host's buttons. The rail stays below. A room's bar is Telegram's row itself ("Telegram's shared row").
 
 Enforcement: `tests/test_design_system_gate_browser.py` visits every registered
 page and Settings' home and pages in WebKit and Chromium at 320, 360, 390, a Telegram-like

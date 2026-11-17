@@ -22,14 +22,6 @@ _MODEL_ROLE_SETTING_KEYS = {
     "light": "OUROBOROS_MODEL_LIGHT",
     "fallback": "OUROBOROS_MODEL_FALLBACKS",
 }
-_DIRECT_PROVIDER_AUTO_DEFAULTS = {
-    provider: {
-        setting_key: defaults[role]
-        for role, setting_key in _MODEL_ROLE_SETTING_KEYS.items()
-        if role in defaults
-    }
-    for provider, defaults in DIRECT_PROVIDER_DEFAULTS.items()
-}
 # Heavy is no longer an active role, but its bounded migration reader still
 # needs to distinguish an owner's custom value from values Ouroboros itself
 # shipped as Heavy/Code defaults (both spellings, every release that shipped
@@ -312,16 +304,16 @@ def provider_slot_proposals(settings: dict) -> dict:
     it (``main_connection_choice``). A proposal never replaces a saved value (DEVELOPMENT: Provider
     Independence).
     """
+    from ouroboros.provider_connections import direct_provider_defaults
     from ouroboros.provider_models import route_on_connection
 
     provider, kind, name = _proposal_connection(settings)
-    name = name or ""  # None: the owner chooses; nothing is guessed
-
     def on_connection(value: str) -> str:  # Fallbacks is a chain: each entry on the connection
-        return _serialize_model_list([route_on_connection(model, kind, name) for model in _parse_model_list(value)])
+        return _serialize_model_list([route_on_connection(model, kind, name or "") for model in _parse_model_list(value)])
 
-    if provider:
-        return {key: on_connection(value) for key, value in _DIRECT_PROVIDER_AUTO_DEFAULTS[provider].items()}
+    if provider:  # its connection's own profile: an OpenAI one on Responses proposes that profile
+        defaults = direct_provider_defaults(provider, settings, name)
+        return {key: on_connection(defaults[role]) for role, key in _MODEL_ROLE_SETTING_KEYS.items() if role in defaults}
     proposals = {key: on_connection(_setting_text(SETTINGS_DEFAULTS, key)) for key in _ALL_MODEL_SLOT_KEYS}
     if not has_remote_provider(settings) and _setting_text(settings, "LOCAL_MODEL_SOURCE"):
         local_main = _truthy_setting(settings.get("USE_LOCAL_MAIN"))

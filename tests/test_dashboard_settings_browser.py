@@ -7,7 +7,8 @@ tab a field the owner is in keeps its text and caret through the tab's own perio
 leaving it shows the row's result line; the Updates channel keeps its focused choice through a status read; the
 Evolution choice "Every N tasks" posts both keys in one body and says itself in its own sentence; the doors of
 Consciousness and Costs lead where they say. The named shell capsule, Escape and the system's Back return each tab to Settings at every width, with the list's scroll preserved. At the 320 x 640 floor
-each page's own Back reaches the list, and every tab and three-way choice fits.
+each page's own Back reaches the list, and every tab and three-way choice fits. In two panes the open page's pane
+is the same flex column, its panel the same box, whether the page stands beside the list on its own or was chosen.
 
 The settings endpoint is answered here the way the server answers it: `_meta.effects` on a read, the receipt
 (`changes`: old, new, token) on a save. Undo's precondition and its refusal are the node test's
@@ -407,6 +408,33 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
     # The primary map clears returns and opens the section list.
     _nav(page, "dashboard", width)
     assert page.locator("#page-dashboard [data-shell-back]").count() == 0
+
+
+# The open page's pane and its shown panel: how the pane lays the panel out, and the panel's box.
+PANE = """() => { const place = document.querySelector('#page-dashboard');
+    const pane = place.querySelector('.dashboard-panels'), panel = pane.querySelector('.dashboard-panel.active');
+    const style = getComputedStyle(pane), r = panel.getBoundingClientRect();
+    return { view: place.dataset.sectionView, tab: panel.dataset.dashboardPanel, display: style.display,
+        direction: style.flexDirection, panel: [r.left, r.top, r.width, r.height] }; }"""
+
+
+def test_a_wide_dashboard_lays_out_its_page_alike_whether_it_stands_beside_the_list_on_its_own_or_was_chosen(ui):
+    # Two panes show an automatic view's pane through ui.css's shared rule, which draws a pane as a grid; the
+    # Dashboard's pane stays the flex column its panels fill (style.css), so the shown panel keeps one box in both views.
+    page, _ = _open(ui, width=1087, height=740)
+    _nav(page, "dashboard", 1087)
+    page.wait_for_selector("#page-dashboard .dashboard-panel.active")
+    settle = "() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"
+    page.evaluate(settle)
+    automatic = page.evaluate(PANE)
+    page.click(f'[data-dashboard-tab="{automatic["tab"]}"]')  # the same row: now a chosen page
+    page.wait_for_function("() => document.querySelector('#page-dashboard').dataset.sectionView === 'page'")
+    page.evaluate(settle)
+    chosen = page.evaluate(PANE)
+    assert (automatic["view"], chosen["view"], chosen["tab"]) == ("auto", "page", automatic["tab"]), (automatic, chosen)
+    assert [automatic["display"], automatic["direction"]] == [chosen["display"], chosen["direction"]] == ["flex", "column"], \
+        (automatic, chosen)
+    assert automatic["panel"] == chosen["panel"], (automatic, chosen)
 
 
 def test_no_tab_scrolls_sideways_at_the_floor_and_a_three_way_choice_keeps_one_line(ui):

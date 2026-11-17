@@ -160,6 +160,44 @@ def test_response_metadata_tracks_the_returned_retry_attempt(tmp_path, monkeypat
     }
 
 
+def test_responses_status_reaches_the_projection_and_never_outlives_its_attempt(tmp_path, monkeypatch):
+    """Replies from the real normalizer, not hand-built usage: a direct OpenAI Responses reply its provider left
+    ``incomplete`` with no reason is no result and is retried. The caller's projection carries that attempt's
+    terminal status until the next reply; the Chat Completions reply that answers leaves the exact Chat form."""
+    from ouroboros.llm import LLMClient
+
+    monkeypatch.setattr("ouroboros.loop_llm_call.time.sleep", lambda _seconds: None)
+    target = {"provider": "openai", "resolved_model": "gpt-6.1-terra", "usage_model": "openai/gpt-6.1-terra",
+              "base_url": "https://api.openai.com/v1", "default_headers": {}, "connection": "",
+              "supports_openrouter_extensions": False, "supports_generation_cost": False}
+    incomplete = {"id": "resp_1", "object": "response", "status": "incomplete", "incomplete_details": {},
+                  "model": "gpt-6.1-terra", "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                  "output": [{"id": "msg_1", "type": "message", "role": "assistant", "status": "incomplete",
+                              "content": [{"type": "output_text", "text": "partial", "annotations": []}]}]}
+    chat = {"id": "chatcmpl_1", "object": "chat.completion", "model": "gpt-6.1-terra",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "complete"}, "finish_reason": "stop"}]}
+    replies = [(incomplete, {**target, "api_surface": "responses"}), (chat, {**target, "api_surface": "chat_completions"})]
+    response_meta, seen, client = {"stale": True}, [], LLMClient(api_key="k")
+
+    class _ResponsesIncompleteThenChatLLM:
+        def chat(self, **kwargs):
+            seen.append(dict(response_meta))  # the caller's projection as this send begins
+            body, reply_target = replies[len(seen) - 1]
+            return client._normalize_remote_response(body, reply_target, skip_cost_fetch=True)
+
+    msg, _cost = call_llm_with_retry(
+        _ResponsesIncompleteThenChatLLM(), [{"role": "user", "content": "hi"}], "openai::gpt-6.1-terra", None,
+        "medium", 2, tmp_path, "task-response-status", 1, None, {},
+        "task", False, response_meta_out=response_meta,
+    )
+
+    assert msg["content"] == "complete"
+    assert seen == [{}, {"finish_reason_present": True, "finish_reason": None, "tool_call_count": 0,
+                         "response_status": "incomplete"}]
+    assert response_meta == {"finish_reason_present": True, "finish_reason": "stop", "tool_call_count": 0}
+
+
 class _OverflowStoppedLLM:
     """Non-empty output whose finish_reason reports a context-window overflow —
     the successful truncated-generation shape (acceptance row ERR-3)."""

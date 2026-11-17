@@ -10,7 +10,7 @@ Paths use `OUROBOROS_*` overrides or `launch_roots`' pre-import `APP_ROOT` (`~/O
 
 ### Reading and writing the settings document
 
-Tasks privately keep their entry Context/Effort, review settings and catalog (`TaskSettingsSnapshot`); route keys (`route_choice.ROUTE_SETTING_KEYS`) read the saved document as it is now (none saved: as every other key). Absent/empty differ; route overrides win; a deployment policy reads last. Cognition stays private through Resume; fallback uses pre-room env. `RoomResolver` follows lineage/conversion. `composer_cognition.py` copies Main's cognition once on project creation/recovery and seeds legacy cognition before Main changes. Subagents stays live: Main's `OUROBOROS_SUBAGENTS_MODE` or project `cognition.subagents_mode`, default Auto, including legacy rooms. It bypasses checkpoints; Settings only masks it. `metadata.lead`: CLIENT_CONTRACT §9; `route_choice.py`. Main effort is independent of helper bounds (`_effort_range_format=1`). Immediate keys, writers, granted skill keys and process `env_from_settings` read current disk, including clears; credential-free skill children reread it, payloads carry operator variables. Access stays boot-pinned; reload failures disclose prior env and missing values.
+Tasks privately keep their entry Context/Effort, review settings and catalog (`TaskSettingsSnapshot`); route keys (`route_choice.ROUTE_SETTING_KEYS`) read the saved document as it is now (none saved: as every other key). Absent/empty differ; route overrides win; a deployment policy reads last. Cognition stays private through Resume; fallback uses pre-room env. `RoomResolver` follows lineage/conversion. `composer_cognition.py` freezes legacy rooms before Main changes; new projects copy Main's Effort and Subagents and start in Max. Subagents stays live: Main's `OUROBOROS_SUBAGENTS_MODE` or project `cognition.subagents_mode`, default Auto, including legacy rooms. It bypasses checkpoints; Settings only masks it. `metadata.lead`: CLIENT_CONTRACT §9; `route_choice.py`. Main effort is independent of helper bounds (`_effort_range_format=1`). Immediate keys, writers, granted skill keys and process `env_from_settings` read current disk, including clears; credential-free skill children reread it, payloads carry operator variables. Access stays boot-pinned; reload failures disclose prior env and missing values.
 
 `normalize_settings_raw()` runs before defaults in `load_settings`, `_owner_read_settings_raw` and `build_colab_settings`; dropped keys stay dropped. Colab budget/mode: launch > saved Drive > fresh 200/advanced; workers have no default cap. `safety_config.normalize_consciousness_safety` seeds absent coverage from saved owner coverage; explicit choices stay and guards compare the disk-derived value. `review_pool_migration.apply_at_read_seam` maps run seats to roster rows, retaining refused values. Retired keys/comma-lists drop with notice; comma-only/lane-free installs get factory rows. Review env keys are inert (one startup notice). Reads are pure/idempotent. The loader proposes unauthored slots (§2); `apply_runtime_provider_defaults` only respells them, unpersisted. `apply_settings_to_env` marks slot echoes in internal `OUROBOROS_PROJECTED_PROPOSALS`, inherited by children, distinct from operator variables. Provider Test (minus the search Model) and credential plans (its route legs) share `provider_models.ACTIVE_MODEL_SETTING_KEYS`, including Safety pins; blank inherits.
 
@@ -28,7 +28,7 @@ GET values and `_meta.tokens` share one source read; a token hashes the canonica
 
 ### LLM output token budgets
 
-OpenRouter/Anthropic-compatible output budgets use `max_tokens`; direct OpenAI Chat uses `max_completion_tokens`. Only successful exact-route wire evidence adapts requests, never model-name prefixes. Budgets are floors, lowered by a known route maximum; constants own the numbers:
+OpenRouter/Anthropic-compatible output budgets use `max_tokens`; direct OpenAI uses `max_completion_tokens` (Responses: `max_output_tokens`), never by model name (§10 invariant 13). Budgets are floors, lowered by a known route maximum; constants own the numbers:
 
 | Surface | Output-token budget |
 |---------|---------------------|
@@ -40,7 +40,7 @@ OpenRouter/Anthropic-compatible output budgets use `max_tokens`; direct OpenAI C
 | Post-task evolution promotion decision (`post_task_evolution`) | 8,192 |
 | Skill publish PR body generation | 8,192 |
 | Project naming LIGHT one-shot (`project_naming.llm_project_name`) | 256 |
-| Provider Test (`llm_probe.PROVIDER_TEST_MAX_TOKENS`) | 16 |
+| Provider Test (`llm_probe`; direct OpenAI's tool call 4,096) | 16 |
 
 Naming/translation share one deadline across preparation, slots and recovery; naming captures it before scheduling so workers cannot renew it. Earlier bounds win; detached naming refreshes cost without publishing a title.
 
@@ -52,6 +52,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 |-----|---------|-------------|
 | OPENROUTER_API_KEY | "" | OpenRouter credential |
 | OPENAI_API_KEY | "" | Official direct-OpenAI credential |
+| OPENAI_API_SURFACE | "" | OpenAI API: empty/`chat_completions` = Chat, `responses` (a new key's; rows: `api_surface`) |
 | OPENAI_BASE_URL | "" | Legacy compatible endpoint (only with `OPENAI_API_KEY`) |
 | OPENAI_COMPATIBLE_API_KEY | "" | OpenAI-compatible endpoint credential |
 | OPENAI_COMPATIBLE_BASE_URL | "" | OpenAI-compatible endpoint; only with its own key (blank = no auth) |
@@ -152,7 +153,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_ONBOARDING_SNAPSHOT_TIMEOUT_SEC | 45 | Onboarding Claudexor snapshot-read bound; a wedged daemon refuses, never hangs |
 | OUROBOROS_SETTINGS_DOCUMENT_LOCK_TIMEOUT_SEC | 30 | In-process document-lock bound for owner writes; contention refuses before the transform runs (`owner_settings.py`) |
 | OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC | 2700 | LLM transport read timeout |
-| OUROBOROS_REVIEW_MAX_CYCLES | "2" | Shared paid review-cycle cap over the result-review/commit/skill gates (plan asks stand outside it); `unlimited` = no local count cap (`review_cycles.py`; §6 Review stack) |
+| OUROBOROS_REVIEW_MAX_CYCLES | "2" | Shared review-cycle cap over the result-review/commit/skill gates (plan asks stand outside it); `unlimited` = no local count cap (`review_cycles.py`; §6 Review stack) |
 | OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES | (none) | Alias only: a stored value migrates into `OUROBOROS_REVIEW_MAX_CYCLES` (passes + 1) at load; env inert |
 | OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC | unset | Env-only: logical review window (late results stay in custody) |
 | OUROBOROS_REVIEW_MAX_TOKENS | 65536 | Env-only: reviewer output budget, clamped to the 8192 floor |
@@ -161,7 +162,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_PREFLIGHT_TEST_WORKERS | unset | Env-only: requested xdist workers, capped by memory and other runs (`test_parallelism.py`); scrubbed from the candidate |
 | OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS | true | Auto-grant manifest requests to accepted bytes (clean review or trusted install; hash-bound) |
 | OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS | true | Derived Built in trust (`false`: review); once a source list is saved its Built in row decides |
-| OUROBOROS_CONTEXT_MODE | max | Main's `nano`/`low`/`max` and initial project copy; owner-selected outside Cyber. Review stays independent (§6 Context fitting) |
+| OUROBOROS_CONTEXT_MODE | max | Main's `nano`/`low`/`max`; owner-selected outside Cyber. Review stays independent (§6 Context fitting) |
 | OUROBOROS_CONTEXT_MODE_AUTO_LOW | false | Provenance tombstone, not a toggle: normalization writes `false`; a persisted `low` is honoured only beside it (`context_mode_compat.py`) |
 | OUROBOROS_RUNTIME_MODE | advanced | Effective Access light/advanced/pro/cyber_pro, persisted as the next-boot value (§6 Safety and runtime mode) |
 | OUROBOROS_SKILLS_REPO_PATH | "" | Skills Repo Path: read in place as My folder (`my-folder`), even with a saved source list; removing that row clears this path. Other folders stay connected. |

@@ -1197,7 +1197,7 @@ class UpdateProgress(TypedDict, total=False):
 class UpdateLetter(TypedDict):
     """The update description, written by Ouroboros as ordinary work and never by a check.
     ``relation``: pending, applied, superseded, other, or '' without text. ``state`` none: nothing
-    saved yet (the projection still carries the offered range and the owner's request)."""
+    saved yet (still projected for a checked range, retained material or the owner's request)."""
 
     state: str  # ready | failed (old records only) | none
     relation: str

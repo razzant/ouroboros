@@ -51,6 +51,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shlex
 import socket
 import struct
@@ -87,7 +88,10 @@ from tests.system_e2e.test_system_scenarios_w2 import (
 )
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-VENV_PYTHON = "/ouroboros/body/venv/bin/python"
+# The image names its runtime venv for the pinned Python minor (Dockerfile ENTRYPOINT).
+VENV = "/ouroboros/body/venv-" + ".".join(re.search(r'^PY_VERSION="([0-9.]+)"$', (REPO / "scripts" / "download_python_standalone.sh")
+                                                 .read_text(encoding="utf-8"), re.MULTILINE)[1].split(".")[:2])
+VENV_PYTHON = f"{VENV}/bin/python"
 BODY_REPO = "/ouroboros/body/repo"
 MANAGED_DATA = "/ouroboros/data"
 RUN_ID = uuid.uuid4().hex[:8]
@@ -343,7 +347,7 @@ def _server_facts(name: str) -> list:
 
 def _body_facts(name: str) -> dict:
     servers = _server_facts(name)
-    marker = json.loads(_exec(name, "cat", "/ouroboros/body/venv/ouroboros-runtime-venv.json"))
+    marker = json.loads(_exec(name, "cat", f"{VENV}/ouroboros-runtime-venv.json"))
     return {"head": _exec(name, "git", "-C", BODY_REPO, "rev-parse", "HEAD"),
             "server_interpreters": sorted({server["argv"][0] for server in servers}),
             "serving_heads": sorted({server["head"] for server in servers}),

@@ -740,7 +740,8 @@ def _work(monkeypatch) -> dict:
         return stream(*args, **kwargs)
 
     def counted_walk(*args, **kwargs):
-        counts["walks"] += 1
+        if sys._getframe(1).f_globals.get("__name__") != "shutil":  # 3.12+ rmtree walks on Windows
+            counts["walks"] += 1
         return walk(*args, **kwargs)
 
     def counted_read(self, node):

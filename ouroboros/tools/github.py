@@ -6,9 +6,10 @@ module owns the transport, the repository binding and the registration.
 ``_gh_run`` is the structured transport read; ``_gh_cmd`` projects it onto the string ABI.
 ``GH_TARGET_INVALID`` / ``GH_TARGET_REQUIRED`` refusals enter the tool-result sidecar. A target
 (including an unbindable directory) or missing-CLI refusal raised before the invocation's first
-``gh`` launch is published ``completed_no_effect``. The checks reader's literal ``gh api``
-annotation path is the one subcall that does not take the explicit repo, alongside workflow
-literal API paths.
+``gh`` launch is published ``completed_no_effect``. A ``github_read`` call naming a valid repo needs
+no checkout: every leg, including the subcalls that take no repo (PR counts, annotations, artifacts,
+whoami), runs in the task's own ``task_drive``, save a route whose ``{branch}`` gh fills from the
+selected folder.
 ``gh api`` takes a repository from the directory but its host from gh's default, so a ``repo=""``
 REST or GraphQL leg never leaves the host to gh: ``_selected_target`` resolves one (host, owner, name)
 per public invocation, and an unresolved target refuses instead of reaching the default host.
@@ -44,6 +45,8 @@ _GENERIC_TRANSPORT = object()
 _SUBMITTED: ContextVar[Optional[List[bool]]] = ContextVar("github_invocation_submitted", default=None)
 # The repository one public tool invocation resolved; empty until a leg needs it.
 _PINNED: ContextVar[Optional[List["GhTarget"]]] = ContextVar("github_invocation_target", default=None)
+# One public github_read invocation whose caller named a valid [HOST/]OWNER/REPO: it reads GitHub, not a checkout.
+_REMOTE_READ: ContextVar[bool] = ContextVar("github_invocation_remote_read", default=False)
 
 
 def _canonical_github_args(args: dict) -> dict:
@@ -54,14 +57,17 @@ def _canonical_github_args(args: dict) -> dict:
     return args
 
 
-def _one_invocation(handler):
-    """Scope ``_gh_run``'s first-submission fact and the resolved repository to one public tool invocation."""
+def _one_invocation(handler, *, remote_read: bool = False):
+    """Scope ``_gh_run``'s first-submission fact, the resolved repository and, for ``remote_read`` (``github_read``),
+    whether the caller named a valid ``[HOST/]OWNER/REPO`` to one public tool invocation."""
     @wraps(handler)
     def invoke(ctx, *args, **kwargs):
-        token, pinned = _SUBMITTED.set([False]), _PINNED.set([])
+        remote = remote_read and isinstance(kwargs.get("repo"), str) and _split_repo(kwargs["repo"]) is not None
+        token, pinned, remote_token = _SUBMITTED.set([False]), _PINNED.set([]), _REMOTE_READ.set(remote)
         try:
             return handler(ctx, *args, **kwargs)
         finally:
+            _REMOTE_READ.reset(remote_token)
             _PINNED.reset(pinned)
             _SUBMITTED.reset(token)
     return invoke
@@ -321,11 +327,9 @@ def _refused(ctx: ToolContext, text: str, failure: str, typed: Optional[ToolResu
 def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Optional[str] = None,
             *, repo: object = _GENERIC_TRANSPORT, capture_to: Optional[pathlib.Path] = None,
             max_bytes: int = 0) -> GhResult:
-    # Only omitted internal API/Hub calls keep the generic transport contract.
-    # Public repository tools always pass repo, including '' for Project focus.
-    # The target refusals below publish a typed argument error into the calling
-    # tool's sidecar; the publication transport omits `repo`, so it can never
-    # reach them and its own final result is never shadowed from here.
+    # Public repository tools pass repo, including '' for Project focus. Their generic follow-up legs
+    # inherit the invocation's read context. Publication/Hub calls omit repo outside that invocation,
+    # so target refusals here cannot shadow their final result with this tool's argument-error sidecar.
     # A refusal before this invocation's FIRST gh launch also attests that the
     # invocation had no effect; after any launch it attests nothing.
     submitted = _SUBMITTED.get()
@@ -343,11 +347,22 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
         return _refused(ctx, f"⚠️ GH_TARGET_UNAVAILABLE: this call resolved {pinned[0].slug} on {pinned[0].host}, but a "
                              f"later step named {named}; that step was not sent.", "target")
     try:
+        from ouroboros.tool_access import build_resolved_resource_binding, folderless_scratch_dir
+
         cwd, env = pathlib.Path(ctx.repo_dir), _gh_env(ctx)
         cmd = ["gh", *args]
+        unbound = "⚠️ GH_TARGET_UNAVAILABLE: no directory could be bound for gh: {}"
+        # A github_read call that named its repository reads GitHub, not a checkout (#3613): each leg, the ones that
+        # take no repo included, runs in the task's own task_drive, save a route whose {branch} gh fills from the
+        # selected folder. The choice never depends on which folder exists: a fallback could read another repository.
+        remote = _REMOTE_READ.get() and repo != ""
+        branch = remote and args[:1] == ["api"] and any(_BRANCH_SLOT.search(arg) for arg in args[1:])
+        if remote and not branch:
+            try:
+                cwd = build_resolved_resource_binding(ctx, operation="read", process_cwd="task_drive").target_path
+            except ValueError as exc:
+                return _refused(ctx, unbound.format(exc), "target")
         if repo is not _GENERIC_TRANSPORT:
-            from ouroboros.tool_access import build_resolved_resource_binding
-
             metadata = getattr(ctx, "task_metadata", {})
             metadata = metadata if isinstance(metadata, dict) else {}
             workspace = getattr(ctx, "workspace_root", None)
@@ -367,14 +382,20 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
                     ))
             # gh's directory is READ: each operation's own admission (registry, Observe, Presence, network,
             # credentials, disabled methods) already decided this call, and read-only children hold github_read.
-            try:
-                binding = build_resolved_resource_binding(ctx, operation="read", process_cwd="")
-            except ValueError as exc:  # Never another directory, e.g. the system repository.
-                return _refused(ctx, f"⚠️ GH_TARGET_UNAVAILABLE: no directory could be bound for gh: {exc}", "target")
-            cwd = binding.target_path
-            if workspace and cwd != pathlib.Path(workspace).resolve(strict=False):
-                return _refused(ctx, "⚠️ GH_TARGET_UNAVAILABLE: the task's Project binding could not be resolved.",
-                                "target")
+            if not remote or branch:
+                try:
+                    binding = build_resolved_resource_binding(ctx, operation="read", process_cwd="")
+                except ValueError as exc:  # Never another directory, e.g. the system repository.
+                    return _refused(ctx, unbound.format(exc), "target")
+                cwd = binding.target_path
+                if workspace and cwd != pathlib.Path(workspace).resolve(strict=False):
+                    return _refused(ctx, "⚠️ GH_TARGET_UNAVAILABLE: the task's Project binding could not be resolved.",
+                                    "target")
+                # The resolver's default selection decides: kept body work (resource_intent system_repo) selects the
+                # body checkout; work with no folder selects only its own scratch, where gh finds no branch.
+                if branch and not (cwd.is_dir() and folderless_scratch_dir(ctx) is None):
+                    return _refused(ctx, "⚠️ GH_TARGET_UNAVAILABLE: gh fills this route's {branch} from the selected "
+                                         "folder, which is unavailable; name the branch in the route.", "target")
             if workspace or room_dir or project:
                 env.pop("GH_REPO", None)  # Ambient defaults cannot replace the selected Project.
             if repo and args[:1] != ["api"]:  # API routes carry the repository.
@@ -433,6 +454,8 @@ _REPO_RE = re.compile(r"^(?:(?P<host>[^/\s]+)/)?(?P<owner>[^/\s]+)/(?P<name>[^/\
 _TARGET_URL_RE = re.compile(r"https://([^/\s]+)/([^/\s]+)/([^/\s]+)/?")
 # gh's own placeholders for a repository; `{branch}` stays with gh, which reads it from the directory.
 _ROUTE_SLOTS = re.compile(r"\{owner\}|\{repo\}|:owner\b|:repo\b")
+# The branch forms of gh's endpoint pattern `(\:(owner|repo|branch)\b|\{[a-z]+\})` (its RE2 \b is ASCII; gh 2.86).
+_BRANCH_SLOT = re.compile(r"\{branch\}|:branch\b", re.ASCII)
 _GRAPHQL_LITERALS = re.compile(r'"""(?:\\.|(?!""")[\s\S])*"""|"(?:\\.|[^"\\])*"|#[^\r\n]*')
 
 
@@ -803,7 +826,8 @@ def get_tools() -> List[ToolEntry]:
         }, _pr_merge),
     ]
     # Wrapped here, not at definition: nested handler calls share one invocation.
-    tools = [replace(entry, handler=_one_invocation(entry.handler)) for entry in tools]
+    tools = [replace(entry, handler=_one_invocation(entry.handler, remote_read=entry.name == "github_read"))
+             for entry in tools]
     for entry in tools:
         entry.schema["parameters"]["properties"]["repo"] = {
             "type": "string", "default": "",

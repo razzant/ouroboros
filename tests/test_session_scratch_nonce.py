@@ -570,3 +570,14 @@ def test_new_managed_nonce_is_confined_readable_with_restrictive_umask_and_no_pr
     assert stat.S_IMODE(container.stat().st_mode) == stat.S_IMODE(container.parent.stat().st_mode) == 0o755
     assert scratch.recorded_scratch(record) == container and checks == [0o644, 0o644]
     assert workspace == container / "w" and list(workspace.iterdir()) == []
+
+
+def test_a_legacy_identity_survives_only_the_windows_serial_widening():
+    """CPython 3.12+ on Windows reports the volume's 64-bit serial where 3.10 reported its low 32 bits: a schema-1
+    record a 3.10 app made matches there exactly what it matched under 3.10."""
+    seen = SimpleNamespace(st_dev=(0xABCD << 32) | 0x12345678, st_ino=77)
+    assert scratch._legacy_identity_matches(seen, [0x12345678, 77], windows=True)
+    assert scratch._legacy_identity_matches(seen, [seen.st_dev, 77], windows=True)
+    assert not scratch._legacy_identity_matches(seen, [0x12345679, 77], windows=True)
+    assert not scratch._legacy_identity_matches(seen, [0x12345678, 78], windows=True)
+    assert not scratch._legacy_identity_matches(seen, [0x12345678, 77], windows=False)

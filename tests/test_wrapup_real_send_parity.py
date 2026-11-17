@@ -226,6 +226,76 @@ def test_every_wire_option_of_the_send_reaches_the_priced_copy():
     assert set(options) == {"stream", "cache_affinity", "allow_server_web_search", "bypass_response_cache"}
 
 
+@pytest.mark.parametrize("api_surface", ["responses", "chat_completions"])
+@pytest.mark.parametrize("learned", [False, True])
+def test_wrapup_parity_after_learned_responses_effort_repair(monkeypatch, tmp_path, api_surface, learned):
+    import ouroboros.llm_fallback as fallback
+    import ouroboros.request_wire_contract as wire
+    from ouroboros.loop_llm_call import MAIN_LOOP_MAX_TOKENS
+    from ouroboros.request_wire_recovery import (
+        finalize_wire_response, note_wire_send_succeeded, plan_wire_retry_from_exception,
+        prepare_wire_payload_for_send, request_wire_call_scope,
+    )
+    from tests.test_request_wire_recovery_phase2b import _Rejected, _capture
+
+    monkeypatch.setenv("OPENAI_API_KEY", "unused")
+    monkeypatch.setenv("OPENAI_API_SURFACE", "responses")
+    monkeypatch.setattr(wire, "canonical_wire_evidence_root", lambda: tmp_path)
+    client, model = LLMClient(api_key="unused"), "openai::gpt-test"
+    if learned:
+        target = client._resolve_remote_target(model)
+        source = client._build_remote_candidate(
+            target, _MESSAGES, "high", MAIN_LOOP_MAX_TOKENS, "auto", None, _TOOLS,
+            skip_capability_fetch=True, **main_loop_wire_options(model, allow_server_web_search=False))
+        # Teach the real durable store using a synthetic refusal and settled success.
+        with request_wire_call_scope():
+            prepare_wire_payload_for_send(target, source, api_surface="responses")
+            repaired = plan_wire_retry_from_exception(_Rejected(
+                "Unsupported value: 'reasoning.effort' does not support 'high' with this model. "
+                "Supported values are: 'low' and 'medium'."))
+            assert repaired["reasoning"] == {"effort": "medium"}
+            note_wire_send_succeeded(_capture(repaired, target))
+            finalize_wire_response({"role": "assistant", "content": "ok"}, {})
+        assert (tmp_path / "state" / wire.REQUEST_WIRE_STATE_FILE).is_file()
+
+    # A Responses repair must not leak onto the same model's Chat surface.
+    monkeypatch.setenv("OPENAI_API_SURFACE", api_surface)
+    finalized, captured = [], {}
+    real_finalize = llm_module._finalized_physical_candidate
+
+    def finalize(*args, **kwargs):
+        payload = real_finalize(*args, **kwargs)
+        finalized.append(copy.deepcopy(payload))
+        return payload
+
+    monkeypatch.setattr(llm_module, "_finalized_physical_candidate", finalize)
+    monkeypatch.setattr(fallback, "_finalized_physical_candidate", finalize)
+
+    def execute(request, send, before_dispatch):
+        captured["request"] = request
+        raise _Captured()
+
+    _patch_execute_candidate(monkeypatch, llm_module, execute)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    with usage_accounting.usage_scope(usage_accounting.UsageScope(
+        drive_root=tmp_path, task_id="parity", root_task_id="parity",
+    )):
+        prospective = task_pacing.prospective_wrapup_attempt_request(
+            llm=client, messages=_MESSAGES, model=model, reasoning_effort="high", tools=_TOOLS)
+        try:
+            call_llm_with_retry(client, _MESSAGES, model, _TOOLS, "high", 1, logs, "parity", 1,
+                                queue.Queue(), {}, initial_messages=_MESSAGES)
+        except _Captured:
+            pass
+    assert "request" in captured, "the real send never reached the physical executor"
+    assert len(finalized) == 2, "one preview and one send, with no drift rebuild"
+    assert {key: getattr(captured["request"], key) for key in _IDENTITY} == {
+        key: getattr(prospective, key) for key in _IDENTITY}
+    assert finalized[0] == finalized[1], "full physical payload parity, not only its size"
+    assert wire.payload_effort(finalized[1]) == ("medium" if learned and api_surface == "responses" else "high")
+
+
 def _completion(text):
     body = {"id": "c1", "object": "chat.completion", "model": "gpt-test", "choices": [{
         "index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": text}}],

@@ -33,6 +33,10 @@ STABLE_PREFIX_BLOCKS_KEY = "_stable_prefix_blocks"
 # cut differently still agree on them; ``story_whole`` says this work's story was not cut at all
 # (``memory_view.story_is_whole``). Host-only, like the count.
 SHARED_HEAD_KEY = "_shared_head"
+# A reply's display projection, ``{"text", "reasoning"}``, where its history bytes hold both
+# (``llm_local.stamp_display``, the one reader of a local server's reasoning grammar). Progress and salvage read it;
+# no send carries it.
+DISPLAY_KEY = "_display"
 
 # One send-copy policy. These are host custody/presentation fields, never model
 # content. Strings (including JSON tool results/arguments) remain byte-identical.
@@ -42,6 +46,7 @@ HOST_ONLY_MESSAGE_KEYS = frozenset({
     "cache_control", "_context_capsule", "_evicted_image", "_caption", "_source_path", "_source_sha256",
     "_review_image_id", "_original_image_url", "acceptance_observation", "_acceptance_observation", "review_feedback",
     "_capture_source", "_canonical", "_requested_look", "_tool_answer", "_call_frame_source", "_call_frame_digest",
+    DISPLAY_KEY,
 })
 DELIVERY_MESSAGE_KEYS = frozenset({"_call_frame_source", "_call_frame_digest"})
 
@@ -307,7 +312,7 @@ class _MessageShapingMixin:
         cleaned = scrub_native_custody(messages)
         sealed = allow_message_cache_control and any(isinstance(m.get("cache_control"), dict) for m in cleaned)
         for msg in cleaned:
-            for key in ("acceptance_observation", "_acceptance_observation", "review_feedback",
+            for key in ("acceptance_observation", "_acceptance_observation", "review_feedback", DISPLAY_KEY,
                         STABLE_PREFIX_BLOCKS_KEY, TOOL_RESULT_RECORD_KEY, REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY,
                         "_review_image_id"):
                 msg.pop(key, None)

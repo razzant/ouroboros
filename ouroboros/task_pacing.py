@@ -751,6 +751,7 @@ def prospective_wrapup_attempt_request(
     sample, so its price is advice: the send seals a fresh line and is admitted
     again at its own price (``loop_forced_finalization._forced_admission_predicate``)."""
     from ouroboros.llm import _attempt_request, _finalized_physical_candidate
+    from ouroboros.llm_fallback import _wire_surface
     from ouroboros.loop_llm_call import MAIN_LOOP_MAX_TOKENS
     from ouroboros.request_wire_recovery import request_wire_call_scope
     from ouroboros.pricing import infer_provider_from_model
@@ -801,7 +802,7 @@ def prospective_wrapup_attempt_request(
         anthropic = target.get("provider") == "anthropic"
         candidate = _finalized_physical_candidate(
             target, stamp_clock_note(candidate, blocks=anthropic),
-            "messages" if anthropic else "chat.completions",
+            _wire_surface(target),
         )
         llm._pop_thread_disclosure("_cache_breakpoint_tls")
     return _merge_scope(_attempt_request(target, candidate))[0]

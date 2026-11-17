@@ -45,6 +45,7 @@ from typing import Any, Dict, List, Optional
 from ouroboros.config import get_finalization_grace_sec
 from ouroboros.deadline_utils import caller_deadline_arguments, owner_deadline_exhausted, review_transport_timeout
 from ouroboros.event_usage import event_token_counts
+from ouroboros._usage_response import usage_reply_unfinished, usage_reply_usability
 from ouroboros.review_dispatch import bind_api_review_paid_stamp, invoke_late_review_paid_stamp
 from ouroboros.review_verdict_extraction import canonicalize_session_verdict
 from ouroboros.review_native_images import NativeReviewImages, staged_image_registry
@@ -859,7 +860,10 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                     if usage.get(_fact):
                         total_usage[_fact] = usage[_fact]
                 content = str(msg.get("content") or "") if isinstance(msg, dict) else ""
-                if content:
+                usability = usage_reply_usability(usage, msg)  # the reply's terminal facts, never its words
+                # A cut the provider left unfinished joins the unusable: no draft, no verdict, however it parses.
+                usability = "unfinished" if usability == "usable" and usage_reply_unfinished(usage) else usability
+                if content and usability == "usable":  # commentary is progress, an unusable reply no result: no draft
                     last_content = content
                 # The envelope joins the record BEFORE any terminal branch, so
                 # the terminal-round fact describes the decision-ending output
@@ -870,6 +874,11 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 assistant.setdefault("role", "assistant")
                 messages.append(assistant)
                 self._round_messages = [copy.deepcopy(assistant)]
+                if usability in {"unusable", "unfinished"}:  # a provider-stated non-result: no verdict, no call, no draft
+                    end_reason = f"{usability}_answer"
+                    break
+                if not tool_calls and usability == "intermediate":
+                    continue  # healthy commentary: this episode continues within its own deadline and budget
                 if not tool_calls:
                     # The reviewer's answer — or an empty round, which is the
                     # episode's honest end: the empty answer rides the ordinary
@@ -955,6 +964,11 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 "host_file_read_attestation": "host_observed",
                 "delivery": "native_tool_rounds",
             })
+        if final_answer is None and end_reason in {"unusable_answer", "unfinished_answer"}:
+            raise ReviewRouteUnavailable(
+                f"native review episode round {self._rounds_used} ended as a provider-stated "
+                f"{'unfinished reply' if end_reason == 'unfinished_answer' else 'non-result'} (reply_usability); "
+                "the episode fails closed with no verdict", code=f"native_round_{end_reason.split('_')[0]}")
         if final_answer is None:
             raise ReviewRouteUnavailable(
                 f"native review episode round {self._rounds_used} carried neither "

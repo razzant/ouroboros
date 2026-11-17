@@ -48,7 +48,9 @@ from ouroboros.gateway.owner_settings import (
 )
 from ouroboros.onboarding_wizard import render_onboarding_html
 from ouroboros.platform_layer import is_container_env
-from ouroboros.provider_connections import connection_references, connections_meta, normalize_connections
+from ouroboros.provider_connections import (
+    connection_references, connections_meta, normalize_connections, seed_new_api_surfaces,
+)
 from ouroboros.provider_models import CONNECTIONS_KEY, normalize_builtin_choices
 from ouroboros.gateway.secret_rows import (
     ConnectionSecretIdentityAmbiguous, MCPSecretIdentityAmbiguous, mask_connections, rehydrate_connections,
@@ -1245,9 +1247,9 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
         runtime_changed = runtime_authored and requested_runtime_mode != pending_runtime_mode
         if runtime_authored:
             pending_runtime_mode = requested_runtime_mode
-        choice_error = normalize_builtin_choices(current)
-        if choice_error:
+        if choice_error := normalize_builtin_choices(current):
             return unsaved_error(choice_error, 400)
+        seed_new_api_surfaces(current, old_effective_settings)  # a key new to this install starts on Responses
         # Generic settings saves operate on the current boot baseline. A pending
         # next-boot mode written by /api/owner/runtime-mode is preserved on disk
         # below, but never hot-applied to this process/env.

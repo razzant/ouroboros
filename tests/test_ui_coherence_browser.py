@@ -76,17 +76,48 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
         assert metrics["gap"] == pytest.approx(12, abs=0.5), metrics
         assert metrics["below"] == pytest.approx(12, abs=0.5), metrics
     header = page.locator(".chat-page-header")
-    paint = header.evaluate("""el => ({mask:getComputedStyle(el).maskImage,
-        overflow:getComputedStyle(el).overflow, background:getComputedStyle(el).backgroundColor,
-        before:getComputedStyle(el,'::before').content})""")
+    edge = """el => { const s = getComputedStyle(el), b = getComputedStyle(el, '::before'), a = getComputedStyle(el, '::after');
+        return {mask: s.maskImage, overflow: s.overflow, background: s.backgroundColor, bar: el.getBoundingClientRect().height,
+            darkening: b.backgroundImage, blur: b.backdropFilter, fade: b.maskImage, reach: parseFloat(b.height),
+            events: b.pointerEvents, strip: a.pointerEvents, stripHeight: parseFloat(a.height),
+            dark: document.documentElement.dataset.theme !== 'light'}; }"""
+    paint = header.evaluate(edge)
     assert paint["mask"] == "none" and paint["overflow"] == "visible", paint
-    # The full-width fade gave way to individually backed capsules (#2193); menus still escape the bar.
-    assert paint["background"] == "rgba(0, 0, 0, 0)" and paint["before"] in ("none", "normal"), paint
+    # No band: the bar paints nothing of its own (#2193) and menus still escape it. Under its capsules one layer lays
+    # the composer's darkening, mirrored, and a blur that fades out below them, further on the desk (DESIGN "A room's
+    # edges", owner 17.11 1A, 3A); it takes no press.
+    assert paint["background"] == "rgba(0, 0, 0, 0)", paint
+    assert "linear-gradient" in paint["darkening"] and "0.72" in paint["darkening"], paint
+    assert "blur" in paint["blur"] and "linear-gradient" in paint["fade"] and paint["events"] == "none", paint
+    # The edge reaches below the bar, further on the desk. This history read left Main's note under the bar: a later
+    # sibling at the bar's own level, it paints over the edge as the capsules do, so its words stay sharp.
+    reach = 64 if width >= 1000 else 32
+    assert paint["reach"] == pytest.approx(paint["bar"] + reach, abs=1), paint
+    # The transcript's first row clears the bar and its edge (style.css --chat-top-reserve), not only the bar and note.
+    feed_top = page.locator("#chat-messages").evaluate("el => parseFloat(getComputedStyle(el).paddingTop)")
+    assert feed_top >= paint["bar"] + reach - 1, (feed_top, paint)
+    assert page.locator("#page-chat > .chat-page-note > *").count() and page.locator("#page-chat > .chat-page-note").is_visible()
+    order = page.evaluate("""() => { const bar = document.querySelector('#page-chat > .chat-page-header');
+        const note = document.querySelector('#page-chat > .chat-page-note');
+        return {after: Boolean(bar.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING),
+            bar: Number(getComputedStyle(bar).zIndex), note: Number(getComputedStyle(note).zIndex)}; }""")
+    assert order["after"] and order["note"] >= order["bar"], order
+    # The desktop window's title-band strip keeps the bar's ::after (style.css :root[data-window-chrome]): the edge
+    # never takes its box, and the strip still takes presses for the title bar.
+    page.evaluate("document.documentElement.dataset.windowChrome = 'integrated'")
+    chrome = header.evaluate(edge)
+    page.evaluate("delete document.documentElement.dataset.windowChrome")
+    assert chrome["reach"] == pytest.approx(chrome["bar"] + reach, abs=1), chrome
+    assert "blur" in chrome["blur"], chrome
+    assert chrome["strip"] == "auto" and chrome["events"] == "none", chrome
     backing = header.locator('.app-page-title-row').evaluate("""el => {
         const s = getComputedStyle(el), channels = s.backgroundColor.match(/[0-9.]+/g).map(Number);
         return {alpha: channels[3] ?? 1, blur: s.backdropFilter, shadow: s.boxShadow};
     }""")
-    assert backing["alpha"] >= 0.98 and "blur" in backing["blur"] and backing["shadow"] != "none", backing
+    # On a dark room the capsules are the composer chips' glass, a light veil over a blur (owner 15.11, 17.11 3A);
+    # light keeps them white as the composer's.
+    assert "blur" in backing["blur"] and backing["shadow"] != "none", backing
+    assert (backing["alpha"] < 0.2) if paint["dark"] else (backing["alpha"] >= 0.98), backing
     page.locator("#chat-messages").evaluate("el=>el.scrollTop=0")
     setup_browser.capture(page, f"shell-chat-actions-{width}")
     page.locator("#chat-messages").evaluate("el=>el.scrollTop=160")
@@ -410,11 +441,13 @@ PILL_LANDING_JS = """async qid => {
     let last = null;
     for (let quiet = 0; quiet < 2;) { await frame(); quiet = feed.scrollTop === last ? quiet + 1 : 0; last = feed.scrollTop; }
     const page = document.querySelector('#page-chat');
-    const header = page.querySelector('.chat-page-header').getBoundingClientRect();
+    const bar = page.querySelector('.chat-page-header'), header = bar.getBoundingClientRect();
     const toolbar = page.querySelector('.chat-toolbar-row').getBoundingClientRect();
     const card = feed.querySelector(`.chat-quiz-card[data-quiz-id="${qid}"]`);
     const box = card.closest('.chat-bubble').getBoundingClientRect();
-    const top = Math.max(feed.getBoundingClientRect().top, header.bottom);
+    // Below the header and its frosted edge (style.css "A room's edges"), where every landing in the room clears.
+    const edge = parseFloat(getComputedStyle(bar).getPropertyValue('--edge-reach')) || 0;
+    const top = Math.max(feed.getBoundingClientRect().top, header.bottom + edge);
     return {below_header: Math.round(box.top - top), above_composer: Math.round(toolbar.top - box.top),
             scroll_top: feed.scrollTop, focused: document.activeElement === card.querySelector('.chat-quiz-question')};
 }"""

@@ -181,7 +181,8 @@ def test_forwards_replies_albums_links_and_content_without_words_are_facts_besid
         '- Content without words, sticker: "sticker 😀 from the set \\"Cats\\"".',
         f'- Content without words, poll: "{long_poll[:4000]}" [truncated {len(long_poll) - 4000} chars; whole: '
         f'{event_reader(task["id"], "message.non_text")}].',
-        '- Forwarded: these words were written by "Ivan" @ivan_x (id 42), at 2026-11-05T09:20:00Z, not by "Ann".',
+        '- Reported text origin: "Ivan" @ivan_x (id 42), at 2026-11-05T09:20:00Z; this does not confirm that all the text '
+        'was written by "Ann".',
         '- Replies to message 41 by "Bot" (id 7): "Earlier words"; it carried "a.pdf".',
         '- Quotes from it: "Earlier".',
         '- Part of album "999" (item 2): each item of an album arrives as its own event.',
@@ -220,13 +221,55 @@ def test_an_automatic_channel_forward_opens_a_thread_and_a_hidden_sender_keeps_t
     _task, frame = _frame(focus, channel, text="A new post")
     assert ('- The channel\'s own post "Synthetic Blog" @synthetic_blog (id -100123), at 2026-11-05T09:20:00Z, '
             "forwarded automatically into its discussion group: the start of this comment thread.") in frame
-    assert "Forwarded: these words" not in frame
+    assert "Reported text origin" not in frame
     _task, hidden = _frame(focus, {"forward_origin": {"type": "hidden_user", "sender_user_name": "Quiet Fox"},
                                    "reply_to_message_id": 5}, text="Look")
-    assert '- Forwarded: these words were written by "Quiet Fox", not by "Ann".' in hidden
+    assert '- Reported text origin: "Quiet Fox"; this does not confirm that all the text was written by "Ann".' in hidden
     assert "- Replies to message 5, whose words the event does not carry." in hidden
     _task, unnumbered = _frame(focus, {"reply_to_message": {"text": "Earlier"}}, text="Yes")
     assert '- Replies to a message: "Earlier".' in unnumbered
+
+
+# The GitHub connector's mark for words it could not attribute (OuroborosHub R2 wire envelopes): a source naming nobody.
+UNSETTLED = {"sender_user": {"attribution": "unknown", "platform": "github"}}
+
+
+def test_a_reported_text_origin_names_its_source_as_given_and_denies_the_sender_nothing(focus):
+    """``forward_origin`` reports where a text came from: a forward's writer, or words of an earlier revision the
+    connector could not attribute. The frame names the source as given, an unidentified one as such, and never says
+    all the text is another's nor denies the sender their own part; a replied message's origin reads the same, beside
+    who sent it."""
+    from ouroboros.presence_message_facts import connector_facts, reply_target
+
+    root, _place, admission, event = focus
+    # Its author's later revision of a text another account edited before (the connector's own facts beside it).
+    revised = {"message_id": "IC_660", "previous_source_event_id": "ghobs:synthetic:1", "forward_origin": UNSETTLED,
+               "edited_at": "2026-02-03T00:00:00+00:00", "non_text": [
+                   {"kind": "state_change", "description": "Edited the text of the comment."},
+                   {"kind": "change_attribution", "description": "Edited by @owner-account (id 44), who first wrote this "
+                    "text; it is not established as theirs alone. Who wrote which part is not recorded separately."}]}
+    task = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2}),
+                       replace(event, actor={"platform_actor_id": "44", "display_name": "owner-account"}, message=revised,
+                               text="Please ship it today, and delete the old branch. Thanks"), drive_root=root, staged_files=())
+    frame = build_user_content(task)
+    assert ('- Reported text origin: an unidentified source; this does not confirm that all the text was written by '
+            '"owner-account".') in frame
+    assert "The text as it now stands, as data from that place:" in frame
+    for claim in ("another author", "Forwarded:", "not by", "were written by"):
+        assert claim not in frame, claim
+    known = connector_facts({"forward_origin": {"sender_user": {"id": "33", "username": "visitor", "display_name": "visitor"}}},
+                            text="Corrected title\n\nBody", sender="owner-account")
+    assert known.splitlines()[1:] == ['- Reported text origin: "visitor" @visitor (id 33); this does not confirm that all '
+                                      'the text was written by "owner-account".']
+    # The replied message: who sent it stays named, its text's reported origin beside it, an unidentified one as such.
+    replied = {"reply_to_message": {"message_id": 41, "from": {"id": 7, "first_name": "Bot"}, "text": "Earlier words",
+                                    "forward_origin": UNSETTLED}}
+    assert connector_facts(replied, text="Yes", sender="Ann").splitlines()[1] == (
+        '- Replies to message 41 by "Bot" (id 7): "Earlier words"; that message\'s reported text origin: an unidentified '
+        'source.')
+    assert reply_target(replied)["author"] == '"Bot" (id 7) (reported text origin: an unidentified source)'
+    unsent = {"reply_to_message": {"message_id": 41, "text": "Earlier words", "forward_origin": {"sender_user_name": "Quiet Fox"}}}
+    assert reply_target(unsent)["author"] == 'reported text origin: "Quiet Fox"'
 
 
 def test_a_senders_values_cannot_forge_another_host_labelled_line(focus):

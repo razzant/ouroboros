@@ -454,11 +454,13 @@ def test_a_direct_result_never_written_before_a_fresh_fit_owes_its_one_pointer()
             first.emit('ready', **READY)
             first.emit('tool_call', call_id='look', name='attend', arguments='{"look":true}')
             await asyncio.wait_for(world.entered.wait(), 2)
+            world.opening = asyncio.Event()  # the resume waits for this scenario however fast the loop reconnects
             first.emit('resumable', handle='covering')
             first.emit('closed', resumable=True, transport_loss=True, reason='transport_lost')
             await until(lambda: not call.connected.is_set() and call.resume)
             world.stale_resume = True  # a native resume is promised, and refused only once the output's send waits
             world.release.set()
+            world.opening.set()
             await until(lambda: len(host.sessions) == 2)
             second = host.sessions[1]
             second.emit('ready', **READY)
@@ -472,6 +474,8 @@ def test_a_direct_result_never_written_before_a_fresh_fit_owes_its_one_pointer()
             assert pointers(second) == 1
         finally:
             world.release.set()
+            if world.opening is not None:
+                world.opening.set()
             host.hub.ended_by_owner = True
             if not task.done():
                 await asyncio.wait_for(task, 2)

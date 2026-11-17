@@ -233,7 +233,9 @@ def test_complete_env_effort_triple_uses_the_saved_format(monkeypatch, independe
 
 
 @pytest.mark.parametrize("exists", [True, False])
-def test_forwarded_nano_is_main_and_new_projects_choice_and_survives_restore(monkeypatch, exists):
+def test_forwarded_nano_is_mains_choice_new_rooms_start_in_max_and_it_survives_restore(monkeypatch, exists):
+    """Main's forwarded Nano is the owner's choice and survives restore; a new room starts in Max all the same
+    (owner 15.11.2026, 3A), whether Main or another room's work creates it."""
     from ouroboros.composer_cognition import read_cognition
 
     if exists:
@@ -244,12 +246,13 @@ def test_forwarded_nano_is_main_and_new_projects_choice_and_survives_restore(mon
             assert config.get_context_mode() == config.get_owner_context_mode() == "nano"
             saved = captured_cognition()
     create_project(config.DATA_DIR, "from-nano")
-    assert read_cognition(config.DATA_DIR, "from-nano")["context_mode"] == "nano"
+    assert read_cognition(config.DATA_DIR, "from-nano")["context_mode"] == "max"
     with task_settings_scope(snapshot({"id": "project", "project_id": "from-nano"})):
-        # A project creating another room still copies Main, not its own overlay.
+        # A project creating another room never passes on its own overlay either.
         set_room("from-nano", choice("low", "none", "low", "medium"))
         create_project(config.DATA_DIR, "second")
-    assert read_cognition(config.DATA_DIR, "second")["context_mode"] == "nano"
+    second = read_cognition(config.DATA_DIR, "second")
+    assert second["context_mode"] == "max" and second["effort_range"] == read_cognition(config.DATA_DIR)["effort_range"]
     save_owner({"OUROBOROS_CONTEXT_MODE": "max", "OUROBOROS_CONTEXT_MODE_AUTO_LOW": "false"})
     with task_settings_scope(snapshot({"id": "resumed"})):
         assert config.get_context_mode() == "max"

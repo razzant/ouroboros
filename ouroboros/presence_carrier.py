@@ -159,6 +159,9 @@ def presence_seed_task(*, admission: PresenceAdmission, event: PresenceTurnEvent
             "identity": dict(event.identity) if isinstance(event.identity, Mapping) else None,
             "staged_files": [str(path) for path in staged_files],
             "vouched_facts": list(event.facts or ()),  # the Host admitted these facts (its declared signals too)
+            # The words the Host read for its connector's kinds, whole and by value: attention also matches kinds the
+            # event never names (``from_bot`` from its author, ``any_message``), and the focus names those it matched.
+            "fact_labels": dict(admission.fact_labels or {}),
             "delivery_reporting_version": int(event.delivery_reporting_version or 0),
             "continuation_version": int(event.continuation_version or 0),
             "allowance": dict(admission.allowance) if isinstance(admission.allowance, Mapping) else None,
@@ -257,6 +260,8 @@ def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_r
                                         **presence_event_origin(facts.get("event")))
         if facts.get("allowance") is not None:
             admission = replace(admission, allowance=dict(facts["allowance"]))
+        if facts.get("fact_labels"):  # the words the Host read for its facts; this process has no registry to ask
+            admission = replace(admission, fact_labels=dict(facts["fact_labels"]))
         event = presence_turn_event(facts.get("event"), admission,
                                     reporting_version=int(facts.get("delivery_reporting_version") or 0),
                                     continuing=int(facts.get("continuation_version") or 0),

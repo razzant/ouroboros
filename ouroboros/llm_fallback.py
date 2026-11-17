@@ -40,6 +40,8 @@ from ouroboros.llm_attempt import (
 from ouroboros.deadline_utils import physical_dispatch_timeout
 from ouroboros.pricing_catalog import pin_tariff
 from ouroboros.llm_stream import consume_stream, consume_stream_async
+from ouroboros.openai_responses import responses_route
+from ouroboros.provider_models import OPENAI_API_SURFACES
 from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.reasoning_artifacts import (
     note_replay_omission,
@@ -58,6 +60,13 @@ from ouroboros.usage_accounting import UsageAccountingError, last_physical_attem
 
 # The moved warnings keep the logger identity they were emitted under.
 log = logging.getLogger("ouroboros.llm")
+
+
+def _wire_surface(target: Dict[str, Any]) -> str:
+    """The wire profile's API name for this target: Messages, a connection's Responses, else Chat Completions."""
+    if target.get("provider") == "anthropic":
+        return "messages"
+    return OPENAI_API_SURFACES["responses"] if responses_route(target) else OPENAI_API_SURFACES["chat_completions"]
 
 
 def _response_body_error(client: Any, response: Any) -> Optional[Dict[str, Any]]:
@@ -441,10 +450,7 @@ class _RecoveryLadderMixin:
 
         def _send(candidate: Dict[str, Any]) -> Any:
             nonlocal prior_capture
-            candidate = _finalized_physical_candidate(
-                target, candidate, "messages" if target.get("provider") == "anthropic" else "chat.completions",
-                fresh_clock=True,
-            )
+            candidate = _finalized_physical_candidate(target, candidate, _wire_surface(target), fresh_clock=True)
             request = _with_tariff(_attempt_request(target, candidate), target, candidate)
 
             def dispatch():
@@ -456,7 +462,8 @@ class _RecoveryLadderMixin:
                     if refusal is error:
                         raise
                     raise refusal from error
-                return consume_stream(response, expected_choices=candidate.get("n", 1)) if candidate.get("stream") else response
+                return consume_stream(response, expected_choices=candidate.get("n", 1),
+                                      responses=responses_route(target)) if candidate.get("stream") else response
 
             try:
                 result = _execute_candidate(
@@ -622,7 +629,7 @@ class _RecoveryLadderMixin:
 
         async def _send(candidate: Dict[str, Any]) -> Any:
             nonlocal prior_capture
-            candidate = _finalized_physical_candidate(target, candidate, "chat.completions", fresh_clock=True)
+            candidate = _finalized_physical_candidate(target, candidate, _wire_surface(target), fresh_clock=True)
             request = _attempt_request(target, candidate)
             if target.get("provider") == "deepseek":  # its key's balance read stays off the event loop
                 request = await asyncio.to_thread(_with_tariff, request, target, candidate)
@@ -636,7 +643,8 @@ class _RecoveryLadderMixin:
                     if refusal is error:
                         raise
                     raise refusal from error
-                return await consume_stream_async(response, expected_choices=candidate.get("n", 1)) if candidate.get("stream") else response
+                return await consume_stream_async(response, expected_choices=candidate.get("n", 1),
+                                                  responses=responses_route(target)) if candidate.get("stream") else response
 
             try:
                 result = await _execute_candidate_async(

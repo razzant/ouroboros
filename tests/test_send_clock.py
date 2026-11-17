@@ -800,3 +800,17 @@ def test_clock_refresh_preserves_composed_tool_dialect_and_effort_recovery(
     assert usage["request_wire"]["applied_effort"] == ("medium" if dialect_first else "high")
     assert usage["request_wire"]["candidate_sha256"] == _digest(sent[-1])
     assert [_sealed(row) for row in _ledger(tmp_path) if row.get("candidate_manifest_ref")] == [_digest(p) for p in sent]
+
+
+def test_a_responses_body_carries_the_same_line_as_its_last_input_message(ticking):
+    """A connection on Responses keeps its conversation in ``input``: the line is a user message there, replaced
+    rather than stacked, and the clock-free identity is the body without it."""
+    payload = {"model": "m", "input": [{"role": "user", "content": "x"}], "max_output_tokens": 5}
+    with sc.MainSendClock(MOSCOW).bound() as clock:
+        stamped = sc.stamp_clock_note(payload)
+        again = sc.stamp_clock_note(stamped)
+        request = _attempt_request({"provider": "openai", "usage_model": "m"}, again)
+    assert "messages" not in stamped and stamped["input"][-1] == {"role": "user", "content": clock.notes[0]}
+    assert len(_clock_rows(again["input"])) == 1 and again["input"][-1]["content"] == clock.notes[1]
+    assert request.candidate_clock_free_sha256 == _digest(payload)
+    assert request.max_completion_tokens == 5  # the Responses output cap is the attempt's sent cap

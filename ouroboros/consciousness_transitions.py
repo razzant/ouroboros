@@ -187,7 +187,7 @@ def export_for_older_body(drive_root: Any) -> Dict[str, Any]:
         return {"status": "nothing_to_export"}
     chain = read_chain(root, accepted["transition_chain"])
     kept = {key: value for key, value in accepted.items() if key != "transition_chain"}
-    boundary = {key: kept[key] for key in (*CHAT_BOUNDARY_KEYS, "memory") if key in kept}
+    boundary = {key: kept[key] for key in (*CHAT_BOUNDARY_KEYS, "memory", "knowledge") if key in kept}
     header = {"kind": "wake_observation", "captured_at": kept.get("captured_at"), "window": {}, "gaps": [],
               "composition": {}, "trigger": "", "boundary": {**boundary, "transitions": chain.state}}
     data = (json.dumps(header, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")

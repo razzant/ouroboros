@@ -28,6 +28,7 @@ import { boundActivityPreview, projectIdFromTask, refitCollapsedActivity, render
 import { DURABLE_RECEIPTS, receiptNotice } from './project_handoff.js';
 import { nameProjectReference, projectReference } from './project_reference.js';
 import { admittedSuccessor } from './task_episodes.js';
+import { noteOrigin } from './task_origin.js';
 import { continueControlSuccessor } from './task_continue.js';
 import { closingLine } from './settled_card.js';
 
@@ -169,7 +170,9 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         const startedSec = Number(row.started_at);
         if (Number.isFinite(startedSec) && startedSec > 0) record.startedAt = startedSec * 1000;
         card.restore(record, row.project_admission_hold);
-        let changed = Boolean(syncParkedPhase(record, row.phase, row));
+        // Its census row also says which place called the work (task_origin.js): a portal has no frame to say it.
+        let changed = noteOrigin(record, row);
+        changed = Boolean(syncParkedPhase(record, row.phase, row)) || changed;
         const now = portalPresent(row);
         if (now.line) {
             record.collapsedActivity = boundActivityPreview(now.line);

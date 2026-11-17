@@ -506,7 +506,9 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         requested = request_tool_schema_selection(tool_ctx, registry, names,
                                                   context_mode=mode, current_schemas=current_tools)
         selected_names = requested.selection.chosen if mode == "nano" else None
-    schemas = (list(select_tool_schemas(registry.schemas(), context_mode=mode, schema_names=selected_names).schemas)
+    from ouroboros.tool_policy import nano_standing
+    schemas = (list(select_tool_schemas(registry.schemas(), context_mode=mode, schema_names=selected_names,
+                                        standing=nano_standing(tool_ctx)).schemas)
                if selected_names is not None else list(current_tools))
     fit_candidate = ctx.fit_candidate
     if fit_candidate is None:
@@ -747,6 +749,7 @@ class _RoundLimitContext:
     # provider prefix as the working round instead of rebuilding it tool-less.
     # LAST field: existing positional construction (tests included) stays valid.
     tool_schemas: Optional[List[Dict[str, Any]]] = None
+    emit_progress: Optional[Callable[..., None]] = None  # the room's progress: a forced answer shows what it displaced
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:

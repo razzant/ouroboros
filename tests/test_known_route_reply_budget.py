@@ -273,6 +273,38 @@ def test_helper_reads_the_canonical_capability_and_selected_account(tmp_path, mo
     assert bound_reply_allowance(target, payload)["max_tokens"] == 35000
 
 
+@pytest.mark.parametrize("main_view", [False, True], ids=["unbound_helper", "main_view"])
+def test_a_responses_body_leaves_the_reply_room_of_its_chat_twin(tmp_path, monkeypatch, main_view):
+    """A direct OpenAI connection on Responses carries its rows in ``input``, not ``messages``. The helper's known
+    window and the reply allowance read every body through ``context_fit.payload_prompt_rows``: the same rows on
+    the same route leave the same room, whichever API the connection chose (its capability identity is one)."""
+    from contextlib import nullcontext
+    from ouroboros import config
+    from ouroboros.llm_attempt import bound_reply_allowance
+    from ouroboros.response_limits import dispatch_target
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    rows = [{"role": "system", "content": "fixture rules"}, {"role": "user", "content": "a" * 160_000}]
+    room, routes = {}, {}
+    for surface, body, field in (
+            ("chat_completions", {"messages": rows, "max_completion_tokens": 65_536}, "max_completion_tokens"),
+            ("responses", {"input": rows, "max_output_tokens": 65_536, "store": False}, "max_output_tokens")):
+        settings = {"OPENAI_API_KEY": "openai-fixture", "OPENAI_API_SURFACE": surface}
+        monkeypatch.setattr(config, "runtime_settings", lambda settings=settings: settings)
+        target = dispatch_target("openai::fixture", settings)
+        routes[surface] = target["capability_route"]
+        if surface == "chat_completions":
+            ce.record_owner_ack(tmp_path, provider="openai", model="openai::fixture",
+                                base_url=target["capability_route"]["base_url"], window_tokens=WINDOW)
+        context = ua.PhysicalAttemptContext(profile="task_local_nano", rendered_mode="nano",
+            measurement_basis="fresh_route_usage", route_fp="route", round_id="round", target_total_tokens=None,
+            capacity_total_tokens=WINDOW, context_target_miss=False, automatic_pass_used=False,
+            measurement_density=1.0)
+        with ua.bind_physical_attempt_context(context) if main_view else nullcontext():
+            room[surface] = bound_reply_allowance(target, body)[field]
+    assert routes["responses"] == routes["chat_completions"]
+    assert room["responses"] == room["chat_completions"] < WINDOW - 40_000
+
+
 @pytest.mark.parametrize('declared', [0, 120000])
 def test_helper_uses_input_refusal_beside_total(tmp_path, monkeypatch, declared):
     from ouroboros.context_window import record_observation

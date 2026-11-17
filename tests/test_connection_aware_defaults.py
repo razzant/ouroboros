@@ -472,3 +472,51 @@ def test_the_wizard_reads_every_way_a_built_in_key_is_ready():
         needed = {spec.flat_key(field) for group in spec.ready for field in group}
         assert needed <= fields, (kind, needed - fields)
     assert set(DIRECT_PROVIDER_DEFAULTS) <= set(contract["providerProfiles"])
+
+
+# --- the key's own API decides which defaults it proposes (OpenAI Responses) ----
+
+RESPONSES_LAB = {"kind": "openai", "name": "lab", "api_key": "row-lab", "api_surface": "responses"}
+
+
+def test_a_proposal_takes_the_defaults_of_the_api_its_own_key_chose():
+    """One table per key, never one for the kind: the only named key on Responses proposes its profile, a key that
+    never chose keeps the earlier one, and among several named keys the one Main runs on decides. A saved Main stays."""
+    assert provider_slot_proposals(_doc(RESPONSES_LAB))["OUROBOROS_MODEL"] == "openai@lab::gpt-6.1-terra"
+    assert provider_slot_proposals(_doc(WORK))["OUROBOROS_MODEL"] == "openai@work::gpt-5.6-terra"
+    mixed = _doc(RESPONSES_LAB, WORK)
+    assert "@" not in provider_slot_proposals(mixed)["OUROBOROS_MODEL"]  # no key, no API is guessed
+    assert provider_slot_proposals({**mixed, "OUROBOROS_MODEL": "openai@lab::gpt-6.1-sol"})["OUROBOROS_MODEL_LIGHT"] == \
+        "openai@lab::gpt-6-luna"
+    assert provider_slot_proposals({**mixed, "OUROBOROS_MODEL": "openai@work::gpt-5.6-sol"})["OUROBOROS_MODEL_LIGHT"] == \
+        "openai@work::gpt-5.6-luna"
+
+
+@pytest.mark.parametrize(("rows", "main"), [((RESPONSES_LAB,), "openai@lab::gpt-6.1-terra"), ((WORK,), "openai@work::gpt-5.6-terra")])
+def test_the_wizard_bootstrap_proposes_on_the_api_of_the_only_named_key(tmp_path, monkeypatch, rows, main):
+    """The real ``GET /api/onboarding/bootstrap`` of a document holding one named OpenAI key: the wizard starts from
+    the proposal of that key's own API, and its masked row keeps the stored word the browser resolves it by."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros import config as cfg
+    from ouroboros.gateway import onboarding_host
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", data_dir, raising=True)
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", data_dir / "settings.json", raising=True)
+    for key in (*cfg.SETTINGS_DEFAULTS, CONNECTIONS_KEY, "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    (data_dir / "settings.json").write_text(json.dumps(_doc(*rows)), encoding="utf-8")
+    app = Starlette(routes=[Route("/api/onboarding/bootstrap", onboarding_host.api_onboarding_bootstrap)])
+    app.state.drive_root = data_dir
+    cfg.reset_runtime_mode_baseline_for_tests()
+    try:
+        with TestClient(app) as client:
+            state = client.get("/api/onboarding/bootstrap").json()["bootstrap"]["initialState"]
+    finally:
+        cfg.reset_runtime_mode_baseline_for_tests()
+    assert state["mainModel"] == main
+    assert [row.get("api_surface") for row in state["connections"]] == [row.get("api_surface") for row in rows]
