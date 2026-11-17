@@ -12441,6 +12441,9 @@ html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section
    it is the list alone: the page's name and controls are not shown over it (the row shows the place). */
 @container sectionplace (min-width: 40rem) {
     html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="auto"] > .app-page-header .app-page-title { display: none; }
+    /* Two panes hold the action in the row at any width, so their header is no size container: the lead over the
+       rail reads the place's box there (ui.css --section-rail-w), as the shell's columns do. */
+    html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place > .app-page-header { container-type: normal; }
 }
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
     html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="auto"] > .app-page-header .app-page-lead { display: none; }

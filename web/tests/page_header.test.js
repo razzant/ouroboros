@@ -115,6 +115,11 @@ test('Telegram sections keep a visible drawer control and one title baseline ins
         'two panes of the automatic view hide the place\'s title under the page\'s name');
     assert.ok(telegram.includes(hide('page')));
     assert.equal(telegram.split(hide('auto')).length, 2, 'only inside the two-pane query');
+    // Two panes: the header is no size container, so the lead over the rail reads the place's box for 100cqi
+    // (ui.css --section-rail-w); as one, Logs' chips stood 24 px left of the rail's end at 1200 px.
+    const unsized = '.section-place > .app-page-header { container-type: normal; }';
+    assert.ok(two.slice(0, two.indexOf('\n}')).includes(unsized), 'two panes keep the place\'s box');
+    assert.equal(telegram.split(unsized).length, 2, 'only inside the two-pane query');
     // One column of the automatic view is the list alone: neither the page's name nor its controls (Logs' chips and
     // Clear) stand in the host row over it; a page alone keeps its lead.
     const lead = (view) => `.section-place[data-section-view="${view}"] > .app-page-header .app-page-lead { display: none; }`;
