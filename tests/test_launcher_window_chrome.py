@@ -643,9 +643,9 @@ def test_a_band_press_drags_from_the_kept_mouse_down_while_the_button_is_down(ma
     assert native.calls[-1] == ("drag", held)
     mac.buttons = 0  # released before the report came: nothing is left to drag
     chrome.receive({"type": "drag", "doc": DOC_B})
-    for late in (press(native, above=0.0), press(native, above=-10.0), press(native, window=WINDOW_NUMBER + 1)):
-        pressed(mac, late)  # on the band's edge or under it (the page's content), or another window's newer press
-        chrome.receive({"type": "drag", "doc": DOC_B})
+    for late in (press(native, window=WINDOW_NUMBER + 1), press(native, above=0.0), press(native, above=-10.0)):
+        pressed(mac, late)  # another window's newer press (first: the kept band press is still this window's), or
+        chrome.receive({"type": "drag", "doc": DOC_B})  # one on the band's edge or under it, the page's content
     assert native.calls.count(("drag", held)) == 1 and native.calls[-1] == ("drag", held)
     mac.observers["NSWindowWillEnterFullScreenNotification"](None)
     held = pressed(mac, press(native))  # built after the switch: only the full-screen guard refuses it
@@ -719,6 +719,11 @@ def test_a_double_click_needs_the_second_band_press_of_this_integrated_window(ma
     pressed(mac, press(native, clicks=2), held=False)  # the report came after the release
     chrome.receive({"type": "double-click", "doc": DOC_A})
     assert native.calls.count("zoom") == 1
+    pressed(mac, press(native), held=False)  # a first click whose report comes late, after the second press
+    pressed(mac, press(native, clicks=2))
+    for kind in ("drag", "double-click"):  # acting on a press does not use it up: the second press still zooms
+        chrome.receive({"type": kind, "doc": DOC_A})
+    assert native.calls[-1] == "zoom"
     mac.defaults["AppleActionOnDoubleClick"] = "Minimize"  # changed in System Settings meanwhile
     pressed(mac, press(native, clicks=2))
     chrome.receive({"type": "double-click", "doc": DOC_A})
@@ -730,7 +735,7 @@ def test_a_double_click_needs_the_second_band_press_of_this_integrated_window(ma
     leave_full_screen(mac, native)
     pressed(mac, press(native, clicks=2))
     chrome.receive({"type": "double-click", "doc": DOC_B})  # the ordinary bar handles its own clicks
-    assert (native.calls.count("zoom"), native.calls.count("miniaturize")) == (1, 1)
+    assert (native.calls.count("zoom"), native.calls.count("miniaturize")) == (2, 1)
     assert native.title_bar.presses == []
 
 
