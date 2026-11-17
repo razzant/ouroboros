@@ -271,7 +271,8 @@ def _residency(note: knowledge_store.KnowledgeNote, delta: dict | None = None) -
         return f"Residency: it has no summary, so {where} shows its address and title, and its whole view marks it (no summary); {tail}"
     loaders = ("Main, tasks, wakes and Presence, and the outline a tight window, a helper and a session start with"
                if knowledge_store.outline_keeps_summary(note.metadata.get("type"))
-               else "Main, tasks, wakes and Presence; a tight window and a helper's or session's start show only its address and title")
+               else "Main, tasks, wakes and Presence; a tight window and a helper's or session's start show only its address and title "
+                    "(a note typed person or person-… keeps its summary there)")
     where = f"the global knowledge index ({loaders})" if note.address.scope == "global" else project
     return (f"Residency: its summary ({len(note.summary)} chars) is shown in {where} from each context's next build; "
             f"works already running keep the view they started with; {tail}")
