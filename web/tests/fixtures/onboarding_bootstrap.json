@@ -4,7 +4,12 @@
     "dailyUsd": 20.0,
     "enabled": null,
     "maxTasks": 2,
-    "offered": true
+    "offered": true,
+    "words": {
+      "choice": "Also on its own and in places",
+      "gloss": "When Ouroboros acts.",
+      "meaning": "Off: it works only when you write to it, and places you connect are heard, not answered. On: it also wakes between your messages and answers in places you make Active."
+    }
   },
   "contract": {
     "budgetFields": [

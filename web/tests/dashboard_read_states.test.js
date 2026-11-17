@@ -101,14 +101,14 @@ test('Activity failed reads stay unknown; independent successful empty state sta
     assert.match(message(section(mount, 'queue')), /Could not load.*unknown/);
     assert.doesNotMatch(section(mount, 'queue').textContent, /Nothing running/);
     assert.match(message(section(mount, 'background')), /Could not load/);
-    assert.equal(section(mount, 'background').querySelectorAll('button').length, 0, 'unknown must not invent Start');
+    assert.equal(section(mount, 'background').querySelectorAll('button').length, 0, 'unknown must not invent Turn on');
     assert.match(section(mount, 'schedules').textContent, /No scheduled tasks/);
     assert.equal(message(section(mount, 'schedules')), '');
     emptyActivity(routes);
     await activity.refresh();
     assert.match(section(mount, 'queue').textContent, /Nothing running or queued/);
     assert.equal(message(section(mount, 'queue')), '');
-    assert.equal(section(mount, 'background').querySelector('button').textContent, 'Start');
+    assert.equal(section(mount, 'background').querySelector('button').textContent, 'Turn on');
 });
 
 test('Activity keeps last-known data and actions on refresh failure, then reconciles recovery', async (t) => {
@@ -1503,4 +1503,30 @@ test('Activity keeps a held Continue blocker readable without offering Pause or 
     await activity.refresh();
     assert.equal(section(mount, 'queue').querySelector('.activity-sub').textContent, 'Queued');
     activity.destroy();
+});
+
+test('Activity keeps saying Reading… while the switch reads what it would change, through a repaint', async (t) => {
+    // The preview read can take seconds on a large install; a repaint meanwhile (the tab shown again) is no reason to
+    // look idle, and the turn still asks and sends once (review r2).
+    const { mount, routes, ws } = setup(t);
+    emptyActivity(routes);
+    const frames = [];
+    ws.send = (frame) => frames.push(frame);
+    let release = () => {};
+    routes.set('/api/consciousness?switch=on', () => new Promise((resolve) => {
+        release = () => resolve(response({ lines: ['Ouroboros will also wake between your messages.'], places: [] }));
+    }));
+    const activity = initActivity({ mount, ws });
+    await activity.refresh();
+    const toggle = () => section(mount, 'background').querySelector('[data-act="bg-toggle"]');
+    assert.equal(toggle().textContent, 'Turn on');
+    const clicking = mount.fire('click', { target: toggle() });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual([toggle().textContent, toggle().disabled], ['Reading…', true]);
+    await activity.refresh();
+    assert.deepEqual([toggle().textContent, toggle().disabled], ['Reading…', true], 'a repaint keeps the read said');
+    release();
+    await clicking;
+    assert.deepEqual(frames, [{ type: 'command', cmd: '/bg start', ui_control: { name: 'consciousness_toggle' } }]);
+    assert.notEqual(toggle().textContent, 'Reading…');
 });

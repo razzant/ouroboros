@@ -109,17 +109,19 @@ def _write_unrelated(page, data_dir: Path, posts: list, days: int) -> dict:
 
 
 def _switch(page, url: str, on: bool) -> None:
-    """Consciousness on or off through the Consciousness tab's own Start/Stop (this isolated server's switch)."""
+    """Consciousness on or off through the Consciousness tab's own switch (this isolated server has no place, so the
+    turn asks nothing); the headline names the switch's position by meaning (owner 15.11, 5A)."""
     from playwright.sync_api import expect
 
     _costs(page, url)
     page.locator("[data-costs-consciousness]").click()
     summary = page.locator("[data-cx-summary]")
-    expect(summary).to_contain_text("Consciousness · o", timeout=30_000)
+    expect(summary).to_contain_text("Consciousness · when Ouroboros acts", timeout=30_000)
     toggle = page.locator('[data-cx-act="toggle"]')
-    if toggle.inner_text() == ("Start" if on else "Stop"):
+    if toggle.inner_text() == ("Turn on" if on else "Turn off"):
         toggle.click()
-    expect(summary).to_contain_text(f"Consciousness · {'on' if on else 'off'}", timeout=30_000)
+    expect(summary.locator(".consciousness-headline")).to_contain_text(
+        "Also on its own" if on else "Only when you write to it", timeout=30_000)
 
 
 def _fits(page) -> None:
@@ -391,9 +393,9 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
             for (width, _height, theme), page in pages.items():
                 _costs(page, url)
                 page.locator("[data-costs-consciousness]").click()
-                headline = page.locator(".consciousness-headline")
-                expect(headline).to_contain_text("Wake-up wake-held stopped at the allowance it had left when it "
-                                                 "started ($2.99).", timeout=30_000)
+                headline = page.locator(".consciousness-headline")  # the switch's position and the owner's mark
+                expect(page.locator(".consciousness-headline-state")).to_contain_text(
+                    "Wake-up wake-held stopped at the allowance it had left when it started ($2.99).", timeout=30_000)
                 assert headline.locator(".status-mark").get_attribute("data-hue") == "owner"
                 expect(page.locator(".consciousness-headline-note")).to_have_text(
                     "Resume keeps that limit, so it pauses again while its known spend is at it, and a higher allowance "
@@ -408,7 +410,8 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                 expect(chip.locator(".cx-chip-mark")).to_have_attribute("data-hue", "owner", timeout=30_000)
                 chip.click()
                 shade = page.locator("#page-chat .cx-shade")
-                expect(shade.locator(".cx-state")).to_contain_text("stopped at the allowance it had left")
+                expect(shade.locator(".cx-state")).to_have_text("Also on its own")  # the switch's position
+                expect(shade.locator(".cx-state-note")).to_contain_text("stopped at the allowance it had left")
                 expect(shade.locator(".cx-state-note")).to_contain_text("Resume keeps that limit, so it pauses again")
                 costs = shade.locator(".cx-door", has_text="Costs ›")
                 expect(costs).to_be_visible()

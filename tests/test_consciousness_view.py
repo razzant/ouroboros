@@ -83,19 +83,22 @@ def test_places_context_has_every_place_and_room_without_reading_history(monkeyp
 
 
 @pytest.mark.parametrize("brief,detail", [
-    ([{"state": "active"}, {"state": "silent"}, {"state": "paused"}], "Off: no own wakes; 2 places only hear."),
-    ([{"state": "silent"}, {"state": "paused"}], "Off: no own wakes; 1 place only hears."),
-    ([{"state": "paused"}], "Off: no own wakes."),
-    (None, "Off: no own wakes."),
-    ("unread", "Off: no own wakes; its places only hear."),  # the place store could not be read: as Stop says
+    ([{"state": "active"}, {"state": "silent"}, {"state": "paused"}], "2 places are heard, not answered."),
+    ([{"state": "silent"}, {"state": "paused"}], "1 place is heard, not answered."),
+    ([{"state": "paused"}], "Nothing wakes it between your messages."),
+    (None, "Nothing wakes it between your messages."),
+    ("unread", "Its places are heard, not answered."),  # the place store could not be read: as Stop says
 ])
-def test_off_says_no_own_wakes_and_how_many_places_only_hear(brief, detail):
+def test_off_says_its_position_and_how_many_places_are_heard_not_answered(brief, detail):
     """Owner 06.11: Off read «Background consciousness is off.» while 28 places went on reading «active». The host's
-    one detail line (the chip's name, the Shade and the Dashboard headline) counts them from the brief it already has."""
+    one detail line (the chip's name, the Shade and the Dashboard headline) counts them from the brief it already has,
+    beside the switch's position by meaning (owner 15.11, 5A)."""
     snapshot = {} if brief is None else {"places_brief": None if brief == "unread" else brief}
     described = view.describe_consciousness_state(snapshot, False)
-    assert (described["status"], described["detail"]) == ("disabled", detail)
-    assert "hear" not in view.describe_consciousness_state(snapshot, True)["detail"], "a switch that is on claims nothing"
+    assert (described["status"], described["detail"], described["position"]) == ("disabled", detail,
+                                                                                  view.position_words(False))
+    on = view.describe_consciousness_state(snapshot, True)
+    assert "heard" not in on["detail"] and on["position"] == view.position_words(True), "a switch that is on claims nothing"
 
 
 def test_my_map_names_each_circle_once_with_its_whole_words_and_my_placements(monkeypatch, tmp_path):

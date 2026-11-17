@@ -2186,6 +2186,18 @@ owns the item.
 
 ### Dashboard › Consciousness
 
+The switch is one (owner 15.11, 5A): its name stays Consciousness, glossed “When Ouroboros acts”, and its positions
+are named by meaning, “Only when you write to it” off and “Also on its own and in places” on (“Also on its own” on an
+install with no place). The headline card says the gloss over the position, the host's state line beneath it, and the
+switch as “Turn off” / “Turn on”. Every turn in the app (this card, the chip's Shade, Activity's row) is one part
+(`consciousness_switch.js`): before turning either way (the owner chose both, 17.11), when the install has places, a
+dialog names what changes from the install's facts: the busiest places by name and how many, the people who wrote
+there in the last 7 days, what stops at once and what keeps working, every place behind its one disclosure. While the preview is read the
+button says “Reading…” (on a large install the first read takes seconds). With no place to name the turn goes at once;
+a preview or a place list that cannot be read does not hold the switch (the dialog says so and still offers the turn). Turning on says where it may answer and that at its first wake it sees what is unread there
+and decides what to read and answer. The words are the host's (`consciousness_view`): the app shows them from the
+server's answers, and the /bg replies (every surface, headless included) and the mind's own fact come from there too.
+
 The headline reports server state apart from wakes, with the host sentence as its only clock. A past next attempt says
 “Due since” the known appointment, or “Due” without one. A live/held own wake
 shows no deadline. “Its own wakes” precedes “Wakes in places”, sharing 50 ledger
@@ -2240,18 +2252,19 @@ its own, and without one they use the consciousness model; the head names it onl
 name's line cannot hold (a long model name, a long circle name) goes under the name, at the line's end, and
 wraps there; a row's facts wrap the same way, and nothing is ever wider than the head or the row.
 
-A row: mark, the place's own name, service, state word (on a place not Paused, the muted dot with
-“· consciousness off” while Off leaves it only hearing, or that no kind is checked), readiness only when
-not simply on, the last captured event (“no captured event”, never “no activity”), its model only when the place
-overrides, and the optional description, ellipsized: its own field, empty until written, never a note's
-first line; purpose, not a rule.
+A row: mark, the place's own name, service, state word (a cause that keeps the place quiet replaces it, in the host's
+words, with the muted dot: the switch off, Panic, the allowance spent, Advises; the stored choice stays the sheet's;
+on a place no cause keeps quiet and not Paused, “· no wake kinds checked” and the muted dot when no kind is checked),
+readiness only when not simply on, the last captured event beside the service (“no captured event”, never “no
+activity”), its model only when the place overrides, and the optional description,
+ellipsized: its own field, empty until written, never a note's first line; purpose, not a rule.
 
 Add asks “What is this place, and what am I here for?” (its first note) and the optional
 description, then where: each connector says its state with Connect, “Choose where” or “Enable in
 Skills”; one without instances or places connects its whole account at once. A connected place shows its
 notes and saves only the ticked changes under its revision; a repeat writes nothing twice. Add
-writes Silent atomically: “It starts Silent: it hears and thinks there and sends nothing until you
-make it Active.” Declared writes/delivery are held; the sheet retains the
+writes Silent atomically and says so in the host's words for the switch as it stands (off: it only hears there until
+consciousness is on). Declared writes/delivery are held; the sheet retains the
 scripts/browser/unintegrated-code disclosure. Paused stays connected without new foci.
 
 Connectors supply names/monochrome marks; technical ids stay in details unless two rows would read
@@ -2298,10 +2311,12 @@ Sheet/reader use status labels over manifest labels; otherwise core words stay. 
 declared labels/settings.
 Bot messages both wake and permit hearing bots. Other events are own-wake observations;
 the mind decides what to read, so the sheet must not promise exhaustive reading.
-While Off the host's `only_hears` replaces what would claim a wake: the state note and the conversation's state
-card say it only hears here, the wake note that nothing here wakes it, with the door `Consciousness ›` (Dashboard ›
-Consciousness, where Start is; no second Start). With no kind checked Active's note claims no wake; the wake note
-and state card say an ongoing conversation can still wake it (owner 16.11: the full repair). Paused keeps its words.
+A cause that keeps the place quiet (the host's `quiet`: the switch off, Panic, the allowance spent, Advises) is the
+meta line's state and one sentence under the state strip with its door (`Consciousness ›`, or `Costs ›` for the
+allowance; no second switch); the strip keeps the stored choice chosen, the wake note says nothing here wakes it
+while consciousness is off, and the conversation's state card says the same sentence. With no kind checked Active's
+note claims no wake; the wake note and state card say an ongoing conversation can still wake it (owner 16.11: the full
+repair). Paused keeps its words.
 Conflicts: “Changed elsewhere; your text is kept”. Resave uses fresh facts.
 
 Reader out rows say “as {label}”/“as you”. Heard chips accompany reasons with

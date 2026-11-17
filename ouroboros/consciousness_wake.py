@@ -982,7 +982,7 @@ def render_wake_message(repo_dir: Any, *, drive_root: Any, reason: str, last_wak
     "On time" is lateness below ``ago_text``'s one-minute display granularity, not a new scheduling threshold.
     """
     template = safe_read(pathlib.Path(repo_dir) / PROMPT_REL) or _FALLBACK_TEMPLATE
-    from ouroboros.consciousness_view import places_text, roots_text, spend_text
+    from ouroboros.consciousness_view import LEVEL_NAMES, places_text, roots_text, spend_text
     normalized = normalize_level(level)
     spent = f"{float(spent_usd):.2f}" if isinstance(spent_usd, (int, float)) else "unknown"
     if spent_is_floor and spent != "unknown":
@@ -993,7 +993,7 @@ def render_wake_message(repo_dir: Any, *, drive_root: Any, reason: str, last_wak
     facts = {
         "reason": reason_text, "previous_wake": previous_wake, "events": events or "nothing new",
         "last_wake_ago": ago_text(now - last_wake_at) if last_wake_at else "no wake since this process started",
-        "level": {"observe": "Advises", "act": "Acts", "full": "Evolves"}[normalized],
+        "level": LEVEL_NAMES[normalized],
         "level_line": LEVEL_LINES[normalized], "places": places_text(drive_root, places),
         "withheld_tools": ", ".join(disabled_tools) if disabled_tools else "none",
         "spent_usd": spent, "daily_usd": f"{float(daily_usd):.2f}",
