@@ -109,6 +109,8 @@ def test_readers_that_could_not_be_discovered_are_recorded_unknown_and_the_save_
     for text in (mail["text"], row["text"]):  # the model's frame and the history row
         assert "No installed skill reads" not in text
         assert "Which installed skills read these keys could not be read" in text
+    from ouroboros.question_answers import MAILBOX_ROUTE_FACT
+    assert MAILBOX_ROUTE_FACT not in mail["text"]  # a secret outcome carries no owner words to route
     _assert_absent(env, CANARY, texts=[response.text])
 
 

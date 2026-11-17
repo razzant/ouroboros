@@ -192,7 +192,7 @@ def _child_attempt(tmp_path, attempt):
 def test_failed_direct_wake_ack_records_no_exposure(tmp_path, monkeypatch):
     import ouroboros.delegate_supervision as supervision
     from tests._run_wait_shared import wake_now
-    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.owner_mailbox import drain_owner_entries, write_owner_message
 
     assert write_owner_message(tmp_path, "held owner words", "child1", msg_id="owner-held")
     ctx = _child_attempt(tmp_path, 1)
@@ -212,16 +212,15 @@ def test_failed_direct_wake_ack_records_no_exposure(tmp_path, monkeypatch):
     monkeypatch.setattr(supervision, "_save_state", refuse_ack_save)
     with pytest.raises(OSError):
         supervision.acknowledge_pending_wake(ctx, wake)
-    # The UNKNOWN hold drops this receipt (#2142): a checkpoint saved now must not mark its mail seen.
-    assert not getattr(ctx, "_loop_mailbox_seen_ids", None)
-    restored = _child_attempt(tmp_path, 2)
-    restored._loop_mailbox_seen_ids = set(getattr(ctx, "_loop_mailbox_seen_ids", None) or ())
-    replay = supervision._addressed_wakes(restored, supervision.supervision_checkpoint(restored))
-    assert [(row["msg_id"], row["text"]) for row in replay] == [("owner-held", "held owner words")]
+    # The UNKNOWN hold drops this receipt (#2142): a checkpoint saved now must not mark its mail seen. The owner's
+    # words beside the wake were never the wake's: the round-top drain delivers them, landed ACK or not.
+    assert "owner-held" not in json.dumps(wake) and not getattr(ctx, "_loop_mailbox_seen_ids", None)
+    assert [row["msg_id"] for row in drain_owner_entries(tmp_path, "child1", set(), 2)] == ["owner-held"]
 
     monkeypatch.setattr(supervision, "_save_state", save)
     assert supervision.acknowledge_pending_wake(ctx, wake)
-    assert ctx._loop_mailbox_seen_ids == {"owner-held"}
+    assert not getattr(ctx, "_loop_mailbox_seen_ids", None)
+    assert [row["msg_id"] for row in drain_owner_entries(tmp_path, "child1", set(), 1)] == ["owner-held"]
 
 
 @pytest.mark.parametrize("control_kind", ["finalize_now", "hurry"])

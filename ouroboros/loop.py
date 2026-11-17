@@ -645,7 +645,7 @@ def run_llm_loop(
                 limit_ctx, context_fit_plan, active_context_mode, _preferred_context_mode, _controls)
             _held = _delegate_hold_round_top(tools, limit_ctx, _controls, emit_progress,
                                              new_input=transcript_growth_signature(messages) != _pre_drain_sig)
-            if _held == "park":  # the hold's host-armed sleep was parked, no model call: its wake is the next top's
+            if _held in ("park", "redrain"):  # no model call: the next top drains first (a parked hold's wake too)
                 free_redial = True
                 continue
             if isinstance(_held, tuple):  # the unknown no-resend terminal: zero provider calls

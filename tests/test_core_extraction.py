@@ -179,8 +179,14 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # the closing sentence; nothing else changed (76a2871b... before).
     # Rolled for card images: show_card's description says an image takes file (a PNG, JPEG, GIF or WebP the
     # host copies into the card) or, like audio and video, an inline data: URI; nothing else changed (4da8992f... before).
+    # Rolled for the owner's decision on questions many works share (15.11): escalate's description adds
+    # the asking side (a shared cause framed at its reach, no new card for an applicable answer already
+    # in view, open cards kept consistent with it) and says the rest in fewer words, so its lead still fits
+    # whole beside its bare structure on the direct-OpenAI custom route; nothing else changed (7a1e368b... before).
+    # Rolled again after review: "A card stays answerable, from Main after the task ends too" stands as its own
+    # sentence again, a fact of every card; nothing else changed (c54daa33... before).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "7a1e368b63165124e58b8b117dc4a1fc843701a9a96ee7700d5cd29a717037b5"
+        "6a522316bb44bb5c0f3c25e77fa555ad231022b830f05aa9c27396714663da2e"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
