@@ -53,3 +53,21 @@ test('a file shown alone names its folder in the shell layer; beside the list it
     assert.equal(layers.page().back.label, 'Files', 'the filesystem root has a name too');
     layers.destroy();
 });
+
+test('a file shown alone gives focus to its Back, unless the caller names a control: a new file\'s name', () => {
+    const source = readFileSync(new URL('../modules/files.js', import.meta.url), 'utf8');
+    const node = (name) => ({ name, getClientRects: () => [1], focus() { context.document.activeElement = this; } });
+    const back = node('back'), nameField = node('name'), previewEl = node('preview'), row = node('row');
+    const context = vm.createContext({
+        document: { activeElement: null, body: {} }, lastFocus: null, listScroll: 0, previewEl,
+        layoutEl: { dataset: { filesView: 'list' }, contains: () => false }, sidebarEl: {},
+        listEl: { querySelectorAll: () => [row] }, page: { querySelector: () => back },
+        placeStatus() {}, singlePane: () => true, syncLayer() {},
+    });
+    vm.runInContext(source.match(/    function showPane\(view, focusTarget = null\) \{[\s\S]+?\n    \}/)[0], context);
+    context.showPane('file', previewEl);
+    assert.equal(context.document.activeElement, back, 'an opened file: Back, where it leads');
+    context.layoutEl.dataset.filesView = 'list';
+    context.showPane('file', nameField);
+    assert.equal(context.document.activeElement, nameField, '"+ File": its name field, where the owner types');
+});

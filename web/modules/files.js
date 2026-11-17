@@ -178,12 +178,14 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         syncLayer(single && view === 'file');
         if (single && changed && view === 'list') sidebarEl.scrollTop = listScroll;
         // Focus never stays on what just left the screen (the pane put away, or Back once both panes fit): it goes
-        // to Back on a file shown alone, otherwise to the file's row.
+        // to Back on a file shown alone, otherwise to the file's row. A control the caller names (a new file's name)
+        // keeps it.
         const lost = layoutEl.contains(active) && !active.getClientRects().length;
         if (!(single && focusTarget) && !lost) return;
         const row = [...listEl.querySelectorAll('.files-entry.selected')].find((node) => node.getClientRects().length);
         const back = page.querySelector('[data-shell-back]');
-        const target = single && view === 'file' && back?.getClientRects().length ? back : focusTarget || row || listEl;
+        const named = focusTarget && focusTarget !== previewEl ? focusTarget : null;
+        const target = named || (single && view === 'file' && back?.getClientRects().length ? back : focusTarget || row || listEl);
         target.focus({ preventScroll: true });
     }
 
