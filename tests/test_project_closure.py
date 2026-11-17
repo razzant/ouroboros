@@ -197,6 +197,11 @@ def test_open_projects_are_listed_oldest_first_after_dialogue_activity_and_befor
     assert "last_active_at=2026-02-01" in text and "closed=false" in text
     text = _list_projects(context(room), closed=True)
     assert '"note": "The work is finished."' in text and '"by": "ouroboros:one"' in text
+    # Every listed room here has held activity (owner-made rooms, one with a fresh message), and none has
+    # a task running: the reader says when each was last active and whether it is closed, never "running".
+    everything = _list_projects(context(room))
+    assert "closed=false" in everything and '"note": "The work is finished."' in everything
+    assert "running" not in everything
 
 
 @pytest.mark.parametrize("closed,oldest_first,limit", [
