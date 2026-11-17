@@ -174,6 +174,34 @@ def test_plus_menu_attaches_by_pointer_and_keyboard_in_both_themes(direct_server
             browser.close()
 
 
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_plus_takes_a_finger_s_reach_under_a_coarse_pointer(direct_server_with_data, engine, tmp_path):  # noqa: F811
+    """The 44 px arm of `_assert_plus_in_place`: the cases above run under a mouse, so only a touch phone reaches it."""
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import sync_playwright
+
+    url = direct_server_with_data["url"]
+    with sync_playwright() as pw:
+        browser, page = _launch(pw, engine, viewport={"width": 360, "height": 800}, has_touch=True, is_mobile=True)
+        try:
+            where = f"{engine} touch 360px"
+            _open_chat(page, url, width=360, height=800)
+            facts = _facts(page)
+            (_evidence_dir(tmp_path) / f"composer-plus-coarse-{engine}.json").write_text(json.dumps(facts, indent=1),
+                                                                                       encoding="utf-8")
+            assert facts["coarse"] is True, (where, "the emulated phone is a coarse pointer")
+            _assert_plus_in_place(facts, where)
+            # A finger opens the menu above "+", inside the phone.
+            page.tap(PLUS)
+            page.wait_for_selector(MENU, state="visible", timeout=5_000)
+            opened = _facts(page)
+            assert opened["expanded"] == "true" and opened["items"][0] == "Attach file", (where, opened)
+            assert opened["menu"]["bottom"] <= opened["plus"]["top"] + 0.5, (where, opened)
+            assert opened["menu"]["left"] >= 0 and opened["menu"]["right"] <= opened["view"] + 0.5, (where, opened)
+        finally:
+            browser.close()
+
+
 CHIPS = """(count) => {
     const slot = document.querySelector('#page-chat [data-composer-chips]');
     for (let i = 0; i < count; i += 1) {
