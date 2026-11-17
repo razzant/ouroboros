@@ -23,7 +23,10 @@ export function createPageNavigation({ layers, capture, canLeave, land = () => {
         const fromKey = pressed?.eventPhase ? pressed.detail === 0 : false;  // a key's click (Enter, Space) counts none
         // A source owns its claim until this commit; covering its room then transfers ownership to the destination.
         if (await canLeave(key) === false || !current()) return false;
-        if (origin.key !== key) doc.activeElement?.blur?.();
+        // A jump lets go of the page it leaves. A map choice is pressed in the sidebar or drawer, which stays: its row
+        // keeps the focus, the opener a layer the commit opens gives it back to (layers.js), and the room it leaves
+        // keeps its selection (WebKit drops a selection with the focus a blur takes from its room).
+        if (map !== true && origin.key !== key) doc.activeElement?.blur?.();
         let id = null;
         layers.batch(() => {
             if (map === true) clear(); // sidebar/drawer; a section's own list and tabs keep the visit

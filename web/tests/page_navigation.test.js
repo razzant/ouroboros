@@ -40,6 +40,33 @@ test('a jump made from a key focuses the destination\'s round Back; a pointer\'s
     nav.destroy(); layers.destroy();
 });
 
+test('a sidebar choice keeps the focus on its row, the opener a Project returns to; a jump lets the page it leaves go', async () => {
+    const body = {}, doc = { body, activeElement: body, addEventListener() {}, removeEventListener() {} };
+    const control = () => ({ isConnected: true, closest: () => null,
+        focus() { doc.activeElement = this; }, blur() { if (doc.activeElement === this) doc.activeElement = body; } });
+    const row = control(), link = control(), feed = control(), panel = { contains: node => node === feed };
+    const layers = createLayerStack({ win: null, doc });
+    const nav = createPageNavigation({ layers, doc, canLeave: () => true,
+        capture: () => ({ key: 'chat', label: 'Main', restore: () => () => {} }) });
+    row.focus();  // Enter on the sidebar's Skills
+    await nav.go('skills', () => {}, { map: true });
+    assert.equal(doc.activeElement, row, 'a sidebar choice keeps the focus on the row pressed');
+    for (const [pressed, map] of [[row, true], [link, false]]) {
+        let seen = null;
+        pressed.focus();
+        await nav.go('project:one', () => {
+            seen = doc.activeElement;
+            layers.push({ id: 'project', el: panel, modal: false, focus: () => feed.focus(), onClose: () => layers.remove('project') });
+        }, { map });
+        assert.equal(seen, map ? row : body, 'the focus the commit\'s layer records as its opener');
+        assert.equal(doc.activeElement, feed);
+        layers.back('escape', 'project'); await settle();
+        assert.equal(doc.activeElement, map ? row : feed, 'Escape returns the focus to the row pressed');
+        layers.batch(() => nav.clear());
+    }
+    nav.destroy(); layers.destroy();
+});
+
 test('only keyboard dismissals ask the returned place to show its focus ring', async () => {
     const layers = createLayerStack({ win: null, doc: null }), restored = [];
     const doc = { addEventListener() {}, removeEventListener() {} };
