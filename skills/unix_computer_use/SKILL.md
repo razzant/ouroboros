@@ -129,8 +129,10 @@ the server and its capture. The session is not restored after a Stop or restart.
 
 - `mcp_mac_window_session__begin(app, window)` resolves `app` launch-free and selects
   exactly one of its windows as `screenshot(window=)` does (a `window_id` or an exact
-  title; none or several is refused), once: the stream stays bound to that window, and
-  a title is never looked up again. It starts one ScreenCaptureKit stream of that
+  title; none or several is refused). Before starting, WindowServer must also confirm that
+  window belongs to the selected PID. A missing window or failed lookup starts no stream;
+  a later `begin` can try again. The stream binds the selected window once and does not
+  resolve its title again. It starts one ScreenCaptureKit stream of that
   window alone (no cursor, no shadow, no audio; at most 1280x800, 5 frames per second,
   four queued surfaces) and returns facts, no image. One session per task: another
   `begin` is `session_exists` until `release`.
@@ -155,8 +157,7 @@ Besides `no_frame_yet` and `no_newer_frame`, `frame` can withhold an image for t
 - `window_lookup_unavailable`: a window lookup that worked at `begin` now gives no answer.
   No frame is delivered on this call. A later call can check again.
 - `window_gone`: WindowServer no longer lists the selected window for its process. The server
-  checks during frame requests and while idle if the window was listed at `begin` (see
-  `window_gone_check`). It permanently withholds frames from this session and asks macOS to
+  checks during frame requests and while idle (`window_gone_check: window_server`). It permanently withholds frames from this session and asks macOS to
   stop capture, even if no one requests another frame. Reuse of the ID does not restart it.
 - `stream_stopped`: the stream ended. See `stop.reason` and, if a native end arrived after
   delivery closed, `stream_end.reason`. Ask the owner before beginning again after `user_stopped`.

@@ -346,14 +346,22 @@ def test_the_streams_own_end_after_the_sessions_is_kept_and_reopens_nothing(stre
     store.accept("complete", buffer="held", width=1, height=1)
     assert store.end("window_gone", by="session") is True
     clock.now += 0.5
-    stream._Feed(None, store).ended(_Error(-3817, "stopped by the user", domain="D"))
-    stream._Feed(None, store).ended(_Error(-3821, "stopped by the system", domain="D"))  # the first stands
+    stream._Feed(None, store).ended(_Error(-3817, "stopped by the user"))
+    stream._Feed(None, store).ended(_Error(-3821, "stopped by the system"))  # the first stands
     assert store.accept("complete", buffer="late", width=1, height=1) is False
     clock.now += 0.25
     held, facts = store.snapshot()
     assert held is None and facts["state"] == "stopped" and facts["seq"] == 1
     assert facts["stop"] == {"reason": "window_gone", "by": "session", "age_ms": 750.0}
-    assert facts["stream_end"] == {"reason": "user_stopped", "code": -3817, "domain": "D", "age_ms": 250.0}
+    assert facts["stream_end"] == {"reason": "user_stopped", "code": -3817,
+                                    "domain": "com.apple.ScreenCaptureKit.SCStreamErrorDomain", "age_ms": 250.0}
+
+
+def test_foreign_error_code_does_not_attribute_a_native_stop_to_the_user(stream):
+    store = stream.FrameStore(_Clock())
+    stream._Feed(None, store).ended(_Error(-3817, domain="OtherDomain"))
+    assert store.stop["by"] == "stream" and store.stop["reason"] == "stream_error"
+    assert (store.stop["domain"], store.stop["code"]) == ("OtherDomain", -3817)
 
 
 class _Reader:
@@ -750,19 +758,17 @@ def test_a_window_the_window_server_no_longer_lists_is_gone_for_good(desk):
     assert sessions.frame({})[1] is not None
 
 
-def test_a_window_not_listed_at_begin_is_never_called_gone_by_that_lookup(desk):
-    sessions, bridge, _clock = desk(listed=False)
-    assert begin(sessions)["window_gone_check"] == "unavailable"
-    feed(bridge)
-    asked = bridge.calls.count(("listed", 7, 11))
-    assert sessions.frame({})[1] is not None and bridge.calls.count(("listed", 7, 11)) == asked
-
-
-def test_idle_never_calls_a_window_gone_that_was_not_listed_at_begin(desk):
-    sessions, bridge, _clock = desk(listed=False)
-    begin(sessions)
+@pytest.mark.parametrize("listed, reason", [(False, "window_not_found"), (None, "window_lookup_unavailable")])
+def test_begin_needs_a_window_that_can_be_monitored(desk, listed, reason):
+    sessions, bridge, _clock = desk(listed=listed)
+    assert begin(sessions)["reason"] == reason
     sessions.idle_check()
-    assert bridge.calls.count(("listed", 7, 11)) == 1  # begin's lookup alone; the idle look asked nothing
+    assert bridge.calls.count(("listed", 7, 11)) == 1
+    assert sessions._session is None and not bridge.stores
+    assert sessions.frame({})[0]["reason"] == "no_session"
+    assert sessions.release()[0]["released"] is False
+    bridge.listed = True
+    assert begin(sessions)["ok"] and len(bridge.stores) == 1
     feed(bridge)
     assert sessions.frame({})[1] is not None
 

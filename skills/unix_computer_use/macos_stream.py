@@ -19,7 +19,8 @@ failed (``callback_error``) and the stream's notice that its window closed (``in
 ``streamDidBecomeInactive:``, macOS 15.2+). A stream that ended, by ``release`` or by the system
 (``stream:didStopWithError:``), gives no image again and is never restarted here. A frame dropped while its PNG was
 being written stays dropped for that call: a later valid report cannot revalidate the image that was in flight.
-Where the window server listed the window at ``begin``, the first time it no longer lists it for that process ends
+Before starting capture, ``begin`` confirms that WindowServer lists the selected window for its owner PID.
+A missing listing or an unreadable lookup starts nothing. The first subsequent confirmed disappearance ends
 the session's delivery for good (``window_gone``) and asks the native stream to stop once — in that same call, or in
 a jobless moment of the server between calls (``idle_check``). The stop outcome is reported separately. A later
 lookup without an answer, or a window that reuses the id, restores nothing,
@@ -320,8 +321,9 @@ class _Feed:
     def ended(self, error: Any) -> None:
         try:
             facts = capture._error_facts(error) if error is not None else {}
-            code = facts.get("error_code")
-            self._store.end(STOP_REASONS.get(code, "stream_error"), by="stream", code=code, domain=facts.get("error_domain"))
+            code, domain = facts.get("error_code"), facts.get("error_domain")
+            reason = STOP_REASONS.get(code, "stream_error") if domain == _SCSTREAM_DOMAIN else "stream_error"
+            self._store.end(reason, by="stream", code=code, domain=domain)
         except BaseException as exc:  # noqa: BLE001
             self._store.note_error(exc)
             self._store.end("stream_error", by="stream")
@@ -634,6 +636,11 @@ class WindowSessions:
         window, facts, refusal = capture.select_window(rows, int(target["pid"]), want)
         if refusal:
             return {"ok": False, "app": target, **refusal}
+        listed = self._listed(facts["window_id"], target["pid"])
+        if listed is not True:
+            reason = "window_not_found" if listed is False else "window_lookup_unavailable"
+            return _refusal(reason, "WindowServer did not confirm this window for the selected process; "
+                            "no capture started", app=target, window=facts)
         content_filter = bridge.content_filter(window)
         width_pt, height_pt, scale = bridge.content_size(content_filter)
         width, height = stream_size(*capture.pixel_size(width_pt, height_pt, scale))
@@ -645,12 +652,10 @@ class WindowSessions:
         problem = bridge.add_output(stream, sink)
         if problem:  # nothing was started: the objects are simply let go
             return _refusal("capture_failed", problem, stage="add_output", app=target, window=facts)
-        # Where the window server lists the window now, its later absence is evidence that the window is gone.
         session = self._session = {
             "app": target, "window": facts, "store": store, "stream": stream, "start": None, "stopped": None,
             "native": (sink, content_filter, config, window),  # kept alive until the stream is known not to run
-            "listed_at_begin": False}
-        session["listed_at_begin"] = self._listed(session) is True
+        }
 
         def start(handler: Callable[[Any, Any], None]) -> None:
             def answered(error: Any) -> None:
@@ -672,7 +677,7 @@ class WindowSessions:
                     "cleanup": self._end(session, "released", STOP_TIMEOUT_MS)}
         return {"ok": True, "state": "live", "backend": "ScreenCaptureKit", "app": target, "window": facts,
                 "stream": applied, "point_pixel_scale": scale, "start_ms": round((clock() - started) * 1000, 1),
-                "window_gone_check": "window_server" if session["listed_at_begin"] else "unavailable",
+                "window_gone_check": "window_server",
                 "mapped_input_available": False, "note": _NOTE}
 
     # -- frame --------------------------------------------------------------------------------------------------
@@ -689,7 +694,6 @@ class WindowSessions:
         waited = clock()
         floor = spec["after_seq"] or 0
         deadline = waited + spec["wait_ms"] / 1000
-        watchable = session["listed_at_begin"]  # the begin lookup answered: its absence is evidence
         gone: dict[str, Any] | None = None  # this call's own window_gone proof, with its native-stop witness
         lookup_unknown = False
 
@@ -697,20 +701,18 @@ class WindowSessions:
             with store.cond:
                 return store.stop is not None or (store.frame is not None and store.frame["seq"] > floor)
 
-        while watchable:
+        while True:
             # A long pending request must not stay blind to a destroyed target: every bounded slice of the wait
             # is followed by one window-server look, and proven destruction ends the wait and the stream early.
             store.wait(floor, min(deadline, clock() + _LOOKUP_SLICE_S), pump=bridge.pump, clock=clock)
             if settled() or clock() >= deadline:
                 break
-            if self._listed(session) is False:
+            if self._listed(*self._ids(session)) is False:
                 gone = self._gone(session)
                 break
             # a mid-wait look without an answer is unknown, not absence: keep waiting, the final look decides
-        if not watchable:
-            store.wait(floor, deadline, pump=bridge.pump, clock=clock)
-        if gone is None and watchable and store.stop is None:
-            listed = self._listed(session)
+        if gone is None and store.stop is None:
+            listed = self._listed(*self._ids(session))
             if listed is False:
                 # The window server's "no such window for this process" is the one destruction proof used here, and
                 # it is independent of the stream's delivery: a hidden, occluded, blank or inactive window stays
@@ -818,13 +820,12 @@ class WindowSessions:
         A session whose window the window server no longer lists is ended exactly as the ``frame`` call that would
         prove it ends it: delivery closes and the native stream is asked to stop once, so proven destruction does
         not keep capturing between calls or after the last one. Nothing runs — and nothing native is touched — when
-        no session is held, when its delivery already ended, or when its window was not listed at ``begin`` (that
-        lookup is then not authoritative). A lookup without an answer is unknown, not absence: the session is left
-        alone and a later moment looks again. An unconfirmed stop is not retried here; ``release`` is that door."""
+        no session is held or its delivery already ended. A lookup without an answer is unknown, not absence:
+        a later idle check looks again. Only an explicit ``release`` retries an unconfirmed stop."""
         session = self._session
-        if session is None or session["store"].stop is not None or not session["listed_at_begin"]:
+        if session is None or session["store"].stop is not None:
             return
-        if self._listed(session) is False:
+        if self._listed(*self._ids(session)) is False:
             self._gone(session)
 
     def _gone(self, session: dict[str, Any]) -> dict[str, Any]:
@@ -911,10 +912,10 @@ class WindowSessions:
     def _ids(session: dict[str, Any]) -> tuple[int, int]:
         return int(session["window"]["window_id"]), int(session["app"]["pid"])
 
-    def _listed(self, session: dict[str, Any]) -> bool | None:
-        """``StreamBridge.window_listed`` for the session's window; a lookup that failed is no answer."""
+    def _listed(self, window_id: int, pid: int) -> bool | None:
+        """Whether WindowServer lists this exact window and owner. A failed lookup gives no answer."""
         try:
-            return self._bridge.window_listed(*self._ids(session))
+            return self._bridge.window_listed(window_id, pid)
         except Exception:  # noqa: BLE001
             return None
 
