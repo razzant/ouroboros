@@ -2858,7 +2858,7 @@ export function createChatInstance({
     function acceptRecentWindow(data, messages) {
         if (data.recentVersion <= recentApplied) return false;
         recentApplied = data.recentVersion;
-        const whole = catchUp.confirm(data);
+        const whole = catchUp.confirmWindow(data);
         preview.save(messages, data);
         // The newest admitted window (↓ too) owns the failure note.
         historyControls.endRecent(whole ? null : new Error('Some saved history could not be loaded.'), Boolean(data.page_cursor));

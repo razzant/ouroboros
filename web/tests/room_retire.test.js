@@ -323,7 +323,7 @@ test('a return\'s read is the one ↓ waits for while it is out; an earlier read
 
 test('catch-up retry requires an attempted unconfirmed read, not a bare absence', () => {
     const catchUp = createCatchUp(() => {});
-    catchUp.confirm({ recentVersion: 1 });
+    catchUp.confirmWindow({ recentVersion: 1 });
     catchUp.cancel(1);
     assert.equal(catchUp.owed, true);
     assert.equal(catchUp.retry, false);
@@ -332,16 +332,16 @@ test('catch-up retry requires an attempted unconfirmed read, not a bare absence'
     assert.equal(catchUp.retry, false, 'a pending attempt is not a failure');
     catchUp.cancel(1);
     assert.equal(catchUp.retry, true, 'a started catch-up interrupted by disconnect is retryable');
-    catchUp.confirm({ recentVersion: 2 });
+    catchUp.confirmWindow({ recentVersion: 2 });
     assert.equal(catchUp.retry, false);
     catchUp.cancel(3);
-    catchUp.confirm({ recentVersion: 3 });
+    catchUp.confirmWindow({ recentVersion: 3 });
     assert.equal(catchUp.retry, true, 'a response begun before the latest absence confirms nothing');
-    catchUp.confirm({ recentVersion: 4 });
+    catchUp.confirmWindow({ recentVersion: 4 });
     catchUp.begin(() => true, read, 4);
     catchUp.end(read);
     assert.equal(catchUp.retry, true, 'a completed catch-up without confirmation failed');
-    catchUp.confirm({ recentVersion: 5 });
+    catchUp.confirmWindow({ recentVersion: 5 });
     assert.equal(catchUp.retry, false);
 });
 
@@ -350,41 +350,41 @@ test('catch-up is owed from absence through failure, and only a read begun after
     assert.equal(catchUp.owed, false);
     catchUp.cancel(5);
     assert.equal(catchUp.owed, true, 'before begin, the retained window is already unconfirmed');
-    catchUp.confirm({ recentVersion: 5 });
+    catchUp.confirmWindow({ recentVersion: 5 });
     assert.equal(catchUp.owed, true, 'an interrupted read may still return, but predates the absence');
     const read = Promise.resolve();
     catchUp.begin(() => true, read, 5);
     catchUp.end(read);
     assert.equal(catchUp.owed, true, 'settled, including failure, is not confirmation');
-    catchUp.confirm({ recentVersion: 6 });
+    catchUp.confirmWindow({ recentVersion: 6 });
     assert.equal(catchUp.owed, false);
     catchUp.cancel(7);
     catchUp.end(read);
-    catchUp.confirm({ recentVersion: 6 });
+    catchUp.confirmWindow({ recentVersion: 6 });
     assert.equal(catchUp.owed, true, 'a repeated disconnect cannot inherit an earlier success');
-    catchUp.confirm({ recentVersion: 8 });
+    catchUp.confirmWindow({ recentVersion: 8 });
     assert.equal(catchUp.owed, false);
 });
 
 test('a newest read that failed part-way discharges no absence; one bounded only by its page does', () => {
     const catchUp = createCatchUp(() => {});
     catchUp.cancel(5);
-    catchUp.confirm({ recentVersion: 6, window: { complete: false, truncated_by: ['quota', 'chat_projection_failed'] } });
+    catchUp.confirmWindow({ recentVersion: 6, window: { complete: false, truncated_by: ['quota', 'chat_projection_failed'] } });
     assert.equal(catchUp.owed, true, 'the rows after a projection fault are missing: this is not the present');
-    catchUp.confirm({ recentVersion: 7, window: { complete: false, truncated_by: ['progress_projection_failed'] } });
-    catchUp.confirm({ recentVersion: 8, reason_code: 'history_source_unavailable', window: { complete: false } });
+    catchUp.confirmWindow({ recentVersion: 7, window: { complete: false, truncated_by: ['progress_projection_failed'] } });
+    catchUp.confirmWindow({ recentVersion: 8, reason_code: 'history_source_unavailable', window: { complete: false } });
     assert.equal(catchUp.owed, true);
-    catchUp.confirm({ recentVersion: 9, window: { complete: false, truncated_by: ['quota'] } });
+    catchUp.confirmWindow({ recentVersion: 9, window: { complete: false, truncated_by: ['quota'] } });
     assert.equal(catchUp.owed, false, 'a whole read bounded by its page is current');
 });
 
 test('a partial newest read owes repair even without an absence; a later whole read settles it', () => {
     const catchUp = createCatchUp(() => {});
-    assert.equal(catchUp.confirm({ recentVersion: 1, window: { truncated_by: ['quota', 'chat_projection_failed'] } }), false);
+    assert.equal(catchUp.confirmWindow({ recentVersion: 1, window: { truncated_by: ['quota', 'chat_projection_failed'] } }), false);
     assert.equal(catchUp.owed, true, 'partial data must not become a reusable present');
-    catchUp.confirm({ recentVersion: 1 });
+    catchUp.confirmWindow({ recentVersion: 1 });
     assert.equal(catchUp.owed, true, 'only a newer read can repair it');
-    assert.equal(catchUp.confirm({ recentVersion: 2, window: { truncated_by: ['quota'] } }), true);
+    assert.equal(catchUp.confirmWindow({ recentVersion: 2, window: { truncated_by: ['quota'] } }), true);
     assert.equal(catchUp.owed, false);
 });
 
