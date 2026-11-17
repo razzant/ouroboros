@@ -998,7 +998,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``project_facts.project_workpad_history_path``, written by ``memory_texts``); its own row beside the project rows.
 # 471 -> 472 (W1): the wake reader names the existing memory/knowledge_history.jsonl directly;
 # its inventory row already covers it. No new stored path.
-EXPECTED_SCAN_PATHS = 472
+# 472 -> 473: the words a place change removes or replaces, ``state/place_words_history.jsonl``
+# (``ouroboros/place_words_history.py``, kept before ``state/places.json`` is written); its own row beside it.
+EXPECTED_SCAN_PATHS = 473
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

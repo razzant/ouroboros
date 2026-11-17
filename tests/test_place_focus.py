@@ -225,10 +225,10 @@ def test_circle_words_and_placements_follow_the_note_rule_and_the_turns_act(focu
     assert call(door, "set_circle", place_id=place.place_id, circle_id=owned["circle_id"])["place"]["circle"][
         "placed_by"] == "owner"
     assert call(door, "inspect", place_id=place.place_id)["circle"]["standing_delegation"] is True
-    described = call(door, "set_description", place_id=place.place_id, description="Чат друзей")["place"]
-    assert described["description"]["author"] == "owner"
     assert call(focused, "set_description", place_id=place.place_id, description="Друзья и быт")["place"][
         "description"]["author"] == "ouroboros"
+    described = call(door, "set_description", place_id=place.place_id, description="Чат друзей")["place"]
+    assert described["description"]["author"] == "owner"  # my human may replace my line
     listed = call(focused, "list")
     assert [c["name"] for c in listed["circles"]] == ["Друзья", "Работа"]
     assert listed["places"][0]["circle"] == {key: listed["places"][0]["circle"][key] for key in (
@@ -238,6 +238,45 @@ def test_circle_words_and_placements_follow_the_note_rule_and_the_turns_act(focu
     gone = call(focused, "delete_circle", circle_id=composed["circle_id"])
     assert gone["circle"]["text"] == "Отвечай коротко и по делу." and gone["detached"] == []
     assert p.get_place(root, place.place_id).state == place.state  # no circle act ever switches a place
+
+
+def test_my_humans_words_leave_a_place_only_by_their_act_and_inspect_keeps_them(focus, monkeypatch):
+    """14.11: a wake removed my human's note. In a place focus their note and their circle's words leave only when the
+    waking message is their own words now (``focus_owner_now``, read again at the act, so a later confirmation
+    counts); another speaker is refused with who may change them, and nothing changes. My own note stays mine, and an
+    owner-door turn may clear their words with words I compose. Inspect shows each word that left, exactly."""
+    from ouroboros.tools.presence import _configure_presence
+    root, place, _admission, _event = focus
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _r: [])
+    door = SimpleNamespace(task_metadata={"origin_message_ref": {"client_message_id": "owner1", "chat_id": 1}},
+                           is_direct_chat=True, task_id="t1", _owner_directives=[
+                               {"source": "initial_user", "content": "Тут без работы.\nДрузья и быт."}])
+    focused = SimpleNamespace(task_metadata=task_for(focus)["metadata"], is_direct_chat=True, task_id="t2",
+                              drive_root=root, _owner_directives=[])
+    call = lambda ctx, action, **kw: _configure_presence(ctx, action, kw.pop("place_id", place.place_id), **kw)
+    circle = json.loads(call(door, "create_circle", name="Друзья", text="Друзья и быт."))["circle"]
+    assert json.loads(call(door, "set_circle", circle_id=circle["circle_id"]))["ok"]
+    assert json.loads(call(door, "add_note", text="Тут без работы."))["ok"]
+    assert json.loads(call(focused, "add_note", text="Мой конспект."))["ok"]
+    owners, mine = (note.note_id for note in p.get_place(root, place.place_id).notes)
+    for action, values in (("remove_note", {"note_id": owners}), ("edit_circle", {"circle_id": circle["circle_id"],
+                                                                                  "text": "x"})):
+        refused = call(focused, action, **values)  # the speaker here is not my human
+        assert refused.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED: place_owner_words_owner_only"), refused
+        assert "by a word in Main, or speaking in that place themselves" in refused
+    assert [note.author for note in p.get_place(root, place.place_id).notes] == ["owner", "ouroboros"]
+    assert p.place_records(root).circle(circle["circle_id"])["text"] == "Друзья и быт."
+    assert json.loads(call(focused, "remove_note", note_id=mine))["ok"]  # my own note stays mine
+    p.edit_place(root, place.place_id, "confirm_owner_account", author="owner", platform_actor_id="person")
+    assert json.loads(call(focused, "remove_note", note_id=owners))["ok"]  # now their own words woke this focus
+    assert json.loads(call(door, "edit_circle", circle_id=circle["circle_id"], text=""))["circle"]["text"] == ""
+    earlier = json.loads(call(focused, "inspect"))["earlier"]
+    assert [(word["action"], word["text"], word["author"], word["changed_by"]) for word in earlier] == [
+        ("edit_circle", "Друзья и быт.", "owner", "owner"), ("remove_note", "Тут без работы.", "owner", "ouroboros"),
+        ("remove_note", "Мой конспект.", "ouroboros", "ouroboros")]
+    assert earlier[1]["owner_speaks_in"] == place.place_id and earlier[1]["writer"]["focus"]["role"] == "presence"
+    assert earlier[0]["writer"]["focus"]["role"] == "main" and "owner_speaks_in" not in earlier[2]
 
 
 def test_author_lending_and_stop(focus):
