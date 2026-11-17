@@ -9,6 +9,7 @@ import asyncio
 import base64
 import contextlib
 import datetime
+import gc
 import ipaddress
 import json
 import logging
@@ -277,8 +278,13 @@ def test_all_telegram_consumers_succeed_through_real_transport(tmp_path, monkeyp
         finally:
             proxy.close()
             origin.close()
-            await proxy.wait_closed()
-            await origin.wait_closed()
+            gc.collect()  # from CPython 3.12 a dropped client's sockets can wait for garbage collection
+            try:  # from CPython 3.12.1 Server.wait_closed also waits for every connection still open
+                await asyncio.wait_for(asyncio.gather(proxy.wait_closed(), origin.wait_closed()), 10)
+            except asyncio.TimeoutError:
+                stuck = {task.get_name(): [f"{frame.f_code.co_filename}:{frame.f_lineno}" for frame in task.get_stack()]
+                         for task in asyncio.all_tasks() if task is not asyncio.current_task()}
+                raise AssertionError(f"the loopback servers still hold connections: {stuck}") from None
             if bot.tasks:
                 await asyncio.wait_for(asyncio.gather(*bot.tasks), 5)
         assert not bot.errors
