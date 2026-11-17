@@ -809,3 +809,46 @@ if __name__ == "__main__":
     if "--write" not in sys.argv[1:]:
         raise SystemExit("usage: python tests/test_llm_provider_golden.py --write")
     _write_golden()
+
+
+# Host-only fields never reach a provider (review 8, Fable): each key in ``HOST_ONLY_MESSAGE_KEYS`` is placed where the
+# host carries it, on a message row or inside a content block, and every send path's wire is read for it.
+_HOST_ROW_KEYS = frozenset({
+    "_host_context_kind", "_host_text_sha256", "_tool_result_record", "_review_history_source", "_review_context_index",
+    "_stable_prefix_blocks", "_context_capsule", "acceptance_observation", "_acceptance_observation", "review_feedback",
+    "_review_image_id", "_display", "cache_control",
+})
+from ouroboros.llm_messages import HOST_ONLY_MESSAGE_KEYS  # noqa: E402  (beside the test it parametrizes)
+
+_SEND_PATH_CASES = [case for case in _CASES if case["id"] in {
+    "openrouter.dispatch.happy_path", "openai.dispatch.happy_path", "compatible.dispatch.happy_path",
+    "local.dispatch.tool_call_from_text", "anthropic.dispatch.happy_path", "gigachat.dispatch.happy_path",
+}]
+
+
+def _carrying(key: str, base: list) -> list:
+    marker = {"text": "HOST-ONLY-MARK"}
+    if key in _HOST_ROW_KEYS:
+        return [*base, {"role": "assistant", "content": "An earlier answer.", key: marker},
+                {"role": "user", "content": "Go on."}]
+    return [*base, {"role": "user", "content": [{"type": "text", "text": "An earlier block.", key: marker}]}]
+
+
+@pytest.mark.parametrize("key", sorted(HOST_ONLY_MESSAGE_KEYS))
+def test_no_send_path_carries_a_host_only_field(key):
+    from ouroboros import llm_claudexor
+
+    assert len(_SEND_PATH_CASES) == 6
+    wires = {}
+    for case in _SEND_PATH_CASES:
+        spec = copy.deepcopy(case["spec"])
+        spec["call"]["kwargs"]["messages"] = _carrying(key, spec["call"]["kwargs"]["messages"])
+        observed = _observe(spec)
+        assert observed.get("sends") and "raised" not in observed, case["id"]
+        wires[case["id"]] = json.dumps(observed["sends"], ensure_ascii=False)
+    claudexor = _carrying(key, [{"role": "user", "content": "Hi."}])
+    wires["claudexor"] = json.dumps(llm_claudexor._request(
+        {"source": "codex", "resolved_model": "fixture"}, claudexor, None, {}))
+    for path, wire in wires.items():
+        assert "HOST-ONLY-MARK" not in wire, (key, path)
+        assert key == "cache_control" or f'"{key}"' not in wire, (key, path)  # a cache mark is translated, not carried

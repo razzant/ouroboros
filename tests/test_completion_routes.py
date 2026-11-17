@@ -49,18 +49,33 @@ def test_presence_speaker_and_disabled_tool_keep_authority(tmp_path):
     assert schemas == []
 
 
-def test_nano_materializes_permitted_completion_only_on_hold(tmp_path):
+def test_nano_starts_with_its_completion_schema_and_the_door_changes_nothing(tmp_path):
     from ouroboros.tool_policy import initial_tool_schemas
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.messages = []
     schemas = initial_tool_schemas(registry, context_mode='nano')
-    assert not any(row['function']['name'] == 'finish_task' for row in schemas)
+    assert any(row['function']['name'] == 'finish_task' for row in schemas)  # resident from the first request
     original = copy.deepcopy(schemas)
     assert completion_schema(registry, schemas) == 'finish_task'
-    assert schemas[:-1] == original and schemas[-1]['function']['name'] == 'finish_task'
-    assert registry._ctx.messages[-1]['role'] == 'user'
-    completion_schema(registry, schemas)
-    assert len(schemas) == len(original) + 1
+    assert schemas == original and registry._ctx.messages == []  # no materialization, no prefix-change notice
+
+
+def test_a_pre_upgrade_presence_registry_starts_with_its_own_completion_door(tmp_path):
+    """A running pre-upgrade Presence registry finishes through ``presence_finish``; it is resident from
+    the first Nano request, so the first hold loads nothing and the schema prefix a local server caches never
+    changes."""
+    from ouroboros.tool_policy import initial_tool_schemas
+    from tests.presence_legacy_helpers import legacy_registry
+
+    registry = legacy_registry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_contract = {'capability_ceiling': presence_ceiling_payload(_admission().capability_ceiling)}
+    registry._ctx.task_metadata = {'presence': {'binding_id': 'a' * 32}}
+    registry._ctx.messages = []
+    schemas = initial_tool_schemas(registry, context_mode='nano')
+    assert [row['function']['name'] for row in schemas] == ['presence_finish']
+    original = copy.deepcopy(schemas)
+    assert completion_schema(registry, schemas) == 'presence_finish'
+    assert schemas == original and registry._ctx.messages == []  # no "The schema prefix changed" notice
 
 
 def test_cold_restore_discards_old_repair_budget_and_retains_exact_selected_sources(tmp_path):

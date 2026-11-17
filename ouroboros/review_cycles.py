@@ -9,7 +9,8 @@ shipped default with one loud log line. It is a string on purpose:
 default would silently swallow ``"unlimited"``. ``review_max_cycles()`` returns
 ``Optional[int]`` — ``None`` means unlimited.
 
-Per-gate meaning of the ONE number — on every gate it counts PAID cycles; a
+Per-gate meaning of the ONE number — on every gate it counts PAID cycles (and, on
+the result gate, the free rewording reminders too); a
 usable verdict on identical material is never re-reviewed for pay unless the
 mind sends it with answers, while an explicit identical request after a settled
 wave formed no verdict is a new paid wave (running or unknown work is collected,
@@ -20,7 +21,10 @@ never sent again):
   budget gate and deadline bound it; nothing here counts plan asks;
 * result review (``review_change(subject="result")``) — paid result waves per
   ROOT task, counted apart from the task's change-review waves (its own
-  ``tool_name`` on the attempt rows), so change reviews never spend it;
+  ``tool_name`` on the attempt rows), so change reviews never spend it; the same
+  number bounds the free reminders asking the author to reword a reviewed answer
+  (``tools/review_result._revised``, counted by its saved questions), while an
+  unread outcome and newer owner words still reach the author regardless;
 * commit gate — paid review-wave cycles per ROOT task (the whole task tree
   shares one ceiling; a manual session is its own task; a follow-up task is a
   fresh root). The paid fact is recorded on the attempt row AT DISPATCH and

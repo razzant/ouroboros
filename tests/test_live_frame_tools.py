@@ -29,7 +29,7 @@ def test_first_nano_manifest_includes_frame_and_feature_tools_and_prices_them(ho
         names = [row['function']['name'] for row in host.schemas]
         assert set(INITIAL_TOOLS) | {'end_call', 'set_call_languages', 'attend'} <= set(names)
         assert len(names) == 9 and len(set(names)) == 9
-        base = initial_tool_schemas(host.tools, context_mode='nano')
+        base = initial_tool_schemas(host.tools, context_mode='nano', standing=False)
         before = [*base, *(s for s in host.schemas if s['function']['name'] in host.call_tools)]
         added = tool_schema_tokens(host.schemas) - tool_schema_tokens(before)
         record_property('schema_tokens_before', tool_schema_tokens(before))

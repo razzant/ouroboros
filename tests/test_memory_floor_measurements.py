@@ -144,19 +144,31 @@ def test_a_start_s_request_is_serialized_once_per_form_at_every_row_count(tmp_pa
 
 
 def test_a_start_s_request_forms_do_not_follow_the_size_of_its_assignment(tmp_path, monkeypatch):
-    """Two assignments of different sizes walk the same frames: the same mode, the same number of request forms, each
-    serialized once. A form is a frame's shape, not a probe of the walk."""
+    """Assignment size does not multiply frame serializations, including a physical refusal.
+
+    The 50k assignment no longer fits beside Nano's standing read_file schema. Keep its full bytes and the
+    92k window: the refusal is honest, and its walk still serializes each frame only once.
+    """
     seen = {}
     for size in (5_000, 50_000):
         root = tmp_path / str(size)
         root.mkdir()
         captured = dataclasses.replace(scale.core(root), user_content_json=json.dumps('Assignment line. ' * (size // 17)))
         with measured_sections():
-            plan = scale.build(root, monkeypatch, captured=captured)
+            if size == 50_000:
+                with pytest.raises(cf.MinimumViewUnfit) as caught:
+                    scale.build(root, monkeypatch, captured=captured)
+                refusal = caught.value
+                assert refusal.physical and refusal.window_tokens == 92000
+                assert refusal.estimated_input_tokens + refusal.response_reserve_tokens > refusal.window_tokens
+            else:
+                plan = scale.build(root, monkeypatch, captured=captured)
+                assert plan.initial_mode == 'nano'
             work = section_spans()['work']
         assert work['request_serializations'] == work['request_forms']
-        seen[size] = (plan.initial_mode, work['request_serializations'])
-    assert seen[5_000] == seen[50_000], seen
+        seen[size] = work['request_serializations']
+    # A refusal exits before the accepted projections are built; it must do no more serializations.
+    assert seen[50_000] <= seen[5_000], seen
 
 
 def _drawn_prices(monkeypatch):

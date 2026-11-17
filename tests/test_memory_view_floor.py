@@ -359,7 +359,9 @@ def test_a_selection_keeps_the_reader_path_of_the_request_that_follows_it(monkey
                           False, memory_view_json=mv.snapshot_json(snap))
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     schemas = [{"type": "function", "function": {"name": name, "description": name, "parameters": {"type": "object"}}}
-               for name in ("compact_context", "enable_tools", "list_available_tools", "memory_read", "read_file")]
+               for name in ("compact_context", "enable_tools", "list_available_tools", "read_file")]
+    # Nano's standing set holds memory_read wherever a request carries it; this request leaves it out (a route's
+    # schema ceiling, a contract), which is when the floor names the reader's path.
 
     def start(tools):
         return cf.build_context_fit_plan(None, core, {"id": "nano-room"}, preferred_mode="nano", tool_schemas=tools,

@@ -105,12 +105,16 @@ def turn(tmp_path, monkeypatch):
     return runner(tmp_path, monkeypatch)
 
 
-def hold_first_delivery(monkeypatch):
-    """A result-review double that holds the first delivery once, naming no cause."""
+def hold_first_delivery(monkeypatch, *, cause="blocking_refusal"):
+    """A result-review double that holds the first delivery once. By default a blocking hold, a debt that arms
+    selection; another ``cause`` is an outcome shown once, a one-shot fact (``delivery_facts``)."""
     seen = []
 
-    def review(_ctx, content, _trace, _hold):
+    def review(ctx, content, _trace, hold):
         seen.append(content)
+        if len(seen) == 1:
+            ctx._completion_hold_cause = cause
+            hold(f"[Result review] {cause}.")
         return len(seen) == 1
 
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review)
@@ -289,7 +293,7 @@ def test_a_later_hold_names_the_current_candidate_never_an_earlier_held_response
 
     assert text == interim and seen == ["Report", interim] and len(turn.calls) == 4
     assert [facts(row) for row in holds(turn.root)] == [
-        (1, "prose", "result_review", None, sha("Report")),
+        (1, "prose", "result_review", "blocking_refusal", sha("Report")),
         (2, "prose", "selection_required", None, sha("Report")),
         (3, "selection", "selection_refused", "selection_unavailable", sha("Report")),
     ]
@@ -589,9 +593,9 @@ def test_a_split_child_hold_survives_its_drive_removal_in_both_canonical_readers
 @pytest.mark.parametrize("failure", ["emitter_raises", "events_log_unwritable"])
 def test_an_unrecorded_hold_plays_out_exactly_as_a_recorded_one(tmp_path, monkeypatch, caplog, failure):
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    # The pre-delivery notice holds the draft (a written result nothing examined); interim prose is then no
-    # selection; a stale selector is refused.
-    script = [write_round(), {"content": "Draft"}, {"content": "Interim."}, finish(answer_sha256="0" * 64),
+    # The pre-delivery notice holds the draft (a written result nothing examined); a stale selector is refused,
+    # which arms selection, so interim prose is then no selection.
+    script = [write_round(), {"content": "Draft"}, finish(answer_sha256="0" * 64), {"content": "Interim."},
               finish("Final")]
     recorded_root, failing_root = tmp_path / "recorded", tmp_path / "failing"
 
@@ -602,7 +606,7 @@ def test_an_unrecorded_hold_plays_out_exactly_as_a_recorded_one(tmp_path, monkey
     recorded.registry.override_handler("write_file", written)
     expected = recorded.run(list(script))
     assert [row["reason"] for row in holds(recorded_root)] == [
-        "finalization_nudge", "selection_required", "selection_refused"]
+        "finalization_nudge", "selection_refused", "selection_required"]
 
     if failure == "emitter_raises":
         real = loop._emit_checkpoint_event
@@ -891,3 +895,261 @@ def test_a_real_result_review_hold_reaches_the_row_through_the_real_loop(tmp_pat
     [row] = holds(ctx.drive_root)
     assert facts(row) == (1, "prose", "result_review", "findings", sha(answer))
     assert getattr(ctx, "_completion_hold_cause", "") == "", "the delivery owner read the cause once"
+
+
+# Prose completion after one-shot delivery facts (Nano regression).
+def _repeating(text, times=6):
+    return [{"role": "assistant", "content": text} for _ in range(times)]
+
+
+def test_prose_without_finish_task_ends_a_turn_that_did_no_reviewable_work(turn):
+    text, _usage, _trace = turn.run([act("list_files", path="."), *_repeating("Two files are there.")])
+    assert text == "Two files are there." and len(turn.calls) == 2
+    assert holds(turn.root) == []
+
+
+def test_a_report_repeated_after_the_pre_delivery_notice_is_delivered(turn):
+    report = "Wrote report.md: the result is 200."
+    text, _usage, _trace = turn.run([write_round(), *_repeating(report)])
+    assert text == report
+    assert len(turn.calls) == 3  # the work, the answer the notice returned, the same answer delivered
+    assert [facts(row) for row in holds(turn.root)] == [
+        (2, "prose", "finalization_nudge", "pre_delivery_notice", sha(report))]
+    assert "Your next answer is not returned for these facts." in str(turn.calls[2])
+    assert "Your next answer is delivered as written, so make it the whole answer." in str(turn.calls[2])
+    assert "You chose silence" not in str(turn.calls[2])  # a spoken answer hears nothing about silence
+    assert "No completion selection was made" not in str(turn.calls[2])  # no selection is demanded of prose
+
+
+def test_a_parent_answering_after_its_childs_result_ends_its_turn(tmp_path, monkeypatch):
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    write_task_result(tmp_path, "child1", STATUS_COMPLETED, parent_task_id="parent1", root_task_id="parent1",
+                      delegation_role="subagent", role="helper", result="29 * 31 = 899")
+    parent = runner(tmp_path, monkeypatch, task_id="parent1")
+    text, _usage, _trace = parent.run([finish("The helper returned 898."), *_repeating("The helper returned 899.")])
+    assert text.startswith("The helper returned 899.")
+    assert len(parent.calls) == 2  # the held selection with the child's result shown, then the corrected answer
+    assert [row["reason"] for row in holds(tmp_path)] == ["subagent_handoff"]
+    assert "[SUBAGENT_RESULTS" in str(parent.calls[1]) and "899" in str(parent.calls[1])
+    assert "Your next answer is delivered as written" in str(parent.calls[1])
+
+
+def _plan_gate_once(monkeypatch):
+    """A real debt's double: the plan gate holds the first answer once (an open plan item), then lets it pass."""
+    import ouroboros.loop as loop
+
+    seen = []
+
+    def gate(_content, messages, _tools, _trace, _emit):
+        seen.append(1)
+        if len(seen) == 1:
+            messages.append({"role": "user", "content": "[PLAN_GATE] An accepted plan item is still open."})
+            return True
+        return False
+
+    monkeypatch.setattr(loop, "_enforce_plan_gate", gate)
+
+
+def test_an_armed_control_episode_still_requires_a_selection(turn, monkeypatch):
+    """Owed selection stays owed: once a real debt (here the plan gate) armed control, prose is held as before."""
+    _plan_gate_once(monkeypatch)
+    text, _usage, _trace = turn.run([{"content": "Report"}, {"content": "Report again"},
+                                     finish(answer_sha256=sha("Report again"))])
+    assert text == "Report again" and len(turn.calls) == 3
+    assert [row["reason"] for row in holds(turn.root)] == ["plan_gate", "selection_required"]
+    assert "Your next answer is delivered as written" not in str(turn.calls)
+
+
+def _shown(monkeypatch):
+    """Every text the loop shows the person as an interim message (``_emit_round_progress``), in order."""
+    import ouroboros.loop as loop
+
+    shown, real = [], loop._emit_round_progress
+
+    def capture(content, msg, emit, trace):
+        if isinstance(content, str) and content.strip():  # a tool round without words shows no text
+            shown.append(content)
+        return real(content, msg, emit, trace)
+
+    monkeypatch.setattr(loop, "_emit_round_progress", capture)
+    return shown
+
+
+def test_a_short_answer_after_the_facts_does_not_hide_the_full_one(turn, monkeypatch):
+    """The model wrote a full report, the notice returned it once, the model answered "see above": the person sees
+    the report first, then the short line. The host never judges which answer is longer."""
+    shown = _shown(monkeypatch)
+    full, short = "Full report: wrote report.md, the check returned 200, all details.", "Done, see above."
+    text, _usage, _trace = turn.run([write_round(), {"content": full}, {"content": short}])
+    assert text == short and len(turn.calls) == 3
+    assert shown == [full]  # shown once, before the final
+
+
+def test_a_parent_reads_the_report_its_childs_short_final_replaced(turn, monkeypatch):
+    """Panel 7 (Opus): the room saw the report, the parent reads only the child's result. The child's result keeps the
+    displaced report apart from its final's bytes; the parent's handoff names it in one line, and the named call reads
+    it whole."""
+    import re
+
+    from ouroboros.task_finalization import build_completion_observations
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.task_status import format_subagent_absorption_message
+
+    monkeypatch.setattr("ouroboros.skill_readiness.acceptance_skill_lifecycle", lambda *_a, **_k: [])
+    full, short = "Full report: wrote report.md, the check returned 200, every detail of it.", "Done, see above."
+    text, _usage, trace = turn.run([write_round(), {"content": full}, {"content": short}])
+    assert text == short
+    child = {"id": "author-task", "budget_drive_root": str(turn.root)}
+    write_task_result(turn.root, "author-task", "completed", result=short, parent_task_id="parent-task",
+                      root_task_id="parent-task", delegation_role="subagent",
+                      completion_observations=build_completion_observations(turn.root, child, trace))
+    row = load_task_result(turn.root, "author-task")
+    assert row["result"] == short  # the final's bytes are the final's alone
+
+    handoff = format_subagent_absorption_message([row], parent_task_id="parent-task")
+    [line] = [line for line in handoff.splitlines() if "that later answers replaced" in line]
+    assert "1 answer(s)" in line and f"{len(full)} chars: get_task_result(" in line
+    call = re.search(r"get_task_result\((\{.*\})\)", line)
+    source = json.loads(turn.registry.execute("get_task_result", json.loads(call.group(1))))["completion_source"]
+    # the named call reads the displaced answer alone, as the source spells it, never the whole source
+    assert source["text"] == json.dumps(full, ensure_ascii=False)
+
+
+def test_two_one_shot_facts_in_a_row_keep_both_displaced_answers_for_the_parent(turn, monkeypatch):
+    """Review 8 (Astra, critical): a full report A, the pre-delivery notice, a red check, "the report is above" B, the
+    red-check notice, "Done" C. Each displaced answer is kept whole and in order; the parent's line names a range for
+    each, and each range reads its answer character for character."""
+    import re
+
+    from ouroboros.task_finalization import build_completion_observations
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.task_status import format_subagent_absorption_message
+
+    monkeypatch.setattr("ouroboros.skill_readiness.acceptance_skill_lifecycle", lambda *_a, **_k: [])
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
+    full = "Подробный отчёт 🐍: результаты 12345, \"кавычки\" и все данные."
+    short, final = "Отчёт приведён выше.", "Готово."
+    text, _usage, trace = turn.run([write_round(), {"content": full}, _missing(), {"content": short},
+                                    {"content": final}])
+    assert text == final and trace["displaced_answer"] == [full, short]
+    observations = build_completion_observations(turn.root, {"id": "author-task"}, trace, final_text=text)
+    write_task_result(turn.root, "author-task", "completed", result=final, parent_task_id="parent-task",
+                      root_task_id="parent-task", delegation_role="subagent", completion_observations=observations)
+    [line] = [line for line in format_subagent_absorption_message(
+        [load_task_result(turn.root, "author-task")], parent_task_id="parent-task").splitlines() if "replaced" in line]
+    calls = [json.loads(found) for found in re.findall(r"get_task_result\((\{.*?\})\)", line)]
+    read = [json.loads(json.loads(turn.registry.execute("get_task_result", call))["completion_source"]["text"])
+            for call in calls]
+    assert "2 answer(s)" in line and read == [full, short]
+
+
+def test_the_parents_line_names_three_ranges_and_an_unwritten_copy_as_unavailable():
+    from ouroboros.task_finalization import displaced_answer_note
+
+    answers = [{"chars": n, "source_range": [10 * n, 10 * n + 5]} for n in range(1, 6)]
+    stored = {"completion_observations": {"displaced_answer": {"count": 5, "answers": answers},
+              "source_status": "available", "source_ref": {"reader": {"tool": "get_task_result",
+              "arguments": {"task_id": "c", "include_completion_source": True}}}}}
+    line = displaced_answer_note(stored)
+    assert line.count("get_task_result(") == 3 and "2 more" in line and "displaced_answer.answers" in line
+    unwritten = {"completion_observations": {"displaced_answer": {"count": 5, "answers": answers},
+                 "source_status": "unavailable"}}
+    assert "5 answer(s)" in displaced_answer_note(unwritten) and "unavailable" in displaced_answer_note(unwritten)
+    assert displaced_answer_note({"completion_observations": {"source_status": "available"}}) == ""
+
+
+@pytest.mark.parametrize("second", ["same", "longer"])
+def test_a_repeated_or_extended_answer_is_shown_once(turn, monkeypatch, second):
+    shown = _shown(monkeypatch)
+    full = "Full report: wrote report.md, the check returned 200."
+    final = full if second == "same" else full + "\n\nAlso: nothing else changed."
+    text, _usage, _trace = turn.run([write_round(), {"content": full}, {"content": final}])
+    assert text == final and shown == []  # the final contains the held text: it is shown once, as the final
+
+
+def test_a_non_blocking_result_review_shown_once_does_not_hold_prose_again(turn, monkeypatch):
+    """Auto/Advisory: a result review's outcome is shown once; a model that only ever answers in prose ends its turn."""
+
+    hold_first_delivery(monkeypatch, cause="findings")
+    text, _usage, _trace = turn.run([{"content": "Report"}, *_repeating("Report")])
+    assert text == "Report" and len(turn.calls) == 2
+    assert [row["reason"] for row in holds(turn.root)] == ["result_review"]
+
+
+def test_work_after_the_facts_leaves_the_next_prose_a_fresh_answer(turn):
+    """Evidence changed after the facts (more work after the held answer): the next prose binds the new evidence
+    as a fresh answer instead of a selection only finish_task could make."""
+    report = "Wrote report.md: the result is 200."
+    text, _usage, _trace = turn.run([write_round(), {"content": report},
+                                     act("write_file", path="report.md", content="Report, checked"),
+                                     *_repeating(report)])
+    assert text == report and len(turn.calls) == 4  # work, answer (facts shown), more work, the answer delivered
+    assert [(row["reason"], row["subreason"]) for row in holds(turn.root)] == [
+        ("finalization_nudge", "pre_delivery_notice")]
+
+
+@pytest.mark.parametrize("replacement", ["short", "same", "extended"])
+def test_explicit_finish_preserves_the_report_returned_by_facts(turn, monkeypatch, replacement):
+    shown = _shown(monkeypatch)
+    full = "Full report: wrote report.md, checked 200, all details."
+    final = {"short": "Done, see above.", "same": full, "extended": full + " More detail."}[replacement]
+    text, _usage, _trace = turn.run([write_round(), {"content": full}, finish(final)])
+    assert text == final and len(turn.calls) == 3
+    assert shown == ([full] if replacement == "short" else [])
+
+
+@pytest.mark.parametrize("work_again", [False, True])
+def test_old_hash_after_work_requires_one_informed_reselection(turn, work_again):
+    report = "Wrote report.md: the result is 200."
+    script = [write_round(), {"content": report},
+              act("write_file", path="report.md", content="Result is 201"),
+              finish(answer_sha256=sha(report))]
+    if work_again:
+        script += [act("write_file", path="report.md", content="Result is 202"),
+                   finish(answer_sha256=sha(report))]
+    script += [finish(answer_sha256=sha(report))]
+    text, _usage, _trace = turn.run(script)
+    assert text == report and len(turn.calls) == len(script)
+    assert [row["reason"] for row in holds(turn.root)] == [
+        "finalization_nudge", *(["evidence_changed"] * (2 if work_again else 1))]
+    assert _trace["delivery_candidate"]["evidence_current"] is True
+    # Review 8 (GLM): the explicit final publishes "candidate", as upstream's replacement did; a restore reads it as an
+    # answer to deliver (owner_wait), while "selected" would arm control and ask the author to select again.
+    assert _trace["delivery_candidate"]["finalization_control"] == "candidate"
+
+
+def test_child_completion_is_refreshed_while_selection_is_owed(tmp_path, monkeypatch):
+    """A parent must see a finished child even when its prose cannot finish the turn."""
+    from ouroboros.task_results import write_task_result
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    write_task_result(tmp_path, "child1", "running", parent_task_id="parent1", root_task_id="parent1",
+                      delegation_role="subagent", role="helper")
+    parent = runner(tmp_path, monkeypatch, task_id="parent1")
+    # The first answer shows the running child; a later real debt arms selection.
+    hold_first_delivery(monkeypatch)
+
+    def child_finishes():
+        assert "STILL RUNNING" in str(parent.calls[-1])
+        assert parent.registry._ctx._delivery_candidate.control_episode_seen
+        write_task_result(tmp_path, "child1", "completed", result="child result: 899")
+        return {"role": "assistant", "content": "The child is still running."}
+
+    def observe_refresh():
+        assert "child result: 899" in str(parent.calls[-1])
+        assert parent.registry._ctx._delivery_control_required
+        assert parent.registry._ctx._delivery_candidate.control_episode_seen
+        # Unchanged child facts do not return a second time or discharge selection.
+        return {"role": "assistant", "content": "I have read the child's result."}
+
+    text, _usage, _trace = parent.run([
+        finish("Waiting for my helper."), {"role": "assistant", "content": "Still waiting."},
+        child_finishes, observe_refresh, finish("The helper returned 899."),
+    ])
+    assert text.startswith("The helper returned 899.") and len(parent.calls) == 5
+    assert [row["reason"] for row in holds(tmp_path)] == [
+        "subagent_handoff", "result_review", "subagent_handoff", "selection_required"]
+    assert sum("child result: 899" in str(row.get("content", ""))
+               for row in parent.calls[-1]) == 1

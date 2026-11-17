@@ -923,6 +923,8 @@ def _prepare_post_tool_budget_context(
     unreadable fingerprint is UNKNOWN, so a retained answer is never lost here.
     """
 
+    from ouroboros.delivery_facts import evidence_notice_control
+
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
     if isinstance(candidate, _loop().DeliveryCandidate):
         hold_control = (
@@ -933,10 +935,9 @@ def _prepare_post_tool_budget_context(
         evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(
             tools, limit_ctx, llm_trace,
         )
-        if (
-            candidate.evidence_revision != evidence_revision
-            or candidate.evidence_fingerprint != evidence_fingerprint
-        ):
+        if candidate.stale(evidence_revision, evidence_fingerprint) and not candidate.owes_no_selection and (
+            candidate.finalization_control != evidence_notice_control(evidence_revision, evidence_fingerprint)
+        ):  # fresh prose binds new evidence; an unchanged shown notice permits explicit reselection
             _loop()._arm_delivery_control(
                 tools,
                 limit_ctx,
