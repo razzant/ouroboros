@@ -304,7 +304,7 @@
       },
       "deepseek": {
         "label": "DeepSeek",
-        "modelCopy": "DeepSeek-only setup detected. These defaults use deepseek-v4-pro for main work and deepseek-v4-flash for the light lane.",
+        "modelCopy": "DeepSeek-only setup detected. These defaults use deepseek-v4-pro for main work and deepseek-flash for the light lane.",
         "providerCopy": "DeepSeek is present, so the next step prefills DeepSeek's own model ids."
       },
       "direct-multi": {
@@ -450,7 +450,7 @@
     "connections": [],
     "consciousnessModel": "",
     "deepseekKey": "",
-    "fallbackModel": "openai/gpt-5.6-luna",
+    "fallbackModel": "openai/gpt-6.1-terra",
     "gigachatCredentials": "",
     "gigachatPassword": "",
     "gigachatUser": "",
@@ -463,7 +463,7 @@
     "localPreset": "",
     "localRoutingMode": "cloud",
     "localSource": "",
-    "mainModel": "google/gemini-3.8-flash",
+    "mainModel": "google/gemini-4-hydrogen",
     "minimaxKey": "",
     "minimaxRegion": "",
     "modelAccounts": {},
@@ -509,8 +509,8 @@
     "anthropic": {
       "consciousness": "",
       "deep_self_review": "anthropic::claude-opus-5-5",
-      "fallback": "anthropic::claude-sonnet-5",
-      "light": "anthropic::claude-sonnet-5",
+      "fallback": "anthropic::claude-sonnet-5-5",
+      "light": "anthropic::claude-sonnet-5-5",
       "main": "anthropic::claude-opus-5-5",
       "safety": "",
       "vision": ""
@@ -526,8 +526,8 @@
     "deepseek": {
       "consciousness": "",
       "deep_self_review": "deepseek::deepseek-v4-pro",
-      "fallback": "deepseek::deepseek-v4-flash",
-      "light": "deepseek::deepseek-v4-flash",
+      "fallback": "deepseek::deepseek-flash",
+      "light": "deepseek::deepseek-flash",
       "main": "deepseek::deepseek-v4-pro",
       "safety": "",
       "vision": ""
@@ -552,7 +552,7 @@
       "consciousness": "",
       "fallback": "",
       "light": "",
-      "main": "google/gemini-3.8-flash",
+      "main": "google/gemini-4-hydrogen",
       "safety": "",
       "vision": ""
     },
@@ -583,9 +583,9 @@
     },
     "openrouter": {
       "consciousness": "",
-      "fallback": "openai/gpt-5.6-luna",
+      "fallback": "openai/gpt-6.1-terra",
       "light": "openai/gpt-6-luna",
-      "main": "google/gemini-3.8-flash",
+      "main": "google/gemini-4-hydrogen",
       "safety": "",
       "vision": ""
     },
@@ -599,10 +599,12 @@
     }
   },
   "modelSuggestions": [
+    "google/gemini-4-hydrogen",
     "google/gemini-3.8-flash",
     "x-ai/grok-4.6",
     "openai/gpt-6.1-sol",
     "openai/gpt-6-luna",
+    "openai/gpt-6.1-terra",
     "anthropic/claude-opus-5.5",
     "openai/gpt-5.6-terra",
     "openai/gpt-5.6-sol",
@@ -612,12 +614,14 @@
     "openai::gpt-5.6-luna",
     "anthropic/claude-sonnet-5",
     "anthropic/claude-opus-5",
+    "anthropic::claude-sonnet-5-5",
     "anthropic::claude-sonnet-5",
     "anthropic::claude-opus-5-5",
     "anthropic::claude-opus-5",
     "anthropic::claude-opus-4-6",
     "deepseek/deepseek-v4-pro",
     "deepseek::deepseek-v4-pro",
+    "deepseek::deepseek-flash",
     "deepseek::deepseek-v4-flash",
     "zai::glm-5.3",
     "zai::glm-5.3-flash",

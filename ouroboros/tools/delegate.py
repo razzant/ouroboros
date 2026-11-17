@@ -134,6 +134,7 @@ from ouroboros.tools.delegate_integration import (  # noqa: F401
     _retry_binding_refusal,
     _snapshot_facts,
     _validated_invocation,
+    accepted_refused_start,
     claimed_start_request,
     payload_host_instructions,
 )
@@ -644,11 +645,12 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     except BaseException as exc:
         typed = isinstance(exc, (ClaudexorUnavailable, OwnerPauseRefused))
         code = getattr(exc, "code", str(exc)) if typed else f"pre_custody_exit_{type(exc).__name__}"
-        status = int(getattr(exc, "status_code", 0) or 0) if typed else 0
-        # A request row is not a POST; an entered callable stays unknown unless
-        # its typed refusal proves otherwise. Recovery retains its original fate.
-        definite = not start_attempted or 400 <= status < 500 or (
-            isinstance(exc, OwnerPauseRefused) and not recovering)
+        # A request row is not a POST; an entered one stays unknown whatever the engine answered (its accepted
+        # work is read), so only a fresh start that never entered it is definite. Recovery retains its fate.
+        definite = not start_attempted
+        if (start_attempted and isinstance(exc, ClaudexorUnavailable)
+                and (accepted := accepted_refused_start(drive, gateway, invocation_id, exc, request_body)) is not None):
+            return accepted
         try:
             cleanup = _retire_orphaned_registration(
                 ctx, gateway, owned_project_id, project_persistent=project_persistent, history_facts=history_facts,
@@ -807,8 +809,8 @@ def _retire_orphaned_registration(ctx: ToolContext, gateway: Any, project_id: st
                                   snapshot_id: str = "", history_facts: Optional[dict] = None) -> Dict[str, Any]:
     """Retire a registration this start created but never bound to a run.
 
-    Only a proven unsent start or a definite negative daemon answer permits retirement. A transport
-    error, a 5xx, or a 2xx handle with no run id all mean the POST's fate is unknown, and
+    Only a proven unsent start permits retirement. Any answer to an entered POST (a 4xx too), a
+    transport error or a 2xx handle with no run id means the POST's fate is unknown, and
     a run may well be live against this very registration. An unverified outcome is never
     grounds for destroying state — the durable row names the id either way, which is what
     the old code lacked. The caller supplies the verdict, so every failing start reaches

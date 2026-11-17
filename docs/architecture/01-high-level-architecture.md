@@ -281,7 +281,7 @@ ouroboros/ — agent core and shared runtime (§6)
   body_candidate.py, body_adoption.py, body_switch.py — Own-body worktree authoring and restart-bound adoption of an exact reviewed commit before body imports (§6 Own-body candidates; §2)
   artifacts.py, artifact_storage.py, artifact_directories.py — artifact_store/attachments/, records/clones, compression, ZIPs, .scratch_manifest.json hashes, output audit, tool-evidence slices (§6)
   chat_uploads.py, confined_files.py — the owner-attachment store (`data/uploads`) with byte-proven media kind; held-directory walks and regular-file opens (POSIX dirfd, Windows NT handles) for attachments, task files and sources (DESIGN "Chat attachments")
-  retention.py, workspace_preflight.py, session_scratch.py — GC clamp, cutoff and exact task-drive retention date; workspace facts, delegated scratch/cache preparation; scratch holders and release (§6)
+  retention.py, workspace_preflight.py, session_scratch.py — retention dates; session facts and locked scratch/cache preparation; scratch allocation, identity, holders and release (§6)
   project_sources.py — attach validation, opt-in `init_git`, server-side clone, trust on attach; folder rules (`apply_folder`): no temporary host copy, a recorded `no_folder`
   promotion_source.py — promoted-task source admission after an executor/id reservation
   workspace_admission.py — Task/promotion workspace admission: disjoint roots and Project binding, never a system-repo fallback (§6 Owner routing verbs; CLI / Headless Boundary below)

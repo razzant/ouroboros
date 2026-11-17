@@ -23,6 +23,7 @@ from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
 from ouroboros.delegate_start_instructions import INVESTIGATION_INSTRUCTION, scratch_fact
 from ouroboros.unindexed import COPIES
 from ouroboros.workspace_preflight import SESSION_SCRATCH_DIRNAME, SNAPSHOT_ENVIRONMENT_NOTE
+from tests.test_session_service_directories import _synthetic_temp_parent  # noqa: F401 -- this run's own scratch
 
 ENGINE_VERSION = "3.25.1"  # carries workspaceRoot (3.8.1+) and scope.ephemeral (3.3.7+)
 
@@ -162,7 +163,7 @@ def test_git_subdirectory_investigation_copies_the_worktree_and_starts_in_the_fo
     # host owns for a full-access run, else the unowned default. A foreign project hears no safe_test.
     assert f"Dependency files in {clone.resolve()} (sha256): none at its top level" in request["instructions"]
     record = Path(ctx.drive_root) / "task_drives" / "child" / SESSION_SCRATCH_DIRNAME / held.snapshot_id / "scratch.json"
-    place = (scratch_fact(granted=json.loads(record.read_text(encoding="utf-8"))["path"]) if access == "full"
+    place = (scratch_fact(granted=str(Path(json.loads(record.read_text(encoding="utf-8"))["path"]) / "w")) if access == "full"
              else scratch_fact())
     assert record.exists() is (access == "full")
     assert f"disposable process state ({place}), since this session writes only in " \

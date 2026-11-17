@@ -21,7 +21,7 @@ import pytest
 
 from ouroboros import work_domain
 from tests._safety_fixtures import disable_safety
-from tests.test_execution_domain import _registry, attached, fake_docker, section
+from tests.test_execution_domain import _registry, attached, fake_docker, posix_host, section
 from tests.test_execution_domain import env as env  # fixture
 
 _EFFECTS = frozenset({"open", "os.mkdir", "os.remove", "os.rename", "os.replace", "os.rmdir", "os.chmod",
@@ -85,6 +85,7 @@ def _managed(env, monkeypatch, **extra):
     return fake_docker(env, monkeypatch)
 
 
+@posix_host
 def test_the_service_performs_no_pathname_effect_on_a_work_tree(env, monkeypatch):
     """Every tool over a managed work repository — write, edit, patch (add, update, delete with its recovery
     copy), read, list (flat and tree), search, Git status, diff and history — works, and the service itself
@@ -119,6 +120,7 @@ def test_the_service_performs_no_pathname_effect_on_a_work_tree(env, monkeypatch
     assert attached(docker, "git") and attached(docker, "mv -f") and not docker.records()
 
 
+@posix_host
 def test_a_work_root_swapped_for_a_link_reaches_nothing_of_the_service(env, monkeypatch):
     """The employee makes the workspace's folder a link to a service folder after the task began. Which domain an
     operation belongs to is read from its spelling, so the write goes to the container, the service's own read
@@ -144,6 +146,7 @@ def test_a_work_root_swapped_for_a_link_reaches_nothing_of_the_service(env, monk
     assert attached(docker, "mv -f"), wrote  # the write was the container's, resolved in its own namespace
 
 
+@posix_host
 def test_a_failing_work_domain_never_falls_back_to_the_service(env, monkeypatch):
     """When the container refuses or the service has no Docker CLI, writes, Git and reads fail typed; nothing is
     done on the service instead, and the work tree is unchanged."""
@@ -160,6 +163,7 @@ def test_a_failing_work_domain_never_falls_back_to_the_service(env, monkeypatch)
     assert "⚠️" in wrote and "GIT_ERROR" in status and (repo / "a.txt").read_text() == "one\n"
 
 
+@posix_host
 def test_work_domain_stdin_and_stdout_cross_byte_exact(env, monkeypatch):
     """A real pipe consumer in the container (dash, whose asynchronous list's stdin is /dev/null before explicit
     redirections): every byte the service sends arrives and returns unchanged, NUL and invalid UTF-8 included."""
@@ -199,6 +203,7 @@ def test_an_unmanaged_run_hands_input_bytes_over_as_a_file_never_a_pipe_the_wait
     assert work_domain.run(command, input=payload, capture_output=True, timeout=60).stdout == b"pipe " + payload
 
 
+@posix_host
 def test_a_native_run_receives_its_inputs_and_returns_verified_outputs_through_the_work_domain(env, monkeypatch, tmp_path):
     """The material flow of a native run on a work repository: its selected inputs are delivered into the staging
     root as bytes the work domain unpacks; its private copy is made there by the work domain's Git (the
@@ -226,9 +231,10 @@ def test_a_native_run_receives_its_inputs_and_returns_verified_outputs_through_t
                                                                 data_dir=data)
     assert seen == [], seen
     delivered = pathlib.Path(inputs.selected[0]["local"])
-    held = delivered.parents[3]  # <staging_root>/scratch/obs-*, owned by the task's drive (session_scratch_owners)
+    workspace = delivered.parents[3]
+    held = workspace.parent  # <staging_root>/scratch/obs-*, owned by the task's drive (session_scratch_owners)
     assert held.parent == staging / "scratch" and held.name.startswith("obs-") and delivered.read_text() == "selected input\n"
-    assert (held / "inputs.json").is_file()
+    assert workspace == held / "w" and (workspace / "inputs.json").is_file()
     copy = pathlib.Path(handle.path)
     assert copy.is_relative_to(staging / "copies") and (copy / "src" / "main.py").read_text() == "print('a')\n"
     assert set(witness.read_text().split()) == {"1"}  # the repository's clean filter ran only in the container
@@ -257,6 +263,7 @@ def test_a_native_run_receives_its_inputs_and_returns_verified_outputs_through_t
     assert not docker.records()  # every launch's group was confirmed ended and its record retired
 
 
+@posix_host
 def test_work_outputs_return_as_checked_bytes_and_a_planted_link_returns_nothing_of_the_service(env, monkeypatch):
     """A run's file outputs come back as bytes the service checks: a work file through the confined intake into the
     task's artifacts, a work folder as the container's tar stream (each member a requested regular file, hashed as
@@ -299,31 +306,41 @@ def test_work_outputs_return_as_checked_bytes_and_a_planted_link_returns_nothing
     assert attached(docker, "tar -c") and not docker.records()
 
 
+_PROBE = ("import sys\nfrom ouroboros import work_domain\ntry:\n    print(work_domain.managed())\n"
+          "except Exception as exc:\n    print(type(exc).__name__)\n"
+          "print('ouroboros.execution_domain' in sys.modules)\n")
+
+
+def _lookup():
+    """A fresh interpreter's first work-domain lookup (its ``sys.modules`` is that lookup's own): what ``managed()``
+    answers, or its error's type, and whether the execution-domain module was imported."""
+    root = pathlib.Path(work_domain.__file__).resolve().parents[1]
+    environ = {**os.environ, "PYTHONPATH": str(root)}
+    done = subprocess.run([sys.executable, "-c", _PROBE], capture_output=True, text=True, cwd=root,
+                          env=environ, timeout=60)
+    assert done.returncode == 0, done.stderr
+    return done.stdout.split()
+
+
 def test_an_unmanaged_lookup_never_imports_the_execution_domain(env, monkeypatch):
     """The first work-domain lookup of a process on an install without an ``execution`` policy answers "no
-    domain" without the execution-domain module graph; a managed one still returns the domain object, and an
-    unusable policy still raises. Each lookup is a fresh interpreter, so ``sys.modules`` is that lookup's own."""
-    from ouroboros import deployment_policy, execution_domain
+    domain" without the execution-domain module graph, and an unusable policy still raises, on every host; a
+    managed lookup is the next test's, where the product allows an execution domain."""
+    from ouroboros import deployment_policy
 
-    probe = ("import sys\nfrom ouroboros import work_domain\ntry:\n    print(work_domain.managed())\n"
-             "except Exception as exc:\n    print(type(exc).__name__)\n"
-             "print('ouroboros.execution_domain' in sys.modules)\n")
-
-    def lookup():
-        root = pathlib.Path(work_domain.__file__).resolve().parents[1]
-        environ = {**os.environ, "PYTHONPATH": str(root)}
-        done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, cwd=root,
-                              env=environ, timeout=60)
-        assert done.returncode == 0, done.stderr
-        return done.stdout.split()
-
-    assert lookup() == ["False", "False"]  # unmanaged
+    assert _lookup() == ["False", "False"]  # unmanaged
     env.manage()
-    assert lookup() == ["False", "False"]  # a policy without ``execution``
-    # A container path is POSIX on every host: name it, never derive it from the host's (a Windows drive path).
-    env.manage(section(env, path_mappings=[{"host_path": str(env.work), "backend_path": "/work"}]))
-    assert lookup() == ["True", "True"]  # managed: the domain, through execution_domain.current()
-    assert work_domain._domain() is execution_domain.current() is not None
+    assert _lookup() == ["False", "False"]  # a policy without ``execution``
     monkeypatch.setenv(deployment_policy.POLICY_ENV, str(env.admin / "missing.json"))
     deployment_policy.reset_for_tests()
-    assert lookup() == ["DeploymentPolicyError", "False"]  # a bad file never reads as unmanaged
+    assert _lookup() == ["DeploymentPolicyError", "False"]  # a bad file never reads as unmanaged
+
+
+@posix_host
+def test_a_managed_lookup_still_returns_the_domain_object(env):
+    from ouroboros import execution_domain
+
+    # A container path is POSIX on every host: name it, never derive it from the host's (a Windows drive path).
+    env.manage(section(env, path_mappings=[{"host_path": str(env.work), "backend_path": "/work"}]))
+    assert _lookup() == ["True", "True"]  # managed: the domain, through execution_domain.current()
+    assert work_domain._domain() is execution_domain.current() is not None

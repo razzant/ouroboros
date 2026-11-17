@@ -699,7 +699,8 @@ def _covers_summary(record: Dict[str, Any], period: Optional[memory_inventory.Pe
         moved = bool(meta.get("transfer"))  # the words a transfer brought are data here (memory_inventory.quoted)
         label, told = (memory_inventory.quoted(value) if moved and value else str(value or "") for value in (
             meta.get("label") or meta.get("legacy_type"), meta.get("legacy_range_text")))
-        stated = ("" if not moved else f"stated period {_span(meta['stated_period'])}"
+        # the period its source states in the view's minutes (memory_inventory.period_text); stored dates stay whole
+        stated = ("" if not moved else f"stated period {memory_inventory.period_text(meta['stated_period'])}"
                   if meta.get("stated_period") else "period not stated by its source")
         return "; ".join(part for part in (label, where, told, stated, memory_inventory.transfer_words(record)) if part)
     if kind == "note":

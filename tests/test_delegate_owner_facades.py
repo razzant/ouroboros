@@ -28,7 +28,7 @@ DELEGATE_LEAF_OWNERS: dict[str, dict[str, str]] = {
         "ouroboros.delegate_custody_reconcile": (
             "open_runs pending_invocations release_task_runs reconcile_task_runs "
             "reconcile_orphaned_runs _reconcile_each _recover_pending_invocation "
-            "_retire_recovered_registration _reconcile_one"
+            "_reconcile_one"
         ),
     },
     "ouroboros.tools.delegate": {

@@ -40,13 +40,13 @@ def test_settings_defaults_include_phase2_keys():
 
     assert SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"] == "advanced"
     assert SETTINGS_DEFAULTS["OUROBOROS_SKILLS_REPO_PATH"] == ""
-    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL"] == "google/gemini-3.8-flash"
-    # Empty role slots inherit Main; Light (Luna 6) and Fallback (Luna 5.6, kept) use Luna explicitly.
+    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL"] == "google/gemini-4-hydrogen"
+    # Empty role slots inherit Main; Light (Luna 6) and Fallback (Terra 6.1, a stronger resilience path) are explicit.
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_HEAVY"] == ""
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_VISION"] == ""
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_CONSCIOUSNESS"] == ""
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"] == "openai/gpt-6-luna"
-    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"] == "openai/gpt-5.6-luna"
+    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"] == "openai/gpt-6.1-terra"
     # Retired (review pool): the deep-review model is a reviewer row of the subagent
     # catalog; the read seam migrates the key, so it is no shipped default any more.
     assert "OUROBOROS_MODEL_DEEP_SELF_REVIEW" not in SETTINGS_DEFAULTS

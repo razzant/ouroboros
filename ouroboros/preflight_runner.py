@@ -1317,7 +1317,7 @@ def _run_hermetic_pytest(
     source_index_tree, source_index_error = _capture_source_index_tree(repo, max_output)
     if source_index_error is not None:
         return source_index_error
-    temp_root = gate_root()
+    temp_root = gate_root(evidence=evidence)
     worktree = temp_root / "repo"
     worktree_added = False
     unproven_teardown = ""

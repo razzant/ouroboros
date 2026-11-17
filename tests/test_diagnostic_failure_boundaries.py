@@ -104,7 +104,7 @@ def test_gate_record_and_stderr_failure_still_releases_with_a_retention_reason(t
     from ouroboros import test_evidence
     root = tmp_path / "scratch"
     root.mkdir()
-    releases = []
+    releases, records = [], []
 
     class FullStderr:
         def write(self, _text):
@@ -112,7 +112,8 @@ def test_gate_record_and_stderr_failure_still_releases_with_a_retention_reason(t
         def flush(self):
             raise OSError(errno.ENOSPC, "stderr volume full")
 
-    def fail_record(*_args):
+    def fail_record(_path, record):
+        records.append(dict(record, evidence_errors=list(record["evidence_errors"])))
         raise OSError(errno.ENOSPC, "record volume full")
 
     try:
@@ -122,7 +123,11 @@ def test_gate_record_and_stderr_failure_still_releases_with_a_retention_reason(t
             evidence = {"path": tmp_path, "cleanup": (None, root, None, None, ""), "evidence_errors": []}
             test_evidence.finish_gate(evidence, None, "pre_commit", lambda *args: releases.append(args))
         assert releases and "gate evidence write failed" in releases[0][-1]
-        assert evidence["evidence_errors"]
+        assert any("gate evidence write failed" in error and "record volume full" in error
+                   for error in evidence["evidence_errors"])
+        assert records[-1]["evidence_errors"] == evidence["evidence_errors"]
+        assert records[-1]["diagnostics_incomplete"] and records[-1]["cleanup"] == "retained"
+        assert records[-1]["verdict"] is None, "diagnostic failure does not rewrite the observed verdict"
         assert (root / RETENTION_MARKER).is_file()
     finally:
         (root / RETENTION_MARKER).unlink(missing_ok=True)

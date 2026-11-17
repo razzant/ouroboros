@@ -38,7 +38,7 @@ def _with_coordination_context(ctx: Any, raw: str) -> str:
 # LOAD-BEARING COUPLING: "malformed_response"/"daemon_unreachable" can also be
 # raised post-POST (a run may be live) — they are safe here ONLY because the
 # ClaudexorUnavailable handler in tools/delegate attaches the pending
-# invocation handle to every non-4xx fault, and the custody-handle guard
+# invocation handle to every fault after its POST was entered (a 4xx too), and the custody-handle guard
 # below then forces the wake. Refactors of that error path must keep
 # post-POST refusals carrying a handle.
 _DEFINITE_UNRUN_REASONS = frozenset({

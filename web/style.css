@@ -2225,6 +2225,11 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
 .chat-scroll-bottom-btn:hover { color: var(--text-primary); }
 .chat-scroll-bottom-btn:not(:disabled):hover { background: var(--surface-capsule-hover); }
 .chat-scroll-bottom-btn:not(:disabled):active { filter: var(--press); }
+/* ↓ still reading the present it goes to: its press's own colour holds and only the arrow carries the history
+   loader's pulse, begun at its dim half so the press reads as taken in its first frame; the new-activity dot keeps
+   its meaning and stands still. */
+.chat-scroll-bottom-btn[aria-busy="true"] { filter: var(--press); cursor: progress; }
+.chat-scroll-bottom-btn[aria-busy="true"] svg { animation: thinking-pulse 1.5s ease-in-out -0.75s infinite; }
 .chat-scroll-bottom-btn:disabled { box-shadow: none; }
 .chat-scroll-bottom-btn:focus-visible {
     outline: 2px solid var(--focus-accent-border);
@@ -5442,6 +5447,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
         --composer-glyph-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));
         column-gap: var(--composer-glyph-gap);
     }
+    /* A folded line that still wraps gives up the extra reach spacing before cutting Model's value. The fit owns
+       this state; the chips slot below gives back the same gap in either state. */
+    .chat-toolbar-row[data-owner-glyphs="true"][data-owner-tight] {
+        --composer-glyph-gap: var(--composer-row-gap);
+    }
     .chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips { margin-inline-start: calc(-1 * var(--composer-glyph-gap)); }
     .chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips::before { width: calc(var(--composer-glyph-gap) - 6px); }
 }
@@ -7014,14 +7024,14 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .dashboard-lead-back:empty { display: none; }
 .dashboard-row-mark[hidden] { display: none; }
 @container sectionplace (min-width: 40rem) {
-    .dashboard-shell[data-section-view="page"] .dashboard-body { padding-inline-start: var(--space-4); }
+    .dashboard-shell .dashboard-body { padding-inline-start: var(--space-4); }
 }
 /* A phone: the list's screen keeps `☰ Dashboard`, with nothing under it; a page's screen is one row, Back (to the
    list, or to Settings) and the page's name in the header's title style, where ☰ and the place's name stood. Only a
    page that REPLACED the list gives ☰ up: a drawer-width window that still holds the list beside its page (40rem up
    to the shell's switch) has no Back, so there ☰ stays the way to every other destination. */
-html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-header .app-page-lead { display: none; }
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
+    html[data-layout="stack"] #page-dashboard[data-section-view="auto"] > .app-page-header .app-page-lead { display: none; }
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header > .app-page-leading,
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title toolbar"; }
@@ -9980,9 +9990,11 @@ html[data-layout="stack"] .project-panel {
         transition: opacity var(--motion-fade) ease;
     }
     html[data-layout="docked"] .project-panel.open { opacity: 1; }
-    .chat-load-older[aria-busy="true"] .chat-load-older-btn {
+    .chat-load-older[aria-busy="true"] .chat-load-older-btn,
+    .chat-scroll-bottom-btn[aria-busy="true"] svg {
         animation: none;
     }
+    .chat-scroll-bottom-btn[aria-busy="true"] svg { opacity: 0.5; }  /* the pulse's dim half, held still */
 }
 
 /* Agent accounts (D30).

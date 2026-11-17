@@ -69,16 +69,20 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
         // Only an EMPTY feed (or a failure already on screen) gets the loading
         // state: an ordinary refresh never puts chrome over a painted transcript.
         // Returns whether there is a state to draw, so a painted feed costs nothing.
+        // A migrating store read again is still `waiting` for its publication.
         beginRecent() {
-            if (recent?.error || feedIsEmpty(messagesDiv)) recent = { loading: true };
+            if (recent?.error || feedIsEmpty(messagesDiv)) {
+                recent = { loading: true, waiting: recent?.waiting || isStoreMigrating(recent?.error) };
+            }
             return Boolean(recent);
         },
         // A failure is shown where the loading state was; elsewhere the reader
-        // keeps the transcript they have and the next sync reconciles it.
-        endRecent(error = null) { recent = error ? { error } : null; },
-        recentFailed: () => Boolean(recent?.error),
+        // keeps the transcript they have and the next sync reconciles it. A migrating store has not failed.
+        endRecent(error = null, partial = false) { recent = error ? { error, partial } : null; },
+        recentFailed: () => Boolean(recent?.error && !recent.partial && !isStoreMigrating(recent.error)),
         render(snapshot, coverage = {}, approximate = false) {
             const error = recent?.error || snapshot.error;
+            const retry = recent?.error && !recent.partial || snapshot.error;
             const migrating = isStoreMigrating(error);
             const hydrating = Boolean(recent?.loading);
             const loading = hydrating || Boolean(snapshot.loading);
@@ -103,11 +107,11 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
                 && !(hydrating && feedIsEmpty(messagesDiv));
             // A grown room's exhausted chain offers the way on (it rebases to the present); a chain a navigation
             // began ends at its older end: ↓ is the way to the present.
-            const buttonHidden = migrating || (!error && !snapshot.canOlder
+            const buttonHidden = migrating || (!retry && !snapshot.canOlder
                 && !(coverage.horizonGap && !snapshot.away) && !hydrating);
             const fields = [
                 [button, { textContent: hydrating ? 'Loading saved history…' : loading ? 'Loading…'
-                    : changedView ? 'Refresh history' : error ? 'Retry loading messages' : 'Load more history',
+                    : changedView ? 'Refresh history' : retry ? 'Retry loading messages' : 'Load more history',
                     disabled: loading, hidden: buttonHidden }],
                 [note, { textContent: noteText, hidden: !noteText }],
                 [gapNote, { textContent: separateGap ? gapText : '', hidden: !separateGap }],
@@ -119,8 +123,13 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
             if (hydrating) root.setAttribute('aria-busy', 'true'); else root.removeAttribute('aria-busy');
             if ((snapshot.initialized || error || hydrating) && !root.isConnected) messagesDiv.prepend(root);
             root.classList.toggle('has-gaps', !migrating && (incomplete || Boolean(error)));
-            return { ...coverage, complete: Boolean(coverage.complete && !error),
-                error: Boolean(error), note: noteText, truncated_by: incomplete ? ['unloaded'] : [] };
+            // For ↓, each read of the present by its own error, whichever note heads the edge: `failed`, one it retries where
+            // the reader is (the room's newest, or the pager's `latest`); else `waiting`, one the migrating store refused.
+            const latest = snapshot.retryDirection === 'latest', latestWaits = latest && isStoreMigrating(snapshot.error);
+            const failed = Boolean(recent?.error && !recent.partial && !isStoreMigrating(recent.error)) || latest && !latestWaits;
+            const waiting = !failed && (isStoreMigrating(recent?.error) || Boolean(recent?.waiting) || latestWaits);
+            return { ...coverage, complete: Boolean(coverage.complete && !error), error: Boolean(error), failed, waiting,
+                note: noteText, truncated_by: incomplete ? ['unloaded'] : [] };
         },
     };
 }
