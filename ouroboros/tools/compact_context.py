@@ -103,16 +103,18 @@ def residue_by_kind(messages: list) -> dict:
     return {kind: {"units": units_, "tokens": tokens} for kind, (units_, tokens) in sorted(residue.items())}
 
 
-def view_notes(messages: list) -> list:
+def view_notes(messages: list, *, own: bool = False) -> list:
     """The working-view notes in ``messages``, in transcript order: ``{id, written, first_line}`` for every capsule
-    except a host source view, under the unit id inspect shows and ``replace_note_ids`` takes. ``written`` is
-    ``context_compaction.note_written``: the note's own write time, or "not recorded" for a note older than that."""
+    except a host source view, under the unit id inspect shows and ``replace_note_ids`` takes; ``own``: only the notes
+    the mind authored (``authorship`` actor, as the round facts count its own notes), never a helper's or one whose
+    author is not recorded. ``written`` is ``context_compaction.note_written``: the note's own write time, or "not
+    recorded" for a note older than that. The one reader of notes for a fold receipt and an arrival line."""
     from ouroboros.context_compaction import _capsule_metadata, _first_line, _unit_from_slice, note_written
 
     notes = []
     for index, message in enumerate(messages):
         meta = _capsule_metadata(message)[1]
-        if meta is None or meta.get("retention") == "source_view":
+        if meta is None or meta.get("retention") == "source_view" or own and meta.get("authorship") != "actor":
             continue
         unit = _unit_from_slice(messages, index, index, trace_refs_by_tool_call_id={}, capsule_meta=meta)
         if unit is not None:

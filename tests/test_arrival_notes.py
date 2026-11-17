@@ -12,9 +12,21 @@ import json
 import queue
 from types import SimpleNamespace
 
-from tests.test_compaction import _note
+from tests.test_compaction import _authored, _large_unit, _note, _unattributed, _undated
 
 WORDS = "Use the March numbers"
+
+
+def _written_note(tmp_path, text, call_id, written_at):
+    """A note the mind wrote at ``written_at`` (its ``compact_context`` call time), through the real fold."""
+    from ouroboros import context_compaction as cc
+
+    source = _large_unit(call_id)
+    folded, receipt = cc.compact_tool_history_llm(
+        source, request=_authored(source, note=text), observed_messages=source, tool_schemas=[],
+        fit_candidate=lambda *_: {"accepted": True}, drive_root=tmp_path, task_id="compaction", written_at=written_at)
+    assert receipt.status == "applied" and len(folded) == 1
+    return folded[0]
 
 
 def _drain(tmp_path, messages, ctx=None, *texts):
@@ -34,9 +46,8 @@ def _unit_id(messages, index):
 
 
 def test_an_arrival_names_the_notes_in_view_and_changes_no_earlier_message(tmp_path):
-    goal = _note(tmp_path, "Goal: keep the reply short.\nThe owner wants one paragraph.", "goal")
-    dated = copy.deepcopy(_note(tmp_path, "Decided: send on Friday.", "dated"))
-    dated["content"][0]["_context_capsule"]["written_at"] = "2026-11-13T22:40:12+03:00"
+    goal = _undated(_note(tmp_path, "Goal: keep the reply short.\nThe owner wants one paragraph.", "goal"))
+    dated = _written_note(tmp_path, "Decided: send on Friday.", "dated", "2026-11-13T22:40:12+03:00")
     view = [{"role": "user", "content": "Draft the reply"}, goal, dated, {"role": "assistant", "content": "Drafted."}]
     before = json.dumps(view, sort_keys=True)
     _drain(tmp_path, view)
@@ -48,9 +59,9 @@ def test_an_arrival_names_the_notes_in_view_and_changes_no_earlier_message(tmp_p
 
 
 def test_no_note_in_view_and_a_row_not_my_humans_add_no_line(tmp_path):
-    from ouroboros.arrival_notes import notes_in_view
     from ouroboros.loop_round_limits import _drain_incoming_messages
     from ouroboros.owner_mailbox import write_task_message
+    from ouroboros.tools.compact_context import view_notes
 
     plain = _drain(tmp_path, [{"role": "user", "content": "Draft the reply"}])
     assert plain[-1]["content"] == f"[Message from my human]: {WORDS}"
@@ -61,7 +72,11 @@ def test_no_note_in_view_and_a_row_not_my_humans_add_no_line(tmp_path):
     assert view[-1]["content"].endswith("Use the Q3 numbers only") and "working-view notes" not in json.dumps(view)
     host = copy.deepcopy(note)  # a host source view is the host's projection, not a note of the mind's
     host["content"][0]["_context_capsule"].update(authorship="host", retention="source_view")
-    assert notes_in_view([host]) == [] and len(notes_in_view([note])) == 1
+    assert view_notes([host]) == [] and len(view_notes([note], own=True)) == 1
+    legacy = _unattributed(note)  # a note in view (a fold receipt lists it) whose author is not recorded: not "yours"
+    assert len(view_notes([legacy])) == 1 and view_notes([legacy], own=True) == []
+    assert _drain(tmp_path, [{"role": "user", "content": "Brief"}, legacy])[-1]["content"] == (
+        f"[Message from my human]: {WORDS}")
 
 
 def test_two_rows_of_my_human_in_one_drain_close_once_on_the_last(tmp_path):
