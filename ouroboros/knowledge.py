@@ -527,9 +527,7 @@ def speaker_pages(canonical_root: Path | None, provider: str, namespace: str, ac
         facts["pages"] = active
     if archived:
         facts["archived_pages"] = archived
-    if not active and not archived:
-        facts["page"] = "no global knowledge note lists this key in its keys frontmatter"
-    elif unverified:
+    if unverified and (active or archived):
         facts["matched_by"] = "an unverified address"
     return facts
 

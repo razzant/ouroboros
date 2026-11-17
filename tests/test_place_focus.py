@@ -578,9 +578,12 @@ def test_focus_names_the_speakers_pages_by_exact_key_never_authority(focus):
                                           f"---\ntype: person\nkeys: {json.dumps(list(keys))}\n---\n# Pat's page\n").ok
 
     page("people/by-name", {**key, "id": "Pat Quill"})  # a display name never joins
-    actor, _rendered, line, _task = admit()
-    assert actor["key"] == key and actor["page"] == "no global knowledge note lists this key in its keys frontmatter"
-    assert line == "- the person (host facts): " + json.dumps(actor, ensure_ascii=False)
+    for authentication in ({}, {"authenticated": False}):
+        actor, rendered, line, task = admit(**authentication)
+        assert actor["key"] == key and not {"page", "pages", "archived_pages", "matched_by"} & actor.keys()
+        assert line == "- the person (host facts): " + json.dumps(actor, ensure_ascii=False) + (
+            "; authenticated: no" if authentication else "")
+        assert focus_frame_sources(task["metadata"], rendered) is not None
     page("people/pat", {"provider": "mail", "namespace": "", "id": "pat@example.org"}, key)
     memory = {path: path.read_bytes() for path in (root / "memory").rglob("*") if path.is_file()}
     actor, rendered, line, _task = admit()
