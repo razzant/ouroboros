@@ -1,0 +1,48 @@
+name: Qualify the RED OS registry on a fresh runner
+on:
+  push:
+    branches: [qualification/redos-ca-20261117]
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Fetch the public packages from v7.11.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          release=https://github.com/razzant/ouroboros/releases/download/v7.11.0
+          deb=ouroboros_7.11.0_amd64.deb
+          rpm=ouroboros-7.11.0-1.red80.x86_64.rpm
+          curl --fail --show-error --location --proto '=https' --proto-redir '=https' -o "$deb" "$release/$deb"
+          curl --fail --show-error --location --proto '=https' --proto-redir '=https' -o "$rpm" "$release/$rpm"
+          printf '%s  %s\n' '33cdf332784ae04b87031168187a0389b5d468d18ad39dbea804d2f08b84e765' "$deb" 'bac89d8c1b11ff864cb7a94cd03dedb26ef7dc38899f0f5c186e6633bc213782' "$rpm" | sha256sum --check
+      - name: Observe the pinned pull under the runner's default trust
+        shell: bash
+        run: |
+          if docker pull registry.red-soft.ru/ubi8/ubi@sha256:cae37cb16daadfecae09e854471592f27bcd6aefb4b44da1e5b22bba57b1e9cd; then
+            echo 'Default trust already accepted this image.'
+          else
+            echo "Default pull returned $?; see the Docker diagnosis above."
+          fi
+      - name: Install the 2024 issuing CA for the RED OS registry
+        shell: bash
+        run: |
+          ca=.github/certs/registry.red-soft.ru-2024.crt
+          echo "6f9d829c8e6712444fce3624658d8788672849c5d5b7b53fd9cf7e83eac4193e  $ca" | sha256sum --check
+          sudo install -D -m 0644 "$ca" /etc/docker/certs.d/registry.red-soft.ru/ca.crt
+      - name: Verify the pinned pull with registry-scoped trust
+        run: docker pull registry.red-soft.ru/ubi8/ubi@sha256:cae37cb16daadfecae09e854471592f27bcd6aefb4b44da1e5b22bba57b1e9cd
+      - name: Run the release's real vendor package smoke
+        shell: bash
+        run: |
+          bash scripts/smoke_linux_packages.sh vendor \
+            "$RUNNER_TEMP/ouroboros_7.11.0_amd64.deb" \
+            "$RUNNER_TEMP/ouroboros-7.11.0-1.x86_64.rpm" \
+            "$RUNNER_TEMP/ouroboros-7.11.0-1.red80.x86_64.rpm"
