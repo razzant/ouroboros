@@ -176,7 +176,7 @@ def test_raw_refusals_identity_and_cancelled_continuations_never_substitute_rows
             }''')
             raw = page.locator(".log-raw")
             status = page.locator(".log-raw-status")
-            record = page.locator(".log-entry:not(.log-task-card) > summary")
+            record = page.locator('.log-entry[data-category="system"]:not(.log-task-card) > summary')
             for code, reason in [(404, "log_source_unavailable"), (409, "log_source_changed"), (416, "raw_range_invalid"), (503, "log_source_unavailable")]:
                 record.click()
                 page.wait_for_function("() => gates.length === 1")
@@ -203,18 +203,21 @@ def test_raw_refusals_identity_and_cancelled_continuations_never_substitute_rows
             assert raw.inner_text() == first
             page.get_by_role("button", name="Retry", exact=True).click()
             page.wait_for_function("() => gates.length === 1")
-            record.click()
-            assert page.evaluate("() => gates[0].signal.aborted")
+            record.click()  # the record folds on its own toggle event, which a browser fires after the press
+            page.wait_for_function("() => gates[0].signal.aborted")
             page.evaluate("answer", {"status": 200, "body": _chunk(payload, 65536)})
             assert raw.inner_text() == ""
+            # Logs' chips name a kind with its count ("Tools 1") and hide a kind with nothing held, so a Tools row
+            # gives the open record a chip that hides it: choosing it cancels the read, All brings it back to read.
+            page.evaluate("emit", {"type": "tool_call", "tool": "query_data", "ts": "2026-11-04T01:00:01Z"})
             record.click()
             page.wait_for_function("() => gates.length === 1")
-            page.get_by_role("button", name="Tools", exact=True).click()
+            page.locator('#log-filters [data-log-kind="tools"]').click()
             assert page.evaluate("() => gates[0].signal.aborted")
             page.evaluate("answer", {"status": 200, "body": _chunk(payload, 0)})
-            page.get_by_role("button", name="All", exact=True).click()
+            page.locator('#log-filters [data-log-kind=""]').click()
             page.wait_for_function("() => gates.length === 1")
-            page.get_by_role("button", name="Clear list", exact=True).click()
+            page.locator("#btn-clear-logs").click()
             assert page.evaluate("() => gates[0].signal.aborted")
             page.evaluate("answer", {"status": 200, "body": _chunk(payload, 0)})
             assert page.locator(".log-entry").count() == 0
