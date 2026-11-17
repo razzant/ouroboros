@@ -27,7 +27,7 @@ from ouroboros import memory_view_conversations as conversations
 from ouroboros import memory_view_legacy as legacy
 from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ordinary_pairs, normalized, swallowed,
                                     form_counts, holding_room, Selection, supersedes, WorkPrices, restore,
-                                    TELLING_STAGES, ROOM_STEPS)
+                                    ORDINARY_STAGES, TELLING_STAGES, ROOM_STEPS)
 from ouroboros.memory_form_facts import holding_lines, telling_emergency, physical_floor
 from ouroboros.chat_chain import parse_address
 from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
@@ -217,8 +217,9 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
 
 
 def max_room_lost(fact: Mapping[str, Any]) -> bool:
-    """Max cannot hold whole books here: the story alone overflows the room, or nothing of memory fits beside them."""
-    return fact["need"] > fact["window"]
+    """Max cannot hold whole books here: my memory, even in its shortest telling of the whole horizon
+    (``telling_level``), does not fit beside them and the work's room (``telling_need``; ``need`` before it existed)."""
+    return fact.get("telling_need", fact["need"]) > fact["window"]
 
 
 def with_max_room(facts: Mapping[str, Any], fact: Optional[Mapping[str, Any]], mode: str,
@@ -249,6 +250,9 @@ def crowded_by_memory(fact: Optional[Mapping[str, Any]]) -> bool:
 
 
 REQUIRED_BOOK_WHOLE = " (this task's directly required handbook stays whole)"
+# An owner's Max that the window took to the compact book form stays Max by name (owner 15.11.2026, 4A); its
+# rendered key is ``low``, the books' chapter-map form, never the owner's Low.
+MAPS = "Max with chapter maps, for the window"
 # What the owner's Low target may take (``render_view_for_mode``, owner 15.11.2026, 3A): other conversations and my
 # story down to my telling; this room and my human's words not at all. The rest only the window's own start bound takes.
 TARGET_FLOOR, TARGET_KEEPS = TELLING_STAGES, ROOM_STEPS
@@ -336,11 +340,13 @@ def lowered_line(mode: str, lowered_from: str, fact: Optional[Mapping[str, Any]]
         return (f"The window cannot hold {lowered_from.capitalize()} with even the shortest view of my memory; "
                 f"this task runs in {mode.capitalize()}.")
     if not fact:
-        return "Low: the books did not fit beside the story and the work room."
+        return f"{MAPS}: the books did not fit beside my memory and the work room."
     if fact["floor_need"] > fact["window"]:
-        return "Low with chapter maps, a disclosed fact of this route: " + ROUTE_FACT.format(
+        return f"{MAPS}, a disclosed fact of this route: " + ROUTE_FACT.format(
             need=fact["floor_need"], window=fact["window"], parts=floor_parts(fact))
-    return f"Low with chapter maps. The host's measure of this start: {measure_text(fact, parts=True)}."
+    said = ": my memory, even in its shortest tellings, does not fit beside the whole books and the work's room" if (
+        fact["zero_need"] <= fact["window"]) else ""  # tool schemas that tip the start alone are measured, not memory
+    return f"{MAPS}{said}. The host's measure of this start: {measure_text(fact, parts=True)}."
 
 
 def required_book_note(*, lowered: bool, book_tokens: int, free: Optional[int], work: int) -> str:
@@ -462,14 +468,20 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
     return level(taken)
 
 
-def ordinary_level(snapshot):
-    """All ordinary replacements, retaining every source that has no in-view telling."""
-    table = _elements(snapshot)
-    previous, level = snapshot.__dict__.get("_ordinary_level", (None, None))
+def ordinary_level(snapshot, stages_of=ORDINARY_STAGES):
+    """All ordinary replacements, retaining every source that has no in-view telling; with ``TELLING_STAGES``
+    (``telling_level``) every form down to my telling or a conversation's line, nothing below it."""
+    table, key = _elements(snapshot), "_ordinary_level" if stages_of is ORDINARY_STAGES else "_telling_level"
+    previous, level = snapshot.__dict__.get(key, (None, None))
     if previous is not table:
-        level = table.level(normalized(ordinary_pairs(snapshot, table.listed), table.replacements[0]))
-        object.__setattr__(snapshot, "_ordinary_level", (table, level))
+        level = table.level(normalized(ordinary_pairs(snapshot, table.listed, stages_of), table.replacements[0]))
+        object.__setattr__(snapshot, key, (table, level))
     return level
+
+
+def telling_level(snapshot):
+    """My shortest telling of the whole horizon: what a Max start prices beside whole books (``max_room_lost``)."""
+    return ordinary_level(snapshot, TELLING_STAGES)
 
 
 def owner_rows(snapshot: mv.MemoryViewSnapshot) -> Dict[str, Mapping[str, Any]]:
@@ -660,7 +672,7 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
     path = memory_read_path(names) if mode == "nano" else ""
     if not asked and not lowered_from and not holding:
         return f"### Memory check\nAddresses this view shows read with memory_read.\n{path}" if path else ""
-    lines, name = ["### Physical floor"], mode.capitalize()
+    lines, name = ["### Physical floor"], "Max" if lowered_from == "max" and mode == "low" else mode.capitalize()
     if asked:
         bounds = ([f"the window ({window_tokens} tokens)"]
                   if window_tokens is not None else []) + (
@@ -747,13 +759,14 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                                   work_room_levels=snapshot.spec.work_room_levels, boundary_tokens=boundary_tokens)
     if kept is not None and not start_work:
         allowances = {**allowances, "margin": allowances["physical"]}
-    # Owner 15.11.2026 (3A): Low's target never takes memory below my shortest telling of the whole horizon and never
-    # takes this room; only the window's own start bound may. A miss of the target is its own fact. Nano's number
-    # still governs all memory (owner 11.10 and 13.10).
+    # Owner 15.11.2026 (3A, 4A): Low's target never takes memory below my shortest telling of the whole horizon and
+    # never takes this room, and a Max start keeping whole books never goes below it either; only the window's own
+    # start bound may. A miss of the target is its own fact. Nano's number still governs all memory (owner 11.10, 13.10).
     binds = kept is None and target is not None and owner_mode == "low" and (window is None or target < window)
-    floor, keeps = (TARGET_FLOOR, TARGET_KEEPS) if binds else (None, frozenset())
+    floor, keeps = ((TARGET_FLOOR, TARGET_KEEPS) if binds else (TELLING_STAGES, frozenset())  # a start's order (4A);
+                    if mode == "max" and (kept is None or start_work) else (None, frozenset()))  # a shown view: 29.10
     size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
-    room_bound = allowances["window"] if binds else allowances["margin"]
+    room_bound = allowances["window"] if binds else allowances["margin"]  # a target's miss is its own fact, below
     uncovered = uncovered_owner_rows(snapshot)
     def total(level, note):  # the whole request with this view and its receipt, as the target counts it
         return math.ceil((non_memory_tokens + measure_text(mv.story_chars(snapshot, level),
@@ -780,7 +793,10 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     walk = dict(kept=kept or mv.FULL_VIEW, measure=measure, floor=floor, keeps=keeps,
                 floor_bound=allowances["window"] if binds else None)
     if shortest and level is None:  # A saving no form can pay takes every form in walk order; no physical bound
-        level = fit_memory_view(snapshot, {**allowances, "physical": None}, saving=math.inf, **walk)  # stops it before owner rows.
+        # stops it before owner rows. The physical judgment of host forms never stops at a Max start's telling floor:
+        # what the window cannot hold beside the books is the books' own step (``context_fit``), not an outline's.
+        level = fit_memory_view(snapshot, {**allowances, "physical": None}, saving=math.inf,
+                                **{**walk, **({} if binds else {"floor": None, "keeps": frozenset()})})
     elif level is None:
         level = fit_memory_view(snapshot, allowances, saving=saving, **walk)
     facts = view_facts(snapshot, level, window_tokens=named, mode=mode, allowances=allowances,
@@ -1038,7 +1054,8 @@ def counterfactual_lines(fit: Mapping[str, Any]) -> List[str]:
         room = arm["max_room"]
         steps = ", ".join(f"{step} {count}" for step, count in arm["steps"].items()) or "none"
         host = ", ".join(f"{section} ~{saved:,}" for section, saved in arm["host"])
-        lines.append(f"- {name}: starts {arm['mode'].capitalize()}"
+        maps = arm["mode"] == "low" and f["preferred"] == "max"  # the owner's Max with chapter maps, for the window
+        lines.append(f"- {name}: starts {'Max with chapter maps' if maps else arm['mode'].capitalize()}"
                      + (" on the input this start rescued" if arm.get("input") == "rescued" else "")
                      + (f"; Max room {room['cause']}: {measure_text(room)}" if room else "; no Max room measured")
                      + f"; floor steps {steps}"

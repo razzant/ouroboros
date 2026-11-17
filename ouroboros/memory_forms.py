@@ -84,17 +84,21 @@ def stage_of(snapshot, step, ident):
     return "owner" if step == "F7" else "room_emergency"
 
 
-def ordinary_pairs(snapshot, elements=None):
-    cached = snapshot.__dict__.get("_ordinary_forms")
+ORDINARY_STAGES = frozenset({"remote_events", "remote_told", "remote_unread", "remote_gists", "task_facts",
+                             "work_progress", "work_final", "story_ordinary"})
+
+
+def ordinary_pairs(snapshot, elements=None, stages_of=ORDINARY_STAGES):
+    """The forms of ``stages_of`` (by default the ordinary ones): their sources keep my telling in view."""
+    key = "_ordinary_forms" if stages_of is ORDINARY_STAGES else "_telling_forms"
+    cached = snapshot.__dict__.get(key)
     if elements is not None and cached and cached[0] is elements:
         return cached[1]
-    ordinary = {"remote_events", "remote_told", "remote_unread", "remote_gists", "task_facts", "work_progress",
-                "work_final", "story_ordinary"}
     listed = list_elements(snapshot) if elements is None else elements
     stages = snapshot.__dict__.get("_form_stages", {})
-    pairs = {(step, ident) for step, ident, *_ in listed if stages[step, ident] in ordinary}
+    pairs = {(step, ident) for step, ident, *_ in listed if stages[step, ident] in stages_of}
     if elements is not None:
-        object.__setattr__(snapshot, "_ordinary_forms", (elements, pairs))
+        object.__setattr__(snapshot, key, (elements, pairs))
     return pairs
 
 

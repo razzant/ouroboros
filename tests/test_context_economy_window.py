@@ -1143,7 +1143,7 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     from ouroboros.transcript_prefix import message_digest
     assert {message_digest(first[1]), message_digest(owner)} <= {message_digest(row) for row in low}
     note = low[2]["content"]
-    assert f"Low cuts for the window ({window} tokens)." in note
+    assert f"Max cuts for the window ({window} tokens)." in note  # the owner's Max with chapter maps (owner 15.11, 4A)
     assert "does not hold all of my memory" not in note and "cannot hold" not in note
     # The task's trace keeps the fact of the Low view sent, not the whole Max view of its start: a writer reads
     # what the request actually showed only by address.

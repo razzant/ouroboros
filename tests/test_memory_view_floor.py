@@ -118,8 +118,9 @@ def test_a_project_roots_sealed_owner_rows_fold_only_under_physical_pressure_old
     ([syn.spoken(i, "ouroboros", 1_000) for i in range(400)], False),
 ])
 def test_the_start_room_notice_names_owner_words_only_when_they_keep_the_view_above_it(lane1, owners):
+    """The window's walk of a start its window took to chapter maps (an owner's Max rendered ``low``, no target)."""
     snapshot = syn.snapshot(room_facts=syn.room("1", lane1=lane1))
-    fit = mf.render_view_for_mode(snapshot, mode="max", owner_mode="max", window_tokens=200_000,
+    fit = mf.render_view_for_mode(snapshot, mode="low", owner_mode="max", window_tokens=200_000,
         known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=104_464)
     text, facts = fit.room, fit.facts
     floor = facts["floor"]
@@ -181,6 +182,24 @@ def test_an_owner_target_keeps_every_conversation_by_its_line_and_only_the_windo
     assert dict(counted.level.addressed).get("F6a") and counted.facts["floor"]["target_missed"] is True
     fits = low(1_000_000, fixed=10_000)  # a target with room: memory yields only what the target asks
     assert fits.facts["floor"]["target_missed"] is False and "F6a" not in dict(fits.level.addressed)
+
+
+def test_a_max_start_keeps_memory_at_my_tellings_while_the_books_stay_whole():
+    """Owner 15.11.2026 (4A): beside whole books my memory yields far conversations to their lines and no further;
+    this room's replies become openings and addresses only in a start the window took to chapter maps (rendered
+    ``low``), where only the window bounds the walk."""
+    replies = [syn.spoken(i, "ouroboros", 1_000) for i in range(400)]
+    groups = [syn.conversation(i, words=3, word_chars=2_000) for i in range(40)]
+    snapshot = syn.snapshot(conversations=groups, room_facts=syn.room("1", lane1=replies))
+
+    def fit(mode):
+        return mf.render_view_for_mode(snapshot, mode=mode, owner_mode="max", window_tokens=200_000, known_window=True,
+                                       output_reserve=65_536, ratio=1, non_memory_tokens=50_000)
+    held, maps = fit("max"), fit("low")
+    held_steps, maps_steps = dict(held.level.addressed), dict(maps.level.addressed)
+    assert held_steps.get("F6g") and not {"F2", "F7a", "F6a"} & set(held_steps)
+    assert "shortest forms exceeds it" in held.note  # the books' own step is the next one (context_fit)
+    assert maps_steps.get("F2") and "Start room is smaller" not in maps.note
 
 
 def test_giveback_keeps_a_reply_prefix_and_never_returns_kept_choices():
