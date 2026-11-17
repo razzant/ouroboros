@@ -3465,7 +3465,8 @@ choice, section list row or tab is a jump. Jumps stack; sidebar/drawer choices c
 them. Jumps land at their row or top, a key's on its Back; Back/sidebar restore place. Drawer, Project, section levels and Files'
 preview share this stack. Escape, browser, system, mouse, Telegram and ⌘[ (Ctrl+[ elsewhere) use one Back: popup
 first, then top layer. Dialogs, menus and the work list keep their dismissal; Escape clears a filled search first.
-× and the scrim close their layer. A Project covering Main (phone card or finger's docked column) is modal, with
+× and the scrim close their layer; a Project reached by a jump closes by ×, its scrim or Back to where the jump
+was pressed. A Project covering Main (phone card or finger's docked column) is modal, with
 the docked sidebar live and covered room inert once it arrives. Modal layers make the shell inert, never overlays;
 closing refocuses the opener unless focus moved somewhere live. One same-address history entry exists while any
 layer is open: Back closes it before leaving the app, without address routing. Close and More use the shared
