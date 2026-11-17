@@ -350,10 +350,10 @@ configured API actor while the canonical list is absent, never an active slot,
 readiness signal, test probe or fallback.
 
 Provider facts that bind routing: the `-pro` suffix is an OpenRouter routing slug, not
-an OpenAI model id, so a direct OpenAI Chat slot uses the plain Sol id; direct OpenAI
-tool conversations stay on Chat Completions, and a model-name prefix is never admission
+an OpenAI model id, so a direct OpenAI slot uses the plain Sol id; direct OpenAI
+uses its connection's API, and a model-name prefix is never admission
 authority; each non-OpenRouter Chat route sends `reasoning_effort`, DeepSeek and Z.ai
-by provider-id projection; direct Anthropic is the deliberate exception to a purely
+by provider-id projection; direct Anthropic and OpenAI Responses are the deliberate exceptions to a purely
 reconstructed provider transcript, and no effort-to-`budget_tokens` policy is
 synthesized (ARCHITECTURE §7 "LLM output token budgets"). A provider-specific optional
 feature may be unavailable elsewhere; the core loop degrades explicitly rather than

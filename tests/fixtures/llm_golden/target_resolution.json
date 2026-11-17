@@ -154,6 +154,7 @@
             "api_key": "openai-fixture-key",
             "base_url": "https://api.openai.com/v1",
             "default_headers": {},
+            "api_surface": "chat_completions",
             "supports_openrouter_extensions": false,
             "supports_generation_cost": false,
             "connection": "",
@@ -164,7 +165,7 @@
               "dispatch_base_url": "https://api.openai.com/v1"
             }
           },
-          "value_sha256": "f470794aabf80b75feff4fcaa608b7140f29127cada3916d0e3f9dfbbcb88438"
+          "value_sha256": "33cd962fb4baad1f40ef114ff2bf15511df361e9cb673e37a6a12485c81170a2"
         },
         "sends": [],
         "unused_script_steps": 0

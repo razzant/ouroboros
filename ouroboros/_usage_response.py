@@ -80,13 +80,68 @@ def reported_price(usage: Dict[str, Any], *fallbacks: Any) -> Tuple[Optional[flo
     return cost, cost is None and any(value is not None for value in candidates), BYOK_COST_BASIS if byok else ""
 
 
-# Finish reasons that mean a reply reached its output allowance: OpenAI-family ``length``
-# and Anthropic ``max_tokens``. The one vocabulary every finish-reason reader shares.
-OUTPUT_LIMIT_FINISH_REASONS = frozenset({"length", "max_tokens"})
+# Finish reasons that mean a reply reached its output allowance: OpenAI-family ``length``, Anthropic
+# ``max_tokens`` and Responses ``max_output_tokens``. The one vocabulary every finish-reason reader shares.
+OUTPUT_LIMIT_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
 # A provider's own content refusal: OpenAI-family ``content_filter`` and Anthropic ``refusal``.
 CONTENT_REFUSAL_FINISH_REASONS = frozenset({"content_filter", "refusal"})
 # A reply that ended to call a tool: OpenAI-family ``tool_calls``/``function_call`` and Anthropic ``tool_use``.
 TOOL_CALL_FINISH_REASONS = frozenset({"tool_calls", "function_call", "tool_use"})
+# A completed reply its provider marked as intermediate progress, not an answer: Responses' last assistant
+# ``phase`` ``commentary`` (the adapter's label). Healthy: its owner continues it as an ordinary round.
+INTERMEDIATE_FINISH_REASONS = frozenset({"commentary"})
+
+
+def reply_usability(finish: Any, status: Any, msg: Any) -> str:
+    """One reply's usability from its provider's own terminal facts (finish label, terminal ``status``), never
+    its words. ``intermediate``: completed commentary with text and no call — continue it as an ordinary round;
+    ``unusable``: a provider-stated terminal that is no result — ``incomplete`` for any reason but its output
+    limit (``content_filter``, ``max_messages``, ``steered``, none), a completed one ending as the provider's
+    content refusal, or a failed/cancelled one — neither text, JSON nor call counts; ``usable``: everything else,
+    which the existing finish rules (output-limit cut, tool-call finish, refusal, empty) still read. A reply
+    without a terminal status (every Chat-shaped lane) is judged by its finish alone. The reply's items, reason
+    and usage are retained by their owners either way."""
+    label, state = str(finish or "").strip().lower(), str(status or "").strip().lower()
+    if state and state != "completed" and not (state == "incomplete" and label in OUTPUT_LIMIT_FINISH_REASONS):
+        return "unusable"
+    if state and label in CONTENT_REFUSAL_FINISH_REASONS:
+        return "unusable"
+    text = isinstance(msg, dict) and bool(str(msg.get("content") or "").strip())
+    if label in INTERMEDIATE_FINISH_REASONS and text and not (isinstance(msg, dict) and msg.get("tool_calls")):
+        return "intermediate"
+    return "usable"
+
+
+def usage_reply_usability(usage: Any, msg: Any) -> str:
+    """``reply_usability`` read from one normalized ``(usage, msg)`` pair."""
+    status = usage.get("response_status") if isinstance(usage, dict) else None
+    return reply_usability(response_finish_reason(usage, msg)[1], status, msg)
+
+
+def usage_reply_unfinished(usage: Any) -> bool:
+    """Whether the provider's own terminal says the reply did not finish (Responses ``incomplete``). Its usable
+    output cut is continued only by Main's output-cut recovery; a caller without that recovery, a tool-less
+    one-shot or a review verdict, never takes it as a result, however well its text parses."""
+    status = usage.get("response_status") if isinstance(usage, dict) else None
+    return str(status or "").strip().lower() == "incomplete"
+
+
+class UnusableReplyError(RuntimeError):
+    """A tool-less one-shot call whose reply is no result by its provider's own terminal facts
+    (``reply_usability`` intermediate or unusable, or ``unfinished``: ``usage_reply_unfinished``): raised before
+    any caller parses its text, carrying the reply and its usage. The attempt is already settled; no other turn
+    is started."""
+
+    code = "unusable_reply"
+
+    def __init__(self, usability: str, message: Any, usage: Any):
+        self.usability = usability
+        self.reply_message = copy.deepcopy(message) if isinstance(message, dict) else {}
+        self.usage = copy.deepcopy(usage) if isinstance(usage, dict) else {}
+        finish = self.usage.get("response_finish_reason")
+        super().__init__(f"unusable_reply: the provider ended this reply as {usability} "
+                         f"(status={self.usage.get('response_status') or 'unknown'}, finish_reason={finish}); "
+                         "it is not a result")
 
 
 def response_finish_reason(usage: Any, msg: Any) -> Tuple[bool, Optional[str]]:

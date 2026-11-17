@@ -17,13 +17,15 @@ import json
 from typing import Any, Callable, Iterable, Mapping
 
 from ouroboros.provider_models import (
-    BUILTIN_CONNECTION, CONNECTIONS_KEY, MODEL_SETTING_KEYS, PROVIDER_KINDS, RouteParts, choice_error,
-    compatible_endpoint, compatible_endpoint_configured, connection_id, parse_model_route,
+    BUILTIN_CONNECTION, CONNECTIONS_KEY, DIRECT_PROVIDER_DEFAULTS, MODEL_SETTING_KEYS, OPENAI_RESPONSES_DIRECT_DEFAULTS,
+    PROVIDER_KINDS, RouteParts, choice_error, compatible_endpoint, compatible_endpoint_configured, connection_id,
+    openai_api_surface, parse_model_route,
 )
 from ouroboros.settings_integrity import runtime_setting
 
 Reader = Callable[..., Any]  # read(flat_setting_key, default) -> the raw saved value
 _ROW_META = ("kind", "name", "label", "enabled")
+_SURFACE_KEY = PROVIDER_KINDS["openai"].flat_key("api_surface")
 
 
 def connection_rows(raw: Any) -> tuple[dict, ...]:
@@ -171,6 +173,50 @@ def connections_meta(settings: Mapping[str, Any], document: Mapping[str, Any]) -
             **(_cache_hints(route, read, row) if route.kind == "openai-compatible" and configured else {}),
         })
     return out
+
+
+def direct_provider_defaults(provider: str, settings: Mapping[str, Any] | None = None, connection: str | None = "") -> dict:
+    """The factory profile a direct provider's connection proposes (slots, catalog, deep review, Provider Test):
+    an OpenAI connection explicitly on Responses proposes the Responses profile; every other one, a never-chosen
+    or unreadable OpenAI surface included, keeps its kind's table."""
+    if provider == "openai" and connection is not None:
+        from ouroboros.llm_attempt import ConnectionUnavailable
+
+        read, rows = settings_view(settings)
+        try:
+            surface = openai_api_surface(connection_values(RouteParts("openai", connection, ""), read, rows)("api_surface"))
+        except (ConnectionUnavailable, ValueError):
+            surface = ""
+        if surface == "responses":
+            return OPENAI_RESPONSES_DIRECT_DEFAULTS
+    return DIRECT_PROVIDER_DEFAULTS.get(provider, {})
+
+
+def seed_new_api_surfaces(after: dict, before: Mapping[str, Any]) -> list[str]:
+    """Save a genuinely new OpenAI connection on Responses (the owner's choice of 16.11.2026); return what was seeded.
+
+    New means it could not serve before this write and can after it, with no API chosen: the built-in key absent
+    from the settings and environment the write started from (and not the legacy compatible pair's key), or a
+    named row the write adds. A connection that already existed keeps what it reads: a never-chosen API stays
+    Chat Completions, whatever the edit."""
+    from ouroboros.provider_models import legacy_openai_base
+
+    seeded: list[str] = []
+    read_before, rows_before = settings_view(before)
+    read_after, rows_after = settings_view(after)
+    builtin = RouteParts("openai", "", "")
+    if (not _text(after.get(_SURFACE_KEY)) and not legacy_openai_base(after)
+            and _has_credential(builtin, read_after, rows_after) and not _has_credential(builtin, read_before, rows_before)):
+        after[_SURFACE_KEY] = "responses"
+        seeded.append(_SURFACE_KEY)
+    rows = after.get(CONNECTIONS_KEY)
+    for row in rows if isinstance(rows, list) else ():
+        name = _text(row.get("name")) if isinstance(row, dict) else ""
+        if (name and name != BUILTIN_CONNECTION and _text(row.get("kind")) == "openai"
+                and not _text(row.get("api_surface")) and find_row(rows_before, "openai", name) is None):
+            row["api_surface"] = "responses"
+            seeded.append(connection_id("openai", name))
+    return seeded
 
 
 def _cache_hints(route: RouteParts, read: Reader, row: Mapping[str, Any]) -> dict:

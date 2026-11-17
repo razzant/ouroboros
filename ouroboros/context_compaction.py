@@ -33,6 +33,7 @@ from ouroboros.context_budget import (
     _UnsafeVisual,
 )
 from ouroboros.anthropic_native_custody import anthropic_tool_unit_active, custody_private_key
+from ouroboros.openai_responses_custody import RESPONSES_PRIVATE_KEYS, responses_tool_unit_active
 from ouroboros.tool_result_record import read_tool_result_record
 from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY
 
@@ -315,7 +316,7 @@ def _atomic_units(
             and len(result_ids) == len(set(result_ids))
             and set(result_ids) == set(call_ids)
         )
-        if complete and not anthropic_tool_unit_active(messages, idx, end):
+        if complete and not anthropic_tool_unit_active(messages, idx, end) and not responses_tool_unit_active(messages, idx, end):
             unit = _unit_from_slice(
                 messages, idx, end,
                 trace_refs_by_tool_call_id=trace_refs,
@@ -331,7 +332,9 @@ def _atomic_units(
 # key marks a host-typed row (acceptance observation, review feedback, native
 # continuation, custody) that stays raw: typed meaning never gets flattened to prose.
 _PLAIN_ROW_KEYS = frozenset({"role", "content", "name", "cache_control", HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY})
-_ASSISTANT_PROSE_KEYS = _PLAIN_ROW_KEYS | {"reasoning_content", "reasoning_details", "refusal", "annotations"}
+# A Responses reply's receipt rides every assistant row; folding the row retires its native replay with it.
+_ASSISTANT_PROSE_KEYS = _PLAIN_ROW_KEYS | {"reasoning_content", "reasoning_details", "refusal", "annotations",
+                                          *RESPONSES_PRIVATE_KEYS}
 UnitScope = Literal["tool", "dialogue"]
 UnitKind = Literal["capsule", "tool", "assistant", "user"]
 

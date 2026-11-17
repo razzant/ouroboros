@@ -69,6 +69,8 @@ OPENROUTER_HELPER_DEFAULTS = (
 SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OPENROUTER_API_KEY": "",
     "OPENAI_API_KEY": "",
+    # The built-in OpenAI connection's API: "" (never chosen: Chat Completions), "chat_completions" or "responses".
+    "OPENAI_API_SURFACE": "",
     "OPENAI_BASE_URL": "",
     "OPENAI_COMPATIBLE_API_KEY": "",
     "OPENAI_COMPATIBLE_BASE_URL": "",

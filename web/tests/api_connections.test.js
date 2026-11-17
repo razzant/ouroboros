@@ -287,6 +287,28 @@ test('a wizard draft lists named endpoints without saved metadata, keeping ident
         .find((entry) => entry.id === 'openai-compatible').enabled, false);
 });
 
+// The defaults are the chosen key's own: an OpenAI key on Responses proposes that profile, a key that never chose the
+// earlier one, and among several named keys the one Main runs on decides (provider_connections.direct_provider_defaults).
+test('a proposal takes the defaults of the API its own key chose', () => {
+    const modelDefaults = { openai: { main: 'openai::gpt-5.6-terra', light: 'openai::gpt-5.6-luna' },
+        'openai-responses': { main: 'openai::gpt-6.1-terra', light: 'openai::gpt-6-luna' }, openrouter: { main: 'or/main' } };
+    const rows = [{ kind: 'openai', name: 'lab', api_key: 'k1', api_surface: 'responses' }, { kind: 'openai', name: 'old', api_key: 'k2' }];
+    const profileOf = (kind, name) => ((rows.find((row) => row.kind === kind && row.name === name) || {}).api_surface === 'responses' ? 'openai-responses' : '');
+    const only = (row) => ({ OUROBOROS_CONNECTIONS: [row] });
+    assert.deepEqual(connectionDefaults(modelDefaults, 'openai', only(rows[0]), {}, '', profileOf).defaults,
+        { main: 'openai@lab::gpt-6.1-terra', light: 'openai@lab::gpt-6-luna' }, 'the only key, on Responses');
+    assert.deepEqual(connectionDefaults(modelDefaults, 'openai', only(rows[1]), {}, '', profileOf).defaults,
+        { main: 'openai@old::gpt-5.6-terra', light: 'openai@old::gpt-5.6-luna' }, 'the only key, never chosen: the earlier API');
+    const both = { OUROBOROS_CONNECTIONS: rows };
+    assert.equal(connectionDefaults(modelDefaults, 'openai', both, {}, 'openai@lab::x', profileOf).defaults.main, 'openai@lab::gpt-6.1-terra');
+    assert.equal(connectionDefaults(modelDefaults, 'openai', both, {}, 'openai@old::x', profileOf).defaults.main, 'openai@old::gpt-5.6-terra');
+    const waiting = connectionDefaults(modelDefaults, 'openai', both, {}, 'openai::gpt-5.6-terra', profileOf);
+    assert.deepEqual([waiting.defaults.main, waiting.choice], ['openai::gpt-5.6-terra', ['openai@lab', 'openai@old']],
+        'before Main names a key, no key and no API is guessed');
+    assert.equal(connectionDefaults(modelDefaults, 'openai', only(rows[0])).defaults.main, 'openai@lab::gpt-5.6-terra',
+        'a caller without a resolver keeps the kind\'s own table');
+});
+
 // #2969: the wizard proposes on the key a draft has — every direct provider's own defaults (none falls back to
 // OpenRouter), on its only named key, or its built-in key first; several named keys wait for Main's choice.
 test('every direct provider the wizard knows proposes on the key a draft has', () => {

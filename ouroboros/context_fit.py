@@ -462,24 +462,34 @@ def tool_schema_tokens(tools: Optional[List[Dict[str, Any]]], *, provider: str =
     return max(estimate_tokens(_compact_json(shape)) for _rows, shape in _request_shapes([], tools, provider, reasoning_effort))
 
 
+def payload_prompt_rows(prompt_payload: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """A physical request's input as estimator rows: Chat/Messages ``messages`` or Responses ``input`` items
+    (a bare string input is one user row), a top-level ``system``/``instructions`` leading; None without either."""
+    rows = prompt_payload.get("messages")
+    if not isinstance(rows, list):
+        rows = prompt_payload.get("input")
+        rows = [{"role": "user", "content": rows}] if isinstance(rows, str) else rows
+    if not isinstance(rows, list):
+        return None
+    system = prompt_payload.get("system") or prompt_payload.get("instructions")
+    return [{"role": "system", "content": system}, *rows] if isinstance(system, (str, list)) and system else list(rows)
+
+
 def bounded_prompt_tokens_for_payload(prompt_payload: Dict[str, Any], fallback_chars: int) -> int:
     """The density witness's basis (``capability_evidence.MAIN_DENSITY_BASIS``): the
-    fit estimator's own token count for a request payload (messages + tools,
-    images at the proxy, a top-level ``system`` — the Messages API's separate
+    fit estimator's own token count for a request payload (``payload_prompt_rows``
+    + tools, images at the proxy, a top-level ``system`` — the Messages API's separate
     field — counted as a leading system message), or ``fallback_chars // 4``
-    when there is no message list. Kept beside the estimator so the two can
+    when there is no input list. Kept beside the estimator so the two can
     never diverge; ``estimate_message_chars`` dropped tool_call objects and made
     density ~1.4x high on the tool-heavy shape, and an uncounted ``system``
     over-sized the direct-Anthropic reply by its whole length (measure_main_fit
     and the send finalizer multiply THIS quantity)."""
     try:
-        messages = prompt_payload.get("messages")
-        if isinstance(messages, list):
-            system = prompt_payload.get("system")
-            if isinstance(system, (str, list)) and system:
-                messages = [{"role": "system", "content": system}, *messages]
+        rows = payload_prompt_rows(prompt_payload)
+        if rows is not None:
             return int(estimate_context_prompt_tokens(
-                messages, prompt_payload.get("tools") or prompt_payload.get("functions")))
+                rows, prompt_payload.get("tools") or prompt_payload.get("functions")))
     except Exception:
         pass
     return max(0, int(fallback_chars) // 4)
