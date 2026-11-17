@@ -574,10 +574,15 @@ def test_new_managed_nonce_is_confined_readable_with_restrictive_umask_and_no_pr
 
 def test_a_legacy_identity_survives_only_the_windows_serial_widening():
     """CPython 3.12+ on Windows reports the volume's 64-bit serial where 3.10 reported its low 32 bits: a schema-1
-    record a 3.10 app made matches there exactly what it matched under 3.10."""
+    record made on either side of the move matches there exactly what the 32-bit serial could tell apart."""
     seen = SimpleNamespace(st_dev=(0xABCD << 32) | 0x12345678, st_ino=77)
     assert scratch._legacy_identity_matches(seen, [0x12345678, 77], windows=True)
     assert scratch._legacy_identity_matches(seen, [seen.st_dev, 77], windows=True)
     assert not scratch._legacy_identity_matches(seen, [0x12345679, 77], windows=True)
     assert not scratch._legacy_identity_matches(seen, [0x12345678, 78], windows=True)
     assert not scratch._legacy_identity_matches(seen, [0x12345678, 77], windows=False)
+    # The other way: the old checkout ran on 3.12 before its first Update, then the 3.10 app came back.
+    narrow = SimpleNamespace(st_dev=0x12345678, st_ino=77)
+    assert scratch._legacy_identity_matches(narrow, [seen.st_dev, 77], windows=True)
+    assert not scratch._legacy_identity_matches(narrow, [(0xABCD << 32) | 0x12345679, 77], windows=True)
+    assert not scratch._legacy_identity_matches(narrow, [seen.st_dev, 77], windows=False)
