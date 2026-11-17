@@ -731,6 +731,7 @@ export function createRoomWork({
             : tr('room_work.scope.main', 'Work in this chat');
         if (surface.getAttribute('aria-label') !== label) surface.setAttribute('aria-label', label);
         rows = arrange(collect()).map((row) => Object.assign(row, { lookup: lookupOf(row) }));
+        placeChip();
         paintTrigger();
         paintNote();
         if (!open) return;
@@ -775,20 +776,71 @@ export function createRoomWork({
     // name still cut there makes the consciousness chip show its brain alone (its name keeps the whole state); a desk's
     // panel beside Main keeps the chip's word and the name ellipsizes.
     // Panic never yields.
+    // In Telegram's shared row (style.css) Main's title also goes whole or not at all, as Ouroboros's card in the sidebar
+    // names it: it wins while it fits whole beside the status's mark; a "Main Chat" that would still be cut gives the
+    // capsule to the room's state, whose word may then come back, whole.
     let fittedWord = null, fittedWidth = null, fitNeeded = false;
+    // Whether a box that ellipsizes its line cuts it, to the fraction of a pixel: an ellipsis shows for any overflow,
+    // while scrollWidth rounds a word a fraction too wide down to its box (a "Sendi…" measured as fitting on a 393 pt
+    // phone). The box's whole width is read by letting it take that width for a moment, in the same task, so nothing
+    // paints between.
+    function cuts(box) {
+        if (!box?.getClientRects?.().length) return false;
+        const given = box.getBoundingClientRect().width;
+        const before = box.style.minWidth;
+        box.style.minWidth = 'max-content';
+        const whole = box.getBoundingClientRect().width;
+        box.style.minWidth = before;
+        return whole > given + 0.01;
+    }
     function fitWord() {
         if (destroyed) return;
         delete trigger.dataset.word;
         delete trigger.dataset.step;
-        const chip = name && bar.querySelector('.cx-chip');
+        if (titleRow) delete titleRow.dataset.title;
+        const chip = name && [...bar.querySelectorAll('.cx-chip')].find((node) => !extras.contains(node));
         if (chip) delete chip.dataset.fit;
-        const cut = () => statusBadge.scrollWidth > statusBadge.clientWidth + 1;
+        const cut = () => cuts(statusBadge);
         if (statusBadge.dataset.step && cut()) trigger.dataset.step = 'off';
         if (cut()) trigger.dataset.word = 'off';
-        if (chip && roomCoversMain({ root: doc.documentElement }) && name.scrollWidth > name.clientWidth + 1) {
+        const mainTitle = !name && inSharedRow() && titleRow?.querySelector('.app-page-title');
+        if (mainTitle && cuts(mainTitle)) {
+            titleRow.dataset.title = 'off';
+            delete trigger.dataset.word;
+            if (cut() || trigger.scrollWidth > trigger.clientWidth + 1 || titleRow.scrollWidth > titleRow.clientWidth + 1) {
+                trigger.dataset.word = 'off';
+            }
+        }
+        if (chip && roomCoversMain({ root: doc.documentElement }) && cuts(name)) {
             chip.dataset.fit = 'mark';
         }
         fittedWidth = titleRow?.clientWidth;
+    }
+
+    // In Telegram's shared row (style.css "Telegram's shared row") the bar keeps the room's name and Panic beside
+    // Telegram's own controls, and the consciousness chip becomes a row of the commands that close the work list, before
+    // Restart and the budget, as those two leave a narrow bar (page_header.js). One node: it returns to the bar's end group
+    // when the row is the page's own again or the room leaves the screen.
+    function inSharedRow() {
+        const root = doc.documentElement;
+        return root?.dataset?.telegramFullscreen === 'active' && root.dataset.layout === 'stack';
+    }
+    function chipHome() {
+        return [...(bar?.children || [])].find((node) => node.classList?.contains('app-page-actions')
+            || node.classList?.contains('app-page-trailing')) || null;
+    }
+    function placeChip() {
+        if (destroyed || !bar) return;
+        const listed = inSharedRow() && !page.hidden && page.isConnected;
+        const chip = listed ? [...bar.querySelectorAll('.cx-chip')].find((node) => !extras.contains(node))
+            : extras.querySelector('.cx-chip');
+        if (!chip) return;
+        if (listed) {
+            if (chip.parentNode !== extras) { delete chip.dataset.fit; extras.prepend(chip); }
+        } else {
+            const home = chipHome();
+            if (home && chip.parentNode !== home) home.prepend(chip);
+        }
     }
 
     function paintTrigger() {
@@ -1029,8 +1081,10 @@ export function createRoomWork({
     // ---- wiring
     listen(globalThis.window, 'ouro:language-changed', schedule);
     // Whether a cut Project name takes the chip's word depends on the layout and the input (fitWord), so a switch fits
-    // again.
-    if (name) listen(globalThis.window, 'ouro:layout-changed', () => { fitNeeded = true; schedule(); });
+    // again; Telegram's shared row comes and goes with the layout and with Telegram's fullscreen (host_telegram.js), and
+    // the consciousness chip's place and Main's title follow it.
+    listen(globalThis.window, 'ouro:layout-changed', () => { fitNeeded = true; schedule(); });
+    listen(globalThis.window, 'ouro:host-chrome', () => { fitNeeded = true; schedule(); });
     // A click with detail 0 is Enter or Space on the focused control: a keyboard open lands in the list.
     listen(trigger, 'click', (event) => { if (open) close(); else openSurface(event?.detail === 0); });
     listen(trigger, 'keydown', (event) => {
@@ -1130,6 +1184,7 @@ export function createRoomWork({
         const away = Boolean(page.hidden) || !page.isConnected;
         if (away) { navigationIntent += 1; close({ restoreFocus: false }); showBack(null); }
         trigger.hidden = away;
+        placeChip();
         if (!away) fitWord();
     }) : null;
     watcher?.observe(page, { attributes: true, attributeFilter: ['hidden'] });

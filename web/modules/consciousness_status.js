@@ -95,7 +95,9 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     glyph.innerHTML = controlIcon('brain', 18);
     const word = element('span', 'cx-chip-word');
     const mark = createStatusMark(doc, 'cx-chip-mark');
-    chip.append(glyph, word, mark);
+    // Its name, shown where the chip lies as a row of the room's work list (Telegram's shared row, room_work.js).
+    const label = element('span', 'cx-chip-label', 'Consciousness');
+    chip.append(glyph, label, word, mark);
     const titleBlock = bar.querySelector('.app-page-title-block');
     if (titleBlock) titleBlock.after(chip);
     else bar.append(chip);
@@ -294,7 +296,12 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         delete chip.dataset.open;
         bar.removeAttribute('data-cx-shade');
         foldAway();
-        if (restoreFocus && chip.isConnected && !chip.hidden) chip.focus({ preventScroll: true });
+        if (restoreFocus && chip.isConnected && !chip.hidden) {
+            // A chip that is a row of the room's folded work list (Telegram's shared row) has no box on the
+            // screen: focus returns to the room's capsule that opened that list.
+            const capsule = chip.getClientRects().length ? null : bar.querySelector('.rw-trigger:not([hidden])');
+            (capsule || chip).focus({ preventScroll: true });
+        }
     }
 
     const disposers = [];
