@@ -273,11 +273,11 @@ export function rowStatusReason(status) {
 
 const ROUTE_HINT = 'Choose how this subagent runs: an API model or an agent session.';
 
-// Two rows on one engine are a repeated review when both are marked, or a review
-// row minted beside the owner's own delegation row; any other twin is a copy slip.
+// Match configured_subagents.validate_unique_engines: both Reviewer marks or
+// either runtime birth marker allow twins, including two migrated rows.
 export function reviewTwinAllowed(first, second) {
     return (first?.review_eligible === true && second?.review_eligible === true)
-        || Boolean(first?.minted_from) !== Boolean(second?.minted_from);
+        || Boolean(first?.minted_from || second?.minted_from);
 }
 
 function executionFor(snapshot, subagentId) {
