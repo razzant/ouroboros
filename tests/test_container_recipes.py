@@ -62,7 +62,10 @@ def test_the_managed_target_hosts_the_launcher_over_a_complete_released_seed():
     entry = _entrypoint(managed["lines"])
     assert entry[:3] == ["python", "/app/launcher.py", "--no-ui"]
     assert entry[entry.index("--seed-bundle") + 1] == "/opt/ouroboros/seed"
-    assert entry[entry.index("--runtime-venv") + 1] == "/ouroboros/body/venv"
+    # Named for the shipped minor, so an existing volume's venv from another Python stays beside it untouched.
+    minor = ".".join(re.search(r'^PY_VERSION="([0-9.]+)"$', (REPO / "scripts" / "download_python_standalone.sh")
+                               .read_text(encoding="utf-8"), re.MULTILINE)[1].split(".")[:2])
+    assert entry[entry.index("--runtime-venv") + 1] == f"/ouroboros/body/venv-{minor}"
     assert '["--launch-intent", "automatic"]' in text
     layout = dict(re.findall(r"(OUROBOROS_[A-Z_]+|HOME)=(\S+)", text))
     assert layout["OUROBOROS_REPO_DIR"] == "/ouroboros/body/repo"

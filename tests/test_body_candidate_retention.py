@@ -1,6 +1,7 @@
 """Quiescent candidate scratch is classified once, with addressed deletion rechecks; one pass's verdicts read the
 kept-output debts once, and each removal reads them fresh."""
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -27,8 +28,9 @@ def count_walks(monkeypatch):
     walked, walk = [], environment.os.walk
 
     def counted(root, **kwargs):
-        walked.append(Path(root))
-        yield from walk(root, **kwargs)
+        if sys._getframe(1).f_globals.get("__name__") != "shutil":  # 3.12+ rmtree walks on Windows
+            walked.append(Path(root))
+        return walk(root, **kwargs)
 
     monkeypatch.setattr(environment.os, "walk", counted)
     return walked

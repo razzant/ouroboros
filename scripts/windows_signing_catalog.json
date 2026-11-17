@@ -4,17 +4,17 @@
     {"path": "Ouroboros/Ouroboros.exe"},
     {
       "path": "Ouroboros/_internal/python-standalone/python.exe",
-      "upstreamSha256": "3fbdcdd370c8840fa15b4f8b6c7162c1812895dd7c0c0a0cc59f49789e27f211"
+      "upstreamSha256": "86c4690be87a6bb6be1affe24b3c1b67ceedc86b477d6cde9f812fafd0f6d3b9"
     },
     {
       "path": "Ouroboros/_internal/python-standalone/pythonw.exe",
-      "upstreamSha256": "352c77af580d5941b2b60b1afedd738782bc95f84028a482ae451fde48bbc9d4"
+      "upstreamSha256": "61531012a23ed8982c15015d582353f42a8834effed08fdc533663e54a32ca4e"
     }
   ],
   "pythonUpstream": {
     "release": "20261009",
-    "pythonVersion": "3.10.22",
-    "archive": "cpython-3.10.22+20261009-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
-    "archiveSha256": "f20288c45ff11e7fe026f40ddcfb2acfe695cec18860746639e289142a589745"
+    "pythonVersion": "3.12.15",
+    "archive": "cpython-3.12.15+20261009-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+    "archiveSha256": "11ed9f8a6ac64fb1b5a55e40e305a6744a3f77a70863c8f8197a6e4349abc64a"
   }
 }

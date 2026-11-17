@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from ouroboros import evidence_packs as packs
+from ouroboros.utils import file_identity
 
 _WALK = contextvars.ContextVar("immutable_source_retention", default=None)
 # The maintenance job whose row keeps the promotion retry's durable observations (``RetentionMemo``).
@@ -248,7 +249,7 @@ def _path_fact(path):
     """Cheap repair evidence includes in-place writes, not only directory changes."""
     try:
         stat = path.lstat()
-        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_mode)
+        return (*file_identity(stat), stat.st_mode)  # the stamp a descriptor's failed_stamp shares
     except OSError as exc:
         return (type(exc).__name__, exc.errno)
 
