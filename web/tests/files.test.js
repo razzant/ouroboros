@@ -30,6 +30,9 @@ test('Files keeps location and actions in the band, with the filter first in its
         'a file shown alone has no column divider');
     assert.doesNotMatch(sidebar, /background:/, 'the column does not paint its own sheet');
     assert.match(css, /\.files-sidebar\[data-scroll-above\] \{ --scroll-fade-top-clear: var\(--files-band-h\); --scroll-fade-top: calc\(var\(--files-band-h\) \+ var\(--scroll-fade-edge\)\); \}/);
+    // The band's location row takes the band's inset alone (a phone showed it 28px in, the rows 12px).
+    assert.match(css, /\.files-band > \.files-browser-header \{ padding-inline: 0; \}/);
+    assert.match(css, /\.app-page-tabs \{[^}]*padding: 0 var\(--page-header-padding-x\)/, 'the band itself keeps the page\'s inset');
     // With a return the rail keeps 14rem only while the band is wide: a tablet's column keeps its last action in it.
     assert.match(css, /html\[data-layout="docked"\] \.app-page-header\[data-lead\]\[data-return\] \{ grid-template-columns: minmax\(min\(14rem, 40%\), 1fr\) auto; \}/);
     assert.doesNotMatch(css, /minmax\(14rem, 1fr\)/, 'a fixed 14rem pushed Refresh past a 768px window\'s edge');

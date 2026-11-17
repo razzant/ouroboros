@@ -1056,6 +1056,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
     margin-left: auto;
 }
 
+/* In its band (a phone's row under the header) the location stands at the band's one inset, not a second one. */
+.files-band > .files-browser-header { padding-inline: 0; }
 .files-browser-header > .files-browser-actions { flex-wrap: wrap; flex-shrink: 1; min-width: 0; }
 /* On a phone (the stack layout) the location shares its row with its actions: its folders wrap beside them. */
 html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis: 0; }
