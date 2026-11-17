@@ -830,6 +830,12 @@ def test_an_unexaminable_path_is_named_unknown_and_the_rest_still_checked(tmp_pa
         (s.tree / "nested").symlink_to("nested")
     except (OSError, NotImplementedError) as exc:
         pytest.skip(str(exc))
+    try:
+        (s.tree / "nested" / "report.txt").lstat()
+    except FileNotFoundError:  # Windows with CPython 3.12+ answers a path through the loop "not found"
+        pytest.skip("this system reports a path through a symlink loop as absent, so nothing here is unexaminable")
+    except OSError:
+        pass
     out = s.integrate("A")
     assert "INTEGRATE_EXTERNAL_WORKSPACE_MISMATCH" in out and "unknown 1: nested/report.txt" in out, out
     assert s.states("A") == {"keep.txt": "unchanged", "nested/report.txt": "unknown"}, out

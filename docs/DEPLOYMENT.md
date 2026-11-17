@@ -160,7 +160,9 @@ Desktop (macOS, Windows, Linux):
    start, start the old one again, run Update, then start the new one.
 4. Run Dashboard → Updates once in the new app. If step 1 was skipped, or a
    package manager such as Homebrew replaced the app, the old checkout's Pillow
-   12.3 is still in use until this Update; when nothing is newer it changes
+   12.3 is still in use until this Update, and on Windows that old code cannot
+   copy files on Python 3.12 ("changed during read" on attachments, generated
+   images and delegated results); when nothing is newer it changes
    nothing. To check, run the app's interpreter with your data directory's user
    packages and expect 3.12.15 and Pillow 13. On macOS:
 

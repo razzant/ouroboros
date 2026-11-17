@@ -457,13 +457,14 @@ def copy_file_bytes(source: Any, destination: Any) -> Any:
     ``copy_function``) and refuses a WAL index; the copy is a byte copy, not a consistent snapshot
     of a live store."""
     refuse_wal_index(source)
-    if os.name == "nt" or not is_sqlite_file(source):
-        return shutil.copy2(source, destination)
     target = pathlib.Path(destination)
     if target.is_dir():
         target = target / pathlib.Path(source).name
+    # Ahead of copy2 too: from CPython 3.12 it copies with CopyFile2 on Windows before its own same-file check.
     if target.exists() and os.path.samefile(source, target):
         raise shutil.SameFileError(f"{source!r} and {str(target)!r} are the same file")
+    if os.name == "nt" or not is_sqlite_file(source):
+        return shutil.copy2(source, destination)
     with open(target, "wb") as handle:
         for data in iter_file_bytes(source):
             handle.write(data)

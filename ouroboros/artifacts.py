@@ -1150,8 +1150,6 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
     """
     source_path = pathlib.Path(path) if isinstance(path, (str, os.PathLike)) else None
     digest, size = sha256(), 0
-    def identity(observation: os.stat_result) -> tuple:
-        return file_identity(observation)
     from ouroboros.store import open_for_read  # a held store file keeps its locks (no new descriptor to close)
 
     # Reject pipes/devices before opening: the descriptor check alone comes too
@@ -1172,8 +1170,8 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
             size += len(chunk)
             if size > before.st_size:
                 raise OSError(f"artifact source size changed during read: {path}")
-        if (identity(before) != identity(os.fstat(handle.fileno()))
-                or (source_path is not None and identity(before) != identity(source_path.stat()))):
+        if (file_identity(before) != file_identity(os.fstat(handle.fileno()))
+                or (source_path is not None and file_identity(before) != file_identity(source_path.stat()))):
             raise OSError(f"artifact source changed during read: {path}")
     result = {"size": size, "sha256": digest.hexdigest()}
     if size != before.st_size:
@@ -1181,11 +1179,11 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
     expected = expected if isinstance(expected, dict) else {}
     if expected.get("immutable") and (not isinstance(expected.get("size"), int) or not expected.get("sha256")):
         raise ArtifactIdentityError(f"immutable artifact is missing its capture identity: {path}",
-                                    source_path=source_path, source_stamp=identity(before))
+                                    source_path=source_path, source_stamp=file_identity(before))
     for key in ("size", "sha256"):
         if expected.get(key) not in (None, "") and expected[key] != result[key]:
             raise ArtifactIdentityError(f"artifact source failed {key} verification: {path}",
-                                        source_path=source_path, source_stamp=identity(before))
+                                        source_path=source_path, source_stamp=file_identity(before))
     return result
 
 

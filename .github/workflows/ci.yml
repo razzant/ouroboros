@@ -1,7 +1,7 @@
 # Ouroboros CI — Five-tier cross-platform testing and release pipeline
 #
 # Lint:                 Manual / tag                                                   → ruff F, ESLint no-undef, generated Pages output
-# Tier 1 (Quick):       Manual                                                        → Ubuntu PERSIST battery, three duration shards
+# Tier 1 (Quick):       Manual / tag                                                   → Ubuntu PERSIST battery, three duration shards
 # Tier 2 (Full):        Manual / tag                                                   → Full 3-OS matrix, duration shards on every OS
 # Tier 1.5 (SQLite floor): Manual                                                      → store modules on ubuntu-22.04's system SQLite 3.37.2
 # Tier 2.5 (Integration): Manual / tag                                                 → Real-provider tests, reusable provider-canary.yml
@@ -128,7 +128,7 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────
   # Lint: deterministic source checks, on manual runs and release tags (a
-  # release requires it). Moved out of quick-test, which tags never ran.
+  # release requires it). Moved out of quick-test, which tags did not run then.
   # ──────────────────────────────────────────────────────────────────
   lint:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
