@@ -424,7 +424,7 @@ def test_a_size_terminal_names_the_final_candidate_it_refused(round_call, monkey
         bare = _attempt_request({"provider": "openai", "model": plan.model}, {
             "model": plan.model, "max_tokens": 65_536, "messages": ctx.messages, "tools": []})
         total = max(before.estimated_input_tokens, bare.prompt_tokens_bounded_estimate) + 65_536
-        limit = cw.WindowLimit(total, "total", "local_health")
+        limit = cw.WindowLimit(total, "total", "local_health", ce.utc_now_iso())  # dated, as its read is
         plan = replace(plan, window_tokens=total, window_record=cw.WindowRecord(
             plan.route_fp, total=limit, reserve=65_536, declared=(limit,)))
         ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
@@ -456,7 +456,7 @@ def test_a_size_terminal_names_the_final_candidate_it_refused(round_call, monkey
                 "remaining reply room 50,000; requested reply limit 65,536.") in text
     else:
         assert (f"\nrequest input estimated {size:,} tokens (host prediction before sending, no provider response) on "
-                f"{plan.model}; assumed window {total:,} total: local serving window;") in text
+                f"{plan.model}; assumed window {total:,} total: local serving window ") in text  # then its read's date
     assert f"{before.estimated_input_tokens:,} tokens" not in text
     assert ("smallest refused request ~50,000 tokens" in text) is exact
 
