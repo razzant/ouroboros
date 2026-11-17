@@ -66,7 +66,13 @@ def wait_quietly(page, expression, timeout=3_000):
         return False
 
 
+# A Project reference in Main is a jump (DESIGN "Layers and dismissal"): its room lies over the return to Main, and
+# closing the room consumes that return with it. A row of the sidebar or drawer leaves the room alone (the drawer case).
+PROJECT_LAYERS = ['page-return-1', 'project']
+
+
 def open_project(page, index=0):
+    """Open a Project the way its reference in Main does."""
     page.evaluate("p => window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project: p}}))",
                   PROJECTS[index])
     page.wait_for_function("() => window.__ouroLayers.top() === 'project'")
@@ -164,7 +170,7 @@ def test_a_dialog_over_a_phone_project_stays_live_after_a_state_sync(shell_ui, t
     # The guard still fires: the room outside the open Project layer stays inert, the panel stays live.
     assert facts['after_sync']['contentInert'] and not facts['after_sync']['panelInert'], facts
     assert facts['click'] == 'clicked' and not facts['after_click']['open'], facts
-    assert facts['after_click']['layers'] == ['project'] and facts['after_click']['contentInert'], facts
+    assert facts['after_click']['layers'] == PROJECT_LAYERS and facts['after_click']['contentInert'], facts
     if surface == 'confirm':
         assert facts['result'] == 'false', facts
 
@@ -210,8 +216,9 @@ def test_back_closes_the_topmost_dialog_before_its_layer(shell_ui, tmp_path, cas
     finally:
         evidence(tmp_path, f'shell-back-{case}-{via}-{shell_ui["engine"]}', facts)
         page.close()
-    assert facts['open']['layers'] == [layer] and facts['open']['dialog'], facts
-    assert facts['first_back']['layers'] == [layer] and not facts['first_back']['dialog'], facts
+    under = ['drawer'] if layer == 'drawer' else PROJECT_LAYERS
+    assert facts['open']['layers'] == under and facts['open']['dialog'], facts
+    assert facts['first_back']['layers'] == under and not facts['first_back']['dialog'], facts
     assert facts['first_back']['drawer'] is (layer == 'drawer'), facts
     if layer == 'project':
         assert facts['first_back']['result'] == 'false', facts
@@ -318,7 +325,7 @@ def test_escape_in_a_composer_capsule_closes_only_the_capsule(shell_ui, tmp_path
         evidence(tmp_path, f'shell-escape-capsule-{shell_ui["engine"]}-{width}', facts)
         page.close()
     assert facts['capsule_before'] == 'true', facts
-    assert facts['capsule_after'] == 'false' and facts['layers_after'] == ['project'], facts
+    assert facts['capsule_after'] == 'false' and facts['layers_after'] == PROJECT_LAYERS, facts
     assert facts['layers_second'] == [], facts
 
 
@@ -375,7 +382,7 @@ UNDER = "([x, y]) => { const e = document.elementFromPoint(x, y); return e ? e.t
 @pytest.mark.parametrize('room', ['main', 'project'])
 def test_the_drawer_follows_a_finger_on_a_phone_room(chromium_ui, tmp_path, room):
     page = seed_page(chromium_ui, 390, 844)
-    under = [] if room == 'main' else ['project']  # the drawer opens over an open Project room
+    under = [] if room == 'main' else PROJECT_LAYERS  # the drawer opens over an open Project room
     facts = {'room': room}
     try:
         boot(page, chromium_ui)
