@@ -1,6 +1,8 @@
 // Runs after `vite build`. The build keeps ../docs (it also holds the handbook), so the files of earlier builds
-// would stay beside the new ones: remove the hashed bundles that no built page references, and the captures and
-// fonts that have left site/public. Published files with stable names in docs/assets are never touched.
+// would stay beside the new ones. This removes, from docs/assets, a hashed bundle that nothing built still loads,
+// and from docs/ui and docs/fonts, a file that has left site/public.
+// A bundle is kept when a built page names it or a kept bundle names it (an imported chunk), and a file that
+// site/public/assets also holds is never removed: those are the published files with stable names.
 import { readdir, readFile, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,14 +30,22 @@ async function pages(dir) {
   return found;
 }
 
-const referenced = new Set();
-for (const page of await pages(outRoot)) {
-  for (const match of (await readFile(page, "utf8")).matchAll(/\/assets\/([\w.-]+\.(?:js|css))/g)) referenced.add(match[1]);
+const assetsDir = join(outRoot, "assets");
+const built = await names(assetsDir);
+const stable = new Set(await names(join(siteRoot, "public", "assets")));
+const loaded = new Set();
+const unread = await Promise.all((await pages(outRoot)).map((page) => readFile(page, "utf8")));
+while (unread.length) {
+  const text = unread.pop();
+  for (const name of built) {
+    if (loaded.has(name) || !text.includes(name)) continue;
+    loaded.add(name);
+    if (/\.(?:js|css)$/.test(name)) unread.push(await readFile(join(assetsDir, name), "utf8"));
+  }
 }
-const removed = [];
-for (const name of await names(join(outRoot, "assets"))) {
-  if (hashedBundle.test(name) && !referenced.has(name)) removed.push(join("assets", name));
-}
+const removed = built
+  .filter((name) => hashedBundle.test(name) && !loaded.has(name) && !stable.has(name))
+  .map((name) => join("assets", name));
 for (const dir of ["ui", "fonts"]) {
   const kept = new Set(await names(join(siteRoot, "public", dir)));
   for (const name of await names(join(outRoot, dir))) {

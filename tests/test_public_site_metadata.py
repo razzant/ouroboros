@@ -200,16 +200,27 @@ def test_rating_publication_is_complete_and_source_bound():
         assert image in readme and (REPO / image).is_file()
 
 
-def _images(page: str) -> list[dict[str, str]]:
-    """Every ``<img>`` of a page as its attributes, whatever their order."""
-    return [dict(re.findall(r'([\w:-]+)="([^"]*)"', tag)) for tag in re.findall(r"<img\b[^>]*>", page)]
+def _tags(page: str, name: str) -> list[dict[str, str]]:
+    """The attributes of every ``<name>`` tag of a page, as an HTML parser reads them."""
+    from html.parser import HTMLParser
+
+    found: list[dict[str, str]] = []
+
+    class Collector(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if tag == name:
+                found.append({key: value or "" for key, value in attrs})
+
+    Collector().feed(page)
+    return found
 
 
 def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
     """Every capture and font the home page or its stylesheet names ships byte-identically in site/public and in
     docs/, neither copy keeps an orphan, every capture on the source and on the served page declares its real pixel
-    size, docs/ holds exactly the home bundles the served page loads, and the social card's cache-busting hash is the
-    card's own content hash on every indexable page that names the card, in the sources and in the served copies."""
+    size, docs/ holds exactly the home bundles the served page loads, the served page is its source built, and every
+    indexable page that names the social card, like its served copy, carries one og:image and one twitter:image whose
+    cache-busting hash is the card's own content hash."""
     import hashlib
 
     from PIL import Image
@@ -217,7 +228,8 @@ def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
     html = (SITE / "index.html").read_text(encoding="utf-8")
     served = (DOCS / "index.html").read_text(encoding="utf-8")
     css = (SITE / "src" / "home.css").read_text(encoding="utf-8")
-    referenced = set(re.findall(r'(?:src|href)="/(ui/[^"]+|fonts/[^"]+)"', html))
+    referenced = {image["src"][1:] for image in _tags(html, "img") if image.get("src", "").startswith("/ui/")}
+    referenced |= {link["href"][1:] for link in _tags(html, "link") if link.get("href", "").startswith("/fonts/")}
     referenced |= set(re.findall(r"""url\(["']?/(fonts/[^)"']+)""", css))
     assert referenced
     for rel in sorted(referenced):
@@ -230,11 +242,11 @@ def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
         assert fonts == {rel for rel in referenced if rel.startswith("fonts/")}, root
         assert "SIL OPEN FONT LICENSE" in (root / "fonts" / "LICENSE-Inter.txt").read_text(encoding="utf-8")
     for page in (html, served):
-        shown = [image for image in _images(page) if image.get("src", "").startswith("/ui/")]
+        shown = [image for image in _tags(page, "img") if image.get("src", "").startswith("/ui/")]
         assert {image["src"][1:] for image in shown} == {rel for rel in referenced if rel.startswith("ui/")}
         for image in shown:
             with Image.open(SITE / "public" / image["src"][1:]) as capture:
-                assert capture.size == (int(image.get("width", 0)), int(image.get("height", 0))), image["src"]
+                assert capture.size == (int(image.get("width") or 0), int(image.get("height") or 0)), image["src"]
     assert {p.name for p in (DOCS / "assets").glob("home-*")} == set(re.findall(r'"/assets/(home-[^"]+)"', served))
     # the served page is this source built: apart from the two bundle lines the build rewrites, they read the same
     lines = [
@@ -246,15 +258,14 @@ def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
     assert (DOCS / "assets" / "og-preview.png").read_bytes() == card
     expected = f"{ORIGIN}/assets/og-preview.png?v={hashlib.sha256(card).hexdigest()[:10]}"
     public = SITE / "public"
-    sources = list(INDEXABLE.values())
-    copies = [DOCS / source.relative_to(public if public in source.parents else SITE) for source in sources]
-    naming = [page for page in (*sources, *copies) if "og-preview.png" in page.read_text(encoding="utf-8")]
-    assert SITE / "index.html" in naming and DOCS / "index.html" in naming
-    for page in naming:
-        text = page.read_text(encoding="utf-8")
-        cards = re.findall(r'<meta (?:property="og:image"|name="twitter:image") content="([^"]*)"', text)
-        assert cards == [expected, expected], page
-        assert text.count("og-preview.png") == 2, page
+    pairs = [(source, DOCS / source.relative_to(public if public in source.parents else SITE)) for source in INDEXABLE.values()]
+    naming = [pair for pair in pairs if any("og-preview.png" in page.read_text(encoding="utf-8") for page in pair)]
+    assert (SITE / "index.html", DOCS / "index.html") in naming
+    for pair in naming:
+        for page in pair:
+            metas = _tags(page.read_text(encoding="utf-8"), "meta")
+            assert [meta.get("content") for meta in metas if meta.get("property") == "og:image"] == [expected], page
+            assert [meta.get("content") for meta in metas if meta.get("name") == "twitter:image"] == [expected], page
 
 
 def test_readme_and_benchmark_page_keep_claim_values_in_sync():
