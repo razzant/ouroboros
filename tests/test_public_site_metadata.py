@@ -200,6 +200,24 @@ def test_rating_publication_is_complete_and_source_bound():
         assert image in readme and (REPO / image).is_file()
 
 
+def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
+    """Every capture and font the home page names ships in site/public and in docs/, nothing shipped is orphaned,
+    and the social card's cache-busting hash is the card's own content hash."""
+    import hashlib
+
+    html = (SITE / "index.html").read_text(encoding="utf-8")
+    referenced = set(re.findall(r'(?:src|href)="/(ui/[^"]+|fonts/[^"]+)"', html))
+    assert referenced
+    for rel in sorted(referenced):
+        assert (SITE / "public" / rel).is_file(), rel
+        assert (DOCS / rel).is_file(), rel
+    shipped = {str(p.relative_to(SITE / "public")) for p in (SITE / "public" / "ui").glob("*.webp")}
+    assert shipped == {rel for rel in referenced if rel.startswith("ui/")}
+    digest = hashlib.sha256((REPO / "assets" / "og-preview.png").read_bytes()).hexdigest()[:10]
+    assert html.count(f"og-preview.png?v={digest}") == 2
+    assert "86.74" in html and 'href="/llm-rating/"' in html
+
+
 def test_readme_and_benchmark_page_keep_claim_values_in_sync():
     readme = (REPO / "README.md").read_text(encoding="utf-8")
     page = (SITE / "benchmarks" / "index.html").read_text(encoding="utf-8")

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Ouroboros is an open-source AI agent on your computer: it runs Codex, Claude Code, Cursor and Antigravity as helpers, talks to you by voice, lives in Telegram and Slack, keeps one memory across rooms and channels and rewrites its own code under review. Self-reported SOTA on Terminal-Bench 2.1, OSWorld-Verified and CL-Bench.">
+  <meta name="description" content="Ouroboros is an open-source AI agent on your computer: it runs Codex, Claude Code, Cursor and Antigravity as helpers, talks to you by voice, works as a colleague in Slack and Telegram, keeps one memory across rooms and channels and rewrites its own code under review. Self-reported SOTA on Terminal-Bench 2.1, OSWorld-Verified and CL-Bench.">
   <meta name="robots" content="index, follow, max-image-preview:large">
   <link rel="canonical" href="https://ouroboros-agent.ai/">
   <meta name="theme-color" content="#0b0b0c">
@@ -61,7 +61,7 @@
       <h1 id="hero-title" class="display">
         <span class="line"><span>An AI agent</span></span>
         <span class="line"><span>on your computer.</span></span>
-        <span class="line red" id="hero-power" aria-hidden="true" data-lines="It rewrites its own code.|It runs a swarm of agents.|It sees your screen.|It lives in your Telegram.|It remembers."><span class="power">It rewrites its own code.</span></span>
+        <span class="line red" id="hero-power" aria-hidden="true" data-lines="It rewrites its own code.|It runs a swarm of agents.|It sees your screen.|It joins your team's Slack.|It remembers."><span class="power">It rewrites its own code.</span></span>
         <span class="visually-hidden">It rewrites its own code.</span>
       </h1>
       <div class="hero-actions">
@@ -74,7 +74,7 @@
         <figure class="win w-front"><img src="/ui/game-card-light.webp" alt="" width="1800" height="1013" fetchpriority="high"></figure>
         <figure class="win w-phone"><img src="/ui/phone-answered-light.webp" alt="" width="780" height="1688"></figure>
       </div>
-      <div class="ticker" aria-hidden="true"><div class="ticker-track"><span>Swarms Codex, Claude Code, Cursor, Antigravity</span><i></i><span>Talks to you by voice</span><i></i><span>Lives in Telegram and Slack</span><i></i><span>One memory, every room</span><i></i><span>Thinks between your messages</span><i></i><span>Rewrites its own code</span><i></i><span>Everything is a plugin</span><i></i><span>Open source</span><i></i></div></div>
+      <div class="ticker" aria-hidden="true"><div class="ticker-track"><span>Swarms Codex, Claude Code, Cursor, Antigravity</span><i></i><span>Talks to you by voice</span><i></i><span>A colleague in your Slack and Telegram</span><i></i><span>One memory, every room</span><i></i><span>Thinks between your messages</span><i></i><span>Rewrites its own code</span><i></i><span>Everything is a plugin</span><i></i><span>Open source</span><i></i></div></div>
     </header>
 
     <!-- ============ PROOF ============ -->
@@ -115,15 +115,38 @@
       <figure class="shot f-window full lean reveal"><img src="/ui/call-big-light.webp" alt="The whole app during a call: the chat, and the wide call view with Ouroboros speaking, a live waveform and the Mute, Show and End controls" loading="lazy" width="1800" height="1013"></figure>
     </section>
 
-    <!-- ============ PLACES ============ -->
+    <!-- ============ A COLLEAGUE: ONE MEMORY ACROSS SLACK AND TELEGRAM ============ -->
     <section class="frame black feature" id="places" aria-labelledby="places-title">
-      <h2 id="places-title" class="display words reveal">Lives where<br><span class="red">you talk.</span></h2>
+      <h2 id="places-title" class="display words reveal">Your team's<br><span class="red">new colleague.</span></h2>
       <div class="copy reveal">
-        <p>Telegram, Slack, email, GitHub. It answers colleagues in its own name, keeps each place's own notes, and sends you a private report when something needs you.</p>
+        <p>Add it to Slack, Telegram, email or GitHub as a member of its own. A colleague tags it in a thread; you pick the same topic up in Telegram four hours later. One memory, nothing to re-explain.</p>
+        <ul class="chips" aria-label="Where it can be a colleague"><li>Slack</li><li>Telegram</li><li>Email</li><li>GitHub</li></ul>
       </div>
-      <div class="places-visual reveal">
-        <figure class="shot f-16x10"><img src="/ui/circles-dark.webp" style="--zoom:1.28;--ox:56%;--oy:18%" alt="The Circles page: Telegram, a Slack workspace, an email inbox, a GitHub repository and a family group, each with its platform icon and state" loading="lazy" width="1800" height="1013"></figure>
-        <figure class="phone"><img src="/ui/phone-places-dark.webp" alt="The same app on a phone in Telegram: the list of projects and places" loading="lazy" width="780" height="1688"></figure>
+      <div class="convo full reveal" aria-label="One conversation that starts in a Slack thread and continues in Telegram">
+        <article class="pane slack">
+          <header><b>#launch</b><span class="where">Slack · Acme workspace</span></header>
+          <ol class="msgs">
+            <li class="m" style="--i:0"><i class="ava" aria-hidden="true">M</i><div><b>Maya</b><time>14:02</time><p><mark>@Ouroboros</mark> when does the billing cutover land? Marketing wants the launch date.</p></div></li>
+            <li class="m ou" style="--i:1"><i class="ava ou" aria-hidden="true"><img src="/assets/icon_1024.png" alt="" width="28" height="28"></i><div><b>Ouroboros</b><time>14:02</time><p>Friday 09:00, right after the digest goes out. The migration passed its 38 tests last night; two refund paths needed a fix and got it. I'll post here if anything moves.</p></div></li>
+            <li class="m" style="--i:2"><i class="ava" aria-hidden="true">M</i><div><b>Maya</b><time>14:03</time><p>Can you also draft the release note?</p></div></li>
+            <li class="m ou" style="--i:3"><i class="ava ou" aria-hidden="true"><img src="/assets/icon_1024.png" alt="" width="28" height="28"></i><div><b>Ouroboros</b><time>14:03</time><p>Drafting it now. In this thread by 16:00.</p></div></li>
+          </ol>
+        </article>
+        <div class="bridge" aria-hidden="true"><span>one memory</span></div>
+        <article class="pane tg">
+          <header><b>Ouroboros</b><span class="where">Telegram · you, on the phone</span></header>
+          <ol class="msgs bubbles">
+            <li class="b you" style="--i:4"><p>What did you promise Maya?</p><time>18:40</time></li>
+            <li class="b ou" style="--i:5"><p>Friday 09:00 for the cutover and a release note in #launch by 16:00. The note is posted. The refunds replay is the one thing I'd still watch.</p><time>18:40</time></li>
+            <li class="b you" style="--i:6"><p>Remind me at 21:00 to check it.</p><time>18:41</time></li>
+            <li class="b ou" style="--i:7"><p>Set. I'll bring the numbers with the reminder.</p><time>18:41</time></li>
+          </ol>
+        </article>
+      </div>
+      <p class="convo-note full reveal">Tagged by a colleague in Slack at 14:02, asked by you in Telegram at 18:40: the same memory, in its own name in both places, and a private report to you when something needs your call.</p>
+      <div class="pair reveal">
+        <figure class="shot f-16x10"><img src="/ui/circles-dark.webp" style="--zoom:1.28;--ox:56%;--oy:18%" alt="The Circles page: Telegram, a Slack workspace, an email inbox, a GitHub repository and a family group, each with its platform icon and state" loading="lazy" width="1800" height="1013"><figcaption><b>Its places.</b> Each with its own notes, people and rules.</figcaption></figure>
+        <figure class="shot f-tall"><img src="/ui/phone-places-dark.webp" style="--zoom:1.0" alt="The same app on a phone in Telegram: the list of projects and places" loading="lazy" width="780" height="1688"><figcaption><b>In your pocket.</b> The Telegram Mini App shows the same rooms.</figcaption></figure>
       </div>
     </section>
 
@@ -218,7 +241,7 @@
       <ul class="kinds reveal" aria-label="What a plugin can be">
         <li><b>Skills</b><span>Tools, workflows and instructions it learns to use.</span></li>
         <li><b>Widgets</b><span>Living cards on its board, from a chart to a game.</span></li>
-        <li><b>Connectors</b><span>Telegram, Slack, email, GitHub: the places it lives in.</span></li>
+        <li><b>Connectors</b><span>Slack, Telegram, email, GitHub: the places where it is a colleague.</span></li>
         <li><b>Voice engines</b><span>Gemini Live, Grok Voice, OpenAI realtime, or yours.</span></li>
         <li><b>Review panels</b><span>Which models judge the plan and the result.</span></li>
         <li><b>MCP tools</b><span>Any server, loaded when a task needs it.</span></li>
