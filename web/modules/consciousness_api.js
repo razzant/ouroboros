@@ -3,7 +3,7 @@
 // JSON shape is read in one place: a field the server renames is one fix in this file. Readers are
 // tolerant (unknown extra keys are fine; a missing field stays absent, never a guessed zero); writers
 // send exactly the contract's request keys.
-import { extensionRoutePath, extensionRoutePrefix, fetchJson, jsonPost, readStateJson } from './api_client.js';
+import { extensionRoutePath, extensionRoutePrefix, fetchJson, jsonPost, readStateJson, withinRequestLifetime } from './api_client.js';
 import { tr } from './i18n.js';
 import { errorWords } from './ui_primitives.js';
 
@@ -253,14 +253,23 @@ export async function readConsciousness(init = {}) {
     return normalizeConsciousness(await fetchJson('/api/consciousness', { cache: 'no-store', ...init }));
 }
 
+/** How long the switch waits for its preview (request and body): a transport bound, so a stalled read never holds the
+ *  switch; past it the dialog says what it would change could not be read and still offers the turn. */
+export const SWITCH_PREVIEW_LIFETIME_MS = 15_000;
+
 /** What turning the switch `to` ('on' | 'off') would change, read at the press (`GET /api/consciousness?switch=`):
- *  `{lines, places: [{id, label, state, people}]}` in the host's words; a failed read throws. */
+ *  `{lines, places: [{id, label, state, people, atLeast}]}` in the host's words; a failed, stalled or unreadable answer
+ *  throws, so the switch asks without it (never as «no place»). */
 export async function readSwitchPreview(to, init = {}) {
-    const data = object(await fetchJson(`/api/consciousness?switch=${encodeURIComponent(to)}`, { cache: 'no-store', ...init })) || {};
+    const data = await withinRequestLifetime((transport) => fetchJson(`/api/consciousness?switch=${encodeURIComponent(to)}`,
+        { cache: 'no-store', ...init, signal: transport }), { signal: init.signal, lifetimeMs: SWITCH_PREVIEW_LIFETIME_MS });
+    if (!object(data) || !Array.isArray(data.lines) || !(data.places === null || Array.isArray(data.places))) {
+        throw new Error('The switch preview could not be read.');
+    }
     // `places: null` is the host's «could not be read»: the switch still asks, with the host's lines.
-    return { lines: list(data.lines).map(text).filter(Boolean),
-        places: data.places === null ? null : list(data.places).map((row) => ({ id: text(row?.place_id), label: text(row?.label),
-            state: text(row?.state), people: count(row?.people) })).filter((row) => row.id) };
+    return { lines: data.lines.map(text).filter(Boolean),
+        places: data.places === null ? null : data.places.map((row) => ({ id: text(row?.place_id), label: text(row?.label),
+            state: text(row?.state), people: count(row?.people), atLeast: row?.people_capped === true })).filter((row) => row.id) };
 }
 
 /** The status the Dashboard falls back to when the full snapshot cannot be read: `/api/state`. */

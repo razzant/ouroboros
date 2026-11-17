@@ -168,8 +168,10 @@ def _ranked(places, people=None, circles=None) -> list[dict]:
     """Places with the people who wrote there lately (``recent_people``), the busiest first, then by name; ``circles``
     maps a place id to its circle's name."""
     counts, circles = (people or {}).get("by_place") or {}, circles or {}
+    capped = set((people or {}).get("capped_places") or ())
     facts = [_place_fact(place, circles.get(_place_fact(place)["place_id"], "")) for place in places or ()]
-    facts = [{**fact, "people": counts.get(fact["place_id"])} for fact in facts]
+    facts = [{**fact, "people": counts.get(fact["place_id"]), **({"people_capped": True} if fact["place_id"] in capped else {})}
+             for fact in facts]
     return sorted(facts, key=lambda fact: (-(fact["people"] or 0), fact["label"].lower()))
 
 
@@ -207,11 +209,13 @@ def _running_line(running) -> str:
     and the own tasks it started; nothing when neither runs or the read failed."""
     wake = bool((running or {}).get("live_wake_task_id")) and not (running or {}).get("live_wake_held")
     tasks = int((running or {}).get("tasks_running") or 0)
-    said = " and ".join(([("The wake running now")] if wake else []) + ([_count(tasks, "own task")] if tasks else []))
+    said = " and ".join((["the wake running now"] if wake else []) + ([f"its {_count(tasks, 'own task')}"] if tasks else []))
     if not said:
         return ""
-    one = (wake and not tasks) or (tasks == 1 and not wake)
-    return f"{said if wake else 'Its ' + said} {'stops' if one else 'stop'} at once."
+    # A stop is graceful (each saves what it has first), so the words promise no instant end (review r3).
+    if (wake and not tasks) or (tasks == 1 and not wake):
+        return f"{said[0].upper()}{said[1:]} is asked to stop now; it saves what it has first."
+    return f"{said[0].upper()}{said[1:]} are asked to stop now; each saves what it has first."
 
 
 def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str = "", daily_usd=None,
@@ -227,7 +231,7 @@ def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str 
                                                       people, circles)
         lines = ["Ouroboros will act only when you write to it."]
         if hearing is None:
-            lines.append("Its places will be heard, not answered.")
+            lines.append("Its places will be heard, not answered; which ones could not be read.")
         elif hearing:
             lines += [f"{_count(len(hearing), 'place')} will be heard, not answered: {_named(hearing)}.",
                       _people_line(people)]
@@ -281,16 +285,14 @@ def read_switch_preview(drive_root, to: str, running=None) -> dict:
                           daily_usd=get_consciousness_daily_usd(), running=running)
 
 
-def on_sentence(at: str, places, autonomy: str = "") -> str:
-    """The switch's first words as it turns consciousness on (every surface's /bg start)."""
-    active = [fact for fact in map(_place_fact, places or ()) if fact["state"] == "active"]
-    said = f"Consciousness on: Ouroboros also acts on its own; next wake at {at}."
-    if active and autonomy == "observe":
-        said += f" Advises: in {_count(len(active), 'place')} what it would say waits for you."
-    elif active:
-        said += (f" It may answer in {_count(len(active), 'place')}; at that wake it sees what is unread there and decides "
-                 "what to read and answer.")
-    return said
+def on_sentence(at: str, places, autonomy: str = "", daily_usd: Any = None) -> str:
+    """The switch's first words as it turns consciousness on (every surface's /bg start): when it wakes next, then the
+    sentences the app's dialog said before the turn (``switch_preview``), so Telegram and the CLI hear the same; a $0
+    allowance names no wake."""
+    rest = switch_preview("on", places, autonomy=autonomy, daily_usd=daily_usd)["lines"][1:]
+    head = ("Consciousness on, but its allowance is $0.00: it cannot wake until you raise it in Costs." if daily_usd == 0
+            else f"Consciousness on: Ouroboros also acts on its own; next wake at {at}.")
+    return " ".join([head, *rest])
 
 
 def status_reply(described: dict) -> str:
@@ -311,13 +313,13 @@ QUIET = {
               "you turn it on.", "consciousness"),
     "off": ("Hears only · consciousness off", "Consciousness is off: it only hears here, and nothing here wakes it until "
             "you turn it on.", "consciousness"),
-    "allowance": ("Waits · allowance spent", "Its allowance for the last 24 hours is spent: what arrives here waits until "
-                  "there is room in it again; Costs shows when.", "costs"),
+    "allowance": ("Waits · allowance spent", "Its allowance for the last 24 hours is spent: nothing here starts a new wake "
+                  "until there is room in it again; Costs shows when.", "costs"),
     "advises": ("Replies wait for you · Advises", "Advises: it reads and thinks here; what it would say waits for you in "
                 "its conversation here.", "consciousness"),
 }
 # A $0 allowance has no reset to wait for: only the owner's change opens it.
-ZERO_ALLOWANCE = "Its allowance is $0.00: what arrives here waits until you raise it in Costs."
+ZERO_ALLOWANCE = "Its allowance is $0.00: nothing here starts a new wake until you raise it in Costs."
 
 
 def place_quiet(state: str, *, switch: str, autonomy: str = "", allowance: str = "", limit_usd: Any = None) -> dict | None:
@@ -347,12 +349,16 @@ def connect_note(switch: str) -> str:
     return "It starts Silent: it hears and thinks there and sends nothing until you make it Active."
 
 
-FIRST_RUN = {
-    "gloss": SWITCH_GLOSS + ".",
-    "choice": POSITION_WORDS[True],
-    "meaning": ("Off: it works only when you write to it, and places you connect are heard, not answered. On: it also "
-                "wakes between your messages and answers in places you make Active."),
-}
+def first_run_words(autonomy: str = "act") -> dict:
+    """The switch's words for a first run, true for the autonomy the offer names (Advises answers nowhere)."""
+    places = ("reads and thinks in places you make Active; what it would say waits for you" if autonomy == "observe"
+              else "answers in places you make Active")
+    return {"gloss": SWITCH_GLOSS + ".", "choice": POSITION_WORDS[True],
+            "meaning": ("Off: it works only when you write to it, and places you connect are heard, not answered. On: it "
+                        f"also wakes between your messages and {places}.")}
+
+
+FIRST_RUN = first_run_words()
 
 
 def mind_fact(places, *, enabled: Any, stop_source: str = "", panic: bool = False) -> str:

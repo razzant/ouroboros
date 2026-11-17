@@ -674,7 +674,7 @@ class BackgroundConsciousness:
         except Exception:
             log.debug("consciousness: places unreadable for the start sentence", exc_info=True)
             places = None
-        return on_sentence(at, places, get_consciousness_autonomy()) + note
+        return on_sentence(at, places, get_consciousness_autonomy(), get_consciousness_daily_usd()) + note
 
     def stop(self, source: str = "") -> str:
         """Stop this process first, then save the stop with ``source`` (``OWNER_STOP`` or ``AGENT_STOP``); Panic names
@@ -740,6 +740,17 @@ class BackgroundConsciousness:
         except Exception:
             log.debug("consciousness: graceful stop of wake %s failed", task_id, exc_info=True)
 
+    def _saved_stop_source(self) -> str:
+        """Who stopped it: this process's own stop, else the confirmed saved one (a Panic stays named after a restart)."""
+        if self._stop_source:
+            return self._stop_source
+        try:
+            from supervisor.state import control_value, read_state
+            known, source = control_value(read_state(self._drive_root).projection(), STOP_SOURCE_KEY)
+            return str(source or "") if known else ""
+        except Exception:
+            return ""
+
     def status_snapshot(self) -> Dict[str, Any]:
         from supervisor.consciousness_carriers import queued_wakes
 
@@ -761,7 +772,7 @@ class BackgroundConsciousness:
                 "live_wake_hold": held_wake_cause(self._drive_root, wake) if held else None,
                 "allowance_status": str(window.get("status") or ""),
                 # Who turned it off (owner, panic, agent_tool): the switch's state line names a Panic (5A).
-                **({"stop_source": self._stop_source} if not self._enabled and self._stop_source else {}),
+                **({"stop_source": source} if not self._enabled and (source := self._saved_stop_source()) else {}),
                 "allowance_open_rows": window.get("accounting_open_rows"),
                 "allowance_room_after": str(window.get("room_after") or ""),
                 "model_route": model_route(),

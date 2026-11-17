@@ -155,6 +155,7 @@ function wakesHtml(place, ui) {
         <ul class="place-wake-list">${items}</ul>
         ${vocabulary.includes('from_bot') ? `<p class="place-sheet-note">${tr('places.wake.bots', 'Bot messages need this check; once checked, they can wake it without another checked kind.')}</p>` : ''}
         ${['off', 'panic'].includes(place.quiet?.cause) ? `<p class="place-sheet-note">${tr('places.wake.consciousness_off', 'While consciousness is off, nothing here wakes it.')}</p>`
+        : place.quiet?.cause === 'allowance' ? `<p class="place-sheet-note">${tr('places.wake.allowance', 'While its allowance is spent, nothing here starts a new wake.')}</p>`
         : place.state === 'paused' ? ''
             : unchecked ? `<p class="place-sheet-note">${tr('places.wake.none', 'No kind is checked: no event starts a new conversation here at once. An ongoing conversation can still wake it.')}</p>`
                 : place.state === 'silent' ? `<p class="place-sheet-note">${tr('places.wake.silent', 'Silent: these still wake it to read and think; what it would say or change here is held.')}</p>` : ''}

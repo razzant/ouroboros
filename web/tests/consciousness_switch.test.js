@@ -5,6 +5,7 @@ import test from 'node:test';
 
 import { switchActionWords, switchDialog, turnConsciousness } from '../modules/consciousness_switch.js';
 import { readSwitchPreview } from '../modules/consciousness_api.js';
+import { renderConfirmDialogDetails } from '../modules/confirm_dialog.js';
 
 const PREVIEW = {
     lines: ['Ouroboros will act only when you write to it.', '3 places will be heard, not answered: Ops, Team and Home.'],
@@ -23,15 +24,18 @@ test('the dialog names what changes, one sentence a line, every place behind its
     assert.equal(dialog.body, PREVIEW.lines.join('\n'));
     assert.deepEqual([dialog.confirmLabel, dialog.cancelLabel], ['Turn off', 'Keep on']);
     assert.equal(dialog.details.summary, 'All 3 places');
-    assert.deepEqual(dialog.details.rows, [{ label: '12 people', value: 'Ops' }, { label: '1 person', value: 'Home · Silent' },
-        { label: '—', value: 'Team' }]);
+    // A place's own name is authored: the page's translator leaves it as written (review r3).
+    assert.deepEqual(dialog.details.rows, [{ label: '12 people', value: 'Ops', authored: true },
+        { label: '1 person', value: 'Home · Silent', authored: true }, { label: '—', value: 'Team', authored: true }]);
+    assert.equal(switchDialog('off', { ...PREVIEW, places: [{ id: 'big', label: 'Big', state: 'active', people: 2000, atLeast: true }] })
+        .details.rows[0].label, 'at least 2000 people', 'a capped place says at least');
     assert.deepEqual([switchDialog('on', PREVIEW).confirmLabel, switchDialog('on', PREVIEW).cancelLabel], ['Turn on', 'Keep off']);
     // Nothing to name: no dialog. A preview that could not be read still asks, and says so.
     assert.equal(switchDialog('off', { lines: ['Ouroboros will act only when you write to it.'], places: [] }), null);
     assert.equal(switchDialog('off', null).body, 'What it would change could not be read.');
     // The host could not read the places (`places: null`): the dialog still asks, with the host's lines, no details.
-    const unread = switchDialog('off', { lines: ['Ouroboros will act only when you write to it.', 'Its places will be heard, not answered.'], places: null });
-    assert.equal(unread.body, 'Ouroboros will act only when you write to it.\nIts places will be heard, not answered.');
+    const unread = switchDialog('off', { lines: ['Ouroboros will act only when you write to it.', 'Its places will be heard, not answered; which ones could not be read.'], places: null });
+    assert.equal(unread.body, 'Ouroboros will act only when you write to it.\nIts places will be heard, not answered; which ones could not be read.');
     assert.equal(unread.details, null);
 });
 
@@ -72,5 +76,32 @@ test('the preview read keeps «could not be read» (null) apart from «no place�
     } finally {
         globalThis.fetch = previous;
     }
+});
+
+test('an answer the preview cannot read, or one that never ends, is never «no place»: the switch still asks', async () => {
+    // A cut 200 body or an older host's answer has no lines: unread, so the dialog asks (review r3).
+    const previous = globalThis.fetch;
+    try {
+        for (const body of [{ to: 'off' }, { places_brief: [{ place_id: 'lab' }] }, null]) {
+            globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => body });
+            await assert.rejects(readSwitchPreview('off'));
+        }
+        globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ lines: ['x'], places: [{ place_id: 'b', label: 'Big', state: 'active', people: 2000, people_capped: true }] }) });
+        assert.equal((await readSwitchPreview('off')).places[0].atLeast, true);
+    } finally {
+        globalThis.fetch = previous;
+    }
+    const sent = [];
+    let asked = 0;
+    const turned = await turnConsciousness('off', { ws: { send: (frame) => sent.push(frame) },
+        read: async () => { throw new Error('unreadable'); }, ask: async () => { asked += 1; return false; } });
+    assert.deepEqual([turned, asked, sent.length], [false, 1, 0], 'an unread preview asks, and a no sends nothing');
+});
+
+test('the dialog keeps a place\'s own name out of the page\'s translator', () => {
+    const html = renderConfirmDialogDetails(switchDialog('off', PREVIEW).details);
+    assert.match(html, /<dd data-i18n-authored>Ops<\/dd>/);
+    assert.match(renderConfirmDialogDetails({ rows: [{ label: 'Cause', value: 'host words' }] }), /<dd>host words<\/dd>/,
+        'a host value stays translatable');
 });
 

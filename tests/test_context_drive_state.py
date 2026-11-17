@@ -380,6 +380,9 @@ def test_the_switch_fact_rides_both_forms_of_the_section_only_while_places_only_
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
     (tmp_path / "state" / "state.initialized.json").write_text(
         json.dumps({"initialization_id": "init-1", "phase": "complete"}), encoding="utf-8")
+    # The place store with its legacy import done (building context never runs that import itself, review r3).
+    (tmp_path / "state" / "places.json").write_text(json.dumps(
+        {"schema_version": 1, "places": {}, "migration": {"presence_bindings_v1": True}}), encoding="utf-8")
     reads = []
 
     def places(root):

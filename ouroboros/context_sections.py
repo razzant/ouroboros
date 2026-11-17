@@ -305,6 +305,14 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
     return HostSection("installed_skills", "\n".join(lines), "\n".join(operative), "list_skills")
 
 
+def _places_imported(root: Any) -> bool:
+    """Whether the place store exists with its legacy import done (a plain read, so it never runs the import)."""
+    from ouroboros.utils import read_json_dict
+
+    document = read_json_dict(pathlib.Path(root) / "state" / "places.json") or {}
+    return bool((document.get("migration") or {}).get("presence_bindings_v1"))
+
+
 def _switch_fact(root: Any, observed: Any, authority: Any) -> str:
     """The switch as a sentence while my places only hear (owner 15.11, 5A: on 7 Nov I read the bare key and told my
     human the places work separately); nothing while it is on, unknown, or no place hears. The switch and the Panic
@@ -319,8 +327,11 @@ def _switch_fact(root: Any, observed: Any, authority: Any) -> str:
         if not (panic or (known and not enabled)):
             return ""
         from ouroboros.places import load_places
+        if not _places_imported(root):
+            return ""  # the legacy import runs on a real place read, never from building context (review r3)
+        source_known, source = control_value(authority, STOP_SOURCE_KEY)  # unconfirmed: who stopped it stays unsaid
         fact = mind_fact(load_places(root), enabled=bool(enabled) if known else None,
-                         stop_source=str(observed.values.get(STOP_SOURCE_KEY) or ""), panic=panic)
+                         stop_source=str(source or "") if source_known else "", panic=panic)
     except Exception:
         return ""
     return f"\n\n{fact}" if fact else ""

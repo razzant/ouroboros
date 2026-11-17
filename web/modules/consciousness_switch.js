@@ -20,8 +20,10 @@ export const switchReadingWords = () => tr('consciousness.switch.reading', 'Read
 export const switchActionWords = (enabled) => tr(`consciousness.switch.${enabled ? 'off' : 'on'}`,
     SWITCH_ACTIONS[enabled ? 'off' : 'on'].act);
 
-/** «87 people» for a place's row in the dialog's details (the week the host's sentence names); '' when not read. */
-const peopleWords = (n) => (n === null || n === undefined ? '' : fmt(n === 1 ? '{n} person' : '{n} people', { n }));
+/** «87 people» for a place's row in the dialog's details (the week the host's sentence names), «at least 2000 people»
+ *  when the place's read was capped; '' when not read. */
+const peopleWords = (n, atLeast = false) => (n === null || n === undefined ? ''
+    : atLeast ? fmt('at least {n} people', { n }) : fmt(n === 1 ? '{n} person' : '{n} people', { n }));
 
 /** The dialog for a preview, or null when there is nothing to name (no place concerns the turn). */
 export function switchDialog(to, preview) {
@@ -31,7 +33,8 @@ export function switchDialog(to, preview) {
     const body = preview ? preview.lines.join('\n') : tr('consciousness.switch.unread', 'What it would change could not be read.');
     // Every place the turn concerns, the busiest first: the week's people in the short column, the place's name in the
     // wide one (names run long); a Silent one says so beside its name, as it never speaks.
-    const rows = (preview?.places || []).map((place) => ({ label: peopleWords(place.people) || '—',
+    // A place's own name is authored: the page's translator leaves it as the owner wrote it.
+    const rows = (preview?.places || []).map((place) => ({ label: peopleWords(place.people, place.atLeast) || '—', authored: true,
         value: [place.label || place.id, place.state === 'silent' ? tr('places.state.silent', 'Silent') : ''].filter(Boolean).join(' · ') }));
     return {
         title: tr(`consciousness.switch.title.${to}`, words.title),

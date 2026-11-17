@@ -464,6 +464,7 @@ def account_candidates(root, place_id):
 _SINCE = ("SELECT json_extract(body,'$.sender_session_id') AS actor, json_extract(body,'$.sender_label') AS label, "
           "json_extract(body,'$.transport.actor.is_bot') AS bot, "
           "json_extract(body,'$.transport.actor.kind') AS kind, "
+          "json_extract(body,'$.transport.message.reaction.schema_version') AS reaction, json_extract(body,'$.text') AS text, "
           f"json_extract(body,'$.historical_import.authorship') AS authorship FROM dialogue INDEXED BY dialogue_place_recent "
           f"WHERE {_ARRIVAL} AND {_PLACE}=? AND ts>=? ORDER BY ts DESC LIMIT ?")
 PEOPLE_ROW_CAP = 2000  # per place: a busier week says «at least»
@@ -471,8 +472,8 @@ PEOPLE_ROW_CAP = 2000  # per place: a busier week says «at least»
 
 def recent_people(root, place_ids, *, days: int, now: float | None = None, services: dict | None = None) -> dict | None:
     """The people who wrote in these places in the last ``days`` (the switch's preview: «how many people wrote there
-    lately»): ``{"by_place": {id: n}, "total": distinct across places, "capped": bool}``, or ``None`` when the index is
-    unreadable. ``services`` (place id → its service) keeps the same raw sender id on two services two people. One
+    lately»): ``{"by_place": {id: n}, "total": distinct across places, "capped": bool, "capped_places": [id]}``, or
+    ``None`` when the index is unreadable. A reaction with no words is no writing (``dialogue_provenance``). ``services`` (place id → its service) keeps the same raw sender id on two services two people. One
     index range per place, at most ``PEOPLE_ROW_CAP`` newest rows each (``capped`` then); the same filter as
     ``account_candidates``: no bots, no connected account's own imports, no chat or anonymous actor."""
     import time as _time
@@ -481,16 +482,18 @@ def recent_people(root, place_ids, *, days: int, now: float | None = None, servi
     if not _dialogue_indexes(root):
         return None
     since = datetime.fromtimestamp((now or _time.time()) - days * 86400, timezone.utc).isoformat()
-    by_place, everyone, capped = {}, set(), False
+    by_place, everyone, capped_places = {}, set(), []
     with dialogue_store.transaction(root, write=False) as conn:
         for place_id in dict.fromkeys(place_ids):
             rows = conn.execute(_SINCE, (place_id, since, PEOPLE_ROW_CAP)).fetchall()
-            capped = capped or len(rows) >= PEOPLE_ROW_CAP
-            people = {person["platform_actor_id"] for person in _people(rows, limit=None)}
+            if len(rows) >= PEOPLE_ROW_CAP:
+                capped_places.append(place_id)
+            wrote = [row for row in rows if not (row["reaction"] == 1 and not str(row["text"] or "").strip())]
+            people = {person["platform_actor_id"] for person in _people(wrote, limit=None)}
             by_place[place_id] = len(people)
             service = str((services or {}).get(place_id) or "")
             everyone |= {(service, actor) for actor in people}
-    return {"by_place": by_place, "total": len(everyone), "capped": capped}
+    return {"by_place": by_place, "total": len(everyone), "capped": bool(capped_places), "capped_places": capped_places}
 
 
 def _people(rows, limit=20):
