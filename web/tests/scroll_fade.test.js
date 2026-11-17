@@ -100,11 +100,11 @@ test('a named body is a keyboard region exactly while it scrolls, and nothing wi
     assert.doesNotThrow(() => { bindScrollFade(plain.scroller); plain.flush(); });
 });
 
-test('keyboard focus clears the fade, while pointer focus leaves its pressed row under the release', () => {
+test('keyboard focus clears the fade, while pointer focus and focus handed back after a pointer leave the list still', () => {
     const f = fixture();
     f.scroller.ownerDocument.defaultView.getComputedStyle = () => ({ getPropertyValue: () => '32px' });
-    let pressed = true;
-    const row = { getBoundingClientRect: () => ({ top: 20, bottom: 50 }), matches: selector => selector === ':active' && pressed };
+    let keyboard = false;
+    const row = { getBoundingClientRect: () => ({ top: 20, bottom: 50 }), matches: selector => selector === ':focus-visible' && keyboard };
     f.scroller.contains = (node) => node === row || node === f.scroller;
     f.scroller.getBoundingClientRect = () => ({ top: 0, bottom: 100 });
     f.scroller.scrollTop = 200;
@@ -112,8 +112,8 @@ test('keyboard focus clears the fade, while pointer focus leaves its pressed row
     f.listeners.get('focusin')({ target: f.scroller });
     assert.equal(f.scroller.scrollTop, 200, 'landing focus on the scroller itself is not a row to reveal');
     f.listeners.get('focusin')({ target: row });
-    assert.equal(f.scroller.scrollTop, 200, 'the pointer release must still hit the pressed row');
-    pressed = false;
+    assert.equal(f.scroller.scrollTop, 200, 'pointer focus, or focus a closed menu hands back, does not move the list');
+    keyboard = true;
     f.listeners.get('focusin')({ target: row });
     assert.equal(f.scroller.scrollTop, 188, 'the row clears the 32px top fade before focus is visible');
 });

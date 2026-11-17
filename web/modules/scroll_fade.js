@@ -53,8 +53,10 @@ export function bindScrollFade(scroller, { axis = 'y', region = '' } = {}) {
         if (!disposed && frame === null) frame = win.requestAnimationFrame(update);
     };
     const onFocus = (event) => {
-        // Pointer focus precedes its click: moving the pressed control now loses the release to another row.
-        if (event.target && event.target !== scroller && !event.target.matches?.(':active') && scroller.contains?.(event.target)) {
+        // Only focus the keyboard can see is brought clear of the fade. A pointer's focus precedes its click (moving the
+        // pressed row would lose the release), and focus handed back after a pointer's menu or dialog must not drag the
+        // list after a row that moved meanwhile (a pinned project's row going to the top).
+        if (event.target && event.target !== scroller && event.target.matches?.(':focus-visible') && scroller.contains?.(event.target)) {
             revealPastFade(scroller, event.target, { axis });
         }
         schedule();
