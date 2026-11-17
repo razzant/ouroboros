@@ -556,6 +556,20 @@ test('passive landing keeps a restored home row focused; an explicitly opened pa
     assert.equal(env.document.activeElement.dataset.settingsPage, 'test-focus');
 });
 
+test('Settings chosen from the sidebar lands its page with the focus, as a place that takes it', async (t) => {
+    const { env, content, state, showPage, layers } = world(t);
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage });
+    layout(t, controls, content, { on: true });
+    const row = new Stub('button');  // the sidebar's Settings row, outside the page: a map choice keeps its focus
+    env.document.body.appendChild(row);
+    row.focus();
+    state.activePage = 'settings';
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
+    await settle();
+    assert.equal(state.settingsPath, 'models');
+    assert.equal(env.document.activeElement.dataset.settingsPage, 'models', 'a keyboard reaches the landed page at once');
+});
+
 test('two panes land on the first-level page last opened on this device, or on Models when it is gone', async (t) => {
     const saved = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
     const store = new Map();

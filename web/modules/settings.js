@@ -153,8 +153,10 @@ export function initSettings(ctx = {}) {
         landing = false;
         if (!panes() || levels.length || ownChosen || opening || !shown() || saved !== lastFirst) return;
         // Open a resolved page directly: unknown-path search paints the home and queues ensurePage again.
-        // Landing never overwrites the device's choice, including while its registry cannot be read.
-        open(target, { under: 0, remember: false, quiet: true });
+        // Landing never overwrites the device's choice, including while its registry cannot be read. Settings entered
+        // from the sidebar or drawer takes the focus into the page it lands on (Back returns it to the row); a row of
+        // its own that holds the focus (one a return gave back) keeps it.
+        open(target, { under: 0, remember: false, quiet: page.contains(document.activeElement) });
     };
     let panesBefore = null;
     function placeOverview(level) {
