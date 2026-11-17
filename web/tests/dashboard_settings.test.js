@@ -688,8 +688,10 @@ test('the automatic Dashboard view keeps its focused rail through both width cro
     const dashboard = initDashboard({ state: { activePage: 'dashboard', dashboardActiveSubtab: 'costs' },
         layers: { push: layer => layers.set(layer.id, layer), remove: id => layers.delete(id) } });
     const shell = dashboard.page.querySelector('.dashboard-shell');
+    const header = dashboard.page.querySelector('.app-page-header');
     const list = dashboard.page.querySelector('.dashboard-tabs');
     const row = list.querySelector('[data-dashboard-tab="costs"]');
+    const band = () => ['data-empty', 'data-controls'].map((name) => header.hasAttribute(name));
     row.focus();
     try {
         for (const [layout, pixels] of [['stack', 390], ['docked', 1000], ['stack', 390]]) {
@@ -702,7 +704,11 @@ test('the automatic Dashboard view keeps its focused rail through both width cro
             assert.equal(document.activeElement, row);
             observers.forEach(fn => fn([{ target: dashboard.page }]));
             assert.equal(shell.dataset.sectionView, 'auto', 'the later observer keeps the automatic view');
+            assert.deepEqual(band(), [false, false], 'the band carries no measured fact: the two-pane query decides it is empty');
         }
+        const controls = new NodeStub(); controls.setAttribute('data-dashboard-controls', 'costs');  // the stub reads attributes
+        dashboard.setControls('costs', controls);
+        assert.deepEqual(band(), [false, true], 'the open page\'s controls are the one fact the band reads');
         dashboard.activateTab('costs');
         for (const pixels of [1000, 390]) {
             width = pixels;
@@ -870,7 +876,7 @@ test('in a wide window the Dashboard holds its list beside a page; an engine wit
     };
     const wide = start(true);
     assert.equal(wide.dashboard.page.dataset.sectionView, 'auto', 'two panes: a page stands beside the list at once');
-    assert.equal(wide.dashboard.page.querySelector('.app-page-header').hasAttribute('data-empty'), true, 'a pane named by its row has no caption band');
+    assert.equal(wide.dashboard.page.querySelector('.app-page-header').hasAttribute('data-controls'), false, 'a pane named by its row puts nothing in the band');
     assert.equal(wide.dashboard.page.querySelector('[data-dashboard-lead-name]').tagName.toLowerCase(), 'h2', 'the pane keeps its accessible heading');
     wide.dashboard.activateTab('costs');
     assert.deepEqual(wide.layers, [], 'and is no layer over it');

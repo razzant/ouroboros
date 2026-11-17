@@ -210,5 +210,8 @@ def test_a_touch_window_keeps_a_sections_two_columns_in_one_header_row_and_an_em
         hidden = _block(css, selector)
         assert 'display: none' not in hidden and 'visibility: hidden' not in hidden
         assert 'position: absolute;' in hidden and 'clip-path: inset(50%);' in hidden, 'the heading remains accessible'
-    assert '#page-dashboard > .app-page-header[data-empty]:not([data-return]) .app-page-lead,' in css
+    dashboard = _block(_block(css, ".dashboard-row-mark[hidden] { display: none; }\n@container sectionplace (min-width: 40rem) {"),
+                       'html[data-layout="stack"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) .app-page-lead {')
+    assert 'display: none' not in dashboard and 'position: absolute;' in dashboard and 'clip-path: inset(50%);' in dashboard, \
+        "an empty two-pane band keeps the page's heading for readers"
     assert '#page-settings > .app-page-header .app-page-lead { display: flex;' in _read('web/settings.css')

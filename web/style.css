@@ -6940,19 +6940,40 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
         overflow: hidden;
         clip-path: inset(50%);
     }
-}
-:root[data-window-chrome="integrated"][data-layout="docked"] #page-dashboard > .app-page-header[data-empty]:not([data-return]) ~ .section-shell :is(.section-rail, .dashboard-body) {
-    padding-top: calc(var(--page-header-row-h) + var(--space-4));
-}
-:root[data-window-chrome="integrated"][data-layout="docked"] #page-dashboard > .app-page-header[data-empty]:not([data-return]) ~ .section-shell > .section-rail {
-    padding-top: calc(var(--page-header-row-h) + var(--space-3));
+    /* Two panes whose band holds nothing (the open page has no controls, no return is owed; dashboard.js writes
+       data-controls): on a desk the header lies over the page as the band, the macOS window's handle where it has one,
+       and the rail and the page start below it, where they start under Logs' controls, so neither moves between pages
+       or when a return is spent, in any window (as Settings', settings.css). A touch window keeps ☰ alone in its row. */
+    html[data-layout="docked"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) {
+        position: absolute;
+        inset: 0 6px auto 0;
+        z-index: 2;
+        height: var(--page-header-row-h);
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+    }
+    html[data-layout="docked"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) ~ .section-shell :is(.section-rail, .dashboard-body) {
+        padding-top: calc(var(--page-header-row-h) + var(--space-4));
+    }
+    html[data-layout="docked"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) ~ .section-shell > .section-rail {
+        padding-top: calc(var(--page-header-row-h) + var(--space-3));
+    }
+    html[data-layout="stack"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) { grid-template-areas: "leading title toolbar"; }
+    html[data-layout="stack"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) .app-page-lead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        min-height: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+    }
 }
 /* A phone: the list's screen keeps `☰ Dashboard`, with nothing under it; a page's screen is one row, Back (to the
    list, or to Settings) and the page's name in the header's title style, where ☰ and the place's name stood. Only a
    page that REPLACED the list gives ☰ up: a drawer-width window that still holds the list beside its page (40rem up
    to the shell's switch) has no Back, so there ☰ stays the way to every other destination. */
-html[data-layout="stack"] #page-dashboard > .app-page-header[data-empty]:not([data-return]) { grid-template-areas: "leading title toolbar"; }
-html[data-layout="stack"] #page-dashboard > .app-page-header[data-empty]:not([data-return]) .app-page-lead,
 html[data-layout="stack"] #page-settings > .app-page-header:not([data-return]) .app-page-lead {
     position: absolute;
     width: 1px;

@@ -46,6 +46,15 @@ test('a section band has the same inset without native chrome and one leading ed
     assert.match(css, /\.app-page-header\[data-return\] > \.app-page-title-block \{ display: flex;/, 'an ordinary leading return keeps its actual sibling');
     assert.match(css, /\.app-page-lead \.app-tab-strip \{[^}]*padding: 10px 0 26px;/);
     assert.match(css, /section-rail \{\s*padding-top: calc\(var\(--page-header-row-h\) \+ var\(--space-3\)\)/);
+    // The Dashboard's two panes start below the band whether Logs' controls fill it or it is empty, with native chrome
+    // and without it (no 66px jump in a browser); the two-pane query, not a measured width, decides it is empty.
+    const panes = css.slice(css.indexOf('.dashboard-shell .dashboard-body { padding-inline-start'));
+    const two = panes.slice(0, panes.indexOf('\n}\n'));
+    const band = '#page-dashboard > .app-page-header:not([data-controls]):not([data-return])';
+    assert.ok(two.includes(`html[data-layout="docked"] ${band} {\n        position: absolute;`), 'the empty band lies over both columns');
+    assert.ok(two.includes(`html[data-layout="docked"] ${band} ~ .section-shell > .section-rail {\n        padding-top: calc(var(--page-header-row-h) + var(--space-3));`),
+        'the rail starts below it in any window');
+    assert.doesNotMatch(css, /#page-dashboard > \.app-page-header\[data-empty\]/, 'no Dashboard rule keys on a measured emptiness');
     // A phone's page row stands at the same inset (18px below a browser's top), under a system band when there is
     // one; a room keeps its own top, and Telegram's row and a macOS window's lights outrank this rule.
     assert.match(css, /:where\(html\[data-layout="stack"\]:not\(\[data-window-chrome="integrated"\]\)\) #content > \.page:not\(#page-chat\) > \.app-page-header \{\s*padding-top: max\(calc\(\(var\(--page-header-row-h\) - var\(--control-h-float\)\) \/ 2\), calc\(var\(--chrome-inset\) \+ var\(--inset-top\)\)\);/);

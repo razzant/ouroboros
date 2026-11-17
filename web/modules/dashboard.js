@@ -214,8 +214,8 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
         shell.dataset.sectionView = view;
         const controls = header.querySelectorAll('[data-dashboard-controls]');
         controls.forEach((node) => { node.hidden = node.dataset.dashboardControls !== state.dashboardActiveSubtab; });
+        // The one fact the band's layout reads; whether the band is empty in two panes is the sheets' (style.css).
         header.toggleAttribute('data-controls', Array.from(controls).some((node) => !node.hidden));
-        header.toggleAttribute('data-empty', panes() && !header.hasAttribute('data-controls'));
         const tab = DASHBOARD_TABS.find((each) => each.value === state.dashboardActiveSubtab);
         if (leadName) leadName.textContent = tab?.label || '';
         syncLayer();
