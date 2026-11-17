@@ -104,6 +104,10 @@ test('Telegram sections keep a visible drawer control and one title baseline ins
         'the list alone shows no lead in the host row');
     assert.equal(telegram.split(lead('auto')).length, 2, 'only below the two-pane query');
     assert.ok(!telegram.includes(lead('page')), 'a page alone keeps its name and controls');
+    // The controls it does not show keep no room from the place's name (Clear's 96px clipped "Dashboard").
+    const room = (view) => `.section-place[data-section-view="${view}"] > .app-page-header { --telegram-title-end: var(--telegram-header-end); }`;
+    assert.ok(one.slice(0, one.indexOf('\n}')).includes(room('auto')), 'the list alone gives its name the whole slot');
+    assert.ok(!telegram.includes(room('page')), 'a page alone keeps the room its controls take');
 });
 
 test('page headers retain their toolbar contract with an optional chrome recipe', () => {

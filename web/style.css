@@ -12411,6 +12411,7 @@ html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section
 }
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
     html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="auto"] > .app-page-header .app-page-lead { display: none; }
+    html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="auto"] > .app-page-header { --telegram-title-end: var(--telegram-header-end); }
 }
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-title-block { display: block; grid-area: title; }
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-page-title-row { display: contents; }
