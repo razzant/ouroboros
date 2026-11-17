@@ -196,6 +196,7 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
     const panes = () => sectionHoldsTwoPanes(page);
     let level = false;   // an explicit choice stays open when two panes narrow to one
     let layered = false;
+    let paneShown = false;   // the open page has a box: one column's list hides it
 
     function syncLayer() {
         if (!layers) return;
@@ -218,6 +219,7 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
         header.toggleAttribute('data-controls', Array.from(controls).some((node) => !node.hidden));
         const tab = DASHBOARD_TABS.find((each) => each.value === state.dashboardActiveSubtab);
         if (leadName) leadName.textContent = tab?.label || '';
+        paneShown = panelsEl.getClientRects().length > 0;
         syncLayer();
     }
 
@@ -284,10 +286,19 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
     // The place's box repaints at once. A change of the root font moves the two panes' 40rem while the box keeps its
     // width: the pane gains or loses the list beside it and the list's rows resize, and those repaint at the next frame
     // (the repaint resizes them again, a loop the observer would refuse).
+    // A box that brings the open page into view (one column widened to two, the list beside it again) shows that page
+    // as a choice does: its tab is announced, so a page that draws only while it has a box (Logs) draws now.
     let frame = 0;
+    const repaint = () => {
+        const hidden = !paneShown;
+        paint();
+        if (hidden && paneShown && state.activePage === 'dashboard') {
+            window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: state.dashboardActiveSubtab } }));
+        }
+    };
     const resize = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
-        if (entries.some((entry) => entry.target === page)) paint();
-        else frame ||= requestAnimationFrame(() => { frame = 0; paint(); });
+        if (entries.some((entry) => entry.target === page)) repaint();
+        else frame ||= requestAnimationFrame(() => { frame = 0; repaint(); });
     }) : null;
     [page, panelsEl, list].forEach((box) => resize?.observe(box));
 

@@ -944,6 +944,36 @@ test('a root font that moves the two panes\' 40rem repaints the Dashboard: the p
     dashboard.destroy();
 });
 
+test('a page that gains its box as one column widens to two is announced shown, once, so Logs draws', (t) => {
+    const { mount, window } = setup(t);
+    const content = new NodeStub(); content.id = 'content'; mount.append(content);
+    window.CSS = { supports: () => true };
+    let width = 390;
+    const before = { box: NodeStub.prototype.getBoundingClientRect, observer: globalThis.ResizeObserver };
+    NodeStub.prototype.getBoundingClientRect = () => ({ width });
+    const observers = [];
+    globalThis.ResizeObserver = class { constructor(fn) { observers.push(fn); } observe() {} disconnect() {} };
+    t.after(() => { NodeStub.prototype.getBoundingClientRect = before.box; globalThis.ResizeObserver = before.observer; });
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+    const dashboard = initDashboard({ state });
+    // The sheets: one column's list hides the pane; from 40rem the pane stands beside it (ui.css @container sectionplace).
+    dashboard.page.querySelector('.dashboard-panels').getClientRects = () => (width >= 640 ? [{ width }] : []);
+    const shown = [];
+    window.addEventListener('ouro:dashboard-subtab-shown', (event) => shown.push(event.detail.tab));
+    const resize = (value) => { width = value; observers.forEach((fn) => fn([{ target: dashboard.page }])); };
+    try {
+        resize(390);
+        assert.deepEqual(shown, [], 'the list alone shows no page');
+        resize(735);
+        assert.deepEqual(shown, ['logs'], 'widened (900 -> 1087 px): the automatic page beside the list is shown');
+        resize(800);
+        assert.deepEqual(shown, ['logs'], 'a page already shown is not announced again');
+        state.activePage = 'chat';
+        resize(390); resize(735);
+        assert.deepEqual(shown, ['logs'], 'another page in front: the Dashboard shows nothing');
+    } finally { dashboard.destroy(); }
+});
+
 test('a page explicitly chosen beside the Dashboard list survives narrowing, while the automatic landing returns to the list', async (t) => {
     for (const gesture of ['same row', 'another row', 'keyboard']) await t.test(gesture, async (sub) => {
         const { mount, window, document } = setup(sub);
