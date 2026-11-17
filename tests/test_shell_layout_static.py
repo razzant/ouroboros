@@ -42,13 +42,6 @@ def _media_blocks(css: str):
 def test_shell_sheets_key_structure_off_the_layout_attribute_not_width_queries():
     for rel in ("web/style.css", "web/ui.css"):
         for head, body in _media_blocks(_read(rel)):
-            if head.strip() == '@media (max-width: 1087px) {':
-                # F10 deliberately caps Skills' container-driven second row at the owner's window width.
-                selectors = re.findall(r'([^{}]+)\{', body)
-                assert len(selectors) == 4 and all(selector.strip().startswith((
-                    '@container skillspage ', 'html[data-layout="docked"] #page-skills > .app-page-header[data-lead]'
-                )) for selector in selectors), selectors
-                continue
             offenders = [sel for sel in SHELL_SELECTORS if sel in body]
             assert not offenders, f"{rel}: {head.strip()} styles shell structure {offenders}; key it off html[data-layout]"
     css = _read("web/style.css")

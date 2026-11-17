@@ -3471,7 +3471,7 @@ Back with the arrow, its destination in its name: the owed jump's origin, then t
 Settings › Tools”). Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
 (Consciousness model), distinct from its return. Docked, the sidebar names a section without pages: tabs or Files' location lead its
 band, actions end it, at one height and shape. Controls share the content's leading inset, centred in native chrome or
-18px below a browser's top. Skills drops its tabs only when short actions cannot fit, never above 1087px. Rails use the shared fade;
+18px below a browser's top. Rails use the shared fade;
 location reveals its folder without widening the rail. Section headings follow
 “A section with pages”; a Project shows its name.
 An empty band draws nothing. Its scroller reaches the window's top; its first row starts below the macOS band,

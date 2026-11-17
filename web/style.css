@@ -7294,13 +7294,11 @@ html[data-layout="docked"] #page-skills .app-page-title-row { display: none; }
 html[data-layout="docked"] #page-skills .app-page-return { grid-area: back; }
 html[data-layout="docked"] #page-skills .app-page-toolbar { min-height: var(--page-header-row-h); }
 html[data-layout="docked"] #page-skills .app-tab-strip { grid-area: tabs; }
-@media (max-width: 1087px) {
-    @container skillspage (max-width: 33rem) {
-        html[data-layout="docked"] #page-skills > .app-page-header[data-lead][data-return] { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "back toolbar" "tabs tabs"; }
-    }
-    @container skillspage (max-width: 30rem) {
-        html[data-layout="docked"] #page-skills > .app-page-header[data-lead] { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "back toolbar" "tabs tabs"; }
-    }
+@container skillspage (max-width: calc(33rem - 0.02px)) {
+    html[data-layout="docked"] #page-skills > .app-page-header[data-lead][data-return] { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "back toolbar" "tabs tabs"; }
+}
+@container skillspage (max-width: calc(30rem - 0.02px)) {
+    html[data-layout="docked"] #page-skills > .app-page-header[data-lead] { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "back toolbar" "tabs tabs"; }
 }
 
 .skills-search-chrome {

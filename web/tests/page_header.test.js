@@ -21,10 +21,11 @@ test('Skills keeps its return and tabs at the leading edge, with one extra line 
     assert.match(css, /#page-skills > \.app-page-tabs > \.app-tab-strip \{[\s\S]*?margin-bottom: calc\(-1 \* var\(--space-4\)\);/,
         'the strip lends its shadows space without a blank row before the search');
     const narrow = css.slice(css.indexOf('html[data-layout="docked"] #page-skills > .app-page-header[data-lead]'), css.indexOf('.skills-search-chrome {'));
-    assert.match(narrow, /max-width: 33rem/, 'the round Back needs 38px of a desk row, 52px under a finger');
+    assert.match(narrow, /@container skillspage \(max-width: calc\(33rem - 0\.02px\)\) \{\n    html\[data-layout="docked"\] #page-skills > \.app-page-header\[data-lead\]\[data-return\]/,
+        'below 33rem of its own column a return takes the tabs\' row: the round Back needs 38px of a desk row, 52px under a finger');
     assert.doesNotMatch(narrow, /max-width: 36rem/, 'the named capsule\'s threshold is gone with it');
-    assert.match(narrow, /max-width: 30rem/);
-    assert.match(narrow, /@media \(max-width: 1087px\)/);
+    assert.match(narrow, /@container skillspage \(max-width: calc\(30rem - 0\.02px\)\)/);
+    assert.doesNotMatch(narrow, /@media/, 'the column decides, never the window\'s width');
     assert.match(narrow, /grid-template-areas: "back toolbar" "tabs tabs"/);
     assert.match(narrow, /\.app-page-toolbar \{ min-height: var\(--page-header-row-h\);/,
         'the first row keeps its band with native chrome and without the host token');
