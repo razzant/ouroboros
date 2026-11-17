@@ -100,6 +100,8 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
 
     function render() {
         if (destroyed) return;
+        const active = document.activeElement;
+        const focused = pane.contains(active) ? active?.closest('[data-source-action], [data-source-menu]') : null;
         const items = itemsBySource();
         const health = healthById();
         const madeHere = (host.installedSkills() || []).filter((row) => !row.install && ['external', 'self_authored'].includes(String(row.source || ''))).length;
@@ -121,6 +123,12 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
                 <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="auto_grant">Permissions and checks ›</button></p>
                 <p>The skills folder on this computer and the ClawHub address: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="skill_sources">Skill sources ›</button></p>
             </div>`;
+        // A return can focus its door while the read is pending. Preserve that current control, not an old one.
+        if (focused) {
+            const target = [...pane.querySelectorAll('[data-source-action], [data-source-menu]')].find((node) =>
+                ['sourceAction', 'sourceId', 'sourceMenu'].every((key) => node.dataset[key] === focused.dataset[key]));
+            (target || pane.querySelector('[data-source-action="add"]'))?.focus({ preventScroll: true });
+        }
     }
 
     async function load({ refresh = false } = {}) {

@@ -3,6 +3,7 @@
 // with who wrote them and who placed the place there, the place's own notes in brief and its optional description;
 // its conversations follow. Connect is separate in place_connect.js; the body stays here for the place-room integration.
 import { bindDialogFocus } from './ui_interactions.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { renderSegmentedField } from './page_header.js';
 import { chipHtml, skillIconHtml } from './skill_presentation.js';
@@ -330,7 +331,7 @@ export function sheetShell(titleHtml, metaText, modifier = '') {
             <div class="document-reader-actions"></div>
             <button type="button" class="btn btn-default document-reader-close" data-place-close>${tr('places.close', 'Close')}</button>
         </div>
-        <div class="document-reader-body place-sheet-body is-quiet-focus" tabindex="-1" data-place-body></div>
+        <div class="document-reader-body place-sheet-body scroll-fade-y is-quiet-focus" tabindex="-1" data-place-body></div>
     </div>`;
     return dialog;
 }
@@ -339,10 +340,12 @@ export function showSheet(dialog, { returnFocus, onClose, onBack }) {
     const body = dialog.querySelector('[data-place-body]');
     let closed = false;
     let disposeFocus = null;
+    const disposeFade = bindScrollFade(body);
     const close = () => {
         if (closed) return;
         closed = true;
         if (dialog.open && typeof dialog.close === 'function') dialog.close();
+        disposeFade();
         disposeFocus?.();
         dialog.remove();
         onClose?.();

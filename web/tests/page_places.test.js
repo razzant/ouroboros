@@ -3,6 +3,7 @@
 // and the Logs list keep their own place and are left alone.
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 
 import { initPagePlaces } from '../modules/page_places.js';
 
@@ -28,7 +29,7 @@ function world() {
         node.scrollLeft = left;
         listeners.doc.get('scroll')({ target: node });
     };
-    return { listeners, page, box, scrolled, restore };
+    return { doc, win, listeners, page, box, scrolled, restore };
 }
 
 test('a box scrolled on a page goes back when the page or its tab is shown again; another page is untouched', () => {
@@ -60,6 +61,72 @@ test('a kept room\'s inner box returns with the room; its feed and the Logs list
     assert.doesNotThrow(() => w.restore(null));
 });
 
+test('a forward landing resets visible ordinary scrollers, and a captured return still restores its own position', () => {
+    const w = world(), root = w.page('page-skills');
+    const list = w.box(root), hidden = w.box(root), feed = w.box(root, { owned: true });
+    Object.assign(root, { matches: () => false, querySelectorAll: () => [list, hidden, feed], getClientRects: () => [1] });
+    for (const box of [list, hidden, feed]) Object.assign(box, { getClientRects: () => [1],
+        scrollHeight: 1000, clientHeight: 100, scrollWidth: 700, clientWidth: 100 });
+    hidden.getClientRects = () => [];
+    w.scrolled(list, 320, 80); w.scrolled(hidden, 220); w.scrolled(feed, 600);
+    const back = w.restore.capture(root);
+    w.restore.land(root);
+    assert.deepEqual([list.scrollTop, list.scrollLeft, hidden.scrollTop, feed.scrollTop], [0, 0, 220, 600]);
+    w.restore(root);
+    assert.equal(list.scrollTop, 0, 'a repaint cannot resurrect the stale arrival');
+    back();
+    assert.deepEqual([list.scrollTop, list.scrollLeft, hidden.scrollTop, feed.scrollTop], [320, 80, 220, 600]);
+});
+
+test('a return within its fade\'s depth goes to the top, and a list beside its open page shows the row naming it', () => {
+    const w = world(), root = w.page('page-settings');
+    w.win.getComputedStyle = () => ({ getPropertyValue: (name) => (name === '--scroll-fade-edge' ? '32px' : ''), overflowY: 'auto' });
+    const box = (top, fades = true) => ({ isConnected: true, scrollTop: top, scrollLeft: 0, scrollHeight: 2000, clientHeight: 600,
+        scrollWidth: 100, clientWidth: 100, clientTop: 0, matches: (selector) => fades && selector === '.scroll-fade-y',
+        ownerDocument: { defaultView: w.win }, getBoundingClientRect: () => ({ top: 0, bottom: 600, left: 0, right: 100 }) });
+    const rail = box(0), pane = box(12), deep = box(240), plain = box(12, false);
+    // The row naming the open page lies under the rail's lower edge: the owner had scrolled the list away from it. The
+    // sheets decide whether the page's column is drawn beside it (the Dashboard's automatic view names no column).
+    let columns = 2;
+    const column = { getClientRects: () => (columns === 2 ? [1] : []) };
+    const shell = { querySelector: (selector) => (selector === ':scope > .section-pane' ? column : null) };
+    const row = { parentElement: rail, getClientRects: () => [1], getBoundingClientRect: () => ({ top: 700, bottom: 748 }),
+        closest: (selector) => (selector === '.section-shell' ? shell : null) };
+    let beside = false;
+    Object.assign(root, { matches: () => false, parentElement: null,
+        querySelectorAll: (selector) => (selector === '*' ? [rail, pane, deep, plain] : beside ? [row] : []) });
+    const back = w.restore.capture(root);
+    back();
+    assert.deepEqual([rail.scrollTop, pane.scrollTop, deep.scrollTop, plain.scrollTop], [0, 0, 240, 12],
+        'a few pixels under a fade go to the top; a real place, or a box without a fade, keeps its pixels');
+    beside = true;
+    columns = 1;
+    back();
+    assert.equal(rail.scrollTop, 0, 'a list standing alone names no page: its chosen row stays where the list was left');
+    columns = 2;
+    back();
+    assert.equal(rail.scrollTop, 748 - (600 - 32), 'the naming row comes in just past the lower fade');
+    // The pressed row's own reveal (scroll_fade.js, on its focus) moves its list a few pixels: the top wins.
+    const pressed = { isConnected: true, parentElement: root, matches: () => true, closest: () => null,
+        getClientRects: () => [1], focus: () => { pane.scrollTop = 19; } };
+    root.contains = (node) => node === pressed;
+    w.restore.capture(root, pressed)();
+    assert.equal(pane.scrollTop, 0, 'a reveal that leaves the list within its fade\'s depth settles at the top');
+    // The pressed row lies in the same list. Near the naming row, both come into view; too far from it to share the
+    // view, the list stays where the owner left it and the pressed row keeps its view.
+    rail.contains = (node) => node === pressed;
+    // A pressed row whose sub-pixel height crosses the lower fade by less than a pixel still shares the view.
+    for (const [at, expected] of [[520, 748 - (600 - 32)], [100, 40], [180 + 600 - 32 - 48 + 0.4, 748 - (600 - 32)]]) {
+        pressed.getBoundingClientRect = () => ({ top: at - rail.scrollTop, bottom: at + 48 - rail.scrollTop });
+        row.getBoundingClientRect = () => ({ top: 700 - rail.scrollTop, bottom: 748 - rail.scrollTop });
+        pressed.focus = () => {};
+        rail.scrollTop = 40;  // the naming row lies under the lower edge, the pressed row in view
+        const later = w.restore.capture(root, pressed);
+        later();
+        assert.ok(Math.abs(rail.scrollTop - expected) <= 1, `${at}: ${rail.scrollTop}`);
+    }
+});
+
 test('disposal releases a room\'s places even before another page restore', () => {
     const w = world(), room = w.page('room');
     const box = w.box(room);
@@ -68,6 +135,51 @@ test('disposal releases a room\'s places even before another page restore', () =
     box.scrollTop = 0;
     w.restore(room);
     assert.equal(box.scrollTop, 0);
+});
+
+test('each return restores its own nested scrolls and pressed row, falling back when that row is removed', () => {
+    const w = world(), root = w.page('page-skills');
+    const box = w.box(root);
+    Object.assign(root, { matches: () => false, querySelectorAll: () => [box] });
+    Object.assign(box, { scrollHeight: 1000, clientHeight: 100, scrollWidth: 700, clientWidth: 100 });
+    let focused;
+    const anchor = (name) => ({ isConnected: true, parentElement: root, matches: () => true,
+        closest: () => null, getClientRects: () => [1], focus: () => { focused = name; } });
+    const row = anchor('pressed'), next = anchor('next');
+    root.boxes.add(row); row.nextElementSibling = next;
+    box.scrollTop = 320; box.scrollLeft = 80;
+    const restore = w.restore.capture(root, row);
+    box.scrollTop = 640; box.scrollLeft = 180;
+    const later = w.restore.capture(root, row);
+    restore();
+    assert.deepEqual([box.scrollTop, box.scrollLeft, focused], [320, 80, 'pressed']);
+    row.isConnected = false;
+    later();
+    assert.deepEqual([box.scrollTop, box.scrollLeft, focused], [640, 180, 'next']);
+});
+
+test('a returned row takes focus for either input, but only a keyboard return paints its ring', () => {
+    const w = world(), root = w.page('page-skills');
+    Object.assign(root, { matches: () => false, querySelectorAll: () => [] });
+    const handlers = new Map(), attrs = new Map();
+    let focused = 0;
+    const row = { isConnected: true, parentElement: root, matches: () => true, closest: () => null,
+        getClientRects: () => [1], focus: () => focused++, setAttribute: (key, value) => attrs.set(key, value),
+        removeAttribute: key => attrs.delete(key), addEventListener: (key, fn) => handlers.set(key, fn),
+        removeEventListener: key => handlers.delete(key) };
+    root.boxes.add(row);
+    const restore = w.restore.capture(root, row);
+    for (const keyboard of [false, true, false]) {
+        restore({ keyboard });
+        assert.equal(attrs.get('data-return-focus'), keyboard ? 'keyboard' : 'pointer');
+        handlers.get('blur')();
+        assert.equal(attrs.has('data-return-focus'), false);
+    }
+    assert.equal(focused, 3);
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(css, /:root \[data-return-focus="pointer"\]:focus \{ outline: none; \}/,
+        'the return input overrides button.settings-row:focus-visible as well as section rows');
+    assert.match(css, /:root \[data-return-focus="keyboard"\]:focus \{ outline: 2px solid var\(--focus-accent-border\)/);
 });
 
 test('Logs owns its actual scroller; generic page restoration still restores other boxes', () => {
@@ -81,6 +193,22 @@ test('Logs owns its actual scroller; generic page restoration still restores oth
     logs.scrollTop = 0; other.scrollTop = 0;
     w.listeners.win.get('ouro:dashboard-subtab-shown')({ detail: { tab: 'logs' } });
     assert.deepEqual([logs.scrollTop, other.scrollTop], [0, 40], 'only logs.js restores #page-logs');
+});
+
+test('a jump from a closed popup returns focus to its surviving trigger, not a hidden row', () => {
+    const w = world(), root = w.page('page-chat');
+    Object.assign(root, { matches: () => false, querySelectorAll: () => [] });
+    const popup = { id: 'room-shade' };
+    let open = true, focused;
+    const row = { isConnected: true, closest: (selector) => selector.includes('role=') ? popup : open ? null : popup,
+        getClientRects: () => open ? [1] : [], focus: () => { focused = 'row'; }, matches: () => true };
+    const trigger = { isConnected: true, getAttribute: () => 'room-shade', getClientRects: () => [1],
+        closest: () => null, matches: () => true, focus: () => { focused = 'trigger'; } };
+    w.doc.querySelectorAll = () => [trigger];
+    const restore = w.restore.capture(root, row);
+    restore(); assert.equal(focused, 'row');
+    open = false;
+    restore(); assert.equal(focused, 'trigger');
 });
 
 // A repaint keeps the reading place: WebKit holds a box in a size container to what remains while a part with an <svg>

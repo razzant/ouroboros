@@ -1,6 +1,51 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { bindScrollFade, revealPastFade } from '../modules/scroll_fade.js';
+
+// A room's feed carries no fade (DESIGN principle 9, owner 21.10): what darkens content under its glass is the
+// bar's and the composer's own drawing. A mask on the feed would also make it one stacking context and drop the
+// lazy-load margin of the photos inside it. Every other scroller keeps the shared fade.
+const ROOM_FEED = /(?:#chat-messages|\.chat-messages)(?![\w-])/;
+function topLevel(text, separator) {  // split outside parentheses, so `:is(a, b) .c` keeps its group
+    const parts = [];
+    let depth = 0, start = 0;
+    [...text].forEach((char, index) => {
+        if (char === '(') depth += 1;
+        else if (char === ')') depth -= 1;
+        else if (!depth && separator.test(char)) { parts.push(text.slice(start, index)); start = index + 1; }
+    });
+    return [...parts, text.slice(start)].map((part) => part.trim()).filter(Boolean);
+}
+function roomFeedFades(css) {
+    css = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const found = [];
+    for (const [, selectors, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        const subjects = topLevel(selectors, /,/).map((one) => topLevel(one, /[\s>+~]/).at(-1));
+        const masked = /(?:^|[;\s])(?:-webkit-)?mask(?:-image)?\s*:(?!\s*none\b)|--scroll-fade-/.test(body);
+        if (/data-room-top/.test(selectors) || (masked && subjects.some((subject) => ROOM_FEED.test(subject)))) {
+            found.push(selectors.trim());
+        }
+    }
+    return found;
+}
+
+test("a room's feed carries no fade or room-top switch, while the shared fade still masks every other scroller", () => {
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.deepEqual(roomFeedFades(css), []);
+    assert.match(css, /\.scroll-fade-y \{[^}]*\bmask-image: linear-gradient\(/, 'the shared fade itself stays');
+    for (const broken of [
+        ':is(#chat-messages, .chat-messages)[data-scroll-above] { --scroll-fade-top: 88px; }',
+        '#page-chat .chat-messages { mask-image: linear-gradient(transparent, black); }',
+        '[data-room-top="crisp"] .chat-messages { mask-image: none; }',
+    ]) assert.equal(roomFeedFades(broken).length, 1, broken);
+    const allowed = `.scroll-fade-y { mask-image: linear-gradient(180deg, transparent 0, black 32px); }
+        .chat-live-timeline.scroll-fade-y[data-scroll-above] { --scroll-fade-top: 32px; }
+        .chat-messages .chat-mirror-text { mask-image: linear-gradient(black, transparent); }
+        :is(#chat-messages, .chat-messages) > .chat-bubble { -webkit-mask-image: linear-gradient(black, transparent); }
+        .project-panel .chat-messages:focus-visible { background-image: linear-gradient(red, red); }`;
+    assert.deepEqual(roomFeedFades(allowed), [], 'a card or line inside the feed may still fade on its own');
+});
 
 function fixture() {
     const attrs = new Set(), listeners = new Map(), frames = new Map(), observers = [];
@@ -87,4 +132,48 @@ test('a named body is a keyboard region exactly while it scrolls, and nothing wi
     dispose();
     const plain = fixture();  // its stub has no attribute API: a body without a name is only decorated
     assert.doesNotThrow(() => { bindScrollFade(plain.scroller); plain.flush(); });
+});
+
+test('keyboard focus clears the fade, while pointer focus and focus handed back after a pointer leave the list still', () => {
+    const f = fixture();
+    f.scroller.ownerDocument.defaultView.getComputedStyle = () => ({ getPropertyValue: () => '32px' });
+    let keyboard = false;
+    const row = { getBoundingClientRect: () => ({ top: 20, bottom: 50 }), matches: selector => selector === ':focus-visible' && keyboard };
+    f.scroller.contains = (node) => node === row || node === f.scroller;
+    f.scroller.getBoundingClientRect = () => ({ top: 0, bottom: 100 });
+    f.scroller.scrollTop = 200;
+    bindScrollFade(f.scroller);
+    f.listeners.get('focusin')({ target: f.scroller });
+    assert.equal(f.scroller.scrollTop, 200, 'landing focus on the scroller itself is not a row to reveal');
+    f.listeners.get('focusin')({ target: row });
+    assert.equal(f.scroller.scrollTop, 200, 'pointer focus, or focus a closed menu hands back, does not move the list');
+    keyboard = true;
+    f.listeners.get('focusin')({ target: row });
+    assert.equal(f.scroller.scrollTop, 188, 'the row clears the 32px top fade before focus is visible');
+});
+
+test('keyboard focus handed back to the row it left stays where it stood; a row that moved meanwhile comes clear', () => {
+    const f = fixture();
+    f.scroller.ownerDocument.defaultView.getComputedStyle = () => ({ getPropertyValue: () => '32px' });
+    let top = 20;  // a reader's opener under the top fade, half above the box
+    const row = { getBoundingClientRect: () => ({ top, bottom: top + 30 }), matches: selector => selector === ':focus-visible' };
+    const other = { getBoundingClientRect: () => ({ top: 60, bottom: 70 }), matches: () => true };
+    f.scroller.contains = (node) => node === row || node === other || node === f.scroller;
+    f.scroller.getBoundingClientRect = () => ({ top: 0, bottom: 100 });
+    f.scroller.scrollTop = 200;
+    bindScrollFade(f.scroller);
+    // The reader opened from the row takes the focus; Escape closes it and hands the focus back (a keyboard's).
+    f.listeners.get('focusout')({ target: row });
+    f.listeners.get('focusin')({ target: row });
+    assert.equal(f.scroller.scrollTop, 200, 'the opener returns at the same place: the chat does not move');
+    // A row the list moved while its menu was open (a project pinned to the top) is revealed on the keyboard's return.
+    f.listeners.get('focusout')({ target: row });
+    top = -400;
+    f.listeners.get('focusin')({ target: row });
+    assert.equal(f.scroller.scrollTop, -232, 'the moved row clears the top fade');
+    // Another row reached by the keyboard is revealed as before.
+    f.scroller.scrollTop = 200; top = 20;
+    f.listeners.get('focusout')({ target: other });
+    f.listeners.get('focusin')({ target: row });
+    assert.equal(f.scroller.scrollTop, 188);
 });

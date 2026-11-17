@@ -229,7 +229,9 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
                 log_card = page.locator('.log-task-card[data-task-group="review-ui"]')
                 log_card.wait_for(state="attached", timeout=30_000)
                 assert log_card.is_visible()
-                review = log_card.locator('[data-task-review]')
+                # The task's review sentence opens with its one fold, the card itself.
+                log_card.locator(':scope > summary').click()
+                review = log_card.locator(':scope > .log-task-review')
                 assert review.is_visible()
                 log_text = review.inner_text()
                 assert "Review panel panel_visual_truth" in log_text
@@ -238,7 +240,7 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
                 # The same formatter serves Logs: finding bodies ride along.
                 assert "Browser evidence missing for the checkout flow" in log_text
                 assert "Reviewer fable findings omitted: 1" in log_text
-                assert log_card.locator('[data-task-phase]').inner_text() == "warn"
+                assert log_card.locator(':scope > summary .log-failure').first.is_hidden()  # a warning is words, not a hue
                 review.scroll_into_view_if_needed()
                 review.screenshot(path=str(diagnostic_directory(data_dir.parent, "review-checkpoint", publish=True) / "review-truth-logs.png"))
             finally:

@@ -389,7 +389,8 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
 # The door's destination, through the real producers and consumers: the gateway's admission and Main's
 # history read by the real router (``door``), the task's tool rows by the real tool-log writer, Main by
 # chat.js, and the navigation by app.js's own revealQuotedSource and ``ouro:open-task`` listener, read
-# from app.js verbatim. Only ``showPage`` stands in for the shell: it switches the page and announces it.
+# from app.js verbatim. Only the shell stands in: ``showPage`` switches the page and announces it, and the page
+# navigation's ``capture`` names the place a jump leaves (app.js revealQuotedSource takes its origin there).
 MAIN_BOOT = """<script type="module">
 import {initDashboard} from '/static/modules/dashboard.js';
 import {initUpdates} from '/static/modules/updates.js';
@@ -419,8 +420,9 @@ const showPage=async(name)=>{
 const app=await (await fetch('/static/app.js')).text();
 const door=app.slice(app.indexOf('async function revealQuotedSource('),app.indexOf('\\nfunction freshProjectRow'));
 const noProject=()=>{throw new Error('a Main task never reads Projects');};
-new Function('apiClient','mainChat','state','showPage','closeProjectPanel','showToast','tr','fetchJson','openProjectPanel',
-    'let projectNavigationGeneration = 0;\\n'+door)(apiClient,mainChat,state,showPage,()=>{},text=>notices.push(text),tr,noProject,noProject);
+const pageNavigation={capture:()=>({key:state.activePage})};
+new Function('apiClient','mainChat','state','showPage','pageNavigation','showToast','tr','fetchJson','openProjectPanel',
+    'let projectNavigationGeneration = 0;\\n'+door)(apiClient,mainChat,state,showPage,pageNavigation,text=>notices.push(text),tr,noProject,noProject);
 window.ready=true;
 </script>"""
 
@@ -754,7 +756,7 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     page.set_viewport_size({"width": 320, "height": OWNER_WINDOW["height"]})
     page.evaluate(FRAMES)
     if page.locator("#dashboard-panel-updates").is_visible():
-        page.click("[data-dashboard-list-back]")
+        page.get_by_role("button", name="Back to Dashboard", exact=True).click()
         page.wait_for_selector("#dashboard-panel-updates", state="hidden")
     current["status"] = _status(large, {**_letter(large, "ready"), "text": large["text"]})
     sockets[-1].send(SAVED)

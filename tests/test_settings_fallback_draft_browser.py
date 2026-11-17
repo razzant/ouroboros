@@ -1,4 +1,4 @@
-"""A saved fallback's window on its own page (Settings › Models › Fallback N): an incomplete number is refused beside
+"""A saved fallback's window on its own page (Settings › Models › Fallback model N): an incomplete number is refused beside
 Save and nothing is sent, the typed text survives leaving Settings, and a whole number is written as that fallback's
 entry of the window map alone."""
 from __future__ import annotations
@@ -23,7 +23,8 @@ def test_saved_fallback_context_keeps_incomplete_number_through_stay_and_auto(ro
     page.goto(ui["url"] + "/#settings")
     level = open_settings(page, f"models/role/fallback/{ordinal + 1}")
     level.locator("[data-editor-save]").wait_for(state="visible")
-    assert page.locator("#page-settings [data-settings-lead-name]").inner_text() == f"Fallback {ordinal + 1}"
+    # A model role names its destination, apart from a return to it (docs/DESIGN.md "Page header").
+    assert page.locator("#page-settings [data-settings-lead-name]").inner_text() == f"Fallback model {ordinal + 1}"
     expect(level.locator("[data-model-role-model]")).to_have_value(['owner/first', 'owner/second', 'owner/third'][ordinal])
     level.locator("details.model-role-details > summary").click()
     field = level.locator('[data-model-role-context]')

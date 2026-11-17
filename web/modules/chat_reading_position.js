@@ -303,6 +303,10 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             if (!intent) intent = { scrollTop: state.top, stick: state.stick, historyAnchor: anchors.serialize() };
             state.position();
         },
+        capture() {
+            const saved = intent || { scrollTop: feed.scrollTop, stick: state.stick, historyAnchor: anchors.serialize() };
+            return () => { state.cancel(); intent = saved; state.position(); };
+        },
         /** An unread room opened (`claim(true)`) lands once on its newest message, `measure()`
          * px from the bottom, unless the reader moved first; `token` is that opening's
          * own claim, so a superseded one spends nothing. Nothing to move (on screen

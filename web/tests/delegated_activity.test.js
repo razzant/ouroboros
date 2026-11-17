@@ -78,6 +78,10 @@ test('messages lead, thinking sits behind one labelled disclosure, problems, cou
     assert.match(html, /<strong>Telegram<\/strong>/, 'the executor message uses the shared rich-text renderer');
     assert.match(html, /<div class="chat-delegated-problem">Problem: claude · a01 · Bash: exit 1: 2 failed/, 'words and warn tone identify the problem without a glyph');
     assert.match(html, /4 technical events since seq 1 · Read ×2 · Bash ×2/);
+    // Logs reads the same observation without the journal's sequence numbers: its record keeps them.
+    const counts = (options) => delegatedActivityView(frame(activity(0, 4, [], { technical: burst.technical })), options).body;
+    assert.equal(counts(), '4 technical events since seq 1 · Read ×2 · Bash ×2');
+    assert.equal(counts({ seq: false }), '4 technical events · Read ×2 · Bash ×2');
     assert.ok(!html.includes('chat-delegated-events'), 'the ordered technical detail waits for the row Expand');
     const expanded = delegatedActivityBodyHtml(view, { expanded: true });
     assert.match(expanded, /<ol class="chat-delegated-events"><li><span class="chat-delegated-seq">#1<\/span> Read — chat.js<\/li>/);

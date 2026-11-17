@@ -13,6 +13,7 @@
 
 import { fmt, fmtInto, tr } from './i18n.js';
 import { bindDialogFocus } from './ui_interactions.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { getMessageActions } from './message_actions.js';
 import { controlIcon } from './page_icons.js';
 import { mountChatMarkdown } from './chat_markdown.js';
@@ -50,7 +51,7 @@ const SHEET_HTML = `
             </div>
             <button type="button" class="btn btn-default document-reader-close" data-share-action="close" aria-label="Close sharing">Close</button>
         </header>
-        <div class="document-reader-body message-share-body is-quiet-focus" tabindex="0" role="region" aria-label="What would leave"></div>
+        <div class="document-reader-body message-share-body scroll-fade-y is-quiet-focus" tabindex="0" role="region" aria-label="What would leave"></div>
         <footer class="message-share-foot">
             <div class="message-share-scope"><p class="message-share-count"></p></div>
             <div class="message-share-actions"></div>
@@ -725,6 +726,7 @@ export function registerMessageShare({ registry = getMessageActions(), win = glo
             content: row.content || null, cardSource, file: null, fileKey: 0,
         };
         current.disposers.push(() => forgetTelegram(current));
+        current.disposers.push(bindScrollFade(current.body));
         const listen = (target, type, handler, options) => {
             if (!target?.addEventListener) return;
             target.addEventListener(type, handler, options);

@@ -247,11 +247,10 @@ export function paintWakeRows(region, wakes, coverage, opened, put, release = de
  *  Circles page. */
 function mountSettingsCards(host, { state, openSettings, openDashboardTab, route }) {
     if (!host) return { paint() {}, dispose() {} };
-    const back = { label: 'Consciousness', go: () => openDashboardTab?.('consciousness') };
     const doors = {
         'consciousness-allowance': () => openDashboardTab?.('costs', { row: 'OUROBOROS_CONSCIOUSNESS_DAILY_USD' }),
-        'consciousness-model': () => openSettings?.('models/role/consciousness', { back }),
-        'consciousness-safety': () => openSettings?.('permissions', { row: 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', back }),
+        'consciousness-model': () => openSettings?.('models/role/consciousness'),
+        'consciousness-safety': () => openSettings?.('permissions', { row: 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE' }),
         'consciousness-places': () => openCircles(),
         'consciousness-evolution': () => openDashboardTab?.('evolution', { row: 'OUROBOROS_POST_TASK_EVOLUTION' }),
     };

@@ -169,7 +169,7 @@ def test_a_skill_form_opened_from_skills_leads_back_to_skills(subscription_ui):
     # On a phone the page's one leading control is its Back, in the header before the page's name: the places
     # control gives way to it (docs/DESIGN.md "Page header").
     back = header_back(page)
-    assert back.is_visible() and back.get_attribute("aria-label") == "Back to Skills"
+    assert back.is_visible() and back.get_attribute("aria-label") == back.get_attribute("title") == "Back to Skills"
     assert lead_name(page) == "Gate skill settings"
     assert page.locator("#page-settings .app-page-header [data-mobile-nav-toggle]").is_hidden()
     assert page.locator("#extension-settings-sections").count() == 1
@@ -178,9 +178,10 @@ def test_a_skill_form_opened_from_skills_leads_back_to_skills(subscription_ui):
     setup_browser.capture(page, "settings-skill-form-320x640")
     page.keyboard.press("Escape")
     page.locator("#page-skills").wait_for(state="visible")
-    assert top_path(page) == ""
+    assert page.locator("#page-settings").is_hidden()
+    assert top_path(page) == "skill/gate_skill_7", "the destination stays mounted while its jump returns to Skills"
     assert page.evaluate("() => document.querySelector('#page-skills .skills-scroll').scrollTop") == kept
-    # The header's Back does the same.
+    # The named header Back does the same.
     open_form()
     level.wait_for(state="visible")
     header_back(page).click()

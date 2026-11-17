@@ -1,6 +1,8 @@
 // A DOM and a server for the node tests of Settings: the dashboard fixture's document with an element that parses
 // markup as a browser nests it, the home's passive reads answered, and the reads that start something left out.
 import { forgetSettingRows } from '../../modules/settings_controls.js';
+import { createLayerStack } from '../../modules/layers.js';
+import { bindPageBack } from '../../modules/page_header.js';
 import { NodeStub, setup } from '../dashboard_dom_fixture.js';
 
 // The fixture's element, reading a self-closed tag (an SVG `<path … />` of a glyph) as childless, so a row drawn
@@ -68,7 +70,21 @@ export function world(t) {
     env.document.body.appendChild(content);
     const state = { activePage: 'chat' };
     const shown = [];
-    const showPage = async (name, ...rest) => { shown.push([name, ...rest]); state.activePage = name; return true; };
-    return { env, posts, content, state, shown, showPage };
+    const layers = createLayerStack({ doc: env.document, win: env.window });
+    const off = bindPageBack({ layers, doc: env.document, win: env.window,
+        currentHeader: () => content.querySelector('.app-page-header') });
+    t.after(() => { off(); layers.destroy(); });
+    const showPage = async (name, options = {}) => {
+        shown.push([name, options]);
+        layers.batch(() => {
+            if (state.activePage !== name) {
+                state.activePage = name;
+                env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));
+            }
+            options.enter?.();
+        });
+        return true;
+    };
+    return { env, posts, content, state, shown, showPage, layers };
 }
 

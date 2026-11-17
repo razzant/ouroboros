@@ -41,6 +41,11 @@ export class NodeStub {
     }
     getAttribute(key) { return this.attrs[key] ?? null; }
     hasAttribute(key) { return key in this.attrs; }
+    toggleAttribute(key, force) {
+        const on = force ?? !this.hasAttribute(key);
+        if (on) this.setAttribute(key, ''); else this.removeAttribute(key);
+        return on;
+    }
     removeAttribute(key) { delete this.attrs[key]; }
     toggleAttribute(key, force = !this.hasAttribute(key)) {
         if (force) this.setAttribute(key, this.getAttribute(key) ?? ''); else this.removeAttribute(key);

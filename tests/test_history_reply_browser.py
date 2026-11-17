@@ -251,6 +251,7 @@ def test_exact_nested_line_and_post_quote_conversion(direct_server_with_data, br
             bind_task_to_project(root, "converted-source", fixture["x"]["id"], origin={"absent": "system"})
             _quote(page, address).click()
             facts["converted"] = _landed(page, address, '#pchat-quote-converted-messages')
+            assert page.evaluate("window.__ouroLayers.returnPage()?.back.label") == "Main"
             _evidence(page, tmp_path, f"converted-target-{browser_engine}", fixture, facts)
             page.locator('#project-panel-close').click()
             _idle(page, '#chat-messages')
@@ -282,11 +283,17 @@ def test_exact_nested_line_and_post_quote_conversion(direct_server_with_data, br
             _evidence(page, tmp_path, f"line-after-gesture-{browser_engine}", fixture, facts)
             page.locator('#project-panel-close').click()
             _idle(page, '#chat-messages')
-            # Ordinary reopening finds the kept room as left (PR #2951, owner 2026-11-03: DESIGN "History edges"),
-            # and `Scroll to latest message` returns it to the present; source navigation adds no global Back.
+            # Ordinary reopening from the sidebar finds the kept room as left, its reading place and draft (PR #2951,
+            # owner 2026-11-03: DESIGN "History edges"), and clears the source jump's return; `Scroll to latest message`
+            # then returns it to the present.
             page.locator('.nav-project-row[data-project-id="quote-triage"]').click()
             _idle(page, '#pchat-quote-triage-messages')
+            assert page.evaluate("window.__ouroLayers.returnPage() === null")
             assert target.count() == 1, 'the kept room still holds the passage it was left on'
+            facts["reopened"] = _settled_row(page, target, feed)
+            assert abs(target.evaluate(timeline_top) - after) <= 2, facts["reopened"]
+            assert abs(facts["reopened"]["feedTop"] - facts["after_resize"]["feedTop"]) <= 2, facts["reopened"]
+            assert page.locator('#pchat-quote-triage-input').input_value() == 'Project draft\n' * 5
             page.locator('#pchat-quote-triage-scroll-bottom').click()
             _idle(page, '#pchat-quote-triage-messages')
             assert page.locator('#pchat-quote-triage-messages').evaluate(

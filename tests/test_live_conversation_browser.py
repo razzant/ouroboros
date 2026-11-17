@@ -593,15 +593,12 @@ def test_catalog_settings_save_and_client_devices(subscription_ui, monkeypatch, 
     page.wait_for_function('__settingsSignals.length === 1')
     assert subscription_ui['call_saves'][-1]['instructions'] == 'Speak briefly in this synthetic call.'
     assert not any('device' in key or key == 'echoCancellation' for key in subscription_ui['call_saves'][-1])
-    # A device option changed, then Back (or the wide rail's overview), then another skill's form drawn (its signal),
-    # then Calls again: the form is
-    # drawn anew and the skill binds it again, so its device controls and its autosave still work.
+    # Back returns to Main, retaining Settings. Choosing its home explicitly then removes the old form;
+    # another skill's mount signal and a fresh Calls form must still bind the device controls and autosave once.
     form.locator('[data-call-processing="echoCancellation"]').check()
-    back = page.locator('#page-settings .app-page-header [data-settings-back]')
-    if back.is_visible():
-        back.click()
-    else:
-        page.locator('#page-settings [data-settings-overview-row]').click()
+    page.locator('#page-settings .app-page-header [data-shell-back]').click()
+    expect(page.locator('#page-chat')).to_be_visible()
+    page.evaluate("window.__ouroSettings.open('', {map: true})")
     expect(page.locator('#page-settings [data-settings-page="skill/live_conversation"]')).to_have_count(0)
     page.evaluate("window.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted'))")
     open_calls_settings(page)
