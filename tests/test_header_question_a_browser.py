@@ -317,12 +317,12 @@ BAR = """name => {
     const page = document.querySelector('#page-' + name), header = page.querySelector('.app-page-header');
     const lead = header.querySelector('.app-page-lead');
     const items = [...header.querySelectorAll('.app-page-lead [role=tab], .app-page-lead .files-crumb, .app-page-lead-title, .app-page-toolbar button')]
-        .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
+        .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).clipPath !== 'inset(50%)');
     const hb = box(header);
     const hit = document.elementFromPoint(hb.x + header.clientWidth / 2, hb.bottom + 8);
     return {lead: !!lead?.children.length, attrs: [...header.attributes].map(a => a.name).filter(a => a.startsWith('data-')),
         height: hb.h, centres: items.map(el => Math.round(box(el).cy * 2) / 2), first: items[0] ? box(items[0]).x - hb.x : null,
-        under: !!page.querySelector('.app-page-tabs > *'), hitsPage: !!hit && !hit.closest('.app-page-header'),
+        under: [...page.querySelectorAll('.app-page-tabs > *')].some(el => el.getClientRects().length && !el.closest('[hidden]')), hitsPage: !!hit && !hit.closest('.app-page-header'),
         display: getComputedStyle(header).display};
 }"""
 
@@ -335,7 +335,7 @@ def _goto(page, name):
 
 def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_a_phone(engine_ui):
     engine = engine_ui['engine']
-    page = _open(engine_ui, 956, 801)
+    page = _open(engine_ui, 1087, 801)
     try:
         bars = {}
         for name in ('skills', 'files'):
@@ -344,24 +344,31 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
             bar = bars[name]
             # Two ends on Main's line: the page's tabs or location at the start, its actions at the end.
             assert bar['lead'] and 'data-lead' in bar['attrs'] and not bar['under'], (name, bar)
-            assert bar['height'] <= 56 and bar['centres'] and max(bar['centres']) - min(bar['centres']) <= 1, (name, bar)
-            assert abs(bar['centres'][0] - 25) <= 1 and abs(bar['first'] - 20) <= 1, (name, bar)
+            assert bar['height'] == 66 and bar['centres'] and max(bar['centres']) - min(bar['centres']) <= 1, (name, bar)
+            # A browser keeps the same 18px upper inset and content edge as the desktop window.
+            assert abs(bar['centres'][0] - 33) <= 1 and abs(bar['first'] - 20) <= 1, (name, bar)
             # The strip lends its shadows room below the bar but never takes a press meant for the page.
             assert bar['hitsPage'], (name, bar)
-            setup_browser.capture(page, f'bar-a-{name}-{engine}-956')
-        # Settings keeps its search and the open page's title in the band's lead.
+            setup_browser.capture(page, f'bar-a-{name}-{engine}-1087')
+        # Settings keeps Search in the band; its selected list row names the page.
         _goto(page, 'settings')
         settings_bar = page.evaluate(BAR, 'settings')
         assert settings_bar['lead'] and 'data-lead' in settings_bar['attrs'] and 'data-empty' not in settings_bar['attrs']
-        assert settings_bar['height'] == 50, settings_bar
+        assert settings_bar['height'] == 66, settings_bar
         # The macOS window: the bar is the band, its controls centred on it; an empty header (Widgets) is only the
         # window's handle over the page, and the page's first card sits one inset (not two) under the band.
+        for top in (66, 52, 33):
+            _band(page, top)
+            for name in ('skills', 'files'):
+                _goto(page, name)
+                native = page.evaluate(BAR, name)
+                assert native['height'] == top and all(abs(c - top / 2) <= 1 for c in native['centres']), (top, name, native)
         _band(page)
         page.set_viewport_size({'width': 1280, 'height': 801})
         _goto(page, 'dashboard')
         page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
         dashboard_band = page.evaluate(BAR, 'dashboard')
-        assert dashboard_band['height'] == 52 and abs(dashboard_band['centres'][0] - 26) <= 1, dashboard_band
+        assert dashboard_band['height'] == 52 and dashboard_band['centres'] == [], dashboard_band
         _goto(page, 'widgets')
         page.locator('.widgets-card').first.wait_for()
         widgets = page.evaluate("""() => ({bar: document.querySelector('#page-widgets .app-page-header').getBoundingClientRect().height,
@@ -377,18 +384,23 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         page.evaluate("window.__strip = document.querySelector('#page-dashboard [role=tablist]')")
         assert page.locator('#page-dashboard [role=tablist]').get_attribute('aria-orientation') == 'vertical'
         assert page.locator('#page-dashboard [data-dashboard-tab]').count() == 7
+        page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
         page.locator('#page-dashboard [data-dashboard-tab="costs"]').focus()
         page.set_viewport_size({'width': 390, 'height': 844})
         page.wait_for_function("document.documentElement.dataset.layout === 'stack'")
         phone = page.evaluate(BAR, 'dashboard')
-        assert not phone['under'] and phone['height'] <= 56, phone
+        # One row whose controls stand 18px below a browser's top: 18 + 44 + the row's 5px foot.
+        assert not phone['under'] and phone['height'] <= 67, phone
+        # Residual guarantee: a chosen page survives narrowing. Return once to reach the retained list.
+        assert page.locator('#page-costs').is_visible()
+        page.locator('#page-dashboard .app-page-header [data-shell-back]').click()
         assert page.evaluate("""() => document.querySelector('#page-dashboard .dashboard-rail [role=tablist]') === window.__strip
             && document.activeElement?.dataset.dashboardTab === 'costs'""")
         page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
         page.locator('#page-costs').wait_for(state='visible')
         assert page.locator('#page-dashboard .app-page-header [data-dashboard-lead-name]').inner_text() == 'Costs'
-        assert page.evaluate(BAR, 'dashboard')['height'] <= 56
-        page.locator('#page-dashboard .app-page-header [data-dashboard-list-back]').click()
+        assert page.evaluate(BAR, 'dashboard')['height'] <= 67
+        page.locator('#page-dashboard .app-page-header [data-shell-back]').click()
         assert page.evaluate("document.activeElement?.dataset.dashboardTab === 'costs'")
         setup_browser.capture(page, f'bar-a-dashboard-{engine}-390')
         page.set_viewport_size({'width': 1280, 'height': 801})
@@ -556,6 +568,16 @@ def _location(page, names):
     page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
 
 
+# The last separator wholly in the location's view, and whether a pointer there lands on the location.
+SEPARATOR = """() => { const strip = document.querySelector('#page-files .app-page-lead > .files-breadcrumb');
+    const box = strip.getBoundingClientRect();
+    const r = [...strip.querySelectorAll('.files-crumb-sep')].map(n => n.getBoundingClientRect())
+        .filter(b => b.width > 0 && b.left >= box.left && b.right <= box.right).at(-1);
+    if (!r) return null;
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    return { x, y, hit: strip.contains(document.elementFromPoint(x, y)) }; }"""
+
+
 @pytest.mark.parametrize('width', [720, 1060])
 def test_files_location_keeps_every_folder_reachable_in_the_bar(engine_ui, width):
     # The bar is one row, so a location longer than its start scrolls there, as a tab strip does: it rests at its
@@ -570,14 +592,21 @@ def test_files_location_keeps_every_folder_reachable_in_the_bar(engine_ui, width
             rest = page.evaluate(LOCATION)
             print(json.dumps({'files_location': rest, 'kind': kind, 'engine': engine, 'width': width}))
             setup_browser.capture(page, f'files-location-{kind}-{engine}-{width}')
-            assert rest['names'] == names and rest['bar'] <= 56 and rest['page'] <= 0, rest
+            assert rest['names'] == names and rest['bar'] == 66 and rest['page'] <= 0, rest
             assert rest['seen'][-1] and rest['current'] <= rest['view'] + 0.5, 'the folder you are in, whole in view'
             assert not rest['cut'] or rest['ellipsis'] == 'ellipsis', rest
             if rest['hidden'] > 1:
                 assert rest['overflow'] in ('auto', 'scroll') and rest['fades'] == ['data-scroll-start'], rest
-            # A sideways wheel (a trackpad's swipe) scrolls the location to its start and back.
+            # A sideways wheel (a trackpad's swipe) scrolls the location to its start and back, from a separator as from
+            # a name: the band passes other presses to the list, but a location that scrolls takes the pointer whole.
             trail = page.locator('#page-files .app-page-lead > .files-breadcrumb')
-            trail.hover()
+            sep = page.evaluate(SEPARATOR)
+            if rest['hidden'] > 1:
+                assert sep and sep['hit'], ('a wheel on a separator reaches the location', sep)
+            if sep:
+                page.mouse.move(sep['x'], sep['y'])
+            else:
+                trail.hover()
             page.mouse.wheel(-4000, 0)
             page.wait_for_function("el => el.scrollLeft <= 1", arg=trail.element_handle())
             page.wait_for_function(f"() => ({LOCATION})().seen[0]")
@@ -599,7 +628,7 @@ def test_files_location_keeps_every_folder_reachable_in_the_bar(engine_ui, width
 
 @pytest.mark.parametrize('theme', ['light', 'dark'])
 def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme):
-    """A docked 720px window keeps Files' 320px floor; use its real resize handle."""
+    """A docked 720px window keeps Files' 320px floor during and after a drag; use its real resize handle."""
     page = _open(engine_ui, 720, 801)
     engine = engine_ui['engine']
     try:
@@ -620,7 +649,7 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
         page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 335")
         page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
         setup_browser.capture(page, f'files-sidebar-drag-{engine}-{theme}')
-        assert page.locator('#files-breadcrumb').evaluate("el => el.closest('.files-browser-header') !== null")
+        assert page.locator('#files-breadcrumb').evaluate("el => el.closest('.app-page-lead') !== null")
         assert page.evaluate("document.activeElement === window.__filesNodes[1]")
         page.mouse.move(start_x + 560 - start_width, handle['y'] + handle['height'] / 2)
         page.mouse.up()
@@ -635,12 +664,12 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
             control.scroll_into_view_if_needed()
             assert control.evaluate("""el => { const r = el.getBoundingClientRect(), content = document.getElementById('content').getBoundingClientRect();
                 const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-                return r.width > 0 && r.left >= content.left && r.right <= content.right + 1 && (hit === el || el.contains(hit)); }""")
+                return r.width > 0 && r.left >= content.left && r.right <= content.right + 1 && (hit === el || el.contains(hit)); }"""), control.evaluate("el => ({box: el.getBoundingClientRect().toJSON(), html: el.outerHTML})")
             control.click(trial=True)
             measured.append({'name': control.inner_text(), 'box': control.bounding_box()})
         print(json.dumps({'files_narrow_controls': measured, 'engine': engine, 'theme': theme, 'content_width': 320}))
         assert page.evaluate('document.scrollingElement.scrollWidth <= innerWidth')
-        assert page.locator('#page-files .app-page-header').get_by_role('heading', name='Files', exact=True).count() == 1
+        assert page.locator('#page-files .app-page-title').evaluate("el => getComputedStyle(el).clipPath === 'inset(50%)'")
         page.locator('#files-new-file').scroll_into_view_if_needed()
         setup_browser.capture(page, f'files-sidebar-narrow-{engine}-{theme}')
         page.locator('#files-new-file').click()
@@ -664,7 +693,7 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
         assert page.locator('.files-editor').input_value() == 'Draft kept while the sidebar and window change width.'
         # Back to the list, where `+ File` is shown: the same nodes and a focused action keep their place through the
         # same two moves.
-        page.locator('[data-files-back]').click()
+        page.locator('[data-shell-back]').click()
         page.locator('#files-new-file').focus()
         widen_then_phone()
         assert kept('window.__filesNodes[1]')
@@ -694,13 +723,14 @@ def test_skills_tabs_and_existing_toolbar_survive_a_narrow_content_column(engine
         page.mouse.down()
         page.mouse.move(558, handle['y'] + handle['height'] / 2, steps=12)
         page.mouse.up()
-        page.wait_for_function("document.querySelector('#page-skills .app-page-header').hasAttribute('data-narrow')")
-        assert page.locator('#page-skills .app-page-header').get_by_role('heading', name='Skills', exact=True).count() == 1
-        strip = page.locator('#page-skills .app-page-tabs .app-tab-strip')
+        page.wait_for_function("document.getElementById('content').clientWidth === 320")
+        assert page.locator('#page-skills .app-page-title').evaluate("el => getComputedStyle(el).clipPath === 'inset(50%)'")
+        strip = page.locator('#page-skills .app-page-lead .app-tab-strip')
         assert strip.evaluate('el => el === window.__skillsTabs && el.clientWidth > 80')
         assert page.evaluate("document.activeElement.dataset.tab === 'installed'")
         for selector in ('#skills-update-all', '#skills-refresh'):
             button = page.locator(selector)
+            button.scroll_into_view_if_needed()
             assert button.evaluate("el => { const r=el.getBoundingClientRect(), c=document.getElementById('content').getBoundingClientRect(); return r.left >= c.left && r.right <= c.right; }")
             button.click(trial=True)
         setup_browser.capture(page, f'skills-sidebar-narrow-{engine_ui["engine"]}-{theme}')
@@ -712,6 +742,33 @@ def test_skills_tabs_and_existing_toolbar_survive_a_narrow_content_column(engine
         page.wait_for_function("document.querySelector('#page-skills .app-page-header').hasAttribute('data-lead')")
         assert page.locator('#page-skills .app-page-lead .app-tab-strip').evaluate('el => el === window.__skillsTabs')
         assert page.evaluate('document.scrollingElement.scrollWidth <= innerWidth')
+        # A jump's return is the round Back. The page column decides whether the three tabs share its row.
+        _goto(page, 'settings')
+        page.locator('[data-settings-open="page:skills"]').click()
+        for column in (488, 733):
+            page.set_viewport_size({'width': column + 297, 'height': 801})
+            page.evaluate("document.documentElement.style.setProperty('--sidebar-width', '296px')")
+            page.wait_for_timeout(150)
+            lead = page.locator('#page-skills [data-shell-back]')
+            assert lead.get_attribute('aria-label') == lead.get_attribute('title') == 'Back to Settings'
+            assert lead.evaluate('n => !n.textContent.trim() && Math.abs(n.offsetWidth - n.offsetHeight) < 1'), 'round, no word drawn'
+            positions = []
+            for tab in ('installed', 'browse'):
+                strip.locator(f'[data-tab="{tab}"]').click()
+                positions.append(strip.locator('[data-tab="installed"]').bounding_box()['x'])
+                assert strip.locator('.app-tab').evaluate_all("""nodes => nodes.length === 3 && nodes.every(n => {
+                    const r=n.getBoundingClientRect(), p=document.querySelector('#page-skills').getBoundingClientRect();
+                    return r.left >= p.left && r.right <= p.right; })""")
+            assert abs(positions[0] - positions[1]) < 1, 'trailing actions cannot move the tabs under the pointer'
+            below = strip.locator('[data-tab="installed"]').bounding_box()['y'] >= lead.bounding_box()['y'] + lead.bounding_box()['height']
+            assert below == (column == 488), 'only the column too narrow for the return, tabs and short actions takes two lines'
+            if column == 733:
+                back_box, tab_box = lead.bounding_box(), strip.locator('[data-tab="installed"]').bounding_box()
+                assert abs((back_box['y'] + back_box['height'] / 2) - (tab_box['y'] + tab_box['height'] / 2)) <= 1, \
+                    ('one row: Back stands on the tabs\' centre line', back_box, tab_box)
+                assert lead.evaluate("""n => { const h = n.closest('.app-page-header'), r = h.getBoundingClientRect();
+                    return Math.abs(n.getBoundingClientRect().left - (r.left + parseFloat(getComputedStyle(h).paddingLeft))) <= 1; }"""), \
+                    'one row: Back opens it at the band\'s leading inset'
     finally:
         page.close()
 

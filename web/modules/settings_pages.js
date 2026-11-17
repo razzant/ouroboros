@@ -30,6 +30,12 @@ export function settingsPageFor(path) {
 /** A door that leaves Settings: a Dashboard tab, another page, Main (`dashboard:costs`, `page:skills`, `main:context`). */
 export const isDoorId = (path) => /^(dashboard|page|main):/.test(String(path || ''));
 
+/** The arrow's destination in words for a reader; an internal row already names its own page. */
+export function settingsDoorName(name, to) {
+    const section = String(to).startsWith('dashboard:') ? 'Dashboard' : String(to).startsWith('main:') ? 'Main' : '';
+    return section ? `${name}, ${section}` : name;
+}
+
 /** The registered prefixes, for search and the tests that walk every page. */
 export function settingsPagePrefixes() {
     return [...PAGES.keys()];

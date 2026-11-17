@@ -46,7 +46,7 @@ def test_ui_logs_error_group_survives_later_heartbeat(direct_server):
                 return {
                     category: failed.dataset.category, visible: !failed.hidden,
                     timeline: failed.querySelectorAll('.log-task-event').length,
-                    failureVisible: failed.querySelector('.log-phase.error') !== null,
+                    failureVisible: !failed.querySelector('.log-failure').hidden,
                     quietHidden: quiet.hidden, cards: mount.querySelectorAll('.log-task-card').length,
                 };
             }""")

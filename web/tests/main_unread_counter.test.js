@@ -419,7 +419,8 @@ function pageHarness({ unread = 0, page = 'files', project = null } = {}) {
         projectInstances: new Map(),
         forgottenSelections: 0,
         roomCoversMain: () => true,
-        document: { hidden: false, querySelectorAll: () => [], getElementById: () => null },
+        document: { hidden: false, querySelectorAll: () => [], getElementById: () => ({ classList: { add() {} } }) },
+        pageNavigation: { go: async (_key, commit) => { commit(); return true; } },
         window: { dispatchEvent() {} },
         CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
         updateUnreadBadge() {}, acknowledgeMainAfterPaint() {},
@@ -431,7 +432,7 @@ function pageHarness({ unread = 0, page = 'files', project = null } = {}) {
         },
         mainUnreadCount: () => unread,
     });
-    vm.runInContext(`${['showPage', 'mainOnScreen', 'enterMain', 'syncMainLifetime'].map(lift).join('\n')}
+    vm.runInContext(`${['showPage', 'commitPage', 'mainOnScreen', 'enterMain', 'syncMainLifetime'].map(lift).join('\n')}
         Object.assign(globalThis, { show: showPage, syncMainLifetime, enterMain });`, context);
     return { context, claims };
 }

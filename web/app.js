@@ -42,7 +42,7 @@ import { initDashboard } from './modules/dashboard.js';
 import { initStorage } from './modules/storage.js';
 import { SHELL_ICONS } from './modules/page_icons.js';
 import { pageById, renderNavRows, renderProjectsHeader } from './modules/pages.js';
-import { renderPageHeader } from './modules/page_header.js';
+import { bindPageBack, renderPageHeader } from './modules/page_header.js';
 import { createRoomHeader, panicButtonHtml } from './modules/chat_header.js';
 import { isCoarsePointer, isStackLayout, measurePinnedBars, onLayoutChange, pinchMagnified, roomCoversMain } from './modules/layout.js';
 import { createLayerStack } from './modules/layers.js';
@@ -50,6 +50,7 @@ import { afterMotion, reducedMotion } from './modules/motion.js';
 import { createShellMotion } from './modules/shell_motion.js';
 import { createRoomRetirement, roomSocket } from './modules/room_retire.js';
 import { initPagePlaces } from './modules/page_places.js';
+import { capturePagePlace, createPageNavigation, canLeavePage, openInitialPage } from './modules/page_navigation.js';
 import { setupResizablePanels } from './modules/panel_widths.js';
 import { createTelegramHost } from './modules/host_telegram.js';
 import { DRAWER_DRAG, bindDrawerDrag } from './modules/drawer_drag.js';
@@ -94,6 +95,8 @@ window.__ouroWs = ws;
 const beforePageLeaveHandlers = [];
 let settingsControls = null;
 let dashboardControls = null;
+let logsControls = null;
+let skillsControls = null;
 const navState = {
     activeProjectId: null,
     mobileDrawerOpen: false,
@@ -107,6 +110,13 @@ window.__ouroLayers = layers;
 syncMarkPhases(document);
 // What the owner scrolled keeps its place while hidden (page_places.js), registered before any page's own show handler.
 const restorePlaces = initPagePlaces();
+const pageNavigation = createPageNavigation({ layers, capture: opener => capturePagePlace({
+    state, navState, settingsControls, dashboardControls, skillsControls, projectInstances, projectPanelTitle,
+    rooms, mainChat, logsControls, restorePlaces, commitPage,
+}, opener), canLeave: key => canLeavePage(key, state, beforePageLeaveHandlers), land: () => restorePlaces.land(document.querySelector('.page.active')),
+leave: () => rooms.rememberSelection(shownRoom()) });
+bindPageBack({ layers, currentHeader: () => navState.activeProjectId
+    ? document.querySelector('.project-panel-bar') : document.querySelector(`#page-${state.activePage} > .app-page-header`) });
 const primarySidebar = document.getElementById('primary-sidebar');
 // The phone shell's motion between places (shell_motion.js): presentation only.
 const shellMotion = createShellMotion({ content: document.getElementById('content'),
@@ -162,7 +172,7 @@ const projectsNav = createProjectsNav({ header: navProjectsHeader, list: navProj
     isUnread: projectUnread,
     onListRead: () => { mergeProjectSeenRevisions(); if (projectsNav.unreadRows().length) refreshSharedProjectSeen(); },
     onShown: () => { patchProjectActivityMarkers(); },
-    open: (project, { pointer }) => openProjectPanel(project, { openOnly: true, pointer }), openMenu: openProjectMenu,
+    open: (project, { pointer }) => openProjectPanel(project, { openOnly: true, pointer, map: true }), openMenu: openProjectMenu,
     pin: setProjectPin, isPinPending: (id) => pendingProjectPins.has(id) });
 const projectInstances = new Map();
 const projectPaintRequests = new Map();
@@ -202,26 +212,15 @@ function setMobileDrawerOpen(open, { sync = true } = {}) {
     if (sync) syncNavigationState();
 }
 
-// The application's one client-side route: a `#<page>` fragment, honoured once
-// on load and validated against the injected sections rather than against a
-// duplicated page list — the DOM is the single source of truth, so an unknown
-// fragment is ignored instead of painting a blank surface. Deliberately NOT
-// written back on navigation: the desktop shell and the Telegram mini app have
-// no address bar to read it from.
-function pageFromHash() {
-    const name = String(window.location.hash || '').replace(/^#/, '').trim();
-    return name && document.getElementById(`page-${name}`) ? name : '';
-}
-
 async function showPage(name, options = {}) {
     const pageName = String(name || '').trim();
-    if (!pageName) return false;
+    if (!document.getElementById(`page-${pageName}`)) return false;
+    return pageNavigation.go(options.key || pageName, () => commitPage(pageName, options), options);
+}
+
+function commitPage(pageName, options = {}) {
     const changingPage = state.activePage !== pageName;
     if (changingPage) {
-        for (const handler of beforePageLeaveHandlers) {
-            const canLeave = await handler({ from: state.activePage, to: pageName });
-            if (canLeave === false) return false;
-        }
         // Main behind another page: a document it opened closes, what it plays goes on; a Project over it keeps its
         // selection now, as the page shown next takes focus (which ends a selection in WebKit).
         if (state.activePage === 'chat') { mainChat?.closeTransient?.(); rooms.suspend(mainChat); rooms.rememberSelection(projectInstances.get(navState.activeProjectId)); }
@@ -235,8 +234,8 @@ async function showPage(name, options = {}) {
     if (pageName === 'chat' && !changingPage && options.closeProject !== false && !options.reveal) enterMain('land');
     if (options.closeProject !== false) closeProjectPanel({ sync: false, reveal: options.reveal });
     if (options.closeDrawer !== false) navState.mobileDrawerOpen = false;
+    options.enter?.();
     if (options.sync !== false) syncNavigationState();
-    return true;
 }
 
 async function openSettings(path = '', options = {}) {
@@ -244,12 +243,8 @@ async function openSettings(path = '', options = {}) {
 }
 
 async function openDashboardTab(tabName, options = {}) {
-    if (!await showPage('dashboard', { closeDrawer: false })) return false;
-    // The chosen page replaces the drawer's layer in one commit, keeping its one browser Back entry.
-    layers.batch(() => {
-        dashboardControls?.activateTab(tabName, options);
-        setMobileDrawerOpen(false);
-    });
+    return showPage('dashboard', { ...options, key: `dashboard:${tabName}`,
+        enter: () => dashboardControls?.activateTab(tabName, options) });
 }
 // A line elsewhere that points at a Dashboard tab (a quiet place's sheet at Consciousness) asks for it by this event.
 window.addEventListener('ouro:open-dashboard', (event) => { void openDashboardTab(String(event.detail?.tab || 'activity')); });
@@ -462,7 +457,10 @@ function syncNavigationState() {
         if (activeProjectId !== shownProjectId) layers.remove('project');
         if (activeProjectId) layers.push({ id: 'project', el: projectPanel, modal: covers,
             live: [projectPanelBackdrop, covers && !isStackLayout() ? primarySidebar : null].filter(Boolean),
-            onClose: () => closeProjectPanel(), focus: focusProjectRoom });
+            onClose: (reason) => {
+                const jump = layers.returnPage();
+                return jump?.destination === `project:${activeProjectId}` ? jump.onClose(reason) : closeProjectPanel();
+            }, focus: focusProjectRoom });
     }, { inertAfter: isStackLayout() ? settled : covers ? arrived : null });
     // The layer's inert release is registered first. A delayed read behind the drawer keeps its notice pending.
     Promise.all([settled, exit]).then(() => {
@@ -541,12 +539,9 @@ onLayoutChange((layout) => {
 // first-level page stays as it stands and a deeper level returns to its section's first-level page; in one column the
 // list comes back. Pressed in the open drawer it closes the drawer, as every other place pressed there does.
 function pressNavPage(name) {
-    if (name === 'settings' && state.activePage === 'settings' && settingsControls) {
-        settingsControls.pressedAgain();
-        if (navState.mobileDrawerOpen) setMobileDrawerOpen(false);
-        return;
-    }
-    showPage(name);
+    const section = name === 'dashboard' ? dashboardControls
+        : name === 'settings' && state.activePage === 'settings' ? settingsControls : null;
+    void showPage(name, { map: true, enter: () => section?.pressedAgain() });
 }
 document.querySelectorAll('[data-nav-page]').forEach(btn => {
     btn.addEventListener('click', () => pressNavPage(btn.dataset.navPage));
@@ -755,21 +750,23 @@ function closeProjectPanel({ sync = true, reveal = false } = {}) {
     void acknowledgeMainAfterPaint();  // Main is the room on screen again: what came while it was covered is read now
 }
 
-async function openProjectPanel(project, { closeDrawer = true, openOnly = false, taskId = '', quizId = '', sourceReveal = null, pointer = false, latest = false } = {}) {
+async function openProjectPanel(project, { closeDrawer = true, openOnly = false, taskId = '', quizId = '', sourceReveal = null, pointer = false, latest = false, map = false } = {}) {
     if (sourceReveal && !sourceReveal.current()) return null;
     // A reference may carry a stale deleting/closed projection. It still names an id that must be checked against the
     // registry before we decide whether to stay put; rejecting it here would skip the exact lookup and hide the reason.
     if (!project?.id) return;
     const navigation = ++projectNavigationGeneration;
     if (navState.activeProjectId === project.id) {
+        if (map) layers.batch(() => pageNavigation.clear());
         if (closeDrawer && navState.mobileDrawerOpen) setMobileDrawerOpen(false);
-        if (!openOnly) return closeProjectPanel();
+        if (!openOnly) { layers.back('project-toggle'); return; }
         if (!latest && !(taskId && quizId)) return;
         const inst = projectInstances.get(project.id);
         // A notification also supersedes an older reveal and its paint in the room already on screen.
         if (!(taskId && quizId)) { projectReveals.delete(project.id); cancelProjectPaint(project.id, inst); }
         return landInProject(freshProjectRow(project), inst, { taskId, quizId, latest });
     }
+    const origin = pageNavigation.capture();
     // The room is the registry's. A row that names its room is its caller's own answer (or the row pressed in the list)
     // and opens as it stands; a reference names only {id, name} and is read by its id first, whatever an older feed row
     // says. Until then the room on screen stays as it is.
@@ -781,8 +778,10 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
     projectPanelOpeningSince = Date.now();
     try {
         // One paint for the whole step (the sync below): a handover leaves the room that was on screen.
-        const movedToChat = await showPage('chat', { closeProject: false, closeDrawer: false, sync: false });
-        if (movedToChat === false || navigation !== projectNavigationGeneration || sourceReveal && !sourceReveal.current()) return;
+        let inst;
+        const movedToChat = await showPage('chat', { map, origin, key: `project:${project.id}`, closeProject: false, closeDrawer: false, sync: false,
+            current: () => navigation === projectNavigationGeneration && (!sourceReveal || sourceReveal.current()),
+            enter: () => {
         // A document Main had open (a modal over the whole app) closes rather than sit over the room. Covered (a phone,
         // a finger's docked column), Main leaves with it; docked beside the room it stays on screen and live.
         rooms.rememberSelection(mainChat);
@@ -797,7 +796,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         for (const pid of [...projectInstances.keys()]) {
             if (pid !== project.id) (handingOver ? rooms.retire : rooms.putAway)(pid);
         }
-        let inst = projectInstances.get(project.id);
+        inst = projectInstances.get(project.id);
         if (!inst) {
             inst = createChatInstance({
                 ...ctx, ws: roomSocket(ws),
@@ -819,6 +818,8 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         if (closeDrawer) navState.mobileDrawerOpen = false;
         inst.quietFocus?.(pointer);  // pressed open by a pointer: the room's focus corners wait for a key
         syncNavigationState();
+        } });
+        if (movedToChat === false || navigation !== projectNavigationGeneration) return;
         if (sourceReveal) {
             const reveal = {};
             projectReveals.set(project.id, reveal);
@@ -869,6 +870,7 @@ async function resolveProjectRoom(project, navigation) {
 // Resolve and read the exact destination before switching; failed lookups retain room/composer state.
 async function revealQuotedSource(address, chatId, isCurrent) {
     const navigation = projectNavigationGeneration;
+    const origin = pageNavigation.capture();
     const current = () => navigation === projectNavigationGeneration && isCurrent();
     let project = null, page = null;
     if (chatId !== 1) {
@@ -890,7 +892,7 @@ async function revealQuotedSource(address, chatId, isCurrent) {
         if (!matches) return { state: 'unknown' };
         if (project) return openProjectPanel(project, { openOnly: true, sourceReveal: { address, page, current: isCurrent } });
     }
-    closeProjectPanel({ reveal: true });
+    if (await showPage('chat', { reveal: true, origin }) === false) return null;
     const showing = projectNavigationGeneration;
     return mainChat.revealSource(address, () => showing === projectNavigationGeneration, page);
 }
@@ -979,8 +981,8 @@ async function acknowledgeProjectAfterPaint(project, instance = null, { forcePai
     return promise;
 }
 
-document.getElementById('project-panel-close')?.addEventListener('click', () => closeProjectPanel());
-projectPanelBackdrop?.addEventListener('click', () => closeProjectPanel());
+document.getElementById('project-panel-close')?.addEventListener('click', () => layers.back('control'));
+projectPanelBackdrop?.addEventListener('click', () => layers.back('scrim'));
 function renderProjectsNav(projects, projectChatIds, activityIndex = projectActivityIndex, readOrder = 0) {
     const all = projects || [];
     // Isolation fan-out SSOT: recognize EVERY registered project chat_id (incl.
@@ -1368,14 +1370,14 @@ setInterval(function pollShownRoomState() { if (state.activePage === 'chat' && !
 setInterval(() => refreshProjectsNav(false), 20000);
 settingsControls = initSettings({ ...ctx, layers });
 dashboardControls = initDashboard({ ...ctx, layers });
-initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs') });
+logsControls = initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs'), setControls: dashboardControls.setControls });
 evolution = initEvolution({ ...ctx, mount: document.getElementById('dashboard-panel-evolution') });
 initUpdates({ ...ctx, mount: document.getElementById('dashboard-panel-updates') });
 initActivity({ ...ctx, mount: document.getElementById('dashboard-panel-activity') });
 initConsciousnessDashboard({ ...ctx, mount: document.getElementById('dashboard-panel-consciousness') });
 initCosts({ ...ctx, mount: document.getElementById('dashboard-panel-costs') });
 const disposeStorage = initStorage({ ...ctx, mount: document.getElementById('dashboard-panel-storage') });
-initSkills(ctx);
+skillsControls = initSkills(ctx);
 initWidgets(ctx);
 initCircles(ctx);
 const updateStatus = initUpdateStatus(ctx);
@@ -1401,8 +1403,7 @@ window.addEventListener('pagehide', (event) => {
 });
 loadVersion();
 syncNavigationState();
-const hashPage = pageFromHash();
-if (hashPage && hashPage !== state.activePage) showPage(hashPage);
+openInitialPage(showPage, state.activePage);
 
 // Mobile soft-keyboard handling: viewport shrink counts only while an editable
 // owns focus. Drawer opening clears that state explicitly before navigation is

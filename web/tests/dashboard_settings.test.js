@@ -1,6 +1,6 @@
 // The Dashboard tabs' own settings (dashboard.js mountTabSettings): rows of settings_rows.js that save themselves, drawn
 // once outside every region a tab repaints, in the cards the approved picture gives them; the way back to Settings
-// (settingsReturn); Costs' subscriptions from the passive quota read. The fake server below answers as the server does:
+// (the page layer); Costs' subscriptions from the passive quota read. The fake server below answers as the server does:
 // the receipt (`changes`), `_meta.effects`, a token per key, a refused `if_unchanged` and `unset`.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -10,7 +10,7 @@ import { normalizeConsciousness } from '../modules/consciousness_api.js';
 import { AUTONOMY_LEVELS } from '../modules/consciousness_autonomy.js';
 import { cardWords, initConsciousnessDashboard, waitWords } from '../modules/consciousness_dashboard.js';
 import { initCosts, subscriptionDoors } from '../modules/costs.js';
-import { focusSettingRow, initDashboard, mountTabSettings, settingsReturn } from '../modules/dashboard.js';
+import { focusSettingRow, initDashboard, mountTabSettings } from '../modules/dashboard.js';
 import { SAFETY_LEVELS } from '../modules/consciousness_words.js';
 import { initEvolution, whenMode, whenName, whenWords } from '../modules/evolution.js';
 import { CODECS, GUARDED_WRITERS, HIDDEN_WHEN, bindSettingRows, commitSetting, forgetSettingRows, outcomeLine, readSettings, settingsRow } from '../modules/settings_controls.js';
@@ -18,7 +18,6 @@ import { ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { initStorage } from '../modules/storage.js';
 import { initUpdates } from '../modules/updates.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
-import { renderPageHeader } from '../modules/page_header.js';
 
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
 const settle = async (rounds = 8) => { for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
@@ -263,18 +262,12 @@ test('Consciousness: its cards are drawn once beside the summary; a refresh leav
     await card.fire('click', { target: rowNode(card, 'consciousness-places') });
     server.window.removeEventListener('ouro:open-circles', onCircles);
     assert.deepEqual(opened.slice(0, 1), [['tab', 'costs', { row: 'OUROBOROS_CONSCIOUSNESS_DAILY_USD' }]]);
-    const [, path, { back }] = opened[1];
-    assert.deepEqual([path, back.label], ['models/role/consciousness', 'Consciousness']);
+    assert.deepEqual(opened[1], ['settings', 'models/role/consciousness', undefined]);
     assert.deepEqual([opened.length, circles], [2, 1], 'the places door leaves through Circles alone');
-    back.go();
-    assert.deepEqual(opened[2], ['tab', 'consciousness', undefined]);
-    // The Safety door opens its row in Permissions and checks, which leads back here; the evolution door opens its row on
-    // the Evolution tab (a door inside the Dashboard asks for no Back).
     await card.fire('click', { target: rowNode(card, 'consciousness-safety') });
     await card.fire('click', { target: rowNode(card, 'consciousness-evolution') });
-    const [, safetyPath, safetyOptions] = opened[3];
-    assert.deepEqual([safetyPath, safetyOptions.row, safetyOptions.back.label], ['permissions', 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', 'Consciousness']);
-    assert.deepEqual(opened[4], ['tab', 'evolution', { row: 'OUROBOROS_POST_TASK_EVOLUTION' }]);
+    assert.deepEqual(opened[2], ['settings', 'permissions', { row: 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE' }]);
+    assert.deepEqual(opened[3], ['tab', 'evolution', { row: 'OUROBOROS_POST_TASK_EVOLUTION' }]);
     controller.destroy();
 });
 
@@ -629,140 +622,55 @@ test('one writer: these tabs post nothing to /api/settings themselves and read n
     }
 });
 
-test('Back to Settings: a first row and one page layer; the press, Escape or Back blur the field first and open Settings', async (t) => {
-    const { mount } = setup(t);
-    const layers = [];
-    const fakeLayers = { push: (layer) => layers.push(layer), remove: (id) => { layers.splice(0, layers.length, ...layers.filter((layer) => layer.id !== id)); } };
-    const order = [];
-    const back = settingsReturn({ layers: fakeLayers, openSettings: (path) => { order.push(`open ${path}`); } });
-    const panel = new NodeStub('section');
-    panel.innerHTML = '<div class="dashboard-body"><input data-setting-control></div>';
-    mount.appendChild(panel);
-    const field = panel.querySelector('[data-setting-control]');
-    field.blur = () => { order.push('blur'); document.activeElement = null; };
-    back.show(panel, 'models');
-    // A place without a header Back slot keeps the app's one Back (page_header.js renderBackControl) as its first row.
-    assert.equal(panel.firstChild.className, 'dashboard-back', 'Back is the first row of a place without a header slot');
-    assert.equal(panel.firstChild.textContent.trim(), '', 'the one Back is icon only');
-    const button = panel.firstChild.querySelector('[data-dashboard-back]');
-    assert.deepEqual([button.className, button.getAttribute('aria-label'), button.getAttribute('title')],
-        ['shell-icon-control shell-back', 'Back to Settings', 'Back to Settings']);
-    assert.deepEqual(layers.map(({ id, el, page, modal, focus, opener }) => ({ id, el, page, modal, focus, opener })),
-        [{ id: 'dashboard-back', el: panel, page: true, modal: false, focus: false, opener: null }]);
-    field.focus();
-    await panel.firstChild.querySelector('[data-dashboard-back]').fire('click');
-    assert.deepEqual(order, ['blur', 'open models'], 'the field is left (and saved) before Settings opens');
-    assert.equal(panel.querySelector('.dashboard-back'), null);
-    assert.equal(layers.length, 0);
-    // Escape and the system's Back pop the layer: its onClose goes the same way.
-    back.show(panel, '');
-    await layers[0].onClose('escape');
-    assert.deepEqual(order.at(-1), 'open ');
-    assert.equal(panel.querySelector('.dashboard-back'), null);
-    back.show(panel, 'accounts');
-    back.clear();
-    assert.deepEqual([panel.querySelector('.dashboard-back'), layers.length, order.length], [null, 0, 3], 'clearing opens nothing');
-});
-
 test('returning to a Settings level preserves its history entry, including a refused return', async (t) => {
     const { createLayerStack } = await import('../modules/layers.js');
+    const { createPageNavigation } = await import('../modules/page_navigation.js');
+    const { bindPageBack, renderPageHeader } = await import('../modules/page_header.js');
     for (const trigger of ['button', 'escape']) for (const allowed of [true, false]) {
         await t.test(`${trigger}/${allowed}`, async (sub) => {
-            const { mount } = setup(sub);
-            const calls = [];
-            const layers = createLayerStack({ win: null, doc: null, history: {
+            const { mount, document, window } = setup(sub);
+            const calls = [], order = [];
+            const layers = createLayerStack({ win: window, doc: document, history: {
                 pushState: () => calls.push('push'), back: () => calls.push('back'),
             } });
             sub.after(() => layers.destroy());
-            let decide;
+            let decide, returning = false;
             const decision = new Promise(resolve => { decide = resolve; });
-            const back = settingsReturn({ layers, openSettings: async () => {
-                if (!await decision) return false;
-                layers.push({ id: 'settings-level-1', page: true, focus: false });
-                return true;
-            } });
+            const nav = createPageNavigation({ layers, doc: document, canLeave: () => returning ? decision : true,
+                capture: () => ({ key: 'settings:tools', label: 'Settings', title: 'Settings › Tools', restore() {
+                    order.push('restore');
+                    layers.push({ id: 'settings-level-1', page: true, modal: false, focus: false });
+                } }) });
+            sub.after(() => nav.destroy());
             const panel = new NodeStub('section'); mount.append(panel);
-            back.show(panel, 'tools');
+            panel.innerHTML = renderPageHeader({ page: 'skills' }) + '<input data-setting-control>';
+            const off = bindPageBack({ layers, currentHeader: () => panel.querySelector('.app-page-header'), doc: document, win: window });
+            sub.after(off);
+            await nav.go('skills', () => {});
+            returning = true;
+            const field = panel.querySelector('input');
+            field.blur = () => { order.push('blur'); document.activeElement = document.body; };
+            field.focus();
             await settle();
-            const button = panel.querySelector('[data-dashboard-back]');
+            const button = panel.querySelector('[data-shell-back]');
+            assert.equal(button.getAttribute('aria-label'), 'Back to Settings › Tools');
             if (trigger === 'button') button.dispatchEvent({ type: 'click' });
-            else layers.pop('escape');
+            else layers.back('escape');
             await settle();
             assert.deepEqual(calls, ['push'], 'a pending leave retains the return entry');
-            assert.equal(panel.querySelector('[data-dashboard-back]'), button);
+            assert.equal(panel.querySelector('[data-shell-back]'), button);
             decide(allowed);
             await settle();
             assert.deepEqual(calls, ['push'], 'a return never consumes and replaces the entry');
-            assert.deepEqual(layers.ids(), [allowed ? 'settings-level-1' : 'dashboard-back']);
-            assert.equal(panel.querySelector('[data-dashboard-back]'), allowed ? null : button);
+            assert.deepEqual(layers.ids(), [allowed ? 'settings-level-1' : 'page-return-1']);
+            assert.equal(panel.querySelector('[data-shell-back]'), allowed ? null : button);
+            assert.deepEqual(order, allowed ? ['blur', 'restore'] : [], 'a refused return leaves the field alone; an accepted return blurs before restoring');
             if (allowed) {
-                layers.pop('escape');
-                await settle();
+                layers.back('escape'); await settle();
                 assert.deepEqual(calls, ['push', 'back'], 'the Settings level consumes only its own entry');
             }
         });
     }
-});
-
-test('Settings returns survive both layout crossings; a direct page keeps its section Back', (t) => {
-    const { mount, window } = setup(t);
-    window.ouroLayout = { layout: 'docked' };
-    const observers = [];
-    const previous = globalThis.ResizeObserver;
-    globalThis.ResizeObserver = class {
-        constructor(fn) { this.fn = fn; observers.push(this); }
-        observe() {}
-        disconnect() {}
-    };
-    t.after(() => { globalThis.ResizeObserver = previous; });
-    const content = new NodeStub(); content.id = 'content'; mount.append(content);
-    const layers = new Map();
-    const dashboard = initDashboard({ state: { activePage: 'dashboard' }, layers: {
-        push: layer => layers.set(layer.id, layer), remove: id => layers.delete(id),
-    } });
-    let width = 735;
-    dashboard.page.getBoundingClientRect = () => ({ width });
-    dashboard.activateTab('costs', { back: 'models' });
-    const slot = dashboard.page.querySelector('[data-dashboard-back-slot]');
-    const listBack = dashboard.page.querySelector('[data-dashboard-list-back]');
-    const pages = [];
-    for (const pageName of ['circles', 'without-header']) {
-        const page = new NodeStub(); page.className = 'page';
-        page.innerHTML = pageName === 'without-header' ? '<p>Page body</p>' : renderPageHeader({ page: pageName });
-        const query = page.querySelector.bind(page);
-        page.querySelector = selector => query(selector.replace(':scope > ', ''));
-        content.append(page);
-        const back = settingsReturn(); back.show(page, 'models');
-        t.after(() => back.clear());
-        pages.push(page);
-    }
-    for (const [layout, pixels, supports] of [
-        ['docked', 735, true], ['docked', 550, true], ['stack', 700, true],
-        ['docked', 735, true], ['stack', 390, true], ['docked', 1000, false],
-    ]) {
-        width = pixels;
-        window.CSS = { supports: () => supports };
-        window.ouroLayout.layout = layout;
-        window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout } }));
-        observers.forEach(observer => observer.fn([{ target: dashboard.page }]));
-        assert.equal(slot.children.length, 1, `${layout}/${width}: the door return stays in its slot`);
-        assert.equal(listBack.hidden, true, 'the Settings return takes the section Back slot');
-        assert.equal(dashboard.page.dataset.sectionView, 'page', 'the open Costs page survives resizing');
-        assert.deepEqual([...layers.keys()], ['dashboard-back']);
-        for (const page of pages) {
-            assert.equal(page.querySelectorAll('[data-dashboard-back]').length, 1);
-            assert.equal(Boolean(page.querySelector('.dashboard-back')), !page.querySelector('.app-page-header'),
-                'the headerless fallback follows the same decision');
-        }
-    }
-    dashboard.activateTab('storage');
-    assert.equal(listBack.hidden, false, 'a page opened directly keeps its own Back in one column');
-    listBack.dispatchEvent({ type: 'click' });
-    assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['auto', 0], 'the section Back returns to its list');
-    window.ouroLayout.layout = 'stack';
-    window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout: 'stack' } }));
-    assert.equal(slot.children.length, 0, 'leaving the page forgets its Settings return');
-    dashboard.destroy();
 });
 
 test('the automatic Dashboard view keeps its focused rail through both width crossings before any callback', (t) => {
@@ -776,10 +684,14 @@ test('the automatic Dashboard view keeps its focused rail through both width cro
     const observers = [];
     globalThis.ResizeObserver = class { constructor(fn) { observers.push(fn); } observe() {} disconnect() {} };
     t.after(() => { NodeStub.prototype.getBoundingClientRect = before.box; globalThis.ResizeObserver = before.observer; });
-    const dashboard = initDashboard({ state: { activePage: 'dashboard', dashboardActiveSubtab: 'costs' } });
+    const layers = new Map();
+    const dashboard = initDashboard({ state: { activePage: 'dashboard', dashboardActiveSubtab: 'costs' },
+        layers: { push: layer => layers.set(layer.id, layer), remove: id => layers.delete(id) } });
     const shell = dashboard.page.querySelector('.dashboard-shell');
+    const header = dashboard.page.querySelector('.app-page-header');
     const list = dashboard.page.querySelector('.dashboard-tabs');
     const row = list.querySelector('[data-dashboard-tab="costs"]');
+    const band = () => ['data-empty', 'data-controls'].map((name) => header.hasAttribute(name));
     row.focus();
     try {
         for (const [layout, pixels] of [['stack', 390], ['docked', 1000], ['stack', 390]]) {
@@ -792,100 +704,56 @@ test('the automatic Dashboard view keeps its focused rail through both width cro
             assert.equal(document.activeElement, row);
             observers.forEach(fn => fn([{ target: dashboard.page }]));
             assert.equal(shell.dataset.sectionView, 'auto', 'the later observer keeps the automatic view');
+            assert.deepEqual(band(), [false, false], 'the band carries no measured fact: the two-pane query decides it is empty');
         }
+        const controls = new NodeStub(); controls.setAttribute('data-dashboard-controls', 'costs');  // the stub reads attributes
+        dashboard.setControls('costs', controls);
+        assert.deepEqual(band(), [false, true], 'the open page\'s controls are the one fact the band reads');
         dashboard.activateTab('costs');
         for (const pixels of [1000, 390]) {
             width = pixels;
             observers.forEach(fn => fn([{ target: dashboard.page }]));
             assert.equal(shell.dataset.sectionView, 'page', 'an explicit page stays open in either layout');
         }
-        dashboard.page.querySelector('[data-dashboard-list-back]').dispatchEvent({ type: 'click' });
+        layers.get('dashboard-level').onClose();
         assert.equal(shell.dataset.sectionView, 'auto', 'Back restores the list and its automatic page on a desk');
         assert.equal(document.activeElement, row);
     } finally { dashboard.destroy(); }
 });
 
-test('openDashboardTab: back gives the tab its Back, a row is brought into view and focused; another tab or page drops Back', async (t) => {
-    const { mount, window } = setup(t);
-    const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
-    const opened = [];
-    const layers = [];
-    const state = { dashboardActiveSubtab: 'logs' };
-    const dashboard = initDashboard({ state, openSettings: (path) => opened.push(path),
-        layers: { push: (layer) => layers.push(layer), remove: (id) => { layers.splice(0, layers.length, ...layers.filter((layer) => layer.id !== id)); } } });
-    const panel = (name) => dashboard.page.querySelector(`#dashboard-panel-${name}`);
-    // Back to Settings stands in the band's Back slot before the open page's name, never inside the page.
-    const slot = dashboard.page.querySelector('[data-dashboard-back-slot]');
-    const listBack = dashboard.page.querySelector('[data-dashboard-list-back]');
-    panel('costs').innerHTML = '<div class="dashboard-body"><details><summary>More</summary>'
-        + '<div class="ui-row settings-row" data-setting-row="OUROBOROS_MAX_ROUNDS"><input data-setting-control></div></details></div>';
-    const row = panel('costs').querySelector('[data-setting-row]');
-    let scrolled = null;
-    let viewWhenScrolled = '';
-    // One column (the fixture measures no width): the page must be the visible level before its row is revealed,
-    // or the scroll and the focus land in a hidden pane.
-    row.scrollIntoView = (options) => { scrolled = options; viewWhenScrolled = dashboard.page.dataset.sectionView; };
-    dashboard.activateTab('costs', { row: 'OUROBOROS_MAX_ROUNDS', back: '' });
-    assert.equal(viewWhenScrolled, 'page', 'the level is shown before its row is scrolled to and focused');
-    assert.equal(slot.children.length, 1);
-    assert.equal(slot.firstChild.getAttribute('aria-label'), 'Back to Settings');
-    assert.equal(panel('costs').querySelector('[data-dashboard-back]'), null);
-    assert.equal(dashboard.page.querySelector('[data-dashboard-lead-name]').textContent, 'Costs', 'the page is named after it');
-    assert.equal(listBack.hidden, true, 'Back to Settings stands instead of the list\'s Back');
-    assert.equal(row.closest('details').open, true, 'a row behind a fold opens it');
-    assert.deepEqual(scrolled, { block: 'center' });
-    assert.equal(document.activeElement, row.querySelector('[data-setting-control]'));
-    // The system's Back returns to the Settings path the tab was opened from: '' is its home.
-    await layers[0].onClose('history');
-    assert.deepEqual(opened, ['']);
-    dashboard.activateTab('costs', { back: 'accounts' });
-    assert.equal(layers.length, 1);
-    await slot.firstChild.fire('click');
-    assert.deepEqual([opened, layers.length], [['', 'accounts'], 0], 'Back itself opens that page of Settings');
-    dashboard.activateTab('costs', { back: 'accounts' });
-    dashboard.activateTab('storage');
-    assert.equal(slot.firstChild, null, 'another tab drops Back');
-    assert.equal(layers.length, 0);
-    dashboard.activateTab('costs');
-    assert.equal(slot.firstChild, null, 'no back, no Back');
-    dashboard.activateTab('costs', { back: '' });
-    window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
-    assert.equal(slot.firstChild, null, 'leaving the Dashboard drops Back');
-    assert.equal(layers.length, 0);
-    assert.equal(focusSettingRow(panel('costs'), 'NO_SUCH_ROW'), false);
-    // Two panes: the page stands beside the list as before, no level, its row revealed in it.
-    dashboard.page.getBoundingClientRect = () => ({ width: 1000 });
-    viewWhenScrolled = '';
-    dashboard.activateTab('costs', { row: 'OUROBOROS_MAX_ROUNDS' });
-    assert.deepEqual([viewWhenScrolled, listBack.hidden, layers.length], ['page', true, 0]);
-    assert.equal(document.activeElement, row.querySelector('[data-setting-control]'));
-    dashboard.destroy();
-});
-
-// A Settings row or search result in one column opens a Dashboard page with Back to Settings: the layer stack changes
-// once (the level that Back replaces is never pushed and removed first), so Telegram's Back is not told show, hide,
-// show in one task (layers.js: one snapshot per batch).
-test('openDashboardTab with back changes the layer stack once in one column', (t) => {
+test('the Dashboard owns only its list level; a jump keeps its return while its pages change', (t) => {
     const { mount } = setup(t);
-    const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
-    const stack = [];
-    const seen = [''];
-    let depth = 0;
-    const commit = () => { if (depth === 0) seen.push(stack.map((layer) => layer.id).join(',')); };
-    const layers = {
-        push(layer) { if (!stack.some((open) => open.id === layer.id)) stack.push(layer); commit(); },
-        remove(id) { stack.splice(0, stack.length, ...stack.filter((layer) => layer.id !== id)); commit(); },
-        batch(fn) { depth += 1; try { return fn(); } finally { depth -= 1; commit(); } },
-    };
-    const state = { dashboardActiveSubtab: 'logs', activePage: 'dashboard' };
-    const dashboard = initDashboard({ state, openSettings() {}, layers });
-    seen.splice(0, seen.length, stack.map((layer) => layer.id).join(','));
-    dashboard.activateTab('costs', { back: 'accounts' });
-    const changes = seen.filter((ids, i) => i > 0 && ids !== seen[i - 1]);
-    assert.deepEqual(changes, ['dashboard-back'], 'one change: Back to Settings, with no level pushed and removed');
-    // Without a Back the page is the level, pushed once as well.
-    dashboard.activateTab('storage');
-    assert.deepEqual(stack.map((layer) => layer.id), ['dashboard-level']);
+    const content = new NodeStub(); content.id = 'content'; mount.append(content);
+    const stack = new Map();
+    let jump = null;
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+    const dashboard = initDashboard({ state, layers: {
+        push: layer => stack.set(layer.id, layer), remove: id => stack.delete(id), returnPage: () => jump,
+    } });
+    dashboard.activateTab('costs');
+    assert.equal(stack.get('dashboard-level').back.label, 'Dashboard');
+    stack.get('dashboard-level').onClose();
+    assert.equal(dashboard.page.dataset.sectionView, 'auto');
+    jump = { id: 'return', back: { label: 'Settings' } };
+    dashboard.activateTab('costs');
+    dashboard.activateTab('logs');
+    assert.deepEqual([...stack.keys()], [], 'a jump has no second list Back');
+    assert.equal(jump.back.label, 'Settings', 'its section choices leave the return alone');
+    const saved = dashboard.capture();
+    // A return names the section, then its page, as Settings does ("Back to Dashboard › Logs").
+    assert.deepEqual([saved.label, saved.title], ['Logs', 'Dashboard › Logs']);
+    dashboard.activateTab('activity');
+    saved.restore();
+    assert.equal(state.dashboardActiveSubtab, 'logs');
+    const panel = dashboard.page.querySelector('#dashboard-panel-costs');
+    panel.innerHTML = '<details><summary>More</summary><div data-setting-row="rounds"><input data-setting-control></div></details>';
+    let view;
+    panel.querySelector('[data-setting-row]').scrollIntoView = () => { view = dashboard.page.dataset.sectionView; };
+    dashboard.activateTab('costs', { row: 'rounds' });
+    assert.equal(view, 'page', 'reveal happens after the level is visible');
+    assert.equal(panel.querySelector('details').open, true);
+    assert.equal(document.activeElement, panel.querySelector('input'));
+    assert.equal(focusSettingRow(panel, 'missing'), false);
     dashboard.destroy();
 });
 
@@ -973,15 +841,24 @@ test('Costs reads subscriptions only through the passive view, on show and Refre
         door.querySelector('.settings-row-value')?.textContent ?? null]), [[true, true, '1 of 2 have room'], [true, true, 'Has room'], [true, true, null]]);
     await block.fire('click', { target: doors[0] });
     await block.fire('click', { target: doors[2] });
-    assert.deepEqual(opened.map(([path, options]) => [path, options?.back?.label]), [['accounts/codex', 'Costs'], ['accounts', 'Costs']]);
-    opened[0][1].back.go();
-    assert.deepEqual(opened.at(-1), ['costs']);
+    assert.deepEqual(opened, [['accounts/codex', undefined], ['accounts', undefined]], 'links need no return callback');
+    doors[0].focus();
+    shown(window, 'costs');
+    await settle();
+    assert.equal(block.querySelector('[data-costs-account="accounts/codex"]'), doors[0], 'return refresh retains the pressed row');
+    assert.equal(document.activeElement, doors[0], 'its focus survives the asynchronous answer');
     // A read that fails keeps the one door, saying why.
     routes.set('/api/claudexor/status?view=quota', response({ error: 'down' }, 502));
     mount.querySelector('#btn-refresh-costs').fire('click');
     await settle();
     assert.deepEqual(block.querySelectorAll('[data-costs-account]').map((door) => [door.dataset.costsAccount, door.querySelector('.ui-row-meta').textContent]),
         [['accounts', 'The accounts could not be read now.']]);
+    assert.equal(document.activeElement, doors[2], 'a vanished account returns to its surviving Accounts anchor');
+    const elsewhere = mount.querySelector('#btn-refresh-costs');
+    elsewhere.focus();
+    shown(window, 'costs');
+    await settle();
+    assert.equal(document.activeElement, elsewhere, 'a refresh does not take focus from elsewhere');
 });
 
 test('in a wide window the Dashboard holds its list beside a page; an engine without container queries gets the list, then a page with Back', (t) => {
@@ -997,21 +874,39 @@ test('in a wide window the Dashboard holds its list beside a page; an engine wit
         const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
         const dashboard = initDashboard({ state, openSettings: () => {},
             layers: { push: (layer) => layers.push(layer), remove: (id) => { layers.splice(0, layers.length, ...layers.filter((layer) => layer.id !== id)); } } });
-        return { dashboard, layers, listBack: dashboard.page.querySelector('[data-dashboard-list-back]') };
+        return { dashboard, layers };
     };
     const wide = start(true);
     assert.equal(wide.dashboard.page.dataset.sectionView, 'auto', 'two panes: a page stands beside the list at once');
+    assert.equal(wide.dashboard.page.querySelector('.app-page-header').hasAttribute('data-controls'), false, 'a pane named by its row puts nothing in the band');
+    assert.equal(wide.dashboard.page.querySelector('[data-dashboard-lead-name]').tagName.toLowerCase(), 'h2', 'the pane keeps its accessible heading');
     wide.dashboard.activateTab('costs');
-    assert.equal(wide.listBack.hidden, true, 'beside its list a page has no Back');
     assert.deepEqual(wide.layers, [], 'and is no layer over it');
     wide.dashboard.destroy();
     const old = start(false);
     assert.equal(old.dashboard.page.dataset.sectionView, 'auto', 'one column: the list first');
     old.dashboard.activateTab('costs');
     assert.equal(old.dashboard.page.dataset.sectionView, 'page');
-    assert.equal(old.listBack.hidden, false, 'the page that replaced the list leads back to it');
+    assert.equal(old.layers[0].back.label, 'Dashboard', 'the page that replaced the list leads back to it');
     assert.equal(old.layers.length, 1, 'as a level a system Back closes');
     old.dashboard.destroy();
+});
+
+test('reopening the selected Dashboard row announces its page after the one-column list gives way', async (t) => {
+    const { mount, window } = setup(t);
+    const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
+    window.CSS = { supports: () => false };
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+    const dashboard = initDashboard({ state });
+    const shown = [];
+    window.addEventListener('ouro:dashboard-subtab-shown', (event) => shown.push([event.detail.tab, dashboard.page.dataset.sectionView]));
+    const list = dashboard.page.querySelector('.dashboard-tabs');
+    const row = list.querySelector('[data-dashboard-tab="logs"]');
+    await list.fire('click', { target: row, preventDefault() {} });
+    dashboard.pressedAgain();
+    await list.fire('click', { target: row, preventDefault() {} });
+    assert.deepEqual(shown, [['logs', 'page'], ['logs', 'page']], 'each reopening restores the same selected reader while visible');
+    dashboard.destroy();
 });
 
 test('a root font that moves the two panes\' 40rem repaints the Dashboard: the pane and the list are watched beside its box', (t) => {
@@ -1027,8 +922,8 @@ test('a root font that moves the two panes\' 40rem repaints the Dashboard: the p
     globalThis.ResizeObserver = class { constructor(fn) { Object.assign(this, { fn, seen: [] }); observers.push(this); } observe(box) { this.seen.push(box); } disconnect() {} };
     t.after(() => { globalThis.ResizeObserver = before; });
     const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
-    const dashboard = initDashboard({ state, openSettings: () => {} });
-    const listBack = dashboard.page.querySelector('[data-dashboard-list-back]');
+    const stack = new Map();
+    const dashboard = initDashboard({ state, layers: { push: layer => stack.set(layer.id, layer), remove: id => stack.delete(id) } });
     assert.equal(dashboard.page.dataset.sectionView, 'auto', '735 px hold the list beside a page at 16 px');
     // The browser's font grows to 20 px: 40rem is 800 px, so the sheets draw one column while the box keeps its width.
     // The pane, which loses the list beside it, says so: the list comes back instead of a page with no way to it.
@@ -1039,14 +934,44 @@ test('a root font that moves the two panes\' 40rem repaints the Dashboard: the p
     heard(pane).fn([{ target: pane }]);
     assert.equal(dashboard.page.dataset.sectionView, 'auto', 'one column shows the list');
     dashboard.activateTab('costs');
-    assert.deepEqual([dashboard.page.dataset.sectionView, listBack.hidden], ['page', false], 'a page opened from it leads back');
+    assert.deepEqual([dashboard.page.dataset.sectionView, stack.size], ['page', 1], 'a page opened from it leads back');
     // Back to 16 px: the list's rows shrink (the pane alone may not move while the list stands alone), two panes again.
     font = 16;
     const list = dashboard.page.querySelector('.dashboard-tabs');
     assert.ok(heard(list), 'the list is watched');
     heard(list).fn([{ target: list }]);
-    assert.deepEqual([dashboard.page.dataset.sectionView, listBack.hidden], ['page', true], 'beside the list again, without Back');
+    assert.deepEqual([dashboard.page.dataset.sectionView, stack.size], ['page', 0], 'beside the list again, without Back');
     dashboard.destroy();
+});
+
+test('a page that gains its box as one column widens to two is announced shown, once, so Logs draws', (t) => {
+    const { mount, window } = setup(t);
+    const content = new NodeStub(); content.id = 'content'; mount.append(content);
+    window.CSS = { supports: () => true };
+    let width = 390;
+    const before = { box: NodeStub.prototype.getBoundingClientRect, observer: globalThis.ResizeObserver };
+    NodeStub.prototype.getBoundingClientRect = () => ({ width });
+    const observers = [];
+    globalThis.ResizeObserver = class { constructor(fn) { observers.push(fn); } observe() {} disconnect() {} };
+    t.after(() => { NodeStub.prototype.getBoundingClientRect = before.box; globalThis.ResizeObserver = before.observer; });
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+    const dashboard = initDashboard({ state });
+    // The sheets: one column's list hides the pane; from 40rem the pane stands beside it (ui.css @container sectionplace).
+    dashboard.page.querySelector('.dashboard-panels').getClientRects = () => (width >= 640 ? [{ width }] : []);
+    const shown = [];
+    window.addEventListener('ouro:dashboard-subtab-shown', (event) => shown.push(event.detail.tab));
+    const resize = (value) => { width = value; observers.forEach((fn) => fn([{ target: dashboard.page }])); };
+    try {
+        resize(390);
+        assert.deepEqual(shown, [], 'the list alone shows no page');
+        resize(735);
+        assert.deepEqual(shown, ['logs'], 'widened (900 -> 1087 px): the automatic page beside the list is shown');
+        resize(800);
+        assert.deepEqual(shown, ['logs'], 'a page already shown is not announced again');
+        state.activePage = 'chat';
+        resize(390); resize(735);
+        assert.deepEqual(shown, ['logs'], 'another page in front: the Dashboard shows nothing');
+    } finally { dashboard.destroy(); }
 });
 
 test('a page explicitly chosen beside the Dashboard list survives narrowing, while the automatic landing returns to the list', async (t) => {
@@ -1066,7 +991,6 @@ test('a page explicitly chosen beside the Dashboard list survives narrowing, whi
         try {
             const list = dashboard.page.querySelector('.dashboard-tabs');
             const rows = list.querySelectorAll('[data-dashboard-tab]');
-            const back = dashboard.page.querySelector('[data-dashboard-list-back]');
             const resize = value => { width = value; observers.forEach(fn => fn([{ target: dashboard.page }])); };
             resize(390);
             assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['auto', 0], 'automatic landing has not chosen a page');
@@ -1080,15 +1004,15 @@ test('a page explicitly chosen beside the Dashboard list survives narrowing, whi
             if (gesture === 'keyboard') await list.fire('keydown', { target: rows[0], key: 'End', preventDefault() {} });
             else await list.fire('click', { target: chosen, preventDefault() {} });
             assert.equal(state.dashboardActiveSubtab, chosen.dataset.dashboardTab);
-            assert.equal(back.hidden, true);
+            assert.equal(layers.size, 0);
             const control = new NodeStub('button'); dashboard.page.querySelector('.dashboard-panels').append(control); control.focus();
             resize(390);
-            assert.deepEqual([dashboard.page.dataset.sectionView, back.hidden, [...layers.keys()]], ['page', false, ['dashboard-level']]);
+            assert.deepEqual([dashboard.page.dataset.sectionView, [...layers.keys()]], ['page', ['dashboard-level']]);
             assert.equal(document.activeElement, control, 'resizing keeps the focused page control');
             resize(735);
-            assert.deepEqual([dashboard.page.dataset.sectionView, back.hidden, layers.size], ['page', true, 0]);
+            assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['page', 0]);
             resize(390);
-            await back.fire('click');
+            layers.get('dashboard-level').onClose();
             assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['auto', 0]);
             assert.equal(document.activeElement, chosen, 'Back returns to the chosen row');
         } finally { dashboard.destroy(); }
@@ -1112,7 +1036,10 @@ test('a Dashboard deep link keeps one Back entry when it replaces the phone draw
                 showPage: async (name, options = {}) => {
                     shown.push(name);
                     if (!allowed) return false;
-                    if (options.closeDrawer !== false) layers.remove('drawer');
+                    layers.batch(() => {
+                        if (options.closeDrawer !== false) layers.remove('drawer');
+                        options.enter?.();
+                    });
                     return true;
                 },
                 dashboardControls: { activateTab: (name, options) => {

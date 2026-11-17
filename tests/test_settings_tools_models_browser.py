@@ -267,7 +267,11 @@ def test_a_tool_servers_page_saves_its_entry_keeps_typed_text_and_remove_asks_fi
     # The header names the server's page, and its Back leads to the list it was opened from.
     assert lead_name(page) == "GitHub"
     back = header_back(page)
-    assert back.is_visible() and back.get_attribute("aria-label") == "Back to Tools"
+    assert back.is_visible() and back.get_attribute("aria-label") == back.get_attribute("title") == "Back to Tools"
+    back.click()
+    page.wait_for_function("() => [...document.querySelectorAll('#page-settings [data-settings-page]')].filter((e) => !e.hidden).at(-1)?.dataset.settingsPage === 'tools'")
+    assert top_path(page) == "tools", "Back opens the list it names"
+    editor = open_entry(page, "github")
     name = editor.locator('[data-mcp-field="name"]')
     name.fill("GitHub (work)")
     # A status read lands while the form holds typed text: the text stays, and so does the caret.
@@ -485,7 +489,7 @@ def test_the_local_model_page_saves_a_row_for_its_own_restart_and_never_offers_a
     _settled(page, "models").locator('[data-setting-row="models:local"]').click()
     level = _settled(page, "models/local")
     back = header_back(page)
-    assert back.is_visible() and back.get_attribute("aria-label") == "Back to Models"
+    assert back.is_visible() and back.get_attribute("aria-label") == back.get_attribute("title") == "Back to Models"
     page.wait_for_function("() => /Ready/.test(document.querySelector('#local-model-status')?.textContent || '')")
     assert commit_row(page, "LOCAL_MODEL_CONTEXT_LENGTH", 32768) == "Saved · applies when the local model is restarted · was 16384 · Undo"
     assert server.writes() == [{"LOCAL_MODEL_CONTEXT_LENGTH": 32768}]

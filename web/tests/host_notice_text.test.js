@@ -7,7 +7,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import test from 'node:test';
 
 import { createChatInstance } from '../modules/chat.js';
-import { HOST_NOTICE_PREFIXES, RETIRED_HOST_NOTICE_PREFIXES, hostNoticeDisplayText, hostRowDisplayText } from '../modules/host_notice_text.js';
+import { HOST_NOTICE_PREFIXES, RETIRED_HOST_NOTICE_PREFIXES, hostNoticeDisplayText, hostRowDisplayText, toolErrorDisplayText } from '../modules/host_notice_text.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { cardRowSummary } from '../modules/chat_activity.js';
 import { loadSkillReviewDetail, renderSkillReviewDisclosure, summarizeSkillReviewMessage } from '../modules/skill_review_card.js';
@@ -46,6 +46,17 @@ test('a typed known prefix loses only its leading mark; everything else stays', 
 
 // Each entry is one producer's prefix: its mark (variation selector included) and its
 // opening words must exist in the backend sources, or the table silently cleans nothing.
+// A failed tool call's result opens with the host's warning mark before its code; its chip says the failure.
+test('a call typed as failed loses the host\'s warning mark before its error; any other text keeps it', () => {
+    const error = '⚠️ TOOL_ARG_ERROR (await_messages): this task has no continuation owner to sleep under';
+    assert.equal(toolErrorDisplayText({ is_error: true }, error), error.slice('⚠️ '.length));
+    for (const evt of [{}, { is_error: false }, { is_error: 'true' }]) assert.equal(toolErrorDisplayText(evt, error), error);
+    assert.equal(toolErrorDisplayText({ is_error: true }, 'exit 1 ⚠️ later'), 'exit 1 ⚠️ later', 'only a leading mark');
+    assert.equal(toolErrorDisplayText({ is_error: true }, undefined), undefined);
+    const producer = readFileSync(new URL('../../ouroboros/loop_tool_execution.py', import.meta.url), 'utf8');
+    assert.ok(producer.includes('f"⚠️ TOOL_ERROR ({fn_name})') && producer.includes('f"⚠️ TOOL_TIMEOUT ({fn_name})'), 'the mark the host writes');
+});
+
 test('every table entry names a mark and words a backend producer actually writes', () => {
     const root = new URL('../../', import.meta.url);
     const sources = [];

@@ -622,8 +622,13 @@ def test_history_details_selection_replay_and_project_reopen(direct_server_with_
                     # Opened again after reading back to its first message, the kept room is found as left, on
                     # that passage (owner 2026-11-03, DESIGN "History edges"), and reads no older page again;
                     # `Scroll to latest message` is the one return to its newest message (owner decision 2026-10-05).
-                    page.locator('#project-panel-close').click()
+                    # The destination was a jump from this room (DESIGN "Layers and dismissal"): its × returns
+                    # here, this room's × goes to Main, and the room opens again from its row.
                     seen = len(page.evaluate("() => window.__historyReads"))
+                    page.locator('#project-panel-close').click()
+                    page.locator(f'#pchat-{project["id"]}-messages').wait_for(state="visible", timeout=30_000)
+                    page.locator('#project-panel-close').click()
+                    page.wait_for_function("() => !document.body.classList.contains('project-panel-open')")
                     reopened = _open_project(page, project)
                     assert not [read["cursor"] for read in page.evaluate("n => window.__historyReads.slice(n)", seen)
                                 if read["cursor"]], "no older page is read again"
