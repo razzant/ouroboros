@@ -40,6 +40,7 @@
 /**
  * @typedef {Object} ActiveChatActivity
  * @property {import('./work_types.js').WorkLead=} lead  // the model it runs on and whose choice that is
+ * @property {import('./task_origin.js').PlaceOrigin=} place_origin  // the place that called this work, as on its frames; a Main portal reads it here
  * @property {import('./work_types.js').WorkProcessing=} processing  // its own tier and the newest call's receipt
  * @property {string=} executor  // where the turn runs: worker, inline_call or inline_degraded
  * @property {string=} carrier  // a lane row: awaiting (no carrier holds it yet) or worker
@@ -117,6 +118,10 @@
  * @property {boolean=} latch_pending
  * @property {string=} error
  * @property {string=} reason_code
+ */
+/**
+ * @typedef {Object} TaskContinueRequest
+ * @property {string} action_nonce
  */
 /**
  * @typedef {Object} TaskContinueResponse

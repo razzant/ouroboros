@@ -553,6 +553,34 @@ test('while consciousness is off the sheet says the place only hears: Active\'s 
         [true, false, false]);
 });
 
+test('with no kind checked the sheet promises neither a wake nor silence: Active\'s note and the list\'s own line', () => {
+    // «Lives here: listens, wakes…» and «these still wake it» stood over an empty list. No event then starts a new
+    // conversation at once, yet a conversation that already has live work still wakes its author (place_intake).
+    const none = (place) => ({ ...place, wakes: [] });
+    const active = placeSheetBodyHtml(none(slack));
+    assert.match(active, /<p class="place-state-note">Lives here: listens, speaks and acts\.<\/p>/);
+    assert.doesNotMatch(active, /wakes when its list says so/);
+    // The setting is said once, in the list's own line, never repeated in the note above it.
+    assert.equal(active.match(/[Nn]o (wake )?kind is checked/g)?.length, 1, active);
+    assert.match(active, /No kind is checked: no event starts a new conversation here at once\. An ongoing conversation can still wake it\./);
+    assert.match(active, /Everything else here it sees at its next own wake and decides what to read\./);
+    assert.doesNotMatch(active, /no event here calls it|nothing here wakes it|Nothing is checked/, 'no blanket promise of silence');
+    assert.match(active, /A checked kind calls it here at once/, 'the rule and its checkboxes stay where the owner changes them');
+    const silent = placeSheetBodyHtml(none(community));
+    assert.match(silent, /No kind is checked: no event starts a new conversation here at once\. An ongoing conversation can still wake it\./);
+    assert.doesNotMatch(silent, /these still wake it to read and think/, 'there is no «these» to wake it');
+    assert.match(silent, /class="place-silent-card"/, 'what Silent blocks is still said');
+    // Paused and Off name their own cause once; a checked kind returns the stored words.
+    const paused = placeSheetBodyHtml(none(mail));
+    assert.match(paused, /While this place is Paused, nothing here wakes it\./);
+    assert.doesNotMatch(paused, /No kind is checked/);
+    const off = placeSheetBodyHtml({ ...none(slack), onlyHears: true });
+    assert.match(off, /While consciousness is off, nothing here wakes it\./);
+    assert.doesNotMatch(off, /No kind is checked|Lives here/);
+    assert.doesNotMatch(placeSheetBodyHtml(slack), /No kind is checked/);
+    assert.match(placeSheetBodyHtml({ ...slack, wakes: [{ fact: 'from_bot', author: 'owner' }] }), /wakes when its list says so/);
+});
+
 test('Silent shows the host\'s card: the note and, verbatim, what it blocks and what it cannot', () => {
     const html = placeSheetBodyHtml(community);
     const card = html.match(/<p class="place-silent-card" role="note">([^<]*)<\/p>/)?.[1] || '';

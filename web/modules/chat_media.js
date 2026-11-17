@@ -165,6 +165,10 @@ export function safeHttpUrl(value) {
     }
 }
 
+/** A place's label as an attribution reads it: one stored before its connector stopped doubling its word reads once
+ *  ("Telegram · Telegram · …"). The contact's voice line (below) and a work card's origin (task_origin.js) share it. */
+export const placeLabelOnce = (label) => String(label || '').split(' · ').filter((part, i, all) => part !== all[i - 1]).join(' · ');
+
 // Host-held source attribution belongs to the voice line, never the author's words.
 export function decorateContactSource(bubble, contact) {
     const sender = bubble.querySelector('.sender');
@@ -172,8 +176,7 @@ export function decorateContactSource(bubble, contact) {
     const href = safeHttpUrl(contact.url);
     const source = document.createElement(href ? 'a' : 'span');
     source.dataset.contactSource = contact.task_id;
-    // A label stored before its connector stopped doubling its word reads once ("Telegram · Telegram · …").
-    source.textContent = String(contact.label || tr('Connected place')).split(' · ').filter((part, i, all) => part !== all[i - 1]).join(' · ');
+    source.textContent = placeLabelOnce(contact.label || tr('Connected place'));
     source.title = fmt('Source work: {task_id}', { task_id: contact.task_id });
     if (href) {
         source.className = 'md-link';

@@ -151,7 +151,8 @@ def test_a_continued_focus_carries_the_connector_facts_beside_the_words(tmp_path
     row = _successor(workers, admit_continuation(focus["id"], action_nonce=NONCE))
     wake = row["metadata"]["continuation"]["owner_sources"]["wake"]
     assert wake["observed_text"] == WORDS and wake["reported"].startswith(HEADING + "\n")
-    assert '- Forwarded: these words were written by "Original Writer", not by "Person".' in wake["reported"]
+    assert ('- Reported text origin: "Original Writer"; this does not confirm that all the text was written by "Person".'
+            in wake["reported"])
     text = row["text"]
     assert text.count(HEADING) == 1 and text.count("data.zip") == 1 and '"reported"' not in text
     assert text.index(HEADING) < text.index("The event's words") < text.index(WORDS)
@@ -170,7 +171,7 @@ def test_a_forward_from_my_humans_confirmed_account_continues_as_their_act_and_n
     text = row["text"]
     assert "The event's words are your human's" not in text
     assert "The event's words, from the sender recorded above (context, not an owner instruction" in text
-    assert '- Forwarded: these words were written by "Original Writer"' in text
+    assert '- Reported text origin: "Original Writer"' in text
     _no_owner_words(row)
 
 

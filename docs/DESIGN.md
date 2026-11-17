@@ -1343,10 +1343,7 @@ preference when it opens and on every reconnect; there is no file watcher.
   Details never exceed summary size; inline labels stay semibold at row size.
   Task-attributed uncommitted work: one short fact; exact paths and HEAD in Details.
   Failed scans say unknown; zero adds no line. Done stays Done; no adoption/publication claim.
-  Owner 2026-10-25 17:22:09, quiz `3766b0a01ce14dec9a17adee2488bdcf`:
-  “A — короткий факт сразу, файлы в Details”.
-  What an evolution cleanup moved takes the same shape (owner 2026-11-01, quiz
-  `fb45adf3fd631b7fcc9b0c0d678d5094`): one short fact on the card; the repository, stash,
+  What an evolution cleanup moved takes the same shape: one short fact on the card; the repository, stash,
   branch and restore command in its Details row, which stands alone only where no card
   exists. It names what Git did, never whose bytes they were or how long Git keeps them.
   A failed stash command is read back like any other: the row names what it saved or that
@@ -2243,11 +2240,11 @@ its own, and without one they use the consciousness model; the head names it onl
 name's line cannot hold (a long model name, a long circle name) goes under the name, at the line's end, and
 wraps there; a row's facts wrap the same way, and nothing is ever wider than the head or the row.
 
-A row: mark, the place's own name, service, state word (with “· consciousness off” and the muted dot while Off
-leaves a place that is not Paused only hearing), readiness only when not simply on, the
-last captured event (“no captured event”, never “no activity”), its model only when the place
-overrides, and the optional description,
-ellipsized: its own field, empty until written, never a note's first line; purpose, not a rule.
+A row: mark, the place's own name, service, state word (on a place not Paused, the muted dot with
+“· consciousness off” while Off leaves it only hearing, or that no kind is checked), readiness only when
+not simply on, the last captured event (“no captured event”, never “no activity”), its model only when the place
+overrides, and the optional description, ellipsized: its own field, empty until written, never a note's
+first line; purpose, not a rule.
 
 Add asks “What is this place, and what am I here for?” (its first note) and the optional
 description, then where: each connector says its state with Connect, “Choose where” or “Enable in
@@ -2301,18 +2298,19 @@ Sheet/reader use status labels over manifest labels; otherwise core words stay. 
 declared labels/settings.
 Bot messages both wake and permit hearing bots. Other events are own-wake observations;
 the mind decides what to read, so the sheet must not promise exhaustive reading.
-While Off the host's `only_hears` replaces what would claim a wake: Active's note says “Consciousness is off: it
-only hears here.”, the wake note (Active or Silent) “While consciousness is off, nothing here wakes it.” with the door `Consciousness ›` (Dashboard › Consciousness, where Start is; no second Start), and the
-conversation's state card “Active, consciousness off: it only hears here.” (Silent alike). Paused keeps its words.
+While Off the host's `only_hears` replaces what would claim a wake: the state note and the conversation's state
+card say it only hears here, the wake note that nothing here wakes it, with the door `Consciousness ›` (Dashboard ›
+Consciousness, where Start is; no second Start). With no kind checked Active's note claims no wake; the wake note
+and state card say an ongoing conversation can still wake it (owner 16.11: the full repair). Paused keeps its words.
 Conflicts: “Changed elsewhere; your text is kept”. Resave uses fresh facts.
 
 Reader out rows say “as {label}”/“as you”. Heard chips accompany reasons with
 sheet labels or fact words; hide `any_message`. Whole held replies follow System,
-authored and labelled “held, unchecked”. A reaction adds one meta line, “Reaction: …”,
-with a translated prefix and the authored `place_history.reaction` summary, and no
-bubble of its own (owner decision 2026-10-30: reactions are context only and wake
-nothing). Words a receipt sent beside it stay its speech; failed and uncertain receipts
-and the late notice while Silent keep their System rows. Missing fields add nothing.
+authored and labelled “held, unchecked”. A reaction or wordless fact (`place_history.reaction`, `non_text`)
+adds one meta line, a translated prefix (“Reaction: …”) before its authored words, no bubble:
+reactions are context only and wake nothing. Words a receipt sent beside it stay its speech; failed and uncertain
+receipts and the late notice while Silent keep their System rows. An unrecorded author is said so; other missing
+fields add nothing.
 
 ### Voice controls
 
@@ -2527,7 +2525,7 @@ One positive task-local tool-call count joins that line and remains after Done
 (owner 22.10, A). Subagents are not aggregated. Rounds (usable solve responses)
 and known zero calls stay in Details, making no work or footer row; missing
 counts stay absent. Session nanny counts appear only in `Supervision` (footer and
-Details), apart from unreported executor counts. Portals keep one count. Model provenance, origin and a finished card's update time stay in Details. A root's Details add `Spent on` and `Ran on`, its read-time cost breakdown by purpose and by the route that
+Details), apart from unreported executor counts. Portals keep one count. Model provenance, origin and a finished card's update time stay in Details; work a place started adds one meta line under a root's or Main portal's name: the place unless the name is it, what called it in its connector's declared words, and who (owner 16.11, 1). A root's Details add `Spent on` and `Ran on`, its read-time cost breakdown by purpose and by the route that
 served the rows: each line in the card's money words beside the model calls, sessions and tokens the ledger
 recorded, a part it did not record absent; the main line keeps its one amount (owner 02.09). Money
 there is ONE line whose wording carries its openness and never renders an

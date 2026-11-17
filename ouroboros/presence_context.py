@@ -682,7 +682,7 @@ def confirmed_delivery_receipts(ctx: Any) -> frozenset[tuple[str, str]]:
     return frozenset(identity for identity, state in latest.items() if state in {"delivered", "accepted"})
 
 
-PLACEHOLDERS = ("who", "place", "when", "facts_line", "event", "speak_line", "place_state", "notes",
+PLACEHOLDERS = ("who", "act", "place", "when", "facts_line", "what", "event", "speak_line", "place_state", "notes",
                 "wake_item", "actor_facts", "work_here", "spent_line", "working_folder", "voice_line", "reported")
 
 # The connector's observed provider facts (CREATING_SKILLS ``event.facts``) in plain words. Each is what the
@@ -841,6 +841,8 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
     if place.place_id not in accounts:  # the places cannot be read now: the admitted row's own accounts
         accounts = {place.place_id: place.owner_accounts}
     facts = observed_facts(event)
+    matched, words = [w.fact for w in wake_matches(place, facts)], getattr(admission, "fact_labels", None) or {}
+    named = {fact: words[fact] for fact in matched if fact in words}  # what the connector's declaration calls a kind
     actor = str(event.actor.get("platform_actor_id") or event.actor.get("id") or "")
     owner_address = is_owner_account(place, actor, event.account_id, accounts[place.place_id])
     identity = deepcopy(event.identity)
@@ -862,7 +864,10 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
                             "is_bot": "from_bot" in facts,
                             **speaker_pages(drive_root, event.provider, event.account_id, actor,
                                             unverified=event.actor.get("authenticated") is False)},
-                  "matched_wakes": [w.fact for w in wake_matches(place, facts)]},
+                  "matched_wakes": matched, **({"matched_labels": named} if named else {}),
+                  # Display provenance every inheritor of this focus keeps, never the allowance or any authority: the
+                  # words of its matched kinds, and that the Host routed it (several works read its conversation).
+                  **({"routed": True} if allowance.get("route") is True else {})},
         "focus_allowance": allowance,
     }
     remaining = allowance.get("remaining_usd")
@@ -955,13 +960,17 @@ def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
         work = _previous_turn_line(previous) + ("\n" + work if work else "")
     voice = _voice_line(focus, event)
     snapshot = _thread_snapshot(focus, event)
-    who = actor.get("display_name") or actor.get("platform_actor_id") or "A person"
+    who = actor.get("display_name") or actor.get("platform_actor_id") or "An author the connector did not name"
+    from ouroboros.place_intake import observed_change  # a change by the connector's typed facts, never the words
+    changed, worded = observed_change(event.get("message")), bool(str(presence.get("observed_text") or "").strip())
     from ouroboros.presence_message_facts import connector_facts, event_reader  # the event record: the frame re-renders
     reported = connector_facts(event.get("message"), text=str(presence.get("observed_text") or ""), sender=who,
                                source=event_reader(task.get("id"), "message.non_text"))
     fields = {
         "voice_line": voice + "\n" if voice else "",
         "who": who,
+        "act": "changed something" if changed else "wrote",
+        "what": ("The text as it now stands" if worded else "The change") if changed else "Their message",
         "place": place.get("label") or place.get("provider") or place.get("place_id"),
         "when": _when(event.get("message") or {}),
         "facts_line": _facts_line(focus, event),

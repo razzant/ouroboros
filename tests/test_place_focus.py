@@ -1020,3 +1020,58 @@ def test_place_model_aliases_keep_the_resolved_locality_on_the_lead(focus, monke
     bind_task_route(ctx, metadata, presence=True)
     assert metadata['model_role'] == 'consciousness'
     assert open_route(ctx, None)[:2] == ('chosen-model', local)
+
+
+def test_a_change_reads_as_a_change_and_an_unnamed_author_as_unnamed(focus):
+    """FOCUS says what happened by the connector's typed facts: words, or a change (``non_text`` kind
+    ``state_change``) with or without its current text; one edit time alone is no change. Unknown is no person."""
+    from ouroboros.presence_context import frame_focus_content
+    root, _place, admission, event = focus
+
+    def frame(**over):
+        task = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2}),
+                           replace(event, **over), drive_root=root, staged_files=())
+        return frame_focus_content(task, task["metadata"]["presence"]["observed_text"] or "(no text)")
+
+    words = frame()
+    assert "You are Ouroboros. person wrote in chat " in words and "Their message, as data from that place:" in words
+    change = {"non_text": [{"kind": "state_change", "description": "Assigned to you by person"}]}
+    state = frame(text="", message=change)
+    assert "You are Ouroboros. person changed something in chat " in state
+    assert "The change, as data from that place:" in state and "Their message" not in state
+    assert 'Content without words, state_change: "Assigned to you by person".' in state
+    revised = frame(text="Revised words", message={**change, "edited_at": "2026-11-16T10:00:00+00:00"})
+    assert "The text as it now stands, as data from that place:\nRevised words" in revised
+    assert ", edited at 2026-11-16T10:00:00+00:00." in revised
+    assert "You are Ouroboros. An author the connector did not name wrote in " in frame(actor={"attribution": "unknown"})
+    assert "You are Ouroboros. person wrote in chat " in frame(message={"edited_at": "2026-11-16T10:00:00+00:00"})
+
+
+def test_a_routed_focus_says_why_on_every_root_child_and_continue_that_inherits_it(focus):
+    """The Host routed an untagged follow-up to the mind because several works read its conversation: the focus
+    keeps that as display provenance, so a root it starts, that root's child and its Continue still say why on their
+    card. The allowance and its authority stay with the focus."""
+    from ouroboros.consciousness_authority import consciousness_origin_metadata
+    from ouroboros.dialogue_provenance import presence_root_carrier
+    from ouroboros.subagent_messages import place_origin
+    from ouroboros.task_activity_facts import card_facts
+    from ouroboros.task_results import load_task_result, write_task_result
+    root, _place, admission, event = focus
+
+    def started(metadata):  # the promote event a focus's start writes (control_routing), then the root admitted from it
+        promoted = {**presence_root_carrier(metadata),
+                    **consciousness_origin_metadata({**metadata, "task_id": "focus-1"}, started_root=True)}
+        return {**presence_root_carrier(promoted), **consciousness_origin_metadata(promoted)}
+
+    routed = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2, "route": True}),
+                         replace(event, facts=("any_message",)), drive_root=root, staged_files=())["metadata"]
+    assert routed["focus"]["routed"] is True and routed["focus"]["matched_wakes"] == []
+    heir = started(routed)
+    write_task_result(root, "root-1", "running", metadata=heir)
+    origins = {"root card": card_facts(load_task_result(root, "root-1"))["place_origin"],
+               "child": place_origin(consciousness_origin_metadata(heir)),
+               "Continue": place_origin(consciousness_origin_metadata({**heir, "task_id": "root-1"}))}
+    assert {name: origin.get("routed") for name, origin in origins.items()} == dict.fromkeys(origins, True), origins
+    assert "focus_allowance" not in heir, "the allowance stays with the focus"
+    plain = started(task_for(focus)["metadata"])
+    assert "routed" not in plain["focus"] and "routed" not in place_origin(plain)

@@ -38,7 +38,7 @@ from ouroboros.consciousness_transitions import (CHAT_BOUNDARY_KEYS, TRANSITIONS
 from ouroboros.chat_chain import row_address, source_row_id
 from ouroboros.context_health import safe_read
 from ouroboros.deadline_utils import ago_text
-from ouroboros.dialogue_provenance import (dialogue_speaker, is_presence_task, memory_row_header, owner_speech,
+from ouroboros.dialogue_provenance import (dialogue_speaker, is_presence_task, owner_speech,
                                            reaction_note, render_memory_row, render_row_text, row_author,
                                            wordless_reaction)
 
@@ -458,18 +458,17 @@ def _presence_failure(result: Dict[str, Any]) -> bool:
 
 def _event_line(kind: str, row: Dict[str, Any], results: Dict[str, Dict[str, Any]],
                 rooms: Any, projects: Dict[str, str], now: float, *, when: str = "", accounts: Any = None,
-                whole: bool = True) -> str:
-    """One chat-row event, or (``when`` given) a task terminal read from its result."""
+                attention: Optional[Dict[str, Any]] = None) -> str:
+    """One chat-row event, or (``when`` given) a task terminal read from its result. ``attention``: a place arrival's
+    heard decision (``place_arrivals.heard_attention``), said beside it; absent says nothing."""
     stamp = _parse_iso(row.get("ts"))
     when = when or (ago_text(now - stamp) if stamp is not None else "at an unknown time")
     task_id = str(row.get("task_id") or "")
-    if kind in {"owner_message", "correspondent_message"}:  # under the author the host knows now, any author
-        address, author = row_address(row), row_author(row, owner_accounts=accounts)
-        if whole:  # the words themselves, never cut
-            words = render_memory_row(address, row, author=author, indent="  ")
-        else:  # the fallback form's pointer: author, size and exact address, no body
-            words = f"{memory_row_header(address, row, author=author)} {len(render_row_text(row))} chars, at the source"
-        return f"- {_KIND_WORDS[kind][0].split(' (counted', 1)[0]} in {rooms.label(row)}, {when}: {words}"
+    if kind in {"owner_message", "correspondent_message"}:  # under the author the host knows now, words never cut
+        heard = (f" (heard: {attention.get('reason') or 'reason not recorded'}"
+                 + (f"; given to {attention['recipient']}" if attention.get("recipient") else "") + ")") if attention else ""
+        words = render_memory_row(row_address(row), row, author=row_author(row, owner_accounts=accounts), indent="  ")
+        return f"- {_KIND_WORDS[kind][0].split(' (counted', 1)[0]} in {rooms.label(row)}, {when}{heard}: {words}"
     if kind == "correspondent_reaction":  # who acted, the gesture and its target, in the host's words
         transport = row.get("transport") if isinstance(row.get("transport"), dict) else {}
         actor = transport.get("actor") if isinstance(transport.get("actor"), dict) else {}
@@ -812,6 +811,12 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
                 if row.get("lifecycle") == PROJECT_ACTIVE}
     if basis == "partial_inventory_upgrade":
         gaps.add("previous_transition_inventory_incomplete")
+    try:  # why each arrival woke nothing, from its own dedup record, one read for the window
+        from ouroboros.place_arrivals import heard_attention  # D15->D20 is lazy-only
+        heard = heard_attention(root, (offset for offset, row in chat_rows if row.get("type") == "place_arrival"))
+    except Exception as exc:
+        heard = {}
+        gaps.add(f"place attention unreadable: {type(exc).__name__}")
     events, announced = [], set()
     for offset, row in chat_rows:
         kind = _row_kind(row, accounts)
@@ -839,7 +844,8 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
         if kind == "task_terminal" and result.get("_is_direct_chat") and not _presence_failure(result):
             listed = result.get("wake_summary") or _continue_open(result, str(row.get("task_id") or ""))
             kind = "direct_turn_summary" if listed else "direct_turn"
-        events.append((kind, offset, _event_line(kind, row, results, rooms, projects, now, accounts=accounts)))
+        events.append((kind, offset, _event_line(kind, row, results, rooms, projects, now, accounts=accounts,
+                                                 attention=heard.get(offset))))
     for key, fact in sorted(((key, fact) for key, fact in fresh.items() if key not in announced),
                             key=lambda item: (item[1]["stamp"] is None, item[1]["stamp"] or 0.0, item[0])):
         kind, line = _transition_line(fact, results, rooms, now, projects)

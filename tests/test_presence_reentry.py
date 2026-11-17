@@ -70,12 +70,12 @@ def test_reentry_carries_unstaged_files_and_forward_provenance_beside_the_exact_
         "non_text": [{"kind": "poll", "description": "Choose Tuesday or Wednesday"}]}
     _append(tmp_path, forwarded, empty)
     note = pc.reentry_note(_binding(tmp_path, cursor), ctx)
-    assert "Forwarded:" in note and "Original author" in note
+    assert "Reported text origin:" in note and "Original author" in note
     assert "Not received:" in note and "data.zip" in note and "300.0 MiB" in note
     assert "Choose Tuesday or Wednesday" in note and "host facts, not their words" in note
     worded = next(line for line in note.splitlines() if json.dumps(raw) in line)
     assert worded.endswith(": " + json.dumps(raw)), "their words, and only those, are quoted as theirs"
-    assert "\n  What the connector reports about this message (host facts, not their words):\n  - Forwarded:" in note
+    assert "\n  What the connector reports about this message (host facts, not their words):\n  - Reported text origin:" in note
     source = _read_all(registry, _reader(note))
     assert [row["text"] for row in source["rows"]] == [raw, ""], "retained words are never manufactured"
 

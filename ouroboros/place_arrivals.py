@@ -127,6 +127,22 @@ def heard_replay(root, task_id, identity="", continuation_version=0):
                               continuation_version=continuation_version)
 
 
+def heard_attention(root, seqs):
+    """``{seq: place_attention}`` of these chat rows' heard decisions from their dedup records, in one read transaction
+    (batched under SQLite's parameter floor), decoded after it closes. A row without one is absent from the answer:
+    undecided, or a focus started (its task says so), never inferred."""
+    seqs, retained = sorted({int(seq) for seq in seqs}), []
+    if not seqs:
+        return {}
+    with dialogue_store.transaction(root, write=False) as conn:
+        for start in range(0, len(seqs), 500):
+            batch = seqs[start:start + 500]
+            retained += conn.execute("SELECT seq,dispatch_input FROM dialogue WHERE stream='chat' AND seq IN ("
+                                     + ','.join('?' for _ in batch) + ')', batch).fetchall()
+    heard = {row['seq']: json.loads(row['dispatch_input'] or '{}').get('place_attention') for row in retained}
+    return {seq: facts for seq, facts in heard.items() if isinstance(facts, dict) and facts.get('decision') == 'heard'}
+
+
 def record_heard(root, task, event, reason, *, captured_task_id=None, recipient=''):
     from ouroboros.presence_runner import _stored_turn, presence_result_from_stored
     from dataclasses import replace

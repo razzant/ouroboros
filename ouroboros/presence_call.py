@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextvars
 import logging
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 from ouroboros.presence_admission import admit_presence_turn, PresenceAdmissionError
@@ -64,14 +64,15 @@ def open_presence_call(*, drive_root, repo_dir, skill_name, binding_id="", event
     from ouroboros.call_protocol import CallSpec, OPENED_BY_SKILL
     from ouroboros.call_peers import open_hub, close_hub
     from ouroboros.live_conversation import LiveConversationTurn, feature_configuration
-    from ouroboros.places import declared_wake_signals
+    from ouroboros.places import declared_fact_labels
     from supervisor.message_bus import get_bridge
 
     try:
-        admission = admit_presence_turn(drive_root=drive_root, authenticated_transport_skill=skill_name,
-            binding_id=binding_id, **presence_event_origin(event))
-        # The connector's live declared signals, as /presence/turn admits them (one Host process, one registry).
-        turn_event = presence_turn_event(event, admission, vouched_facts=declared_wake_signals(skill_name))
+        # The connector's live declared signals and words, as /presence/turn admits them (one Host, one registry).
+        declared = declared_fact_labels(skill_name)
+        admission = replace(admit_presence_turn(drive_root=drive_root, authenticated_transport_skill=skill_name,
+            binding_id=binding_id, **presence_event_origin(event)), fact_labels=declared)
+        turn_event = presence_turn_event(event, admission, vouched_facts=declared)
         # Heard before any decision, as a text event is (host_service_places).
         captured = capture_presence_event(admission, turn_event, drive_root=Path(drive_root))
     except (PresenceAdmissionError, PresenceTurnError) as exc:
@@ -115,7 +116,7 @@ def open_presence_call(*, drive_root, repo_dir, skill_name, binding_id="", event
 
 
 def _event_from_task(task: Mapping[str, Any]) -> PresenceTurnEvent:
-    """The call's opening event as each utterance carries it, with the identity its focus admitted (``focus.identity``):
+    """The opening event a call's utterances are named after, with its focus's admitted identity (``focus.identity``):
     a heard row keeps the account the place sends as, so the room's newest arrivals never lose it to a long call."""
     presence = task["metadata"]["presence"]
     stored = presence["event"]
@@ -150,6 +151,8 @@ def record_call_utterance(drive_root: Path, task: Mapping[str, Any], *, directio
     if direction not in {"in", "out"} or not text:
         return False
     event = _event_from_task(task)
+    if direction == "in":  # what the connector reported with the opening (a change, its files, its send time and order)
+        event = replace(event, message={})  # stays the opening row's, never a heard utterance's (``call_utterance``)
     chat_id = int(task["chat_id"])
     if direction == "out":
         speaker, user_id = None, 0
@@ -165,3 +168,12 @@ def record_call_utterance(drive_root: Path, task: Mapping[str, Any], *, directio
         log.warning("Presence call %s: a %s utterance could not be retained", task.get("id"), direction)
         return False
     return True
+
+
+def call_utterance(row: Mapping[str, Any]) -> bool:
+    """A row ``record_call_utterance`` wrote, by the name it gave it after its event (``<event>:heard:<item>``,
+    ``:spoken:``); the event's own row keeps the event's name. Its identity, focus and, on one written before heard
+    utterances stopped carrying it, its message are the call's opening facts, never this utterance's."""
+    provenance = row.get("presence_provenance")
+    event = str(provenance.get("source_event_id") or "") if isinstance(provenance, Mapping) else ""
+    return bool(event) and str(row.get("client_message_id") or "").startswith((f"{event}:heard:", f"{event}:spoken:"))

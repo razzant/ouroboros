@@ -20,6 +20,7 @@ import pytest
 
 import supervisor.message_bus as message_bus
 from ouroboros.projects_registry import MIRRORED_ANSWER_MAX_CHARS, mirrored_answer
+from tests.test_place_conversation_work import host as host
 
 ANSWER = "**Done: PR #7 merged.**\n\n## What changed\n\n- one\n- two\n"
 
@@ -87,8 +88,9 @@ def test_the_row_carries_the_answer_and_its_text_does_not_change(tmp_path, monke
     # and it invites nothing, since the row's Project reference is its door (owner 17.10, Q2 C).
     assert mirrored["text"] == "Launch › Ship release · Done"
     assert "PR #7" not in mirrored["text"]
-    # Without a model-authored answer the key is ABSENT, not empty.
+    # Without a model-authored answer the key is ABSENT, not empty; so is the origin of work no place started.
     assert "completion_answer" not in pointer["progress_meta"]
+    assert "place_origin" not in mirrored["progress_meta"]
 
 
 def test_the_answer_survives_live_frame_durable_row_and_history_replay(monkeypatch, tmp_path):
@@ -186,6 +188,72 @@ def test_the_roots_closing_sentence_rides_its_row_live_durable_and_replayed(monk
     assert json.loads(_encode(live))["wake_summary"] == replayed["wake_summary"] == "Empty tables now export as a header-only CSV."
 
 
+@pytest.mark.usefixtures("provider_catalog_offline")
+def test_a_place_born_roots_origin_rides_its_completion_row_and_detail_as_its_census_says(host, monkeypatch):
+    """A place-born Project root's Main portal reads ``place_origin`` from the census while it runs, then from this
+    row and its task detail. Real path: the owed unit, the real enqueue, the supervisor's bus consumer and sender."""
+    import time
+    from collections import deque
+    from starlette.requests import Request
+    from ouroboros import server_liveness
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.gateway.tasks import _task_get_response
+    from ouroboros.project_dialogue import append_terminal_task_projection
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.task_activity_facts import card_facts
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+    from ouroboros.terminal_projection import SETTLEMENT_DEFERRED, main_delivery_recorded, settle_terminal_projection
+    from ouroboros.utils import append_jsonl
+    from supervisor import events_chat_delivery as delivery, terminal_delivery
+    from supervisor.event_observation import ObservedEventQueue
+    from tests.test_dialogue_retry import bridge
+    from tests.test_place_conversation_work import promote
+
+    def detail(task_id):
+        return json.loads(_task_get_response(Request({
+            "type": "http", "method": "GET", "path": f"/api/tasks/{task_id}", "path_params": {"task_id": task_id},
+            "query_string": b"", "headers": [], "app": SimpleNamespace(state=SimpleNamespace(drive_root=world.data))})).body)
+
+    world = host()
+    task = promote(world)  # the real producer: a place focus's start_task through promote_chat_to_task
+    origin = card_facts(task).get("place_origin")  # the live census's own carrier while the work runs
+    assert origin and origin["place_id"] == world.place.place_id, origin
+    project = create_project(world.data, "launch", name="Launch")
+    bind_task_to_project(world.data, task["id"], project["id"], project["chat_id"], origin={"absent": "system"})
+    root = {**task, "project_id": project["id"], "chat_id": project["chat_id"], "root_task_id": task["id"]}
+    stored = write_task_result(world.data, task["id"], STATUS_COMPLETED, root_task_id=task["id"],
+                               project_id=project["id"], metadata=task["metadata"], **_result())
+    frames, bus = bridge(world.data, monkeypatch), ObservedEventQueue()  # only the transport is the test's own sink
+    for name, value in (("_DELIVERED_MESSAGE_IDS", deque(maxlen=256)), ("_ACTIVE_DELIVERIES", set()),
+                        ("_DEFERRED_DELIVERIES", set())):
+        monkeypatch.setattr(delivery, name, value)
+    monkeypatch.setattr("supervisor.workers.get_event_q", lambda **_kw: bus)
+    ctx = SimpleNamespace(DRIVE_ROOT=world.data, RUNNING={}, EVENT_Q=bus, append_jsonl=append_jsonl,
+                          send_with_budget=message_bus.send_with_budget)
+    done = {"chat_id": 1, "status": "completed", "outcome_axes": {"execution": {"status": "ok"}}}
+    assert append_terminal_task_projection(world.data, task["id"], root, stored, done)  # the owed unit, durable first
+    assert settle_terminal_projection(world.data, task["id"], task=root, event_queue=bus) == SETTLEMENT_DEFERRED
+    did = f"project-completion:{task['id']}"
+    owed = next(row for row in terminal_delivery.pending_deliveries(world.data) if row.get("delivery_id") == did)
+    server_liveness.drain_worker_events(bus, ctx, [time.monotonic(), {}, time.thread_time(), None],
+                                       on_restart=lambda *_: pytest.fail("no restart event"))
+    assert main_delivery_recorded(world.data, did, task_id=task["id"]), "the sender's own receipt settles the debt"
+    assert all(row.get("delivery_id") != did for row in terminal_delivery.pending_deliveries(world.data))
+    response = asyncio.run(make_chat_history_endpoint(world.data)(SimpleNamespace(query_params={"chat_id": "1"})))
+    carriers = {
+        "owed event": owed["progress_meta"],
+        "live frame": next(frame for frame in frames if frame.get("system_type") == "project_completion_summary"),
+        "durable row": next(row for row in dialogue_test.log_rows(world.data / "logs" / "chat.jsonl")
+                            if row.get("type") == "project_completion_summary"),
+        "history reload": next(row for row in json.loads(response.body.decode("utf-8"))["messages"]
+                               if row.get("system_type") == "project_completion_summary"),
+        "task detail": detail(task["id"]),
+    }
+    assert {name: row.get("place_origin") for name, row in carriers.items()} == dict.fromkeys(carriers, origin)
+    write_task_result(world.data, "plain-root", STATUS_COMPLETED, root_task_id="plain-root", result="Done.")
+    assert "place_origin" not in detail("plain-root"), "work no place started: absent, never empty"
+
+
 def test_a_row_without_the_key_replays_without_it(monkeypatch, tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir(parents=True)
@@ -201,7 +269,7 @@ def test_a_row_without_the_key_replays_without_it(monkeypatch, tmp_path):
     endpoint = make_chat_history_endpoint(tmp_path)
     response = asyncio.run(endpoint(SimpleNamespace(query_params={"chat_id": "1"})))
     row = json.loads(response.body.decode("utf-8"))["messages"][0]
-    assert "completion_answer" not in row
+    assert "completion_answer" not in row and "place_origin" not in row
 
 
 def test_moved_direct_completion_uses_bound_main_request_without_a_result_origin(tmp_path, monkeypatch):
