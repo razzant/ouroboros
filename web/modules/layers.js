@@ -213,15 +213,17 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
     const onTab = (event) => { if (event.key === 'Tab') pendingInert?.(); };
 
     /** One commit: `fn` pushes and removes; the stack settles once when the outermost batch ends (also when `fn`
-     * throws). `inertAfter` (the outermost batch's): a promise of the motion's end, after which the inert difference
-     * and the focus that needs it are applied; without it they are applied now. */
-    function batch(fn, { inertAfter = null } = {}) {
-        if (depth++ === 0) change = { pushed: new Set(), removed: [] };
+     * throws). `inertAfter`: a promise of the motion's end, after which the inert difference and the focus that needs
+     * it are applied; without it (or null) they are applied now. The last batch that names it, at any depth, decides:
+     * a page jump wraps the shell's sync in its own batch, and that sync's motion is the commit's. */
+    function batch(fn, { inertAfter } = {}) {
+        if (depth++ === 0) change = { pushed: new Set(), removed: [], inertAfter: null };
+        if (inertAfter !== undefined) change.inertAfter = inertAfter;
         try { return fn(); } finally {
             if (--depth === 0) {
                 const done = change;
                 change = null;
-                if (!disposed) settle(done, inertAfter);
+                if (!disposed) settle(done, done.inertAfter);
             }
         }
     }

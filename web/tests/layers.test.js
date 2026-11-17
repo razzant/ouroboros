@@ -605,6 +605,27 @@ test('a later commit supersedes a pending inert difference; one without inertAft
     v.layers.destroy();
 });
 
+test('a sync nested in a jump\'s batch keeps its motion: the covered room turns inert when the motion ends', async () => {
+    const w = world();
+    let arrived;
+    // page_navigation.js pushes the return and commits the destination in one batch; the shell's sync inside it
+    // (app.js syncNavigationState) names the motion that covers the room.
+    w.layers.batch(() => {
+        w.layers.push({ id: 'page-return-1', page: true, modal: false, focus: false, opener: null, returnTo: {}, onClose() {} });
+        w.layers.batch(() => w.layers.push({ id: 'project', el: w.panel, modal: true, onClose() {} }),
+            { inertAfter: new Promise((resolve) => { arrived = resolve; }) });
+    });
+    assert.deepEqual(w.layers.ids(), ['page-return-1', 'project']);
+    assert.equal(w.content.inert, false, 'the room is not written while the panel comes in');
+    arrived();
+    await tick();
+    assert.equal(w.content.inert, true, 'inert once the panel has arrived');
+    // A nested sync that names no motion (null) applies at once, as its own commit would.
+    w.layers.batch(() => w.layers.batch(() => w.layers.remove('project'), { inertAfter: null }));
+    assert.equal(w.content.inert, false);
+    w.layers.destroy();
+});
+
 test('what is opened over the shell beside it (a dialog, a menu, a toast) stays live under a modal layer', () => {
     const w = world();
     const reconnect = w.node('div', w.doc.body);  // mounted before the layer opens
