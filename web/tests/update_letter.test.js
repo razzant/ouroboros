@@ -468,20 +468,78 @@ test('a level check after apply writes the retained update, not an older descrip
         const empty = updateLetterView({ ...status, letter: { ...status.letter, text: '', state: 'none' } });
         assert.equal(empty.state, 'empty');
         assert.deepEqual(empty.write.key, recent);
-        // Before restart, disk consumed the target but the serving range remains non-empty.
-        const waiting = { ...status, running_sha: recent.base_sha,
-            letter: { ...status.letter, checked_key: recent, material: null } };
+        assert.deepEqual([empty.label, empty.note], ["What's new", 'No description of this update yet.']);
+        // Before restart the disk holds the target while the server still runs its base: the check that offered
+        // the update kept its material, so Write names that range and no word says this version runs it.
+        const waiting = { ...status, running_sha: recent.base_sha, letter: { ...status.letter, checked_key: recent } };
         assert.deepEqual(updateLetterView(waiting).write.key, recent);
-        // A merged install has its own HEAD, but consumes the same checked official target.
-        assert.deepEqual(updateLetterView({ ...status, running_sha: 'd'.repeat(40),
-            letter: { ...status.letter, checked_key: { ...recent, base_sha: 'd'.repeat(40) } } }).write.key,
-            recent);
-        // A new pending offer always wins; another channel's retained material never does.
+        assert.equal(updateLetterView(waiting).label, 'Earlier update');
+        const waitingEmpty = updateLetterView({ ...waiting, letter: { ...waiting.letter, text: '', state: 'none' } });
+        assert.deepEqual([waitingEmpty.state, waitingEmpty.label, waitingEmpty.write.key], ['empty', "What's new", recent]);
+        // Without that material the checked pair alone proves no incoming change: only the shown text's Rewrite.
+        const unproven = { ...waiting, letter: { ...waiting.letter, material: null } };
+        assert.deepEqual(updateLetterView(unproven).write,
+            { mode: 'rewrite', key: letter().key, label: 'Rewrite', disabled: false });
+        assert.equal(updateLetterView({ ...unproven, letter: { ...unproven.letter, text: '', state: 'none' } }).state,
+            'none');
+        // A new pending offer always wins; another target's, channel's or ref's retained material never does.
         const pending = { ...status, available: true, latest_sha: 'd'.repeat(40),
             checked_target_sha: 'd'.repeat(40), letter: { ...status.letter,
                 checked_key: { ...recent, base_sha: recent.target_sha, target_sha: 'd'.repeat(40) } } };
         assert.equal(updateLetterView(pending).write.key.target_sha, 'd'.repeat(40));
         assert.equal(updateLetterView({ ...status, update_channel: 'other' }).write.mode, 'rewrite');
+        assert.equal(updateLetterView({ ...status, target_ref: 'managed/elsewhere' }).write.mode, 'rewrite');
         assert.equal(updateLetterView({ ...status, checked_target_sha: 'e'.repeat(40) }).write.mode, 'rewrite');
     }
+});
+
+
+test('a merged install never writes its bare checked pair; a text just saved for the material reads neutrally', () => {
+    const merge = 'd'.repeat(40);
+    for (const channel of ['stable', 'qa', 'development']) {
+        const recent = { base_sha: 'b'.repeat(40), target_sha: 'c'.repeat(40),
+            update_channel: channel, target_ref: `managed/${channel}` };
+        // The install serves its own merge M with the official target inside it: checkout and server are both M,
+        // and the check records the pair M..T, which names no incoming commit.
+        const merged = { ...CURRENT, current_sha: merge, running_sha: merge, checked_target_sha: recent.target_sha,
+            update_channel: channel, target_ref: recent.target_ref,
+            letter: letter({ relation: 'applied', description_current: false,
+                checked_key: { ...recent, base_sha: merge }, material: { key: recent } }) };
+        const view = updateLetterView(merged);
+        assert.deepEqual(view.write, { mode: 'write', key: recent, label: 'Write description', disabled: false });
+        assert.equal(view.label, 'Earlier update', 'a technical checked pair keeps no current-version heading');
+        assert.equal(view.note, `This description covers an earlier update (${'a'.repeat(8)} → ${'b'.repeat(8)}).`);
+        // Without material nothing proves an incoming range, whether the checkout is still M or a local commit C
+        // moved it past M: no new Write; the shown text keeps its own Rewrite and no text hides the section.
+        for (const checkout of [merge, 'e'.repeat(40)]) {
+            const level = { ...merged, current_sha: checkout, letter: { ...merged.letter, material: null } };
+            assert.deepEqual(updateLetterView(level).write,
+                { mode: 'rewrite', key: letter().key, label: 'Rewrite', disabled: false });
+            assert.equal(updateLetterView({ ...level, letter: { ...level.letter, text: '', state: 'none' } }).state,
+                'none');
+        }
+        // The text just saved for that material keeps its predecessor's ancestry (relation other) until the next
+        // check: a neutral heading, no earlier note, and Rewrite of its own range.
+        const fresh = updateLetterView({ ...merged, letter: { ...merged.letter, key: recent, relation: 'other',
+            text: 'What b..c brings.' } });
+        assert.deepEqual([fresh.label, fresh.note], ["What's new", '']);
+        assert.deepEqual(fresh.write, { mode: 'rewrite', key: recent, label: 'Rewrite', disabled: false });
+    }
+});
+
+
+test('the same target from another base: Write keeps the material, the old text reads as a different range', () => {
+    // The text was written for A..C before the install moved to B; B..C was then retained and applied.
+    const recent = { base_sha: 'b'.repeat(40), target_sha: 'c'.repeat(40), update_channel: 'stable',
+        target_ref: 'managed/main' };
+    const old = { ...recent, base_sha: 'a'.repeat(40) };
+    const view = updateLetterView({ ...CURRENT, current_sha: recent.target_sha, running_sha: recent.target_sha,
+        checked_target_sha: recent.target_sha, update_channel: 'stable', target_ref: 'managed/main',
+        letter: letter({ key: old, relation: 'applied', description_current: false, material: { key: recent } }) });
+    assert.deepEqual(view.write, { mode: 'write', key: recent, label: 'Write description', disabled: false });
+    assert.deepEqual([view.markdown, view.covers], [letter().text, `${'a'.repeat(8)} → ${'c'.repeat(8)}`]);
+    // A shared target makes the text neither earlier nor this version's own account: a neutral heading and note.
+    assert.equal(view.label, 'Different range');
+    assert.equal(view.note,
+        `This description covers the same target from another starting version (${'a'.repeat(8)} → ${'c'.repeat(8)}).`);
 });

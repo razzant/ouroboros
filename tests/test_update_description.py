@@ -744,3 +744,55 @@ def test_consumed_material_remains_requestable_after_level_check(door, tmp_path,
     # Another retained-material write never prevents explicitly rewriting the saved text.
     historical = _request(door, mode="rewrite", base=TARGET, target=NEWER)
     assert historical.status_code == 200
+
+
+def test_a_text_saved_for_retained_material_keeps_the_old_ancestry_until_a_check(tmp_path):
+    """A merged install: the serving merge M holds the official target, and the level check proved that only for the
+    text it showed. The text saved for the retained material is not called applied before a check proves it; the
+    panel words that state neutrally (web/tests/update_letter.test.js)."""
+    drive, merge = tmp_path / "data", "d" * 40
+    _offer(drive, state="ready", text="older description", revision=2, checked_key=_key(merge, NEWER),
+           material={"key": _key(TARGET, NEWER), "text_bytes": 123}, checked_running_sha=merge,
+           target_in_running=True, target_in_for=TARGET)
+    status = {"running_sha": merge, "checked_target_sha": NEWER}
+    assert ul.project_letter_for_panel(status, drive_root=drive)["relation"] == "applied"
+    saved = ul.save_description("what that update brought", TARGET, NEWER, 2, author={"task_id": "t", "model": "m"},
+                                drive_root=drive)
+    assert saved["outcome"] == "saved"
+    view = ul.project_letter_for_panel(status, drive_root=drive)
+    assert (view["relation"], view["description_current"], view["key"]) == ("other", False, _key(TARGET, NEWER))
+    assert view["material"]["key"] == view["key"]
+
+
+def test_a_retained_material_request_keeps_its_range_through_a_newer_check(door, monkeypatch):
+    """After apply the owner asks for the retained range; a check then finds the next update and replaces the stored
+    material and check facts. A second press while the task can save admits nothing, a press naming the range only
+    the old request names is refused, the requested task's own save still lands and a stale revision is refused."""
+    newest = "d" * 40
+    _offer(door.root, state="ready", text="older description", revision=2, checked_key=_key(NEWER, NEWER),
+           material={"key": _key(TARGET, NEWER), "text_bytes": 123})
+    first = _request(door, base=TARGET, target=NEWER)
+    assert first.status_code == 200, first.text
+    handle = first.json()["task_id"]
+    task_text = door.pending[0]["text"]
+    assert "what this update changes for them and for me" in task_text and "once this update is applied" not in task_text
+    again = _request(door, mode="rewrite", base=TARGET, target=NEWER)
+    assert again.status_code == 409 and again.json()["task_id"] == handle and len(door.pending) == 1
+    monkeypatch.setattr(ul, "collect_range_material", lambda base, target, **_k: {
+        "base_sha": base, "target_sha": target, "releases": [], "bodies_omitted": 0, "omitted_rows": 0, "versions": {},
+        "commits": [{"sha": newest, "date": "2026-11-17", "subject": "the next update", "body": ""}]})
+    ul.refresh_after_check({"check_ok": True, "available": True, "running_sha": NEWER, "current_sha": NEWER,
+                            "latest_sha": newest, "update_channel": "stable", "target_ref": "managed/main"},
+                           drive_root=door.root)
+    record = ul.read_record(door.root)
+    assert record["material"]["key"] == _key(NEWER, newest) and record["request"]["key"] == _key(TARGET, NEWER)
+    stale = _request(door, base=TARGET, target=NEWER)
+    assert stale.status_code == 409 and _key(TARGET, NEWER) not in stale.json()["legal_ranges"]
+    assert len(door.pending) == 1
+    saved = ul.save_description("what that update brought", TARGET, NEWER, 2, author={"task_id": handle, "model": "m"},
+                                drive_root=door.root)
+    assert saved["outcome"] == "saved" and saved["key"] == _key(TARGET, NEWER)
+    assert ul.read_record(door.root)["author"]["requested"] is True
+    late = ul.save_description("a stale rewrite", TARGET, NEWER, 2, author={"task_id": "other", "model": "m"},
+                               drive_root=door.root)
+    assert late["outcome"] == "revision_conflict" and ul.read_record(door.root)["text"] == "what that update brought"

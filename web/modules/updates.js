@@ -337,7 +337,9 @@ const LETTER_RELATIONS = new Set(['pending', 'applied', 'superseded', 'other']);
 // The request's own ordinary task statuses during which it may still save.
 const LIVE_REQUEST_STATUSES = new Set(['requested', 'scheduled', 'running', 'interrupted', 'cancel_requested']);
 // `applied` is the one relation whose label changes: the running version IS
-// the description's target, so the text is history, not a preview.
+// the description's target, so the text is history, not a preview. With no
+// offer, text of another target than the retained material Write names reads
+// "Earlier update"; of that target from another base, "Different range".
 const LETTER_LABELS = {
     pending: "What's new",
     applied: 'What changed in this version',
@@ -387,9 +389,10 @@ function endedRequestNote(request) {
  * presentation descriptor, pure but for the clock `relativeAge` reads.
  *
  * `state: 'none'` hides the section; `'empty'` shows it without text, offering
- * Write for the update on offer. `write` is the one authoring control: Write
- * for the offered or just-consumed material range, Rewrite when that range
- * is already described; historical text remains readable.
+ * Write for the update on offer or its retained material. `write` is the one
+ * authoring control: Write for such a range nothing describes yet, Rewrite for
+ * the shown text's own range (an applied one included), disabled while a
+ * requested task still runs; historical text remains readable.
  */
 export function updateLetterView(data = {}, phase = '') {
     // No record yet still offers Write for an update on offer: the server checks the range.
@@ -403,17 +406,19 @@ export function updateLetterView(data = {}, phase = '') {
     const state = letter.state === 'failed' ? 'failed' : (markdown ? 'ready' : 'empty');
     const runningBase = String(data.running_sha || data.current_sha || '');
     const latestTarget = String(data.checked_target_sha || data.latest_sha || '');
-    const checked = runningBase && latestTarget && runningBase !== latestTarget
+    const offered = data.available && runningBase && latestTarget && runningBase !== latestTarget
         && (!letter.checked_key || sameRange(letter.checked_key, { base_sha: runningBase, target_sha: latestTarget }))
         ? { ...(letter.checked_key || {}), base_sha: runningBase, target_sha: latestTarget } : null;
-    const offered = data.available ? checked : null;
+    // Two different checked SHAs do not prove an incoming change (a merge may already hold its target). With nothing
+    // on offer, Write follows the material retained for exactly the checked target: a check stores it only for a
+    // non-empty range and keeps it after apply. It names what to describe, not what the server adopted.
     const materialKey = letter.material?.key;
     const consumed = !data.available && materialKey?.base_sha && materialKey.base_sha !== materialKey.target_sha
         && materialKey.target_sha === latestTarget
         && (!data.update_channel || materialKey.update_channel === data.update_channel)
         && (!data.target_ref || materialKey.target_ref === data.target_ref) ? materialKey : null;
     const request = requestView(letter);
-    if (!markdown && !checked && !consumed && !request?.live && state !== 'failed') return noLetterView();
+    if (!markdown && !offered && !consumed && !request?.live && state !== 'failed') return noLetterView();
     // The host's own fact about the update on offer, whatever text is shown and whether or not one exists:
     // only the check facts of exactly that range speak for it.
     const over = offered && sameRange(letter.qualification, offered) ? updateOverReview(letter.qualification) : null;
@@ -433,9 +438,12 @@ export function updateLetterView(data = {}, phase = '') {
         || (failedKey.base_sha === runningBase && failedKey.target_sha === latestTarget))
         ? { kind: String(letter.error_kind || ''), text: String(letter.error_text || ''),
             failedAt: String(letter.failed_at || ''), key: failedKey || null } : null;
-    // A level check has no range: material keeps the last non-empty one, even after apply.
-    const writeKey = offered || consumed || checked || (markdown && letter.key?.base_sha ? letter.key : null);
-    const earlier = Boolean(markdown && writeKey && !sameRange(letter.key, writeKey));
+    // Write targets the update on offer, else its retained material; with neither, Rewrite rephrases the shown text.
+    const writeKey = offered || consumed || (markdown && letter.key?.base_sha ? letter.key : null);
+    const otherRange = Boolean(markdown && writeKey && !sameRange(letter.key, writeKey));
+    // Text ending at the retained material's own target from another base is a different range, neither earlier nor
+    // applied. Ranges stay exact SHA pairs and the material passed its channel/ref gate, so Write keeps its key.
+    const otherBase = Boolean(otherRange && consumed?.target_sha && letter.key?.target_sha === consumed.target_sha);
     const rewriting = Boolean(writeKey && markdown && sameRange(letter.key, writeKey));
     const write = writeKey ? {
         mode: rewriting ? 'rewrite' : 'write',
@@ -457,9 +465,12 @@ export function updateLetterView(data = {}, phase = '') {
             ? 'Previous description kept.' : 'No description is available yet.'}`;
     } else if (!markdown) {
         note = endedRequestNote(request) || 'No description of this update yet.';
-    } else if (earlier) {
+    } else if (otherBase) {
+        note = `This description covers the same target from another starting version (${shortRange(letter.key)}).`;
+    } else if (otherRange) {
         note = `This description covers an earlier update (${shortRange(letter.key)}).`;
-    } else if (!offered && !descriptionCurrent && relation !== 'applied') {
+    } else if (!offered && !descriptionCurrent && relation !== 'applied' && !sameRange(letter.key, consumed)) {
+        // Text saved for the retained material keeps the old text's ancestry until a check: not earlier, not applied.
         note = 'This description was written for an earlier update.';
     }
     const ended = request && sameRange(request.key, writeKey) ? endedRequestNote(request) : '';
@@ -472,7 +483,8 @@ export function updateLetterView(data = {}, phase = '') {
         meta,
         failure,
         descriptionCurrent,
-        label: earlier && !checked ? 'Earlier update' : (LETTER_LABELS[relation] || "What's new"),
+        label: otherBase ? 'Different range'
+            : (otherRange && !offered ? 'Earlier update' : (LETTER_LABELS[relation] || "What's new")),
         note,
         covers: markdown ? shortRange(letter.key) : '',
         write,
@@ -826,7 +838,7 @@ export function initUpdates({ mount, state, ws }) {
         letterProvenance.textContent = view.markdown ? `Written by Ouroboros${view.meta.authorVersion
             ? ` ${view.meta.authorVersion}` : ''}${author}${view.meta.targetVersion
             ? ` about ${view.meta.targetVersion}` : ''}.${view.covers ? ` Changes ${view.covers}.` : ''}`
-            : (view.write ? `The update on offer: changes ${shortRange(view.write.key)}.` : '');
+            : (view.write ? `Changes ${shortRange(view.write.key)}.` : '');
         letterProvenance.hidden = !letterProvenance.textContent;
         letterOver.textContent = view.over;
         letterOver.hidden = !view.over;

@@ -771,20 +771,26 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
 
 @pytest.mark.parametrize("channel", ["stable", "qa", "development"])
 def test_applied_update_button_admits_retained_range(subscription_ui, door, tmp_path, channel):
-    """Real SPA button → gateway → admitted task after a level check kept older prose."""
+    """Real SPA button → gateway → admitted task → its save, on a merged install after a level check: the serving
+    merge holds the official target, so the checked pair names nothing incoming and Write follows the retained
+    material. Older prose reads "Earlier update"; the text saved for the material reads neutrally until the next
+    check refreshes its ancestry; with no text, Details name the range and no offer."""
     from ouroboros import update_letter as ul
     from tests.test_update_description import TARGET, NEWER, _request, _finish
 
     ui = subscription_ui
+    merge = "d" * 40
     recent = {"base_sha": TARGET, "target_sha": NEWER, "update_channel": channel,
               "target_ref": {"development": "managed/ouroboros", "qa": "managed/ouroboros-stable",
                              "stable": "managed/main"}[channel]}
-    _offer(door.root, state="ready", text="Older update: widgets and sharing.", revision=23,
-           checked_key={**recent, "base_sha": NEWER}, material={"key": recent, "text_bytes": 123})
+    # What the level check recorded: the pair M..N and, for the older text it showed, that its target is inside M.
+    level = {"checked_key": {**recent, "base_sha": merge}, "material": {"key": recent, "text_bytes": 123},
+             "checked_running_sha": merge, "target_in_running": True, "target_in_for": TARGET}
+    _offer(door.root, state="ready", text="Older update: widgets and sharing.", revision=23, **level)
     status = {**_status(FIXTURE["small"], {}), "available": False, "check_ok": True,
-              "current_sha": NEWER, "running_sha": NEWER, "latest_sha": "", "checked_target_sha": NEWER,
+              "current_sha": merge, "running_sha": merge, "latest_sha": "", "checked_target_sha": NEWER,
               "current_version": "7.11.1-alpha.0", "update_channel": channel, "target_ref": recent["target_ref"]}
-    calls = []
+    calls, sockets = [], []
 
     def respond(route):
         path = urlparse(route.request.url).path
@@ -797,18 +803,28 @@ def test_applied_update_button_admits_retained_range(subscription_ui, door, tmp_
             projected = ul.project_letter_for_panel(status, drive_root=door.root)
             route.fulfill(content_type="application/json", body=json.dumps({**status, "letter": projected}))
 
+    def connect(socket):
+        sockets.append(socket)
+        socket.send(json.dumps({"type": "heartbeat"}))
+
+    def saved_shows(text):  # the server's own frame after a save; the status read brings the text
+        sockets[-1].send(json.dumps({"type": "update_progress_changed"}))
+        page.wait_for_function("t => document.querySelector('#updates-letter-body').textContent.includes(t)", arg=text)
+
     page = ui["new_page"](viewport={"width": 1422, "height": 1058}, color_scheme="dark")
-    page.route_web_socket("**/ws", lambda socket: socket.send(json.dumps({"type": "heartbeat"})))
+    page.route_web_socket("**/ws", connect)
     page.route("**/api/update/status", respond)
     page.route("**/api/update/check", respond)
     page.route("**/api/update/description", respond)
     page.goto(ui["url"] + "/")
     page.click('[data-nav-page="dashboard"]')
     page.click('[data-dashboard-tab="updates"]')
-    button = page.locator("#updates-letter-write")
+    button, label, note = (page.locator(f"#updates-letter-{part}") for part in ("write", "label", "note"))
+    provenance = page.locator("#updates-letter-provenance")
     button.wait_for()
     assert button.inner_text() == "Write description"
-    assert page.locator("#updates-letter-label").inner_text() == "Earlier update"
+    assert label.inner_text() == "Earlier update"
+    assert note.inner_text() == f"This description covers an earlier update ({BASE[:8]} → {TARGET[:8]})."
     assert "Older update" in page.locator("#updates-letter-body").inner_text()
     output = diagnostic_directory(tmp_path, "update-range", publish=True)
     page.screenshot(path=str(output / f"{channel}-retained.png"))
@@ -820,6 +836,25 @@ def test_applied_update_button_admits_retained_range(subscription_ui, door, tmp_
     assert task["metadata"]["update_description"]["key"] == recent
     assert f"{TARGET}..{NEWER}" in task["text"]
     assert ul.read_record(door.root)["text"] == "Older update: widgets and sharing."
-    # The public API still lets an owner intentionally rephrase the retained historical text.
+    # The requested task saves the retained range; until the next check its ancestry still describes the older
+    # text, so the heading is neutral, no note calls it earlier and Rewrite names its own range.
+    saved = ul.save_description("What this update brings: a calmer Updates panel.", TARGET, NEWER, 23,
+                                author={"task_id": task["id"], "model": "test"}, drive_root=door.root)
+    assert saved["outcome"] == "saved"
     _finish(door.root, task["id"], "completed")
-    assert _request(door, mode="rewrite").status_code == 200
+    saved_shows("a calmer Updates panel")
+    page.wait_for_function("document.querySelector('#updates-letter-write').textContent === 'Rewrite'")
+    assert label.inner_text() == "What's new" and note.is_hidden()
+    assert f"Changes {TARGET[:8]} → {NEWER[:8]}." in provenance.text_content()
+    page.screenshot(path=str(output / f"{channel}-saved.png"))
+    # The public API still lets an owner intentionally rephrase the saved text.
+    rephrase = _request(door, mode="rewrite", base=TARGET, target=NEWER)
+    assert rephrase.status_code == 200
+    _finish(door.root, rephrase.json()["task_id"], "completed")
+    # With no text at all, Write still names the retained range and Details name it without claiming an offer.
+    _offer(door.root, **level)
+    sockets[-1].send(json.dumps({"type": "update_progress_changed"}))
+    page.wait_for_function("document.querySelector('#updates-letter-write').textContent === 'Write description'")
+    assert label.inner_text() == "What's new" and note.inner_text() == "No description of this update yet."
+    assert provenance.text_content() == f"Changes {TARGET[:8]} → {NEWER[:8]}."
+    page.screenshot(path=str(output / f"{channel}-letterless.png"))

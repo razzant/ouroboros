@@ -449,7 +449,7 @@ def _key_from_status(status: Dict[str, Any]) -> Dict[str, str]:
 
 
 def _range_key(candidate: Any) -> Optional[Dict[str, str]]:
-    """A key naming a real, non-empty range, else ``None``."""
+    """A key of two different SHAs, else ``None``; its Git range may still be empty (a merge holding its target)."""
     if not isinstance(candidate, dict):
         return None
     key = {field: str(candidate.get(field) or "") for field in _KEY_FIELDS}
@@ -633,7 +633,8 @@ def _safe_text(text: str) -> str:
 
 def legal_ranges(record: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
     """Ranges already offered: the last check, retained material, shown text and request.
-    A level check is empty; retained material still names the update just consumed."""
+    Each names two different SHAs whose Git range may be empty (a merge holding its target);
+    retained material still names the update just consumed."""
     record = record or {}
     provenance, text, _last_good = shown_letter(record)
     request = record.get("request") if isinstance(record.get("request"), dict) else {}
@@ -834,7 +835,7 @@ def author_request_text(record: Dict[str, Any], request: Dict[str, Any]) -> str:
         f"(channel {key.get('update_channel') or 'unknown'}, ref {key.get('target_ref') or 'unknown'}"
         + (f", target version {target_version}" if target_version else "") + "). "
         + saved + "\n\n" + _request_sources(record, key) + "\n\n"
-        "Write it for my human: what changes for them and for me once this update is applied, in the language we use "
+        "Write it for my human: what this update changes for them and for me, in the language we use "
         "together, as long and as structured as the change needs. Say honestly what was not verified where it matters; "
         "promise nothing about how applying will go. Save it with record_update_description("
         f"base_sha=\"{base}\", target_sha=\"{target}\", expected_revision={request['revision_at_request']}, text=...), "
@@ -921,8 +922,8 @@ def project_letter(
     both readers. Nothing here infers it from ``latest_sha``, which a passive read leaves
     empty exactly when the cached target has been consumed. ``description_current`` compares
     ranges only: a new post-merge run is a fact about the same range, never a stale text.
-    A record without a description projects only while it carries something to act on (an
-    offered range or a request); ``request`` is the caller's ``_request_view``.
+    A record without a description projects only while it carries something to act on (a
+    range ``legal_ranges`` names or a request); ``request`` is the caller's ``_request_view``.
     """
     if not record:
         return None

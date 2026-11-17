@@ -77,8 +77,8 @@ def _record_update_description(ctx: ToolContext, text: str = "", base_sha: str =
             + json.dumps(outcome, ensure_ascii=False))))
     if outcome["outcome"] == "range_not_offered":
         return _publish_tool_result(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED", text=(
-            "⚠️ RESOURCE_CONSTRAINT_BLOCKED: range not offered — no check, saved description or request names "
-            "this range; nothing was saved.\n" + json.dumps(outcome, ensure_ascii=False))))
+            "⚠️ RESOURCE_CONSTRAINT_BLOCKED: range not offered — no check, retained material, saved description or "
+            "request names this range; nothing was saved.\n" + json.dumps(outcome, ensure_ascii=False))))
     if source:
         outcome["text_file"] = source
     outcome["window_refresh"] = _hand_on_refresh(ctx)
@@ -148,7 +148,7 @@ def update_description_tool_entries() -> List[ToolEntry]:
                           "path": {"type": "string", "description": "The file: absolute, or relative to root."},
                           "root": {"type": "string", "description": "As in read_file; omitted, the root holding an "
                                                                     "absolute path, else your workspace."}}},
-        "base_sha": {"type": "string", "description": "Full SHA of the range's base (the running source)."},
+        "base_sha": {"type": "string", "description": "Full SHA of the range's base, not always the running source."},
         "target_sha": {"type": "string", "description": "Full SHA of the range's official target."},
         "expected_revision": {"type": "integer", "minimum": 0,
                               "description": "The revision of the record you read; 0 when it has none."},
