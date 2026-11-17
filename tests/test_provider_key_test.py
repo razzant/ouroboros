@@ -418,6 +418,8 @@ def test_provider_test_of_an_added_key_takes_a_model_its_own_server_serves():
 
 
 def test_catalog_is_used_only_for_compatible_discovery(monkeypatch):
+    from ouroboros.settings_defaults import OPENROUTER_DEFAULTS
+
     discoveries = []
     probes = []
 
@@ -435,7 +437,7 @@ def test_catalog_is_used_only_for_compatible_discovery(monkeypatch):
         "openrouter", {"OPENROUTER_API_KEY": "key"},
     ) == {"ok": True}
     assert discoveries == []
-    assert probes == ["google/gemini-3.8-flash"]
+    assert probes == [OPENROUTER_DEFAULTS["main"]]  # a bare router key is probed on the shipped Main
     assert provider_api._run_provider_test_with_settings("openai-compatible", {
         "OPENAI_COMPATIBLE_BASE_URL": "https://compat.example/v1",
     }) == {"ok": True}

@@ -787,6 +787,12 @@ def test_payload_effort_and_semantic_matrix_cover_all_current_carriers():
         "thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}
     }) == "high"
     assert payload_effort({"thinking": {"type": "disabled"}}) == "none"
+    assert payload_effort({"thinking": {"type": "between_tools"}}) == "none"  # Sonnet 5.5's off state
+    assert payload_effort({"extra_body": {"thinking": {"type": "between_tools"}}}) == ""  # Anthropic-native only
+    from ouroboros.provider_models import ANTHROPIC_THINKING_OFF_TYPES
+
+    for off_type in ANTHROPIC_THINKING_OFF_TYPES.values():  # every off state the Anthropic leaf writes reads back
+        assert payload_effort({"thinking": {"type": off_type}}) == "none", off_type
     assert payload_effort({
         "extra_body": {"reasoning": {"effort": "low", "exclude": False}}
     }) == "low"

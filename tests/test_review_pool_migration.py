@@ -28,6 +28,7 @@ from ouroboros import config as cfg
 from ouroboros import review_pool_migration as m
 from ouroboros import server_maintenance
 from ouroboros.settings_defaults import (
+    OPENROUTER_HELPER_DEFAULTS,
     OPENROUTER_REVIEW_DEFAULTS,
     RETIRED_COMMA_LIST_SETTING_KEYS,
     RETIRED_SETTING_KEYS,
@@ -182,7 +183,7 @@ ANTON_EXPECTED_EXECUTIONS = {
 # them), plus the deep row the legacy key synthesized.
 N1_EXPECTED_EXECUTIONS = {
     "triad": [
-        _seat("slot_1", "api_chat", "google/gemini-3.8-flash", "high", "document", "native", authored=False),
+        _seat("slot_1", "api_chat", "google/gemini-4-hydrogen", "high", "document", "native", authored=False),
         _seat("slot_2", "api_chat", "openai/gpt-6.1-sol", "high", "document", "native", authored=False),
         _seat("slot_3", "api_chat", "anthropic/claude-opus-5.5", "high", "document", "native", authored=False),
     ],
@@ -326,7 +327,7 @@ def test_the_nminus1_fixture_migrates_to_the_contract_catalog():
     factory = m.REVIEW_SEAT_RECOMMENDATION
     assert after == {"enabled": True, "items": [
         {"subagent_id": "review-1", "recommended_use": factory,
-         "route": {"kind": "api_model", "target_id": "google/gemini-3.8-flash"},
+         "route": {"kind": "api_model", "target_id": "google/gemini-4-hydrogen"},
          "effort": "high", "review_eligible": True, "minted_from": "factory_default"},
         {"subagent_id": "review-2", "recommended_use": factory,
          "route": {"kind": "api_model", "target_id": "openai/gpt-6.1-sol"},
@@ -806,8 +807,8 @@ def test_m1_a_never_configured_document_reads_the_factory_rows_at_the_seam(docum
     assert all(row["minted_from"] == "factory_default" and row["effort"] == "high" for row in _reviewers(items))
     assert [row["route"]["target_id"] for row in _reviewers(items)] == list(OPENROUTER_REVIEW_DEFAULTS["triad"])
     helpers = [row for row in items if not row.get("review_eligible")]
-    assert [row["subagent_id"] for row in helpers] == (
-        ["primary-builder", "fast-scout"] if "OPENROUTER_API_KEY" in document else [])
+    assert [row["subagent_id"] for row in helpers] == (["primary-builder", "fast-scout", *(
+        row_id for row_id, _model, _use in OPENROUTER_HELPER_DEFAULTS)] if "OPENROUTER_API_KEY" in document else [])
     assert not any(row.get("effort") or row.get("minted_from") for row in helpers)
     pool = rs.review_pool_rows(loaded)
     assert [row.slot_id for row in pool] == ["review-1", "review-2", "review-3"]

@@ -27,12 +27,12 @@ CLAUDEXOR_ADMISSION_POLL_SEC = 0.15
 # provider profiles gives onboarding, runtime defaults, and tests one vocabulary
 # instead of repeating model ids across those surfaces.
 OPENROUTER_DEFAULTS = {
-    "main": "google/gemini-3.8-flash",
+    "main": "google/gemini-4-hydrogen",
     "heavy": "",
     "light": "openai/gpt-6-luna",
     "vision": "",
     "consciousness": "",
-    "fallback": "openai/gpt-5.6-luna",
+    "fallback": "openai/gpt-6.1-terra",
     # Plain Sol, not the `-pro` routing slug: a pro-mode call bills the prompt
     # three to four times over (parallel test-time compute), so the density
     # witness it records can never admit a repository-sized pack, and every
@@ -42,7 +42,7 @@ OPENROUTER_DEFAULTS = {
 
 OPENROUTER_REVIEW_DEFAULTS = {
     "triad": (
-        "google/gemini-3.8-flash",
+        "google/gemini-4-hydrogen",
         "openai/gpt-6.1-sol",
         "anthropic/claude-opus-5.5",
     ),
@@ -51,6 +51,18 @@ OPENROUTER_REVIEW_DEFAULTS = {
     "scope": ("openai/gpt-5.6-terra",),
     "advisory": "anthropic/claude-sonnet-5",
 }
+
+# Ordinary helpers (row id, model, recommended use) any reachable OpenRouter adds to a factory catalog beside
+# Main, Light and the subscriptions (owner, 2026-11-16): Auto effort, never marked Reviewer, never added to a
+# catalog the owner saved (``subscription_install_presets.compile_available_subagents``).
+OPENROUTER_HELPER_DEFAULTS = (
+    ("analysis-critic", "z-ai/glm-5.3",
+     "Use for analysis, labeling and an extra critical read from another model family."),
+    ("bulk-reader", "deepseek/deepseek-v4.1-flash-1017",
+     "Use as an inexpensive reader of large volumes of text and an independent view of them."),
+    ("alternative-voice", "moonshotai/kimi-k3.1-pro",
+     "Use as a stronger alternative voice on hard questions; its long answers cost more than the two lighter helpers."),
+)
 
 
 # Settings defaults

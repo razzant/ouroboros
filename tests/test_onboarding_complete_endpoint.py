@@ -17,6 +17,9 @@ from starlette.testclient import TestClient
 from ouroboros.settings_setup_contract import ONBOARDING_COMPLETED_KEY
 from ouroboros.subscription_install_presets import PRESET_MARKER_KEY
 from ouroboros.configured_subagents import SUBAGENTS_RECEIPT_KEY, SUBAGENTS_SETTING
+from ouroboros.settings_defaults import OPENROUTER_HELPER_DEFAULTS
+
+OPENROUTER_HELPERS = [model for _row_id, model, _use in OPENROUTER_HELPER_DEFAULTS]
 
 _PROVIDER_ENV = (
     "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY",
@@ -187,19 +190,20 @@ def test_fresh_install_applies_the_preset_in_one_write(onboarding):
     assert saved[PRESET_MARKER_KEY] == "4"
     assert saved["OUROBOROS_SUBAGENT_HARNESS"] == ""
     available = json.loads(saved[SUBAGENTS_SETTING])
-    # One list: the actors are Auto rows (the owner's effort range decides), so the
-    # review seats keep their pinned levels on minted rows of their own (the scope
-    # seat merges into the codex reviewer row); no advisory seat exists, and no
-    # lane key is written.
+    # One list: the actors are Auto rows (the owner's effort range decides), the connected
+    # OpenRouter's helpers among them, so the review seats keep their pinned levels on minted
+    # rows of their own (the scope seat merges into the codex reviewer row); no advisory seat
+    # exists, and no lane key is written.
     assert [(row["route"]["target_id"], row.get("review_eligible", False)) for row in available["items"]] == [
         ("claude=claude-opus-5-5", False), ("codex=gpt-5.6-sol", False), ("openai/gpt-5.6-luna", False),
+        *((model, False) for model in OPENROUTER_HELPERS),
         ("claude=claude-opus-5-5", True), ("codex=gpt-5.6-sol", True),
     ]
     assert all("name" not in row for row in available["items"])  # retired (1=A)
-    assert [row.get("effort") for row in available["items"]] == [None, None, None, "medium", "medium"]
+    assert [row.get("effort") for row in available["items"]] == [None] * 6 + ["medium", "medium"]
     receipt = json.loads(saved[SUBAGENTS_RECEIPT_KEY])
     assert receipt["available_subagents_fingerprint"]
-    assert receipt["review_pool"] == [row["subagent_id"] for row in available["items"][3:]]
+    assert receipt["review_pool"] == [row["subagent_id"] for row in available["items"][6:]]
     assert "OUROBOROS_REVIEWER_SLOTS" not in saved
     # Everything else of the transaction landed in the SAME file.
     assert saved["OUROBOROS_RUNTIME_MODE"] == "advanced"

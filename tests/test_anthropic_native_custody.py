@@ -474,6 +474,72 @@ def test_invalid_json_after_repair_commits_no_anthropic_evidence(tmp_path, monke
     assert not (root / "state" / wire.REQUEST_WIRE_STATE_FILE).exists()
 
 
+class _NativeBody:
+    status_code, reason, text = 200, "OK", ""
+    url = "https://api.anthropic.example/v1/messages"
+
+    def __init__(self, body):
+        self.body = body
+
+    def json(self):
+        return copy.deepcopy(self.body)
+
+
+def test_sonnet_5_5_none_sends_its_off_state_once_and_replays_the_signed_note(tmp_path, monkeypatch):
+    """Sonnet 5.5 refuses "disabled": requested none is its own between_tools, sent once and
+    disclosed none/none; the signed note it writes beside a tool call replays unchanged."""
+    monkeypatch.setattr(wire, "canonical_wire_evidence_root", lambda: tmp_path / "wire")
+    target = _target(model="claude-sonnet-5-5")
+    tools = [{"type": "function", "function": {
+        "name": "probe_a", "description": "Probe.",
+        "parameters": {"type": "object", "properties": {"value": {"type": "integer"}}},
+    }}]
+    tool_turn = [
+        {"type": "thinking", "thinking": "progress note", "signature": "sig-note"},
+        {"type": "tool_use", "id": "tool-A", "name": "probe_a", "input": {"value": 1}},
+    ]
+    replies = [  # empty usage, like the tests above: nothing here prices a model
+        {"content": tool_turn, "stop_reason": "tool_use", "usage": {}},
+        {"content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn", "usage": {}},
+    ]
+    sent = []
+
+    def post(*_args, **kwargs):
+        sent.append(copy.deepcopy(kwargs["json"]))
+        return _NativeBody(replies[len(sent) - 1])
+
+    import requests
+
+    monkeypatch.setattr(requests, "post", post)
+    client = LLMClient(api_key="unused")
+    # No up-front thinking: the note comes after an earlier call's result, beside the next call.
+    history = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "", "tool_calls": [{
+        "id": "tool-0", "type": "function", "function": {"name": "probe_a", "arguments": '{"value": 0}'},
+    }]}, {"role": "tool", "tool_call_id": "tool-0", "content": "result-0"}]
+    with usage_scope(UsageScope(drive_root=tmp_path / "usage", task_id="sonnet-none")):
+        message, usage = client._chat_anthropic(target, history, tools, "none", 64, "auto")
+        assert len(sent) == 1
+        assert sent[0]["thinking"] == {"type": "between_tools"}
+        assert "output_config" not in sent[0] and "tool_choice" not in sent[0]
+        assert (usage["request_wire"]["requested_effort"], usage["request_wire"]["applied_effort"]) == ("none", "none")
+        assert usage.get("reasoning_effort_clamped") is None
+        assert [call["id"] for call in message["tool_calls"]] == ["tool-A"]
+        receipt = message[ANTHROPIC_NATIVE_RECEIPT_KEY]
+        assert json.loads(receipt["content_json"]) == tool_turn
+
+        final, _usage = client._chat_anthropic(
+            target, [*history, message, {"role": "tool", "tool_call_id": "tool-A", "content": "result-A"}],
+            tools, "none", 64, "auto",
+        )
+    assert len(sent) == 2
+    assert sent[1]["thinking"] == {"type": "between_tools"}
+    assert [row["role"] for row in sent[1]["messages"]] == ["user", "assistant", "user", "assistant", "user"]
+    assert sent[1]["messages"][3] == {"role": "assistant", "content": tool_turn}
+    assert sent[1]["messages"][4]["content"][0]["tool_use_id"] == "tool-A"
+    assert final["content"] == "done"
+    assert final[ANTHROPIC_CONSUMED_RECEIPTS_KEY] == [receipt["content_sha256"]]
+
+
 def test_main_preserves_private_receipt_but_persists_only_public_projection(
     tmp_path, monkeypatch,
 ):
