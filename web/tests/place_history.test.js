@@ -60,12 +60,15 @@ function mount(f, options = {}, currentPlace = place) {
     return reader;
 }
 
-test('the conversation\'s state card says a place only hears while consciousness is off; Paused keeps its words', () => {
-    // Owner 06.11: Off left 28 places hearing while every card still said it «hears, wakes, speaks and acts here».
-    const off = (state) => placeHistoryState(normalizePlace({ ...rawPlace(), state, only_hears: true }));
-    assert.equal(off('active'), 'Active, consciousness off: it only hears here.');
-    assert.equal(off('silent'), 'Silent, consciousness off: it only hears here.');
-    assert.equal(off('paused'), 'Paused now: it does not wake or act here; what the connector still reports is saved.');
+test('the conversation\'s state card says why a place is quiet in the host\'s words; Paused keeps its words', () => {
+    // Owner 06.11: Off left 28 places hearing while every card still said it «hears, wakes, speaks and acts here»;
+    // owner 15.11 (5A): the same one cause the row and the sheet say.
+    const note = 'Consciousness is off: it only hears here and answers nothing until you turn it on.';
+    const quiet = { cause: 'off', word: 'Hears only · consciousness off', note, door: 'consciousness' };
+    const off = (state, extra = { quiet }) => placeHistoryState(normalizePlace({ ...rawPlace(), state, ...extra }));
+    assert.equal(off('active'), note);
+    assert.equal(off('silent'), note);
+    assert.equal(off('paused', {}), 'Paused now: it does not wake or act here; what the connector still reports is saved.');
     assert.equal(placeHistoryState(place), 'Active now: it hears, wakes, speaks and acts here.');
     assert.equal(placeHistoryState(normalizePlace({ ...rawPlace(), state: 'silent' })),
         'Silent now: it still hears and wakes here; what it would say or change here is held.');

@@ -73,10 +73,9 @@ export function placeRoomsHtml({ rooms = null, coverage = null, error = '' } = {
 }
 
 export function placeHistoryState(place) {
-    // While consciousness is off a place that is not Paused only hears (the host's `only_hears`): nothing wakes it.
-    const off = place.onlyHears ? { silent: 'Silent, consciousness off: it only hears here.',
-        active: 'Active, consciousness off: it only hears here.' } : {};
-    return off[place.state] || { silent: 'Silent now: it still hears and wakes here; what it would say or change here is held.',
+    // Why it is quiet now, by its one cause, in the host's words (owner 15.11, 5A).
+    if (place.quiet?.note) return place.quiet.note;
+    return { silent: 'Silent now: it still hears and wakes here; what it would say or change here is held.',
         paused: 'Paused now: it does not wake or act here; what the connector still reports is saved.',
         active: 'Active now: it hears, wakes, speaks and acts here.' }[place.state] || 'The current Place state is unavailable.';
 }

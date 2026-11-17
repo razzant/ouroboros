@@ -246,7 +246,7 @@ test('skill review paint changes only its generated opening, in legacy and lazy 
 // display table (which cannot detect a missing producer entry).
 test('command, plan and paused-evolution producer variants are covered', () => {
     const cases = [
-        ['server.py', 'command_reply', '🧠 Background consciousness: ', 'off'],
+        ['ouroboros/consciousness_view.py', 'command_reply', '🧠 Consciousness: ', 'Only when you write to it — 2 places are heard, not answered.'],
         ['ouroboros/tools/plan_ask.py', 'host_progress', '📐 Plan: ', 'ask a1 on revision 1 — sending to 2 participants.'],
         ['supervisor/evolution_lifecycle.py', 'evolution_notice', '🧬 Evolution paused: ', 'its next cycle was not admitted (consciousness_allowance_exhausted). /evolve start resumes it.'],
         // An OpenAI attempt and the stream's own search event stay two rows, each without its mark.
@@ -270,8 +270,8 @@ test('command, plan and paused-evolution producer variants are covered', () => {
 
 test('the switch-off row from /bg stop and from the mind\'s own toggle loses its mark like every consciousness notice', () => {
     // consciousness_view.off_sentence opens the row (owner 09.11); /bg (server.py) and the runtime control add «🧠 ».
-    assert.ok(readFileSync(new URL('../../ouroboros/consciousness_view.py', import.meta.url), 'utf8').includes('Consciousness off: no own wakes'));
-    const raw = '🧠 Consciousness off: no own wakes, and 2 places only hear until Start. Stopping now: its wake-up.';
+    assert.ok(readFileSync(new URL('../../ouroboros/consciousness_view.py', import.meta.url), 'utf8').includes('Consciousness off: Ouroboros acts only when you write to it'));
+    const raw = '🧠 Consciousness off: Ouroboros acts only when you write to it. 2 places are heard, not answered, until you turn it on. Stopping now: its wake-up.';
     for (const [path, type] of [['server.py', 'command_reply'], ['supervisor/events_runtime_controls.py', 'consciousness_notice']]) {
         assert.ok(readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8').includes('f"🧠 {result}'));
         assert.equal(hostNoticeDisplayText(raw, type), raw.slice('🧠 '.length));

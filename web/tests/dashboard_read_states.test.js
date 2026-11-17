@@ -101,14 +101,14 @@ test('Activity failed reads stay unknown; independent successful empty state sta
     assert.match(message(section(mount, 'queue')), /Could not load.*unknown/);
     assert.doesNotMatch(section(mount, 'queue').textContent, /Nothing running/);
     assert.match(message(section(mount, 'background')), /Could not load/);
-    assert.equal(section(mount, 'background').querySelectorAll('button').length, 0, 'unknown must not invent Start');
+    assert.equal(section(mount, 'background').querySelectorAll('button').length, 0, 'unknown must not invent Turn on');
     assert.match(section(mount, 'schedules').textContent, /No scheduled tasks/);
     assert.equal(message(section(mount, 'schedules')), '');
     emptyActivity(routes);
     await activity.refresh();
     assert.match(section(mount, 'queue').textContent, /Nothing running or queued/);
     assert.equal(message(section(mount, 'queue')), '');
-    assert.equal(section(mount, 'background').querySelector('button').textContent, 'Start');
+    assert.equal(section(mount, 'background').querySelector('button').textContent, 'Turn on');
 });
 
 test('Activity keeps last-known data and actions on refresh failure, then reconciles recovery', async (t) => {

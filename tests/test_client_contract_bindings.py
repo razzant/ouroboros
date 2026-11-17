@@ -480,9 +480,10 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     assert set(place["model_route"]) == _declared("PlaceModelRoute")
     assert validate_ingress({**place, "model_route": {"value": "x", "layer": "unknown"}}, contract_typed_dict("PlaceSummary"))
     assert set(place) <= _declared("PlaceSummary") and "connector_label" not in place
-    # The derived «only hears» fact is an optional boolean: present, it validates; any other type does not.
-    assert not validate_ingress({**place, "only_hears": True}, contract_typed_dict("PlaceSummary"))
-    assert validate_ingress({**place, "only_hears": "consciousness_off"}, contract_typed_dict("PlaceSummary"))
+    # The derived quiet cause is an optional object of words: present, it validates; any other type does not.
+    quiet = {"cause": "off", "word": "Hears only · consciousness off", "note": "…", "door": "consciousness"}
+    assert not validate_ingress({**place, "quiet": quiet}, contract_typed_dict("PlaceSummary"))
+    assert validate_ingress({**place, "quiet": "consciousness_off"}, contract_typed_dict("PlaceSummary"))
     assert [(n["text"], n["author"]) for n in place["notes"]] == [(connect["note"], "owner")]
     assert place["circle"]["circle_id"] == circle["circle_id"] and place["circle"]["placed_by"] == "owner"
     assert not validate_ingress(place["circle"], contract_typed_dict("PlaceCircleChoice"))

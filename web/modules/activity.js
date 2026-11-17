@@ -33,6 +33,8 @@ import { markView, statusMarkHtml } from './status_mark.js';
 import { whenLabel } from './storage_format.js';
 import { showToast } from './toast.js';
 import { normalizeConsciousness } from './consciousness_api.js';
+import { switchActionWords, turnConsciousness } from './consciousness_switch.js';
+import { autonomyOf } from './consciousness_autonomy.js';
 import { allowanceText } from './consciousness_words.js';
 
 function esc(value) {
@@ -554,9 +556,9 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         if (typeof stateData?.bg_consciousness_enabled !== 'boolean') throw new Error('Background state unavailable');
         const enabled = stateData.bg_consciousness_enabled;
         const bg = (stateData && stateData.bg_consciousness_state) || {};
-        const detail = esc(bg.detail || (enabled ? 'enabled' : 'disabled'));
+        const detail = esc(String(bg.detail || '').replace(/\.$/, ''));
         const facts = [
-            bg.level ? `autonomy ${esc(bg.level)}` : '',
+            enabled && bg.level ? esc(autonomyOf(bg.level)?.label || bg.level) : '',
             bg.last_wake_at ? `last wake ${esc(whenLabel(bg.last_wake_at))}${bg.last_wake_outcome ? ` (${esc(bg.last_wake_outcome)})` : ''}` : '',
             // The money line in the Consciousness tab's own words ("≥ $1.50 of $20.00 in the last 24 hours").
             esc(allowanceText(normalizeConsciousness(bg, { enabled }))),
@@ -564,9 +566,9 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         ].filter(Boolean).join(' · ');
         return `<div class="ui-row activity-row">
             <span class="ui-row-title activity-name">Consciousness</span>
-            <span class="ui-row-meta activity-sub">${enabled ? 'enabled' : 'disabled'}${detail ? ` · ${detail}` : ''}${facts ? ` · ${facts}` : ''}</span>
+            <span class="ui-row-meta activity-sub">${esc(bg.position || (enabled ? 'enabled' : 'disabled'))}${detail ? ` · ${detail}` : ''}${facts ? ` · ${facts}` : ''}</span>
             <div class="ui-row-actions activity-row-actions">
-                <button type="button" class="btn btn-sm btn-default" data-act="bg-toggle" data-enabled="${enabled ? '1' : '0'}"${ws ? '' : ' disabled'}>${enabled ? 'Stop' : 'Start'}</button>
+                <button type="button" class="btn btn-sm btn-default" data-act="bg-toggle" data-enabled="${enabled ? '1' : '0'}"${ws ? '' : ' disabled'}>${esc(switchActionWords(enabled))}</button>
                 <button type="button" class="btn btn-sm btn-ghost" data-act="bg-open" aria-label="Open Dashboard › Consciousness"${openDashboardTab ? '' : ' hidden'}>Details</button>
             </div>
         </div>${keptServicesHtml(kept)}`;
@@ -794,11 +796,10 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 });
                 showToast(...keptStopToast(receipt, name));
             } else if (act === 'bg-toggle') {
-                const on = btn.dataset.enabled === '1';
-                // Reuse the existing direct control command (same as the chat header
-                // toggle); /bg is a control slash-command, not a chat message to the agent.
-                ws?.send?.({ type: 'command', cmd: `/bg ${on ? 'stop' : 'start'}`, ui_control: { name: 'consciousness_toggle' } });
-                await new Promise((resolve) => setTimeout(resolve, 400));
+                // The one switch (consciousness_switch.js): it names what changes, then sends the Dashboard's /bg.
+                if (await turnConsciousness(btn.dataset.enabled === '1' ? 'off' : 'on', { ws })) {
+                    await new Promise((resolve) => setTimeout(resolve, 400));
+                }
             }
         } catch (exc) {
             // A 404 is the documented completion race (the run finished on its own)

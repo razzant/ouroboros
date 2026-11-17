@@ -28,8 +28,8 @@ import { openConfirmDialog } from './confirm_dialog.js';
 const SEP = ' · ';
 const UNASSIGNED = 'none';
 const OWNER_VOICE = new Set(['owner', 'migration']);
-// The state word's tone: a live place is the ok dot, a silent or paused one the muted dot, and so is a place that only
-// hears because consciousness is off (the host's `only_hears`).
+// The state word's tone: a live place is the ok dot, a silent or paused one the muted dot, and so is a place a cause
+// keeps quiet (the host's `quiet`: the switch off, Panic, the allowance spent, Advises).
 const STATE_TONE = { active: 'ok', silent: 'muted', paused: 'muted' };
 
 /** «model glm-5.3»: a model named as a fact of a row or a head. The words name a model, so the overlay leaves them. */
@@ -48,25 +48,29 @@ export function placeRowHtml(place, { title = '', source = '' } = {}) {
     const readiness = place.readiness && place.readiness.tone !== 'ok'
         ? tr(`places.readiness.${place.readiness.text}`, place.readiness.text) : '';
     const word = tr(`places.state.${place.state}`, placeStateWord(place.state));
-    const state = place.onlyHears ? `${word}${SEP}${tr('places.only_hears.consciousness_off', 'consciousness off')}` : word;
+    // Why it is quiet, in the host's words (owner 15.11, 5A: the Panic, the switch, the allowance, the level), in place
+    // of a stored word it does not do now; the stored choice stays the sheet's.
+    const state = place.quiet ? tr(place.quiet.word, place.quiet.word) : word;
     const when = lastEventText(place);
     const name = title || placeTitle(place);
     // The service as a quiet label, unless the name already is it (a whole account no status has named yet).
     const service = source || placeService(place);
     const where = sameWords(name, service) ? '' : service;
     const description = place.description?.text || '';
-    const tone = place.onlyHears ? 'muted' : STATE_TONE[place.state] || 'muted';
+    const tone = place.quiet ? 'muted' : STATE_TONE[place.state] || 'muted';
     // Its model is a fact of the row only when the place overrides: an inheriting place says nothing.
     const own = overrides(place) ? place.model || place.modelRoute.value : '';
+    // The state and why it is quiet own the status slot; the last event rides the quiet service label, so a cause never
+    // reads as «since then» (Panic · yesterday).
     const facts = `<span class="ui-status" data-tone="${tone}">${escapeHtml(state)}</span>${readiness
-        ? `${SEP}<span data-tone="${escapeHtml(place.readiness.tone)}">${escapeHtml(readiness)}</span>` : ''}${SEP}${escapeHtml(when)}${own
+        ? `${SEP}<span data-tone="${escapeHtml(place.readiness.tone)}">${escapeHtml(readiness)}</span>` : ''}${own
         ? `${SEP}${modelFactHtml(own)}` : ''}`;
     const label = fmt(where ? 'Open {place} ({where}): {facts}' : 'Open {place}: {facts}', { place: name, where,
         facts: [state, readiness, fmt('last event {when}', { when }), own ? fmt('model {model}', { model: placeModelWord(own) }) : '']
             .filter(Boolean).join('; ') });
     return `<li><button type="button" class="place-row" data-place-open="${escapeHtml(place.id)}" data-state="${escapeHtml(place.state || '')}" aria-label="${escapeHtml(label)}">
-        <span class="place-row-main"><span class="place-glyph" aria-hidden="true">${skillIconHtml(place.icon, 18)}</span><span class="consciousness-place-name" data-i18n-authored>${escapeHtml(name)}</span>${where
-            ? `<span class="place-row-source" data-i18n-authored>${escapeHtml(where)}</span>` : ''}<span class="consciousness-place-facts">${facts}</span></span>
+        <span class="place-row-main"><span class="place-glyph" aria-hidden="true">${skillIconHtml(place.icon, 18)}</span><span class="consciousness-place-name" data-i18n-authored>${escapeHtml(name)}</span><span class="place-row-source">${where
+            ? `<span data-i18n-authored>${escapeHtml(where)}</span>${SEP}` : ''}${escapeHtml(when)}</span><span class="consciousness-place-facts">${facts}</span></span>
         ${description ? `<span class="place-row-meta" data-i18n-authored>${escapeHtml(description)}</span>` : ''}
     </button></li>`;
 }

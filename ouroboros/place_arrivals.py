@@ -445,12 +445,42 @@ def account_candidates(root, place_id):
     return _people(rows)
 
 
-def _people(rows):
-    """``account_candidates`` of one place's newest 50 arrival rows."""
+_SINCE = ("SELECT json_extract(body,'$.sender_session_id') AS actor, json_extract(body,'$.sender_label') AS label, "
+          "json_extract(body,'$.transport.actor.is_bot') AS bot, "
+          "json_extract(body,'$.transport.actor.kind') AS kind, "
+          f"json_extract(body,'$.historical_import.authorship') AS authorship FROM dialogue INDEXED BY dialogue_place_recent "
+          f"WHERE {_ARRIVAL} AND {_PLACE}=? AND ts>=? ORDER BY ts DESC LIMIT ?")
+PEOPLE_ROW_CAP = 2000  # per place: a busier week says «at least»
+
+
+def recent_people(root, place_ids, *, days: int, now: float | None = None) -> dict | None:
+    """The people who wrote in these places in the last ``days`` (the switch's preview: «how many people wrote there
+    lately»): ``{"by_place": {id: n}, "total": distinct across places, "capped": bool}``, or ``None`` when the index is
+    unreadable. One index range per place, at most ``PEOPLE_ROW_CAP`` newest rows each (``capped`` then); the same
+    filter as ``account_candidates``: no bots, no connected account's own imports, no chat or anonymous actor."""
+    import time as _time
+    from datetime import datetime, timezone
+
+    if not _dialogue_indexes(root):
+        return None
+    since = datetime.fromtimestamp((now or _time.time()) - days * 86400, timezone.utc).isoformat()
+    by_place, everyone, capped = {}, set(), False
+    with dialogue_store.transaction(root, write=False) as conn:
+        for place_id in dict.fromkeys(place_ids):
+            rows = conn.execute(_SINCE, (place_id, since, PEOPLE_ROW_CAP)).fetchall()
+            capped = capped or len(rows) >= PEOPLE_ROW_CAP
+            people = {person["platform_actor_id"] for person in _people(rows, limit=None)}
+            by_place[place_id] = len(people)
+            everyone |= people
+    return {"by_place": by_place, "total": len(everyone), "capped": capped}
+
+
+def _people(rows, limit=20):
+    """``account_candidates`` of one place's newest 50 arrival rows (``limit=None``: every person among ``rows``)."""
     people = {}
     for row in rows:
         actor = str(row['actor'] or '')
         if (actor and not row['bot'] and row['authorship'] != 'platform_account' and actor not in people
                 and row['kind'] not in {'chat', 'anonymous'}):
             people[actor] = {'platform_actor_id': actor, 'label': str(row['label'] or actor)}
-    return list(people.values())[:20]
+    return list(people.values())[:limit]
