@@ -91,8 +91,8 @@ def test_larger_or_fitting_route_keeps_bytes_and_smaller_route_uses_same_snapsho
 
 def test_a_narrowing_keeps_what_the_starts_request_took_with_no_memory(tmp_path, monkeypatch):
     """3A: Low's missed target names what the start's request took with no memory (``floor.no_memory_tokens``), the
-    start's fact. A route that narrows the shown view keeps it, as it keeps the start's Max room, so the mode chooser's
-    warning lasts until a new start measures again; a start without it gets none."""
+    start's fact. A route that narrows the shown view keeps it, as it keeps the start's Max room, so the mode chooser can
+    warn while later sends still miss Low, until a new start measures again; a start without it gets none."""
     _core, build = _built(tmp_path, monkeypatch, ratio=1, page_chars=400_000)
     plan = build(1_000_000)
 

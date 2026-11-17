@@ -103,8 +103,9 @@ def test_a_selection_declares_whether_the_story_it_shows_is_whole():
 
 def test_a_selection_keeps_what_the_starts_request_took_with_no_memory():
     """3A: Low's missed target at the start names what the request took with no memory (``floor.no_memory_tokens``),
-    the start's fact. A selection the mind makes keeps it, so the mode chooser's warning lasts until a new start
-    measures again (``context_measurement._no_memory_tokens``); a start that met its target adds none."""
+    the start's fact. A selection the mind makes keeps it, so the mode chooser can warn while later sends still miss
+    Low, until a new start measures again (``context_measurement._no_memory_tokens``); a start that met its target adds
+    none."""
     p, _snap = plan()
     shown = p.projection("max")
     missed = replace(p, max_projection=replace(shown, memory_facts={
