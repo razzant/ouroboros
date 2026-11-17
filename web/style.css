@@ -1601,10 +1601,10 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     --scroll-fade-top-clear: 0px;
     --scroll-fade-bottom: 0px;
     --scroll-fade-bottom-clear: 0px;
-    -webkit-mask-image: linear-gradient(180deg, transparent var(--scroll-fade-top-clear),
+    --scroll-fade-mask: linear-gradient(180deg, transparent var(--scroll-fade-top-clear),
         black var(--scroll-fade-top), black calc(100% - var(--scroll-fade-bottom)), transparent calc(100% - var(--scroll-fade-bottom-clear)));
-    mask-image: linear-gradient(180deg, transparent var(--scroll-fade-top-clear),
-        black var(--scroll-fade-top), black calc(100% - var(--scroll-fade-bottom)), transparent calc(100% - var(--scroll-fade-bottom-clear)));
+    -webkit-mask-image: var(--scroll-fade-mask);
+    mask-image: var(--scroll-fade-mask);
 }
 .scroll-fade-y[data-scroll-above] { --scroll-fade-top: var(--scroll-fade-edge); }
 .scroll-fade-y[data-scroll-below] { --scroll-fade-bottom: var(--scroll-fade-edge); }
@@ -9867,6 +9867,17 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     background-repeat: no-repeat;
     background-size: 8px 2px, 2px 12px, 8px 2px, 2px 12px;
     background-position: left -11px top -4px, left -11px top -4px,
+        right calc(var(--chat-feed-lane, 0px) - 11px) top -4px, right calc(var(--chat-feed-lane, 0px) - 11px) top -4px;
+    /* The corners stand on the line where rows start fading (.scroll-fade-y); they are the keys' cue, not moving
+       content, so four mask layers in the same boxes keep them whole over the fade. */
+    -webkit-mask-image: var(--scroll-fade-mask), linear-gradient(#000, #000), linear-gradient(#000, #000),
+        linear-gradient(#000, #000), linear-gradient(#000, #000);
+    mask-image: var(--scroll-fade-mask), linear-gradient(#000, #000), linear-gradient(#000, #000),
+        linear-gradient(#000, #000), linear-gradient(#000, #000);
+    mask-origin: border-box, content-box, content-box, content-box, content-box;
+    mask-repeat: no-repeat;
+    mask-size: auto, 8px 2px, 2px 12px, 8px 2px, 2px 12px;
+    mask-position: 0 0, left -11px top -4px, left -11px top -4px,
         right calc(var(--chat-feed-lane, 0px) - 11px) top -4px, right calc(var(--chat-feed-lane, 0px) - 11px) top -4px;
 }
 /* Forced colours drop gradients, the corners with them: there the keys get the system's ring, inset. */
