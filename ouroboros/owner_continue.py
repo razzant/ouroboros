@@ -46,7 +46,7 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.answer_facts import forwarded_bubble_matches, living_card_input, option_answer, press_record, row_source
+from ouroboros.answer_facts import card_input, forwarded_bubble_matches, option_answer, press_record, row_source
 from ouroboros.owner_words import (OWNER_CARD_INPUT, OWNER_PRESS, OWNER_SOURCES, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card,
                                    answered_card_reply, carded, reply_target, scheduled_text_items)
 from ouroboros.review_evidence_sections import renders_exactly
@@ -307,9 +307,9 @@ def _start_answer(root: pathlib.Path, task_id: str, row: dict, drafter: str) -> 
             quoted = quoted or _retained_start_quote(root, drafter, msg_id)
         except (StoreError, OSError, ValueError, TypeError):
             return None
-        if not quoted or not quotable_owner_row(quoted, source_root) or row_source(quoted, "owner_mailbox") != row["source"]:
+        if not quoted or not quotable_owner_row(quoted, source_root) or row_source(quoted, "owner_mailbox", source_root) != row["source"]:
             return None
-        block, asker = answered_card_source(quoted)
+        block, asker = answered_card_source(quoted, source_root)
         quiz_id = (block or {}).get("quiz_id")
         if not block and isinstance(carried := quoted.get("corpus_answer"), dict):
             asker, quiz_id = carried.get("source_task_id"), carried.get("quiz_id")
@@ -773,7 +773,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             continue  # form outcomes remain recoverable task evidence, never fabricated owner words
         if kind == "quiz_answer" and (entry.get("quiz_delivery") or {}).get("answer_snapshot"):
             entry = {**entry, "text": late_answer_owner_text(entry["quiz_delivery"]["answer_snapshot"])}
-        living = living_card_input(entry, root)
+        living = card_input(entry, root)
         if living:
             entry = {**entry, "text": living["content"]}
         files = kind in OWNER_SOURCE_KINDS and (entry.get("attachment_manifest") or "attachment_manifest_ref" in entry)
@@ -792,7 +792,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                 row.update(living)
             if target := row.get("reply_to") or reply_target(root, entry.get("reply_reference")):  # the message these words reply to
                 row["reply_to"] = target
-            later.append(carded(row, entry))  # a live delivery's card, or a late answer's snapshot, beside the words
+            later.append(carded(row, entry, root))  # a live delivery's card, or a late answer's snapshot, beside the words
             if files:
                 attached.append(entry)  # the files that message attached, staged in this task's own store
         elif kind == "relay_entry" and not entry.get("host_carried"):  # a carried row is the tree's, not this corpus
@@ -834,18 +834,12 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
 
 def _opening_message(root, result: dict, metadata: dict) -> dict:
     """Rebuild the opening from its own producer facts, including a submitted form or an answered quiz."""
-    from ouroboros.owner_words import answered_card_source
-
     original = {"source": "origin_message", "content": result.get("origin_message_text"),
                 "origin_message_ref": result.get("origin_message_ref")}
-    if living := living_card_input(metadata, root):
-        original.update(input_source=living["source"], words=living["content"],
-                        **{k: living[k] for k in ("reply_to", "source_task_id") if k in living})
-    block, asker = answered_card_source(metadata)
-    if block and (card := answered_card(block, original["content"])):
-        original["reply_to"] = answered_card_reply(card, asker)
-        if row_source({**metadata, "text": original["content"]}, "origin_message") == OWNER_PRESS:
-            original.update(input_source=OWNER_PRESS, source_task_id=asker, quiz_id=card.get("quiz_id"))
+    if submitted := card_input(metadata, root, "origin_message"):
+        if submitted["source"] != "origin_message":
+            original["input_source"] = submitted["source"]
+        original.update(words=submitted["content"], **{k: submitted[k] for k in ("reply_to", "source_task_id", "quiz_id") if k in submitted})
     return original
 
 
@@ -863,7 +857,7 @@ def _relay_owner_inputs(root, entry: dict, seen: dict):
         address = owner_row_address(row)
         if address in seen or not quotable_owner_row(row, source_root, accounts=accounts_by_root[key]):
             continue
-        item = living_card_input(row, source_root)
+        item = card_input(row, source_root)
         if not item:
             carried = row.get("corpus_answer") or {}
             target = carried.get("reply_to") or reply_target(source_root, row.get("reply_to"))
@@ -872,7 +866,7 @@ def _relay_owner_inputs(root, entry: dict, seen: dict):
                     **({"reply_to": target} if target else {})}
         files = [{**ref, "_owner_source_root": str(source_root)}
                  for ref in row.get("attachments") or [] if isinstance(ref, dict)]
-        yield carded({**item, "msg_id": address}, row), files
+        yield carded({**item, "msg_id": address}, row, source_root), files
 
 
 def continuation_room(drive_root: Any, predecessor_task_id: str, result: Dict[str, Any]) -> Dict[str, Any]:

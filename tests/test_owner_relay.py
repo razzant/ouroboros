@@ -1123,3 +1123,39 @@ def test_a_relay_built_before_act_labels_still_renders_a_press_as_a_press(tmp_pa
     assert "paper-maker" in messages[0]["content"] and "pressed" in relation_text({"relay": envelope})
     [act] = ctx._owner_directives
     assert act["source_task_id"] == "paper-maker" and act["relayed_from_task_id"] == "paper-courier"
+
+
+@pytest.mark.parametrize("kind", ["press", "comment", "unavailable"])
+def test_reference_only_answer_uses_its_source_store_for_history_and_receipt(tmp_path, kind):
+    from ouroboros.dialogue_provenance import quote_words, relation_text
+    from ouroboros.owner_quiz import record_asked, record_answered
+    from ouroboros.owner_relay import inject_relay, owner_quote
+    from ouroboros.owner_words import owner_words_contain
+
+    source_root, asker, quiz = tmp_path / "source", "reed-desk", "reed-choice"
+    label, comment = "Use the reed map", "  after dusk  " if kind == "comment" else ""
+    # The recipient has a different card under the same task and quiz ids.
+    for root, value in ((tmp_path, "unrelated answer"), (source_root, comment)):
+        if root == source_root and kind == "unavailable":
+            continue
+        record_asked(root, asker, quiz_id=quiz, question="Which map?", options=[label])
+        record_answered(root, asker, quiz_id=quiz, option_index=0, comment=value, request_id="reed-answer")
+    row = {"direction": "in", "text": comment or "1. " + label, "chat_id": 1, "ts": "2040-01-01T03:00:00Z",
+           "client_message_id": "reed-late", "late_answer": {"task_id": asker, "quiz_id": quiz},
+           "_owner_source_root": str(source_root)}
+    quote = owner_quote(tmp_path, row)
+    entry, created = write_relay(tmp_path, "reed-reader", relay_id="reed-relay", note="Read the choice",
+                                 quotes=[quote], teller_task_id="reed-teller", chat_id=1)
+    assert created
+    history = relation_text({"relay": entry["relay"]})
+    ctx, frames = context(tmp_path), []
+    inject_relay(ctx, entry, frames)
+    [received] = ctx._owner_directives
+    assert quote_words(row, source_root) == comment
+    assert not owner_words_contain(ctx, label) and not owner_words_contain(ctx, "unrelated answer")
+    assert ("Owner words quoted" in history) == bool(comment)
+    expected = {"press": "owner_press", "comment": "owner_mailbox", "unavailable": "owner_card_input"}[kind]
+    assert received["source"] == quote["input_source"] == expected
+    if kind != "unavailable":
+        assert received["content"] == row["text"] and received["reply_to"]["address"] == "quiz reed-choice of task reed-desk"
+        assert "Which map?" in quote["question_frame"] and "Which map?" in frames[0]["content"]

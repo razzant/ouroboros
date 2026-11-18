@@ -298,9 +298,9 @@ def _drain_incoming_messages(
                                                                            kind=SECRET_OUTCOME_ROW_KIND))
                     ack_content(entry)
                     continue
-            from ouroboros.answer_facts import living_card_input
+            from ouroboros.answer_facts import card_input
             from ouroboros.owner_words import OWNER_PRESS
-            living = living_card_input(entry, getattr(owner_ctx, "budget_drive_root", None) or drive_root)
+            living = card_input(entry, getattr(owner_ctx, "budget_drive_root", None) or drive_root)
             if kind in (KIND_QUIZ_CLOSED, KIND_CARD_INPUT):
                 _loop()._record_owner_directive(
                     owner_ctx, source=living.get("source", "owner_mailbox"), content=living.get("content", dmsg),
@@ -360,7 +360,7 @@ def _drain_incoming_messages(
                 msg_id=str(entry.get("msg_id") or ""),
                 # The same message relayed, or read from its room, is one row: its room and client id name it.
                 origin={**_arrival(held, entry.get("ts")), "client_message_id": entry.get("client_message_id"),
-                        "source_task_id": living.get("source_task_id")},
+                        "source_task_id": living.get("source_task_id"), "quiz_id": living.get("quiz_id")},
                 reply_to=living.get("reply_to") or answered_card_reply(*answered_card_source(entry))  # a late answer replies to its card
                 or reply_target(chats, entry.get("reply_reference")) or None,
             )

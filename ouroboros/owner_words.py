@@ -437,7 +437,7 @@ def directive_owner_rows(ctx: Any) -> List[Dict[str, Any]]:
     rows = []
     for item, ts, ref, door in _dated_directives(ctx):
         rows += _words_rows(item, carrier="ctx", task_id=task_id,
-                            content=door_text if door and door_text is not None else None, ts=ts, ref=ref)
+                            content=door_text if door and not item.get("quiz_id") and door_text is not None else None, ts=ts, ref=ref)
     return _deduped(rows)
 
 
@@ -475,7 +475,8 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
                           and (row.get("source") in (OWNER_PRESS, OWNER_CARD_INPUT) or _mapping(row.get("reply_to")).get("card_id"))), None)
     if source_text and opening_press is None and not any(row.get("source") == "origin_message" for row in rest):
         ids = {key: door[key] for key in ("reply_to", "client_message_id", "chat_id") if door and key in door}
-        rows = [{**ids, "source": "origin_message", "content": source_text}, *rest]
+        words = door["content"] if door and door.get("quiz_id") else source_text
+        rows = [{**ids, "source": "origin_message", "content": words}, *rest]
     else:
         rows = [*([door] if door is not None and not source_text else []), *rest]
     rows = [{**row, "content": _owner_content_projection(row.get("content"))} for row in rows]
@@ -657,17 +658,17 @@ def answered_card(block: Any, words: str) -> Dict[str, Any] | None:
     return {key: copy.deepcopy(block[key]) for key in CARD_FIELDS if key in block}
 
 
-def carded(row: Dict[str, Any], source: Any) -> Dict[str, Any]:
+def carded(row: Dict[str, Any], source: Any, root: Any = None) -> Dict[str, Any]:
     """``row`` with the card its words answer beside them (``answered_card_source(source)``) when that card records
     exactly these words: the asking task, the card's id and the card a Continue successor reads."""
-    block, asker = answered_card_source(source)
+    block, asker = answered_card_source(source, root)
     card = answered_card(block, row["content"])
     if card and all(isinstance(value, str) and value for value in (asker, card.get("quiz_id"))):
         row.update(source_task_id=asker, quiz_id=card["quiz_id"], card=card)
     return row
 
 
-def answered_card_source(row: Any) -> tuple:
+def answered_card_source(row: Any, root: Any = None) -> tuple:
     """``(block, asking task)`` of the card a row of my human's words answers, else ``(None, None)``: a relayed quiz row's
     ``quiz``, a live delivery's ``quiz_delivery`` snapshot, or a late answer's typed snapshot (``late_answer_ref``)."""
     row = _mapping(row)
@@ -675,10 +676,10 @@ def answered_card_source(row: Any) -> tuple:
         return row.get("quiz"), row.get("task_id")
     if delivery := _mapping(row.get("quiz_delivery")):
         return delivery.get("answer_snapshot"), delivery.get("task_id")
-    from ouroboros.owner_quiz import late_answer_ref
+    from ouroboros.owner_quiz import late_answer_ref, resolved_late_quiz
 
-    late = late_answer_ref(row.get("late_answer")) or {}
-    return _mapping(late.get("answer_snapshot")).get("quiz"), late.get("task_id")
+    late = late_answer_ref(row.get("late_answer"))
+    return (resolved_late_quiz(root, late) or None, late["task_id"]) if late else (None, None)
 
 
 def answered_card_reply(block: Any, task_id: Any) -> Dict[str, str]:
@@ -770,9 +771,9 @@ def _chat_words(row: Mapping[str, Any], *, key: str, carrier: str, source: str, 
     from ouroboros.answer_facts import row_source
     from ouroboros.owner_relay import owner_text
 
-    reference, (block, asker) = _mapping(row.get("reply_to")), answered_card_source(row)
-    from ouroboros.answer_facts import living_card_input
-    living = living_card_input(row, root)
+    reference, (block, asker) = _mapping(row.get("reply_to")), answered_card_source(row, root)
+    from ouroboros.answer_facts import card_input
+    living = card_input(row, root, source)
     replied = living.get("reply_to") or answered_card_reply(block, asker) or reply_target(
         root, reference if root is not None else {**reference, "unresolved": True})
     carried = _mapping(row.get("corpus_answer"))
@@ -809,7 +810,7 @@ def _held_words(held: Any, drive_root: Any, task_id: str, *, context: Any = None
             source_accounts = accounts_by_root[str(source_root)] = owner_place_accounts(source_root)
         if quotable_owner_row(row, source_root, accounts=source_accounts):
             rows += _chat_words(row, key=str(key), carrier=f"went to {went}" if went else "held",
-                                source="owner_mailbox", task_id=task_id, root=source_root if read else None, addressed=addressed)
+                                source="owner_mailbox", task_id=task_id, root=source_root if read or row.get("late_answer") else None, addressed=addressed)
     return rows
 
 
@@ -997,9 +998,12 @@ def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
     root = _data_root(ctx)
     for key, row in _mapping(getattr(ctx, "_held_owner_messages", None)).items():
         if isinstance(row, Mapping) and isinstance(row.get("carried"), dict) and not row["carried"].get("went_to"):
-            replied = answered_card_reply(*answered_card_source(row)) or reply_target(
-                row.get("_owner_source_root") or root, row.get("reply_to"))
-            add({"source": row_source(row, "owner_mailbox"), "content": owner_text(row), "msg_id": str(key),
+            from ouroboros.answer_facts import card_input
+            source_root = row.get("_owner_source_root") or root
+            item = card_input(row, source_root) or {"source": row_source(row, "owner_mailbox"), "content": owner_text(row)}
+            replied = item.get("reply_to") or answered_card_reply(*answered_card_source(row)) or reply_target(
+                source_root, row.get("reply_to"))
+            add({**item, "msg_id": str(key),
                  **({"ts": when} if (when := _item_time(row)) else {}), **({"reply_to": replied} if replied else {})})
     return rows
 
@@ -1145,10 +1149,10 @@ def _annotation_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any]
 
 def mailbox_owner_input(drive_root: Any, entry: Mapping[str, Any]) -> dict:
     """The owner input in an owner-text or card mailbox entry, with its card or chat reply target."""
-    from ouroboros.answer_facts import living_card_input, row_source
+    from ouroboros.answer_facts import card_input, row_source
 
-    if living := living_card_input(entry, drive_root):
-        return living
+    if submitted := card_input(entry, drive_root):
+        return submitted
     block, asker = answered_card_source(entry)
     target = answered_card_reply(block, asker) or reply_target(drive_root, entry.get("reply_reference"))
     return {"source": row_source(entry, "owner_mailbox"), "content": entry.get("text"),

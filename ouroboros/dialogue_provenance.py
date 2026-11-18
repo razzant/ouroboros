@@ -1010,13 +1010,9 @@ def quote_words(row: Mapping[str, Any], root: Any = None) -> str:
     if living := living_card_input(row, root):
         return living["content"] if living["source"] == "owner_mailbox" else ""
     if row.get("type") == "quiz_answer" or row.get("late_answer"):
-        from ouroboros.owner_quiz import late_answer_ref
-        from ouroboros.owner_source import answered_quiz_block
         from ouroboros.owner_words import answered_card_source
 
-        quiz, asker = answered_card_source(row)
-        if not quiz and root and (ref := late_answer_ref(row.get("late_answer"))):
-            quiz = answered_quiz_block(root, asker, ref["quiz_id"])
+        quiz, _ = answered_card_source(row, row.get("_owner_source_root") or root)
         quiz = _mapping(quiz)
         return "" if quiz.get("secret_request") else str(quiz.get("comment") or "")
     if (row.get("direction") == "in" and row_provenance(row) == "place"

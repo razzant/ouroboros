@@ -1290,3 +1290,48 @@ def test_cold_opening_keeps_its_identity_through_a_routed_start(tmp_path, monkey
         assert owner_words_contain(focus, words) is (kind != "press")
         assert owner_words_contain(focus, label) is (kind == "message")
 
+
+
+@pytest.mark.parametrize("kind", ["press", "comment", "unavailable"])
+def test_a_reference_only_late_answer_keeps_its_type_on_every_opening(tmp_path, monkeypatch, kind):
+    from types import SimpleNamespace
+    from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision, owner_reply_owed
+    from ouroboros.owner_quiz import late_answer_model_text, record_asked, record_answered
+    from ouroboros.owner_words import carried_owner_corpus, cited_owner_basis, owner_words_contain
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    asker, quiz, label = "fern-desk", "fern-card", "Use the fern chart"
+    comment = "  after moonrise  " if kind == "comment" else ""
+    bubble = comment or "1. " + label
+    reference = {"task_id": asker, "quiz_id": quiz}
+    if kind != "unavailable":
+        record_asked(tmp_path, asker, quiz_id=quiz, question="Which chart?", options=[label])
+        record_answered(tmp_path, asker, quiz_id=quiz, option_index=0, comment=comment, request_id="fern-choice")
+    ref = build_owner_message_ref(chat_id=7, client_message_id="fern-late", ts="2040-01-01T00:00:00Z", text=bubble)
+    meta = {"origin_message_text": bubble, "origin_message_ref": ref, "late_answer": reference}
+
+    def opened(metadata, frame):
+        ctx = SimpleNamespace(task_metadata=metadata, drive_root=tmp_path)
+        _initialize_owner_directives(ctx, [{"role": "user", "content": frame}])
+        return ctx
+
+    head = opened(meta, late_answer_model_text(tmp_path, reference, bubble))
+    assert owner_input_revision(head) == 1 and owner_reply_owed(head)
+    start = opened({"objective_author": {"kind": "task"}, "owner_corpus": carried_owner_corpus(head, bubble)}, "Read notes")
+    _interrupted(tmp_path, metadata=meta, origin_message_ref=ref, origin_message_text=bubble,
+                 owner_mailbox={"read_complete": True, "rows": []})
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    [successor] = workers.PENDING
+    for focus in (head, start, opened(successor["metadata"], successor["text"])):
+        [row] = focus._owner_directives
+        assert not owner_words_contain(focus, label)
+        if kind == "unavailable":
+            assert row["source"] == "owner_card_input" and not cited_owner_basis(focus, label)[0]
+        else:
+            assert row["content"] == bubble and "Which chart?" in row["reply_to"]["text"]
+            if comment:
+                assert owner_words_contain(focus, comment)
+            else:
+                assert cited_owner_basis(focus, label)[0]["source"] == "owner_press"
