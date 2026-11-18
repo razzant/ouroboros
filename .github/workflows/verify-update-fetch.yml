@@ -1,0 +1,21 @@
+name: Verify the update fetch thread
+on:
+  push:
+    branches: ['verify/update-fetch-5d7b4862']
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 5d7b4862c985bedc0461edb1eed5f6f3e2bf8f94
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Exercise the Check endpoint and inspect the fetching thread
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = '5d7b4862c985bedc0461edb1eed5f6f3e2bf8f94'
+          python -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" --evidence-dir "$RUNNER_TEMP/fetch-evidence" --timeout 120 -- "$(command -v python)" -m pytest -o addopts= -q tests/test_update_apply_routing.py::test_fetching_update_endpoints_leave_the_event_loop
