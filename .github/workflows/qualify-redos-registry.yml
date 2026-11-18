@@ -12,6 +12,50 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Install the 2024 issuing CA for the RED OS registry
+        shell: bash
+        run: |
+          ca=.github/certs/registry.red-soft.ru-2024.crt
+          echo "6f9d829c8e6712444fce3624658d8788672849c5d5b7b53fd9cf7e83eac4193e  $ca" | sha256sum --check
+          sudo install -D -m 0644 "$ca" /etc/docker/certs.d/registry.red-soft.ru/ca.crt
+      - name: Read the runner's TLS and Docker facts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ca=.github/certs/registry.red-soft.ru-2024.crt
+          docker version --format 'Client {{.Client.Version}} / server {{.Server.Version}}'
+          docker info --format 'Driver {{.Driver}} / {{json .DriverStatus}}'
+          # Never print a bearer credential or cookie; the TLS handshake and HTTP codes suffice.
+          for path in '/v2/' '/service/token?service=harbor-registry&scope=repository%3Aubi8%2Fubi%3Apull'; do
+            rc=0
+            curl --silent --show-error --max-time 30 --proto '=https' --cacert "$ca" \
+              -o /dev/null -w "HTTP %{http_code}, TLS verification result %{ssl_verify_result}, peer %{remote_ip}\n" "https://registry.red-soft.ru$path" || rc=$?
+            printf 'curl exit: %s\n' "$rc"
+          done
+      - name: Pull with only this registry's 2024 CA
+        id: ordinary
+        continue-on-error: true
+        run: docker pull registry.red-soft.ru/ubi8/ubi@sha256:cae37cb16daadfecae09e854471592f27bcd6aefb4b44da1e5b22bba57b1e9cd
+      - name: Compare Docker's classic registry client on this disposable runner
+        if: ${{ steps.ordinary.outcome == 'failure' && runner.environment == 'github-hosted' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          containers="$(docker ps --all --quiet)"
+          [ -z "$containers" ]
+          docker info --format '{{json .DriverStatus}}' | grep -Fq 'io.containerd.snapshotter.v1'
+          base="$RUNNER_TEMP/daemon-old.json"
+          if sudo test -f /etc/docker/daemon.json; then sudo cat /etc/docker/daemon.json > "$base"; else printf '{}\n' > "$base"; fi
+          jq '.features = ((.features // {}) + {"containerd-snapshotter": false})' "$base" > "$RUNNER_TEMP/daemon-classic.json"
+          sudo dockerd --validate --config-file="$RUNNER_TEMP/daemon-classic.json"
+          sudo install -m 0644 "$RUNNER_TEMP/daemon-classic.json" /etc/docker/daemon.json
+          sudo systemctl restart docker
+          driver="$(docker info --format '{{.Driver}} / {{json .DriverStatus}}')"
+          printf 'Comparison backend: %s\n' "$driver"
+          [[ "$driver" != *io.containerd.snapshotter.v1* ]]
+          docker pull registry.red-soft.ru/ubi8/ubi@sha256:cae37cb16daadfecae09e854471592f27bcd6aefb4b44da1e5b22bba57b1e9cd
+      - name: Require the exact vendor reference in the local store
+        run: docker image inspect --format '{{json .RepoDigests}}' registry.red-soft.ru/ubi8/ubi@sha256:cae37cb16daadfecae09e854471592f27bcd6aefb4b44da1e5b22bba57b1e9cd
       - name: Fetch the public packages from v7.11.0
         shell: bash
         run: |
@@ -23,22 +67,6 @@ jobs:
           curl --fail --show-error --location --proto '=https' --proto-redir '=https' -o "$deb" "$release/$deb"
           curl --fail --show-error --location --proto '=https' --proto-redir '=https' -o "$rpm" "$release/$rpm"
           printf '%s  %s\n' '33cdf332784ae04b87031168187a0389b5d468d18ad39dbea804d2f08b84e765' "$deb" 'bac89d8c1b11ff864cb7a94cd03dedb26ef7dc38899f0f5c186e6633bc213782' "$rpm" | sha256sum --check
-      - name: Observe the pinned pull under the runner's default trust
-        shell: bash
-        run: |
-          if docker pull registry.red-soft.ru/ubi8/ubi@sha256:cae37cb16daadfecae09e854471592f27bcd6aefb4b44da1e5b22bba57b1e9cd; then
-            echo 'Default trust already accepted this image.'
-          else
-            echo "Default pull returned $?; see the Docker diagnosis above."
-          fi
-      - name: Install the 2024 issuing CA for the RED OS registry
-        shell: bash
-        run: |
-          ca=.github/certs/registry.red-soft.ru-2024.crt
-          echo "6f9d829c8e6712444fce3624658d8788672849c5d5b7b53fd9cf7e83eac4193e  $ca" | sha256sum --check
-          sudo install -D -m 0644 "$ca" /etc/docker/certs.d/registry.red-soft.ru/ca.crt
-      - name: Verify the pinned pull with registry-scoped trust
-        run: docker pull registry.red-soft.ru/ubi8/ubi@sha256:cae37cb16daadfecae09e854471592f27bcd6aefb4b44da1e5b22bba57b1e9cd
       - name: Run the release's real vendor package smoke
         shell: bash
         run: |
