@@ -676,29 +676,38 @@ def test_a_hold_resumed_on_owner_words_after_its_park_sleeps_again_on_its_next_l
 
 def test_the_frozen_delegate_wait_contract_says_its_result_is_owed_to_the_next_request(tmp_path):
     """Frozen ABI: the five delegate verbs, delegate_wait's arguments and its str publisher are unchanged; the meaning of
-    its result changed and the description says so (a signature equality alone would not show that)."""
+    its result changed and the description says so (a signature equality alone would not show that). What each mode
+    keeps is said in the tool's own lead, in wait_task's words: the custom-tool wire drops parameter descriptions; the
+    parameter says it in the one wording the task waits splice in."""
     import inspect
 
     from ouroboros.delegate_supervision import delegate_wait_entry
+    from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
     from ouroboros.tools import delegate
 
     entries = {entry.name: entry for entry in delegate.get_tools()}
     assert set(entries) == {"delegate_start", "delegate_wait", "delegate_cancel", "delegate_answer", "delegate_message"}
-    from ouroboros.native_task_wait import SLEEP_MODES
+    from ouroboros.native_task_wait import SLEEP_MODE_WORDS, SLEEP_MODES, SLEEP_PARAMS
 
     wait = entries["delegate_wait"]
     properties = wait.schema["parameters"]["properties"]
     assert set(properties) == {"run_id", "runs", "since_seq", "checkpoint_after_sec", "checkpoint_reason", "sleep_mode"}
     assert set(properties["sleep_mode"]["enum"]) == set(SLEEP_MODES), "the task waits' modes, no other"
     held = properties["sleep_mode"]["description"]
-    assert all(words in held for words in ("Omitted: your process is released", "warm: your process and all it holds stay",
-                                           "cold: your saved continuation stays", "in_slot: your process and this call stay"))
+    assert SLEEP_MODE_WORDS in held and SLEEP_MODE_WORDS in SLEEP_PARAMS["sleep_mode"]["description"], "one wording"
+    assert "with no continuation owner it waits in this call" in held
     assert not any(character.isdigit() for character in held), "what stays held, in words and no numbers"
     assert list(inspect.signature(wait.handler).parameters) == list(inspect.signature(delegate_wait_entry).parameters)
     assert wait.handler.__wrapped__ is delegate_wait_entry, "the one ToolResult->str publisher wraps the entry"
     text = " ".join(wait.schema["description"].split())
+    modes = "Explicit in_slot keeps the process and same-call result while yielding acting capacity; warm/cold choose"
+    wire = project_function_tools_to_openai_custom([{"type": "function", "function": wait.schema}]).wire_tools()
+    assert modes in text and modes in wire[0]["custom"]["description"]
+    assert " ".join(held.split()) not in wire[0]["custom"]["description"], "the wire keeps no parameter prose"
     assert "this wait's result is then owed to your next model request" in text
-    assert "it returns sleep_armed" in text and "yields acting capacity" in text and "with no further call" in text
+    assert "Otherwise a sleep returns sleep_armed" in text and "it returns sleep_armed" not in text
+    assert "unless named live custody or a conversation turn keeps it warm" in text
+    assert "yields acting capacity" in text and "with no further call" in text
     assert "Each wake is delivered once and counts as shown only when shown whole" in text
     assert "a wait_sec an old transcript passes is accepted and sizes nothing" in text
     assert "wait_sec" in inspect.signature(delegate_wait_entry).parameters, "accepted, though the schema offers none"
