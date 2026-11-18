@@ -418,6 +418,33 @@ class TestShowRecord:
         monkeypatch.setattr(ledger, "recent_records", lambda *_args, **_kwargs: full)
         assert show_record(ctx, "live", [item]).endswith("Reviews on record naming these bytes: unknown.")
 
+    def test_a_torn_hot_index_cannot_prove_that_no_review_named_the_bytes(self, tmp_path, monkeypatch):
+        import hashlib
+
+        from ouroboros import review_ledger as ledger
+        from ouroboros.tools.owner_delivery import show_record, shown_material
+        from ouroboros.tools.review_result import subject_source
+
+        ctx = self._ctx(tmp_path, monkeypatch)
+        item = shown_material("drawing.txt", b"A bridge drawing")
+        index = ledger.index_path(ctx.drive_root)
+        index.parent.mkdir(parents=True, exist_ok=True)
+        index.write_bytes(b"")
+        assert show_record(ctx, "live", [item]).endswith(
+            "Reviews on record naming these bytes: none in this task's recent records.")
+
+        subject = f"Produced drawing.txt, sha256 {item['sha256']}"
+        subject_source(ctx, subject)
+        record_id = ledger.new_record_id()
+        ledger.write_record(ctx.drive_root, ledger.ReviewLedgerRecord(
+            record_id=record_id, state="settled", task_id=ctx.task_id, surface="result",
+            subject={"diff_sha": hashlib.sha256(subject.encode()).hexdigest()}, verdict={"aggregate": "PASS"}))
+        with index.open("ab") as tail:
+            tail.write(b'{"record_id":"unfinished-review"')
+        assert show_record(ctx, "live", [item]).endswith(f"result review {record_id} (settled, PASS).")
+        other = shown_material("bridge-notes.txt", b"The bridge notes")
+        assert show_record(ctx, "live", [other]).endswith("Reviews on record naming these bytes: unknown.")
+
     def test_no_line_without_material_or_under_review_off_and_unknown_when_records_cannot_be_read(
             self, tmp_path, monkeypatch):
         """Both directions: links carry no material and an install with task review Off records no show; an app
@@ -478,3 +505,100 @@ class TestShowRecord:
         aimed = shown({"type": "image", "src": uri(first), "path": "hero", "target": "elsewhere"},
                       data={"hero": uri(second)})
         assert short[first] in aimed and short[second] not in aimed
+
+    @pytest.mark.parametrize(("visible", "review"), [(False, "auto"), (False, "off"), (True, "auto")])
+    def test_optional_media_data_cannot_break_an_accepted_card_receipt(self, tmp_path, monkeypatch, visible, review):
+        import json
+
+        from ouroboros.card_store import load_card
+        from ouroboros.tools.cards import _show_card
+
+        ctx = self._ctx(tmp_path, monkeypatch, review=review)
+        image = "data:image/png;base64,aGVyZQ=="
+        result = json.loads(_show_card(ctx, title="Optional preview", fallback_text="One preview", components=[
+            {"type": "image", "path": "optional", "condition_key": "visible"},
+            {"type": "image", "src": image},
+        ], data={"visible": visible, "optional": 10**310}))
+        [event] = ctx.event_queue.items
+        assert event["type"] == "send_card" and event["card_id"] == result["card_id"]
+        assert load_card(ctx.drive_root, result["card_id"])
+        assert result["delivery"].splitlines()[0] == "OK: card accepted for delivery to owner chat."
+        assert ("image components[1], sha256" in result["delivery"]) == (review == "auto")
+        assert "image components[0]" not in result["delivery"]
+        assert ("Other card media bytes: unknown." in result["delivery"]) == (visible and review == "auto")
+
+    def test_a_show_collector_failure_leaves_the_card_accepted(self, tmp_path, monkeypatch):
+        import json
+
+        from ouroboros.card_store import load_card
+        from ouroboros.tools import cards
+
+        ctx = self._ctx(tmp_path, monkeypatch)
+        card = {"title": "Preview", "fallback_text": "A drawing",
+                "components": [{"type": "image", "src": "data:image/png;base64,aGVyZQ=="}]}
+        healthy = json.loads(cards._show_card(ctx, **card))
+        assert "image components[0], sha256" in healthy["delivery"]
+
+        def unreadable(*_args, **_kwargs):
+            raise ValueError("unreadable card media")
+
+        monkeypatch.setattr(cards, "_shown_media", unreadable)
+        receipt = json.loads(cards._show_card(ctx, **card))
+        assert receipt["delivery"].splitlines() == ["OK: card accepted for delivery to owner chat.",
+                                                    "Host fact: card media bytes: unknown."]
+        assert load_card(ctx.drive_root, receipt["card_id"])
+        assert [event["card_id"] for event in ctx.event_queue.items] == [healthy["card_id"], receipt["card_id"]]
+
+    @pytest.mark.parametrize(("condition", "visible"), [(False, False), ({}, True), ([], True)])
+    def test_a_card_receipt_follows_the_visibility_of_its_media(self, tmp_path, monkeypatch, condition, visible):
+        import hashlib
+        import json
+
+        from ouroboros.tools.cards import _show_card
+
+        ctx = self._ctx(tmp_path, monkeypatch)
+        digest = hashlib.sha256(b"here").hexdigest()[:12]
+        result = json.loads(_show_card(ctx, title="Preview", fallback_text="One preview", components=[
+            {"type": "group", "condition_key": "show", "components": [{"type": "image", "path": "preview"}]},
+        ], data={"show": condition, "preview": "data:image/png;base64,aGVyZQ=="}))
+        assert (f"sha256 {digest}" in result["delivery"]) is visible
+        assert ("Host fact:" in result["delivery"]) is visible
+
+    @pytest.mark.parametrize("routed_item", [False, True])
+    def test_a_card_receipt_reads_nested_gallery_media_and_honors_route_precedence(self, tmp_path, monkeypatch, routed_item):
+        import hashlib
+        import json
+
+        from ouroboros.tools.cards import _show_card
+
+        ctx = self._ctx(tmp_path, monkeypatch)
+        route_bytes, nested_bytes = b"elsewhere", b"here"
+        route_digest, nested_digest = (hashlib.sha256(raw).hexdigest()[:12] for raw in (route_bytes, nested_bytes))
+        items = [{"type": "group", "components": [{"type": "image", "path": "preview"}]}]
+        if routed_item:
+            items.insert(0, {"route": "another-source", "src": "data:image/png;base64,ZWxzZXdoZXJl"})
+        result = json.loads(_show_card(ctx, title="Gallery", fallback_text="Gallery preview",
+                                       components=[{"type": "gallery", "path": "items"}],
+                                       data={"items": items, "preview": "data:image/png;base64,aGVyZQ=="}))
+        assert route_digest not in result["delivery"]
+        assert f"sha256 {nested_digest}" in result["delivery"]
+        assert ("Other card media bytes: unknown." in result["delivery"]) is routed_item
+
+    def test_a_card_receipt_names_the_first_tab_and_reports_unknown_tabs_on_replace(self, tmp_path, monkeypatch):
+        import hashlib
+        import json
+
+        from ouroboros.tools.cards import _show_card
+
+        ctx = self._ctx(tmp_path, monkeypatch)
+        first, second = (hashlib.sha256(raw).hexdigest()[:12] for raw in (b"here", b"elsewhere"))
+        card = {"title": "Previews", "fallback_text": "Two previews", "components": [{"type": "tabs", "tabs": [
+            {"label": "Summary", "components": [{"type": "image", "src": "data:image/png;base64,aGVyZQ=="}]},
+            {"label": "Detail", "components": [{"type": "image", "src": "data:image/png;base64,ZWxzZXdoZXJl"}]},
+        ]}]}
+        fresh = json.loads(_show_card(ctx, **card))
+        assert first in fresh["delivery"] and second not in fresh["delivery"]
+        replacement = json.loads(_show_card(ctx, **card, replace=fresh["card_id"]))
+        assert replacement["card_id"] == fresh["card_id"] and replacement["revision"] == 2
+        assert replacement["delivery"].endswith("Host fact: card media bytes: unknown.")
+        assert "sha256" not in replacement["delivery"]

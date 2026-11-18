@@ -328,7 +328,11 @@ def named_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str, 
     """The frame's actual local destination and queue acceptance, never proof of display; a frame carrying produced
     ``material`` (``shown_material``) adds the host's record of that show (``show_record``)."""
     receipt = _named_receipt(ctx, evt, mode, noun)
-    show = show_record(ctx, mode, material)
+    try:
+        show = show_record(ctx, mode, material)
+    except Exception:
+        log.debug("Optional show record unavailable for task %s", evt.get("task_id"), exc_info=True)
+        return receipt
     return f"{receipt}\n{show}" if show else receipt
 
 
@@ -351,19 +355,30 @@ def show_record(ctx: Any, mode: str, material: Any) -> str:
     on record name those exact bytes (``_reviews_naming``), a negative stated in the scope it was read in: this task's
     recent records, never a helper's. A fact on the existing receipt, never a gate: nothing waits or is refused, and
     every review mode stays as it is. No line for a frame that carries no material or did not go out, nor when task
-    review is Off (no result review runs there to name anything)."""
-    items = [item for item in material or () if isinstance(item, dict) and item.get("sha256")]
-    if not items or mode not in ("live", "deferred"):
+    review is Off (no result review runs there to name anything). A card can defer resolving its material until
+    those checks pass. Its unresolved media is separate from reviews of the bytes it could resolve."""
+    if not material or mode not in ("live", "deferred"):
         return ""
     from ouroboros.config import get_task_review_mode
 
     if get_task_review_mode() == "off":
         return ""
+    if callable(material):
+        try:
+            material = material()
+        except Exception:
+            log.debug("Card media unreadable for task %s", getattr(ctx, "task_id", ""), exc_info=True)
+            material = ({"bytes_unknown": True},)
+    pieces = [item for item in material or () if isinstance(item, dict)]
+    unresolved = any(item.get("bytes_unknown") for item in pieces)
+    items = [item for item in pieces if item.get("sha256")]
+    if not items:
+        return "Host fact: card media bytes: unknown." if unresolved else ""
     found = _reviews_naming(ctx, {str(item["sha256"]): str(item.get("name") or "") for item in items})
     shown = "; ".join(f"{item.get('name')}, sha256 {str(item['sha256'])[:12]}, {item.get('size')} B" for item in items)
     reviews = "unknown" if found is None else "; ".join(found) or "none in this task's recent records"
     return (f"Host fact: {'accepted' if mode == 'live' else 'queued'} for delivery: {shown}. "
-            f"Reviews on record naming these bytes: {reviews}.")
+            f"Reviews on record naming these bytes: {reviews}." + (" Other card media bytes: unknown." if unresolved else ""))
 
 
 # The newest result-review rows of the review ledger's hot index one receipt reads (``recent_records``).
@@ -375,7 +390,7 @@ def _reviews_naming(ctx: Any, digests: Dict[str, str]) -> Any:
     ledger's newest ``_REVIEW_ROWS`` hot rows, whose retained subject lists each produced file by sha256
     (``result_material.answer_text``; a helper's records are its own, and archived rows are not read), and its plan
     asks, which keep each attachment's sha256. ``None`` (unknown) when this task or any of its records could not be
-    read, and when nothing names them but the bounded read came back full, since a row past it might."""
+    read, and on a miss if the bounded read came back full or had a parse gap."""
     from ouroboros import review_ledger as ledger
     from ouroboros.plan_record import load_plan_record
     from ouroboros.tools.review_result import _retained_subject_text
@@ -388,9 +403,10 @@ def _reviews_naming(ctx: Any, digests: Dict[str, str]) -> Any:
         return label + (" for " + ", ".join(digests[digest] for digest in hashes) if len(digests) > 1 else "")
 
     found = []
+    gaps: set[str] = set()
     try:
         rows = ledger.recent_records(ledger.ledger_root(ctx), task_id, limit=_REVIEW_ROWS, hot_only=True,
-                                     surface="result")
+                                     surface="result", gap_reasons=gaps)
         for row in rows:
             if row.get("task_id") != task_id:
                 continue  # a descendant's record: its subject is retained in that task's own store
@@ -410,7 +426,7 @@ def _reviews_naming(ctx: Any, digests: Dict[str, str]) -> Any:
     except Exception:
         log.debug("records naming shown bytes unreadable for task %s", task_id, exc_info=True)
         return None
-    return found if found or len(rows) < _REVIEW_ROWS else None
+    return found if found or (not gaps and len(rows) < _REVIEW_ROWS) else None
 
 
 def _named_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) -> str:
