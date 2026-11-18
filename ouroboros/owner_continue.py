@@ -555,6 +555,30 @@ def occurrence_schedule_text(result: Dict[str, Any], task_id: str) -> List[Dict[
     return kept
 
 
+def _chained_row(row: Any, text_key: str, source_key: str, sources: Optional[frozenset[str]], *,
+                 later: bool) -> Tuple[Optional[dict], str]:
+    """Copy a retained row, checking a later quiz answer against the accepted card saved with it."""
+    if not (isinstance(row, dict) and isinstance(row.get(text_key), str)
+            and all(isinstance(row.get(field, ""), str) for field in (source_key, "words", *ROW_IDS))):
+        return None, "chained_owner_source_malformed"
+    source = row.get(source_key, "")
+    if sources is not None and source not in sources:
+        return None, "owner_source_provenance_unknown"
+    kept = dict(row)
+    if later and "card" in row:
+        card = row["card"]
+        if (not isinstance(card, dict) or not row["content"].strip()
+                or not row.get("quiz_id") or card.get("quiz_id") != row["quiz_id"]):
+            return None, "chained_owner_source_malformed"
+        proven = _start_answer_source(card, row)
+        if proven is None:
+            return None, "chained_owner_source_malformed"
+        # A verified comment already typed as words keeps its recorded source.
+        if proven == OWNER_PRESS or source == OWNER_PRESS:
+            kept["source"] = proven
+    return kept, ""
+
+
 def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict[str, Any]:
     """The predecessor's owner sources, authored note pointer and peer context, apart.
 
@@ -677,15 +701,12 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     ):
         for row in container(continuation if key == "peer_context" else chained, key, list,
                              "chained_owner_source_malformed"):
-            if not (isinstance(row, dict) and isinstance(row.get(text_key), str)
-                    and all(isinstance(row.get(field, ""), str) for field in (source_key, "words", *ROW_IDS))):
-                gaps.append("chained_owner_source_malformed")
-                continue
-            if sources is not None and row.get(source_key, "") not in sources:
-                gaps.append("owner_source_provenance_unknown")
+            row, gap = _chained_row(row, text_key, source_key, sources, later=target is later)
+            if gap:
+                gaps.append(gap)
                 continue
             if named(row_identity(row), row.get("words", row[text_key]), target is later) is None:
-                target.append(dict(row))
+                target.append(row)
     quizzes = result.get("owner_quiz") if isinstance(result.get("owner_quiz"), dict) else {}
 
     def corpus_pass(rows: List[Any], malformed: str, *, carried: bool = False) -> None:

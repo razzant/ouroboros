@@ -1345,3 +1345,70 @@ def test_continue_labels_a_later_unavailable_answer_and_preserves_the_words_arou
     assert "Other owner words in that task's record (verbatim, in order):" not in order
     assert order.count(notice) == 2 and order.count(after) == 1
     assert order.index("Owner words (verbatim): " + notice) < order.index("Host record: " + notice) < order.index(after)
+
+
+@pytest.mark.parametrize("conflict", [None, "selection", "quiz_id", "comment"],
+                         ids=["released", "changed-option", "other-card", "trimmed-comment"])
+def test_continue_retypes_the_previous_releases_later_quiz_answers(tmp_path, monkeypatch, conflict):
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.owner_words import cited_owner_basis, owner_words_contain
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    asker, label, comment = "larch-desk", "Violet ledger", "  after the print proof  "
+    _interrupted(tmp_path, task_id=asker)
+    for quiz_id, question, options, typed in (
+        ("ledger", "Which ledger?", ["Amber ledger", label], ""),
+        ("print", "When?", ["Now", "Later"], comment),
+    ):
+        card = {"state": "answered", "quiz_id": quiz_id, "question": question, "options": options,
+                "answered_index": 1, **({"comment": typed} if typed else {})}
+        assert write_owner_message(tmp_path, typed or "2. " + label, asker, kind="quiz_answer",
+                                   msg_id=f"quiz_answer:{asker}:{quiz_id}", quiz_delivery={
+                                       "task_id": asker, "quiz_id": quiz_id, "answer_snapshot": card})
+
+    # The previous Continue wrote both accepted cards and their corpus copies under owner_quiz_answer.
+    with monkeypatch.context() as previous:
+        previous.setattr("ouroboros.owner_continue.row_source", lambda entry, words_source: words_source)
+        first = admit_continuation(asker, action_nonce=NONCE)
+    assert first["ok"], first
+    predecessor = first["successor_task_id"]
+    assert not workers.WORKERS
+    assert workers.kill_workers(terminal_status="cancelled", result_reason="server shutdown", stop_source="server_shutdown")
+    record = load_task_result(tmp_path, predecessor)
+    press, words = record["metadata"]["continuation"]["owner_sources"]["later"]
+    assert press["source"] == words["source"] == "owner_quiz_answer"
+    assert press["content"] == "2. " + label and words["content"] == words["card"]["comment"] == comment
+    if conflict:
+        if conflict == "selection":
+            press["card"]["answered_index"] = 0
+        elif conflict == "quiz_id":
+            press["card"]["quiz_id"] = words["quiz_id"]
+        else:
+            words["card"]["comment"] = comment.strip()
+        seed_result(tmp_path, predecessor, record)
+        refused = admit_continuation(predecessor, action_nonce=NONCE)
+        assert refused == {"ok": False, "error": "owner_source_missing", "gaps": ["chained_owner_source_malformed"]}
+        assert not workers.PENDING and "continued_by" not in load_task_result(tmp_path, predecessor)
+        return
+
+    second = admit_continuation(predecessor, action_nonce=NONCE)
+    assert second["ok"], second
+    [successor] = workers.PENDING
+    meta = successor["metadata"]
+    focus = SimpleNamespace(task_metadata=meta)
+    _initialize_owner_directives(focus, [{"role": "user", "content": successor["text"]}])
+    assert not owner_words_contain(focus, label) and not owner_words_contain(focus, "ledger")
+    assert cited_owner_basis(focus, "ledger")[0] is None
+    whole = cited_owner_basis(focus, label)[0]
+    assert (whole["source"], whole["msg_id"], whole["cited"]) == ("owner_press", press["msg_id"], label)
+    assert owner_words_contain(focus, comment)
+    worded = cited_owner_basis(focus, "print proof")[0]
+    assert (worded["source"], worded["msg_id"], worded["content"]) == ("owner_quiz_answer", words["msg_id"], comment)
+    assert [(row["msg_id"], row["source"]) for row in meta["owner_corpus"] if row.get("quiz_id")] == [
+        (press["msg_id"], "owner_press"), (words["msg_id"], "owner_quiz_answer")]
+    assert meta["continuation"]["owner_sources"]["later"] == [{**press, "source": "owner_press"}, words]
