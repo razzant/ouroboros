@@ -1,0 +1,122 @@
+# Disposable driver for PR 3713 and the S11 restart test. Its only parent is S11 (83aed31c). Through
+# .github/qualification/qualification_witness.py each lane checks out its own pinned subject and uploads
+# only qualification-proof/*.json. No secrets, no write permission, no retry.
+name: PR 3713 and S11 qualification
+'on':
+  push:
+    branches: [qualification/restart-and-stand-20261118]
+permissions:
+  contents: read
+
+jobs:
+  witness:
+    if: github.repository == 'razzant/ouroboros' && !github.event.deleted
+    name: ${{ matrix.lane }}
+    runs-on: ${{ contains(matrix.lane, 'windows-') && 'windows-latest' || 'ubuntu-24.04' }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        lane:
+          - system-1
+          - system-2
+          - stand-linux-before
+          - stand-linux-after
+          - stand-windows-before
+          - stand-windows-after
+          - linux-before
+          - linux-after
+          - windows-before
+          - windows-after
+          - settings
+    env:
+      WITNESS_LANE: ${{ matrix.lane }}
+      # Runs the stdlib-only helper; pytest itself always runs from the checkout's .venv.
+      WITNESS_PYTHON: ${{ contains(matrix.lane, 'windows-') && 'python' || 'python3' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        id: checkout
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the driver and check out the exact subject
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/qualification-bin"
+          mkdir -p "$bin"
+          git show "$GITHUB_SHA:.github/qualification/qualification_witness.py" > "$bin/witness.input"
+          test "$(sha256sum < "$bin/witness.input" | cut -d' ' -f1)" = 74ab93c8c19dd611d1a64b5a63f1cee1ffbd67e2b6a7ad34dc0663cdd239b7b7
+          mv "$bin/witness.input" "$bin/qualification_witness.py"
+          "$WITNESS_PYTHON" -I -S "$bin/qualification_witness.py" pin
+
+      - name: Put Windows test temp on the work disk, as ci.yml does
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      # Read from the subject's checkout: the same action blob in every subject; dependency-only venv.
+      - uses: ./.github/actions/setup-python-env
+        id: python
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        id: node
+        with:
+          node-version: '22'
+
+      - name: Run the pinned selection
+        id: producer
+        timeout-minutes: 125
+        shell: bash
+        run: |
+          "$WITNESS_PYTHON" -I -S "$RUNNER_TEMP/qualification-bin/qualification_witness.py" run
+
+      - name: Project the public evidence
+        if: always()
+        timeout-minutes: 4
+        shell: bash
+        env:
+          CHECKOUT: ${{ steps.checkout.outcome }}
+          PIN: ${{ steps.pin.outcome }}
+          PYTHON_SETUP: ${{ steps.python.outcome }}
+          NODE_SETUP: ${{ steps.node.outcome }}
+          PRODUCER: ${{ steps.producer.outcome }}
+        run: |
+          set -eu
+          proof="$RUNNER_TEMP/qualification-proof"
+          mkdir -p "$proof"
+          printf '{"lane": "%s", "driver": "%s", "run": "%s", "attempt": "%s", "os": "%s", "steps": {"checkout": "%s", "pin": "%s", "python_setup": "%s", "node_setup": "%s", "producer": "%s"}}\n' \
+            "$WITNESS_LANE" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_OS" \
+            "$CHECKOUT" "$PIN" "$PYTHON_SETUP" "$NODE_SETUP" "$PRODUCER" > "$proof/steps.json"
+          helper="$RUNNER_TEMP/qualification-bin/qualification_witness.py"
+          if [ ! -f "$proof/source.json" ]; then
+            printf '{"lane":"%s","driver":"%s","state":"untested","reason":"no source receipt"}\n' \
+              "$WITNESS_LANE" "$GITHUB_SHA" > "$proof/source.json"
+          fi
+          if [ ! -f "$helper" ]; then
+            printf '{"lane":"%s","subject":null,"execution":"not_run","qualified":false,"diagnostic_gaps":["verified witness unavailable"]}\n' \
+              "$WITNESS_LANE" > "$proof/outcome.json"
+            exit 1
+          fi
+          "$WITNESS_PYTHON" -I -S "$helper" report
+
+      - name: Upload only the public JSON projection
+        if: always()
+        timeout-minutes: 4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qualification-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/qualification-proof/steps.json
+            ${{ runner.temp }}/qualification-proof/source.json
+            ${{ runner.temp }}/qualification-proof/outcome.json
+          if-no-files-found: error
+          retention-days: 14
