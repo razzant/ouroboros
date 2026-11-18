@@ -203,7 +203,8 @@ def test_window_steps_heads_one_at_a_time_after_maps_and_leaves_a_head_without_a
     for topic in ("c", "b", "a"):
         _write(world, topic, f"Head {topic}. " * 5_000, **({"summary": f"Authored telling of {topic}."} if topic != "b" else {}))
     captured = _core(world)
-    roomy, maps, one, two = (_plan(world, window, core=captured) for window in (150_000, 60_000, 43_000, 28_000))
+    # At 120k, summarizing a head in the whole-book frame could keep Max. Map the books first.
+    roomy, maps, one, two = (_plan(world, window, core=captured) for window in (150_000, 120_000, 43_000, 28_000))
     assert roomy.initial_mode == "max" and "Book text. Book text." in _blocks(roomy)[0]["text"]
     assert maps.initial_mode == one.initial_mode == two.initial_mode == "low"
     assert "Book text. Book text." not in _blocks(maps)[0]["text"] and "Full mechanism" in _blocks(maps)[0]["text"]
