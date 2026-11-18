@@ -228,7 +228,7 @@ def _waiting_facts(stored: Dict[str, Any], attempt: Any) -> List[Dict[str, Any]]
     ``since`` is the wait's OWN recorded start and ``None`` when the record has
     none (a wait written before it was stamped) -- never the task's start.
     """
-    from ouroboros.budget_pause import LIVE_PAUSE_STATES
+    from ouroboros.budget_pause import LIVE_PAUSE_STATES, saved_budget_pause
 
     facts: List[Dict[str, Any]] = []
     wait = stored.get("owner_wait")
@@ -243,7 +243,7 @@ def _waiting_facts(stored: Dict[str, Any], attempt: Any) -> List[Dict[str, Any]]
             if _iso_text(row.get("reset_at")):
                 fact["reset_at"] = _iso_text(row.get("reset_at"))
             facts.append(fact)
-    pause = stored.get("budget_pause")
+    pause = saved_budget_pause(stored)
     if (isinstance(pause, dict) and pause.get("state") in LIVE_PAUSE_STATES
             and _same_attempt(pause.get("task_attempt"), attempt)):
         facts.append(_pause_fact(pause, stored.get("owner_pause")))
