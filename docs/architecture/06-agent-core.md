@@ -350,7 +350,7 @@ At receipt, `owner_relay` mails every live tree member and `delegate_interaction
 
 #### Supervision, activity and recovery
 
-**Supervision.** `delegate_wait` uses the model's own sleep (`run_wait`), yielding acting capacity until sources wake its nanny; the body observes independently (§5). Immediate/owed delivery, replay and in-process fallback: `delegate_supervision.py` docstring.
+**Supervision.** `delegate_wait` uses the model's own sleep (`run_wait`) until sources wake its nanny; the body observes independently (§5). Immediate/owed delivery, replay and in-process fallback: `delegate_supervision.py` docstring.
 
 Selected terminal, any owned ordinary run's new question, a direct child's attention/terminal, addressed mail, owner input, cancel/deadline or a chosen checkpoint wakes it; progress does not. Deadline/ceiling/budget/cancel stay outer rails. Mail left to the drain, ACK/coverage, unknown-outcome holds, save failures and coordination/pacing facts: `delegate_supervision.py` docstring.
 
@@ -749,7 +749,7 @@ All Resume doors (`queue_transitions`, `budget_resume`, mind child/Continue sele
 
 #### The model's own sleep
 
-`await_messages` and `wait_task(s)` sleep by default, even with `timeout_sec`: it sets a wake time. State and delivery obligations save before process release; non-transferable custody keeps the process warm, the receipt naming why. Explicit `mode="in_slot"` (`sleep_mode` on task and delegate waits) keeps the process and same-call window/result in task bounds, yielding acting capacity via `in_slot_wait`. A zero timeout peeks unless `await_messages` selects sleep sources; without a continuation owner the default stays in-process. Warm/cold are explicit, never inferred from duration.
+`await_messages`, `wait_task` and `wait_tasks` sleep by default, even with `timeout_sec`: it sets a wake time. State and delivery obligations save before process release; non-transferable custody keeps the process warm, the receipt naming why. Explicit `mode="in_slot"` (`sleep_mode` on task and delegate waits) keeps the process and same-call window/result within task bounds, yielding acting capacity via `in_slot_wait`. A zero timeout peeks unless `await_messages` selects sleep sources; without a continuation owner the default stays in-process. Warm/cold are explicit, never inferred from duration.
 
 `model_sleep.py` rechecks canonical sources (selected senders, task/run terminals, service exits (warm only) or time) after installing the wait, losing no wake to read errors/contention. Owner input, descendant mail and true `place_arrival.wake` always wake, false never (absent: mail); own-run questions wake mid-run. Polls batch typed statuses (warm traces a failure streak once); refresh failure keeps known readiness; terminal, collection, money, success differ. Services pin one start: exit gives its code, loss/unreadability wakes as unknown.
 
