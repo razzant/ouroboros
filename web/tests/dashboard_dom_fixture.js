@@ -76,8 +76,10 @@ export class NodeStub {
                 node.setAttribute(attr[1], value);
             }
             stack.at(-1).appendChild(node);
-            // `<path …/>` inside an inline icon closes itself, as a browser parses it; left open it would swallow every later sibling.
-            if (!token.endsWith('/>') && !['input', 'br', 'hr', 'img', 'meta', 'link', 'wbr'].includes(tag)) stack.push(node);
+            // SVG icon elements honor `/>`; ordinary non-void HTML elements ignore the slash.
+            const closesSvg = token.endsWith('/>') && (tag === 'svg' ||
+                stack.at(-1).closest('svg, foreignObject, desc, title')?.tagName === 'svg');
+            if (!closesSvg && !['input', 'br', 'hr', 'img', 'meta', 'link', 'wbr'].includes(tag)) stack.push(node);
         }
     }
     appendChild(node) { node.remove(); node.parentElement = this; this.children.push(node); return node; }
