@@ -387,9 +387,10 @@ def _workspace_words(repo: Any, snapshot: dict, candidates: list[str], budget: i
 def _declared_effects(ctx: Any, root: Any, task_id: str, issues: List[str]) -> List[Dict[str, Any]]:
     """Extension tools' own execution receipts (``PluginAPI.register_tool``): read exactly as the producer
     wrote them, never inferred from a method or backend name. A call whose producer reported its own failure
-    (``TOOL_REPORTED_FAILURE``) may still declare what ran before it failed; a host-owned outcome (a timeout,
-    a refusal, a raised handler) declares nothing. Host notes trail the payload the model saw, so a noted
-    call is read from its retained producer payload, verified, and its notes ride beside the receipt."""
+    (``TOOL_REPORTED_FAILURE``) may still declare what ran before it failed; so may a call the host refused a
+    further action (``refused_step``), from the producer payload it kept. Any other host-owned outcome (a
+    timeout, a refusal, a raised handler) declares nothing. Host notes trail the payload the model saw, so a
+    noted call is read from its retained producer payload, verified, and its notes ride beside the receipt."""
     from ouroboros.artifacts import materialize_tool_result_source, read_actor_source_bytes
     from ouroboros.extension_surface_names import parse_extension_surface_name
     from ouroboros.store import StoreError
@@ -397,8 +398,12 @@ def _declared_effects(ctx: Any, root: Any, task_id: str, issues: List[str]) -> L
     effects: List[Dict[str, Any]] = []
     trace = getattr(ctx, "_execution_trace", None) or {}
     for call in trace.get("tool_calls") or []:
+        refused_step = (isinstance(call, dict) and call.get("tool_result_code") == "OWNER_OPERATION_REFUSED"
+                        and isinstance(call.get("tool_result_meta"), dict)
+                        and call["tool_result_meta"].get("refused_step") is True and "producer_source_ref" in call)
         if (not isinstance(call, dict) or not parse_extension_surface_name(str(call.get("tool") or ""))
-                or (call.get("is_error") and call.get("tool_result_code") != "TOOL_REPORTED_FAILURE")):
+                or (call.get("is_error") and call.get("tool_result_code") != "TOOL_REPORTED_FAILURE"
+                    and not refused_step)):
             continue
         tool = str(call.get("tool") or "")
         try:
