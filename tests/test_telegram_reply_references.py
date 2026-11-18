@@ -292,7 +292,8 @@ def test_child_notice_replies_use_the_exact_child_card_not_the_notice_or_parent(
     assert b.calls[-1][1]["reply_to_message_id"] == 101
 
 
-def test_confirmed_lifecycle_card_survives_child_index_eviction(bridge):
+@pytest.mark.parametrize("separate_notice", [False, True])
+def test_confirmed_lifecycle_card_survives_child_index_eviction(bridge, separate_notice):
     b = bridge
     state = _state(b.plugin)
     asyncio.run(b.plugin._make_outbound(b.api)({
@@ -311,7 +312,14 @@ def test_confirmed_lifecycle_card_survives_child_index_eviction(bridge):
     record = state._message_ref(b.api, "", 42, 101)
     assert record["confirmed_lifecycle_card"] is True
     state._remember_message(b.api, "bot-1", 42, 101, record)
-    fields = state._owner_ingress_fields(b.api, "bot-1", 42, _owner(50, "About the child", reply=101), 50)
+    if separate_notice:
+        state._remember_message(b.api, "bot-1", 42, 102, {
+            "chat_id": 7, "kind": "work_card", "task_id": "child", "child_card": True,
+        })
+        state._remember_message(b.api, "bot-1", 43, 103, record)
+        state._remember_message(b.api, "bot-2", 42, 104, record)
+    fields = state._owner_ingress_fields(b.api, "bot-1", 42,
+        _owner(50, "About the child", reply=102 if separate_notice else 101), 50)
     assert fields["transport"]["reply_child_message_id"] == 101
 
 
@@ -387,6 +395,20 @@ def test_telegram_reply_turn_uses_target_room_but_keeps_ingress_identity(bridge,
     if target_kind.startswith("unavailable") or target_kind == "project_retired":
         assert not started and notices[0][0][0] == 42
         assert notices[0][1]["progress_meta"]["origin_message_ref"] == source_ref
+        if target_kind == "project_retired":
+            state = _state(b.plugin)
+            state._owner_ingress_fields(b.api, "", 42, _owner(50), 50)
+            owner = state._message_ref(b.api, "", 42, 50)
+            state._remember_message(b.api, "", 42, 50, {**owner, "reply_card": "missing-child"})
+            state._set_subagent_msg(b.api, "", 42, "missing-child", 99)  # card deleted at Telegram
+            live = bus.LocalChatBridge({})
+            monkeypatch.setattr(bus, "get_bridge", lambda: live)
+            monkeypatch.setattr(bus, "publish_event", lambda _topic, event:
+                                asyncio.run(b.plugin._make_outbound(b.api)(event)))
+            args, kwargs = notices[0]
+            bus.send_with_budget(*args, **kwargs)
+            [(method, form)] = b.calls
+            assert method == "sendMessage" and form["reply_to_message_id"] == 50
         return
     [(args, kwargs)] = started
     assert args[0] == expected_room and not notices

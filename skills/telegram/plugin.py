@@ -85,7 +85,7 @@ def _bridge_client(api, event=None, chat_id: int = 0,
     api_base_url, files_dir = server or _saved_server(api)
     client = TelegramClient(token, trust_env=_HONOR_ENV_PROXIES,
                             proxy=telegram_proxy(pathlib.Path(api.get_state_dir())),
-                            **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
+                            **(_mirror_options(api, bot_id(token), event, chat_id) if token and event is not None else {}),
                             origin_label=origin_label(event, telegram_i18n.language()) if event is not None else "",
                             api_base_url=api_base_url, files_dir=files_dir, binding=binding, generation=generation)
     return client, generation

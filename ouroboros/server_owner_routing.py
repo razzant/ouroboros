@@ -625,8 +625,10 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         except (OSError, ValueError, StoreError):
             room = None
         if room is None:
+            notice = host_operation_reply_kwargs(incoming.get("origin_message_ref"), "failed", client_message_id)
+            notice.setdefault("progress_meta", {})["routing_notice_carrier"] = "system"
             ctx.send_with_budget(chat_id, "The message or work card you replied to is unavailable. Nothing was routed.",
-                                 **host_operation_reply_kwargs(incoming.get("origin_message_ref"), "failed", client_message_id),
+                                 **notice,
                                  role="system", system_type="command_reply")
             return
         telegram_ingress_chat, chat_id = chat_id, room

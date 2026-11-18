@@ -22,6 +22,12 @@ _MAX_MESSAGE_REFS = 1000
 _MESSAGE_REFS_LOCK = threading.RLock()
 
 
+class TelegramDestinationUnavailable(RuntimeError):
+    """A host-bound delivery has no matching bot and peer in this bridge binding."""
+
+    cause = "telegram_origin_destination_unavailable"
+
+
 def _reference_state(api) -> dict:
     data = _read_json_file(_state_file(api, "message_refs.json"))
     return data if isinstance(data, dict) else {}
@@ -106,8 +112,7 @@ def _owner_ingress_fields(api, bot: str, chat_id: int, message: dict, update_id:
             transport.update(bot_id=bot, owner_message_id=message_id)
             if child:
                 transport.update(reply_child_task_id=child,
-                                 reply_child_message_id=(_get_subagent_msg(api, bot, chat_id, child)
-                                                         or (target_id if target.get("confirmed_lifecycle_card") else 0)))
+                                 reply_child_message_id=_child_reply_message(api, bot, chat_id, child))
         _remember_message(api, bot, chat_id, message_id, {
             **_message_ref(api, bot, chat_id, message_id), "direction": "in", "chat_id": chat_id,
             "kind": "message", "client_message_id": client_id,
@@ -167,11 +172,11 @@ def _native_reply_id(api, bot: str, chat_id: int, event: dict) -> int:
             child = str(transport.get("reply_child_task_id") or "")
             if child and not _is_routing_notice(event):
                 saved = transport.get("reply_child_message_id")
-                return _get_subagent_msg(api, bot, chat_id, child) or (saved if type(saved) is int and saved > 0 else mid)
+                return _child_reply_message(api, bot, chat_id, child) or (saved if type(saved) is int and saved > 0 else mid)
             return mid
     task_id = str(reply.get("task_id") or "")
     if address == f"task:{task_id}" and task_id:
-        if child_mid := _get_subagent_msg(api, bot, chat_id, task_id):
+        if child_mid := _child_reply_message(api, bot, chat_id, task_id):
             return child_mid
     with _MESSAGE_REFS_LOCK:
         records = [(int(key.split(":", 1)[1]), record) for key, record in _message_refs(api, bot).items()
@@ -189,7 +194,7 @@ def _native_reply_id(api, bot: str, chat_id: int, event: dict) -> int:
         if exact_row or exact_card:
             child = str(record.get("reply_card") or "")
             if child and not _is_routing_notice(event):
-                return _get_subagent_msg(api, bot, chat_id, child) or mid
+                return _child_reply_message(api, bot, chat_id, child) or mid
             return mid
     return 0
 
@@ -208,6 +213,10 @@ def _quiet_progress(event: dict) -> bool:
 def _mirror_options(api, bot: str, event: dict, chat_id: int) -> dict:
     """A client mirrors one host row; all of its physical parts share this fact, and the bot of
     the token this client is built from: a token saved during a long send never moves a part."""
+    transport = event.get("transport")
+    if (isinstance(transport, dict) and transport.get("kind") == "telegram" and transport.get("bot_id")
+            and (transport["bot_id"] != bot or transport.get("conversation_id") != str(chat_id))):
+        raise TelegramDestinationUnavailable("Original Telegram bot or chat is unavailable; the message remains in Ouroboros.")
     child = _child_card_target(event)
     task_id = child or str(event.get("task_id") or "")
     kind = str(event.get("kind") or event.get("type") or event.get("system_type") or "message")
@@ -460,6 +469,20 @@ def _subagent_key(bot: str, chat_id: int, child_id: str) -> str:
 
 def _get_subagent_msg(api, bot: str, chat_id: int, child_id: str) -> int:
     return int(_load_subagent_state(api).get(_subagent_key(bot, chat_id, child_id)) or 0)
+
+
+def _child_reply_message(api, bot: str, chat_id: int, child_id: str) -> int:
+    """An evicted lifecycle entry can still have a confirmed card in the larger Reply index."""
+    if mid := _get_subagent_msg(api, bot, chat_id, child_id):
+        return mid
+    with _MESSAGE_REFS_LOCK:
+        records = _message_refs(api, bot)
+    prefix = f"{chat_id}:"
+    for key, record in reversed(records.items()):
+        if (key.startswith(prefix) and record.get("confirmed_lifecycle_card") is True
+                and record.get("child_card") is True and record.get("task_id") == child_id):
+            return int(key[len(prefix):])
+    return 0
 
 
 def _set_subagent_msg(api, bot: str, chat_id: int, child_id: str, message_id: int) -> None:

@@ -337,22 +337,37 @@ def test_a_reply_never_takes_a_reference_from_another_bots_message(world):
 
 
 def test_native_replies_belong_to_the_sending_bot_including_latest(world):
+    from ouroboros.chat_references import origin_reply
+    from ouroboros.project_dialogue import build_owner_message_ref
+
+    def reply(index, text):
+        row = world.rows()[index]
+        source = build_owner_message_ref(chat_id=42, client_message_id=row["client_message_id"],
+                                         ts=row["ts"], text=row["text"])
+        transport = {}
+        reference = origin_reply(world.data, "", {"origin_message_ref": source}, transport=transport)
+        assert transport["bot_id"] in (A_ID, B_ID)
+        return {"chat_id": 1, "text": text, "reply_to": reference, "transport": transport}
+
     async def steps():
         await world.deliver(A, _owner(900, "A early"), _owner(901, "A latest"))
         await world.deliver(B, _owner(5, "B early"), _owner(6, "B latest"))
-        early_a, early_b, latest_b = world.reference(0), world.reference(2), world.reference(3)
-        world.use(A)
-        await world.outbound({"chat_id": 1, "text": "to A's early", "reply_to": early_a})
+        world.use(A_ROTATED)
+        await world.outbound(reply(0, "to A's early"))
         world.use(B)
-        await world.outbound({"chat_id": 1, "text": "A's row, B sends", "reply_to": early_a})
-        await world.outbound({"chat_id": 1, "text": "to B's early", "reply_to": early_b})
-        await world.outbound({"chat_id": 1, "text": "to B's latest", "reply_to": latest_b})
+        await world.outbound(reply(0, "A's row, B must not send"))
+        world.plugin.merge_settings(world.state, {"TELEGRAM_CHAT_ID": "43"})
+        await world.outbound(reply(2, "bot B cannot send to chat 43"))
+        world.plugin.merge_settings(world.state, {"TELEGRAM_CHAT_ID": "42"})
+        await world.outbound(reply(2, "to B's early"))
+        await world.outbound(reply(3, "to B's latest"))
 
     world.run(steps)
-    sent_a = world.bots.bot(A).methods("sendMessage")
+    sent_a = world.bots.bot(A_ROTATED).methods("sendMessage")
     sent_b = {form["text"]: form for form in world.bots.bot(B).methods("sendMessage")}
     assert [form.get("reply_to_message_id") for form in sent_a] == ["900"]
-    assert "reply_to_message_id" not in sent_b["A's row, B sends"]
+    assert set(sent_b) == {"to B's early", "to B's latest"}
+    assert sum("Original Telegram bot or chat is unavailable" in message for _, message in world.api.logs) == 2
     assert sent_b["to B's early"]["reply_to_message_id"] == "5"
     assert sent_b["to B's latest"]["reply_to_message_id"] == "6"
 
