@@ -1,42 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { afterUpdateRows, bindPreflightDescription, preflightDescription, preflightEvidenceRows, updateOverReview } from '../modules/update_status.js';
-import { factValueHtml, initUpdates, updateLetterView } from '../modules/updates.js';
+import { afterUpdateRows, preflightDescription, preflightEvidenceRows, updateOverReview } from '../modules/update_status.js';
+import { factValueHtml, initUpdates } from '../modules/updates.js';
 import { setup } from './dashboard_dom_fixture.js';
 
 const plan = { base_sha: 'aaaa', target_sha: 'bbbb' };
 const letter = { key: plan, text: '## Exact range\n\n- one change', description_current: true, state: 'ready', relation: 'pending' };
 
-test('a new preflight removes the older description and preserves the exact one', () => {
-    const status = { available: true, managed: true, check_ok: true, letter };
-    const matching = bindPreflightDescription(status, { merge_plan: plan, letter });
-    assert.match(updateLetterView(matching).markdown, /Exact range/);
-    const moved = bindPreflightDescription(status, { merge_plan: { ...plan, target_sha: 'cccc' }, letter });
-    assert.equal(moved.letter, null);
-    assert.equal(updateLetterView(moved).markdown, '');
-    assert.equal(preflightDescription({ merge_plan: moved.preflight_range, letter }), '');
-    // The exact range's text reaches the dialog as Markdown to render, never flattened into the body.
+test('the confirmation reads only prose saved for both exact preflight pins', () => {
     assert.equal(preflightDescription({ merge_plan: plan, letter }), letter.text);
+    for (const other of [{ ...plan, base_sha: 'cccc' }, { ...plan, target_sha: 'cccc' }, {}]) {
+        assert.equal(preflightDescription({ merge_plan: other, letter }), '');
+    }
     assert.equal(preflightDescription({ merge_plan: plan, letter: { ...letter, description_current: false } }), '');
-});
-
-test('the preflight pins the prose only: the live request keeps its task followed', () => {
-    // Write was pressed, then Apply opened before anything was saved: the plan has no text to show,
-    // yet the request's task is still the one whose save and end the panel must hear.
-    const request = { task_id: 'd3adb33f', mode: 'write', key: plan, status: 'running', saved: false };
-    const writing = { available: true, managed: true, check_ok: true, running_sha: 'aaaa',
-        letter: { state: 'none', text: '', checked_key: plan, request } };
-    const pinned = bindPreflightDescription(writing, { merge_plan: plan, letter: { ...letter, key: {}, text: '' } });
-    assert.equal(pinned.letter.request.task_id, 'd3adb33f');
-    assert.equal(updateLetterView(pinned, 'preflighting').note, 'Ouroboros is writing the description (task d3adb33f).');
-    // A refresh while the dialog is open binds the fresh status: its request, never the old pin's.
-    const saved = { ...writing, letter: { ...letter, request: { ...request, status: 'completed', saved: true } } };
-    const refreshed = bindPreflightDescription(saved, { merge_plan: plan, letter: pinned.letter });
-    assert.deepEqual(refreshed.letter.request, saved.letter.request);
-    assert.equal(updateLetterView(refreshed, 'preflighting').markdown, '', 'the dialog\'s pin still decides the prose');
-    // A matching pin carries the live request beside its own text; no request, no letter.
-    assert.equal(bindPreflightDescription(saved, { merge_plan: plan, letter }).letter.request.saved, true);
-    assert.equal(bindPreflightDescription({}, { merge_plan: { ...plan, target_sha: 'cccc' }, letter }).letter, null);
+    assert.equal(preflightDescription({ letter: { ...letter, key: {} } }), '');
 });
 
 const rowsText = (rows) => rows.map((row) => `${row.label}: ${row.value}`).join('\n');

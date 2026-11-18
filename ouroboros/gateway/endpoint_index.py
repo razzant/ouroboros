@@ -529,9 +529,10 @@ HTTP_SHAPES: dict[str, Shape] = {
                                     note="reads no body; fetches and records range facts, never prose; broadcasts update_progress_changed"),
     "POST /api/update/preflight": Shape("200:UpdatePreflightResponse 500:ErrorResponse", "UpdatePreflightRequest"),
     "POST /api/update/description": Shape(
-        "200:UpdateDescriptionResponse 400,409,503:UpdateDescriptionErrorResponse 500:ErrorResponse",
-        "UpdateDescriptionRequest",
-        note="admits one ordinary Main task that writes the description; 409 while a requested one runs; never repeats on its own"),
+        "200:UpdateDescriptionResponse|UpdateDescriptionLatestResponse 400,409,503:UpdateDescriptionErrorResponse "
+        "500:ErrorResponse", "UpdateDescriptionRequest",
+        note="admits at most one ordinary Main task that writes the description; write/rewrite answer 409 while a "
+             "requested one runs, latest checks first and answers for the range found; never repeats on its own"),
     "POST /api/update/apply": Shape(
         "200:UpdateApplySuccessResponse 400,403:ErrorResponse 409,500:UpdateApplyErrorResponse", "UpdateApplyRequest",
         note="200: inspect status (manual, assisted_started, restart_required, or ok with restarting); adoption requires the landed transaction/merge identity and running_sha after startup"),

@@ -94,3 +94,81 @@ test('an unreadable OK body keeps its placeholder for ordinary callers and is an
         }
     } finally { globalThis.fetch = prior; }
 });
+
+
+for (const failure of [new SyntaxError('truncated JSON'), new TypeError('body stream failed')]) {
+    test(`both update status readers reject an unreadable HTTP 200 body: ${failure.message}`, async () => {
+        const prior = globalThis.fetch;
+        globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => { throw failure; } });
+        try {
+            for (const read of [apiClient.updateStatus, apiClient.updateCheck]) {
+                await assert.rejects(read, (error) => error.unreadable === true
+                    && error.responseStatus === 200 && error.status === undefined);
+            }
+            assert.deepEqual(await fetchJson('/api/other'), { error: 'non-json response (HTTP 200)' });
+        } finally { globalThis.fetch = prior; }
+    });
+}
+
+test('updateStatus keeps readable JSON and typed HTTP failures', async () => {
+    const body = { managed: true, available: true, letter: { text: 'Saved description.' } };
+    let restore = respond(200, body);
+    try { assert.deepEqual(await apiClient.updateStatus(), body); } finally { restore(); }
+    restore = respond(503, { error: 'temporarily unavailable' });
+    try {
+        await assert.rejects(() => apiClient.updateStatus(), (error) => error.status === 503
+            && error.body.error === 'temporarily unavailable');
+    } finally { restore(); }
+});
+
+test('status and description doors reject JSON without an update status or a usable outcome', async () => {
+    for (const body of [{}, null, [], { error: 'lost status' }, { managed: true }]) {
+        const restore = respond(200, body);
+        try {
+            for (const read of [apiClient.updateStatus, apiClient.updateCheck, apiClient.updateDescribeLatest,
+                () => apiClient.updateDescription('write')]) {
+                await assert.rejects(read, error => error.unreadable && error.status === undefined);
+            }
+        } finally { restore(); }
+    }
+    for (const body of [{ status: 'queued' }, { status: 'writing', task_id: ' ' }, { status: 'current', update: {} }]) {
+        const restore = respond(200, body);
+        try { await assert.rejects(apiClient.updateDescribeLatest, error => error.unreadable); }
+        finally { restore(); }
+    }
+    const restore = respond(200, { status: 'queued', task_id: 'writer', update: {} });
+    try {
+        assert.deepEqual(await apiClient.updateDescribeLatest(), { status: 'queued', task_id: 'writer', update: null });
+    } finally { restore(); }
+});
+
+// The named Write/Rewrite door may already have admitted its writer when the answer arrives unreadable.
+// That is an unknown outcome with no HTTP status, never a reply: the press says so instead of returning
+// silently, and it never claims a refusal the server did not state.
+test('the named description door rejects an unreadable HTTP 200 body and keeps readable answers', async () => {
+    const prior = globalThis.fetch;
+    globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('truncated JSON'); } });
+    try {
+        await assert.rejects(() => apiClient.updateDescription('write', { base_sha: 'a', target_sha: 'b' }), (error) => {
+            assert.equal(error.unreadable, true);
+            assert.equal(error.responseStatus, 200);
+            assert.equal(error.status, undefined, 'no HTTP status: the press reads it as an unknown outcome');
+            assert.equal(error.message, '');
+            return true;
+        });
+        // A reader that did not ask for a readable body still gets the placeholder: the change is this door's alone.
+        assert.deepEqual(await fetchJson('/api/other'), { error: 'non-json response (HTTP 200)' });
+    } finally { globalThis.fetch = prior; }
+    const answer = { status: 'queued', task_id: 't1', key: { base_sha: 'a', target_sha: 'b' } };
+    let restore = respond(200, answer);
+    try { assert.deepEqual(await apiClient.updateDescription('rewrite', { base_sha: 'a', target_sha: 'b' }), answer); }
+    finally { restore(); }
+    restore = respond(409, { error: 'A description is already being written.', task_id: 't2' });
+    try {
+        await assert.rejects(() => apiClient.updateDescription('write', { base_sha: 'a', target_sha: 'b' }), (error) => {
+            assert.equal(error.status, 409);
+            assert.equal(error.body.task_id, 't2');
+            return true;
+        });
+    } finally { restore(); }
+});

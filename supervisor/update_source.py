@@ -94,17 +94,17 @@ def git_fetch_bounded(remote_name: str, *, timeout: Optional[float] = None) -> T
     )
 
 
-def _managed_update_target() -> Tuple[str, str, str]:
+def _managed_update_target(update_channel: str | None = None) -> Tuple[str, str, str]:
     """Return the runtime-selected official ref, independent from launcher provenance."""
     from supervisor import git_ops as _g
 
     managed_meta = _g._read_managed_repo_meta()
     if not managed_meta:
         return "", "", ""
-    from ouroboros.update_channels import get_update_branch
+    from ouroboros.update_channels import UPDATE_CHANNEL_BRANCHES, get_update_branch
 
     remote_name = _g._managed_remote_name(managed_meta)
-    remote_branch = get_update_branch()
+    remote_branch = get_update_branch() if update_channel is None else UPDATE_CHANNEL_BRANCHES[update_channel]
     target_ref = f"{remote_name}/{remote_branch}" if remote_name and remote_branch else ""
     return remote_name, remote_branch, target_ref
 

@@ -167,6 +167,7 @@ HOST_ROW_CLASSES = {
     "cancel_receipt": ("owner_act_receipt", 2),
     "command_reply": ("owner_act_receipt", 2),
     "consciousness_notice": ("runtime_state", 1),
+    "context_mode_changed": ("owner_act_receipt", 1),  # a room's context mode switched: old → new in that room
     "deep_self_review_queued": ("owner_act_receipt", 1),
     "deep_self_review_unavailable": ("not_started", 2),
     "evolution_cleanup": ("card_row", 1),  # what a cycle's cleanup moved; alone only on a page without its card

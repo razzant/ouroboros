@@ -382,7 +382,7 @@
  *   Generated speech and actual playback evidence; retained on history replay.
  * @property {string=} initiator
  *   The turn's origin label: "consciousness" on every frame and row of a self-initiated wake-up (and the roots it starts); absent on an owner's turn.
- * @property {import('./task_origin.js').PlaceOrigin=} place_origin  // The place that called this work, beside `initiator`: on a focus's work and the works it starts; absent elsewhere.
+ * @property {import('./place_contract_types.js').PlaceOrigin=} place_origin  // The place that called this work, beside `initiator`: on a focus's work and the works it starts; absent elsewhere.
  * @property {('owner'|'ouroboros'|'unknown')=} continue_requester  // Continue's declared requester; unknown if undeclared, absent on other work.
  * @property {boolean=} cancelable
  *   v6.82 (P5): host-attested — this frame's task is a supervisor-queue task that
@@ -1220,7 +1220,7 @@
  * @property {{status: 'pending'|'problem'|'complete', pending_count: number, problem_count: number, promoted_ref_count: number, promoted_source_handle_count: number, problem_reasons?: Array<{reason:string,count:number}>}=} history_retention
  *   Background history placement, separate from task outcome. Routine progress is detail-only;
  *   only a problem appears on the collapsed card.
- * @property {import('./task_origin.js').PlaceOrigin=} place_origin  // the place that called this work, as on its frames and census row
+ * @property {import('./place_contract_types.js').PlaceOrigin=} place_origin  // the place that called this work, as on its frames and census row
  * @property {string=} cancel_state
  * @property {string=} cancel_reason
  * @property {string=} stop_policy
@@ -1537,6 +1537,7 @@
 /** @typedef {import('./update_types.js').UpdateApplyErrorResponse} UpdateApplyErrorResponse */
 /** @typedef {import('./update_types.js').UpdateDescriptionRequest} UpdateDescriptionRequest */
 /** @typedef {import('./update_types.js').UpdateDescriptionResponse} UpdateDescriptionResponse */
+/** @typedef {import('./update_types.js').UpdateDescriptionLatestResponse} UpdateDescriptionLatestResponse */
 /** @typedef {import('./update_types.js').UpdateDescriptionErrorResponse} UpdateDescriptionErrorResponse */
 /** @typedef {import('./management_contract_types.js').UpdateProgress} UpdateProgress */
 /** @typedef {import('./update_types.js').UpdateProgressChangedOutbound} UpdateProgressChangedOutbound */

@@ -71,11 +71,12 @@ def test_ui_smoke_update_letter_renders_below_the_action(direct_server, tmp_path
                         scripts: body.querySelectorAll('script').length,
                         xss: window.__letter_xss === 1,
                         buttons: body.querySelectorAll('button').length,
-                        refresh: section.querySelector('#updates-letter-refresh').textContent.trim(),
-                        write: section.querySelector('#updates-letter-write').textContent.trim(),
+                        descriptionAction: section.querySelector('#updates-letter-action').textContent.trim(),
+                        headButtons: section.querySelectorAll('.updates-letter-actions button:not([hidden])').length,
+                        rewrite: section.querySelector('#updates-letter-details #updates-letter-rewrite').textContent.trim(),
                         codeBlocks: section.querySelectorAll('.md-code-block').length,
                         headline: document.querySelector('#updates-summary').textContent,
-                        action: document.querySelector('#btn-update-primary').textContent,
+                        primaryAction: document.querySelector('#btn-update-primary').textContent,
                         order: [top('#btn-update-primary'), top('#updates-letter'), top('.updates-recovery')],
                         scrollWidth: document.documentElement.scrollWidth,
                         clientWidth: document.documentElement.clientWidth,
@@ -97,8 +98,9 @@ def test_ui_smoke_update_letter_renders_below_the_action(direct_server, tmp_path
     assert info["provenance"].startswith("Written by Ouroboros 6.113.5 about 6.114.0")
     assert info["strong"] == 1 and info["scripts"] == 0 and info["xss"] is False
     assert info["buttons"] == 0, "the authored body retains no Copy or other generated controls"
-    assert "Check" in info["refresh"] and info["write"] == "Rewrite", "Check and the explicit authoring request stay apart"
+    assert info["descriptionAction"] == "Check and describe" and info["headButtons"] == 1, "the section offers one action"
+    assert info["rewrite"] == "Rewrite", "asking again for the shown range waits in Details"
     assert info["codeBlocks"] == 1, "the fenced block still renders; only its control is gone"
-    assert info["headline"].startswith("Update available") and info["action"] == "Update to 6.114.0"
+    assert info["headline"].startswith("Update available") and info["primaryAction"] == "Update to 6.114.0"
     assert info["order"][0] < info["order"][1] < info["order"][2], "the headline's action, then letter, then Recovery"
     assert info["scrollWidth"] == info["clientWidth"], "no horizontal page scroll at a phone width"

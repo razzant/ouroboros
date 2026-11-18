@@ -48,10 +48,8 @@ def _managed_update_payload(*, fetch: bool, include_tags: bool) -> dict[str, Any
     from supervisor.git_ops import compute_managed_update_status, git_capture
     from supervisor.update_merge import active_update_tx
 
-    status = compute_managed_update_status(fetch=fetch)
-    # The update description rides the same payload: a FETCHING check records only
-    # facts (never prose, never on the passive read), with the running source separate
-    # from the mutable checkout HEAD that binds apply/preflight.
+    status = {"running_sha": "", **compute_managed_update_status(fetch=fetch)}
+    # Only a fetching check records facts. Apply uses checkout HEAD even if the letter is unreadable.
     letter = None
     try:
         from ouroboros import update_letter as _letter
@@ -61,6 +59,7 @@ def _managed_update_payload(*, fetch: bool, include_tags: bool) -> dict[str, Any
             _letter.refresh_after_check(status)
         letter = _letter.project_letter_for_panel(status)
     except Exception:
+        status["letter_unavailable"] = True
         log.debug("update letter projection failed", exc_info=True)
     # Additive minimal public projection of an active managed-update
     # transaction, so a re-opened panel can say "resolution in progress"
@@ -433,18 +432,18 @@ async def api_update_status(_request: Request) -> JSONResponse:
         return json_exception(exc)
 
 
+def _checked_payload() -> dict[str, Any]:
+    """One fetching check; a completed one changes availability for every client, never the retained attempt (#1818)."""
+    payload = _managed_update_payload(fetch=True, include_tags=True)
+    if payload.get("check_ok") is True:
+        update_progress.notify_changed()
+    return payload
+
+
 async def api_update_check(_request: Request) -> JSONResponse:
     """Fetch the managed remote and return fresh update status."""
     try:
-        payload = await asyncio.to_thread(
-            _managed_update_payload,
-            fetch=True,
-            include_tags=True,
-        )
-        if payload.get("check_ok") is True:
-            # Availability may have changed for every client; the retained attempt has not (#1818).
-            update_progress.notify_changed()
-        return JSONResponse(payload)
+        return JSONResponse(await asyncio.to_thread(_checked_payload))
     except Exception as exc:
         return json_exception(exc)
 
@@ -487,39 +486,66 @@ async def _preflight_description(plan: dict) -> dict:
 
 
 async def api_update_description(request: Request) -> JSONResponse:
-    """The owner's Write/Rewrite: ONE ordinary Main task describes the named range.
-
-    The range must be checked, retained in update material or the saved description's own; a
-    request whose task has not ended answers 409 with that task. The task is admitted with
-    its scheduled receipt like any host-started root, and runs on the ordinary Main route.
-    """
+    """Admit one Main writer. Write/Rewrite names its range and returns 409 for an unfinished writer.
+    Latest checks first and returns the outcome for the range it found."""
     body = await request_json_or(request, {})
     body = body if isinstance(body, dict) else {}
     mode = str(body.get("mode") or "")
     base_sha, target_sha = (str(body.get(name) or "").strip().lower() for name in ("base_sha", "target_sha"))
-    if mode not in ("write", "rewrite") or not base_sha or not target_sha:
-        return json_error("mode (write or rewrite), base_sha and target_sha are required.", 400)
+    named = mode in ("write", "rewrite") and base_sha and target_sha
+    if not named and (mode != "latest" or base_sha or target_sha):
+        return json_error("mode write or rewrite with base_sha and target_sha, or mode latest alone, is required.", 400)
     try:
-        from ouroboros.update_letter import RecordBusy, request_description
+        from ouroboros.update_letter import RecordBusy, RecordUnreadable, request_description
 
         try:
-            outcome = await asyncio.to_thread(request_description, mode, base_sha, target_sha,
-                                              admit=_admit_description_task)
+            if named:
+                payload, outcome = None, await asyncio.to_thread(request_description, mode, base_sha, target_sha,
+                                                                 admit=_admit_description_task)
+            else:
+                payload, outcome = await asyncio.to_thread(_describe_latest)
         except RecordBusy:
-            return json_error("The update description record is busy; nothing was requested.", 503)
+            return json_error("The update description record is busy; nothing was requested.", 503,
+                              reason="record_busy")
+        except RecordUnreadable as exc:
+            return json_error(f"{exc}; nothing was requested.", 503, reason="request_not_recorded")
         if outcome["outcome"] == "in_flight":
             return json_error("A description is already being written.", 409,
                               task_id=outcome["task_id"], task_status=outcome["status"])
         if outcome["outcome"] == "range_not_offered":
             return json_error("This range has no checked update, retained material or saved description; "
                               "check for updates first.", 409, legal_ranges=outcome["legal_ranges"])
+        if outcome["outcome"] == "range_unavailable":
+            return json_error("The check found an update, but could not identify two distinct revisions to describe.",
+                              409, reason="range_unavailable")
         if outcome["outcome"] == "refused":
+            if outcome["reason"] == "task_status_unknown":
+                return json_error(f"The existing writing task ({outcome['task_id']}) has unknown status; no new task was requested. "
+                                  "Check its status before asking again.", 503, reason="task_status_unknown",
+                                  task_id=outcome["task_id"], task_status="unknown")
+            if outcome["reason"] == "request_not_recorded":
+                return json_error("The description record is missing or changed; nothing was requested. "
+                                  "Check and describe again.", 503, reason="request_not_recorded")
             return json_error(f"The writing task was not accepted ({outcome['reason']}).", 503,
                               reason=outcome["reason"])
-        update_progress.notify_changed()
-        return JSONResponse({"status": "queued", "task_id": outcome["task_id"], "key": outcome["key"]})
+        if named and outcome["outcome"] == "queued":
+            update_progress.notify_changed()
+        answer = {"status": outcome["outcome"], **{name: outcome[name] for name in ("task_id", "key") if name in outcome}}
+        return JSONResponse(answer if named else {**answer, "update": payload, "checked_key": outcome["checked_key"]})
     except Exception as exc:
         return json_exception(exc)
+
+
+def _describe_latest() -> tuple[dict[str, Any], dict[str, Any]]:
+    """Check and describe: the check's payload and what ``update_letter.request_latest`` did with the range it found.
+    One worker thread runs both halves and tells every client, so a page closed meanwhile cancels only its wait."""
+    from ouroboros.update_letter import request_latest
+
+    payload = _checked_payload()
+    outcome = request_latest(payload, admit=_admit_description_task)
+    if outcome["outcome"] == "queued":
+        update_progress.notify_changed()
+    return payload, outcome
 
 
 def _admit_description_task(task_id: str, text: str, metadata: Dict[str, Any]) -> str:
