@@ -43,6 +43,7 @@ def build_knowledge_sections(
     *,
     project_id: str = "",
     warn_large: bool = False,
+    global_capture: Optional[dict] = None,
 ) -> List[str]:
     sections: List[str] = []
     # One mind keeps its authored common orientation across rooms. The generated
@@ -75,7 +76,7 @@ def build_knowledge_sections(
     except (OSError, UnicodeDecodeError) as exc:
         sections.append(f"Shared understanding source unavailable: knowledge_read(topic='{OVERVIEW_TOPIC}', scope='global'). {type(exc).__name__}.")
     sections.extend(knowledge_navigation_sections(global_address.canonical_root, pid, overview=overview,
-                                                  warn_large=warn_large))
+                                                  warn_large=warn_large, global_capture=global_capture))
     if pid:
         # Bounded per-project journal tail + workpad (multi-project, v6.32.0):
         # the project's durable progress memory rides along with its knowledge.
@@ -106,15 +107,27 @@ def build_knowledge_sections(
     return sections
 
 
+def _navigation_views(address, overview, *, whole: bool, global_capture: Optional[dict]):
+    from ouroboros.knowledge import inventory_knowledge, knowledge_index_views
+
+    if global_capture is None or address.scope != "global":
+        return knowledge_index_views(address, overview=overview, whole=whole)
+    rows = inventory_knowledge(address, navigation=True, known_note=overview)
+    global_capture.update(inventory=rows, overview=overview)
+    forms = knowledge_index_views(address, overview=overview, whole=whole, inventory=rows)
+    global_capture.update(whole=whole, outline=True)
+    return forms
+
+
 @timed_section("knowledge.navigation")
 def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: Any = None,
-                                  warn_large: bool = False) -> List[str]:
+                                  warn_large: bool = False, global_capture: Optional[dict] = None) -> List[str]:
     """One knowledge navigation rendering for integrating contexts and first delegations.
 
     Captured full/outline forms retain the same source addresses and canonical root.
     ``overview`` is the global note its caller already read, if any.
     """
-    from ouroboros.knowledge import OVERVIEW_TOPIC, knowledge_index_views, resolve_knowledge_address
+    from ouroboros.knowledge import OVERVIEW_TOPIC, resolve_knowledge_address
 
     pid = str(project_id or "").strip()
     global_address = resolve_knowledge_address(root, OVERVIEW_TOPIC, "global")
@@ -131,7 +144,7 @@ def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: 
         # when a previous writer could not publish its generated index.
         reader = f"knowledge_list(scope={address.scope!r})"
         try:
-            text, outline = knowledge_index_views(address, overview=overview)
+            text, outline = _navigation_views(address, overview, whole=True, global_capture=global_capture)
         except (OSError, UnicodeDecodeError) as exc:
             text = outline = f"Knowledge navigation unavailable: {type(exc).__name__}; {reader}."
         if warn_large and len(text) > _LARGE_CONTEXT_SECTION_CHARS:
@@ -144,11 +157,11 @@ def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: 
 
 
 @timed_section("knowledge_outline")
-def helper_navigation_sections(root: Any, project_id: str = "") -> List[str]:
+def helper_navigation_sections(root: Any, project_id: str = "", *, global_capture: Optional[dict] = None) -> List[str]:
     """A helper's knowledge at its start: the global shelf's outline and its room's (every active note by address and
     title, people's summaries kept: ``knowledge.render_knowledge_outline``), each under its own heading; the whole
     index arrives with its first accepted delegation (``delegation_knowledge_index``)."""
-    from ouroboros.knowledge import OVERVIEW_TOPIC, knowledge_index_views, resolve_knowledge_address
+    from ouroboros.knowledge import OVERVIEW_TOPIC, resolve_knowledge_address
 
     pid = str(project_id or "").strip()
     shelves = [("knowledge_outline", "## Knowledge outline", resolve_knowledge_address(root, OVERVIEW_TOPIC, "global"))] + (
@@ -158,7 +171,7 @@ def helper_navigation_sections(root: Any, project_id: str = "") -> List[str]:
     for section_id, header, address in shelves:
         reader = f"knowledge_list(scope={address.scope!r})"
         try:
-            outline = knowledge_index_views(address, whole=False)[1]
+            outline = _navigation_views(address, None, whole=False, global_capture=global_capture)[1]
         except (OSError, UnicodeDecodeError) as exc:
             outline = f"Knowledge navigation unavailable: {type(exc).__name__}; {reader}."
         sections.append(HostSection(section_id, f"{header}\n\n{outline}", reader=reader))

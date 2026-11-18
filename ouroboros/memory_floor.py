@@ -851,8 +851,34 @@ WINDOW_ONLY = ("world",)
 TELLING_SPARED = ("return_facts", "return_facts_words")
 
 
+def _held_note_steps(sections, receipts, fits, *, form="summary"):
+    """Before memory can go below a telling, walk the captured entries in address order.
+
+    The map frame supplies the window predicate. At the emergency floor only the
+    exact reader remains.
+    """
+    from ouroboros.held_notes import HeldNoteSection
+
+    addressed = section_views(sections, receipts)
+    saved = 0
+    for part in sections:
+        if not isinstance(part, HeldNoteSection) or part.section_id in addressed:
+            continue
+        row = part.window_receipt(form)
+        short = part.view_for_receipt(row, addressed)
+        if short is None or (delta := view_tokens(part.full_text) - view_tokens(short)) <= 0:
+            continue
+        if fits(addressed):
+            break
+        addressed[part.section_id] = short
+        receipts.append({**row, "tokens_saved": delta})
+        saved += delta
+    return saved
+
+
 def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, root, task_id, allowance=None,
-                shortest=None, budget_mode=None, slack=0, bare=None, retain=None, window_bound=None, told=None):
+                shortest=None, budget_mode=None, slack=0, bare=None, retain=None, window_bound=None, told=None,
+                held_telling_fits=None):
     """First steps of mode_views, using the same physical allowance as memory.
 
     Producers own meaning; this walk selects only explicit smaller views. Retained
@@ -883,16 +909,26 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     ``window_bound``, the window's own start bound: neither an owner's target nor the start's own room shortens it.
     A ``TELLING_SPARED`` section steps only while the window cannot hold the request with memory at my shortest telling
     and the books as the frame holds them (``told``: ``max_room_lost``'s own test), so before the books or a telling.
+    Held heads use their own late step, after ordinary host forms. A map frame supplies their physical predicate.
     """
-    if measure is None or not window or not root or not task_id:
-        return list(previous), saving
+    from ouroboros.held_notes import HeldNoteSection
+
     receipts = list(previous)
+    def finish(remaining):
+        if held_telling_fits is not None:
+            # Since to openings → held heads → Since to counts (the two Since steps belong here).
+            remaining = max(0, remaining - _held_note_steps(sections, receipts, held_telling_fits))
+        return receipts, remaining
+
+    if measure is None or not window or not root or not task_id:
+        return finish(saving)
     addressed = section_views(sections, receipts)
     candidates = [part for part in sections if part.section_id not in addressed
-                  and part.section_id not in PROTECTED and part.operative_view is not None
+                  and part.section_id not in PROTECTED and not isinstance(part, HeldNoteSection)
+                  and part.operative_view is not None
                   and len(part.operative_view) < len(part.full_text)]
     if not candidates:
-        return receipts, saving
+        return finish(saving)
     physical = floor_allowances(window_tokens=window, output_reserve_tokens=reserve,
                                 non_memory_tokens=0, calibration_ratio=ratio)["physical"]
     # No step reaches a shorter form (a pointer follows the operative view) and memory only adds to a request.
@@ -903,7 +939,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     initial = current = measure(addressed)
     bound = allowance if allowance is not None else physical
     if (bound is None or current <= bound) and saving == 0:
-        return receipts, 0
+        return finish(0)
     soft = bound is not None and bound < physical
     excess = max(0, saving - slack)  # what a window or a refusal measured; slack never outlines
     fits = None  # what this start can send, uncovered owner words whole: priced when a step needs it
@@ -938,7 +974,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         addressed[part.section_id] = short
         receipts.append({**row, "tokens_saved": saved, **({"start_room": start_room} if start_room else {})})
         current, fits = measure(addressed), None
-    return receipts, max(0, saving - (initial - current))
+    return finish(max(0, saving - (initial - current)))
 
 
 # --- a pairwise start fit of other memories in one captured frame ------------------------------------------------

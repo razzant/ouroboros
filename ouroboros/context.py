@@ -906,8 +906,10 @@ def _capture_context_core(
     # only where the view holds it; a child or nanny starts with its outline (every note by address
     # and title) and meets the whole index with its first accepted delegation (delegation_knowledge_index).
     project_id = resolve_project_id(task)
-    head_parts = (build_knowledge_sections(context_env, project_id=project_id) if view_spec.knowledge
-                  else helper_navigation_sections(canonical_root, project_id))
+    global_knowledge = {}
+    head_parts = (build_knowledge_sections(context_env, project_id=project_id, global_capture=global_knowledge)
+                  if view_spec.knowledge else
+                  helper_navigation_sections(canonical_root, project_id, global_capture=global_knowledge))
     if design_nav:
         head_parts.append(design_nav)
 
@@ -1036,6 +1038,9 @@ def _capture_context_core(
         from ouroboros.return_facts import turn_sections
 
         dynamic_parts.extend(turn_sections(task, canonical_root, ctx, seen=seen))
+    from ouroboros.held_notes import turn_sections as held_note_sections
+
+    dynamic_parts.extend(held_note_sections(canonical_root, task, view_spec, global_knowledge, ctx=ctx))
 
     return _ContextCore(
         base_prompt=base_prompt,

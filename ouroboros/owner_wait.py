@@ -196,6 +196,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
     cost_ceiling = getattr(ctx, "_cost_ceiling", None)
     model_wait = getattr(ctx, "model_wait_context", None)
     model_state = model_wait.continuation_state() if model_wait is not None else {}
+    from ouroboros.held_notes import continuation_capture
     from ouroboros.settings_integrity import captured_cognition
     from ouroboros.model_slots import acting_model_role
 
@@ -206,6 +207,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         # an absent legacy dispatch mark can only belong to the original run.
         "retained_work_dispatch_protocol": 1,
         "messages": messages, "trace": trace,
+        **continuation_capture(getattr(ctx, "context_fit_plan", None)),
         # Live timing cannot retain a monotonic origin across a reboot.
         "usage": without_finalization_timing(usage),
         "cost_ceiling": asdict(cost_ceiling) if cost_ceiling is not None else None,

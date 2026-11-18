@@ -267,6 +267,28 @@ def claim_record_path(shelf: Path, topic: str) -> Path:
     return shelf.parent / "knowledge_note_records" / f"{key}.json"
 
 
+def _held_version_path(address: Any, revision: str) -> Path:
+    topic_key = claim_record_path(address.shelf, address.topic).stem
+    return address.shelf.parent / "knowledge_held_versions" / topic_key / f"{revision}.md"
+
+
+def retain_held_version(note: Any, revision: str) -> None:
+    """Keep the observed bytes for an exact reader without consulting the shelf journal at a start."""
+    path = _held_version_path(note.address, revision)
+    if not path.is_file():
+        utils.write_bytes_atomic(path, note.raw, fsync=True)
+
+
+def _retained_held_version(address: Any, revision: str) -> str | None:
+    if getattr(address, "scope", None) != "global":
+        return None
+    try:
+        raw = _held_version_path(address, revision).read_bytes()
+        return raw.decode("utf-8") if hashlib.sha256(raw).hexdigest() == revision else None
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def read_claim_record_names(path: Path) -> list[str]:
     return claim_names((utils.json_snapshot(path) or {}).get("active_claims"))
 
@@ -386,6 +408,8 @@ def find_version(address: Any, version: Any, live: Any = _READ) -> tuple[str, di
             held = text  # a later row's old side: keep looking for the row that wrote it
     if held is not None:
         return held, {}
+    if (captured := _retained_held_version(address, version)) is not None:
+        return captured, {}
     # A torn line may have lost the very version asked for: on a miss, count every line naming this note.
     unfiltered = NoteHistory(address)
     for _row in unfiltered:

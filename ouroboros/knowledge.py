@@ -490,9 +490,9 @@ def knowledge_index_view(address: KnowledgeAddress, view: str = "active", *,
 
 
 def knowledge_index_views(address: KnowledgeAddress, *, overview: KnowledgeNote | None = None,
-                          whole: bool = True) -> tuple[str, str]:
+                          whole: bool = True, inventory: tuple[dict[str, Any], ...] | None = None) -> tuple[str, str]:
     """The active index whole (``""`` for a reader of the outline alone) and as its outline, from one inventory."""
-    rows = inventory_knowledge(address, navigation=True, known_note=overview)
+    rows = inventory_knowledge(address, navigation=True, known_note=overview) if inventory is None else inventory
     legacy = _legacy_prose(address, "active", overview)
     return (render_knowledge_index(rows, legacy, view="active", scope=address.scope) if whole else "",
             render_knowledge_outline(rows, legacy, scope=address.scope))

@@ -195,6 +195,7 @@ def _restore_saved_clocks(ctx: Any, task: Dict[str, Any], saved_wait: Optional[d
         from ouroboros.settings_integrity import restore_cognition
         from ouroboros.task_pacing import restore_cost_ceiling
 
+        ctx._held_note_sections = saved_wait.get("held_note_sections", [])
         restore_cognition(saved_wait.get("cognition"))
         ctx._cost_ceiling = restore_cost_ceiling(ctx, saved_wait.get("cost_ceiling"))
     if saved_wait and ctx.model_wait_context is not None:

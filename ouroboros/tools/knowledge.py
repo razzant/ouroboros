@@ -153,7 +153,7 @@ def _note_view(address: knowledge_store.KnowledgeAddress, view: str, version: st
         raise ValueError("version selects one version for view=note or view=outline; view=history lists them all")
     try:
         note = knowledge_store.read_knowledge_note(address)
-    except FileNotFoundError:
+    except (OSError, UnicodeDecodeError):
         if version is None:
             raise
         note = None
