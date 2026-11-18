@@ -301,9 +301,10 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
     ``next_offset`` while units remain. The reader rebuilds a restore reference from the one
     ``restore_checkpoint`` and a unit's id and hash instead of receiving it repeated per unit.
     The fields every page would share come once, on page one (``offset`` 0); a later page carries
-    its units, the paging, the view revision and the retained ordinary-memory map (``_ordinary_memory``'s
-    continuation read). A page holds at least one unit, so paging always advances: only page one's shared
-    fields can leave no room for it."""
+    its units, the paging, the view revision, the ``restore_checkpoint`` of the observation it lists (a newer
+    observation has its own, so a listed unit always restores from its page) and the retained ordinary-memory
+    map (``_ordinary_memory``'s continuation read). A page holds at least one unit, so paging always advances:
+    only page one's shared fields can leave no room for it."""
     from ouroboros.context_compaction import (_capsule_metadata, _first_line, context_units, note_written,
                                               owner_protected_unit_ids, unit_kind)
     from ouroboros.review_history_view import attachment_transfer_options, review_note_options
@@ -371,7 +372,7 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
         from ouroboros.loop_model_call import _measure_main_context_view
         measurement = _measure_main_context_view(plan, messages, observed['tool_schemas'],
             getattr(ctx, 'active_context_mode', '') or 'max', getattr(ctx, 'active_effort', ''), 'inspect')
-    body = {"view_revision": observed["revision"],
+    body = {"view_revision": observed["revision"], "restore_checkpoint": restore_checkpoint,
             "ordinary_memory": _ordinary_memory(ctx, observed, continuation_page=True)} if start else {
         "fit_measurement": measurement,
         "work_room": observed.get('work_room'),
@@ -392,7 +393,7 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
                  "units, earlier records, your own completed replies (kind assistant) and completed prose rows (kind user; "
                  "eligibility distinguishes governing owner words); a unit with eligible=false carries protected dialogue "
                  "and stays whole. units is one page in transcript order (offset, total; next_offset while more remain: "
-                 "call inspect again with that offset; a later page repeats only view_revision and "
+                 "call inspect again with that offset; a later page repeats only view_revision, restore_checkpoint and "
                  "ordinary_memory beside its units and the paging). Select complete unit IDs to keep and write a local working_note; "
                  "a restore_unit_refs entry is {checkpoint_ref: restore_checkpoint, unit_id, raw_sha256}. Earlier notes "
                  "stay unless replace_note_ids names them (capsule rows show authorship and first_line, a note's also "

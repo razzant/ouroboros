@@ -459,8 +459,8 @@ def test_a_fold_receipt_names_the_notes_in_view_and_each_body_that_left_by_a_res
 
 def test_inspect_sends_its_shared_fields_on_page_one_only_and_every_unit_once(tmp_path, monkeypatch):
     """Both directions: page one carries the fields every page shares; a later page carries only its units, the paging,
-    the view revision and the retained ordinary-memory map, within the page limit; together the pages list every unit
-    exactly once."""
+    the view revision, the checkpoint its units restore from and the retained ordinary-memory map, within the page
+    limit; together the pages list every unit exactly once."""
     from ouroboros import tool_capabilities
 
     messages = [*_source()[:2], *(row for index in range(80) for row in _read(f"r{index}"))]
@@ -476,7 +476,41 @@ def test_inspect_sends_its_shared_fields_on_page_one_only_and_every_unit_once(tm
     first, later = pages[0][1], pages[1:]
     assert len(later) >= 2 and {"rule", "schema_names", "inventory", "fit_measurement", "restore_checkpoint"} <= set(first)
     for text, page in later:
-        assert set(page) <= {"view_revision", "ordinary_memory", "offset", "total", "units", "next_offset"} and page["units"]
+        assert set(page) <= {"view_revision", "restore_checkpoint", "ordinary_memory", "offset", "total", "units",
+                             "next_offset"} and page["units"]
         assert page["view_revision"] == first["view_revision"] and len(text) <= 6000
+        assert page["restore_checkpoint"] == first["restore_checkpoint"]
     listed = [row["unit_id"] for _, page in pages for row in page["units"]]
     assert len(listed) == len(set(listed)) == first["total"] == first["inventory"]["units"]
+
+
+def test_a_later_inspect_page_names_the_checkpoint_its_units_restore_from(tmp_path, monkeypatch):
+    """Both directions: a later page read from a newer observation carries that observation's restore_checkpoint, and a
+    unit only that observation holds restores from the page alone; page one's checkpoint of the earlier observation
+    does not hold it. The large shared fields still come on page one only."""
+    from ouroboros import tool_capabilities
+
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 6000)
+    ctx = SimpleNamespace(active_context_mode="low", drive_root=tmp_path, budget_drive_root=tmp_path,
+                          task_id="view-task")  # the round context `_context` builds runs as this task
+    earlier = [*_source()[:2], *(row for index in range(55) for row in _read(f"r{index}"))]
+    record_context_view(ctx, earlier, [])
+    first = json.loads(_compact_context(ctx, inspect=True))
+    assert first.get("next_offset") and first.get("restore_checkpoint")
+    newer = [*earlier, {"role": "assistant", "tool_calls": [{"id": "inspect", "function": {
+        "name": "compact_context", "arguments": '{"inspect": true}'}}]},
+        {"role": "tool", "tool_call_id": "inspect", "content": json.dumps(first)}, *_read("newest")]
+    record_context_view(ctx, newer, [])
+    page = json.loads(_compact_context(ctx, inspect=True, offset=first["total"] + 1))
+    assert page["view_revision"] != first["view_revision"] and page.get("restore_checkpoint")
+    assert {"fit_measurement", "rule", "inventory", "schema_names", "work_room"}.isdisjoint(page)
+    unit = page["units"][-1]
+
+    def restore(checkpoint):
+        _compact_context(ctx, restore_unit_refs=[{"checkpoint_ref": checkpoint, "unit_id": unit["unit_id"],
+                                                  "raw_sha256": unit["raw_sha256"]}])
+        _run_round_compaction(copy.deepcopy(newer), _context(tmp_path, ctx, [], monkeypatch))
+        return ctx._context_view_receipt["status"]
+
+    assert restore(first["restore_checkpoint"]) == "source_unavailable"
+    assert restore(page["restore_checkpoint"]) == "applied"
