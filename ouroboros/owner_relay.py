@@ -865,7 +865,7 @@ def _words_identity(row: dict) -> Any:
     return row["ref"] or ("words", _text_sha256(row["text"]), str(row.get("ts") or ""))
 
 
-def _pristine_form(ctx, row: dict, targets: dict) -> tuple:
+def _pristine_form(ctx, row: dict, targets: dict | None = None) -> tuple:
     """``(address, chat row)`` for a row of the set this run holds no chat row for (a direct turn's input): its
     words, time, room and client id as the corpus recorded them, in the shape a quote is built from."""
     ref, client = str(row.get("ref") or ""), ""
@@ -881,7 +881,7 @@ def _pristine_form(ctx, row: dict, targets: dict) -> tuple:
     if "answer_input" in row or row["source"] == "owner_press":
         fact = row.get("answer_input") or {}
         address = fact.get("reply_address")
-        target = targets.get(address) or {}
+        target = (targets or {}).get(address) or {}
         answer = {"source": row["source"], **{k: fact[k] for k in ("source_task_id", "quiz_id") if fact.get(k)}}
         if target:
             answer["reply_to"] = {"address": address, "author": target.get("author"), "text": target["text"],
