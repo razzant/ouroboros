@@ -1946,9 +1946,10 @@ time. For optional delivery evidence, shared `JsonSession.hold_context` and `hol
 The factory's `observe("usage", raw)` reports JSON
 `{"usage": {...}, "raw_usage": {...}}` for that physical connection; `close()` emits
 its final sample before returning. Samples and responses share one watermark. The call's
-own thread writes connection samples to the ledger in arrival order, so the call loop never
-waits on it; a connection's close waits for its samples, the money check reads what is
-written, and one still waiting takes in its connection's next. The host
+own thread writes connection samples to the ledger, so the call loop never waits on those
+writes; a connection keeps one sample waiting, which takes in its next. A connection's close
+waits for its own samples and fails if one could not be written; the money check reads what
+is written. The host
 settles growth after Stop/budget exhaustion without admitting work or inventing responses;
 response IDs dedupe across the call, including resumed connections. Reservations
 survive reconnects; final call teardown abandons responses without a receipt.

@@ -58,6 +58,7 @@ def test_connected_samples_share_watermark_and_settle_before_close_ends(host_wor
     async def consume(session):
         for _ in range(2):
             sample(session, 4)
+        await asyncio.to_thread(host._connection_ledger.flush)  # written before the tail, which would join it waiting
         host.response_started('same-id')
         for _ in range(2):
             host.response_done('same-id', usage={'connected_seconds': 7},
@@ -175,6 +176,52 @@ def test_a_slow_connected_time_write_never_holds_the_call_loop(host_world, monke
     rows = ua.read_usage_records(host.ctx.drive_root)
     assert [row['cost_evidence']['usage']['connected_seconds'] for row in rows] == [4, 4, 5, 1]
     assert all(row['source'] == 'live_connection_usage' and row['task_id'] == host.ctx.task_id for row in rows)
+
+
+
+def test_a_connection_close_waits_for_its_own_connected_time_only(host_world, monkeypatch):
+    """#3633. One ledger writer serves every connection of a call. A connection's close waits for its own receipts and
+    raises only its own failed write: another connection's write in progress neither holds the close nor marks it
+    failed, and the call's money check still raises that other failure."""
+    import threading
+    from ouroboros import live_usage
+    host = host_world.host
+    host.quote = tariff(input_cost_per_second=.01)
+    entered, release, serving = threading.Event(), threading.Event(), []
+    settle = live_usage.settle_connection_usage
+
+    def held_then_failed(**receipt):
+        if receipt['connection_key'] in serving:
+            return settle(**receipt)
+        entered.set()
+        assert release.wait(5), 'held by the test'
+        raise RuntimeError('ledger write failed')
+    monkeypatch.setattr(live_usage, 'settle_connection_usage', held_then_failed)
+
+    def sample(observer, seconds):
+        observer.observe('usage', json.dumps({'usage': {'connected_seconds': seconds}, 'raw_usage': {}}))
+
+    async def consume(session):
+        view = session.observe.__self__
+        serving.append(str(view.connection_number))
+        sample(session, 4)
+        await asyncio.to_thread(host._connection_ledger.flush)
+        successor = copy.copy(view)  # reports beside the serving connection, as views are made
+        successor.connection_number, successor._meter_watermark = view.connection_number + 1, 0.0
+        sample(successor, 3)
+        await asyncio.to_thread(entered.wait, 2)
+
+    async def run():
+        with ua.usage_scope(ua.UsageScope(drive_root=host.ctx.drive_root, task_id=host.ctx.task_id)):
+            await host.session(consume, LiveOptions())  # the serving connection has closed
+            assert entered.is_set() and not release.is_set(), 'its close did not wait for the other write'
+            assert 'cleanup_failure' not in host.timing['connections'][-1]
+            release.set()
+            await asyncio.to_thread(host._connection_ledger.flush)
+            with pytest.raises(RuntimeError, match='ledger write failed'):
+                await host.check()  # the call's money check still ends it
+    asyncio.run(run())
+    assert [row['cost_usd'] for row in ua.read_usage_records(host.ctx.drive_root)] == pytest.approx([.04])
 
 
 def test_cancel_joins_started_tool_before_connection_closes(host_world):
