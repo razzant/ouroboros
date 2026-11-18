@@ -918,7 +918,7 @@ class TestVitalsFact:
                                   "dispatch": "observed_send"} for n in range(3)])
         _section, data = self._runtime(env)
         assert data["vitals"]["owner_turns"] == ["19:51 chat 1 waited 1.0 s",
-                                                 "19:52 chat 1 resumed (exact_pause) 33.9 s from its own entry"]
+                                                 "19:52 chat 1 resumed (exact_pause) 33.9 s from its own entry, its message accepted 10-24 14:00"]
         assert "owner_turns_note" not in data["vitals"]
 
     def test_the_journal_per_store_and_the_wal_gate_only_for_a_rollback_store(self, tmp_path, monkeypatch):

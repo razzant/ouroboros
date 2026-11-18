@@ -565,7 +565,9 @@ def _owner_turn(row: Dict[str, Any], ended: Dict[str, Any], today: Any) -> str:
     top frame when its end row is still in the tail, and a journal row that was not written."""
     wait, entry = row.get("owner_wait_sec"), _sec(row.get("handler_wait_sec"))
     waited = (f"waited {_sec(wait)}" if wait is not None
-              else f"resumed ({row['resumed']}) {entry} from its own entry" if row.get("resumed")
+              else f"resumed ({row['resumed']}) {entry} from its own entry, its message accepted "
+                   f"{_clock(row.get('origin_accepted_at'), today) if row.get('origin_accepted_at') else 'at an unknown time'}"
+              if row.get("resumed")
               else f"waited {entry} from entry (acceptance stamp unknown)")
     text = f"{_clock(row.get('ts'), today)} chat {row.get('chat_id')} {waited}"
     if row.get("slowest_phase"):
