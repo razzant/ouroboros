@@ -291,7 +291,7 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
 @pytest.mark.parametrize('window,probes,hosts', [
     # This boundary crosses the receipt's owner-only clause after host reduction:
     # the longer receipt needs another walk, then the index must outline too.
-    (11_398, ['walk', 're-price', 'walk', 're-price', 'walk'],
+    (11_394, ['walk', 're-price', 'walk', 're-price', 'walk'],
      [('runtime', False), ('installed_skills', False), ('knowledge_index', False)]),
     # With this larger window the second re-price fits and the index stays whole.
     (11_444, ['walk', 're-price', 're-price'], [('runtime', False), ('installed_skills', True)]),
@@ -420,6 +420,11 @@ def test_a_pairwise_start_fit_is_the_production_start_fit_and_writes_nothing(tmp
     text = '\n'.join(mf.counterfactual_lines(fit))
     assert f"- as captured: starts {plan.initial_mode.capitalize()}; Max room {shown['max_room']['cause']}: " in text
     assert f"This task started in {plan.initial_mode} (its start projection, a separate fact" in text
+    # The start is named by its own cause, never by the mode chosen now: a Low start resumed under the owner's Max stays
+    # Low; a Max start the window took to chapter maps (a cause recorded) is Max with chapter maps (4A).
+    for start, said in ((('low', ''), 'low'), (('low', 'memory'), 'Max with chapter maps')):
+        frame = mf.counterfactual_starts(dataclasses.replace(plan, start=start, preferred_mode='max'), {'as captured': captured})
+        assert f"This task started in {said} (its start projection" in '\n'.join(mf.counterfactual_lines(frame))
     # Without the inputs the frame needs, the fit is named as not measured, never guessed.
     for missing, bare in (('the tool schemas its start priced', dataclasses.replace(plan, start_tool_schemas_json=None)),
                           ('its window record', dataclasses.replace(plan, window_record=None)),

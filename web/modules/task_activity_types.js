@@ -6,9 +6,10 @@
  * @property {'dispatched'|'settled'|'unresolved'|'released'} ledger_state
  * @property {string} round_id
  * @property {''|'max'|'low'|'nano'} preferred_at_send  // the task plan's owner mode when it sent
- * @property {'max'|'low'|'nano'} applied  // the mode the sent candidate was rendered in
+ * @property {'max'|'low'|'nano'} applied  // the mode the send is named in: Max for Max's chapter maps (shown_mode)
+ * @property {'whole'|'maps'} books  // the books' form in this send
  * @property {string} profile  // owner_max | owner_low | owner_nano | task_local_low | task_local_nano
- * @property {''|'memory'|'route'|'window'|'after_start'} cause  // why applied is lower than preferred_at_send
+ * @property {''|'memory'|'route'|'window'|'after_start'} cause  // why applied is lower than preferred_at_send, or Max's books are maps
  * @property {boolean} target_missed  // this send exceeded the owner's mode target
  * @property {?number} no_memory_tokens  // Low's missed target: the start's request with no memory, else null
  * @property {string} observed_at

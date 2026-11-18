@@ -577,8 +577,7 @@ def _rebind_context_fit_plan(
     ).reproject_for_route(  # the shown view kept while this route admits it (``WindowRecord.admitted``), else narrowed
         window_tokens=window_tokens, known_window=known_window, ratio=estimator_ratio(evidence, ratio), measured_input_tokens=carried, admitted=True,
         output_reserve=output_reserve, tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages,
-        room_if_narrowed=True, reasoning_effort=shape["reasoning_effort"],
-        telling_floor=True)  # a shown Max view narrowed for this window keeps my tellings before its books (4A)
+        room_if_narrowed=True, reasoning_effort=shape["reasoning_effort"])
     mode = rebound.initial_mode
     projected_prompt_tokens = rebound.projected_tokens_with_tools(mode, tool_schemas, **shape)
     shown = messages[0] if messages else None
@@ -1592,6 +1591,4 @@ def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target
     deficit = fit.measurement.capacity_deficit_tokens
     excess, asked = ((max(0, target - slack), min(slack, target)) if target else (deficit, slack) if deficit
                      else (WHOLE_CATEGORY, 0) if step == "memory_rest" else (0, slack or WHOLE_CATEGORY))
-    # The first pass stops a Max view at my tellings, so the books step goes before memory's rest (4A).
-    return shed_since_before() if _coarsen_memory_view(ctx, fit, saving=excess, slack=asked,
-                                                       telling_floor=step == "floor") else None
+    return shed_since_before() if _coarsen_memory_view(ctx, fit, saving=excess, slack=asked) else None

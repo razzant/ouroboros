@@ -251,9 +251,10 @@ def measure_main_fit(
 
 def _no_memory_tokens(plan: Any, rendered_mode: str) -> Optional[int]:
     """The start's own receipt of a missed Low target: what the request took with no memory (``memory_floor``)."""
-    if not hasattr(plan, "projection"):
+    projection = getattr(plan, "projection", None)
+    if not callable(projection):
         return None
-    value = ((plan.projection(rendered_mode).memory_facts or {}).get("floor") or {}).get("no_memory_tokens")
+    value = ((getattr(projection(rendered_mode), "memory_facts", None) or {}).get("floor") or {}).get("no_memory_tokens")
     return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
 
 

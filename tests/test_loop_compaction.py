@@ -538,9 +538,8 @@ def test_a_fallback_candidate_in_the_same_round_walks_no_pass_again(tmp_path, mo
 @pytest.mark.parametrize("saved", [True, False])
 def test_the_floor_pays_the_excess_and_slack_and_books_wait_for_a_further_refusal(tmp_path, monkeypatch, saved):
     """Owner order 7A with the 06.11 sizing: memory's detail pays the measured excess the bodies left plus the
-    return-after-fold slack, down to my tellings in Max (4A), and Max keeps its books through the first pass
-    while they fit; only a further refusal of that narrowed candidate turns the books into navigation
-    (task-local Low) in the second pass."""
+    return-after-fold slack, and Max keeps its books through the first pass; only a further refusal of that
+    narrowed candidate turns the books into navigation (task-local Low) in the second pass."""
     from ouroboros import capability_evidence as ce, loop, loop_model_call
 
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)  # a measured refusal is durable
@@ -553,8 +552,8 @@ def test_the_floor_pays_the_excess_and_slack_and_books_wait_for_a_further_refusa
     monkeypatch.setattr(loop_model_call, "_run_emergency_address_pass",
                         lambda ctx, fit, *, rung, goal_tokens=None: SimpleNamespace(status="no_eligible"))
     coarsened = []
-    monkeypatch.setattr(loop_model_call, "_coarsen_memory_view", lambda ctx, fit, *, saving=None, slack=0,
-                        telling_floor=False: coarsened.append((saving, slack, telling_floor)) or True)
+    monkeypatch.setattr(loop_model_call, "_coarsen_memory_view",
+                        lambda ctx, fit, *, saving=None, slack=0: coarsened.append((saving, slack)) or True)
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
     sends = []
 
@@ -571,9 +570,7 @@ def test_the_floor_pays_the_excess_and_slack_and_books_wait_for_a_further_refusa
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
     msg, _cost, mode = loop._call_round_model(context)
     assert msg["content"] == "fits" and len(sends) == (2 if saved else 3)
-    # The excess the bodies left, and the slack, from the level shown; the first pass stops a Max view at my
-    # tellings, so the books go to chapter maps before memory goes below a telling (owner 15.11.2026, 4A).
-    assert coarsened[0] == (target - SLACK, SLACK, True)
+    assert coarsened[0] == (target - SLACK, SLACK)  # the excess the bodies left, and the slack, from the level shown
     if saved:
         assert mode == "max" and context.messages[0]["content"] == "MAX_SYSTEM"
         context.context_fit_plan.reproject_for_route.assert_not_called()
@@ -591,7 +588,7 @@ def test_already_low_overflow_never_emits_max_to_low_toast(tmp_path, monkeypatch
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(profile="owner_low", mode="low")]))
     monkeypatch.setattr(loop_model_call, "_run_emergency_address_pass",
                         lambda ctx, fit, *, rung, goal_tokens=None: SimpleNamespace(status="no_eligible"))
-    monkeypatch.setattr(loop_model_call, "_coarsen_memory_view", lambda ctx, fit, *, saving=None, slack=0, **_kw: True)
+    monkeypatch.setattr(loop_model_call, "_coarsen_memory_view", lambda ctx, fit, *, saving=None, slack=0: True)
 
     def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
         nonlocal calls

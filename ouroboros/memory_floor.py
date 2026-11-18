@@ -181,8 +181,11 @@ def floor_allowances(*, window_tokens: Optional[int], output_reserve_tokens: Opt
                  calibration_ratio=calibration_ratio, margin_count=work_room_levels, boundary_tokens=boundary_tokens)
     physical = context_budget.request_context_budget(window_tokens=window_tokens, **frame)
     start = context_budget.request_context_budget(window_tokens=window_tokens, target_tokens=target_tokens, **frame)
-    return {"margin": start["with_margin_tokens"], "physical": physical["without_margin_tokens"],
-            "window": physical["with_margin_tokens"], "budget": start["with_margin_tokens"] if target_tokens else None}
+    # A target names its cuts only where it is tighter than the window's own start bound, never the window's cut
+    window = physical["with_margin_tokens"]  # None: an unknown window, the target alone bounds the start
+    budget = start["with_margin_tokens"] if target_tokens and (window is None or start["with_margin_tokens"] < window) else None
+    return {"margin": start["with_margin_tokens"], "physical": physical["without_margin_tokens"], "window": window,
+            "budget": budget}
 
 
 def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: Iterable[str], *, story: int, fixed: int,
@@ -579,6 +582,8 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
                                    "budget": old.get("budget_allowance_tokens")},
                        target_tokens=old.get("target_tokens"), lowered_from=switched.get("from"))
     facts.update({"max_room": max_room} if max_room else {})
+    # Low's missed target was the start's: what its request took with no memory stays its fact (3A)
+    facts["floor"].update({"no_memory_tokens": old["no_memory_tokens"]} if "no_memory_tokens" in old else {})
     governance = _governance_blocks(None, plan.core, mode="low" if mode == "nano" else mode)
     sections = (*plan.core.semi_stable_sections, *plan.core.dynamic_head_sections, *plan.core.dynamic_sections,
                 *(governance[0] if not isinstance(governance[0], str) else ()))
@@ -732,7 +737,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                          kept: Optional[mv.FloorLevel] = None, saving: int = 0, boundary_tokens: Optional[int] = None,
                          working_reserve_tokens: Optional[int] = None,
                          measure_text: Optional[Callable[[str, str], int]] = None,
-                         start_work: bool = False, telling_floor: bool = False,
+                         start_work: bool = False,
                          max_room: Optional[Mapping[str, Any]] = None, stated_window_tokens: Optional[int] = None,
                          shortest: bool = False, level: Optional[mv.FloorLevel] = None) -> ViewFit:
     """One mode's projection, the floor decided once.
@@ -748,9 +753,6 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     ``shortest``: where this walk ends when only uncovered owner rows are left to address, with its
     completed receipt -- what a start's host walk judges beside the window (``_host_steps``).
     ``level``: such a walk's level again, without walking, its receipt priced beside this request's host forms.
-    ``telling_floor``: a shown Max view narrowed by a refusal's first pass stops at my tellings too, so the books
-    go to chapter maps before memory goes below a telling (owner 15.11.2026, 4A; consilium 17.11.2026); a later
-    pass takes memory's rest.
     A level is priced from the snapshot's pieces, never by drawing it; ``measure_text(story_chars, room_chars)`` prices
     the two memory texts of a whole request (by default their own tokens).
     """
@@ -769,7 +771,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     # start bound may. A miss of the target is its own fact. Nano's number still governs all memory (owner 11.10, 13.10).
     binds = kept is None and target is not None and owner_mode == "low" and (window is None or target < window)
     floor, keeps = ((TARGET_FLOOR, TARGET_KEEPS) if binds else (TELLING_STAGES, frozenset())  # the one order (4A)
-                    if mode == "max" and (kept is None or start_work or telling_floor) else (None, frozenset()))
+                    if mode == "max" and (kept is None or start_work) else (None, frozenset()))
     size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
     room_bound = allowances["window"] if binds else allowances["margin"]  # a target's miss is its own fact, below
     uncovered = uncovered_owner_rows(snapshot)
@@ -1016,7 +1018,10 @@ def counterfactual_starts(plan: Any, snapshots: Mapping[str, mv.MemoryViewSnapsh
                 "host_sections_addressed", ())], **({"input": "rescued"} if rescued else {})}
     frame = {"core": plan.core_sha256[:12], "preferred": plan.preferred_mode, "window": record.total_equivalent,
              "known": record.usable is not None, "reserve": plan.output_reserve_tokens, "ratio": ratio,
-             "schemas": len(schemas or ()), "started": plan.start[0] or plan.initial_mode}  # the start's own mode
+             "schemas": len(schemas or ()), "started": plan.start[0] or plan.initial_mode,  # the start's own mode
+             # an owner's Max the start took to chapter maps carries its cause (``start_cause``), whatever is chosen now
+             "maps": (plan.start[0] or plan.initial_mode) == "low" and bool(
+                 plan.start[1] if plan.start[0] else start_cause(plan.projection(plan.initial_mode).memory_facts))}
     return {"measured": True, "frame": frame, "arms": arms}
 
 
@@ -1043,13 +1048,14 @@ def counterfactual_lines(fit: Mapping[str, Any]) -> List[str]:
     if not fit.get("measured"):
         return ["", head, "not measured: this task's plan does not hold " + "; ".join(fit.get("missing") or ()) + "."]
     f = fit["frame"]
+    started = "Max with chapter maps" if f.get("maps") else f["started"]
     lines = ["", head, (
         f"frame: core {f['core']}, owner mode {f['preferred']}, window {f['window']:,}"
         f"{'' if f['known'] else ' (not known: no window bound applies)'}, reply reserve {f['reserve']:,}, density "
         f"{f['ratio']:.3f}, {f['schemas']} tool schemas as this task's start priced them; my story, its status and this "
         "room's retold records read now, everything else as this task captured it. "
         + ("This task's original start is not known: its continuation did not carry it."
-           if f["started"] == "unknown" else f"This task started in {f['started']} (its start projection, a separate "
+           if f["started"] == "unknown" else f"This task started in {started} (its start projection, a separate "
            "fact: my chronicle may have changed since)."))]
     for name, arm in fit["arms"].items():
         if "refused" in arm or "unmeasured" in arm:

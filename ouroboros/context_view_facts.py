@@ -88,7 +88,8 @@ def memory_facts(plan, mode, messages=()):
 
 
 def low_start_line(plan, mode, task_id):
-    """The owner's Main line for a fresh start of an integrating focus that memory lowered to Low: its Max room (which
+    """The owner's Main line for a fresh start of an integrating focus that memory took from whole books (to chapter
+    maps, or to Nano where protected words leave the maps frame no room), named in the mode it got: its Max room (which
     exists only on the owner's Max with a known window) is ``crowded`` while the books, core, assignment, tool schemas,
     reply reserve and work room alone fit (``memory_floor.crowded_by_memory``). No numbers: the task's own facts keep
     them. "" for every other start: a route (the task's own facts disclose it), tool schemas that tip it alone, a held
@@ -97,8 +98,10 @@ def low_start_line(plan, mode, task_id):
     room = receipt.get("max_room")
     if receipt.get("role") in DELEGATED_FOCUS_ROLES or not floor.crowded_by_memory(room):
         return ""
-    maps = "Max with chapter maps" + (floor.REQUIRED_BOOK_WHOLE if room.get("book_required") else "")
-    return f"Task {task_id} started in {maps}: my memory, even in its shortest tellings, did not fit beside the whole books."
+    nano = mode == "nano"  # protected words the maps frame could not hold beside its reply reserve: the start is Nano
+    maps = ("Nano" if nano else "Max with chapter maps") + (floor.REQUIRED_BOOK_WHOLE if room.get("book_required") else "")
+    return (f"Task {task_id} started in {maps}: my memory, even in its shortest tellings, did not fit beside the "
+            + ("books, even as chapter maps." if nano else "whole books."))
 
 
 def low_start_episode(root, plan, mode, task_id, send):
