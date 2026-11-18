@@ -416,7 +416,7 @@ def test_linux_package_smoke_pins_third_party_vendor_images_by_digest():
     script = (REPO / "scripts/smoke_linux_packages.sh").read_text(encoding="utf-8")
     assert re.search(r'^ASTRA_IMAGE="registry\.astralinux\.ru/library/astra/ubi18@sha256:[0-9a-f]{64}"$',
                      script, re.MULTILINE)
-    assert (REPO / "scripts/redos-ubi8.pin").read_text().split() == [
+    assert (REPO / "scripts/redos-ubi8.pin").read_text(encoding="ascii").split() == [
         "registry.red-soft.ru/ubi8/ubi@sha256:7ab4f904e704cc3538f384897f91a69cf0c8980ba1c3476357d33c3799062384",
         "sha256:a3493f3c4808a1d7872ba7865bee2bee12caecd0ba5a1a0f58e7d368a24257fe",
     ]
@@ -439,8 +439,8 @@ def test_vendor_package_command_checks_identity_and_propagates_failure(
 ):
     for name in ("dirname", "grep"):
         (tmp_path / name).symlink_to(shutil.which(name))
-    red_ref, red_id = (REPO / "scripts/redos-ubi8.pin").read_text().split()
-    astra_ref = re.search(r'^ASTRA_IMAGE="([^"]+)"', (REPO / "scripts/smoke_linux_packages.sh").read_text(), re.M)[1]
+    red_ref, red_id = (REPO / "scripts/redos-ubi8.pin").read_text(encoding="ascii").split()
+    astra_ref = re.search(r'^ASTRA_IMAGE="([^"]+)"', (REPO / "scripts/smoke_linux_packages.sh").read_text(encoding="utf-8"), re.M)[1]
     docker = tmp_path / "docker"
     docker.write_text(r'''#!/bin/sh
 set -eu
@@ -713,7 +713,7 @@ def test_vendor_distro_smoke_is_informational_and_never_gates_a_release():
 
 
 def test_only_hosted_red_os_ci_selects_the_registry_ca(monkeypatch):
-    jobs = yaml.safe_load((REPO / ".github/workflows/ci.yml").read_text())["jobs"]
+    jobs = yaml.safe_load((REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
     [(name, smoke)] = [(name, step) for name, job in jobs.items() for step in job.get("steps", [])
                        if "redos-ci" in step.get("run", "")]
     assert name == "vendor-package-smoke" and jobs[name]["runs-on"] == "ubuntu-latest"
@@ -739,10 +739,11 @@ def test_only_hosted_red_os_ci_selects_the_registry_ca(monkeypatch):
     assert context.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
     ca = REPO / ".github/certs/registry.red-soft.ru-2024.crt"
     assert _digest(ca) == "6f9d829c8e6712444fce3624658d8788672849c5d5b7b53fd9cf7e83eac4193e"
-    assert context.get_ca_certs(binary_form=True) == [ssl.PEM_cert_to_DER_cert(ca.read_text())]
+    assert context.get_ca_certs(binary_form=True) == [ssl.PEM_cert_to_DER_cert(ca.read_text(encoding="ascii"))]
 
 
-def test_red_os_pinned_archive_retains_original_config_and_layer(tmp_path):
+@pytest.mark.parametrize("changed_config", [False, True], ids=["matching", "changed-bytes"])
+def test_red_os_pinned_archive_retains_original_config_and_layer(tmp_path, changed_config):
     # Inert data on a request recorder. No sockets, engine, credentials or installation.
     helper = runpy.run_path(str(REPO / "scripts/ci_redos_image.py"))
 
@@ -758,7 +759,8 @@ def test_red_os_pinned_archive_retains_original_config_and_layer(tmp_path):
                          "rootfs": {"type": "layers", "diff_ids": [descriptor(content)["digest"]]}}).encode()
     manifest = json.dumps({"schemaVersion": 2, "mediaType": helper["MANIFEST_TYPE"],
                            "config": descriptor(config), "layers": [descriptor(compressed)]}).encode()
-    responses = [io.BytesIO(data) for data in (b'{"token":"fixture"}', manifest, config, compressed)]
+    served = config.replace(b'"layers"', b'"LAYERS"') if changed_config else config
+    responses = [io.BytesIO(data) for data in (b'{"token":"fixture"}', manifest, served, compressed)]
     for response in responses:
         response.status = 200
     connection = Mock()
@@ -766,6 +768,12 @@ def test_red_os_pinned_archive_retains_original_config_and_layer(tmp_path):
     config_id = descriptor(config)["digest"]
     manifest_id = descriptor(manifest)["digest"]
     out = io.BytesIO()
+    if changed_config:
+        assert served != config and len(served) == len(config)
+        with pytest.raises(ValueError, match=f"content mismatch for {config_id}"):
+            helper["write_image"](connection, tmp_path, manifest_id, config_id, out)
+        assert not out.getvalue()
+        return
     helper["write_image"](connection, tmp_path, manifest_id, config_id, out)
     auth = {"Authorization": "Bearer fixture"}
     prefix = "/v2/ubi8/ubi"
