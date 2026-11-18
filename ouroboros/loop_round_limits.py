@@ -648,11 +648,12 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         with_receipt = [*candidate, {"role": "user", "content": "[Context view receipt]\n" + json.dumps(notice, ensure_ascii=False)}]
         try:
             final_fit = fit_candidate(copy.deepcopy(with_receipt), copy.deepcopy(schemas))
-            for detail in ("request_exceptions", "bodies_removed"):
+            for detail in ("request_exceptions", "bodies_removed", "notes_kept"):
                 if final_fit.get("accepted") is True or detail not in notice:
                     continue
                 # Optional detail must not undo an otherwise fitting view. The
                 # counted omission still points to the whole retained receipt.
+                # The notes themselves stay in the view; only their list leaves.
                 notice[f"{detail}_omitted"] = len(notice.pop(detail))
                 if detail == "bodies_removed":
                     notice.pop("restore_checkpoint", None)

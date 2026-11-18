@@ -96,9 +96,11 @@ def test_receipt_itself_is_included_in_final_fit_before_publication(tmp_path, mo
         return {"accepted": not candidate[-1].get("content", "").startswith("[Context view receipt]")
                 if isinstance(candidate[-1].get("content"), str) else True}
     result = _run_round_compaction(messages, _context(tmp_path, ctx, schemas, monkeypatch, fit))
-    # The candidate, then with its receipt, then with the list of removed bodies counted instead of listed.
-    assert len(calls) == 3 and result is messages
+    # The candidate, then with its receipt, then with the list of removed bodies and then the list of notes counted
+    # instead of listed: a receipt that fits no window still undoes nothing it did not have to.
+    assert len(calls) == 4 and result is messages
     assert '"bodies_removed": ' in calls[1][-1]["content"] and '"bodies_removed_omitted": 1' in calls[2][-1]["content"]
+    assert '"notes_kept": ' in calls[2][-1]["content"] and '"notes_kept_omitted": 1' in calls[3][-1]["content"]
     assert ctx._context_view_receipt["status"] == "fit_rejected"
 
 
@@ -401,8 +403,8 @@ def _receipt(rows):
 def test_a_fold_receipt_names_the_notes_in_view_and_each_body_that_left_by_a_restorable_address(tmp_path, monkeypatch):
     """Both directions: an applied fold's receipt lists every note in view (id, write time or "not recorded", first
     line) and every source body that left (what it was, its address), facts only; the address restores that body; a
-    restore that removes nothing names no body; a receipt the window cannot hold drops the list for a count rather
-    than undoing the view."""
+    restore that removes nothing names no body; a receipt the window cannot hold drops a list for a count (the bodies,
+    then the notes) rather than undoing the view, and the retained receipt keeps every list the notice counts."""
     from ouroboros.context_compaction import context_units
     from tests._working_notes import _note, _undated
 
@@ -442,6 +444,17 @@ def test_a_fold_receipt_names_the_notes_in_view_and_each_body_that_left_by_a_res
     counted, _ = _receipt(held)
     assert ctx._context_view_receipt["status"] == "applied" and counted["bodies_removed_omitted"] == 1
     assert "restore_checkpoint" not in counted and len(counted["notes_kept"]) == 2
+
+    def no_notes_list(rows, _tools):  # a window that holds the view and its receipt, but not the list of notes
+        return {"accepted": '"notes_kept": ' not in str(rows[-1].get("content"))}
+
+    record_context_view(ctx, messages, [])
+    _compact_context(ctx, working_note="The read confirms the goal.", keep_unit_ids=[])
+    fitted = _run_round_compaction(copy.deepcopy(messages), _context(tmp_path, ctx, [], monkeypatch, fit=no_notes_list))
+    assert ctx._context_view_receipt["status"] == "applied"  # the fold that fits is kept, never undone by a list
+    noted, _ = _receipt(fitted)
+    assert noted["notes_kept_omitted"] == 2 and noted["bodies_removed_omitted"] == 1 and "notes_kept" not in noted
+    assert len(ctx._context_view_receipt["notes_kept"]) == 2 and ctx._context_view_receipt["bodies_removed"]
 
 
 def test_inspect_sends_its_shared_fields_on_page_one_only_and_every_unit_once(tmp_path, monkeypatch):
