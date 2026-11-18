@@ -1,0 +1,249 @@
+# One-shot positive installation of published packages and offline contract checks.
+# The first attempt is qualification; reruns are diagnostic. The workflow is not part of the product.
+name: Qualify the vendor packages on the reviewed tree (positive install)
+
+on:
+  push:
+    branches: [qualification/redos-261103-20261118]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualify-redos-package-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PATCH_BASE: e0fb9542b828964dd792e202b7d5939c6c0140eb
+  REVIEWED_PARENT: 8a8783bd02683b58eda0451d4044e77813c0482f
+  SUBJECT_COMMIT: 5f20c94f9e77ae8e1b826bcab4321796376611a3
+  SUBJECT_TREE: c8c826db0c7a90ae8964302efa20283024d0a523
+
+jobs:
+  vendor-install:
+    name: positive install (${{ matrix.leg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: redos
+            lane: redos-ci
+            distro: RED OS 8
+            package: ouroboros-7.11.0-1.red80.x86_64.rpm
+            url: https://github.com/razzant/ouroboros/releases/download/v7.11.0/ouroboros-7.11.0-1.red80.x86_64.rpm
+            sha256: bac89d8c1b11ff864cb7a94cd03dedb26ef7dc38899f0f5c186e6633bc213782
+            bytes: "1116119462"
+          - leg: astra
+            lane: astra
+            distro: Astra Linux
+            package: ouroboros_7.11.0_amd64.deb
+            url: https://github.com/razzant/ouroboros/releases/download/v7.11.0/ouroboros_7.11.0_amd64.deb
+            sha256: 33cdf332784ae04b87031168187a0389b5d468d18ad39dbea804d2f08b84e765
+            bytes: "1018706280"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 4
+          persist-credentials: false
+
+      - name: Bind the run to the exact reviewed tree (this commit adds only this workflow)
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "x86_64"
+          test "$(git rev-parse HEAD~1)" = "$SUBJECT_COMMIT"
+          test "$(git rev-parse 'HEAD~1^{tree}')" = "$SUBJECT_TREE"
+          test "$(git rev-parse HEAD~2)" = "$REVIEWED_PARENT"
+          test "$(git rev-parse HEAD~3)" = "$PATCH_BASE"
+          test "$(git diff --name-only HEAD~1 HEAD)" = ".github/workflows/qualify-redos-package.yml"
+
+      - name: Download the published v7.11.0 package, digest-strict
+        timeout-minutes: 20
+        env:
+          PKG: ${{ matrix.package }}
+          URL: ${{ matrix.url }}
+          SHA: ${{ matrix.sha256 }}
+          BYTES: ${{ matrix.bytes }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pkg"
+          curl --fail --silent --show-error --location --retry 3 --proto '=https' --proto-redir '=https' \
+            --output "$RUNNER_TEMP/pkg/$PKG" "$URL"
+          ( cd "$RUNNER_TEMP/pkg" && echo "$SHA  $PKG" | sha256sum --check --strict )
+          test "$(wc -c < "$RUNNER_TEMP/pkg/$PKG" | tr -d '[:space:]')" = "$BYTES"
+
+      - name: Real install through the product lane (${{ matrix.lane }})
+        timeout-minutes: 40
+        env:
+          LEG: ${{ matrix.leg }}
+          LANE: ${{ matrix.lane }}
+          DISTRO: ${{ matrix.distro }}
+          PKG: ${{ matrix.package }}
+          URL: ${{ matrix.url }}
+          SHA: ${{ matrix.sha256 }}
+          BYTES: ${{ matrix.bytes }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/smoke-$LANE.log"      # runner-local only; never uploaded or echoed
+          if [ "$LEG" = redos ]; then
+            read -r image config < scripts/redos-ubi8.pin
+          else
+            image='registry.astralinux.ru/library/astra/ubi18@sha256:694fcfd48cf152ec833caeb63dba416e7ea55d8491bf5b46dd6c29d6fbf0ede3'
+            config=''
+          fi
+          cached=false
+          if docker image inspect "$image" >/dev/null 2>&1 || { [ -n "$config" ] && docker image inspect "$config" >/dev/null 2>&1; }; then cached=true; fi
+          rc=0
+          bash scripts/smoke_linux_packages.sh "$LANE" "$RUNNER_TEMP/pkg/$PKG" > "$log" 2>&1 || rc=$?
+          LEG_RC="$rc" EXPECTED_IMAGE="$image" CACHED="$cached" python3 -I -S - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          e = os.environ
+          lane = e['LANE']
+          log = Path(e['RUNNER_TEMP'], f'smoke-{lane}.log')
+          pattern = re.compile(r'--- Verified linux/amd64 ' + re.escape(e['EXPECTED_IMAGE']) + r' \(sha256:[0-9a-f]{64}\) ---')
+          identity = complete = False
+          with log.open(encoding='utf-8', errors='replace') as stream:
+              for line in stream:
+                  line = line.rstrip('\r\n')
+                  identity |= pattern.fullmatch(line) is not None
+                  complete |= line == f'=== Linux package smoke passed ({lane} lane) ==='
+          code, attempt = int(e['LEG_RC']), int(e['GITHUB_RUN_ATTEMPT'])
+          passed = code == 0 and identity and complete
+          facts = dict(lane=lane, distro=e['DISTRO'], subject=e['SUBJECT_COMMIT'], tree=e['SUBJECT_TREE'],
+                       image=e['EXPECTED_IMAGE'], cached_before=e['CACHED']=='true', package_sha256=e['SHA'],
+                       package_bytes=int(e['BYTES']), image_confirmed=identity, smoke_confirmed=complete,
+                       lane_exit=code, run=e['GITHUB_RUN_ID'], attempt=attempt, qualified=passed and attempt==1)
+          text = json.dumps(facts, sort_keys=True)
+          Path(e['RUNNER_TEMP'], f'{lane}-evidence.json').write_text(text+'\n', encoding='utf-8')
+          print(text)
+          raise SystemExit(code or int(not passed))
+          PY
+
+      - name: Upload the curated install evidence (predefined public fields only)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qualify-vendor-install-${{ matrix.leg }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/${{ matrix.lane }}-evidence.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  defensive-tests:
+    name: the product's own offline contract tests of both lanes
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 4
+          persist-credentials: false
+
+      - name: Bind the run to the exact reviewed tree (this commit adds only this workflow)
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD~1)" = "$SUBJECT_COMMIT"
+          test "$(git rev-parse 'HEAD~1^{tree}')" = "$SUBJECT_TREE"
+          test "$(git rev-parse HEAD~2)" = "$REVIEWED_PARENT"
+          test "$(git rev-parse HEAD~3)" = "$PATCH_BASE"
+          test "$(git diff --name-only HEAD~1 HEAD)" = ".github/workflows/qualify-redos-package.yml"
+
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
+        with:
+          install-project: 'false'
+
+      # Whole module through the product's own runner. Covers both cached image identifiers, the
+      # ordinary local pull, the local-archive load, both installer failure codes, the in-memory
+      # archive build and the TLS policy — through synthetic recorders, without network or daemon.
+      # The raw pytest export stays runner-local; the witness below publishes curated fields only.
+      - name: Defensive tests of the vendor lanes (tests/test_release_proof.py, whole module)
+        id: contracts
+        timeout-minutes: 25
+        run: >-
+          python scripts/run_tests.py --evidence-dir "$RUNNER_TEMP/qualify/defensive" -q -ra
+          tests/test_release_proof.py --tb=no > "$RUNNER_TEMP/package-contracts.log" 2>&1
+
+      - name: Witness — profile checks ran whole by function name, nothing skipped
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        shell: python
+        env:
+          RUNNER_STEP_OUTCOME: ${{ steps.contracts.outcome }}
+        run: |
+          import json
+          import os
+          import sys
+          from collections import defaultdict
+          from pathlib import Path
+
+          sys.path.insert(0, os.getcwd())
+          from tests.ci_verdicts import final
+
+          data, error = final(Path(os.environ["RUNNER_TEMP"], "qualify", "defensive", "focused"))
+          # Profile checks are witnessed BY FUNCTION NAME, without pinned parametrization counts:
+          # each function must have run whole (setup/call/teardown all passed) at least once, and
+          # any skip anywhere in the session fails the witness.
+          profile = [
+              "tests/test_release_proof.py::test_linux_package_smoke_pins_third_party_vendor_images_by_digest",
+              "tests/test_release_proof.py::test_vendor_package_command_checks_identity_and_propagates_failure",
+              "tests/test_release_proof.py::test_vendor_package_requires_a_real_file_before_docker",
+              "tests/test_release_proof.py::test_vendor_distro_smoke_is_informational_and_never_gates_a_release",
+              "tests/test_release_proof.py::test_only_hosted_red_os_ci_selects_the_registry_ca",
+              "tests/test_release_proof.py::test_red_os_pinned_archive_retains_original_config_and_layer",
+              "tests/test_release_proof.py::test_red_os_registry_requires_a_direct_success",
+          ]
+          attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          evidence = {"leg": "defensive", "run": os.environ["GITHUB_RUN_ID"], "run_attempt": attempt,
+                      "subject": os.environ["SUBJECT_COMMIT"], "tree": os.environ["SUBJECT_TREE"],
+                      "runner_step_outcome": os.environ["RUNNER_STEP_OUTCOME"],
+                      "session_error": error or None,
+                      "session_exit_code": data.get("session_exit_code")}
+          problems = []
+          if evidence["runner_step_outcome"] != "success":
+              problems.append("the test runner did not finish successfully")
+          if error or data.get("session_exit_code") != 0:
+              problems.append(f"defensive session: {error or 'exit ' + str(data.get('session_exit_code'))}")
+          phases = defaultdict(dict)
+          for row in data.get("reports") or []:
+              if not row.get("is_subtest"):
+                  phases[row["nodeid"]].setdefault(row["phase"], set()).add(row["outcome"])
+          whole = {node for node, seen in phases.items()
+                   if all(seen.get(phase) == {"passed"} for phase in ("setup", "call", "teardown"))}
+          functions = {}
+          for function in profile:
+              ran = sorted(node[len(function):] or "[no-param]" for node in whole
+                           if node == function or node.startswith(function + "["))
+              functions[function] = {"ran_whole": len(ran)}
+              if not ran:
+                  problems.append(f"{function} did not run whole")
+          skipped = sum(row['outcome']=='skipped' for row in data.get('reports') or [])
+          collection_skips = len(data.get('collection_skips') or [])
+          if skipped or collection_skips:
+              problems.append('a test or its collection was skipped')
+          if len(whole) != data.get('tests_collected'):
+              problems.append('collection and whole-test counts differ')
+          evidence.update(tests_ran_whole=len(whole), profile_functions=functions,
+                          skipped_phases=skipped, collection_skips=collection_skips,
+                          problems=problems, qualified=not problems and attempt==1)
+          text = json.dumps(evidence, indent=2)
+          Path(os.environ["RUNNER_TEMP"], "defensive-evidence.json").write_text(text, encoding="utf-8")
+          print(text)                              # predefined public fields only
+          if attempt != 1:
+              print(f"RERUN: attempt {attempt}; the qualification of this run is attempt 1")
+          sys.exit("\n".join(problems) or None)
+
+      - name: Upload the curated defensive evidence (predefined public fields only)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qualify-vendor-defensive-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/defensive-evidence.json
+          retention-days: 14
+          if-no-files-found: warn
