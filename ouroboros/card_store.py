@@ -130,7 +130,8 @@ def find_submission(record: Dict[str, Any], request_id: str) -> Optional[Dict[st
 
 
 def record_submission(root: Any, card_id: str, *, request_id: str, action_id: str, label: str,
-                      values: Optional[Dict[str, Any]], once: bool, revision: int) -> Dict[str, Any]:
+                      values: Optional[Dict[str, Any]], once: bool, revision: int,
+                      form_title: str = "", bubble_label: str = "") -> Dict[str, Any]:
     """Record one owner press of the card drawn at ``revision``, idempotent on ``request_id``.
 
     Returns ``{"record", "submission", "duplicate"}``; ``{"record", "stale"}`` (the current
@@ -158,6 +159,8 @@ def record_submission(root: Any, card_id: str, *, request_id: str, action_id: st
             return None
         # The author and title the press was made on: a retry after a replace still reaches them.
         submission = {"request_id": request_id, "action_id": action_id, "label": label,
+                      **({"form_title": form_title} if form_title else {}),
+                      **({"bubble_label": bubble_label} if bubble_label else {}),
                       **({"values": values} if values is not None else {}), "at": utc_now_iso(), "delivered": "owed",
                       "task_id": str(current.get("task_id") or ""), "title": str(current.get("title") or "")}
         submissions.append(submission)
@@ -214,6 +217,7 @@ def owner_press_text(label: str, values: Optional[Dict[str, Any]]) -> str:
 def press_snapshot(submission: Dict[str, Any]) -> Dict[str, Any]:
     """The fields of the accepted submission that a reader needs after the card is replaced or pruned."""
     return {"label": submission.get("label") or submission.get("action_id") or "",
+            **{k: submission[k] for k in ("form_title", "bubble_label") if submission.get(k)},
             "title": submission.get("title") or "", "values": dict(submission.get("values") or {})}
 
 

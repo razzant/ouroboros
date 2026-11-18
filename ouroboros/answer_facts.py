@@ -110,7 +110,7 @@ def forwarded_bubble_matches(row: Mapping, content: str, root: Any) -> bool:
     submission = _living_submission(row, root)
     if not submission or not (snap := submission[2]):
         return False
-    bubble = owner_press_text(snap["label"], snap["values"])
+    bubble = owner_press_text(snap.get("bubble_label") or snap["label"], snap["values"])
     return content in (bubble, bubble.strip())
 
 
@@ -126,7 +126,8 @@ def living_card_input(row: Any, root: Any = None) -> dict:
     values = [v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
               for v in snap["values"].values() if v is not None and (not isinstance(v, str) or v.strip())]
     target = {"address": f"card {card_id} of task {asker}", "author": f"Ouroboros, task {asker}",
-              "text": f"{snap['title']}\n{label}", "pressed_label": label, "card_id": card_id}
+              "text": "\n".join(part for part in (snap["title"], snap.get("form_title"), label) if part),
+              "pressed_label": label, "card_id": card_id}
     return {"source": "owner_mailbox" if values else OWNER_PRESS, "content": "\n".join(values) if values else label,
             "source_task_id": asker, "reply_to": target}
 

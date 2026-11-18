@@ -58,7 +58,7 @@ def test_a_card_tree_indexes_its_commit_controls_with_their_drawn_labels():
     ])
     assert checked["actions"] == {
         "book": {"kind": "action", "once": False, "label": "Book it"},
-        "dates": {"kind": "form", "once": True, "label": "Dates", "fields": ["from", "to"]},
+        "dates": {"kind": "form", "once": True, "label": "Submit", "form_title": "Dates", "bubble_label": "Dates", "fields": ["from", "to"]},
     }
     assert checked["components"][1]["components"][0] == ACTION
 

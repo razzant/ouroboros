@@ -165,10 +165,10 @@ def test_a_press_reaches_the_live_author_as_card_input_once(tmp_path, decide):
                                "delivery": "delivered", "card_id": card["card_id"], "revision": 1}
     [entry] = _mail(tmp_path)
     assert entry["kind"] == KIND_CARD_INPUT and entry["msg_id"] == f"card_input:{card['card_id']}:r1"
-    assert entry["text"].startswith(f"[Card input] The owner pressed «Dates» on your card «Flights» (card {card['card_id']}).")
+    assert entry["text"].startswith(f"[Card input] The owner pressed «Submit» on your card «Flights» (card {card['card_id']}).")
     assert json.loads(entry["text"].split("Values:\n", 1)[1]) == {"from": "Mon", "to": "Fri"}
     [stored] = load_card(tmp_path, card["card_id"])["submissions"]
-    assert stored["delivered"] == "delivered" and stored["label"] == "Dates"
+    assert stored["delivered"] == "delivered" and stored["label"] == "Submit" and stored["form_title"] == "Dates"
     state = [f for f in decide.frames if f.get("type") == "card_state"][-1]
     assert state["submissions_summary"][0]["delivery"] == "delivered"
 
@@ -283,8 +283,9 @@ def test_an_owed_press_retried_after_a_replace_reaches_the_author_it_was_pressed
     retried = decide({"request_id": "r1", "revision": 1, "decision_id": f"card:{card['card_id']}:dates"})
     assert retried.status_code == 200 and retried.json()["duplicate"] is True and retried.json()["delivery"] == "delivered"
     [entry] = _mail(tmp_path, "task-1")
-    assert "«Dates» on your card «Flights»" in entry["text"] and json.loads(entry["text"].split("Values:\n", 1)[1]) == {"from": "Mon"}
-    assert all("«Dates»" not in row["text"] for row in _mail(tmp_path, "task-2")), "never the replacing task's"
+    assert "«Submit» on your card «Flights»" in entry["text"] and "Form: Dates." in entry["text"]
+    assert json.loads(entry["text"].split("Values:\n", 1)[1]) == {"from": "Mon"}
+    assert _mail(tmp_path, "task-2") == []
 
 
 def test_a_once_press_that_lost_to_an_owed_winner_says_so(tmp_path, decide):
@@ -304,7 +305,7 @@ def test_the_summary_names_each_press_by_its_request(tmp_path, decide):
     assert decide({"request_id": "r1", "revision": 1, "decision_id": f"card:{card['card_id']}:dates",
                    "values": {"from": "Mon"}}).status_code == 202
     [entry] = submissions_summary(load_card(tmp_path, card["card_id"]))
-    assert entry == {"action_id": "dates", "label": "Dates", "at": entry["at"], "delivery": "owed", "request_id": "r1"}
+    assert entry == {"action_id": "dates", "label": "Submit", "at": entry["at"], "delivery": "owed", "request_id": "r1"}
 
 
 def test_an_undeliverable_press_stays_owed_and_a_retry_delivers_it(tmp_path, decide):
@@ -582,3 +583,36 @@ def test_continue_normalizes_only_the_exact_forwarded_form_bubble(tmp_path, deci
     [form] = [r for r in successor["metadata"]["owner_corpus"] if r.get("msg_id") == "fern-forward"]
     assert form["source"] == "owner_mailbox" and form["content"] == "\n".join(values.values())
     assert form["reply_to"]["card_id"] == card["card_id"]
+
+
+@pytest.mark.parametrize("component, caption, heading, bubble", [
+    ({"type": "form", "title": "Cedar dates", "fields": [{"name": "from"}]}, "Submit", "Cedar dates", "Cedar dates"),
+    ({"type": "form", "label": "Cedar dates", "submit_label": "  File dates  ", "fields": [{"name": "from"}]},
+     "  File dates  ", "Cedar dates", "  File dates  "),
+    ({"type": "action", "label": "  Choose the cedar route  "}, "  Choose the cedar route  ", "", "  Choose the cedar route  "),
+])
+def test_only_the_complete_drawn_caption_proves_a_wordless_press(tmp_path, decide, component, caption, heading, bubble):
+    from types import SimpleNamespace
+    from ouroboros.card_store import load_card, write_card
+    from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision
+    from ouroboros.owner_words import cited_owner_basis, owner_words_contain
+
+    card = write_card(tmp_path, chat_id=1, task_id="cedar-desk", title="Cedar options", fallback_text="Choose",
+                      kind="components", body={"components": [{**component, "submit": {"id": "cedar"}}]})
+    decide.state["live"] = False
+    assert decide({"request_id": "cedar-choice", "revision": 1, "decision_id": f"card:{card['card_id']}:cedar"}).json()["delivery"] == "forwarded"
+    event = decide.bridge._inbox.get_nowait()
+    assert event["text"] == bubble
+    [stored] = load_card(tmp_path, card["card_id"])["submissions"]
+    assert stored["label"] == caption
+    meta = {**event["task_metadata"], "origin_message_ref": {"chat_id": 1, "client_message_id": event["client_message_id"]},
+            "origin_message_text": bubble}
+    ctx = SimpleNamespace(task_metadata=meta, drive_root=tmp_path)
+    _initialize_owner_directives(ctx, [{"role": "user", "content": bubble}])
+    [act] = ctx._owner_directives
+    assert owner_input_revision(ctx) == 1 and act["reply_to"]["pressed_label"] == caption
+    if heading:
+        assert heading in act["reply_to"]["text"] and not cited_owner_basis(ctx, heading)[0]
+    assert not owner_words_contain(ctx, caption)
+    assert cited_owner_basis(ctx, caption)[0]["source"] == "owner_press"
+    assert cited_owner_basis(ctx, caption.strip()[1:])[0] is None
