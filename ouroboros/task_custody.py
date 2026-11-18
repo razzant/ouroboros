@@ -1327,8 +1327,9 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
     final census, probe and move happen inside it. ``stop()`` closes a maintenance
     generation between phases. ``admission_rollback`` additionally lets a never-started
     task's drive go without a settled row. Returns ``{"status": "removed" | "retained",
-    "reason", "published"}`` and, given a prune ``report``, records a kept drive. ``owed``: the pass's one read of the
-    kept-output debts (``owed_declarations``) for the first gate; the move rechecks with its own.
+    "reason", "published"}`` and, given a prune ``report``, records a kept drive and Phase B's step seconds
+    (``under_q_sec``, on the pass's ``headless_task_drive_prune`` event, not its job row). ``owed``: the pass's one
+    read of the kept-output debts (``owed_declarations``) for the first gate; the move rechecks with its own.
     """
     canonical = pathlib.Path(canonical_root).resolve(strict=False)
     tid = validate_task_id(task_id)
@@ -1375,7 +1376,9 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
             alive = live(item["task_id"])
             if alive is not False:
                 raise _Retained("liveness_unknown" if alive is None else "task_live")
-        with (guard() if guard is not None else contextlib.nullcontext(True)) as allowed:  # Phase B: the move
+        with contextlib.ExitStack() as phase_b:  # Phase B: the move, under the guard
+            allowed = phase_b.enter_context(guard() if guard is not None else contextlib.nullcontext(True))
+            phase_b.callback(lambda: under_q.append(time.monotonic()))  # its last step ends as the guard is left
             under_q.append(time.monotonic())
             if not allowed:
                 raise _Retained("generation_closed")
@@ -1421,7 +1424,6 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
         if not closed():
             log.warning("Child drive %s kept: custody could not be proven", drive, exc_info=True)
     finally:
-        under_q.append(time.monotonic())  # a step cut short ends here, Q released by then
         shutil.rmtree(staging, ignore_errors=True)
     if report is not None and len(under_q) > 1:
         report.setdefault("under_q_sec", []).append({"task_id": tid, **{step: round(b - a, 3) for step, a, b in zip(

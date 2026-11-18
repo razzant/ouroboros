@@ -255,6 +255,45 @@ def test_the_moves_steps_under_the_interlock_reach_the_passs_report(tmp_path):
     assert "under_q_sec" not in before
 
 
+def test_a_steps_seconds_under_the_interlock_end_where_the_interlock_ends(tmp_path, monkeypatch):
+    """The move's seconds are those spent under the guard, on success and on failure alike: a move that fails counts
+    the time it took inside the guard, never the warning logged after the guard released the queue lock."""
+    import contextlib
+
+    clock, active, busy, real_replace = [0.0], [], [], os.replace
+
+    @contextlib.contextmanager
+    def guard():
+        active.append(True)
+        try:
+            yield True
+        finally:
+            active.pop()
+
+    def replace(old, new):
+        if active:
+            clock[0] += 3  # the move's own time, under the guard
+        if Path(old) in busy:
+            raise OSError("drive in use")
+        return real_replace(old, new)
+
+    def warning(*_args, **_kwargs):
+        assert not active, "the warning comes after the guard released Q"
+        clock[0] += 12
+
+    monkeypatch.setattr(task_custody, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(task_custody.os, "replace", replace)
+    monkeypatch.setattr(task_custody.log, "warning", warning)
+    for name, fails in (("moved", False), ("in_use", True)):
+        (tmp_path / name).mkdir()
+        data, drive, _record = _cancelled_with_capture(tmp_path / name, "task_drives")
+        busy[:] = [drive] if fails else []
+        report = {}
+        outcome = _settle(data, drive, report=report, guard=guard)
+        assert outcome["status"] == ("retained" if fails else "removed"), outcome
+        assert report["under_q_sec"][0]["move"] == 3, report["under_q_sec"]
+
+
 def test_read_only_folders_in_custody_leftovers_never_strand_them(tmp_path):
     """A moved drive or a crashed settlement's staging carrying read-only folders and files (a Git
     object store, a tool's own modes) is removed whole by the permission-granting removal, so no
