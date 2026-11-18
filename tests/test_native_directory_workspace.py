@@ -13,6 +13,7 @@ from ouroboros.task_status import load_effective_task_result
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 from supervisor.events_subagent_admission import _resolve_subagent_constraint
+from tests._workspace_git import publish_capture
 
 
 def _setup(tmp_path, monkeypatch):
@@ -65,6 +66,34 @@ def test_native_directory_retains_and_verifies_binary_output(tmp_path, monkeypat
     assert load_effective_task_result(drive, "child")["child_result_disposition"] == "integrated"
     verdict = json.loads((task_artifacts_dir(drive, "parent") / "subagent_patch_verdict_child.json").read_text())
     assert verdict["outcome"] == "verified_registered_outputs" and not verdict["applied"]
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_direct_manifest_published_before_held_output_copies(tmp_path, monkeypatch, missing):
+    from pathlib import Path
+    from ouroboros.artifacts import artifact_record
+
+    workspace, drive, _, parent, output_ctx = _setup(tmp_path, monkeypatch)
+    source = workspace / "answer.bin"
+    source.write_bytes(b"\x00retained direct output")
+    output = copy_file_to_task_artifacts(output_ctx, source, kind="process_output")
+    manifest = {"schema_version": 1, "workspace_root": str(workspace), "status": "ready",
+                "capture_kind": "directory_direct", "apply_state": "already_applied", "before": "unknown",
+                "complete": False, "evidence_extent": "registered_outputs_only", "registered_outputs": [output]}
+    path = task_artifacts_dir(drive, "child") / "workspace_patch.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    write_task_result(drive, "child", "completed", artifacts=[output, artifact_record(path, kind="workspace_patch_manifest")],
+                      artifact_status="ready", artifact_finalized_at="2026-11-01T12:00:00Z")
+    if missing:
+        Path(output["path"]).unlink()
+    result = _integrate_subagent_patch(parent, task_id="child")
+    if missing:
+        assert "INTEGRATE_DIRECTORY_OUTPUT_MISMATCH" in result
+        verdict = json.loads((task_artifacts_dir(drive, "parent") / "subagent_patch_verdict_child.json").read_bytes())
+        assert verdict["outcome"] == "direct_output_mismatch" and not verdict["applied"]
+    else:
+        assert "Verified 1 registered file postimage(s)" in result
+    assert source.read_bytes() == b"\x00retained direct output"
 
 
 @pytest.mark.parametrize("directory", [False, True])
@@ -138,6 +167,32 @@ def test_native_directory_refuses_changed_postimage(tmp_path, monkeypatch, chang
     assert not load_task_result(drive, "child").get("child_result_disposition")
 
 
+def test_cli_and_comparison_verify_the_held_directory_output(tmp_path, monkeypatch):
+    from pathlib import Path
+    from ouroboros import cli
+    from ouroboros.tools.subagent_integration import _compare_subagent_patches
+    from tests._task_file_http import task_file_client, use_cli_http
+
+    workspace, drive, task, parent, output_ctx = _setup(tmp_path, monkeypatch)
+    source = workspace / "out.bin"
+    source.write_bytes(b"recorded output")
+    copy_file_to_task_artifacts(output_ctx, source)
+    finalize_task_artifacts(drive, task)
+    result = load_task_result(drive, "child")
+    held = next(row for row in result["artifacts"] if row["kind"] == "workspace_registered_output")
+    with task_file_client(drive) as http:
+        reader, requests = use_cli_http(monkeypatch, http)
+        public = reader.request("GET", "/api/tasks/child")
+        assert cli._patch_from_result(reader, "child", public, strict=False) == ""
+        assert ("HEAD", f"/api/tasks/child/artifacts/{held['name']}") in requests
+        assert "patch status: ready |" in _compare_subagent_patches(parent, ["child"])
+        Path(held["path"]).write_bytes(b"altered output")
+        with pytest.raises(cli.PatchCLIError):
+            cli._patch_from_result(reader, "child", public, strict=False)
+        assert "patch status: failed" in _compare_subagent_patches(parent, ["child"])
+    assert source.read_bytes() == b"recorded output"
+
+
 @pytest.mark.parametrize("no_space", [False, True])
 def test_native_directory_capture_fails_when_it_cannot_hold_an_output(tmp_path, monkeypatch, no_space):
     """A registered output the capture cannot hold (ENOSPC copying it into ``registered_outputs/``) has its bytes only
@@ -175,7 +230,7 @@ def test_native_directory_capture_fails_when_it_cannot_hold_an_output(tmp_path, 
     assert row["artifact_bundle"]["errors"] == [row["artifact_error"]]
     for decision in ("apply", "accept"):
         message = _integrate_subagent_patch(parent, task_id="child", decision=decision, reason="Read the findings")
-        assert "direct folder capture is not ready" in message, message
+        assert "INTEGRATE_CAPTURE_FAILED" in message and f"registered output {named['name']}" in message, message
     assert not load_effective_task_result(drive, "child").get("child_result_disposition")
 
 
@@ -211,6 +266,53 @@ def test_native_directory_admission_keeps_git_geometry(tmp_path, monkeypatch, co
     subprocess.run(["git", "init", "-q", str(workspace)], check=True)
     constraint, root, _, error = admission()
     assert not error and constraint["base_sha"] == "(unborn)" and root == str(workspace)
+
+
+@pytest.mark.parametrize("failure,reason", [
+    ("missing", "executable or working directory not found"),
+    ("timeout", "timed out after 5 seconds"),
+    ("nonzero", "exited 128: fatal: invalid Git metadata"),
+    ("oserror", "could not start git (PermissionError, errno 13)"),
+    ("incomplete", "did not report a worktree root"),
+])
+def test_self_worktree_provisioning_reports_external_git_probe_failure(tmp_path, monkeypatch, failure, reason):
+    from ouroboros import subagent_worktrees
+    from tests._workspace_git import repository
+
+    workspace = repository(tmp_path / "external")
+    ctx = SimpleNamespace(REPO_DIR=tmp_path / "system", DRIVE_ROOT=tmp_path / "data")
+    monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "1")
+    original_run = subprocess.run
+    sensitive_url = "https://fixture-user:fixture-password@example.invalid/path"
+    stderr = f"fatal: invalid Git metadata\n{sensitive_url}\t\x1b" + "noise " * 250
+    seen = []
+
+    def fail_probe(args, **kwargs):
+        if args != ["git", "rev-parse", "--is-bare-repository", "--show-toplevel"]:
+            return original_run(args, **kwargs)
+        seen.append(kwargs["cwd"])
+        if failure == "missing":
+            raise FileNotFoundError(sensitive_url)
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"], stderr=stderr)
+        if failure == "oserror":
+            raise PermissionError(13, sensitive_url)
+        if failure == "incomplete":
+            return subprocess.CompletedProcess(args, 0, "false\n", stderr)
+        return subprocess.CompletedProcess(args, 128, "", stderr)
+
+    monkeypatch.setattr(subprocess, "run", fail_probe)
+    monkeypatch.setattr(subagent_worktrees, "provision_worktree", lambda **_: pytest.fail("created a copy after refusal"))
+    constraint, root, mode, detail = _resolve_subagent_constraint(
+        ctx, tid="child", requested_constraint={"mode": "acting_subagent", "surface": "self_worktree"},
+        workspace_root=str(workspace), workspace_mode="external", base_sha="", parent_task_id="parent",
+    )
+    assert seen == [str(workspace.resolve())]
+    assert constraint["mode"] == "local_readonly_subagent" and (root, mode) == (str(workspace), "external")
+    assert "failed to provision self_worktree" in detail and reason in detail
+    assert "fixture-password" not in detail and "fixture-user" not in detail and "\x1b" not in detail
+    if failure == "nonzero":
+        assert "***REDACTED***" in detail and detail.endswith("…") and len(detail) < 850
 
 
 def test_native_directory_reject_does_not_undo_effects(tmp_path, monkeypatch):
@@ -256,18 +358,15 @@ def test_native_git_receives_complete_file_outputs(tmp_path, monkeypatch, surfac
     (source / "large.bin").write_bytes(payload)
     if mixed:
         (source / "text.txt").write_text("b\n")
-    art = task_artifacts_dir(drive, "child-git")
     constraint = {"mode": "acting_subagent", "surface": surface,
                   "write_root": str(source), "base_sha": base}
-    artifacts, manifest = capture.write_workspace_patch_artifacts(
-        source, art, task={"task_constraint": constraint},
-    )
+    art, manifest = publish_capture(drive, {"id": "child-git", "parent_task_id": "parent", "root_task_id": "parent",
+                                            "delegation_role": "subagent", "task_constraint": constraint,
+                                            "workspace_root": str(source)})
     assert manifest["status"] == "ready_with_changes"
     assert manifest["file_output_changes"] and bool(manifest["patch_size"]) is mixed
     if not mixed:
         (art / "workspace.patch").unlink(missing_ok=True)
-    write_task_result(drive, "child-git", "completed", parent_task_id="parent", root_task_id="parent",
-                      delegation_role="subagent", task_constraint=constraint, workspace_root=str(source), artifacts=artifacts)
     ctx = ToolContext(repo_dir=target, drive_root=drive, task_id="parent",
                       workspace_root=source if surface == "external_workspace" else None,
                       workspace_mode="external" if surface == "external_workspace" else "")

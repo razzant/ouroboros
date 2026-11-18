@@ -873,8 +873,8 @@ def append_startup_receipt(
         )
     else:
         guidance = _custody_guidance(receipt, ctx)
-    delivered = _startup_view(
-        startup_wake, receipt, getattr(ctx, "_loop_mailbox_seen_ids", None) if seen is None else seen, ctx, messages)
+    from ouroboros.mailbox_restore import startup_view
+    delivered = startup_view(ctx, startup_wake, receipt)
     messages.append({
         "role": "user",
         "content": (
@@ -887,30 +887,9 @@ def append_startup_receipt(
 
     if seen is not None:
         ctx._loop_mailbox_seen_ids = seen
-    stage_pending_wake_exposure(ctx, delivered, mail=False)  # its old wake's mail stays the first drain's
-    # The canonical receipt, not its narrowed view, names every id the ACK covers.
-    defer_content_ack(ctx, lambda: acknowledge_pending_wake(ctx, startup_wake))
+    stage_pending_wake_exposure(ctx, delivered)
+    defer_content_ack(ctx, lambda: acknowledge_pending_wake(ctx, delivered))
     ctx._configured_startup_wake = ""
-
-
-def _startup_view(raw: str, receipt: Any, seen: Any, ctx: Any = None, messages: Any = None) -> str:
-    """The receipt as delivered: one wake copy, without mail the restored transcript holds."""
-    recovery = receipt.get("recovery") if isinstance(receipt, dict) else None
-    if isinstance(recovery, dict) and len(recovery.get("holders") or []) > 1:
-        from ouroboros.delegate_supervision import unseen_wake_view
-
-        views = [{**item, "wake": unseen_wake_view(item["wake"], seen, ctx, messages)} if isinstance(item.get("wake"), dict)
-                 else item for item in recovery["holders"]]
-        return json.dumps({**receipt, "recovery": {**recovery, "holders": views}}, ensure_ascii=False, indent=2)
-    if not isinstance(receipt, dict) or not isinstance(receipt.get("wake"), dict):
-        return raw
-    from ouroboros.delegate_supervision import unseen_wake_view
-
-    view = {**receipt, "wake": unseen_wake_view(receipt["wake"], seen, ctx, messages)}
-    recovery = view.get("recovery")
-    if isinstance(recovery, dict) and recovery.get("wake") == receipt["wake"]:
-        view["recovery"] = {key: value for key, value in recovery.items() if key != "wake"}
-    return raw if view == receipt else json.dumps(view, ensure_ascii=False, indent=2)
 
 
 __all__ = [

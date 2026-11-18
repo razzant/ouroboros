@@ -83,6 +83,31 @@ def test_inline_view_is_the_numbered_conversation(harness):
     assert gap_snapshot == ""
 
 
+@pytest.mark.parametrize("with_history", [True, False])
+def test_plan_evidence_keeps_original_card_and_only_attributes_the_owner_reason(harness, with_history):
+    from ouroboros.owner_mailbox import KIND_QUIZ_CLOSED, write_owner_message
+    from ouroboros.tools.plan_dialogue import attach_own_dialogue, render_dialogue
+
+    ctx = harness.make_ctx()
+    ctx.current_chat_id = 1
+    reason, frame = "Withdraw this option.", "Host event. No answer or approval was recorded."
+    dialogue_store.append(harness.drive, "chat", {"direction": "out", "chat_id": 1, "text": "Earlier discussion."})
+    if with_history:
+        dialogue_store.append(harness.drive, "chat", {"direction": "system", "chat_id": 1, "type": "quiz_closed",
+            "task_id": "original", "client_message_id": "quiz_closed:original:q1", "text": reason,
+            "quiz": {"quiz_id": "q1", "closed_actor": "owner", "closed_reason": reason, "owner_wrote_reason": True}})
+    assert write_owner_message(ctx.drive_root, frame, ctx.task_id, msg_id="quiz_closed:q1", kind=KIND_QUIZ_CLOSED,
+        quiz_delivery={"task_id": "original", "quiz_id": "q1", "closed_actor": "owner", "owner_close_words": reason})
+    manifest = attach_own_dialogue(ctx, harness.drive, {}, _ASK)
+    view, _ = render_dialogue(manifest)
+    assert view.count(reason) == 1 and " · host · " in view and " · Owner · " not in view
+    assert "Owner's verbatim reason:" in view and "No approval recorded." in view
+    source = [json.loads(line) for line in manifest["own_dialogue"]["text"].splitlines()][1:]
+    [closed] = [row for row in source if row.get("type") == "quiz_closed"]
+    assert closed["text"] == (reason if with_history else frame)
+    assert (closed.get("quiz_delivery") or {}).get("task_id", closed["task_id"]) == "original"
+
+
 @pytest.mark.parametrize("native_hint", [100_000, 1_000])
 def test_mixed_delivery_keeps_full_file_and_exact_overflow_range(harness, monkeypatch, native_hint):
     from types import SimpleNamespace

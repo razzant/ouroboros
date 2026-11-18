@@ -291,7 +291,7 @@ def write_relay(root, task_id: str, *, relay_id: str, note: str, quotes: list, c
     """Mail lock: dedupe then append; caller bumps generation only on a new quote. ``host_carried`` (a dict naming
     where the row went, ``went_to``: "" for a row addressed to the receiver) marks a row the host carries to a
     member of its tree (``carry_to_members``): held and shown there, in no corpus, with no receipt and no return."""
-    from ouroboros.owner_mailbox import _mailbox_path, mailbox_lines
+    from ouroboros.owner_mailbox import _mailbox_path, _mail_rows
     from ouroboros.task_custody import task_mail_lock
     from ouroboros.utils import append_jsonl, utc_now_iso
     path = _mailbox_path(Path(root), task_id)
@@ -313,13 +313,15 @@ def write_relay(root, task_id: str, *, relay_id: str, note: str, quotes: list, c
     with task_mail_lock(root, task_id) as locked:
         if not locked:
             raise OSError("relay mailbox lock unavailable")
-        if path.exists():
-            for line in mailbox_lines(path.read_text(encoding="utf-8")):
-                prior = json.loads(line)
-                if prior.get("msg_id") == entry["msg_id"]:
-                    if any(prior.get(k) != entry[k] for k in ("text", "relay", "owner_rows", "source_task_id")):
-                        raise ValueError("relay identity already names different words")
-                    return prior, False
+        try:
+            rows, _, _ = _mail_rows(path, require_terminator=True)
+        except FileNotFoundError:
+            rows = []
+        for prior in rows:
+            if prior.get("msg_id") == entry["msg_id"]:
+                if any(prior.get(k) != entry[k] for k in ("text", "relay", "owner_rows", "source_task_id")):
+                    raise ValueError("relay identity already names different words")
+                return prior, False
         if not append_jsonl(path, entry, require_lock=True, ensure_record_boundary=True):
             raise OSError("relay mailbox append failed")
     return entry, True
@@ -364,6 +366,37 @@ def _quotes_by_row(entry: dict) -> list:
     quotes = quotes if isinstance(quotes, list) else []
     return [(row, quotes[index] if index < len(quotes) and isinstance(quotes[index], dict) else {})
             for index, row in enumerate(entry.get("owner_rows") or [])]
+
+
+def restored_relay_entry(ctx, entry):
+    """An older envelope can still name exact rows held by its addressee. Never match on the teller's note."""
+    if entry.get("kind") != KIND_RELAY or not isinstance(entry.get("relay"), dict):
+        return entry
+    quotes = entry["relay"].get("quotes")
+    rows = entry.get("owner_rows")
+    if isinstance(rows, list) and all(isinstance(row, dict) for row in rows) and (
+            (quotes is None and rows) or (quotes == [] and not rows)):
+        return entry
+    if not isinstance(quotes, list) or not quotes or (rows is not None and not isinstance(rows, list)):
+        return {**entry, "_incomplete_relay": True}
+    held = held_owner_messages(ctx) if not rows or len(rows) < len(quotes) else {}
+    recovered = []
+    for index, quote in enumerate(quotes):
+        source = quote.get("source") if isinstance(quote, dict) else None
+        address = source.get("address") if isinstance(source, dict) else None
+        if not isinstance(address, str) or not address:
+            break
+        row = rows[index] if rows and index < len(rows) else held.get(address)
+        if not isinstance(row, dict):
+            break
+        row = {key: value for key, value in row.items() if key != "carried"}
+        if (owner_row_address(row) != address or owner_text(row) != quote.get("text")
+                or (row.get("attachments") or []) != (quote.get("attachments") or [])):
+            break
+        recovered.append(row)
+    if len(recovered) == len(quotes) and len(rows or []) <= len(quotes):
+        return {**entry, "owner_rows": recovered}
+    return {**entry, "_incomplete_relay": True}
 
 
 def retained_relay(entry: dict, delivered: set | None = None) -> dict:
@@ -436,7 +469,7 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
     # The deferred ACK describes this injection, not a later account snapshot. In particular, revocation after
     # injection cannot erase a real read, while a row refused before it earns no read or return context.
     entry["_relay_delivery"] = retained_relay(entry, delivered)
-    if ctx is not None:
+    if ctx is not None and not (entry.get("_recalled") or entry.get("_recovering_seen") or entry.get("_receipt_uncertain")):
         relays = getattr(ctx, "_open_relays", None)
         if not isinstance(relays, dict):
             ctx._open_relays = relays = {}
@@ -538,18 +571,22 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
     fact_of = entry["host_carried"]
     went = str(fact_of.get("went_to") or "")
     held = held_owner_messages(ctx) if ctx is not None else {}
-    stamps = first_request_stamps(messages)
+    replay = entry.get("_recalled") or entry.get("_recovering_seen") or entry.get("_receipt_uncertain")
+    stamps = {} if replay else first_request_stamps(messages)
     addressed = []
     for row, quote in _quotes_by_row(entry):
         source = quote.get("source") if isinstance(quote.get("source"), dict) else {}
         address = str(source.get("address") or "") or owner_row_address(row)
         prior = held.get(address)
+        existing = False
         if isinstance(prior, dict):
             prior_fact = prior.get("carried") if isinstance(prior.get("carried"), dict) else {}
-            if went or not str(prior_fact.get("went_to") or ""):
+            existing = bool(went or not prior_fact.get("went_to"))
+            if existing and not replay:
                 continue  # the same standing, or addressed already: nothing more to show
-        held[address] = {**copy.deepcopy(row), "carried": {"from": str(entry.get("source_task_id") or ""),
-                                                            "went_to": went, "at": str(entry.get("ts") or "")}}
+        if not existing:
+            held[address] = {**copy.deepcopy(row), "carried": {"from": str(entry.get("source_task_id") or ""),
+                                                                "went_to": went, "at": str(entry.get("ts") or "")}}
         refs = {address, _chat_ref(row) if row.get("client_message_id") else "", str(fact_of.get("earlier_ref") or "")}
         seen = [stamps[ref] for ref in refs - {""} if ref in stamps]
         if not seen:
@@ -856,19 +893,15 @@ def _rows_to_carry(ctx, root) -> list:
 
 def _member_has(drive, task_id: str, member: dict) -> tuple:
     """What a member already holds, read once: the identities of its inherited field and the ids of its mailbox
-    (append-only until its settlement; an id counts whatever its bytes)."""
-    from ouroboros.owner_mailbox import _mail_text, _mailbox_path, mailbox_lines
+    (append-only until its settlement; a whole row identifies a prior carriage)."""
+    from ouroboros.owner_mailbox import _mailbox_path, _mail_rows
     from ouroboros.owner_words import REPLY_TARGET, task_governing_words
 
-    path, ids = _mailbox_path(Path(drive), task_id), set()
-    if path.exists():
-        for line in mailbox_lines(_mail_text(path)):
-            try:
-                parsed = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(parsed, dict):
-                ids.add(str(parsed.get("msg_id") or ""))
+    try:
+        rows, _, _ = _mail_rows(_mailbox_path(Path(drive), task_id), require_terminator=True)
+    except FileNotFoundError:
+        rows = []
+    ids = {row["msg_id"] for row in rows if row.get("msg_id")}
     return {_words_identity(row) for row in task_governing_words(member)[0] if row["source"] != REPLY_TARGET}, ids
 
 

@@ -597,7 +597,9 @@ def test_a_lost_wake_is_healed_by_the_same_id_without_changing_its_decision(host
     assert json.loads((host[0] / "state/ui_preferences.json").read_text(encoding="utf-8"))["model_recents"][0]["model"] == B
 
 
-def test_owner_model_wakes_a_refused_call_wait_but_never_interrupts_a_sent_call(host, monkeypatch):
+@pytest.mark.parametrize("torn", [False, True])
+def test_owner_model_wakes_a_refused_call_wait_but_never_interrupts_a_sent_call(host, monkeypatch, torn):
+    from ouroboros import owner_mailbox as mail
     from ouroboros.model_wait import ModelWaitInterrupted, TaskModelWait
     from ouroboros.owner_model import waiting_wake
 
@@ -606,8 +608,18 @@ def test_owner_model_wakes_a_refused_call_wait_but_never_interrupts_a_sent_call(
     waiter = TaskModelWait(task=task, drive_root=host[0], event_queue=queue.Queue(),
                            worker_slot_held=True, owner_control=lambda: None)
     waiter.tool_context = ctx
+    if torn:
+        receipt = mail._ack_path(host[0], "work")
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_bytes(b'{"msg_id":')
     assert waiting_wake(waiter) is None
+    if torn:
+        assert act(host, model=C, request_id="earlier").status_code == 200
     assert act(host, model=B).status_code == 200
+    if torn:
+        with monkeypatch.context() as patch:
+            patch.setattr(ctx, "_loop_mailbox_seen_ids", {"owner_model:press"}, raising=False)
+            assert waiting_wake(waiter) is None  # only the superseded act is still unread
     assert waiter.control_reason() is None  # the physical sender's polling reader stays quiet
     with waiter.register_reprepare("main", lambda values: values, owner_model_wake=True), \
             pytest.raises(ModelWaitInterrupted) as interrupted:

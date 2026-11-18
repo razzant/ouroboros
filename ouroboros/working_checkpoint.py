@@ -115,7 +115,8 @@ def _signature(limit_ctx: Any) -> tuple:
     ctx = getattr(getattr(limit_ctx, "tools", None), "_ctx", None)
     candidate = getattr(ctx, "_delivery_candidate", None)
     return (int(getattr(ctx, "task_attempt", 1) or 1), int(limit_ctx.round_idx), id(messages), len(messages),
-            tail, len(limit_ctx.owner_msg_seen or ()), getattr(candidate, "revision", None))
+            tail, len(limit_ctx.owner_msg_seen or ()), len(getattr(ctx, "_mailbox_content_ids", ())),
+            getattr(candidate, "revision", None))
 
 
 def save_round(limit_ctx: Any, boundary: str) -> bool:
@@ -906,7 +907,8 @@ def resume_from_working(tools: Any, state: Dict[str, Any], messages: list, trace
     handoff = state.get("_working_handoff") or {}
     same_id = str(handoff.get("source_task_id") or ctx.task_id) == str(ctx.task_id)
     restore_continuation_state(tools, state if same_id else {
-        **state, "usage": {}, "delivery": {key: value for key, value in state.get("delivery", {}).items()
+        **state, "usage": {}, "mailbox_content_ids": [], "legacy_mailbox_seen": [],
+        "delivery": {key: value for key, value in state.get("delivery", {}).items()
             if key in {"_delivery_candidate_revision", "_delivery_evidence_revision", "_delivery_evidence_fingerprint",
                        "_delivery_effective_criteria", "_delivery_material_tool_indices"}},
         "acceptance": {}}, messages, trace, usage, seen)

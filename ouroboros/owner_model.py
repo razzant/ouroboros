@@ -290,15 +290,15 @@ def waiting_wake(waiter: Any) -> str | None:
         status = {}
         entries = drain_owner_entries(root, waiter.task_id, seen, waiter.attempt,
                                       kinds={KIND_OWNER_MODEL}, _read_status=status)
-        if not status.get("complete"):
-            return None
         with acquisition_budget(0):
             control = read_current(ctx).get("owner_model") or {} if entries else {}
     except (OSError, StoreBusy):
         return None  # leave the read owed; contention is not a task control
-    if control.get("request_id") and control["request_id"] != applied:
+    request_id = control.get("request_id")
+    if request_id and request_id != applied and any(row["msg_id"] == f"owner_model:{request_id}" for row in entries):
         return "owner_model"
-    waiter._owner_model_mail_stamp = stamp
+    if status.get("complete"):
+        waiter._owner_model_mail_stamp = stamp
     return None
 
 

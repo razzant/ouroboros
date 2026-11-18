@@ -60,6 +60,7 @@ STATE_CLOSED = "closed"
 # Admission bounds OPEN questions only. Accepted unanswered questions and
 # unsettled delivery debt never compete with the bounded discharged history.
 _QUIZ_CAP = 16
+_KEEP = object()
 
 # The explicit closure facts every card view copies beside the answer facts.
 CLOSURE_FIELDS = ("closed_reason", "closed_at", "closed_by_task_id", "closed_actor", "closed_request_id")
@@ -106,7 +107,7 @@ def question_delivery_settled(block: Any) -> bool:
 
 def _delivery_debt(task_id: str, quiz_id: str, kind: str) -> Dict[str, Any]:
     return {"kind": kind, "state": "owed", "logical_id": f"quiz_{kind}:{task_id}:{quiz_id}",
-            "attempts": 0, "next_retry_at": ""}
+            "attempts": 0, "next_retry_at": "", **({"first_route_pending": True} if kind == "closure" else {})}
 
 
 def question_delivery_projection(block: Any) -> Dict[str, str]:
@@ -144,22 +145,24 @@ def record_answer_delivery_after_terminal(drive_root: Any, task_id: str, quiz_id
     return dict(_mutate_projection(drive_root, task_id, mutate).get(str(quiz_id)) or {})
 
 
-def quiz_delivery_due(block: Any, *, now: Optional[str] = None) -> bool:
+def quiz_delivery_due(block: Any, *, now: Optional[str] = None, force: bool = False) -> bool:
     """Current addressed debt only; the retained chat history is never polled. A debt waiting
     on a fact no retry supplies stays owed and current without automatic attempts: an answer or
     closure address only an import can bind (due again once bound), or an accepted late answer
-    whose dispatch witness ended with its process (``late_answer_delivery_unknown``)."""
-    if not isinstance(block, dict) or question_delivery_settled(block) or delivery_dismissed(block):
-        return False
-    delivery = block.get("delivery") if isinstance(block.get("delivery"), dict) else {}
-    if delivery.get("state") == "delivered":
-        return False
-    if not delivery:
+    whose dispatch witness ended with its process (``late_answer_delivery_unknown``). An explicit
+    retry skips those waits for an existing, unsettled delivery the owner has not dismissed."""
+    delivery = block.get("delivery") if isinstance(block, dict) else None
+    if not isinstance(delivery, dict) or not delivery:
         return False  # Legacy schema absence authorizes neither publication nor owner-input replay.
+    if delivery.get("state") == "delivered" or question_delivery_settled(block) or delivery_dismissed(block):
+        return False
+    if force:
+        return True
     reason = delivery.get("reason_code")
     if reason == "late_answer_delivery_unknown" or (
             reason == "publication_address_unknown" and delivery.get("kind") != "publication"
-            and "publication_chat_id" not in block):
+            and "publication_chat_id" not in block and not (
+                delivery.get("kind") == "closure" and block.get("closed_actor") == "owner" and not delivery.get("read_at"))):
         return False
     after = str(delivery.get("next_retry_at") or "")
     try:
@@ -207,11 +210,9 @@ def claim_quiz_delivery(drive_root: Any, task_id: str, quiz_id: str, *, force: b
 
     def mutate(quizzes: Dict[str, Dict[str, Any]]) -> Any:
         block = quizzes.get(str(quiz_id))
-        if not block or question_delivery_settled(block) or delivery_dismissed(block):
-            return _KEEP  # a removed unknown is never attempted again, not even by an owner retry
-        delivery = dict(block.get("delivery") or {})
-        if not delivery or delivery.get("state") == "delivered" or (not force and not quiz_delivery_due(block, now=now)):
+        if not quiz_delivery_due(block, now=now, force=force):
             return _KEEP
+        delivery = dict(block["delivery"])
         attempts = max(0, int(delivery.get("attempts") or 0)) + 1
         delay = min(3600, 30 * 2 ** min(attempts - 1, 7))
         delivery.update(state="owed", attempts=attempts, last_attempt_at=now,
@@ -241,17 +242,19 @@ def record_quiz_delivery_failure(drive_root: Any, task_id: str, quiz_id: str, re
 
 
 def mark_quiz_history_written(drive_root: Any, task_id: str, quiz_id: str, receipt: str = "history_at",
-                              source_row: Optional[dict] = None) -> None:
+                              source_row: Optional[dict] = None) -> bool:
     """Strict history append receipt; retries no longer fold history to find this fact.
     ``mailbox_at``: the live author's mailbox holds the answer or closure, which neither a
-    retry nor the late path repeats while the history row alone stays owed."""
+    retry nor the late path repeats while the history row alone stays owed. Return whether this call wrote the receipt."""
+    written = False
+
     def mutate(quizzes: Dict[str, Dict[str, Any]]) -> Any:
+        nonlocal written
         block = quizzes.get(str(quiz_id))
-        if not block:
+        delivery = dict((block or {}).get("delivery") or {})
+        if not block or delivery.get(receipt):
             return _KEEP
-        delivery = dict(block.get("delivery") or {})
-        if delivery.get(receipt):
-            return _KEEP
+        written = True
         delivery[receipt] = utc_now_iso()
         if source_row is not None:
             delivery["answer_row"] = dict(source_row)
@@ -259,6 +262,7 @@ def mark_quiz_history_written(drive_root: Any, task_id: str, quiz_id: str, recei
         return True
 
     _mutate_projection(drive_root, task_id, mutate)
+    return written
 
 
 def mark_published(drive_root: Any, task_id: str, quiz_id: str) -> None:
@@ -279,16 +283,16 @@ def mark_published(drive_root: Any, task_id: str, quiz_id: str) -> None:
     _mutate_projection(drive_root, task_id, mutate)
 
 
-class _Keep:
-    pass
-
-
-_KEEP = _Keep()
+def _quiz_blocks(record):
+    quizzes = record.get("owner_quiz") if isinstance(record, dict) else None
+    if not isinstance(quizzes, dict):
+        return {}
+    return {str(key): dict(value) for key, value in quizzes.items() if isinstance(value, dict)}
 
 
 def _mutate_projection(
     drive_root: Any, task_id: str,
-    mutator: Callable[[Dict[str, Dict[str, Any]]], Any],
+    mutator: Callable[[Dict[str, Dict[str, Any]]], Any], *, last_word=None,
 ) -> Dict[str, Dict[str, Any]]:
     """Locked writer for the ``owner_quiz`` key only (hurry idiom).
 
@@ -301,20 +305,12 @@ def _mutate_projection(
         stamp_task_result_schema,
     )
 
-    view: Dict[str, Dict[str, Any]] = {}
-
     def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        view.clear()
         # ABI 7.0 (hurry idiom): never write over a row another schema owns;
         # every write stamps the row (stamp-on-write, not a converter).
         require_writable_task_result_schema(current)
-        raw = current.get("owner_quiz")
-        quizzes = {
-            str(k): dict(v) for k, v in raw.items() if isinstance(v, dict)
-        } if isinstance(raw, dict) else {}
-        outcome = mutator(quizzes)
-        if outcome is _KEEP:
-            view.update(quizzes)
+        quizzes = _quiz_blocks(current)
+        if mutator(quizzes) is _KEEP:
             return None
         if len(quizzes) > _QUIZ_CAP:
             wait = current.get("owner_wait") or {}
@@ -326,13 +322,10 @@ def _mutate_projection(
             )
             for key in discharged[:max(0, len(quizzes) - _QUIZ_CAP)]:
                 quizzes.pop(key, None)
-        updated = dict(current)
-        updated["owner_quiz"] = quizzes
-        view.update(quizzes)
-        return stamp_task_result_schema(updated)
+        return stamp_task_result_schema({**current, "owner_quiz": quizzes})
 
-    patch_document(drive_root, str(task_id), _mutate)
-    return view
+    options = {"last_word": last_word} if last_word is not None else {}
+    return _quiz_blocks(patch_document(drive_root, str(task_id), _mutate, **options))
 
 
 def record_asked(
@@ -479,66 +472,78 @@ def dismiss_unknown_delivery(drive_root: Any, task_id: str, *, quiz_id: str, req
     return outcome
 
 
-def retire_closure_owed_nowhere(drive_root: Any, task_id: str, quiz_id: str) -> bool:
-    """An explicit closure whose card no room shows (the publication import found no witness in
-    readable, stable history) owes its note nowhere: the debt becomes ``no_target`` with
-    ``no_publication_target``, never ``delivered`` and never a guessed room; the closed record
-    stays. Only a closure whose attempt already found no address qualifies, once its author's letter is
-    settled: none is owed (the owner did not close it), it was written (``mailbox_at``), or no work can
-    ever hold it (the author's result is truly terminal, a status that never turns back). An answer keeps
-    its debt."""
-    retired: List[str] = []
-    letter_owed: List[bool] = []
+def _when_reader_line_ended(root, task_id, mutate):
+    """The absence of a reader and this write must describe the same admissions."""
+    from ouroboros.question_answers import reader_line_ended
+    from ouroboros.task_store import signature
 
-    def mutate(quizzes: Dict[str, Dict[str, Any]], author_gone: bool = False) -> Any:
+    stamps = {}
+    try:
+        if not reader_line_ended(root, task_id, stamps=stamps):
+            return {}
+    except (OSError, ValueError, RuntimeError):
+        return {}
+
+    def still_ended(txn, current, updated):
+        if all(signature(root, tid, txn=txn) == stamp for tid, stamp in stamps.items()):
+            return updated
+        return None
+
+    return _mutate_projection(root, task_id, mutate, last_word=still_ended)
+
+
+def retire_closure_owed_nowhere(drive_root: Any, task_id: str, quiz_id: str) -> bool:
+    """Stable history has no card. Retire after the letter was read or its whole reader line ended."""
+    letter_owed = False
+    retired = False
+
+    def mutate(quizzes, author_gone=False):
+        nonlocal letter_owed, retired
         block = quizzes.get(str(quiz_id))
         delivery = dict((block or {}).get("delivery") or {})
         if (not block or block.get("state") != STATE_CLOSED or "publication_chat_id" in block
                 or (delivery.get("kind"), delivery.get("state"), delivery.get("reason_code"))
                 != ("closure", "owed", "publication_address_unknown")):
             return _KEEP
-        if not (author_gone or block.get("closed_actor") != "owner" or delivery.get("mailbox_at")):
-            letter_owed.append(True)
+        if not author_gone and block.get("closed_actor") == "owner" and not delivery.get("read_at"):
+            letter_owed = True
             return _KEEP
         delivery.update(state=DELIVERY_NO_TARGET, reason_code="no_publication_target", retired_at=utc_now_iso())
         block["delivery"] = delivery
-        retired.append(str(quiz_id))
+        retired = True
         return True
 
-    _mutate_projection(drive_root, task_id, mutate)
-    if letter_owed and _result_truly_terminal(drive_root, task_id):
-        _mutate_projection(drive_root, task_id, lambda quizzes: mutate(quizzes, author_gone=True))
-    return bool(retired)
+    view = _mutate_projection(drive_root, task_id, mutate)
+    if letter_owed:
+        view = _when_reader_line_ended(drive_root, task_id, lambda quizzes: mutate(quizzes, author_gone=True))
+    # Retiring an old closure can prune it in this write. A rejected write returns its original block.
+    block = view.get(str(quiz_id))
+    return retired if block is None else (block.get("delivery") or {}).get("state") == DELIVERY_NO_TARGET
 
 
-def _result_truly_terminal(drive_root: Any, task_id: str) -> bool:
-    """A truly terminal result never runs again, so no closure letter can reach it; an unreadable one keeps the debt."""
-    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
-
-    try:
-        result = load_task_result(drive_root, task_id, strict=True) or {}
-    except Exception:
-        return False
-    return str(result.get("status") or "") in _TRULY_TERMINAL_STATUSES
-
-
-def mark_discharged(drive_root: Any, task_id: str, quiz_id: str) -> Dict[str, Any]:
+def mark_discharged(drive_root: Any, task_id: str, quiz_id: str, *, no_reader=False) -> Dict[str, Any]:
     """After durable answer delivery or closure evidence, permit bounded history GC."""
-    discharged: Dict[str, Any] = {}
+    discharged = {}
+
     def mutate(quizzes: Dict[str, Dict[str, Any]]) -> Any:
         block = quizzes.get(str(quiz_id))
         if not block or current_question(block) or question_delivery_settled(block):
             return _KEEP
-        block["discharged_at"] = utc_now_iso()
         delivery = dict(block.get("delivery") or {})
+        if block.get("closed_actor") == "owner" and not (delivery.get("history_at") and (
+                delivery.get("read_at") or no_reader)):
+            return _KEEP
+        block["discharged_at"] = utc_now_iso()
         delivery.update(state="delivered", delivered_at=block["discharged_at"])
         delivery.pop("reason_code", None)
         block["delivery"] = delivery
         discharged.update(block)
         return True
 
-    _mutate_projection(drive_root, task_id, mutate)
-    return discharged
+    writer = _when_reader_line_ended if no_reader else _mutate_projection
+    block = writer(drive_root, task_id, mutate).get(str(quiz_id))
+    # An accepted write can prune the very block it settled. A refused transaction returns its owed block.
+    return discharged if block is None or question_delivery_settled(block) else {}
 
 
 def record_closed(
@@ -556,6 +561,7 @@ def record_closed(
     owner's cancel, which passes its typed ``secret_outcome`` from under the settings lock.
     """
     reason = str(reason or "")
+    owner_wrote_reason = actor == "owner" and bool(reason.strip()) and secret_outcome is None
     if actor == "owner" and not reason.strip():
         reason = OWNER_CLOSE_REASON
     if not reason.strip():
@@ -593,6 +599,8 @@ def record_closed(
         block.update(state=STATE_CLOSED, closed_at=utc_now_iso(), closed_reason=reason,
                      closed_actor=actor, closed_request_id=request_id,
                      delivery=_delivery_debt(task_id, quiz_id, "closure"))
+        if owner_wrote_reason:
+            block["owner_wrote_reason"] = True
         if pending_publication and "publication_chat_id" not in block:
             block["delivery"]["publication_pending"] = True
         if actor == "model":
@@ -801,10 +809,7 @@ def quiz_states(drive_root: Any, task_id: str) -> Dict[str, Dict[str, Any]]:
         raw = read_document(drive_root, str(task_id))
     except Exception:
         return {}
-    quizzes = raw.get("owner_quiz") if isinstance(raw, dict) else None
-    if not isinstance(quizzes, dict):
-        return {}
-    return {str(k): dict(v) for k, v in quizzes.items() if isinstance(v, dict)}
+    return _quiz_blocks(raw)
 
 
 def quiz_answer_frame(

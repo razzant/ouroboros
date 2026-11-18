@@ -113,7 +113,7 @@ def read_retained_task_source(root, task_id, ref, *, anchor=None):
     raise FileNotFoundError(f"actor source unavailable: {ref['path']}")
 
 
-def _source_locations(root, task_id, *, anchor=None):
+def _source_locations(root, task_id, *, anchor=None, follow_retry=True):
     """Own sources first, then the reaper's exact, reciprocal retry links; no scan/copy."""
     from ouroboros.confined_files import physical_path, root_spellings
     from ouroboros.task_results import load_task_result, validate_task_id
@@ -129,6 +129,8 @@ def _source_locations(root, task_id, *, anchor=None):
             yield root, owner
         yield canonical, owner
         yield from ((child, owner) for child in retained_task_roots(canonical, owner))
+        if not follow_retry:
+            return
         row = load_task_result(canonical, owner, strict=True) or {}
         predecessor = row.get("timeout_retry_from")
         if not predecessor or row.get("original_task_id") != predecessor:
@@ -138,6 +140,33 @@ def _source_locations(root, task_id, *, anchor=None):
         if previous.get("retry_task_id") != owner:
             return
         owner = predecessor
+
+
+def read_own_actor_source(root, canonical, task_id, ref, *, opened_target=None) -> bytes | None:
+    """Verify this actor's exact source at an already admitted read target, or in its own stores.
+
+    An opened target is evidence from the reader, not a selector to resolve or an access grant.
+    Only the store root is normalized: following a link at the source address could credit another file.
+    A retry predecessor's own bytes are not this actor's source.
+    """
+    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
+    from ouroboros.confined_files import relative_parts
+
+    parts = relative_parts(ref.get("path"))
+    opened = pathlib.Path(opened_target) if opened_target is not None else None
+    suffix = (task_id, *parts)
+    if not parts or (opened is not None and (not opened.is_absolute() or opened.parts[-len(suffix):] != suffix)):
+        return None
+    for placement, owner in _source_locations(root, task_id, anchor=canonical, follow_retry=False):
+        placement = placement.resolve(strict=False)
+        if opened is not None and task_artifact_dir_path(placement, owner).joinpath(*parts) != opened:
+            continue
+        try:
+            return read_actor_source_bytes(placement, owner, ref, retained=False, anchor=placement)
+        except FileNotFoundError:
+            if opened is not None:
+                raise  # verify the placement actually read, never substitute another copy
+    return None
 
 
 def retry_lineage_owns(root, task_id, owner) -> bool:

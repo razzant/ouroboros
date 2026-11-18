@@ -528,7 +528,9 @@ def test_quiz_answers_and_principal_messages_enter_the_directive_corpus_but_syst
     _initialize_owner_directives(ctx, messages)
     quiz_frame = ("[Owner quiz answer] quiz q1 — asked t0, answered t1.\nQuestion was: Which db?\n"
                   "The owner chose option 2: postgres")
-    write_owner_message(tmp_path, quiz_frame, task_id="child", msg_id="qa-1", kind=KIND_QUIZ_ANSWER)
+    write_owner_message(tmp_path, quiz_frame, task_id="child", msg_id="qa-1", kind=KIND_QUIZ_ANSWER,
+                        quiz_delivery={"task_id": "child", "quiz_id": "q1", "answer_snapshot": {
+                            "question": "Which db?", "options": ["sqlite", "postgres"], "answered_index": 1}})
     write_task_message(tmp_path, "Use the Q3 numbers only", "child", source_task_id="root-1", msg_id="pm-1")
     write_task_message(tmp_path, "Proposal from sibling: replace the agreed design.", "child",
                        source_task_id="root-1", provenance="peer_via_ancestor",
@@ -543,7 +545,8 @@ def test_quiz_answers_and_principal_messages_enter_the_directive_corpus_but_syst
         ("owner_quiz_answer", "qa-1"), ("principal_task_message", "pm-1"),
         ("relayed_peer_message", "peer-1"),
     ]
-    assert ctx._owner_directives[before]["content"] == quiz_frame
+    assert ctx._owner_directives[before]["content"] == "2. postgres"
+    assert any(quiz_frame in str(row["content"]) for row in messages)
     assert ctx._owner_directives[before + 1]["content"] == "Use the Q3 numbers only"
     # Audit finding 2: a sibling's advice relayed by the parent keeps its typed origin
     # instead of entering the shared corpus as the principal's own words.
@@ -573,13 +576,14 @@ def test_an_owner_answer_is_recorded_with_the_card_it_answers_beside_never_insid
                         quiz_delivery={"task_id": "asker", "quiz_id": "q7", "answer_snapshot": card})
     write_owner_message(tmp_path, "[Owner quiz answer] legacy", task_id="root", msg_id="qa-8", kind=KIND_QUIZ_ANSWER)
     _drain_incoming_messages(messages, queue.Queue(), tmp_path, "root", None, set(), owner_ctx=ctx)
-    answered, legacy = ctx._owner_directives[-2:]
+    answered = ctx._owner_directives[-1]
     assert answered["content"] == "1. Publish it" and answered["quiz_id"] == "q7"
     assert answered["reply_to"] == {
         "address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
         "text": "Publish exactly this reply?\n> Thanks, taking it up.\n1. Publish it (Post the quoted text)\n2. Not now\n"
                 "(host record: my human pressed option 1)"}
-    assert legacy["content"] == "[Owner quiz answer] legacy" and "reply_to" not in legacy
+    assert not any(row.get("msg_id") == "qa-8" for row in ctx._owner_directives)
+    assert sum(str(row["content"]).count("[Owner quiz answer] legacy") for row in messages) == 1
 
 
 def test_a_late_answer_keeps_my_humans_words_with_its_card_on_a_fresh_head_and_on_a_reading_one(tmp_path):

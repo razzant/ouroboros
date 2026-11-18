@@ -58,13 +58,23 @@ def _row_projection(row: dict, stream: str, ordinal: int, root: Any = None, *, p
     # and, for a chat row with a stream position, by the activation's lineage epoch.
     from ouroboros.owner_quiz import secret_outcome_block
 
-    if stream == "mailbox" and secret_outcome_block(row) is not None:
+    if stream == "mailbox" and row.get("kind") == "quiz_closed":
+        from ouroboros.question_answers import closure_directive, closure_source
+
+        result.update(author="host", type="quiz_closed")
+        if source := closure_source(row):
+            result["quiz_delivery"] = {k: source[k] for k in ("task_id", "quiz_id", "closed_actor", "closed_at") if k in source}
+        if reason := closure_directive(row):
+            result["owner_close_words"] = reason["content"]
+    elif stream == "mailbox" and secret_outcome_block(row) is not None:
         result["author"] = "host"  # a secret request's outcome frame, never the owner's words
     elif stream == "mailbox" and row.get("type") != "quiz_answer":
         result["author"] = str(row.get("provenance") or "Owner")
     else:  # the epoch's rule needs the row's stream position; the places' owner snapshot never does
         keywords = dict(lineage or {}) if pos is not None else {"owner_accounts": (lineage or {}).get("owner_accounts")}
         result["author"] = row_author(row, pos=pos, **keywords)["label"]
+        if row.get("type") == "quiz_closed" and result["author"] == "Owner":
+            result["author"] = "host"  # the closure action and its reason have separate authorship
     # Payload bytes are never interpreted as dialogue. Existing attachment
     # manifests carry the owner-visible file names alongside custody handles.
     attachments = row.get("attachment_manifest")
@@ -184,9 +194,17 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
         entries = drain_owner_entries(pathlib.Path(mailbox_root or root), task_id, include_acknowledged=True,
                                       kinds={KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_CARD_INPUT, KIND_TASK_MESSAGE},
                                       _read_status=mailbox_coverage)
+        from ouroboros.question_answers import closure_source
+
+        closure_ids = {r["client_message_id"] for r in source_rows
+                       if r.get("type") == "quiz_closed" and r.get("client_message_id")}
         for i, entry in enumerate(entries, 1):
             row = {**entry, "task_id": task_id}
-            if entry.get("kind") in {KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED}:
+            if entry.get("kind") == KIND_QUIZ_CLOSED:
+                source = closure_source(entry)
+                if source and f"quiz_closed:{source['task_id']}:{source['quiz_id']}" in closure_ids:
+                    continue
+            elif entry.get("kind") == KIND_QUIZ_ANSWER:
                 # New canonical facts and the old mailbox use the same typed
                 # quiz id; a duplicated physical delivery is one source answer.
                 prefix = str(entry["kind"]) + ":"

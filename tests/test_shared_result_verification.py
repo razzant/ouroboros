@@ -606,6 +606,27 @@ def test_registered_output_must_keep_its_recorded_type(env, change):
     assert_unabsorbed(drive)
 
 
+def test_split_directory_result_verifies_the_promoted_registered_file(env):
+    parent, a, b, drive = env
+    b = b.parent / "plain"
+    b.mkdir()
+    (b / "report.txt").write_bytes(b"fixture report\n")
+    producer = drive / "task_drives" / "child"
+    producer.mkdir(parents=True)
+    art = capture(parent, b, producer, direct=True, edit=lambda: None, outputs=("report.txt",))
+    row = read_result(producer, "child")
+    write_task_result(drive, "child", "running", parent_task_id="parent", workspace_root=str(b),
+                      task_constraint=row["task_constraint"], child_drive_root=str(producer), artifact_status="pending")
+    [held] = [Path(item["path"]) for item in row["artifacts"] if item["kind"] == "workspace_registered_output"]
+    destination = task_artifact_dir_path(drive, "child") / held.relative_to(art)
+    destination.parent.mkdir(parents=True)
+    held.replace(destination)
+    before = snapshot(a), snapshot(b)
+    out = invoke(parent)
+    assert "Verified 1 registered file postimage(s)" in out, out
+    assert (snapshot(a), snapshot(b)) == before
+
+
 def test_verdict_target_reaches_the_custody_disposition_rows_and_absence_stays_absent(env):
     from ouroboros import delegate_custody
     parent, _, b, drive = env

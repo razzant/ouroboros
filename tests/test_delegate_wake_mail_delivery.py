@@ -5,10 +5,9 @@ import queue
 
 import pytest
 
-from tests._run_wait_shared import held_run, publish, scripted_reads
+from tests._run_wait_shared import held_run, publish, reads as reads, scripted_reads
 from tests._stub_delegate_engines import stub_delegate_engines as stub_delegate_engines
 from tests.test_configured_session_restore import InputReached
-from tests.test_delegate_run_wait import reads as reads
 
 
 
@@ -24,11 +23,10 @@ def test_wake_mail_reaches_next_real_model_input_once(tmp_path, monkeypatch, ori
     from ouroboros import delegate_supervision as ds, loop, loop_round_limits, owner_hurry, working_checkpoint as wc
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
     from ouroboros.owner_mailbox import KIND_HURRY, drain_owner_entries, write_owner_message, write_task_message
-    from ouroboros.utils import utc_now_iso
     from tests.test_delegate_pending_recovery import _pending_handoff
     from tests.test_delegate_recovery import _bound
-    from tests.test_loop_transport_wait import _loop_kwargs
-    from tests.test_working_checkpoint import _registry
+    from tests._loop_resume_shared import _loop_kwargs
+    from tests._loop_resume_shared import _registry
 
     registry = _registry(tmp_path, monkeypatch, "nanny", 2)
     ctx = registry._ctx
@@ -68,15 +66,16 @@ def test_wake_mail_reaches_next_real_model_input_once(tmp_path, monkeypatch, ori
         _, recovery, task, _, invocation, _, _ = _pending_handoff(tmp_path, ctx.task_id)
         task["_working_recovery"] = {}
         post_mail()
+        posted = {row["msg_id"]: row for row in drain_owner_entries(tmp_path, ctx.task_id)}
         # The wake an earlier producer saved: every addressed kind rode in it, the mail beside the control, and its
         # record owed the mail's ACK.
         legacy_events = [
             {"type": "addressed_message", "msg_id": msg_id,
              "kind": "owner_text" if origin == "owner" else "task_message",
              "provenance": provenance, "source_task_id": "" if origin == "owner" else "parent",
-             "relayed_from_task_id": "sibling" if origin == "relay" else "", "text": text, "ts": utc_now_iso()},
+             "relayed_from_task_id": "sibling" if origin == "relay" else "", "text": text, "ts": posted[msg_id]["ts"]},
             {"type": "addressed_message", "msg_id": hurry_id, "kind": KIND_HURRY, "provenance": "owner",
-             "source_task_id": "", "relayed_from_task_id": "", "text": "owner_hurry", "ts": utc_now_iso()}]
+             "source_task_id": "", "relayed_from_task_id": "", "text": "owner_hurry", "ts": posted[hurry_id]["ts"]}]
         wake = {"status": "waiting_on_user", "run_id": run_id, "supervision_wake_id": "old-wake",
                 "wake_events": legacy_events}
         row = recovery._read(tmp_path, ctx.task_id)
@@ -176,7 +175,7 @@ def test_only_shown_non_control_mail_is_seen_before_save(tmp_path, monkeypatch, 
     from ouroboros.owner_mailbox import KIND_HURRY
     from ouroboros.subagent_bootstrap import append_startup_receipt
     from tests.test_sleep_questions import _deliver
-    from tests.test_working_checkpoint import _registry
+    from tests._loop_resume_shared import _registry
 
     ctx = _registry(tmp_path, monkeypatch, "nanny", 2)._ctx
     seen = ctx._loop_mailbox_seen_ids = {"already-shown"}
@@ -187,11 +186,13 @@ def test_only_shown_non_control_mail_is_seen_before_save(tmp_path, monkeypatch, 
     ds._save_state(ctx, {"run_id": "run", "pending_wake": {
         "wake_id": "wake", "payload": payload, "mailbox_ids": ["shown", "omitted", "control", "absent"]}})
     if delivery == "tool":
-        _deliver(ctx, json.dumps(payload), monkeypatch, tool="delegate_wait", meta={"supervision_wake_id": "wake"})
+        messages = _deliver(ctx, json.dumps(payload), monkeypatch, tool="delegate_wait", meta={"supervision_wake_id": "wake"})
     else:
-        append_startup_receipt(ctx, [], json.dumps({"status": "configured_session_continuation", "wake": payload}), seen)
+        messages = []
+        append_startup_receipt(ctx, messages, json.dumps({"status": "configured_session_continuation", "wake": payload}), seen)
     assert ctx._loop_mailbox_seen_ids is seen
-    assert seen == ({"already-shown", "shown"} if delivery == "tool" else {"already-shown"})  # startup: the drain's
+    assert seen == {"already-shown"}, "an old wake cannot register an addressed letter"
+    assert "shown words" in str(messages) and not getattr(ctx, "_mailbox_content_ids", set())
     assert ds._load_state(ctx, "")["pending_wake"], "only an incorporated save may flush the ACK"
 
 
@@ -210,9 +211,9 @@ def test_crash_handoff_restores_wake_mail_once_and_keeps_later_correction_latest
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
     from ouroboros.owner_mailbox import write_owner_message
     from tests.test_configured_session_restore import _known_custody, _restored_registry, _task
-    from tests.test_loop_transport_wait import _loop_kwargs
+    from tests._loop_resume_shared import _loop_kwargs
     from tests.test_sleep_questions import _deliver
-    from tests.test_working_checkpoint import _registry
+    from tests._loop_resume_shared import _registry
 
     task_id, run_id = "nanny", "run-one"
     old, correction = "Old instruction: paint it blue", "Later correction: paint it green"
@@ -302,6 +303,309 @@ def test_crash_handoff_restores_wake_mail_once_and_keeps_later_correction_latest
 
 # --- the owner's answer to a card while the asking work waits on its delegate ---------------------------------
 
+@pytest.mark.parametrize("checkpoint", ["original_assignment", "unusable_checkpoint", "behind_receipt",
+                                        "legacy_seen_only", "identical_history", "legacy_transcript",
+                                        "legacy_missing_cursor", "ahead_of_receipt", "current"])
+@pytest.mark.parametrize("sender", ["ancestor_task", "peer_task", "peer_via_ancestor"])
+def test_first_request_reconciles_letter_with_sender_receipt(tmp_path, monkeypatch, checkpoint, sender):
+    from types import SimpleNamespace
+
+    from ouroboros import loop, owner_mailbox as mail, working_checkpoint as wc
+    from ouroboros.task_results import write_task_result
+    from tests._loop_resume_shared import _loop_kwargs
+    from tests._loop_resume_shared import _registry
+
+    tid, mid, words = "reader", "letter", "Keep the two archived plans."
+    write_task_result(tmp_path, tid, "running")
+    old = _registry(tmp_path, monkeypatch, tid, 1)
+    state = SimpleNamespace(tools=old, owner_msg_seen=set(), round_idx=3, tool_schemas=[], budget_tail="tool",
+                            messages=[{"role": "user", "content": "Proceed."}], llm_trace={"tool_calls": []},
+                            accumulated_usage={})
+    retry = {"id": tid}
+
+    def freeze():
+        assert wc.save_round(state, "ready")
+        assert wc.attach_recovery(tmp_path, retry, source_task_id=tid, from_attempt=1, cause="worker_crash")
+
+    if checkpoint == "behind_receipt":
+        freeze()
+    assert mail.write_task_message(tmp_path, words, tid, source_task_id="writer", msg_id=mid, provenance=sender,
+                                   relation="sibling" if sender == "peer_task" else "",
+                                   relayed_from_task_id="sibling" if sender == "peer_via_ancestor" else "")
+    [letter] = mail.drain_owner_entries(tmp_path, tid)
+    assert mail.write_owner_message(tmp_path, "owner_hurry", tid, msg_id="earlier-control", kind=mail.KIND_HURRY)
+    assert mail.acknowledge_task_messages(tmp_path, tid, ["earlier-control"], wake_id="old-control")
+    if checkpoint in ("current", "ahead_of_receipt", "legacy_transcript", "legacy_missing_cursor"):
+        loop._drain_incoming_messages(state.messages, queue.Queue(), tmp_path, tid, None, state.owner_msg_seen,
+                                      owner_ctx=old._ctx, defer_content_ack=True)
+        if checkpoint in ("legacy_transcript", "legacy_missing_cursor"):
+            del old._ctx._mailbox_content_ids
+        if checkpoint == "legacy_missing_cursor":
+            state.owner_msg_seen.discard(mid)
+        freeze()  # the crash can fall between the durable checkpoint and its ACK callback
+        if checkpoint in ("current", "legacy_transcript", "legacy_missing_cursor"):
+            wc.flush_content_acks(old._ctx)
+    else:
+        assert mail.acknowledge_task_messages(tmp_path, tid, [mid], wake_id="historical-global-receipt")
+        if checkpoint in ("legacy_seen_only", "identical_history"):
+            if checkpoint == "identical_history":
+                mail.deliver_task_message(letter, tid, None, lambda frame: state.messages.append({
+                    "role": "user", "content": frame}))  # another occurrence, byte-identical, no registration
+                loop._record_owner_directive(old._ctx, source="principal_task_message", content=words,
+                    msg_id="earlier-letter", origin={"source_task_id": "earlier-writer"})
+            state.owner_msg_seen.add(mid)  # an old global ACK could put this id into seen without its letter
+            freeze()
+    ack_path = mail._ack_path(tmp_path, tid)
+    before = ack_path.read_bytes()
+    cold = _registry(tmp_path, monkeypatch, tid, 2)
+    cold._ctx.working_recovery = ({"source_ref": {"path": "unavailable"}} if checkpoint == "unusable_checkpoint"
+                                  else retry.get("_working_recovery"))
+    events = queue.Queue()
+
+    def first_request(call, *_args, **_kwargs):
+        text = "\n".join(str(row.get("content") or "") for row in call.messages)
+        unregistered = checkpoint == "identical_history" or (
+            checkpoint == "legacy_missing_cursor" and sender == "peer_task")
+        assert text.count(words) == 1 + int(unregistered)
+        if unregistered and checkpoint != "legacy_missing_cursor":
+            assert "no identified delivery for letter" in text
+        if checkpoint == "identical_history":
+            [earlier] = [row for row in cold._ctx._owner_directives if row.get("msg_id") == "earlier-letter"]
+            assert (earlier["source_task_id"], earlier["content"]) == ("earlier-writer", words)
+        assert {"ancestor_task": "ancestor task writer", "peer_task": "peer task writer",
+                "peer_via_ancestor": "task sibling, relayed by ancestor writer"}[sender] in text
+        replay = unregistered or checkpoint in ("original_assignment", "unusable_checkpoint", "behind_receipt", "legacy_seen_only")
+        assert ("previously acknowledged letter" in text) is replay
+        if replay:
+            assert mid in text and letter["ts"] in text and sender in text
+        corpus = [row for row in cold._ctx._owner_directives if row.get("msg_id") == mid]
+        if sender == "peer_task":
+            assert not corpus
+        else:
+            assert len(corpus) == 1 and corpus[0]["source_task_id"] == "writer"
+        assert not [event for event in events.queue if event.get("type") in
+                    {"task_message_injected", "owner_message_injected", "quiz_answer_injected"}]
+        assert "earlier-control" not in text
+        rows = [json.loads(line) for line in ack_path.read_text().splitlines()]
+        assert [row["msg_id"] for row in rows].count(mid) == 1
+        if checkpoint != "ahead_of_receipt":
+            assert ack_path.read_bytes() == before
+        raise InputReached
+
+    monkeypatch.setattr(loop, "_dispatch_round_model", first_request)
+    with pytest.raises(InputReached):
+        loop.run_llm_loop(**{**_loop_kwargs(tmp_path, cold, []), "task_id": tid, "event_queue": events})
+
+
+@pytest.mark.parametrize("sender", ["owner", "ancestor_task", "peer_via_ancestor", "peer_task"])
+def test_legacy_recovery_distinguishes_two_ids_with_the_same_words_and_loop_receipts(tmp_path, sender):
+    from copy import deepcopy
+    from ouroboros import mailbox_restore, owner_mailbox as mail, owner_wait, working_checkpoint
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from tests._run_wait_shared import _nanny
+
+    ctx, old = _nanny(tmp_path)
+    tid, words = ctx.task_id, "Use the same wording."
+    events = queue.Queue()
+
+    def drain(limit):
+        _drain_incoming_messages(limit.messages, queue.Queue(), tmp_path, tid, events, limit.owner_msg_seen,
+                                 owner_ctx=limit.tools._ctx, defer_content_ack=True)
+        working_checkpoint.save_ready(limit)
+
+    def deliver(mid):
+        if sender == "owner":
+            assert mail.write_owner_message(tmp_path, words, tid, msg_id=mid, client_message_id=f"client-{mid}")
+        else:
+            assert mail.write_task_message(tmp_path, words, tid, msg_id=mid, provenance=sender, source_task_id="sender",
+                                           relation="sibling" if sender == "peer_task" else "",
+                                           relayed_from_task_id="peer" if sender == "peer_via_ancestor" else "")
+        drain(old)
+
+    deliver("first")
+    saved = deepcopy(owner_wait.continuation_state(ctx, old.messages, {}, {}, 2, [], old.owner_msg_seen))
+    assert saved.pop("mailbox_content_ids") == ["first"]
+    deliver("second")  # another saved state really did ACK this ID through the ordinary loop
+    saved["seen"].append("second")  # a legacy cursor also admitted IDs from the global receipt file
+    receipts = mail._ack_path(tmp_path, tid)
+    before = receipts.read_bytes()
+    assert [(r["msg_id"], r["wake_id"]) for r in map(json.loads, before.splitlines())] == [
+        ("first", "loop_delivery"), ("second", "loop_delivery")]
+    events = queue.Queue()
+    cold, limit = _nanny(tmp_path)
+    owner_wait.restore_continuation_state(limit.tools, saved, limit.messages, {}, {}, limit.owner_msg_seen)
+    mailbox_restore.restore_wake_mail(cold, limit.messages)
+    drain(limit)
+    text = str(limit.messages)
+    assert "no identified delivery for letter second" in text
+    if sender == "peer_task":  # neither of the identical peer frames identifies its letter
+        assert text.count(words) == 3 and not cold._owner_directives
+    else:
+        assert text.count(words) == 2 and "no identified delivery for letter first" not in text
+        assert [r["msg_id"] for r in cold._owner_directives if r.get("msg_id") in {"first", "second"}] == ["first", "second"]
+    assert cold._mailbox_content_ids == {"first", "second"}
+    drain(limit)
+    assert str(limit.messages) == text and receipts.read_bytes() == before
+    assert not any(e.get("type") in {"task_message_injected", "owner_message_injected"} for e in events.queue)
+
+
+@pytest.mark.parametrize("same_words", [False, True])
+def test_healthy_legacy_checkpoint_keeps_context_only_mail_once(tmp_path, same_words):
+    from ouroboros import mailbox_restore, owner_mailbox as mail, owner_relay, owner_wait, working_checkpoint
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from tests._run_wait_shared import _nanny
+
+    ctx, old = _nanny(tmp_path)
+    tid = ctx.task_id
+    for sender in ("system", "descendant_task", "independent_task", "place_event"):
+        words = "Same note from distinct senders." if same_words else f"Exact note from {sender}."
+        assert mail.write_task_message(tmp_path, words, tid, source_task_id="sender",
+                                       msg_id=sender, provenance=sender)
+    relay, written = owner_relay.write_relay(tmp_path, tid, relay_id="relayed", note="The teller's note.",
+        quotes=[], chat_id=1, teller_task_id="sender")
+    assert written
+    for mid, fields in (("close", {"closed_actor": "owner"}), ("outcome", {"answer_snapshot": {
+            "secret_request": True, "secret_outcome": {"state": "cancelled"}}})):
+        assert mail.write_owner_message(tmp_path, f"Host frame for {mid}.", tid, msg_id=mid,
+                                       kind=mail.KIND_QUIZ_CLOSED, quiz_delivery=fields)
+
+    def drain(limit):
+        _drain_incoming_messages(limit.messages, queue.Queue(), tmp_path, tid, None, limit.owner_msg_seen,
+                                 owner_ctx=limit.tools._ctx, defer_content_ack=True)
+
+    drain(old)
+    working_checkpoint.save_ready(old)
+    journal = mail._ack_path(tmp_path, tid)
+    before = journal.read_bytes()
+    saved = owner_wait.continuation_state(ctx, old.messages, {}, {}, 2, [], old.owner_msg_seen)
+    assert set(saved.pop("mailbox_content_ids")) == {
+        "system", "descendant_task", "independent_task", "place_event", "close", "outcome", relay["msg_id"]}
+    cold, limit = _nanny(tmp_path)
+    owner_wait.restore_continuation_state(limit.tools, saved, limit.messages, {}, {}, limit.owner_msg_seen)
+    mailbox_restore.restore_wake_mail(cold, limit.messages)
+    original = json.dumps(limit.messages)
+    drain(limit)
+    working_checkpoint.save_ready(limit)
+    assert json.dumps(limit.messages) == original and not cold._owner_directives
+    assert journal.read_bytes() == before
+
+
+def test_permanently_torn_receipt_preserves_later_letters_and_only_new_controls(tmp_path):
+    from ouroboros import owner_mailbox as mail, working_checkpoint
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from tests._run_wait_shared import _nanny
+
+    ctx, limit = _nanny(tmp_path)
+    ctx._restore_mailbox, ctx._mailbox_content_ids = True, set()
+    for mid, words in [("first", "An already read letter."), ("next", "A newly arrived letter.")]:
+        assert mail.write_task_message(tmp_path, words, ctx.task_id, msg_id=mid, source_task_id="principal")
+    assert mail.write_owner_message(tmp_path, "deadline", ctx.task_id, msg_id="uncertain", kind=mail.KIND_FINALIZE_NOW)
+    assert mail.acknowledge_task_messages(tmp_path, ctx.task_id, ["first"], wake_id="old")
+    journal = mail._ack_path(tmp_path, ctx.task_id)
+    with journal.open("ab") as handle:
+        handle.write(b'{"msg_id":"in-progress","note":"\xc3')
+    torn = journal.read_bytes()
+    events = queue.Queue()
+
+    def drain():
+        return _drain_incoming_messages(limit.messages, queue.Queue(), tmp_path, ctx.task_id, events,
+                                        limit.owner_msg_seen, owner_ctx=ctx, defer_content_ack=True)
+
+    assert "finalize_now" not in drain() and journal.read_bytes() == torn
+    assert not ctx._restore_mailbox and ctx._mailbox_content_ids == {"first", "next"}
+    assert "could not be read completely" in str(limit.messages)
+    working_checkpoint.save_ready(limit)
+    assert journal.read_bytes().startswith(torn + b"\n")
+    assert mail.write_owner_message(tmp_path, "new deadline", ctx.task_id, msg_id="late-control", kind=mail.KIND_FINALIZE_NOW)
+    assert mail.write_task_message(tmp_path, "Still deliver mail.", ctx.task_id, msg_id="later", source_task_id="principal")
+    assert drain()["finalize_now"] == "new deadline"
+    working_checkpoint.save_ready(limit)
+    assert "finalize_now" not in drain()
+    text = "\n".join(str(row.get("content") or "") for row in limit.messages)
+    assert all(text.count(words) == 1 for words in ("An already read letter.", "A newly arrived letter.", "Still deliver mail."))
+    assert [row["content"] for row in ctx._owner_directives] == [
+        "An already read letter.", "A newly arrived letter.", "Still deliver mail."]
+    assert [event["text_preview"] for event in events.queue if event.get("type") == "task_message_injected"] == [
+        "Still deliver mail."]
+    assert [json.loads(line)["msg_id"] for line in journal.read_bytes()[len(torn):].splitlines() if line] == ["next", "later"]
+
+
+@pytest.mark.parametrize("failed", ["mailbox", "receipts"])
+def test_restore_retries_a_failed_whole_file_before_delivering(tmp_path, monkeypatch, failed):
+    from pathlib import Path
+    from ouroboros import owner_mailbox as mail, working_checkpoint
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from tests._run_wait_shared import _nanny
+
+    ctx, limit = _nanny(tmp_path)
+    ctx._restore_mailbox, ctx._mailbox_content_ids = True, set()
+    words = "This letter was waiting during recovery."
+    assert mail.write_task_message(tmp_path, words, ctx.task_id, msg_id="letter", source_task_id="principal")
+    journal = mail._ack_path(tmp_path, ctx.task_id)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_bytes(b"")
+    source = mail._mailbox_path(tmp_path, ctx.task_id) if failed == "mailbox" else journal
+    original = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path == source:
+            raise OSError("whole file unavailable")
+        return original(path, *args, **kwargs)
+
+    def drain():
+        _drain_incoming_messages(limit.messages, queue.Queue(), tmp_path, ctx.task_id, None, limit.owner_msg_seen,
+                                 owner_ctx=ctx, defer_content_ack=True)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", read)
+        drain()
+        working_checkpoint.save_ready(limit)
+        assert ctx._restore_mailbox and words not in str(limit.messages)
+        assert journal.read_bytes() == b"" and not ctx._mailbox_content_ids
+    drain()
+    assert not ctx._restore_mailbox and words in str(limit.messages)
+    assert journal.read_bytes() == b""
+    working_checkpoint.save_ready(limit)
+    drain()
+    assert mail.mail_read_state(tmp_path, ctx.task_id, "letter", transcript_only=True) is True
+    assert str(limit.messages).count(words) == 1
+
+
+def test_torn_mailbox_does_not_hide_later_controls_or_resurrect_a_revocation(tmp_path):
+    from ouroboros import owner_mailbox as mail, owner_relay, working_checkpoint
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from tests._run_wait_shared import _nanny
+
+    ctx, limit = _nanny(tmp_path)
+    ctx._restore_mailbox, ctx._mailbox_content_ids = True, set()
+    tid = ctx.task_id
+    assert mail.write_owner_message(tmp_path, "possibly revoked", tid, msg_id="early", kind=mail.KIND_FINALIZE_NOW)
+    mailbox = mail._mailbox_path(tmp_path, tid)
+    with mailbox.open("ab") as handle:
+        handle.write(b'{"kind":"control_revoked","text":"\xc3')
+    torn = mailbox.read_bytes()
+    assert mail.write_owner_message(tmp_path, "revoked", tid, msg_id="cancelled", kind=mail.KIND_FINALIZE_NOW)
+    assert mail.revoke_owner_control(tmp_path, tid, "cancelled")
+    assert mail.write_owner_message(tmp_path, "current", tid, msg_id="accepted", kind=mail.KIND_FINALIZE_NOW)
+    assert mail.write_owner_message(tmp_path, "Keep this change.", tid, msg_id="words")
+    addressed = dict(relay_id="after-gap", note="Only the teller wrote this.", quotes=[], chat_id=1, teller_task_id="sender")
+    relay, written = owner_relay.write_relay(tmp_path, tid, **addressed)
+    assert written and not owner_relay.write_relay(tmp_path, tid, **addressed)[1]
+
+    def drain():
+        return _drain_incoming_messages(limit.messages, queue.Queue(), tmp_path, tid, None, limit.owner_msg_seen,
+                                        owner_ctx=ctx, defer_content_ack=True)
+
+    assert drain()["finalize_now"] == "current"
+    assert not ctx._restore_mailbox and "early" not in limit.owner_msg_seen
+    assert not mail._ack_path(tmp_path, tid).exists()
+    working_checkpoint.save_ready(limit)
+    assert "finalize_now" not in drain() and mailbox.read_bytes().startswith(torn + b"\n")
+    assert [row["content"] for row in ctx._owner_directives] == ["Keep this change."]
+    assert str(limit.messages).count(addressed["note"]) == 1
+    assert mail.acknowledged_task_message_ids(tmp_path, tid) == {"words", relay["msg_id"]}
+
+
 @pytest.mark.parametrize("wait", ["ready", "in_slot"])
 def test_an_answer_to_a_card_that_arrives_while_the_work_waits_becomes_the_owners_words_for_it(
         tmp_path, monkeypatch, reads, wait):
@@ -317,7 +621,7 @@ def test_an_answer_to_a_card_that_arrives_while_the_work_waits_becomes_the_owner
     from ouroboros.task_results import load_task_result, write_task_result
     from ouroboros.working_checkpoint import flush_content_acks
     from tests._budget_pause_exact_helpers import _loop_ctx
-    from tests.test_delegate_run_wait import _ended, _run
+    from tests._run_wait_shared import _ended, _run
     from tests.test_question_answer_routing import answer, runtime
 
     app, _bridge, _q, _task = runtime(tmp_path, monkeypatch)
@@ -363,12 +667,11 @@ def test_an_answer_to_a_card_that_arrives_while_the_work_waits_becomes_the_owner
 _NANNY, _RUN, _TAIL, _WAKE_TAIL = "nanny", "run-1", "OWNER-MAIL-TAIL-7c1f", "WAKE-BODY-TAIL-3d9a"
 
 
-def _nanny(tmp_path, monkeypatch, observe, runs=(_RUN,)):
-    """The nanny's real ``delegate_wait``: its runs ended (the body recorded it), so each wait is ready at once;
-    only the one addressed read is scripted (``observe``)."""
+def _nanny(tmp_path, monkeypatch, observe, runs=(_RUN,), *, ended="succeeded"):
+    """The nanny's real ``delegate_wait``; the body has ended its runs by default. Script just the addressed read."""
     from ouroboros import delegate_output
     from ouroboros.task_results import write_task_result
-    from tests.test_working_checkpoint import _registry
+    from tests._loop_resume_shared import _registry
 
     write_task_result(tmp_path, _NANNY, "running")
     registry = _registry(tmp_path, monkeypatch, _NANNY, 1)
@@ -377,7 +680,7 @@ def _nanny(tmp_path, monkeypatch, observe, runs=(_RUN,)):
     ctx._loop_mailbox_seen_ids = set()  # the loop's round-top drain and wake exposure share it
     (tmp_path / "logs").mkdir(exist_ok=True)
     for run_id in runs:
-        held_run(tmp_path, run_id, _NANNY, ended="succeeded")
+        held_run(tmp_path, run_id, _NANNY, ended=ended)
     scripted_reads(monkeypatch, observe)
     monkeypatch.setattr(delegate_output, "_READ_COVERAGE", {})  # a fresh worker's reading ledger
     return registry, ctx
@@ -420,14 +723,16 @@ def _base_saved_wake(root, ctx, run_id, mail="", **read):
     import uuid
 
     from ouroboros import delegate_supervision as ds
-    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.owner_mailbox import drain_owner_entries, write_owner_message
     from ouroboros.utils import utc_now_iso
 
     mail = mail or _mail()
     assert write_owner_message(root, mail, _NANNY, msg_id="owner-mail")
+    posted = next(row for row in drain_owner_entries(root, _NANNY, include_acknowledged=True)
+                  if row["msg_id"] == "owner-mail")
     payload = {**read, "run_id": run_id, "wake_events": [{
         "type": "addressed_message", "msg_id": "owner-mail", "kind": "owner_text", "provenance": "owner",
-        "source_task_id": "", "relayed_from_task_id": "", "text": mail, "ts": utc_now_iso()}],
+        "source_task_id": "", "relayed_from_task_id": "", "text": mail, "ts": posted["ts"]}],
         "coordination_context": ds.coordination_live_context(ctx), "leaf_live_input": "unknown",
         "supervision_wake_id": uuid.uuid4().hex}
     state = ds._load_state(ctx, run_id)
@@ -568,6 +873,90 @@ def test_a_crowded_frame_cuts_the_wake_and_only_its_source_read_whole_acknowledg
     assert len(polls) == 2 and _wake_id(again) != _wake_id(wake), "the next wait observes the run"
 
 
+@pytest.mark.parametrize("forked", [False, True])
+def test_native_wake_credits_the_read_of_its_canonical_source(tmp_path, monkeypatch, forked):
+    """The owed wake is cut on the canonical drive. Real guarded reads earn credit by owner, address and revision."""
+    from types import SimpleNamespace
+
+    from ouroboros import delegate_output, loop, native_task_wait, working_checkpoint as wc
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.headless import task_state_dir
+
+    polls = []
+    registry, ctx = _nanny(tmp_path, monkeypatch, _observer(tmp_path, polls), ended="")
+    if forked:
+        ctx.drive_root = task_state_dir(tmp_path, _NANNY) / "data"
+        ctx.drive_root.mkdir(parents=True, exist_ok=True)
+    _intent(ctx, "Exact retained words; " * 430 + _WAKE_TAIL + " then return it;" * 64)
+    armed = _call(registry, tmp_path, "arm", "delegate_wait", {"run_id": _RUN})
+    assert json.loads(armed["result"])["reason"] == "sleep_armed" and polls == []
+    held_run(tmp_path, _RUN, _NANNY, ended="succeeded")
+
+    def measured(_ctx, rows, _schemas, **_kw):
+        tokens = sum(len(json.dumps(row)) for row in rows) // 4
+        return {"estimated_input_tokens": tokens, "response_reserve_tokens": 100,
+                "target_total_tokens": 2000, "capacity_total_tokens": 3600}
+
+    monkeypatch.setattr(loop, "_measure_tool_result_batch", measured)
+    fit, messages, trace = _wide()
+    _shown(registry, armed, messages, trace, fit)
+    limit = SimpleNamespace(tools=registry, messages=messages, llm_trace=trace, accumulated_usage={},
+                            round_idx=2, tool_schemas=[], owner_msg_seen=set())
+    assert native_task_wait.deliver_owed(limit)
+    delivery, = trace["task_wait_deliveries"]
+    source, = ctx._wake_sources.values()
+    assert delivery["partial"] and source == delivery["source_ref"] and polls == [_RUN]
+    assert delivery.get("preempted") and ctx._pending_task_wait is None
+    target = task_artifact_dir_path(tmp_path, _NANNY) / source["path"]
+    raw = target.read_bytes()
+    if forked:
+        assert not (task_artifact_dir_path(ctx.drive_root, _NANNY) / source["path"]).exists()
+    pending, last = _wake_state(ctx)
+    assert pending and not last
+    _ready(registry, messages, trace)
+
+    def read(call_id, args, expected_target):
+        row = _call(registry, tmp_path, call_id, "read_file", args)
+        assert not row["is_error"], row["result"]
+        meta = row["result_meta"]["tool_result_meta"]["read_view"]
+        assert meta["target"] == str(expected_target.resolve())
+        shown, view = _shown(registry, row, messages, trace, fit)
+        assert not view.get("result_partial") and _wake_state(ctx) == (pending, "")
+        return shown, meta
+
+    coverage = delegate_output.read_coverage(_NANNY)
+    for store in (task_artifact_dir_path(tmp_path, "other"), task_artifact_dir_path(tmp_path / "alias", _NANNY)):
+        decoy = store / source["path"]
+        decoy.parent.mkdir(parents=True)
+        decoy.write_bytes(raw)
+        shown, meta = read(f"decoy-{store.name}", {"root": "runtime_data", "path": str(decoy)}, decoy)
+        assert _WAKE_TAIL in shown and meta["source_revision"] == source["sha256"]
+    target.write_bytes(raw.replace(b"Exact retained words", b"Elsewhere read words", 1))
+    _, meta = read("wrong-revision", {"root": "runtime_data", "path": str(target)}, target)
+    assert meta["source_revision"] != source["sha256"] and delegate_output.read_coverage(_NANNY) == coverage
+    target.write_bytes(raw)
+
+    read("first-page", _page(source, 0, len(raw) // 3), target)
+    _ready(registry, messages, trace)
+    replay = _call(registry, tmp_path, "still-owed", "delegate_wait", {"run_id": _RUN})
+    assert _wake_id(replay) == pending and json.loads(replay["result"])["replay_of"]["fresh_observation"] is False
+    assert polls == [_RUN] and _wake_state(ctx) == (pending, "")
+    shown, meta = read("whole-source", _page(source, 0, len(raw) + 1), target)
+    assert _WAKE_TAIL in shown and meta["source_revision"] == source["sha256"]
+    with monkeypatch.context() as failed_save:
+        def unwritten(*_args, **_kw):
+            raise OSError("synthetic checkpoint write failure")
+        failed_save.setattr(wc, "_write", unwritten)
+        _ready(registry, messages, trace)
+    assert _wake_state(ctx) == (pending, "") and len(ctx._pending_content_acks) == 1
+    _ready(registry, messages, trace)
+    assert _wake_state(ctx) == ("", pending) and ctx._wake_sources == {}
+    saved = wc.read_working(tmp_path, _NANNY, ctx.task_attempt)[1]
+    assert any(msg.get("tool_call_id") == "whole-source" and _WAKE_TAIL in msg["content"] for msg in saved["messages"])
+    after = _call(registry, tmp_path, "fresh", "delegate_wait", {"run_id": _RUN})
+    assert _wake_id(after) != pending and polls == [_RUN, _RUN] and json.loads(after["result"])["last_seq"] == 2
+
+
 def test_a_spilled_wake_waits_for_its_source_and_the_next_round_drain_delivers_the_omitted_mail_first(
         tmp_path, monkeypatch):
     """Mail that arrives with a spilled wake is omitted from it: the complete view of the wake's summary holds none
@@ -673,8 +1062,8 @@ def test_a_refused_ack_after_the_source_read_is_recorded_and_the_replay_acknowle
     """The read whole, its saved state, then an acknowledgement that does not land: the wake stays pending with a
     typed diagnostic and no callback is kept. The replay names the same canonical source, already read in this
     process, and acknowledges at the next saved state. A current wake owes only its acknowledgement row; a wake
-    saved before this contract (``legacy``, by hand, pending at the upgrade so the first wait replays it) also owes
-    the ACK of the short mail inside it, which the replay's acknowledgement then writes."""
+    saved before this contract (``legacy``) also waits for its addressed letter. The drain retries an unwritten
+    letter receipt independently of the observation."""
     from ouroboros import delegate_custody as custody
     from ouroboros import owner_mailbox
 
@@ -690,6 +1079,14 @@ def test_a_refused_ack_after_the_source_read_is_recorded_and_the_replay_acknowle
     _shown(registry, wake, messages, trace, fit)
     _shown(registry, _call(registry, tmp_path, "read-1", "read_file", _page(source, 0, source["size"] + 1)),
            messages, trace, fit)
+    if saved == "legacy":
+        from ouroboros.loop_round_limits import _drain_incoming_messages
+
+        _ready(registry, messages, trace)
+        assert _refused(tmp_path) == [(_wake_id(wake), "legacy_mail_not_in_transcript", None)]
+        _drain_incoming_messages(messages, queue.Queue(), tmp_path, _NANNY, None, ctx._loop_mailbox_seen_ids,
+                                 owner_ctx=ctx, defer_content_ack=True)
+        assert sum(str(r.get("content") or "").count(_TAIL) for r in messages) == 1
     with monkeypatch.context() as refusing:
         if saved == "legacy":
             refusing.setattr(owner_mailbox, "acknowledge_task_messages", lambda *_a, **_k: False)
@@ -698,9 +1095,12 @@ def test_a_refused_ack_after_the_source_read_is_recorded_and_the_replay_acknowle
             refusing.setattr(custody, "emit", lambda root, kind, payload, **kwargs: (
                 False if kind == "delegate_supervision_wake_acknowledged" else emit(root, kind, payload, **kwargs)))
         _ready(registry, messages, trace)
-    assert _wake_state(ctx) == (_wake_id(wake), "") and not getattr(ctx, "_pending_content_acks", None)
-    reason = "mailbox_acknowledgement_unwritten" if saved == "legacy" else "acknowledgement_row_unwritten"
-    assert _refused(tmp_path) == [(_wake_id(wake), reason, None)]
+    assert _wake_state(ctx) == (_wake_id(wake), "")
+    assert bool(getattr(ctx, "_pending_content_acks", None)) is (saved == "legacy")
+    if saved == "legacy":
+        assert _unread(tmp_path, ctx) == ["owner-mail"]
+    else:
+        assert _refused(tmp_path) == [(_wake_id(wake), "acknowledgement_row_unwritten", None)]
     replay = _call(registry, tmp_path, "wait-2", "delegate_wait", {"run_id": _RUN})
     assert len(polls) == int(saved == "current") and json.loads(replay["result"])["wake_delivery"]["source"] == source
     _shown(registry, replay, messages, trace, fit)
@@ -717,7 +1117,7 @@ def test_a_startup_receipt_carries_an_oversized_recovered_wake_whole_before_its_
     from ouroboros import delegate_supervision as ds
     from ouroboros.subagent_bootstrap import append_startup_receipt
     from ouroboros.tool_capabilities import tool_result_limit
-    from tests.test_working_checkpoint import _registry
+    from tests._loop_resume_shared import _registry
 
     registry = _registry(tmp_path, monkeypatch, _NANNY, 2)
     ctx = registry._ctx

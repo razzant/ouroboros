@@ -198,7 +198,7 @@ def test_acknowledged_owner_source_and_wait_completeness_remain_distinct(tmp_pat
     delivery_status = {}
     normal = mailbox.drain_owner_entries(tmp_path, "parent", _read_status=delivery_status)
     assert delivery_status["complete"] is (ack_state in {"missing", "valid"})
-    assert bool(normal) is (ack_state in {"missing", "unreadable"})
+    assert bool(normal) is (ack_state in {"missing", "unreadable", "torn"})
     # Exact owner-source lookup reads acknowledged content without requiring
     # the ACK projection; it still resolves all mailbox revocations.
     source_status = {}

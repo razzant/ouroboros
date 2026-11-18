@@ -8,6 +8,7 @@ from ouroboros.gateway import task_decision as td
 from ouroboros.owner_quiz import record_asked, record_publication, quiz_states
 from ouroboros.task_store import patch_document
 from ouroboros.question_answers import admitted_successor
+from tests._question_answer_shared import continue_to, drain
 from tests.test_quiz_answer import _post
 from tests.test_quiz_late_answer import _late_bridge, _inbox
 
@@ -40,25 +41,6 @@ def debt(root):
     return quiz_states(root, "asker")["q"]["delivery"]
 
 
-def drain(root, task_id):
-    from ouroboros.loop_round_limits import _drain_incoming_messages
-    ctx = SimpleNamespace(task_id=task_id, task_metadata={}, drive_root=root, budget_drive_root=root)
-    messages = []
-    _drain_incoming_messages(messages, queue.Queue(), root, task_id, None, set(), owner_ctx=ctx)
-    return ctx, messages
-
-
-def continue_to(root, state="admitted"):
-    from ouroboros.owner_continue import binding_sha
-    from ouroboros.task_results import write_task_result
-    write_task_result(root, "successor", status="running", chat_id=1)
-    binding = {"predecessor_task_id": "asker", "successor_task_id": "successor", "action_nonce": "nonce"}
-    admission = {"binding": binding, "binding_sha256": binding_sha(binding)}
-    patch_document(root, "asker", lambda row: {**row, "continued_by": {
-        **admission, "state": state, "successor_task_id": "successor"}})
-    patch_document(root, "successor", lambda row: {**row, "continuation_admission": admission})
-
-
 def test_live_answer_is_owed_until_saved_read_and_keeps_only_owner_words(tmp_path, monkeypatch):
     app, bridge, q, task = runtime(tmp_path, monkeypatch)
     response = answer(app)
@@ -79,6 +61,38 @@ def test_live_answer_is_owed_until_saved_read_and_keeps_only_owner_words(tmp_pat
     assert _inbox(bridge) == []
 
 
+def test_recalled_answer_and_card_press_keep_their_content_without_settling_twice(tmp_path, monkeypatch):
+    from ouroboros import card_store, owner_mailbox, question_answers
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_relay import quote_rows
+
+    app, bridge, _q, _task = runtime(tmp_path, monkeypatch)
+    assert answer(app).status_code == 200
+    press_id, press = "card_input:card:press", "Pressed Save on the draft."
+    assert owner_mailbox.write_owner_message(tmp_path, press, "asker", msg_id=press_id,
+        kind=owner_mailbox.KIND_CARD_INPUT, card_delivery={"card_id": "card", "request_id": "press"})
+    original, _ = drain(tmp_path, "asker")
+    receipt = owner_mailbox._ack_path(tmp_path, "asker").read_bytes()
+    saved_debt = debt(tmp_path)
+    [handle] = original._held_owner_messages
+
+    def duplicate(*_args, **_kwargs):
+        pytest.fail("a restored transcript settled the original action twice")
+
+    monkeypatch.setattr(card_store, "acknowledge_press", duplicate)
+    monkeypatch.setattr(question_answers, "acknowledge_answer", duplicate)
+    messages, events = [], queue.Queue()
+    ctx = SimpleNamespace(task_id="asker", task_metadata={}, drive_root=tmp_path, budget_drive_root=tmp_path,
+                          _restore_mailbox=True, _mailbox_content_ids=set())
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, "asker", events, set(), owner_ctx=ctx)
+    assert sum(str(row.get("content") or "").count(press) for row in messages) == 1
+    assert [row["content"] for row in ctx._owner_directives] == ["exact answer", press]
+    [quote], error = quote_rows(ctx, [handle])
+    assert not error and quote["text"] == "exact answer" and "Which database?" in quote["question_frame"]
+    assert not list(events.queue) and not _inbox(bridge)
+    assert owner_mailbox._ack_path(tmp_path, "asker").read_bytes() == receipt and debt(tmp_path) == saved_debt
+
+
 def test_only_admitted_successor_can_receive_an_answer(tmp_path, monkeypatch):
     app, bridge, q, task = runtime(tmp_path, monkeypatch, running=False)
     continue_to(tmp_path)
@@ -89,6 +103,222 @@ def test_only_admitted_successor_can_receive_an_answer(tmp_path, monkeypatch):
     assert _inbox(bridge) == []
     drain(tmp_path, "successor")
     assert debt(tmp_path)["state"] == "delivered"
+
+
+@pytest.mark.parametrize("written_by_current_producer", [True, False], ids=["fresh", "legacy-unassigned"])
+def test_first_closure_route_distinguishes_creation_from_legacy_ack_gap(tmp_path, monkeypatch, written_by_current_producer):
+    from ouroboros import owner_mailbox as mail
+    from ouroboros.owner_quiz import record_closed
+
+    app, _bridge, q, task = runtime(tmp_path, monkeypatch, running=False)
+    continue_to(tmp_path)
+    q.RUNNING["successor"] = {"task": {**task, "id": "successor"}}
+    ack = mail._ack_path(tmp_path, "asker")
+    ack.parent.mkdir(parents=True, exist_ok=True)
+    ack.write_bytes(b"{historical-torn-receipt")
+    if not written_by_current_producer:
+        assert record_closed(tmp_path, "asker", quiz_id="q", reason="Done.", actor="owner", request_id="close")["ok"]
+        def remove_creation_stamp(row):
+            row["owner_quiz"]["q"]["delivery"].pop("first_route_pending", None)
+            return row
+        patch_document(tmp_path, "asker", remove_creation_stamp)
+    assert _post(app, {"decision_id": "quiz:asker:q", "request_id": "close", "action": "close", "reason": "Done."}).status_code == 200
+    assert bool(mail.drain_owner_entries(tmp_path, "successor")) is written_by_current_producer
+    assert not debt(tmp_path).get("read_at")  # route admission is not consumption
+    assert ack.read_bytes() == b"{historical-torn-receipt"
+
+
+@pytest.mark.parametrize("holder", ["running", "paused", "held"])
+def test_closure_reaches_the_admitted_reader_once_with_its_reason(tmp_path, monkeypatch, holder):
+    from ouroboros.owner_mailbox import drain_owner_entries
+
+    app, bridge, q, task = runtime(tmp_path, monkeypatch, running=False)
+    continue_to(tmp_path)
+    successor = {**task, "id": "successor"}
+    q.RUNNING["neighbour"] = {"task": {**task, "id": "neighbour"}}
+    if holder == "running":
+        q.RUNNING["successor"] = {"task": successor}
+    else:
+        successor.update({"_owner_hold": True} if holder == "held" else {"_budget_pause": {"reason": "budget"}})
+        q.PENDING.append(successor)
+    reason = "The original requirement was withdrawn."
+    request = {"decision_id": "quiz:asker:q", "request_id": "close", "action": "close", "reason": reason}
+    for _ in range(2):
+        response = _post(app, request)
+        assert response.status_code == 200, response.text
+    [entry] = drain_owner_entries(tmp_path, "successor")
+    assert entry["msg_id"] == "quiz_closed:q" and entry["kind"] == "quiz_closed"
+    assert entry["text"].count(reason) == 1 and "no option was chosen" in entry["text"]
+    assert not drain_owner_entries(tmp_path, "asker") and not drain_owner_entries(tmp_path, "neighbour")
+    assert not _inbox(bridge) and debt(tmp_path)["recipient_task_id"] == "successor"
+    ctx, messages = drain(tmp_path, "successor")
+    assert reason in str(messages) and [r["content"] for r in ctx._owner_directives] == [reason]
+    assert not drain(tmp_path, "successor")[1]
+    assert debt(tmp_path)["read_at"] and debt(tmp_path)["state"] == "delivered"
+    assert "answered_index" not in quiz_states(tmp_path, "asker")["q"]
+
+
+@pytest.mark.parametrize("retired_mailbox", [False, True], ids=["old-wake-receipt", "settled-unread-capture"])
+def test_closed_card_is_published_once_when_the_first_recipient_ends_before_read(tmp_path, monkeypatch, retired_mailbox):
+    from ouroboros import owner_mailbox as mail, working_checkpoint
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from tests._budget_pause_exact_helpers import _loop_ctx
+    from tests._dialogue import chat_rows
+
+    app, bridge, q, task = runtime(tmp_path, monkeypatch, running=False)
+    frames = []
+    bridge._broadcast_fn = frames.append
+    continue_to(tmp_path)
+    q.PENDING.append({**task, "id": "successor", "_owner_hold": True})
+    reason = "The experiment is complete."
+    request = {"decision_id": "quiz:asker:q", "request_id": "close", "action": "close", "reason": reason}
+    assert _post(app, request).status_code == 200
+    assert debt(tmp_path)["state"] == "owed" and debt(tmp_path)["mailbox_at"] and not debt(tmp_path).get("read_at")
+    assert [frame["state"] for frame in frames if frame.get("type") == "quiz_state"] == ["closed"]
+    mid = debt(tmp_path)["msg_id"]
+    # The old wake named this letter, but the queued reader never held its words.
+    if not retired_mailbox:
+        assert mail.acknowledge_task_messages(tmp_path, "successor", [mid], wake_id="historical-wake")
+    assert not mail.mail_read_state(tmp_path, "successor", mid, transcript_only=True)
+    q.PENDING.clear()
+    patch_document(tmp_path, "successor", lambda row: {**row, "status": "completed"})
+    if retired_mailbox:
+        assert mail.cleanup_task_mailbox(tmp_path, "successor", canonical_root=tmp_path)
+        assert not mail.mailbox_holds(tmp_path, "successor", mid)
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.task_results import load_task_result
+    predecessor = load_task_result(tmp_path, "successor", strict=True)
+    if retired_mailbox:
+        assert predecessor["unread_mailbox"]["read_complete"] and len(predecessor["unread_mailbox"]["rows"]) == 1
+    assert not [row for row in owner_sources(tmp_path, predecessor, "successor")["later"] if row["msg_id"] == mid]
+    continue_to(tmp_path, asker="successor", successor="next")
+    q.RUNNING["next"] = {"task": {**task, "id": "next"}}
+    for _ in range(2):
+        assert _post(app, request).status_code == 200
+    assert debt(tmp_path)["state"] == "owed" and debt(tmp_path)["recipient_task_id"] == "next"
+    [letter] = mail.drain_owner_entries(tmp_path, "next", include_acknowledged=True)
+    assert letter["msg_id"] == mid and reason in letter["text"]
+    assert len(mail._mailbox_path(tmp_path, "next").read_bytes().splitlines()) == 1
+    ctx, limit = _loop_ctx(tmp_path, "next")
+    limit.messages[:] = [{"role": "user", "content": "Resume."}]
+    _drain_incoming_messages(limit.messages, queue.Queue(), tmp_path, "next", None, limit.owner_msg_seen,
+                             owner_ctx=ctx, defer_content_ack=True)
+    assert debt(tmp_path)["state"] == "owed" and not mail.mail_read_state(tmp_path, "next", mid)
+    working_checkpoint.save_ready(limit)
+    assert mail.mail_read_state(tmp_path, "next", mid, transcript_only=True) and debt(tmp_path)["read_at"]
+    assert debt(tmp_path)["state"] == "delivered" and not drain(tmp_path, "next")[1]
+    assert [row["content"] for row in ctx._owner_directives] == [reason]
+    assert "answered_at" not in quiz_states(tmp_path, "asker")["q"]
+    assert [row["text"] for row in chat_rows(tmp_path) if row.get("type") == "quiz_closed"] == [reason]
+    assert len([frame for frame in frames if frame.get("type") == "quiz_state"]) == 1 and not _inbox(bridge)
+
+
+def test_ended_closure_reader_with_unknown_ack_does_not_repost_without_unread_capture(tmp_path, monkeypatch):
+    from ouroboros import owner_mailbox as mail
+
+    app, _bridge, q, task = runtime(tmp_path, monkeypatch, running=False)
+    continue_to(tmp_path)
+    q.RUNNING["successor"] = {"task": {**task, "id": "successor"}}
+    request = {"decision_id": "quiz:asker:q", "request_id": "close", "action": "close", "reason": "Done."}
+    assert _post(app, request).status_code == 200
+    assert debt(tmp_path)["recipient_task_id"] == "successor"
+    mail._ack_path(tmp_path, "successor").write_bytes(b"{torn")
+    q.RUNNING.pop("successor")
+    patch_document(tmp_path, "successor", lambda row: {**row, "status": "completed"})
+    continue_to(tmp_path, asker="successor", successor="next")
+    q.RUNNING["next"] = {"task": {**task, "id": "next"}}
+    assert _post(app, request).status_code == 200
+    assert not mail.drain_owner_entries(tmp_path, "next")
+    assert debt(tmp_path)["recipient_task_id"] == "successor" and not debt(tmp_path).get("read_at")
+
+
+@pytest.mark.parametrize("newest,expected", [("completed", "successor"), ("running", "next")])
+def test_answer_follows_the_latest_live_admitted_reader(tmp_path, monkeypatch, newest, expected):
+    app, bridge, q, task = runtime(tmp_path, monkeypatch, running=False)
+    continue_to(tmp_path)
+    continue_to(tmp_path, asker="successor", successor="next")
+    patch_document(tmp_path, "next", lambda row: {**row, "status": newest})
+    q.RUNNING["successor"] = {"task": {**task, "id": "successor"}}
+    if newest == "running":
+        q.RUNNING["next"] = {"task": {**task, "id": "next"}}
+    assert answer(app).status_code == 200 and debt(tmp_path)["recipient_task_id"] == expected
+    assert not _inbox(bridge)
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("binding", ["admitted", "bound", "mismatched", "cycle", "admitted_during_retirement", "ended"])
+def test_closure_stays_owed_until_its_reader_line_ends(tmp_path, monkeypatch, binding, published):
+    from ouroboros.owner_continue import binding_sha
+    from ouroboros.owner_quiz import record_closed, record_quiz_delivery_failure, retire_closure_owed_nowhere
+
+    _app, _bridge, _q, _task = runtime(tmp_path, monkeypatch, running=False)
+    record_asked(tmp_path, "asker", quiz_id="lost-card", question="Which one?", options=["one", "two"], chat_id=1)
+    assert record_closed(tmp_path, "asker", quiz_id="lost-card", actor="owner", reason="No longer needed.",
+                         request_id="close-lost-card")["ok"]
+    record_quiz_delivery_failure(tmp_path, "asker", "lost-card", "publication_address_unknown")
+    continue_to(tmp_path, "bound" if binding == "bound" else "admitted")
+    if binding == "mismatched":
+        patch_document(tmp_path, "successor", lambda row: {**row, "continuation_admission": {}})
+    if binding in ("ended", "cycle", "admitted_during_retirement"):
+        patch_document(tmp_path, "successor", lambda row: {**row, "status": "completed"})
+    if binding == "admitted_during_retirement":
+        from ouroboros import question_answers
+        from ouroboros.task_results import write_task_result
+
+        ended = question_answers.reader_line_ended
+
+        def admit_before_commit(*args, **kwargs):
+            assert ended(*args, **kwargs)
+            new = {"predecessor_task_id": "successor", "successor_task_id": "next", "action_nonce": "forward"}
+            admission = {"binding": new, "binding_sha256": binding_sha(new)}
+            write_task_result(tmp_path, "next", status="running", chat_id=1)
+            patch_document(tmp_path, "next", lambda row: {**row, "continuation_admission": admission})
+            patch_document(tmp_path, "successor", lambda row: {**row, "continued_by": {
+                **admission, "state": "admitted", "successor_task_id": "next"}})
+            return True
+
+        monkeypatch.setattr(question_answers, "reader_line_ended", admit_before_commit)
+    if binding == "cycle":
+        back = {"predecessor_task_id": "successor", "successor_task_id": "asker", "action_nonce": "back"}
+        admission = {"binding": back, "binding_sha256": binding_sha(back)}
+        patch_document(tmp_path, "successor", lambda row: {**row, "continued_by": {
+            **admission, "state": "admitted", "successor_task_id": "asker"}})
+        patch_document(tmp_path, "asker", lambda row: {**row, "continuation_admission": admission})
+    if published:
+        from ouroboros.owner_quiz import mark_discharged, mark_quiz_history_written
+        record_publication(tmp_path, "asker", "lost-card", 1)
+        mark_quiz_history_written(tmp_path, "asker", "lost-card")
+        settled = mark_discharged(tmp_path, "asker", "lost-card", no_reader=True)
+        assert bool(settled) is (binding == "ended")
+    else:
+        assert retire_closure_owed_nowhere(tmp_path, "asker", "lost-card") is (binding == "ended")
+    block = quiz_states(tmp_path, "asker")["lost-card"]
+    assert block["closed_reason"] == "No longer needed."
+    assert block["delivery"]["state"] == (("delivered" if published else "no_target") if binding == "ended" else "owed")
+    assert not block["delivery"].get("read_at")
+
+
+@pytest.mark.parametrize("binding", ["bound", "mismatched", "cycle"])
+def test_closure_never_enters_an_unadmitted_or_cyclic_reader_mailbox(tmp_path, monkeypatch, binding):
+    from ouroboros.owner_continue import binding_sha
+    from ouroboros.owner_mailbox import drain_owner_entries
+
+    app, bridge, q, task = runtime(tmp_path, monkeypatch, running=False)
+    continue_to(tmp_path, "bound" if binding == "bound" else "admitted")
+    if binding == "mismatched":
+        patch_document(tmp_path, "successor", lambda row: {**row, "continuation_admission": {}})
+    if binding == "cycle":
+        back = {"predecessor_task_id": "successor", "successor_task_id": "asker", "action_nonce": "back"}
+        admission = {"binding": back, "binding_sha256": binding_sha(back)}
+        patch_document(tmp_path, "successor", lambda row: {**row, "continued_by": {
+            **admission, "state": "admitted", "successor_task_id": "asker"}})
+        patch_document(tmp_path, "asker", lambda row: {**row, "continuation_admission": admission})
+    for tid in ("successor", "other"):
+        q.RUNNING[tid] = {"task": {**task, "id": tid}}
+    response = _post(app, {"decision_id": "quiz:asker:q", "request_id": "close", "action": "close", "reason": "Done."})
+    assert response.status_code == 200, response.text
+    assert debt(tmp_path)["state"] == "owed" and not debt(tmp_path).get("mailbox_at")
+    assert not _inbox(bridge) and all(not drain_owner_entries(tmp_path, tid) for tid in ("asker", "other", "successor"))
 
 
 def test_bound_claim_and_unrelated_room_reader_cannot_take_the_answer(tmp_path, monkeypatch):

@@ -268,11 +268,14 @@ def test_owner_closure_reaches_a_live_author_while_its_row_waits_for_an_address(
     [entry] = drain_owner_entries(runtime.root, runtime.task["id"], set())
     assert entry["kind"] == "quiz_closed" and "no approval was given" in entry["text"]
     due(runtime)
-    assert recover(runtime)["attempted"] == 0 and block(runtime)["delivery"]["mailbox_at"]
+    assert recover(runtime)["pending"] == 1 and block(runtime)["delivery"]["mailbox_at"]
     record_publication(runtime.root, runtime.task["id"], "q", 1, evidence="history")
     due(runtime)
-    assert recover(runtime) == {"attempted": 1, "delivered": 1, "pending": 0}
-    assert len(drain_owner_entries(runtime.root, runtime.task["id"], set())) == 1
+    assert recover(runtime) == {"attempted": 1, "delivered": 0, "pending": 1}
+    from tests._question_answer_shared import drain
+    drain(runtime.root, runtime.task["id"])
+    assert block(runtime)["delivery"]["read_at"] and block(runtime)["delivery"]["state"] == "delivered"
+    assert not drain_owner_entries(runtime.root, runtime.task["id"], set())
     rows = chat_rows(runtime.root)
     assert [row["text"] for row in rows if row.get("type") == "quiz_closed"] == ["Withdrawn"]
 
@@ -389,11 +392,9 @@ def test_a_closure_no_room_shows_retires_its_note_and_leaves_current_questions(r
 @pytest.mark.parametrize("author", ["running", "finished"])
 def test_an_owner_closure_retires_only_once_its_authors_letter_is_settled(runtime, monkeypatch, author):
     """The owner closed an older body's question whose card no room shows; the delivery attempt recorded the missing
-    address and wrote no letter. A living author is still owed it, so no door retires that note yet (nothing writes
-    that letter later either); once the letter is written, the import retires it. A finished author's terminal status
-    never turns back, so no letter can reach it and the import retires the note at once."""
+    address. A live author can read the letter at its next drain. A truly ended line has no reader."""
     from ouroboros import startup_migrations
-    from ouroboros.owner_quiz import mark_quiz_history_written, record_quiz_delivery_failure
+    from ouroboros.owner_quiz import record_quiz_delivery_failure
     from tests.test_main_decisions import older_body_ask
 
     tid = runtime.task["id"]
@@ -411,16 +412,21 @@ def test_an_owner_closure_retires_only_once_its_authors_letter_is_settled(runtim
         return
     assert "retired" not in startup_migrations.migrate_question_publications(runtime.root, legacy=True)
     assert block(runtime, "closed")["delivery"]["state"] == "owed"
-    mark_quiz_history_written(runtime.root, tid, "closed", receipt="mailbox_at")  # the letter reached its author
-    assert startup_migrations.migrate_question_publications(runtime.root, legacy=True)["retired"] == 1
+    due(runtime, "closed")
+    assert recover(runtime)["pending"] == 1 and block(runtime, "closed")["delivery"]["mailbox_at"]
+    assert "retired" not in startup_migrations.migrate_question_publications(runtime.root, legacy=True)
+    from tests._question_answer_shared import drain
+    drain(runtime.root, tid)
+    due(runtime, "closed")
+    recover(runtime)
+    assert block(runtime, "closed")["delivery"]["read_at"]
     assert block(runtime, "closed")["delivery"]["state"] == "no_target"
 
 
 @pytest.mark.parametrize("author", ["live", "finished"])
 def test_the_owner_closing_a_card_no_room_shows_settles_its_letter_before_the_note_retires(runtime, monkeypatch, author):
     """The owner closes an older body's question whose card left no row in readable, stable history. Its delivery
-    attempt finds no address: a living author first gets the closure letter in its mailbox, then the note retires as
-    ``no_target``; a finished author is owed no letter and the note retires in the same attempt."""
+    attempt finds no address. A living author reads the letter before retirement. An ended line owes no letter."""
     from ouroboros import obligations, startup_migrations
     from ouroboros.gateway.task_decision import answer_decision
     from ouroboros.owner_mailbox import drain_owner_entries
@@ -438,6 +444,13 @@ def test_the_owner_closing_a_card_no_room_shows_settles_its_letter_before_the_no
     assert status == 200 and reply["state"] == "closed"
     letters = [entry for entry in drain_owner_entries(runtime.root, tid, set()) if entry["kind"] == "quiz_closed"]
     assert len(letters) == (1 if author == "live" else 0)
+    if author == "live":
+        from tests._question_answer_shared import drain
+        assert block(runtime, "closed")["delivery"]["state"] == "owed"
+        drain(runtime.root, tid)
+        due(runtime, "closed")
+        recover(runtime)
+        assert block(runtime, "closed")["delivery"]["read_at"]
     delivery = block(runtime, "closed")["delivery"]
     assert (delivery["state"], delivery["reason_code"]) == ("no_target", "no_publication_target")
     assert bool(delivery.get("mailbox_at")) == (author == "live")

@@ -109,6 +109,43 @@ def _owner_content(entry: Dict[str, Any], drive_root: Any, task_id: str) -> Any:
                 f"{type(exc).__name__}: {exc}; any attached files remain as listed]").strip()
 
 
+def _deliver_question_letter(messages, ctx, task_id, entry, notify, *, restoring):
+    """Deliver the recorded answer or closure with its author's words and its card."""
+    from ouroboros.owner_mailbox import KIND_QUIZ_CLOSED, deliver_quiz_answer
+    from ouroboros.owner_quiz import SECRET_OUTCOME_ROW_KIND, late_answer_owner_text, secret_outcome_block
+    from ouroboros.owner_relay import retain_owner_message
+    from ouroboros.owner_words import answered_card_reply
+    from ouroboros.question_answers import closure_directive
+
+    closure = entry["kind"] == KIND_QUIZ_CLOSED
+    delivery = entry.get("quiz_delivery") if isinstance(entry.get("quiz_delivery"), dict) else {}
+    if secret_outcome_block(entry) is not None:
+        row_kind = SECRET_OUTCOME_ROW_KIND
+    elif closure:
+        reason = closure_directive(entry)
+        row_kind = OWNER_WORDS_KIND if reason else ""  # protect the quoted words in the live transcript
+        if reason:
+            _loop()._record_owner_directive(ctx, source=reason["source"], content=reason["content"], msg_id=reason["msg_id"],
+                origin={k: reason[k] for k in ("source_task_id", "quiz_id", "ts")})
+    elif isinstance(answer := delivery.get("answer_snapshot"), dict):
+        answer_row = answer["delivery"].get("answer_row") if isinstance(answer.get("delivery"), dict) else None
+        if restoring and not isinstance(answer_row, dict):
+            _loop()._append_or_merge_user_message(messages, f"[Historical quiz answer {entry['msg_id']}: "
+                "the card's saved answer fields survive without their original chat row.]", slot=ctx)
+        held = retain_owner_message(ctx, answer_row)
+        _loop()._record_owner_directive(ctx, source="owner_quiz_answer", content=late_answer_owner_text(answer),
+            msg_id=entry["msg_id"], reply_to=answered_card_reply(answer, delivery.get("task_id")),
+            origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id"),
+                    **_arrival(held, entry.get("ts"))})
+        row_kind = OWNER_WORDS_KIND
+    else:
+        _loop()._append_or_merge_user_message(messages,
+            f"[Historical quiz answer {entry['msg_id']}; the original answer row is unavailable.]", slot=ctx)
+        row_kind = ""
+    deliver_quiz_answer(entry, task_id, None if closure else notify,
+        lambda text: _loop()._append_or_merge_user_message(messages, text, slot=ctx, kind=row_kind))
+
+
 def _drain_incoming_messages(
     messages: List[Dict[str, Any]],
     incoming_messages: queue.Queue,
@@ -133,18 +170,30 @@ def _drain_incoming_messages(
     controls: Dict[str, Any] = {}
 
     def ack_saved(entry: Dict[str, Any]) -> None:
-        if not acknowledge_transcript_entry(drive_root, task_id, entry) or event_queue is None:
+        if not acknowledge_transcript_entry(drive_root, task_id, entry):
+            if defer_content_ack and owner_ctx is not None:
+                from ouroboros.working_checkpoint import defer_content_ack as defer
+                defer(owner_ctx, lambda: ack_saved(entry))
             return
+        if event_queue is None or entry.get("_receipt_exists") or entry.get("_receipt_uncertain") or entry.get("_recalled"):
+            return
+        quiz_ack = entry.get("quiz_delivery") if entry.get("kind") == KIND_QUIZ_ANSWER else None
         if ((entry.get("relay") and not entry.get("host_carried"))  # a carried row posts no receipt to the room
-                or entry.get("quiz_delivery") or entry.get("card_delivery")):
+                or quiz_ack or entry.get("card_delivery")):
             from ouroboros.owner_relay import retained_relay
             event_queue.put_nowait({"type": "owner_message_injected", "task_id": task_id,
                                    "relay_ack": (entry["_relay_delivery"] if "_relay_delivery" in entry
                                                  else retained_relay(entry)) if entry.get("relay") else None,
-                                   "quiz_ack": entry.get("quiz_delivery"),
+                                   "quiz_ack": quiz_ack,
                                    "card_ack": entry.get("card_delivery")})
 
     def ack_content(entry: Dict[str, Any]) -> None:
+        if owner_ctx is not None and entry.get("msg_id"):
+            if not hasattr(owner_ctx, "_mailbox_content_ids"):
+                owner_ctx._mailbox_content_ids = set()
+            owner_ctx._mailbox_content_ids.add(entry["msg_id"])
+        if entry.get("_recalled") and (entry.get("kind") not in {KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED} or entry.get("_loop_receipt")):
+            return
         if defer_content_ack and owner_ctx is not None:
             from ouroboros.working_checkpoint import defer_content_ack as defer
 
@@ -187,19 +236,40 @@ def _drain_incoming_messages(
             break
 
     if drive_root is not None and task_id:
-        from ouroboros.owner_mailbox import CONTEXT_ONLY_TASK_PROVENANCES, KIND_CARD_INPUT, KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, acknowledge_transcript_entry, deliver_quiz_answer, deliver_task_message, drain_owner_entries
+        from ouroboros.owner_mailbox import (
+            CONTEXT_ONLY_TASK_PROVENANCES, KIND_CARD_INPUT, KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE,
+            KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, acknowledge_transcript_entry,
+            receipt_gap_history, deliver_task_message, drain_owner_entries,
+        )
 
         if owner_ctx:
             owner_ctx._loop_mailbox_seen_ids = _owner_msg_seen
         attempt = getattr(owner_ctx, "task_attempt", None) or (1 if owner_ctx is not None else None)
-        for entry in drain_owner_entries(drive_root, task_id, _owner_msg_seen, attempt):
+        restore = getattr(owner_ctx, "_restore_mailbox", False)
+        if restore:
+            from ouroboros.mailbox_restore import restored_entries
+
+            entries = restored_entries(owner_ctx, drive_root, task_id, _owner_msg_seen, attempt,
+                lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx, kind="mailbox_recovery"), messages)
+        else:
+            entries = drain_owner_entries(drive_root, task_id, _owner_msg_seen, attempt,
+                                         gap_history=receipt_gap_history(owner_ctx))
+        for entry in entries:
             kind = entry.get("kind") or KIND_OWNER_TEXT
+            mid = entry.get("msg_id")
+            if entry.get("_receipt_only"):
+                if relay := entry.get("relay"):
+                    entry["_relay_delivery"] = (getattr(owner_ctx, "_open_relays", {}) or {}).get(relay["relay_id"], {})
+                ack_content(entry)
+                continue
+            recalled = entry.get("_recalled") or entry.get("_recovering_seen") or entry.get("_receipt_uncertain")
+            notify = None if recalled else event_queue
             if kind == "relay_entry":
                 from ouroboros.owner_relay import inject_relay
                 if entry.get("host_carried") and getattr(owner_ctx, "_task_acceptance_sealed_fence_token", None):
                     _owner_msg_seen.discard(entry.get("msg_id"))  # a sealed close leaves a carried row as unread mail
                     continue
-                if shown := inject_relay(owner_ctx, entry, messages):  # rows addressed to this work, read by no round
+                if (shown := inject_relay(owner_ctx, entry, messages)) and not recalled:
                     controls["owner_carried_addressed"] = controls.get("owner_carried_addressed", []) + shown
                 delivered = True
                 ack_content(entry)
@@ -248,7 +318,8 @@ def _drain_incoming_messages(
                 if provenance == "place_event":
                     from ouroboros.place_intake import arrival_owner_words
                     from ouroboros.presence_continuation import note_place_delivery
-                    note_place_delivery(owner_ctx, entry, controls)  # the event is context; my human's words are theirs
+                    if not recalled:
+                        note_place_delivery(owner_ctx, entry, controls)
                     arrival = {**arrival, "confirmed_words": arrival_owner_words(owner_ctx, drive_root, entry)}  # now
                     entry = {**entry, "place_arrival": arrival}  # its delivered prefix reads the same fact
                     if confirmed := arrival["confirmed_words"]:  # provenance, as at the opening
@@ -264,13 +335,13 @@ def _drain_incoming_messages(
                         owner_ctx, content=dmsg, msg_id=str(entry.get("msg_id") or ""),
                         source=("relayed_peer_message" if provenance == "peer_via_ancestor"
                                 else "principal_task_message"),
-                        origin={"source_task_id": str(entry.get("source_task_id") or ""),
+                        origin={"ts": entry.get("ts"), "source_task_id": str(entry.get("source_task_id") or ""),
                                 "relayed_from_task_id": str(entry.get("relayed_from_task_id") or "")},
                     )
                 owned = provenance not in CONTEXT_ONLY_TASK_PROVENANCES or arrival.get("confirmed_words") or arrival.get("owner_words")
                 words = OWNER_WORDS_KIND if owned else ""  # my human's words never fold as context
                 deliver_task_message(
-                    entry, task_id, event_queue,
+                    entry, task_id, notify,
                     lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx, kind=words),
                 )
                 if provenance == "system" and isinstance(entry.get("review_feedback"), dict) and messages:
@@ -278,44 +349,20 @@ def _drain_incoming_messages(
                 ack_content(entry)
                 continue
             if kind in (KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED):
-                from ouroboros.owner_quiz import SECRET_OUTCOME_ROW_KIND, secret_outcome_block
-
-                if secret_outcome_block(entry) is not None:
-                    # The host reports a form outcome, not words or a new directive. The actual
-                    # cancel action remains in the canonical question with its owner attribution.
-                    deliver_quiz_answer(entry, task_id, event_queue if kind == KIND_QUIZ_ANSWER else None,
-                        lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx,
-                                                                           kind=SECRET_OUTCOME_ROW_KIND))
-                    ack_content(entry)
-                    continue
-            if kind in (KIND_QUIZ_CLOSED, KIND_CARD_INPUT):  # host frames around the owner's own act
+                _deliver_question_letter(messages, owner_ctx, task_id, entry, notify, restoring=restore)
+                ack_content(entry)
+                continue
+            if kind == KIND_CARD_INPUT:
                 _loop()._record_owner_directive(owner_ctx, source="owner_mailbox", origin=_arrival(received=entry.get("ts")),
                     content=dmsg, msg_id=str(entry.get("msg_id") or ""))
                 _loop()._append_or_merge_user_message(messages, dmsg, slot=owner_ctx, kind=OWNER_WORDS_KIND)
                 ack_content(entry)
                 continue
-            if kind == KIND_QUIZ_ANSWER:
-                from ouroboros.owner_quiz import late_answer_owner_text
-                from ouroboros.owner_words import answered_card_reply
-                delivery = entry.get("quiz_delivery") or {}
-                answer = delivery.get("answer_snapshot")
-                owner_words = late_answer_owner_text(answer) if isinstance(answer, dict) else dmsg
-                from ouroboros.owner_relay import retain_owner_message
-                held = retain_owner_message(owner_ctx, (answer.get("delivery") or {}).get("answer_row")) if isinstance(answer, dict) else None
-                _loop()._record_owner_directive(  # the card it answers rides beside it, the asking task's words
-                    owner_ctx, source="owner_quiz_answer", content=owner_words, msg_id=str(entry.get("msg_id") or ""),
-                    origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id"), **_arrival(held, entry.get("ts"))},
-                    reply_to=answered_card_reply(answer, delivery.get("task_id")))
-                deliver_quiz_answer(
-                    entry, task_id, event_queue,
-                    lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx,
-                                                                       kind=OWNER_WORDS_KIND),
-                )
-                ack_content(entry)
+            if kind != KIND_OWNER_TEXT:
+                _loop()._append_or_merge_user_message(messages, f"[Historical mailbox entry {mid}, "
+                    f"unrecognized kind {kind}]\n{dmsg}", slot=owner_ctx)
                 continue
-            # A LATE quiz answer: the owner's row and this entry's text are the
-            # owner's own words; the model reads the FULL card frame rebuilt from the
-            # stored block on the canonical root, the corpus the card beside their words.
+            # A late answer retains the owner's words beside the card frame on the canonical root.
             model_msg = dmsg
             if entry.get("late_answer") is not None:
                 from ouroboros.owner_quiz import late_answer_model_text
@@ -333,13 +380,15 @@ def _drain_incoming_messages(
             from ouroboros.owner_words import answered_card_reply, answered_card_source, reply_target
 
             chats = str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root  # the room's rows
-            held = _stamp_owner_delivery(  # the chat row is held first: its corpus row names the same room and time
-                owner_ctx,
-                msg_id=str(entry.get("msg_id") or ""),
-                client_message_id=str(entry.get("client_message_id") or ""),
-                text=dmsg,
-                ts=str(entry.get("ts") or ""),
-            )
+            if recalled:
+                from ouroboros.owner_relay import retain_owner_message
+                held = retain_owner_message(owner_ctx, client_message_id=entry.get("client_message_id") or "")
+            else:
+                held = _stamp_owner_delivery(
+                    owner_ctx, msg_id=str(entry.get("msg_id") or ""),
+                    client_message_id=str(entry.get("client_message_id") or ""),
+                    text=dmsg, ts=str(entry.get("ts") or ""),
+                )
             _loop()._record_owner_directive(
                 owner_ctx,
                 source="owner_mailbox",
@@ -362,9 +411,9 @@ def _drain_incoming_messages(
                 slot=owner_ctx, kind=OWNER_WORDS_KIND,
             )
             ack_content(entry)
-            if event_queue is not None:
+            if notify is not None:
                 try:
-                    event_queue.put_nowait({
+                    notify.put_nowait({
                         "type": "owner_message_injected",
                         "task_id": task_id,
                         "text": dmsg,

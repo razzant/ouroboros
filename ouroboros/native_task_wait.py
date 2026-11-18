@@ -438,8 +438,9 @@ def deliver_owed(limit_ctx: Any) -> bool:
         f"{usage.setdefault('execution_id', new_execution_id())}:round:{limit_ctx.round_idx}"))
 
     run_wait = descriptor.get("tool") == "delegate_wait"
+    materialized = run_wait and "delivery" in descriptor
 
-    def step() -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    def step():
         if "delivery" not in descriptor:  # what woke it (or why it never parked) is its own notice
             if run_wait:  # one published wake, after the round top drained its mail
                 from ouroboros.delegate_supervision import owed_wake
@@ -454,26 +455,34 @@ def deliver_owed(limit_ctx: Any) -> bool:
         source = persist_result_source(root, owner, source_id, delivery["text"])
         if not source:
             raise OSError("source_unavailable: the wait's result stays owed until its exact text is retained")
+        body, meta, boundary = delivery["text"], delivery.get("meta") or {}, ""
+        if materialized:
+            from ouroboros.mailbox_restore import restored_wait_result
+
+            body, meta, boundary = restored_wait_result(ctx, descriptor, delivery)
         header = {key: descriptor[key] for key in ("tool", "arguments", "sleep_id", "armed_at") if key in descriptor}
         header.update(observed_at=delivery["observed_at"], source=source,
                       **({"children": delivery["children"]} if "children" in delivery else {}),
                       **({"sleep_preempted": True} if descriptor.get("sleep_preempted") else {}))
-        row = {"tool_call_id": source_id, "result": delivery["text"], "fn_name": str(descriptor.get("tool") or ""),
+        if boundary:
+            header["mailbox_recovery"] = boundary
+        row = {"tool_call_id": source_id if body == delivery["text"] else source_id + "-mailbox-view",
+               "result": body, "fn_name": str(descriptor.get("tool") or ""),
                "tool_args": dict(descriptor.get("arguments") or {}), "is_error": False}
         views, receipt = project_tool_result_batch(
             [row], limit_ctx.messages, list(limit_ctx.tool_schemas or []), drive_root=root, task_id=owner,
             fit_candidate=fit, policy="measured_frame", as_message=lambda _row, body: notice(header, body))
         if views[0].get("result_partial") and views[0].get("result_source_status") != "ready":
             raise OSError("source_unavailable: the projected task wait has no readable original")
-        return header, row, views[0], receipt
+        return header, row, views[0], receipt, meta
 
-    header, row, view, receipt = _hold_until(ctx, usage, "native_task_wait_undelivered", step,
+    header, row, view, receipt, meta = _hold_until(ctx, usage, "native_task_wait_undelivered", step,
                                               rail="native_task_wait", owner_pause_context=limit_ctx)
     limit_ctx.messages.append(notice(header, str(view["result"])))
     if run_wait:  # the projected wake itself, not the notice around it, is what its acknowledgement parses
         from ouroboros.delegate_supervision import deliver_wake
 
-        deliver_wake(ctx, {**row, "result_meta": {"tool_result_meta": dict(descriptor["delivery"]["meta"])}}, view,
+        deliver_wake(ctx, {**row, "result_meta": {"tool_result_meta": meta}}, view,
                      str(view["result"]))
     elif descriptor["delivery"]["held"]:  # what the delivered view showed of a held dependency, as a tool result's
         from ouroboros.model_sleep import HOLD_NOTICE, acknowledge_hold_delivery, credit_hold_source

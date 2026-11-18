@@ -52,7 +52,7 @@ log = logging.getLogger(__name__)
 # The one list of corpus labels (``loop_messages._record_owner_directive``) that are my human's own words;
 # ``place_owner``: their words from a place that a run cited for the work it started (``basis: cited``, verified by
 # ``cited_owner_basis``); older records carry the same label from the retired host verdict.
-OWNER_SOURCES = frozenset({"initial_user", "owner_mailbox", "owner_quiz_answer", "origin_message",
+OWNER_SOURCES = frozenset({"initial_user", "owner_mailbox", "owner_quiz_answer", "owner_question_close", "origin_message",
                            "owner_corpus", "direct_incoming", "place_owner"})
 # A place event from an account its place confirms as my human's: their words, said where others can hear. Provenance
 # only (outside ``OWNER_SOURCES``): whom they are for, and whether they ask me for work, is my reading; an order exists

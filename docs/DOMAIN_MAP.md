@@ -8,7 +8,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 
 | domain | name | modules | proposed |
 |---|---|---:|---:|
-| D01 | Agent core & main loop | 68 | 0 |
+| D01 | Agent core & main loop | 69 | 0 |
 | D02 | LLM client, routing & providers | 52 | 0 |
 | D03 | Context assembly, fit & compaction | 43 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
@@ -24,11 +24,11 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D14 | Skills & extensions | 74 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 40 | 0 |
 | D16 | Observability, usage accounting & cost | 32 | 0 |
-| D17 | Projects, workspaces & task results | 60 | 0 |
+| D17 | Projects, workspaces & task results | 61 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 27 | 0 |
-| **total** | | **1060** | **0** |
+| **total** | | **1062** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -244,6 +244,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/loop_routes.py`
 - `ouroboros/loop_tool_execution.py`
 - `ouroboros/loop_transport.py`
+- `ouroboros/mailbox_restore.py`
 - `ouroboros/model_detach.py`
 - `ouroboros/model_sleep.py`
 - `ouroboros/mutation_attribution.py`
@@ -1225,6 +1226,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/work_domain.py`
 - `ouroboros/work_skill_payloads.py`
 - `ouroboros/workspace_admission.py`
+- `ouroboros/workspace_capture_result.py`
 - `ouroboros/workspace_executor.py`
 - `ouroboros/workspace_executor_paths.py`
 - `ouroboros/workspace_file_outputs.py`

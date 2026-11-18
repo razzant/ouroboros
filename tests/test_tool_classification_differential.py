@@ -560,6 +560,7 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # refreshed (or could not be), and an unreadable child result apply nothing to the target. Plain text the
     # registry adapts, so the live answer through the tool is the family's, the same as for the bare text.
     "INTEGRATE_NATIVE_CANCELLED": (True, "integration_blocked"),
+    "INTEGRATE_CAPTURE_FAILED": (True, "integration_blocked"),
     "INTEGRATE_NATIVE_CAPTURE": (True, "integration_blocked"),
     "INTEGRATE_NATIVE_CAPTURE_UNAVAILABLE": (True, "integration_blocked"),
     "INTEGRATE_RESULT_UNREADABLE": (True, "integration_blocked"),
