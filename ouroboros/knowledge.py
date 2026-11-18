@@ -200,16 +200,21 @@ def resolve_knowledge_address(
 
 
 def shelf_spelling(address: KnowledgeAddress) -> KnowledgeAddress:
-    """Keep the shelf's directory-entry spelling when a volume accepts an alias."""
+    """Keep the directory-entry spelling when it can be read."""
     parent = address.shelf
     for part in address.path.relative_to(address.shelf).parts:
         requested = parent / part
-        if requested.exists():
+        try:
+            if not requested.exists():
+                parent = requested
+                continue
             entries = os.listdir(parent)
             if part not in entries:
                 folded = unicodedata.normalize("NFC", part).casefold()
                 part = next((name for name in entries if unicodedata.normalize("NFC", name).casefold() == folded
                              and requested.samefile(parent / name)), part)
+        except OSError:
+            return address
         parent /= part
     topic = parent.relative_to(address.shelf).as_posix()[:-3]
     return replace(address, topic=sanitize_topic(topic)) if topic != address.topic else address
@@ -615,7 +620,7 @@ def rebuild_knowledge_index(address: KnowledgeAddress) -> None:
     # Preserve the exact old source before changing its first generated view.
     # Later rebuilds retain that same source, never a recursively nested index.
     if old and not modern and not append_jsonl(address.shelf.parent / "knowledge_history.jsonl", {
-        "ts": utc_now_iso(), "type": "knowledge_index_source", "topic": "index-full",
+        "ts": utc_now_iso(), "type": knowledge_versions.INDEX_SOURCE_TYPE, "topic": "index-full",
         "scope": address.scope, "old_content": text,
         "old_sha256": hashlib.sha256(old).hexdigest(),
     }, ensure_record_boundary=True, require_lock=True):
@@ -842,7 +847,7 @@ def write_knowledge_note(
     target: Any = None
     if mode == "revert":  # outside the lock: a recorded row never changes
         try:
-            target = knowledge_versions.find_version(shelf_spelling(address), version)
+            _, target, _ = knowledge_versions.find_note_version(shelf_spelling(address), address, version)
         except knowledge_versions.VersionUnavailable as exc:
             target = exc
     journal = address.shelf.parent / knowledge_versions.JOURNAL_NAME
@@ -876,7 +881,7 @@ def write_knowledge_note(
         try:
             explicit_claims = False
             if mode == "revert":
-                raw = current.raw if version == revision else target[0].encode("utf-8")
+                raw = current.raw if version == revision else target.encode("utf-8")
             elif lifecycle:
                 raw = _lifecycle_content(current, mode, reason)
             elif _host_claim is not None and current is not None:

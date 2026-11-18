@@ -153,6 +153,9 @@ def _note_view(address: knowledge_store.KnowledgeAddress, view: str, version: st
         raise ValueError("fingerprint continues a list of versions (view='history'), as its first page names it")
     if version is not None and view == "history":
         raise ValueError("version selects one version for view=note or view=outline; view=history lists them all")
+    requested = address
+    if version is not None or view == "history":
+        address = knowledge_store.shelf_spelling(address)
     live_status = "readable"
     try:
         note = knowledge_store.read_knowledge_note(address)
@@ -164,33 +167,30 @@ def _note_view(address: knowledge_store.KnowledgeAddress, view: str, version: st
     current_revision = note.revision if note is not None else None
     shown, earlier = note, None
     if version is not None:
-        try:
-            spelled = knowledge_store.shelf_spelling(address) if note is not None else address
-        except OSError:  # a readable file can sit behind a directory we cannot list
-            spelled = address
         if version == current_revision:
-            shown = replace(note, address=spelled)
+            if requested != address:
+                try:
+                    pin, _, _ = knowledge_versions.find_note_version(address, requested, version, live=None)
+                except knowledge_versions.VersionUnavailable:
+                    pass  # The live text can still supply a head with no recoverable journal entry.
+                else:
+                    shown = replace(note, address=pin)
         else:
             live = note.text if note is not None else None
-            try:
-                text, row = knowledge_versions.find_version(address, version, live=live)
-            except knowledge_versions.VersionUnavailable:
-                if spelled.topic == address.topic:
-                    raise
-                address = spelled
-                text, row = knowledge_versions.find_version(address, version, live=live)
-            shown = knowledge_store._note(address, text.encode("utf-8"))
+            pin, text, row = knowledge_versions.find_note_version(address, requested, version, live=live)
+            shown = knowledge_store._note(pin, text.encode("utf-8"))
             earlier = {**knowledge_versions.row_facts(row), "revision": version, "current_revision": current_revision,
                        **({"live_status": live_status} if note is None else {})}
     if view == "note":
         return _source_view(shown, start_char, end_char, earlier, notes, shelves, situation, version=version)
-    facts = {"topic": address.topic, "scope": address.scope, "revision": shown.revision,
+    topic = requested.topic if view == "history" else shown.address.topic
+    facts = {"topic": topic, "scope": shown.address.scope, "revision": shown.revision,
              **({"current_revision": current_revision, "earlier_version": earlier} if earlier else {})}
     if view == "history":  # newest first: a later page continues the list its first page read, by its fingerprint
         for name, bound in (("start_char", start_char), ("end_char", end_char)):  # an argument error, not a list's
             if bound is not None and (type(bound) is not int or bound < 0):
                 raise ValueError(f"{name}={bound!r} is not a position in the list: a non-negative integer")
-        listing = knowledge_versions.render_history(note)
+        listing = knowledge_versions.render_history(note, requested)
         digest = hashlib.sha256(listing.encode("utf-8")).hexdigest()[:16]
         if (start_char or fingerprint) and fingerprint != digest:
             raise ListChanged("that page belongs to another list of versions (a write landed since, or no fingerprint "

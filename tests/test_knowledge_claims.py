@@ -111,44 +111,57 @@ def test_claim_records_use_the_shelf_spelling_and_advertise_that_versions_addres
     assert exact.status == "ok" and exact.text.endswith("Revised case note.\n")
 
 
-def test_a_byte_identical_move_keeps_claims_and_rekeys_only_on_write(tmp_path, monkeypatch):
+@pytest.mark.parametrize("copy", [False, True], ids=["move", "copy"])
+def test_a_new_address_holds_nothing_until_an_explicit_write_there(tmp_path, copy):
     registry = _registry(tmp_path)
     old = knowledge.resolve_knowledge_address(tmp_path, "nova", "global")
     moved = knowledge.resolve_knowledge_address(tmp_path, "renamed", "global")
-    unrelated = knowledge.resolve_knowledge_address(tmp_path, "unrelated", "global")
-    raw = _markdown(["room:1", "place:handwritten"])
     assert _write(registry, old, _markdown(["room:1"])).startswith("✅")
-    old.path.write_bytes(raw.encode())
-    assert _write(registry, old, "Latest authored body.\n", mode="append").startswith("✅")
-    old.path.rename(moved.path)
-    unrelated.path.write_bytes(raw.encode())
+    assert knowledge.active_claims(tmp_path) == {"room:1": [old]}
+    original = knowledge.read_knowledge_note(old)
     old_record = knowledge_versions.claim_record_path(old.shelf, old.topic)
     new_record = knowledge_versions.claim_record_path(moved.shelf, moved.topic)
     before = old_record.read_bytes()
-    rows = knowledge.inventory_knowledge(moved, navigation=True)
+    if copy:
+        moved.path.write_bytes(original.raw)
+    else:
+        old.path.rename(moved.path)
+    before_adoption = {"room:1": [old]} if copy else {}
+    assert knowledge.active_claims(tmp_path) == before_adoption
+    assert "unchanged" in _write(registry, moved, "", mode="append")
+    assert not new_record.exists() and knowledge.active_claims(tmp_path) == before_adoption
+    assert _write(registry, moved, "Later body line.\n", mode="append").startswith("✅")
+    assert not new_record.exists() and knowledge.active_claims(tmp_path) == before_adoption
 
-    def forbidden(*_args, **_kwargs):
-        pytest.fail("claim lookup must use the supplied inventory and projections")
+    current = knowledge.read_knowledge_note(moved)
+    adoption = _write(registry, moved, current.text, expected_revision=current.revision)
+    assert "Present situations holding this note: room:1" in adoption
+    assert moved.path.read_bytes() == current.raw and new_record.is_file()
+    assert knowledge.active_claims(tmp_path) == {"room:1": [old, moved] if copy else [moved]}
+    assert old_record.read_bytes() == before
+    pin = registry.execute_result("knowledge_read", {"topic": old.topic, "scope": "global", "version": original.revision})
+    assert pin.status == "ok" and pin.text.endswith(original.text)
 
-    with monkeypatch.context() as spy:
-        spy.setattr(knowledge, "inventory_knowledge", forbidden)
-        spy.setattr(knowledge_versions, "_journal_lines", forbidden)
-        assert knowledge.active_claims(tmp_path, inventory=rows) == {"room:1": [moved]}
-    assert old_record.read_bytes() == before and not new_record.exists()
 
-    # A different source at the old topic uses only the record names still in its YAML.
-    old.path.write_bytes(raw.encode())
-    assert knowledge.active_claims(tmp_path) == {"room:1": [old, moved]}
-    original = knowledge.read_knowledge_note(moved)
-    same_bytes = _write(registry, moved, "", mode="append")
-    assert "unchanged" in same_bytes and not old_record.exists()
-    assert json.loads(new_record.read_bytes())["revision"] == original.revision
-    assert knowledge.active_claims(tmp_path) == {"room:1": [moved]}
-    new_record.unlink()
-    with knowledge.knowledge_write_lock(moved.shelf):
-        knowledge_versions.rebuild_claim_record(moved)
-        knowledge_versions.rebuild_claim_record(old)
-    assert not old_record.exists() and knowledge.active_claims(tmp_path) == {"room:1": [moved]}
+def test_a_claimless_append_can_use_a_known_file_when_its_directory_cannot_be_listed(tmp_path, monkeypatch):
+    target = knowledge.resolve_knowledge_address(tmp_path, "restricted/known", "global")
+    first = knowledge.write_knowledge_note(target, "Known text.\n").current
+    journal = knowledge_versions.journal_path(target)
+    before = journal.read_bytes()
+    listdir = knowledge.os.listdir
+
+    def restricted(path):
+        if path == target.path.parent:
+            raise PermissionError("directory has write and search permission only")
+        return listdir(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(knowledge.os, "listdir", restricted)
+        without_listing = knowledge.write_knowledge_note(target, "", mode="append")
+    with_listing = knowledge.write_knowledge_note(target, "", mode="append")
+    assert with_listing == without_listing
+    assert without_listing.ok and without_listing.reason == "unchanged" and without_listing.current.raw == first.raw
+    assert journal.read_bytes() == before
 
 
 def test_body_only_append_keeps_recorded_names_without_adopting_names_from_yaml(tmp_path):
@@ -285,7 +298,9 @@ def test_host_claim_splices_only_its_name_in_source_and_by_name_readers(tmp_path
     "claims: room:1\n",
     "source: &names ['room:1']\nclaims: *names\n",
     "claims: &names ['room:1']\nshared: *names\n",
-], ids=["scalar", "alias", "shared-anchor"])
+    "null # keep this\n",
+    "authored scalar\n",
+], ids=["scalar-field", "alias", "shared-anchor", "null-document", "scalar-document"])
 def test_host_claim_keeps_an_unextendable_note_pending_with_no_write(tmp_path, preamble):
     target = knowledge.resolve_knowledge_address(tmp_path, "bound", "global")
     target.path.parent.mkdir(parents=True)
@@ -402,7 +417,8 @@ def test_authored_history_and_return_facts_count_claimed_writes_once(tmp_path, m
     def counts(index, expected):
         facts = return_facts.facts(tmp_path, owner_word(index), return_facts.Own(room=1))
         full = return_facts.render(facts)[0]
-        assert f"- knowledge global/nova: {expected} {'write' if expected == 1 else 'writes'} by" in full
+        [page] = [line for line in full.splitlines() if line.startswith("- knowledge ")]
+        assert page.startswith(f"- knowledge global/nova: {expected} {'write' if expected == 1 else 'writes'} by")
 
     def edit(index, content, **kwargs):
         monkeypatch.setattr(knowledge, "utc_now_iso", lambda: stamp(index))
@@ -414,16 +430,29 @@ def test_authored_history_and_return_facts_count_claimed_writes_once(tmp_path, m
         return result["data"]
 
     owner_word(0)
-    edit(1, _markdown(["room:1"]), reason="Adopt the claim")
+    target.shelf.mkdir(parents=True)
+    legacy = {"ts": stamp(1), "topic": target.topic, "mode": "overwrite", "reason": "Legacy write"}
+    journal.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
     counts(2, 1)
+    assert history(tail=1) == [legacy]
+
+    legacy_index = "# Authored index before upgrading\n"
+    (target.shelf / knowledge.INDEX_FILE).write_text(legacy_index, encoding="utf-8")
+    edit(3, _markdown(["room:1"]), reason="Adopt the claim")
+    counts(4, 1)
     [first] = history(tail=1)
     assert first["reason"] == "Adopt the claim" and first["delta"]["body_changed"] is True
-    edit(3, "Second.\n", mode="append", reason="Second write")
-    edit(4, "Third.\n", mode="append", reason="Third write")
-    counts(5, 2)
+    edit(5, "Second.\n", mode="append", reason="Second write")
+    edit(6, "Third.\n", mode="append", reason="Third write")
+    counts(7, 2)
     assert [row["reason"] for row in history(tail=2)] == ["Second write", "Third write"]
-    edit(6, _markdown([]), expected_revision=knowledge.read_knowledge_note(target).revision, reason="Remove the claim")
-    counts(7, 1)
-    assert [row["reason"] for row in history()] == ["Adopt the claim", "Second write", "Third write", "Remove the claim"]
+    edit(8, _markdown([]), expected_revision=knowledge.read_knowledge_note(target).revision, reason="Remove the claim")
+    counts(9, 1)
+    assert [row["reason"] for row in history()] == [
+        "Legacy write", "Adopt the claim", "Second write", "Third write", "Remove the claim",
+    ]
     assert history(filter={"field": "publication", "op": "eq", "value": "claims_published"}) == []
-    assert json.loads(journal.read_bytes().splitlines()[-1])["publication"] == "claims_published"
+    raw = [json.loads(line) for line in journal.read_bytes().splitlines()]
+    [backup] = [row for row in raw if row.get("type") == "knowledge_index_source"]
+    assert backup["old_content"] == legacy_index and "publication" not in backup
+    assert raw[-1]["publication"] == "claims_published"
