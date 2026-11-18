@@ -1102,3 +1102,24 @@ def test_a_carried_corpus_answer_keeps_its_card_without_a_room_row(tmp_path):
     assert "Which reed?" in press and "reed-maker" in press
     assert "Owner words quoted verbatim" in words and words.endswith("  before dusk  ")
     assert not getattr(child, "_owner_directives", None)
+
+
+def test_a_relay_built_before_act_labels_still_renders_a_press_as_a_press(tmp_path):
+    from ouroboros.owner_relay import inject_relay, owner_quote, relay_envelope
+    from ouroboros.dialogue_provenance import relation_text
+
+    card = {"quiz_id": "paper-choice", "question": "Which paper?", "state": "answered",
+            "options": ["Green paper"], "answered_index": 0}
+    row = {"type": "quiz_answer", "source": "owner_quiz_answer", "direction": "system", "task_id": "paper-maker",
+           "quiz": card, "chat_id": 1, "ts": "2040-01-01T00:00:00Z"}
+    quote = owner_quote(tmp_path, row)
+    quote.pop("input_source", None)
+    envelope = relay_envelope("paper-mail", [quote], chat_id=1)
+    messages = []
+    ctx = context(tmp_path)
+    inject_relay(ctx, {"kind": "relay_entry", "relay": envelope, "source_task_id": "paper-courier",
+                       "owner_rows": [row], "text": "From the maker"}, messages)
+    assert "Owner card press" in messages[0]["content"] and "Owner words quoted verbatim" not in messages[0]["content"]
+    assert "paper-maker" in messages[0]["content"] and "pressed" in relation_text({"relay": envelope})
+    [act] = ctx._owner_directives
+    assert act["source_task_id"] == "paper-maker" and act["relayed_from_task_id"] == "paper-courier"

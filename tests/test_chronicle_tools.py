@@ -1210,3 +1210,18 @@ def test_an_answer_row_can_only_supply_the_humans_entered_words(tmp_path, choice
     if comment:
         assert write(ctx_for(tmp_path), kind="page", text="The answer came with words.", covers=covers,
                      quotes=[{**cite, "text": comment}])["ok"]
+
+
+def test_a_late_answer_bubble_offers_only_the_comment_for_a_human_quote(tmp_path):
+    from ouroboros.dialogue_provenance import quote_words
+
+    for i, comment in enumerate(("", "  to the east  ")):
+        block = {"quiz_id": "late-iris", "state": "answered", "answered_after_terminal": True,
+                 "options": ["Open the iris"], "answered_index": 0, "comment": comment}
+        [row] = chat(tmp_path, [{"chat_id": 1, "direction": "in", "ts": ts(i+1), "text": comment or "1. Open the iris",
+                                 "late_answer": {"task_id": "iris-keeper", "quiz_id": "late-iris",
+                                                 "answer_snapshot": {"task_id": "iris-keeper", "quiz": block}}}])
+        assert quote_words(row) == comment
+        assert check_quotes(tmp_path, [{"address": addr(row), "speaker": "human", "text": "Open the iris"}]) == (False, 0)
+        if comment:
+            assert check_quotes(tmp_path, [{"address": addr(row), "speaker": "human", "text": comment}]) == (True, None)

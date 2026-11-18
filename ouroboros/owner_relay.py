@@ -343,17 +343,18 @@ def write_relay(root, task_id: str, *, relay_id: str, note: str, quotes: list, c
     return entry, True
 
 
-def carried_quote_line(quote: dict, *, address: str, fact=None) -> str:
+def carried_quote_line(quote: dict, *, address: str, fact=None, row=None) -> str:
     """The one line over an owner row's quoted words, for a relay's quote and a carried row alike: the pinned
     prefix, the time and the room the quote names (a part the host does not have is left out, never invented),
     the carriage fact of a carried row (``reached this work`` | ``went to <task>`` | ``in the project room; routed by
     a head``, for ``ROUTED_BY_HEAD``) and the row's handle."""
     source = quote.get("source") if isinstance(quote, dict) and isinstance(quote.get("source"), dict) else {}
     from ouroboros.answer_facts import row_source
-    from ouroboros.owner_words import OWNER_PRESS
+    from ouroboros.owner_words import OWNER_CARD_INPUT, OWNER_PRESS
 
-    pressed = quote.get("input_source") == OWNER_PRESS or row_source(quote.get("owner_row") or {}, "") == OWNER_PRESS
-    parts = ["Owner card press" if pressed else "Owner words quoted verbatim", str(source.get("ts") or ""), str(source.get("label") or "")]
+    kind = quote.get("input_source") or row_source(row or quote.get("owner_row") or {}, "")
+    heading = {OWNER_PRESS: "Owner card press", OWNER_CARD_INPUT: "Owner card input"}.get(kind, "Owner words quoted verbatim")
+    parts = [heading, str(source.get("ts") or ""), str(source.get("label") or "")]
     if isinstance(fact, dict):
         went = str(fact.get("went_to") or "")
         where = ("in the project room; routed by a head" if went == ROUTED_BY_HEAD else f"went to {went}" if went
@@ -450,16 +451,22 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
         # An answer replies to its card (a quiz row's own, or a late answer's snapshot), else to its chat target.
         from ouroboros.answer_facts import living_card_input
         living = living_card_input(row, source_root)
-        replied = living.get("reply_to") or answered_card_reply(*answered_card_source(row)) or reply_target(source_root, row.get("reply_to")) or None
+        answered, asker = answered_card_source(row)
+        carried_answer = row.get("corpus_answer") or {}
+        target = living.get("reply_to") or answered_card_reply(answered, asker) or carried_answer.get("reply_to")
+        replied = target or reply_target(source_root, row.get("reply_to")) or None
         source = living.get("source") or row_source(row, "owner_mailbox")
-        loop._record_owner_directive(ctx, source=source, content=owner_text(row),
+        teller = entry.get("source_task_id")
+        author = living.get("source_task_id") or asker or carried_answer.get("source_task_id")
+        loop._record_owner_directive(ctx, source=source, content=living.get("content") if living else owner_text(row),
                                      msg_id=address, carried=True,
-                                     origin={"source_task_id": entry.get("source_task_id"),
+                                     origin={"source_task_id": author or teller, "relayed_from_task_id": teller if author else None,
+                                             "quiz_id": (answered or {}).get("quiz_id") or carried_answer.get("quiz_id"),
                                              "client_message_id": row.get("client_message_id"),
                                              "chat_id": row.get("chat_id"), "ts": row.get("ts"),
                                              "relay_source_root": str(source_root) if source_root and str(source_root) != str(root) else ""},
                                      reply_to=replied)
-        content = quote_content(ctx, entry, row, _quote_body(row, carried_quote_line(quote, address=address)))
+        content = quote_content(ctx, entry, row, _quote_body(row, carried_quote_line(quote, address=address, row=row)))
         loop._append_or_merge_user_message(messages, content, slot=ctx, kind=OWNER_WORDS_KIND)
         if source == OWNER_PRESS:
             mark_press_arrival(ctx, messages[-1])
@@ -591,7 +598,7 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
         refs = {address, _chat_ref(row) if row.get("client_message_id") else "", str(fact_of.get("earlier_ref") or "")}
         seen = [stamps[ref] for ref in refs - {""} if ref in stamps]
         if not seen:
-            body = _quote_body(row, carried_quote_line(quote, address=address, fact={"went_to": went}))
+            body = _quote_body(row, carried_quote_line(quote, address=address, fact={"went_to": went}, row=row))
             loop._append_or_merge_user_message(messages, quote_content(ctx, entry, row, body), slot=ctx,
                                                kind=OWNER_WORDS_KIND)
             if row_source(row, "") == OWNER_PRESS:
