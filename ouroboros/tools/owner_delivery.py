@@ -328,7 +328,11 @@ def named_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str, 
     """The frame's actual local destination and queue acceptance, never proof of display; a frame carrying produced
     ``material`` (``shown_material``) adds the host's record of that show (``show_record``)."""
     receipt = _named_receipt(ctx, evt, mode, noun)
-    show = show_record(ctx, mode, material)
+    try:
+        show = show_record(ctx, mode, material)
+    except Exception:
+        log.debug("Optional show record unavailable for task %s", evt.get("task_id"), exc_info=True)
+        return receipt
     return f"{receipt}\n{show}" if show else receipt
 
 
@@ -351,19 +355,30 @@ def show_record(ctx: Any, mode: str, material: Any) -> str:
     on record name those exact bytes (``_reviews_naming``), a negative stated in the scope it was read in: this task's
     recent records, never a helper's. A fact on the existing receipt, never a gate: nothing waits or is refused, and
     every review mode stays as it is. No line for a frame that carries no material or did not go out, nor when task
-    review is Off (no result review runs there to name anything)."""
-    items = [item for item in material or () if isinstance(item, dict) and item.get("sha256")]
-    if not items or mode not in ("live", "deferred"):
+    review is Off (no result review runs there to name anything). A card can defer resolving its material until
+    those checks pass. Its unresolved media is separate from reviews of the bytes it could resolve."""
+    if not material or mode not in ("live", "deferred"):
         return ""
     from ouroboros.config import get_task_review_mode
 
     if get_task_review_mode() == "off":
         return ""
+    if callable(material):
+        try:
+            material = material()
+        except Exception:
+            log.debug("Card media unreadable for task %s", getattr(ctx, "task_id", ""), exc_info=True)
+            material = ({"bytes_unknown": True},)
+    pieces = [item for item in material or () if isinstance(item, dict)]
+    unresolved = any(item.get("bytes_unknown") for item in pieces)
+    items = [item for item in pieces if item.get("sha256")]
+    if not items:
+        return "Host fact: card media bytes: unknown." if unresolved else ""
     found = _reviews_naming(ctx, {str(item["sha256"]): str(item.get("name") or "") for item in items})
     shown = "; ".join(f"{item.get('name')}, sha256 {str(item['sha256'])[:12]}, {item.get('size')} B" for item in items)
     reviews = "unknown" if found is None else "; ".join(found) or "none in this task's recent records"
     return (f"Host fact: {'accepted' if mode == 'live' else 'queued'} for delivery: {shown}. "
-            f"Reviews on record naming these bytes: {reviews}.")
+            f"Reviews on record naming these bytes: {reviews}." + (" Other card media bytes: unknown." if unresolved else ""))
 
 
 # The newest result-review rows of the review ledger's hot index one receipt reads (``recent_records``).
