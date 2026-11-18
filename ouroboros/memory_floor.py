@@ -739,7 +739,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                          measure_text: Optional[Callable[[str, str], int]] = None,
                          start_work: bool = False,
                          max_room: Optional[Mapping[str, Any]] = None, stated_window_tokens: Optional[int] = None,
-                         shortest: bool = False, level: Optional[mv.FloorLevel] = None) -> ViewFit:
+                         shortest: bool = False, level: Optional[mv.FloorLevel] = None,
+                         report_nano_miss: bool = False) -> ViewFit:
     """One mode's projection, the floor decided once.
 
     The window counts only when known and fresh (``known_window``). An owner target binds
@@ -770,6 +771,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     # never takes this room, and a Max start keeping whole books never goes below it either; only the window's own
     # start bound may. A miss of the target is its own fact. Nano's number still governs all memory (owner 11.10, 13.10).
     binds = kept is None and target is not None and owner_mode == "low" and (window is None or target < window)
+    reports_miss = binds or (report_nano_miss and kept is None and mode == owner_mode == "nano"
+                             and target is not None and (window is None or target < window))
     floor, keeps = ((TARGET_FLOOR, TARGET_KEEPS) if binds else (TELLING_STAGES, frozenset())  # the one order (4A)
                     if mode == "max" and (kept is None or start_work) else (None, frozenset()))
     size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
@@ -781,9 +784,10 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     def receipt(level):
         note = floor_note(level, window_tokens=named, mode=mode, target_tokens=target, lowered_from=lowered_from,
                           tool_names=tool_names, budget_mode=owner_mode, max_room=max_room, snapshot=snapshot)
-        if binds and (need := total(level, note)) > target:
-            note += (f"\nLow's target ({target:,} tokens) is not met at this start: this request needs "
-                     f"about {need:,} with my memory in its shortest tellings, "
+        if reports_miss and (need := total(level, note)) > target:
+            telling = " with my memory in its shortest tellings" if binds else ""
+            note += (f"\n{mode.capitalize()}'s target ({target:,} tokens) is not met at this start: this request needs "
+                     f"about {need:,}{telling}, "
                      f"{math.ceil(non_memory_tokens * ratio) + reserve:,} with no memory at all.")
         if room_bound is not None and size(level) > room_bound:
             gone = dict(level.addressed)
@@ -810,7 +814,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                        target_tokens=target, lowered_from=lowered_from)
     bound, note = allowances["margin"], receipt(level)
     facts["floor"]["ordinary_unfit"] = bound is not None and measure(ordinary_level(snapshot)) > bound
-    facts["floor"]["target_missed"] = binds and total(level, note) > target
+    facts["floor"]["target_missed"] = reports_miss and total(level, note) > target
     if facts["floor"]["target_missed"]:  # where the mode is chosen it says what the rest of the request took (3A)
         facts["floor"]["no_memory_tokens"] = math.ceil(non_memory_tokens * ratio) + reserve
     return ViewFit(snapshot, level, note, facts)
@@ -860,18 +864,27 @@ def _held_note_steps(sections, receipts, fits, *, form="summary"):
     from ouroboros.held_notes import HeldNoteSection
 
     addressed = section_views(sections, receipts)
+    positions = {row["section_id"]: index for index, row in enumerate(receipts)}
     saved = 0
     for part in sections:
-        if not isinstance(part, HeldNoteSection) or part.section_id in addressed:
+        if not isinstance(part, HeldNoteSection):
+            continue
+        position = positions.get(part.section_id)
+        if position is not None and (form != "reader" or receipts[position].get("held_note_form") != "summary"
+                                     or part.summary_is_resident(addressed)):
             continue
         row = part.window_receipt(form)
         short = part.view_for_receipt(row, addressed)
-        if short is None or (delta := view_tokens(part.full_text) - view_tokens(short)) <= 0:
+        current = addressed.get(part.section_id, part.full_text)
+        if short is None or (delta := view_tokens(current) - view_tokens(short)) <= 0:
             continue
         if fits(addressed):
             break
         addressed[part.section_id] = short
-        receipts.append({**row, "tokens_saved": delta})
+        if position is None:
+            receipts.append({**row, "tokens_saved": delta})
+        else:
+            receipts[position] = {**row, "tokens_saved": receipts[position]["tokens_saved"] + delta}
         saved += delta
     return saved
 

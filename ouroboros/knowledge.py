@@ -283,7 +283,11 @@ def _note(address: KnowledgeAddress, raw: bytes) -> KnowledgeNote:
     return KnowledgeNote(address, raw, source)
 
 
-def read_knowledge_note(address: KnowledgeAddress) -> KnowledgeNote:
+def read_knowledge_note(address: KnowledgeAddress, *, captured=None) -> KnowledgeNote:
+    if captured is not None:
+        identity, raw = captured
+        if utils.file_identity(address.path.stat()) == identity:
+            return _note(address, raw)
     return _note(address, address.path.read_bytes())
 
 
@@ -326,7 +330,7 @@ def _navigation_descriptor(address: KnowledgeAddress, raw: bytes | None = None) 
 _NAVIGATION: Dict[KnowledgeAddress, tuple] = {}
 
 
-def _navigation_row(address: KnowledgeAddress) -> dict[str, Any]:
+def _navigation_row(address: KnowledgeAddress, bodies: dict | None = None) -> dict[str, Any]:
     """``_navigation_descriptor``, parsed again only when the note's bytes may have changed: while its
     file identity holds (``utils.file_identity``, the rule ``utils.json_snapshot`` keeps on every OS;
     Windows' ``st_ctime`` is the creation time, its in-place writes move the mtime), settled beyond a
@@ -337,7 +341,10 @@ def _navigation_row(address: KnowledgeAddress) -> dict[str, Any]:
     held = _NAVIGATION.get(address)
     if held is not None and held[0] == key:
         return dict(held[1])
-    row = _navigation_descriptor(address)
+    raw = address.path.read_bytes()
+    row = _navigation_descriptor(address, raw)
+    if bodies is not None and row.get("claims") and row.get("state") == "active":
+        bodies[address] = (key, raw)
     if settled and not row.get("parse_error"):
         _NAVIGATION[address] = (key, row)
     return dict(row)
@@ -345,7 +352,7 @@ def _navigation_row(address: KnowledgeAddress) -> dict[str, Any]:
 
 def inventory_knowledge(address: KnowledgeAddress, *, navigation: bool = False,
                         known_note: KnowledgeNote | None = None, after: str = "",
-                        limit: int | None = None) -> tuple[dict[str, Any], ...]:
+                        limit: int | None = None, bodies: dict | None = None) -> tuple[dict[str, Any], ...]:
     """Enumerate the current shelf without writes; navigation omits source proofs.
 
     A note already read by this operation can be reused. A note's navigation is
@@ -372,7 +379,7 @@ def inventory_knowledge(address: KnowledgeAddress, *, navigation: bool = False,
         listed.add(item)
         try:
             rows.append(note_descriptor(known_note) if known_note is not None and item.path == known_note.address.path
-                        else _navigation_row(item) if navigation else note_descriptor(read_knowledge_note(item)))
+                        else _navigation_row(item, bodies) if navigation else note_descriptor(read_knowledge_note(item)))
         except (OSError, UnicodeDecodeError) as exc:
             rows.append({**item.as_dict(), "title": topic, "summary": "", "revision": None,
                          "read_error": type(exc).__name__})

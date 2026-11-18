@@ -4,7 +4,9 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import asdict, dataclass, replace
+from inspect import signature
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 from ouroboros import knowledge, knowledge_versions
@@ -16,7 +18,7 @@ from ouroboros.section_floor import HostSection
 log = logging.getLogger(__name__)
 _HEADING = "## Held knowledge notes"
 _HEAD_END = re.compile(rb"^## ", re.MULTILINE)
-CAPTURE_KEY = "held_note_sections"
+CAPTURE_KEY = "held_note_capture"
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -28,20 +30,25 @@ class HeldNoteSection(HostSection):
     window_label: str = ""  # a head this actor has an exact reader for
     summary: str = ""
     outline_has_summary: bool = False
+    index_has_summary: bool = False
 
     def __new__(cls, section_id, full_text, *_args, **_kwargs):
         return super().__new__(cls, section_id, full_text)
 
     def __getnewargs__(self):
         return (*super().__getnewargs__(), self.topic, self.revision, self.window_label,
-                self.summary, self.outline_has_summary)
+                self.summary, self.outline_has_summary, self.index_has_summary)
 
     def with_index(self, row: Mapping, navigation: Mapping) -> HeldNoteSection:
-        """Locate the captured summary in this request's index, including after a cold restore."""
+        """Locate the authored summary in either captured form of the index."""
         same = row.get("summary") == self.summary and row.get("state") == "active"
         outline = navigation.get("outline", False) and same and knowledge.outline_keeps_summary(row.get("type"))
         resident = same if navigation.get("whole") else outline
-        return replace(self, operative_view=self._summary_view(resident), outline_has_summary=outline)
+        return replace(self, operative_view=self._summary_view(resident), outline_has_summary=outline,
+                       index_has_summary=resident)
+
+    def summary_is_resident(self, addressed: Mapping) -> bool:
+        return self.outline_has_summary if "knowledge_index" in addressed else self.index_has_summary
 
     def _summary_view(self, resident: bool) -> str | None:
         if not self.window_label or not self.summary.strip():
@@ -64,11 +71,40 @@ class HeldNoteSection(HostSection):
                                    "topic": self.topic, "scope": "global", "version": self.revision}}}}
 
 
-def continuation_capture(plan: Any) -> dict:
-    """Carry the original entries by value in the ordinary continuation."""
+def frame_key(mode: str, owner: str, window: int, record: Any, reserve: int) -> list:
+    """The mode and its physical frame, independent of the route's observation date."""
+    if record and record.usable is not None:
+        window = replace(record, reserve=reserve).total_equivalent
+    return [mode, owner, window, record.boundary if record else None, reserve]
+
+
+def restored_capture(state: Mapping) -> dict:
+    return state.get(CAPTURE_KEY) or {"entries": state.get("held_note_sections", [])}
+
+
+def continuation_capture(plan: Any, mode: str | None) -> dict:
+    """Carry the sent forms and their captured index and overview in the ordinary continuation."""
+    from ouroboros.context_budget import context_mode_limits
+
     core = getattr(plan, "core", None)
-    entries = [asdict(part) for part in getattr(core, "dynamic_sections", ()) if isinstance(part, HeldNoteSection)]
-    return {CAPTURE_KEY: entries} if entries else {}
+    entries = [part for part in getattr(core, "dynamic_sections", ()) if isinstance(part, HeldNoteSection)]
+    if not entries:
+        return {}
+    mode = mode if mode in {"max", "low", "nano"} else plan.initial_mode
+    companions = {}
+    if any(part.summary for part in entries):
+        companions.update((part.section_id, asdict(part)) for part in core.dynamic_head_sections
+                          if part.section_id == "knowledge_index")
+    if any(part.topic == knowledge.OVERVIEW_TOPIC for part in entries):
+        companions["shared_understanding"] = asdict(core.dynamic_head_sections[0])
+    _, reserve = context_mode_limits(mode, plan.preferred_mode, plan.output_reserve_tokens,
+                                     working_reserve_tokens=plan.working_reserve_tokens)
+    receipts = plan.projection(mode).memory_facts.get("host_sections_addressed", ())
+    return {CAPTURE_KEY: {
+        "entries": [asdict(part) for part in entries], "companions": companions,
+        "frame": frame_key(mode, plan.preferred_mode, plan.window_tokens, plan.window_record, reserve),
+        "receipts": [row for row in receipts if row.get("held_note_form") or row["section_id"] in companions],
+    }}
 
 
 def note_head(source: MarkdownSource) -> str:
@@ -83,18 +119,33 @@ def note_head(source: MarkdownSource) -> str:
     return source.raw[start:heading.start() if heading else end].decode("utf-8")
 
 
-def _can_read(ctx: Any, topic: str, revision: str) -> bool:
-    from ouroboros.presence_authority import (PresenceAuthorityError, apply_presence_argument_bindings,
-                                             presence_ceiling_allows_tool, presence_ceiling_from_context)
+def _reader_restriction(ctx: Any, note: knowledge.KnowledgeNote, revision: str) -> str:
+    from ouroboros.tool_access_paths import workspace_mode_block_reason
+    from ouroboros.tools.knowledge import _address, _knowledge_read, _range
+    from ouroboros.tools.registry_core import _presence_bound_args
+    from ouroboros.tools.registry_guards import _capability_resource_guard_result
 
+    args = {"topic": note.address.topic, "scope": "global", "version": revision}
+    bound, refusal = _presence_bound_args(ctx, "knowledge_read", args)
+    if refusal:
+        return refusal
+    if denied := _capability_resource_guard_result(ctx, "knowledge_read", bound):
+        return denied.text
     try:
-        ceiling = presence_ceiling_from_context(ctx)
-        args = {"topic": topic, "scope": "global", "version": revision}
-        return ceiling is None or (
-            presence_ceiling_allows_tool(ceiling, "knowledge_read")
-            and apply_presence_argument_bindings(ctx, "knowledge_read", args) == args)
-    except PresenceAuthorityError:
-        return False
+        if problem := workspace_mode_block_reason(ctx):
+            return f"Workspace restriction ({problem})."
+        call = signature(_knowledge_read).bind(ctx, **bound)
+        call.apply_defaults()
+        effective = call.arguments
+        address = _address(ctx, effective["topic"], effective["scope"])
+        length = len(note.text)
+        start, end, _ = _range(length, effective["start_char"], effective["end_char"])
+        if (address == note.address and effective["version"] == revision and effective["view"] in ("note", None, "")
+                and effective["fingerprint"] in (None, "") and (start, end) == (0, length)):
+            return ""
+    except (OSError, TypeError, ValueError):
+        pass
+    return "Presence argument bindings do not request the complete note at this address and revision."
 
 
 def _entry(note: knowledge.KnowledgeNote, matched: list[str], *, first: bool, ctx: Any) -> HeldNoteSection:
@@ -104,20 +155,25 @@ def _entry(note: knowledge.KnowledgeNote, matched: list[str], *, first: bool, ct
         f"### {note.title}\n\nGlobal note: memory/knowledge/{topic}.md\n"
         f"Matched claims: {names}\nRevision: {revision}\n")
     reader = f"knowledge_read(topic={topic!r}, scope='global', version={revision!r})"
-    try:
-        knowledge_versions.retain_held_version(note, revision)
-        label += f"Exact reader: {reader}"
-    except OSError:
-        log.warning("Could not retain held note %s at %s", topic, revision, exc_info=True)
+    restriction = _reader_restriction(ctx, note, revision)
+    if not restriction:
+        try:
+            knowledge_versions.retain_held_version(note, revision)
+        except OSError:
+            log.warning("Could not retain held note %s at %s", topic, revision, exc_info=True)
+            restriction = "This revision could not be retained and is unavailable in the journal."
+    if restriction:
         reader = ""
-        label += "Exact reader unavailable: this revision could not be retained."
+        label += f"Exact reader unavailable: {restriction}"
+    else:
+        label += f"Exact reader: {reader}"
 
     window_label = ""
     if topic == knowledge.OVERVIEW_TOPIC:
         full = label + "\nShared understanding reference."
     else:
         full = label + "\n\n" + note_head(note.source)
-        if reader and _can_read(ctx, topic, revision):
+        if reader:
             window_label = label
     return HeldNoteSection("held_note:" + topic, full, reader=reader, topic=topic, revision=revision,
                            window_label=window_label, summary=note.summary)
@@ -129,9 +185,12 @@ def turn_sections(root: Path, task: Mapping[str, Any], spec: Any, navigation: Ma
     if spec.role in DELEGATED_FOCUS_ROLES:
         return []
     inventory = navigation.get("inventory", ())
-    if (captured := getattr(ctx, "_held_note_sections", None)) is not None:
+    if (captured := getattr(ctx, "_held_note_capture", None)) is not None:
+        entries = [HeldNoteSection(**entry) for entry in captured["entries"]]
+        if "companions" in captured or not entries:
+            return entries
         rows = {row["topic"]: row for row in inventory}
-        return [HeldNoteSection(**entry).with_index(rows.get(entry["topic"], {}), navigation) for entry in captured]
+        return [entry.with_index(rows.get(entry.topic, {}), navigation) for entry in entries]
 
     claims = knowledge.active_claims(root, inventory=inventory)
     matches: dict[knowledge.KnowledgeAddress, list[str]] = {}
@@ -141,19 +200,28 @@ def turn_sections(root: Path, task: Mapping[str, Any], spec: Any, navigation: Ma
     if not matches:
         return []
 
+    if ctx is None:
+        from ouroboros.contracts.task_contract import build_task_contract
+
+        ctx = SimpleNamespace(drive_root=root, task_metadata=task.get("metadata") or task,
+                              task_contract=build_task_contract(dict(task)), project_id=task.get("project_id"))
     rows = {row["topic"]: row for row in inventory}
+    bodies = navigation.get("bodies", {})
     entries = []
     for address in sorted(matches, key=lambda item: item.topic):
         try:
             note = navigation.get("overview") if address.topic == knowledge.OVERVIEW_TOPIC else None
             if note is None:
-                note = knowledge.read_knowledge_note(address)
+                note = knowledge.read_knowledge_note(address, captured=bodies.get(address))
         except (ValueError, OSError):
             continue  # the source changed or disappeared between navigation and capture
         if note.source is None or note.state != "active":
             continue
         written = set(knowledge_versions.claim_names(note.metadata.get("claims")))
         matched = [name for name in matches[address] if name in written]
+        if note.revision != rows[address.topic].get("revision"):
+            current = knowledge.active_claims(root, inventory=(knowledge.note_descriptor(note),))
+            matched = [name for name in matched if address in current.get(name, ())]
         if matched:
             entry = _entry(note, matched, first=not entries, ctx=ctx)
             entries.append(entry.with_index(rows[address.topic], navigation))

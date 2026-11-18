@@ -906,8 +906,10 @@ def _capture_context_core(
     # only where the view holds it; a child or nanny starts with its outline (every note by address
     # and title) and meets the whole index with its first accepted delegation (delegation_knowledge_index).
     project_id = resolve_project_id(task)
-    global_knowledge = {}
-    head_parts = (build_knowledge_sections(context_env, project_id=project_id, global_capture=global_knowledge)
+    held_resume = getattr(ctx, "_held_note_capture", None)
+    global_knowledge = {"bodies": {}} if held_resume is None and view_spec.knowledge else {}
+    head_parts = (build_knowledge_sections(context_env, project_id=project_id, global_capture=global_knowledge,
+                                           held_companions=(held_resume or {}).get("companions"))
                   if view_spec.knowledge else
                   helper_navigation_sections(canonical_root, project_id, global_capture=global_knowledge))
     if design_nav:
@@ -1064,6 +1066,7 @@ def _capture_context_core(
         memory_view_json=view_json, memory_view_sequence=view.chronicle_sequence,
         supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),
         connections=connections,
+        held_note_resume=held_resume,
     )
 
 

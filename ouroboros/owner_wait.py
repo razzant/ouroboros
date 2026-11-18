@@ -207,7 +207,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         # an absent legacy dispatch mark can only belong to the original run.
         "retained_work_dispatch_protocol": 1,
         "messages": messages, "trace": trace,
-        **continuation_capture(getattr(ctx, "context_fit_plan", None)),
+        **continuation_capture(getattr(ctx, "context_fit_plan", None), getattr(ctx, "active_context_mode", None)),
         # Live timing cannot retain a monotonic origin across a reboot.
         "usage": without_finalization_timing(usage),
         "cost_ceiling": asdict(cost_ceiling) if cost_ceiling is not None else None,

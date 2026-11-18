@@ -37,6 +37,29 @@ _SHARED_UNDERSTANDING_GAP = (
 )
 
 
+def _shared_understanding(address):
+    from ouroboros.knowledge import OVERVIEW_TOPIC, overview_residency, read_knowledge_note
+
+    try:
+        overview = read_knowledge_note(address)
+        overview_text = overview.source.text_at(overview.source.body_span) if overview.source else overview.text
+        if overview_text.strip():
+            reader = f"knowledge_read(topic='{OVERVIEW_TOPIC}', scope='global')"
+            heading = f"## Shared understanding\n\n{overview_residency(overview)}\nSource: {reader}.\n\n"
+            # Its revision rides after the body, so a write needs no read for its token. The revision covers
+            # the whole note, its summary too: a summary-only edit moves this last line and no byte before it.
+            revision = revision_line("overview", overview_text, overview.revision)
+            # The whole authored orientation rides whole in every request: the window never
+            # shortens the overview (TIER0_ALWAYS_FULL); its headings are no substitute for it.
+            return HostSection("shared_understanding", heading + overview_text + revision, reader=reader), overview
+        return _SHARED_UNDERSTANDING_GAP, overview  # present but empty is still unauthored
+    except FileNotFoundError:
+        return _SHARED_UNDERSTANDING_GAP, None
+    except (OSError, UnicodeDecodeError) as exc:
+        return (f"Shared understanding source unavailable: knowledge_read(topic='{OVERVIEW_TOPIC}', scope='global'). "
+                f"{type(exc).__name__}.", None)
+
+
 @timed_section("knowledge")
 def build_knowledge_sections(
     env: Any,
@@ -44,39 +67,21 @@ def build_knowledge_sections(
     project_id: str = "",
     warn_large: bool = False,
     global_capture: Optional[dict] = None,
+    held_companions: Optional[dict] = None,
 ) -> List[str]:
-    sections: List[str] = []
-    # One mind keeps its authored common orientation across rooms. The generated
-    # inventory is navigation, not a substitute for that understanding; a
-    # project's shelf adds focus without hiding the common corpus.
-    from ouroboros.knowledge import (OVERVIEW_TOPIC,
-                                     read_knowledge_note, resolve_knowledge_address)
+    from ouroboros.knowledge import OVERVIEW_TOPIC, resolve_knowledge_address
 
     pid = str(project_id or "").strip()
     global_address = resolve_knowledge_address(env.drive_path("memory").parent, OVERVIEW_TOPIC, "global")
-    overview = None
-    try:
-        overview = read_knowledge_note(global_address)
-        overview_text = overview.source.text_at(overview.source.body_span) if overview.source else overview.text
-        if overview_text.strip():
-            reader = f"knowledge_read(topic='{OVERVIEW_TOPIC}', scope='global')"
-            from ouroboros.knowledge import overview_residency
-
-            heading = f"## Shared understanding\n\n{overview_residency(overview)}\nSource: {reader}.\n\n"
-            # Its revision rides after the body, so a write needs no read for its token. The revision covers
-            # the whole note, its summary too: a summary-only edit moves this last line and no byte before it.
-            revision = revision_line("overview", overview_text, overview.revision)
-            # The whole authored orientation rides whole in every request: the window never
-            # shortens the overview (TIER0_ALWAYS_FULL); its headings are no substitute for it.
-            sections.append(HostSection("shared_understanding", heading + overview_text + revision, reader=reader))
-        else:
-            sections.append(_SHARED_UNDERSTANDING_GAP)  # present but empty is still unauthored
-    except FileNotFoundError:
-        sections.append(_SHARED_UNDERSTANDING_GAP)
-    except (OSError, UnicodeDecodeError) as exc:
-        sections.append(f"Shared understanding source unavailable: knowledge_read(topic='{OVERVIEW_TOPIC}', scope='global'). {type(exc).__name__}.")
+    companions = held_companions or {}
+    if saved := companions.get("shared_understanding"):
+        section, overview = HostSection(**saved), None
+    else:
+        section, overview = _shared_understanding(global_address)
+    sections = [section]
     sections.extend(knowledge_navigation_sections(global_address.canonical_root, pid, overview=overview,
-                                                  warn_large=warn_large, global_capture=global_capture))
+                                                  warn_large=warn_large, global_capture=global_capture,
+                                                  captured_index=companions.get("knowledge_index")))
     if pid:
         # Bounded per-project journal tail + workpad (multi-project, v6.32.0):
         # the project's durable progress memory rides along with its knowledge.
@@ -112,7 +117,7 @@ def _navigation_views(address, overview, *, whole: bool, global_capture: Optiona
 
     if global_capture is None or address.scope != "global":
         return knowledge_index_views(address, overview=overview, whole=whole)
-    rows = inventory_knowledge(address, navigation=True, known_note=overview)
+    rows = inventory_knowledge(address, navigation=True, known_note=overview, bodies=global_capture.get("bodies"))
     global_capture.update(inventory=rows, overview=overview)
     forms = knowledge_index_views(address, overview=overview, whole=whole, inventory=rows)
     global_capture.update(whole=whole, outline=True)
@@ -121,7 +126,8 @@ def _navigation_views(address, overview, *, whole: bool, global_capture: Optiona
 
 @timed_section("knowledge.navigation")
 def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: Any = None,
-                                  warn_large: bool = False, global_capture: Optional[dict] = None) -> List[str]:
+                                  warn_large: bool = False, global_capture: Optional[dict] = None,
+                                  captured_index: Optional[dict] = None) -> List[str]:
     """One knowledge navigation rendering for integrating contexts and first delegations.
 
     Captured full/outline forms retain the same source addresses and canonical root.
@@ -140,6 +146,9 @@ def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: 
         knowledge_indexes.append((project_address,
                                   f"## Project knowledge ({pid})", "project knowledge index"))
     for address, header, label in knowledge_indexes:
+        if address is global_address and captured_index:
+            sections.append(HostSection(**captured_index))
+            continue
         # Every shelf and overview branch projects the current source state, even
         # when a previous writer could not publish its generated index.
         reader = f"knowledge_list(scope={address.scope!r})"

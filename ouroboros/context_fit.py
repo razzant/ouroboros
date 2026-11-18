@@ -334,6 +334,7 @@ class ContextCore:
     # This task's own direct requirement of the whole handbook (``development_required``), beside
     # ``docs_need_development``, which then holds what the subject alone says for Max.
     development_required: bool = False
+    held_note_resume: Optional[Mapping[str, Any]] = None
 
     def required_book_tokens(self, mode: str) -> int:
         """What the directly required handbook adds to the ordinary view of ``mode``, 0 when that view holds it.
@@ -883,7 +884,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     """
     from dataclasses import replace
     from ouroboros import memory_floor as floor
-    from ouroboros.held_notes import HeldNoteSection
+    from ouroboros.held_notes import HeldNoteSection, frame_key
     from ouroboros.memory_view import FULL_VIEW, json_chars, room_chars, snapshot_from_json, story_chars
     from ouroboros.tool_policy import select_tool_schemas
 
@@ -895,6 +896,20 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     form = {m: "low" if core.compact_reference_docs or m == "nano" else m for m in floor.MODES}
     snapshot = snapshot_from_json(core.memory_view_json) if core.memory_view_json else None
     held_heads = any(isinstance(part, HeldNoteSection) for part in core.dynamic_sections)
+    saved = core.held_note_resume or {}
+
+    def restores_frame(selected):
+        if kept is not None or not saved.get("frame"):
+            return False
+        _, reserve = context_budget.context_mode_limits(selected, preferred, output_reserve,
+                                                        working_reserve_tokens=working_reserve_tokens)
+        return saved["frame"] == frame_key(selected, preferred, window_tokens if known_window else 0,
+                                            window_record, reserve)
+
+    if not (select or start) and saved.get("frame"):
+        restored_mode = saved["frame"][0]
+        if restored_mode in floor.MODES and restores_frame(restored_mode):
+            mode = restored_mode
     names = [schema["function"]["name"] for schema in tool_schemas or []] if resident else nano_base
     standing = resident or nano_base is None
 
@@ -947,7 +962,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             max_room=floor.with_max_room({}, room_fact, selected).get("max_room"),
             tool_names=None if tool_schemas is None else sent.chosen, working_reserve_tokens=working_reserve_tokens,
             stated_window_tokens=stated.get(selected),  # the note names the window as stated, never the admitted frame
-            boundary_tokens=boundary, measure_text=lambda *memory: measure(selected, sent, addressed, *memory) - fixed)
+            boundary_tokens=boundary, measure_text=lambda *memory: measure(selected, sent, addressed, *memory) - fixed,
+            report_nano_miss=held_heads)
 
     stated: Dict[str, Optional[int]] = {}  # each walked mode's window in the start's frame (``frame`` fills it)
 
@@ -961,6 +977,11 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     def frame(selected):
         nonlocal receipts
         prior = host_receipts(selected, previous)
+        available, replay = sections[selected], restores_frame(selected)
+        if replay:
+            prior = saved["receipts"]
+            if "knowledge_index" in saved["companions"] and not any(row["section_id"] == "knowledge_index" for row in prior):
+                available = tuple(part for part in available if part.section_id != "knowledge_index")
         sent = select_tool_schemas(tool_schemas or [], context_mode=selected, schema_names=names, standing=standing)
         target, reserve = context_budget.context_mode_limits(selected, preferred, output_reserve,
                                                             working_reserve_tokens=working_reserve_tokens)
@@ -985,11 +1006,12 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             return telling_fits(selected, sent, forms, window, boundary, reserve, start_room=kept is None)
         def held_told(forms):  # voice setup is a start even when it carries a prepared view
             return telling_fits(selected, sent, forms, window, boundary, reserve, start_room=kept is None or start_work)
-        receipts, _ = floor._host_steps(sections[selected], prior,  # every frame starts from what was shown
+        receipts, _ = floor._host_steps(available, prior,  # every frame starts from what was shown
             measure=lambda addressed: measure(selected, sent, addressed, story_before, room_before),
             shortest=shortest if snapshot and kept is None else None,  # a held view was sent: it keeps its steps
             told=told if snapshot and known_window else None,
-            held_telling_fits=held_told if held_heads and snapshot and known_window and form[selected] == "low" else None,
+            held_telling_fits=held_told if held_heads and snapshot and known_window and form[selected] == "low"
+            and not replay else None,
             window=window if known_window else None, reserve=reserve, ratio=ratio, slack=slack,
             saving=owed(measure(selected, sent, section_views(sections[selected], prior)), reserve) if asked else 0,
             root=core.section_root, task_id=core.section_task_id, bare=lambda forms: measure(selected, sent, forms),
@@ -1039,11 +1061,21 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         mode = "low"
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
 
-    def render():  # this frame's own completed memory view, its floor receipt included
-        return view(mode, sent, section_views(sections[mode], receipts), window, boundary, saving=owed(fixed, reserve),
-                    fixed=fixed, kept=None if kept is None else kept.get(start or preferred)) if snapshot else floor.NO_VIEW
+    def render(forms=None, *, level=None):  # this frame's memory with its floor receipt
+        if not snapshot:
+            return floor.NO_VIEW
+        forms = section_views(sections[mode], receipts) if forms is None else forms
+        price = measure(mode, sent, forms)
+        return view(mode, sent, forms, window, boundary, saving=owed(price, reserve), fixed=price,
+                    kept=None if kept is None else kept.get(start or preferred), level=level)
+
+    def spare(fit, forms):
+        price = measure(mode, sent, forms, fit.story_chars, fit.room_chars)
+        return window - reserve - math.ceil(price * ratio)
 
     def overflows(fit=floor.NO_VIEW):  # the known window cannot hold this frame's request beside this memory view
+        if held_heads:
+            return known_window and spare(fit, section_views(sections[mode], receipts)) < 0
         memory = floor.tokens_of(fit.story_chars) + floor.tokens_of(fit.room_chars)
         return known_window and math.ceil((fixed + memory) * ratio) + reserve > window
 
@@ -1051,28 +1083,33 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     # ordinary memory and the work room; the same ordinary Nano is the last physical rescue for every
     # Main route, a view already shown included. A frame whose core alone cannot fit steps down unrendered. A frame
     # is judged by its pieces' prices: a frame the fit walks away from is never drawn whole.
+    low = None
     while True:
         shown = floor.NO_VIEW if mode != "nano" and overflows() else render()
         books_lost = (kept is None or start_work) and mode == "max" and bool(room_fact) and floor.max_room_lost(room_fact)
         if mode == "nano" or not (books_lost or overflows(shown)):
             break
-        held = (sent, fixed, reserve, window, boundary, allowances), receipts
-        lower = "low" if mode == "max" else "nano"
-        sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{lower}", frame, lower)
-        if lower == "nano" and kept is not None and admitted and window - reserve <= held[0][3] - held[0][2] and fixed >= held[0][1]:
-            # A view a Main work holds keeps Low where Nano would admit no more input and is no smaller (a total that
-            # nothing has proved, an input limit): the mode is not paid for nothing, the round's passes take bodies.
-            (sent, fixed, reserve, window, boundary, allowances), receipts = held
-            shown = render()
-            break
-        mode = lower
+        if mode == "low" and kept is not None and admitted:
+            low_view = render() if shown is floor.NO_VIEW else shown
+            low = (sent, fixed, reserve, window, boundary, allowances, receipts, low_view,
+                   spare(low_view, section_views(sections[mode], receipts)))
+        mode = "low" if mode == "max" else "nano"
+        sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
     if held_heads and mode == "nano" and overflows(shown):
+        emergency_level = shown.level
+
         def emergency_fits(forms):
-            price = measure(mode, sent, forms, shown.story_chars, shown.room_chars)
-            return math.ceil(price * ratio) + reserve <= window
+            return spare(render(forms, level=emergency_level), forms) >= 0
+
         if floor._held_note_steps(sections[mode], receipts, emergency_fits, form="reader"):
             fixed = measure(mode, sent, section_views(sections[mode], receipts))
             shown = render()
+            if overflows(shown):
+                shown = render(level=emergency_level)
+    if low is not None and spare(shown, section_views(sections[mode], receipts)) <= low[-1]:
+        # The running request keeps Low when the fully priced alternative leaves no more room.
+        mode = "low"
+        sent, fixed, reserve, window, boundary, allowances, receipts, shown, _ = low
     if kept is None and overflows(shown):  # a start's refusal names its last view, never a work room's shortfall
         core_alone = overflows()
         raise MinimumViewUnfit("Core, assignment, resident control tools and work room cannot fit" if core_alone
