@@ -345,7 +345,7 @@ def test_a_call_whose_own_arguments_nest_past_the_decoder_is_refused_beside_a_ru
 
 
 def test_enable_tools_loads_a_whole_server_and_says_what_the_next_request_carries(registry):
-    """Any binding but Main's text loop loads (a voice session, Nano, a narrowed child), the gateway resident or not."""
+    """A voice-style binding loads schemas into the request even if call_mcp_tool is resident."""
     from ouroboros import loop as loop_module
 
     _servers()
@@ -461,6 +461,121 @@ def test_every_role_holds_the_loader_in_every_mode(tmp_path, monkeypatch, profil
     assert {"enable_tools", "list_available_tools"} <= set(registry.available_tools())
     bind_resident_schemas(registry, initial_tool_schemas(registry, context_mode=mode))
     assert "Hidden by policy" in registry.execute("enable_tools", {"tools": "commit_reviewed"})
+
+
+def _child_registry(tmp_path, monkeypatch, *, profile, mode="max", grants=()):
+    """A real child registry — read-only, or acting with ``grants`` — over this module's fake servers."""
+    from ouroboros.contracts.task_constraint import TaskConstraint
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")  # the restricted acting profile, not Cyber
+    repo, data, workspace = tmp_path / "repo", tmp_path / "data", tmp_path / "workspace"
+    for path in (repo, data, workspace):
+        path.mkdir(parents=True, exist_ok=True)
+    constraint = (
+        TaskConstraint(mode="local_readonly_subagent", allow_enable=False) if profile == "readonly"
+        else TaskConstraint(mode="acting_subagent", surface="external_workspace",
+                            write_root=str(workspace), external_tool_grants=tuple(grants))
+    )
+    registry = ToolRegistry(repo_dir=repo, drive_root=data)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=data, active_context_mode=mode,
+                                     workspace_root=workspace, workspace_mode="external",
+                                     task_constraint=constraint))
+    return registry
+
+
+@pytest.mark.parametrize("profile", ["readonly", "acting"])
+@pytest.mark.parametrize("mode", ["low", "max"])
+def test_a_text_child_can_inspect_and_call_an_allowed_mcp_without_adding_its_schema(tmp_path, monkeypatch, profile, mode):
+    from ouroboros import loop as loop_module
+    from ouroboros import safety
+    from ouroboros.tools.tool_result import ToolResult
+
+    manager = _servers()
+    lookup = "mcp_gitlab__get_merge_request"
+    registry = _child_registry(tmp_path, monkeypatch, profile=profile, mode=mode, grants=(lookup,))
+    resident = initial_tool_schemas(registry, context_mode=mode)
+    loop_module._setup_dynamic_tools(registry, resident, [], context_mode=mode, gateway=True)
+    assert "call_mcp_tool" in _names(resident) and lookup not in _names(resident)
+    before = json.dumps(resident)
+    shown = registry.execute("enable_tools", {"tools": "mcp_gitlab"})
+    assert f"## {lookup}" in shown and "parameters: " in shown
+    if profile == "acting":
+        assert "mcp_gitlab__create_issue" not in shown  # only the granted lookup is visible
+    assert json.dumps(resident) == before
+
+    sent, checked = [], []
+
+    async def transport(_cfg, name, args, _timeout):
+        sent.append((name, args))
+        return ToolResult(status="ok", code="OK", text="fixture record")
+
+    def check(name, _args, *, declared_policy="", **_kwargs):
+        if declared_policy != safety.POLICY_SKIP:
+            checked.append(name)
+            return len(checked) == 1, "fixture decision"
+        return True, ""
+
+    monkeypatch.setattr(manager, "_async_call_tool", transport)
+    monkeypatch.setattr(safety, "check_safety", check)
+    call = {"name": lookup, "arguments": {}}
+    assert "fixture record" in registry.execute_result("call_mcp_tool", call).text
+    assert registry.execute_result("call_mcp_tool", call).code == "SAFETY_RETURNED"
+    assert sent == [("get_merge_request", {})] and checked == [lookup, lookup]
+    if profile == "acting":
+        missing = "mcp_slack__history"  # a second, ungranted, synthetic read
+        direct = registry.execute_result(missing, {})
+        via = registry.execute_result("call_mcp_tool", {"name": missing})
+        assert direct.code == via.code == "ACCESS_BLOCKED" and via.text == direct.text
+        assert len(sent) == 1
+
+
+def test_a_child_gateway_takes_only_mcp_names_and_a_nano_child_keeps_loading_physically(tmp_path, monkeypatch):
+    """An extension left out by a route limit loads physically; so does MCP on a default Nano child."""
+    from ouroboros import extension_loader, provider_models
+    from ouroboros import loop as loop_module
+    from ouroboros.tool_policy import route_tool_limit_notice, usable_selectors
+
+    _servers()
+    registry = _child_registry(tmp_path, monkeypatch, profile="readonly")
+    ext = extension_loader.extension_surface_name("weather", "forecast")
+    with extension_loader._lock:
+        monkeypatch.setitem(extension_loader._tools, ext, {
+            "name": ext, "handler": lambda ctx: "ok", "description": "Forecast weather.",
+            "schema": {"type": "object", "properties": {}}, "timeout_sec": 5, "skill": "weather",
+        })
+    monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: True)
+    initial = initial_tool_schemas(registry)
+    pinned = "mcp_slack__history"
+    initial.sort(key=lambda schema: schema["function"]["name"] == pinned)  # the schema to displace
+    limit = len(initial) - 1
+    registry._ctx.active_model = "openai::gpt-fixture"
+    monkeypatch.setitem(provider_models.PROVIDER_TOOL_SCHEMA_LIMITS, "openai", limit)
+    resident, omitted = fit_tool_schemas_to_limit(initial, limit, keep=set(_names(initial)) - {ext})
+    assert omitted == (ext,) and "call_mcp_tool" in _names(resident)
+    loop_module._setup_dynamic_tools(registry, resident, [], gateway=True)
+    lookup = "mcp_gitlab__get_merge_request"
+    receipt = registry.execute("enable_tools", {"tools": f"{lookup}, {ext}"})
+    assert f"Call schemas for call_mcp_tool(name, arguments): {lookup}" in receipt
+    assert "These MCP schemas are not added" in receipt
+    assert "Call schemas loaded" in receipt and f"{ext}. The next request carries" in receipt
+    assert len(resident) == limit and ext in _names(resident) and lookup not in _names(resident)
+    assert f"leaves out: {pinned}." in receipt
+    notice = route_tool_limit_notice(registry._ctx.active_model, limit, len(initial), [pinned],
+                                     selectors=usable_selectors(registry, resident))
+    assert "shows an MCP schema" in notice and pinned in notice
+    before = json.dumps(resident)
+    shown = registry.execute("enable_tools", {"tools": pinned})
+    assert f"## {pinned}" in shown and "Channel history." in shown
+    assert pinned not in _names(resident) and json.dumps(resident) == before
+    assert "enable_tools can show or load a selected schema" in receipt
+
+    nano = _child_registry(tmp_path, monkeypatch, profile="readonly", mode="nano")
+    nano_resident = initial_tool_schemas(nano, context_mode="nano")
+    assert "call_mcp_tool" not in _names(nano_resident)  # Nano's standing set is unchanged
+    loop_module._setup_dynamic_tools(nano, nano_resident, [], context_mode="nano", gateway=True)
+    receipt = nano.execute("enable_tools", {"tools": "mcp_gitlab"})
+    assert "Call schemas loaded (≈" in receipt and "mcp_gitlab (all 2 tools)" in receipt
+    assert {"mcp_gitlab__create_issue", "mcp_gitlab__get_merge_request"} <= set(_names(nano_resident))
 
 
 def test_status_reports_the_pin_instructions_and_catalog_potential():

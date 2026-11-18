@@ -86,7 +86,8 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
 META_TOOL_NAMES: frozenset[str] = frozenset({
     "list_available_tools", "enable_tools",
 })
-# Main's gateway to on-demand MCP tools: what keeps a request's tool list stable, so a route ceiling keeps it too.
+# Text tasks keep this envelope resident to inspect MCP schemas without changing their request's tools.
+# The named MCP tool retains its own permissions and Safety check.
 MCP_GATEWAY_TOOL_NAME: str = "call_mcp_tool"
 
 # An actor's own working form: which model thinks (switch_model) and how its own
@@ -147,6 +148,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # This child's own callable catalog (the name-miss answer points here) and the loader
     # of a permitted schema a route's ceiling or Nano left out; neither grants a tool.
     "list_available_tools", "enable_tools", "list_image_models",
+    MCP_GATEWAY_TOOL_NAME,
 })
 
 ACTING_SUBAGENT_MODE: str = "acting_subagent"
@@ -197,6 +199,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
     "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames", "read_archive",
     "list_available_tools", "enable_tools", "list_image_models", "generate_image", "recover_image",
+    MCP_GATEWAY_TOOL_NAME,
 })
 
 def schema_selection_tools_for_context(ctx: object) -> frozenset[str]:
