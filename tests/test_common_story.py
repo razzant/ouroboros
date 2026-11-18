@@ -53,6 +53,21 @@ def _story(root, task=MAIN):
     return mv.render_story(_snapshot(root, task))
 
 
+def _mapped_citations(snapshot, account_id):
+    from ouroboros.memory_form_facts import ordinary_composition
+
+    parts = ordinary_composition(snapshot)["blocks"]["story"]["parts"]
+    account = next(s for p in parts if p["kind"] == "account" for s in p["sources"] if s["id"] == account_id)
+    return {s["id"]: s for s in account["cited_sources"]}
+
+
+def _mapped_changes(snapshot, account_id):
+    from ouroboros.memory_form_facts import ordinary_composition
+
+    parts = ordinary_composition(snapshot)["blocks"]["story"]["parts"]
+    return next(p for p in parts if p["kind"] == "account" and p["sources"][0]["id"] == account_id).get("changes", [])
+
+
 def _page(root, room, first, last, *, author=shared.MIND, text=None):
     from ouroboros.tools.chronicle import page_covers
 
@@ -324,6 +339,9 @@ def test_two_accounts_cite_one_source_and_a_local_fold_over_it_still_works(tmp_p
     assert f"part {local.record['id']}" in story and "Alpha, told once." in story  # the new local part is new, whole
     assert "Beta asked and I answered." not in story and "1 story records told through this account" in _block(story, g2.record["id"])
     assert f"replaces 1: {c1};" in _memory_read(_ctx(tmp_path), node_id=g2.record["id"])
+    edge = _mapped_citations(_snapshot(tmp_path), g)[a1]
+    assert edge["status_now"] == edge["status"] == "final"
+    assert edge["folded_into"] == local.record["id"]
 
 
 # --- C. a later correction of a source, and a changed or missing source identity ---------------------
@@ -356,9 +374,23 @@ def test_a_correction_after_the_account_keeps_its_basis_and_is_shown_as_not_inco
     old = _memory_read(_ctx(tmp_path), node_id=a1, revision=a1)
     assert f"as of revision {a1}: the original alone; later corrections not shown: {fix.record['id']}" in old
     assert "I counted twice" not in old and "text:\nAlpha asked again and I counted." in old
+    edge = _mapped_citations(_snapshot(tmp_path), g)[a1]
+    assert edge["current_revision"] == fix.record["id"] and edge["revision"] == a1
+    assert edge["read"]["tool"] == "memory_read" and _memory_read(_ctx(tmp_path), **edge["read"]["arguments"]) == old
     assert f"informs account {g} (revision {a1} read;" in old
     current = _memory_read(_ctx(tmp_path), node_id=a1, revision=fix.record["id"])
     assert "the original and its corrections up to that one; none later" in current and "I counted twice" in current
+    later = [c for c in _mapped_changes(_snapshot(tmp_path), g) if c["target"] == a1]
+    assert [(c["kind"], c["id"]) for c in later] == [("correction", fix.record["id"])]
+    assert later[0]["read"]["arguments"] == {"node_id": fix.record["id"], "revision": fix.record["id"]}
+    assert _memory_read(_ctx(tmp_path), **later[0]["target_read"]["arguments"]) == current
+    assert "I counted twice" not in json.dumps(later)
+    old = json.loads(mv.snapshot_json(_snapshot(tmp_path)))
+    for entry in old["story"]:
+        for src in entry.get("sources") or ():
+            src.pop("later_corrections", None)  # a capture without the ids the printed corrections need
+    gap = next(c for c in _mapped_changes(mv.snapshot_from_json(json.dumps(old)), g) if c["target"] == a1)
+    assert gap["read_gap"] and "read" not in gap and gap["target_navigation"]["arguments"] == {"node_id": a1}
     assert "TOOL_ARG_ERROR" in _memory_read(_ctx(tmp_path), node_id=a1, revision=b1)
     assert "TOOL_ARG_ERROR" in _memory_read(_ctx(tmp_path), revision=a1)
 
@@ -387,6 +419,9 @@ def test_a_source_missing_from_a_copied_journal_is_a_gap_not_text(tmp_path):
     story = mv.render_story(snapshot)
     assert f"- source: page {a1} of room {alpha}, revision {a1}; not in this chronicle: its words are not here" in story
     assert "Alpha asked again" not in story and G_TEXT in story
+    mapped = _mapped_citations(snapshot, g)
+    assert mapped[a1]["missing"] and mapped[a1]["read_gap"] and "read" not in mapped[a1]
+    assert mapped[b1]["read"]["arguments"] == {"node_id": b1, "revision": b1}
     assert mi.record_period(other, other.get(g), {}).span["incomplete"] is True
     read = _memory_read(_ctx(copy), node_id=g)
     assert f"source page {a1} (room {alpha}): revision {a1} used; NOT in this chronicle: its words cannot be read here" in read
@@ -424,12 +459,34 @@ def test_rejecting_a_cited_draft_follows_local_authority_and_the_account_shows_i
     assert "told through this account" not in block  # a rejected draft is no entry of the story
     read = _memory_read(_ctx(tmp_path), node_id=synthetic["id"])
     assert f"revision {h1} used, draft then; now rejected;" in read
+    edge = _mapped_citations(_snapshot(tmp_path), synthetic["id"])[h1]
+    assert (edge["status"], edge["status_now"]) == ("draft", "rejected")
+    rejections = {c["target"]: c for c in _mapped_changes(_snapshot(tmp_path), synthetic["id"]) if c["kind"] == "rejection"}
+    assert set(rejections) == {b1, h1} and all(c.get("id") for c in rejections.values())
+    assert rejections[h1]["read"]["arguments"] == {"node_id": rejected.record["id"], "revision": rejected.record["id"]}
+    assert rejections[h1]["target_navigation"]["arguments"] == {"node_id": h1}
+    assert "TOOL_ARG_ERROR" not in _memory_read(_ctx(tmp_path), **rejections[h1]["read"]["arguments"])
+    assert "not what happened in Beta" not in json.dumps(rejections)
     # An accepted draft is said so too, and an account over a draft the mind accepts stays as written.
     h2 = _page(tmp_path, beta, 14, 14, author=HELPER, text="A better draft about Beta.")
     later = store.publish_account(room_id="1", text="Over the better draft.", sources=[h2], author=shared.MIND).record["id"]
-    assert store.decide(h2, True, shared.MIND, "right").ok
+    accepted = store.decide(h2, True, shared.MIND, "right")
+    assert accepted.ok
     assert store.select_account(later, replaces=[], author=shared.MIND, reason="shown").ok
     assert f"- its source {h2}, a draft then, I have since accepted" in _block(_story(tmp_path), later)
+    acceptances = {c["target"]: c for c in _mapped_changes(_snapshot(tmp_path), later) if c["kind"] == "acceptance"}
+    assert set(acceptances) == {h2} and acceptances[h2]["id"] == accepted.record["id"]
+    assert acceptances[h2]["read"]["arguments"] == {"node_id": accepted.record["id"], "revision": accepted.record["id"]}
+    assert acceptances[h2]["target_navigation"]["arguments"] == {"node_id": h2}
+    assert "right" not in json.dumps(acceptances)  # the decision's reader, never its reason
+    stale = json.loads(mv.snapshot_json(_snapshot(tmp_path)))
+    for entry in stale["story"]:
+        if entry.get("id") == later:
+            for src in entry.get("sources") or ():
+                src.pop("acceptance_id", None)  # a capture from before the id was recorded
+    gaps = {c["target"]: c for c in _mapped_changes(mv.snapshot_from_json(json.dumps(stale)), later)
+            if c["kind"] == "acceptance"}
+    assert not gaps[h2].get("id") and gaps[h2]["read_gap"] and gaps[h2]["target_navigation"]
 
 
 # --- E. new records after the account stay new; a later account replaces explicitly ------------------

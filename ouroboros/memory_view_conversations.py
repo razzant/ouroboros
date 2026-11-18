@@ -38,6 +38,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, 
 
 from ouroboros import chat_chain, memory_inventory, memory_view_events as events
 from ouroboros.context_timing import timed_section
+from ouroboros.memory_view_work import stored_bounds
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 from ouroboros.dialogue_provenance import (owner_speech, place_row_facts, recorded_person, recorded_speaker, row_class,
                                            warm_lineage)
@@ -94,6 +95,8 @@ def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]], summarie
     head = f"[{_minute(first[1].get('ts') or '?')}; host; task {root_id}] "
     return {"task": root_id, "line": head + "; ".join([status, *([f"«{sentence}»"] if sentence else []), *parts]),
             "line_without_gist": head + "; ".join([status, *parts]),
+            "first": chat_chain.format_address(first[0]), "last": chat_chain.format_address(last[0]),
+            "stored_bounds": stored_bounds([entry for entry, _ in group]),
             "pos": first[2], "last_pos": last[2], "chars": sum(int(e[1].get("text_chars") or 0) for e, _c in group)}
 
 
@@ -153,9 +156,9 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
             elif author["lane"] == 1 and _ours(meta, author["author"]):
                 ours = True
         engaged = not place or ours
-        fold = max(((pos, meta) for _a, meta, pos in held if meta.get("fold_read") is True and meta.get("wake_summary")),
-                   key=lambda pair: pair[0], default=None)  # S5: a finish that read here folded it into its sentence
-        considered = max(own, considered_through(quiet.get(room, ()), lineage), fold[0] if fold else -1)
+        fold = max((e for e in held if e[1].get("fold_read") is True and e[1].get("wake_summary")),
+                   key=lambda e: e[2], default=None)
+        considered = max(own, considered_through(quiet.get(room, ()), lineage), fold[2] if fold else -1)
         noted = max((_instant(note.get("ts")) for note in notes.get(room, ()) if _instant(note.get("ts"))), default=None)
         retold = max((pos for _a, meta, pos in held if meta.get("wake_summary")), default=-1)
         sample = samples[room]
@@ -169,6 +172,7 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
         group["running"] = sorted({*group["running"], *running.get(room, ())})
         newest = max(entries, key=lambda entry: entry[2]) if entries else None
         item: Dict[str, Any] = {"room_id": room, "label": label(room, sample), "engaged": engaged, "facts": facts,
+                                "running_tasks": list(running.get(room, ())),
                                 "overheard": bool(place) and engaged and not participated,
                                 "first": first, "notes": [], "words": [], "tasks": [], "silent": "", "folded": {},
                                 "newest": chat_chain.format_address(newest[0]) if newest else "",
@@ -180,6 +184,7 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
             item["events"] = events.capture([*previous, *spoken])
         item["notes"] = list(notes.get(room, ()))
         again = _repeats(sorted((*sealed.get(room, ()), *held), key=lambda entry: entry[2]))
+        folded_rows = []
         for entry, cls in (pair for pair in spoken if pair[0][0]["row_sha256"] not in here):  # once, in this room
             if room == str(spec.room_id) or not engaged and not (
                 cls["author"]["kind"] == "place_fact" and entry[1].get("direction") == "out"
@@ -187,18 +192,20 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
                 continue
             # My human's words stay whole, and so does a relay row, which may carry them quoted (``relay_quotes``):
             # a fold of what a finish read stands for its room's other words only.
-            if (fold and entry[2] <= fold[0] and not owner_speech(entry[1], cls["author"])
+            if (fold and entry[2] <= fold[2] and not owner_speech(entry[1], cls["author"])
                     and entry[1].get("type") != "relay_entry"):
-                folded = item["folded"] or {"sentence": str(fold[1]["wake_summary"]), "ts": str(fold[1].get("ts") or ""),
-                                            "task": str(fold[1].get("task_id") or ""),
-                                            "count": 0, "chars": 0, "from": chat_chain.format_address(entry[0])}
-                item["folded"] = {**folded, "count": folded["count"] + 1, "to": chat_chain.format_address(entry[0]),
-                                  "chars": folded["chars"] + int(entry[1].get("text_chars") or 0)}
+                folded_rows.append(entry)
                 continue
             rank = 0 if entry[2] <= retold else 1 if not _unconsidered(entry, cls["author"], considered) or (
                 noted is not None and (_instant(entry[1].get("ts")) or noted) <= noted) else 2
             shown.append((item, entry, {**cls["author"], "rank": rank},
                           None if owner_speech(entry[1], cls["author"]) else again.get(entry[0]["row_sha256"])))
+        if folded_rows:
+            item["folded"] = {"sentence": str(fold[1]["wake_summary"]), "ts": str(fold[1].get("ts") or ""),
+                              "task": str(fold[1].get("task_id") or ""), "finish_address": chat_chain.format_address(fold[0]),
+                              "count": len(folded_rows), "chars": sum(int(e[1].get("text_chars") or 0) for e in folded_rows),
+                              "from": chat_chain.format_address(folded_rows[0][0]), "to": chat_chain.format_address(folded_rows[-1][0]),
+                              "stored_bounds": stored_bounds(folded_rows)}
         tasks: Dict[str, List[Tuple[Entry, Dict[str, Any]]]] = {}
         for entry, cls in classed:
             task = str(entry[1].get("root_task_id") or entry[1].get("task_id") or "")
@@ -221,7 +228,7 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
         if earlier is not None:  # the earlier copy's words: one line naming it, this row's text never read
             first, where = chat_chain.format_address(earlier[0]), earlier[1] or item["room_id"]
             same = "the same words as" if earlier[1] is None else f"the same row as in room {where}:"
-            word.update(again=first, line=f"{word['head']} delivered again: {same} {first}; "
+            word.update(again=first, again_room=where, line=f"{word['head']} delivered again: {same} {first}; "
                         f"memory_read(room_id='{where}', rows=true, from='{first}', to='{first}')")
         item["words"].append({**word, "id": f"{item['room_id']}:{word['address']}", "rank": author["rank"]})
     ordered = [groups[key] for key in sorted(groups)]

@@ -14,18 +14,40 @@ def starts_conversation(author):
 
 
 def capture(spoken):
-    """Select event samples; arrivals without a recorded author are counted here too (owner choice A)."""
-    arrivals = [(entry, cls["author"]) for entry, cls in spoken if cls["lane"] == 1 and entry[1].get("direction") == "in"]
-    known = [(e, a) for e, a in arrivals if recorded_speaker(e[1])]
-    unknown = [(e, a) for e, a in arrivals if not recorded_speaker(e[1])]
-    texts = [(e, a) for e, a in arrivals if e[1].get("text_chars")]
-    samples = {"first": min(texts, key=lambda p: p[0][2], default=None),
-               "last": max(known, key=lambda p: p[0][2], default=None),
-               "unknown_first": min(unknown, key=lambda p: p[0][2], default=None)}
-    return {"count": len(arrivals), "unknown_count": len(unknown),
-            "unknown_chars": sum(int(e[1].get("text_chars") or 0) for e, _a in unknown),
-            "unknown_last": str(max(unknown, key=lambda p: p[0][2])[0][1].get("ts") or "") if unknown else "",
-            "_samples": samples}
+    """Select samples and arrival bounds from entries already in hand, never enumerate/copy their bodies.
+
+    Bounds and counts address an aggregated selection, not complete membership:
+    a range reader can include non-arrivals. Legacy captures without bounds stay unknown.
+    Arrivals without a recorded author are counted here too (owner choice A).
+    """
+    first = last = first_text = last_known = first_unknown = last_unknown = None
+    count = unknown_count = unknown_chars = 0
+    for entry, cls in spoken:
+        _, row, pos = entry
+        if cls["lane"] != 1 or row.get("direction") != "in":
+            continue
+        count += 1
+        if first is None or pos < first[2]:
+            first = entry
+        if last is None or pos > last[2]:
+            last = entry
+        if row.get("text_chars") and (first_text is None or pos < first_text[0][2]):
+            first_text = (entry, cls["author"])
+        if recorded_speaker(row):
+            if last_known is None or pos > last_known[0][2]:
+                last_known = (entry, cls["author"])
+        else:
+            unknown_count += 1
+            unknown_chars += int(row.get("text_chars") or 0)
+            if first_unknown is None or pos < first_unknown[0][2]:
+                first_unknown = (entry, cls["author"])
+            if last_unknown is None or pos > last_unknown[2]:
+                last_unknown = entry
+    return {"count": count, "unknown_count": unknown_count,
+            "bounds": [{"address": chat_chain.format_address(e[0]), "pos": e[2],
+                        "ts": str(e[1].get("ts") or "")} for e in (first, last) if e is not None],
+            "unknown_chars": unknown_chars, "unknown_last": str(last_unknown[1].get("ts") or "") if last_unknown else "",
+            "_samples": {"first": first_text, "last": last_known, "unknown_first": first_unknown}}
 
 
 def text_entries(event):

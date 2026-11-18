@@ -9,6 +9,15 @@ from __future__ import annotations
 from ouroboros.text_sentences import first_sentence as first_sentence
 
 
+def stored_bounds(entries):
+    """Inclusive reader endpoints for display-ordered room entries."""
+    from ouroboros.chat_chain import format_address
+
+    first = min(entries, key=lambda entry: entry[2])
+    last = max(entries, key=lambda entry: entry[2])
+    return [format_address(first[0]), format_address(last[0])]
+
+
 def row_range(first, last):
     """Source coordinates carry the chat they were written in and their time; a single row needs one address."""
     return first if first == last else f"{first} → {last}"
@@ -106,14 +115,16 @@ def task_gists_before_work_lines(room, gone):
             and t["first"] in gone.get("F1", ())]
 
 
-def conversation_task_lines(group):
+def conversation_task_lines(group, *, with_sources=False):
     """Each work's task telling once within this conversation, beside all its host facts."""
     told = {(room.get("folded") or {}).get("task") for room in group["rooms"]}
     lines = {}
     for room in group["rooms"]:
         lines[room["room_id"]] = []
         for task in room["tasks"]:
-            lines[room["room_id"]].append(task_line(task, folded=task.get("task") in told))
+            folded = task.get("task") in told
+            line = task_line(task, folded=folded)
+            lines[room["room_id"]].append((line, task, "without_gist" if folded else "whole") if with_sources else line)
             if task.get("gist"):
                 told.add(task.get("task"))
     return lines

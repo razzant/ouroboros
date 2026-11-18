@@ -421,6 +421,15 @@ def test_overheard_unread_is_per_conversation_only_in_line_forms(tmp_path, provi
         host = mf.form_counts(snapshot, level)["host"]
         assert host["unread in rooms without my human's word or my reply"] == {"lines": 1, "sources": 6}
         assert host["unread"] == {"lines": 1, "sources": 1}
+        from ouroboros.memory_form_facts import memory_composition
+
+        parts = memory_composition(snapshot, level)["blocks"]["room"]["parts"]
+        counted = [p["sources"] for p in parts if p["kind"] == "conversation_unread"]
+        expected = {(r["room_id"], w["address"]) for r in group["rooms"] if r["overheard"]
+                    for w in r["words"] if "Topic" in w["text"]}
+        assert len(expected) == 6
+        assert any({(s["room_id"], s.get("address")) for s in sources} == expected and len(sources) == 6
+                   for sources in counted)
     aggregate = {"F6a": {group["key"], "unread"}}
     assert "7 words without recorded consideration" in draw(aggregate) and "with no recorded word of my human or reply of mine" not in draw(aggregate)
     counts = mf.form_counts(snapshot, mv.FloorLevel((("F6a", tuple(aggregate["F6a"])),)))
@@ -671,19 +680,32 @@ def test_unread_openings_quote_only_the_rows_own_text(own_text):
 @pytest.mark.parametrize("length", [40, 500])
 def test_event_openings_are_bounded_and_an_empty_room_names_its_last_fact(tmp_path, author, length):
     from ouroboros import dialogue_store as ds, memory_view_events as events
+    from ouroboros.memory_form_facts import memory_composition
+
+    def held_event_source(snapshot, room_id):
+        # The detailed room line, not the count used in the compact ordinary form.
+        return next(s for p in memory_composition(snapshot, mv.FULL_VIEW)["blocks"]["room"]["parts"]
+                    if p["kind"] == "conversation_events" and p["form"] == "host_fact"
+                    for s in p["sources"] if s["room_id"] == room_id)
+
     shared.world(tmp_path)
     row = _event_row("harbor", "one", 1, direction="system", type="task_summary", task_id="done")
     ds.append(tmp_path, "chat", row)
-    room = _event_group(view(tmp_path))["rooms"][0]
+    snapshot = view(tmp_path)
+    room = _event_group(snapshot)["rooms"][0]
     empty = events.room_line(room)
     assert "; no arrivals; last 2026-09-09 00:01; memory_read(" in empty
     assert "author not recorded" not in empty
+    # The zero-arrival line prints the captured last-activity scalar; its span's source carries it.
+    assert held_event_source(snapshot, room["room_id"])["facts"] == {"latest": room["facts"]["latest"]}
     first = "A" * length
     ds.append(tmp_path, "chat", _event_row("harbor", "one", 2, author, text=first + "\nLater paragraph."))
-    room = _event_group(view(tmp_path))["rooms"][0]
+    snapshot = view(tmp_path)
+    room = _event_group(snapshot)["rooms"][0]
     event = room["events"]
     assert event["first"]["opening"] == first[:160]
     assert "Event: 1 arrivals" in events.room_line(room) and "no arrivals" not in events.room_line(room)
+    assert "facts" not in held_event_source(snapshot, room["room_id"])  # an arrivals line prints no such scalar
 
 
 def test_a_conversation_of_several_rooms_reads_its_header_through_its_catalogue_place(tmp_path):

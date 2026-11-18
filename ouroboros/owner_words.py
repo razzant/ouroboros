@@ -173,7 +173,7 @@ def _held_origin(ref: Mapping[str, Any], held: Any) -> Mapping[str, Any] | None:
     return next(iter(matches.values())) if len(matches) == 1 else None
 
 
-def _deduped(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _deduped(rows: List[Dict[str, Any]], *, addressed: bool = False) -> List[Dict[str, Any]]:
     """Drop empty rows and repeats of one source: its reference, else (none recorded) its whitespace-normalized
     text and its time; the text alone only when no time was recorded either. Similar words under different
     references or times are not copies (BIBLE P1): two "yes" stay two. The first row of one identity keeps its
@@ -191,8 +191,19 @@ def _deduped(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         if key not in seen:
             kept.append(seen.setdefault(key, row))
-        elif row.get("attachments") and not seen[key].get("attachments"):
-            seen[key]["attachments"] = row["attachments"]
+            continue
+        first = seen[key]
+        if row.get("attachments") and not first.get("attachments"):
+            first["attachments"] = row["attachments"]
+        # Only the birth capture requests coordinates. A normalized-text match
+        # without a ref does not identify a twin, and a changed row cannot
+        # supply a reader for the earlier words even with the same client id.
+        if (addressed and row["ref"] and row["ts"] == first["ts"] and row["text"] == first["text"]
+                and row.get("author") == first.get("author")
+                and (not first.get("address") or not row.get("address") or first["address"] == row["address"])):
+            for field in ("address", "room_id", "origin_ref"):
+                if field in row:
+                    first.setdefault(field, row[field])
     return kept
 
 
@@ -674,21 +685,32 @@ def reply_target(drive_root: Any, reference: Any) -> Dict[str, str]:
     return {"address": address, "author": row_author(row)["label"], "text": render_row_text(row)}
 
 
-def task_governing_words(task: Mapping[str, Any]) -> Tuple[List[Dict[str, str]], str]:
-    """``(rows, absence marker)`` carried by value, read at the top level or under ``metadata``."""
+def task_governing_words(task: Mapping[str, Any], *, addressed: bool = False) -> Tuple[List[Dict[str, str]], str]:
+    """``(rows, absence marker)`` carried by value, read at the top level or under ``metadata``. ``addressed`` (an
+    inspection's capture alone): a carried row keeps the coordinates it was carried with."""
     source = _mapping(task)
     nested = _mapping(source.get("metadata"))
     holder = source if (FIELD in source or ABSENT_FIELD in source) else nested
     raw = holder.get(FIELD)
-    rows = [_row(item.get("text"), source=item.get("source"), carrier=str(item.get("carrier") or ""),
-                 task_id=item.get("task_id"), ts=item.get("ts"), ref=item.get("ref"), author=item.get("author"),
-                 attachments=item.get("attachments"))
-            for item in (raw if isinstance(raw, list) else []) if isinstance(item, Mapping)]
-    return [row for row in rows if _kept(row)], str(holder.get(ABSENT_FIELD) or "")
+    rows = []
+    for item in raw if isinstance(raw, list) else ():
+        if not isinstance(item, Mapping):
+            continue
+        row = _row(item.get("text"), source=item.get("source"), carrier=str(item.get("carrier") or ""),
+                   task_id=item.get("task_id"), ts=item.get("ts"), ref=item.get("ref"), author=item.get("author"),
+                   attachments=item.get("attachments"))
+        if _kept(row):
+            if addressed and isinstance(item.get("address"), str):
+                row["address"] = item["address"]
+            if addressed and isinstance(origin := item.get("origin_ref"), Mapping):
+                row["origin_ref"] = {key: origin[key] for key in ("chat_id", "client_message_id", "ts", "text_sha256")
+                                     if key in origin}
+            rows.append(row)
+    return rows, str(holder.get(ABSENT_FIELD) or "")
 
 
 def _chat_words(row: Mapping[str, Any], *, key: str, carrier: str, source: str, task_id: str = "",
-                root: Any = None) -> List[Dict[str, Any]]:
+                root: Any = None, addressed: bool = False) -> List[Dict[str, Any]]:
     """One chat row of my human's (held by a focus, or read from its room) as rows of the set: its words under the
     carriers' one reference (its room and client id; ``key``, its address, for a row with no client id), its files
     named beside them, then the card it answers, else the message it replies to, under that message's own author
@@ -701,12 +723,15 @@ def _chat_words(row: Mapping[str, Any], *, key: str, carrier: str, source: str, 
         root, reference if root is not None else {**reference, "unresolved": True})
     item = {"source": "owner_quiz_answer" if row.get("type") == "quiz_answer" else source,
             "content": owner_text(row), "reply_to": replied}
-    return _words_rows(item, carrier=carrier, task_id=task_id, ts=row.get("ts"), attachments=row.get("attachments"),
+    found = _words_rows(item, carrier=carrier, task_id=task_id, ts=row.get("ts"), attachments=row.get("attachments"),
                        ref=_chat_ref(row) if row.get("client_message_id") else key)
+    if addressed:
+        found[0]["address"] = key
+    return found
 
 
 def _held_words(held: Any, drive_root: Any, task_id: str, *, context: Any = None, accounts: Any = None,
-                read: bool = False) -> List[Dict[str, Any]]:
+                read: bool = False, addressed: bool = False) -> List[Dict[str, Any]]:
     """The rows a focus holds by address (``owner_relay.held_owner_messages``) as rows of the set. ``context``
     selects by the carriage fact beside a held row: False, the rows that reached this work (a held value without
     a ``carried`` fact counts as one); True, the rows held as context, which went to another work; None, every
@@ -727,7 +752,7 @@ def _held_words(held: Any, drive_root: Any, task_id: str, *, context: Any = None
             source_accounts = accounts_by_root[str(source_root)] = owner_place_accounts(source_root)
         if quotable_owner_row(row, source_root, accounts=source_accounts):
             rows += _chat_words(row, key=str(key), carrier=f"went to {went}" if went else "held",
-                                source="owner_mailbox", task_id=task_id, root=source_root if read else None)
+                                source="owner_mailbox", task_id=task_id, root=source_root if read else None, addressed=addressed)
     return rows
 
 
@@ -751,8 +776,11 @@ def _live_words(drive_root: Any, room: int, accounts: Any, marks: Any = None, *,
     def words(row: Any, carrier: str, source: str) -> List[Dict[str, Any]]:
         if not quotable_owner_row(row, drive_root, accounts=accounts):
             return []
-        found = _chat_words(row, key=(key := format_address(row_address(row))), carrier=carrier, source=source, root=drive_root)
-        return [{**found[0], "address": key}, *found[1:]] if addressed and found else found
+        found = _chat_words(row, key=format_address(row_address(row)), carrier=carrier, source=source,
+                            root=drive_root, addressed=addressed)
+        if addressed and carrier == "room":  # only this row passed room_rows; its quoted target did not
+            found[0]["room_id"] = str(room)
+        return found
 
     rows: List[Dict[str, Any]] = []
     gaps: List[str] = []
@@ -771,9 +799,11 @@ def _live_words(drive_root: Any, room: int, accounts: Any, marks: Any = None, *,
         try:  # the registry's retained copies of the Project's first words: read whether or not the room read failed
             for origin in project_origin_rows(drive_root, room):
                 ref = _mapping(origin.get("ref"))
-                rows.append(_row(origin.get("text"), source="origin_message", carrier="origin", ts=ref.get("ts"),
-                                 ref=_chat_ref(ref) if ref.get("client_message_id") else "",
-                                 attachments=origin.get("attachments")))
+                row = _row(origin.get("text"), source="origin_message", carrier="origin", ts=ref.get("ts"),
+                           ref=_chat_ref(ref) if ref.get("client_message_id") else "", attachments=origin.get("attachments"))
+                if addressed:
+                    row["origin_ref"] = ref
+                rows.append(row)
         except Exception as exc:
             log.warning("owner words: origin rows of room %s unreadable at a handoff (%s: %s)", room, type(exc).__name__, exc)
             gaps.append(f"[Host fact: the origin rows the Project retained for room {room} could not be read here "

@@ -1023,6 +1023,26 @@ def test_a_conversation_page_seals_every_room_of_its_conversation_each_in_its_ow
     document = _memory_read(ctx, node_id=page["node_id"])
     assert all(reader in document for reader in readers.values()), document  # every room it sealed, the middle one too
     assert "second issue" in _memory_read(ctx, room_id=i2, rows=True, **{"from": addr(rows[1]), "to": addr(rows[1])})
+    # A sealed room's map names the room that published the page, not the showing one; a capture from before
+    # that record keeps the reader and discloses the gap (its room-liveness coverage lives here: one installation,
+    # one publication).
+    from ouroboros.memory_form_facts import ordinary_composition
+
+    showing = mv.capture_memory_view(tmp_path, {"id": "map-focus", "chat_id": int(i1)},
+                                     mv.ViewSpec("integrator", room_id=i1))
+    assert [item["room_id"] for item in showing.room["sealed_by"]] == [i3]
+
+    def held(view):
+        parts = ordinary_composition(view)["blocks"]["room"]["parts"]
+        return next(p for p in parts if p["kind"] == "sealed_by")["sources"][0]
+    source = held(showing)
+    assert source["room_id"] == i3 and "publishing_room_gap" not in source
+    assert source["read"]["arguments"] == {"node_id": page["node_id"], "revision": page["node_id"]}
+    assert "Three issues read" in _memory_read(ctx, **source["read"]["arguments"])
+    old = json.loads(mv.snapshot_json(showing))
+    old["room"]["sealed_by"][0].pop("room_id")  # a capture from before the publisher was recorded
+    legacy = held(mv.snapshot_from_json(json.dumps(old)))
+    assert "room_id" not in legacy and legacy["publishing_room_gap"] and legacy["read"] == source["read"]
     account = write(ctx, kind="account", text="The repository, read.", sources=[page["node_id"]], room_id=i3)["node_id"]
     preview = _memory_read(ctx, proposed_selection={"target_id": account, "replaces": [page["node_id"]]}, room_id=i3)
     assert all(f"rows: {reader}" in preview for reader in readers.values()), preview  # one reader per covered room
