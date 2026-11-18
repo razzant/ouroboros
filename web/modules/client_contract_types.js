@@ -872,6 +872,7 @@
 /** @typedef {import('./place_contract_types.js').PlaceUpdateRequest} PlaceUpdateRequest */
 /** @typedef {import('./place_contract_types.js').PlaceCircleChoice} PlaceCircleChoice */
 /** @typedef {import('./place_contract_types.js').PlaceDescription} PlaceDescription */
+/** @typedef {import('./place_contract_types.js').PlaceOrigin} PlaceOrigin */
 /** @typedef {import('./place_contract_types.js').CircleSummary} CircleSummary */
 /** @typedef {import('./place_contract_types.js').CircleCreateRequest} CircleCreateRequest */
 /** @typedef {import('./place_contract_types.js').CircleUpdateRequest} CircleUpdateRequest */

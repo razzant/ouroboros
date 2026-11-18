@@ -824,10 +824,13 @@ def test_a_seed_carrying_a_room_or_lineage_is_never_attested_unscoped(carried):
 
 def test_a_presence_seed_stays_unmarked():
     from ouroboros import presence_carrier
+    from ouroboros.presence_admission import PresenceAdmission
+    from ouroboros.presence_bindings import PresenceEndpoint
     from ouroboros.presence_events import PresenceTurnEvent
 
     event = PresenceTurnEvent("event1", "chat", "a", "r", "", "chat:a:r", {"platform_actor_id": "person"}, {}, {}, "hello")
-    admission = SimpleNamespace(binding_id="binding", transport_skill="skill", allowance=None)
+    endpoint = PresenceEndpoint(event.provider, event.account_id, event.conversation_id)
+    admission = PresenceAdmission(binding_id="binding", transport_skill="skill", origin=endpoint, destination=endpoint)
     task = presence_carrier.presence_seed_task(admission=admission, event=event, skill_name="skill", event_payload={},
                                                staged_files=(), gate_wait=False)
     assert "_project_scope_none" not in task
