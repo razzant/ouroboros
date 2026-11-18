@@ -347,11 +347,18 @@ def _words_rows(item: Mapping[str, Any], *, carrier: str, task_id: str, content:
     from ouroboros.review_evidence_sections import _owner_content_projection
 
     words = _owner_content_projection(item.get("content") if content is None else content)
+    shown = words
     if item["source"] == OWNER_PRESS:  # an act: the host's record stands where words would; its card follows
         words = press_record(words, answered_card_source(item)[1])
     rows = [_row(words, source=item["source"], carrier=carrier, task_id=task_id, ts=ts or _item_time(item),
                  ref=ref or row_ref(item), attachments=attachments)]
-    if (target := _mapping(item.get("reply_to"))).get("address"):
+    target = _mapping(item.get("reply_to"))
+    if item["source"] == OWNER_PRESS or is_answered_card(target) or target.get("card_id"):
+        rows[0]["answer_input"] = {**({"shown": shown} if item["source"] == OWNER_PRESS else {}),
+                                   "reply_address": target.get("address", ""),
+                                   **{k: item[k] for k in ("source_task_id", "quiz_id") if item.get(k)},
+                                   **{k: target[k] for k in ("card_id", "pressed_label") if target.get(k)}}
+    if target.get("address"):
         rows.append(_row(target.get("text"), source=REPLY_TARGET, carrier=carrier, task_id=task_id,
                          ref=target["address"], author=target.get("author") or "author not recorded"))
     return rows
@@ -730,6 +737,8 @@ def task_governing_words(task: Mapping[str, Any], *, addressed: bool = False) ->
                    task_id=item.get("task_id"), ts=item.get("ts"), ref=item.get("ref"), author=item.get("author"),
                    attachments=item.get("attachments"))
         if _kept(row):
+            if isinstance(fact := item.get("answer_input"), Mapping):
+                row["answer_input"] = dict(fact)
             if addressed and isinstance(item.get("address"), str):
                 row["address"] = item["address"]
             if addressed and isinstance(origin := item.get("origin_ref"), Mapping):
@@ -754,7 +763,11 @@ def _chat_words(row: Mapping[str, Any], *, key: str, carrier: str, source: str, 
     living = living_card_input(row, root)
     replied = living.get("reply_to") or answered_card_reply(block, asker) or reply_target(
         root, reference if root is not None else {**reference, "unresolved": True})
-    item = living or {"source": row_source(row, source), "content": owner_text(row), "reply_to": replied}
+    carried = _mapping(row.get("corpus_answer"))
+    item = living or {"source": row_source(row, source), "content": owner_text(row),
+                      "reply_to": carried.get("reply_to") or replied,
+                      "source_task_id": asker or carried.get("source_task_id"),
+                      "quiz_id": _mapping(block).get("quiz_id") or carried.get("quiz_id")}
     found = _words_rows(item, carrier=carrier, task_id=task_id, ts=row.get("ts"), attachments=row.get("attachments"),
                        ref=_chat_ref(row) if row.get("client_message_id") else key)
     if addressed:

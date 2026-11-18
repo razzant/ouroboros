@@ -389,7 +389,7 @@ def test_a_relayed_answer_carries_the_card_it_answers(tmp_path, shape):
     assert row["reply_to"] == {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
                                "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n"
                                        "(host record: my human pressed option 1)"}
-    words = next(str(m["content"]) for m in messages if "Owner words quoted verbatim" in str(m["content"]))
+    words = next(str(m["content"]) for m in messages if "Owner card press" in str(m["content"]))
     assert "[Host question frame]" in words and "Publish exactly this reply?" in words  # the model reads it too
     assert ("\n(host record: my human pressed «1. Publish it» and wrote no words; the label is the text of task asker)"
             "\n") in words and "\n1. Publish it\n" not in words
@@ -1076,3 +1076,29 @@ def test_relay_puts_last_local_words_on_each_press_and_excludes_carried_words(tm
     owner_rows = [m for m in messages if m.get("_host_context_kind") == "owner_words"]
     assert [line in m["content"] for m in owner_rows] == [True, True, False]
     assert all(line not in m["content"] for m in messages if m not in owner_rows)
+
+
+def test_a_carried_corpus_answer_keeps_its_card_without_a_room_row(tmp_path):
+    from ouroboros.owner_relay import _rows_to_carry, inject_relay
+    from ouroboros.owner_words import answered_card_reply
+
+    ctx = context(tmp_path)
+    card = {"quiz_id": "reed-option", "question": "Which reed?", "options": ["Tall reed"],
+            "answered_index": 0}
+    target = answered_card_reply(card, "reed-maker")
+    ctx._owner_directives = [
+        {"source": "owner_press", "content": "1. Tall reed", "reply_to": target, "source_task_id": "reed-maker",
+         "quiz_id": "reed-option", "client_message_id": "reed-press", "chat_id": "1"},
+        {"source": "owner_mailbox", "content": "  before dusk  ", "client_message_id": "reed-text", "chat_id": "1"}]
+    child = _helper(tmp_path, "reed-reader")
+    frames = []
+    for _, _, quote, _, _ in _rows_to_carry(ctx, tmp_path):
+        entry, created = _carried_entry(tmp_path, tmp_path, child.task_id, quote, went_to=ctx.task_id)
+        assert created
+        inject_relay(child, entry, frames)
+    assert len(frames) == 2
+    press, words = (row["content"] for row in frames)
+    assert "Owner words quoted verbatim" not in press and "pressed" in press
+    assert "Which reed?" in press and "reed-maker" in press
+    assert "Owner words quoted verbatim" in words and words.endswith("  before dusk  ")
+    assert not getattr(child, "_owner_directives", None)

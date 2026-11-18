@@ -117,6 +117,9 @@ def row_source(row: Any, words_source: str) -> str:
     from ouroboros.owner_relay import owner_text
     from ouroboros.owner_words import answered_card_source
 
+    if isinstance(row, Mapping) and isinstance(answer := row.get("corpus_answer"), Mapping):
+        if answer.get("source") in (OWNER_PRESS, "owner_quiz_answer", "owner_mailbox", "initial_user", "origin_message"):
+            return answer["source"]
     if living := living_card_input(row):
         return living["source"]
     block = answered_card_source(row)[0]
@@ -131,7 +134,11 @@ def row_words(row: Any) -> str:
     from ouroboros.owner_words import answered_card_source
 
     if row_source(row, "") == OWNER_PRESS:
-        return press_record(owner_text(row), living_card_input(row).get("source_task_id") or answered_card_source(row)[1])
+        carried = row.get("corpus_answer") or {}
+        if carried.get("rendered"):
+            return owner_text(row)
+        return press_record(owner_text(row), carried.get("source_task_id") or living_card_input(row).get("source_task_id")
+                            or answered_card_source(row)[1])
     return owner_text(row)
 
 
