@@ -349,6 +349,53 @@ def test_real_transcript_landing_after_the_answer_finds_nothing_owed(host_world,
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('recognition', ['newer-first', 'older-failed'])
+@pytest.mark.parametrize('engine', ['openai', 'grok'])
+def test_real_transcripts_out_of_order_keep_the_answer_after_its_words(host_world, monkeypatch, engine, recognition):
+    """Transcripts of different utterances land in any order on these engines, matched to their items. The owner asked,
+    heard the answer and spoke again while the question still awaited its transcript: the newer words are written as
+    they come, and the answer still follows its own words, or their failed recognition (#3633)."""
+    from tests._live_stack import stack
+    more = 'One more thing, please.'
+
+    def at(live, text):
+        return next(i for i, row in enumerate(live.host.messages) if str(row.get('content')).endswith(text))
+
+    async def scenario():
+        async with stack(host_world, monkeypatch, engine) as live:
+            first, said, items = live.wire, spoken(live), len(live.call.audio_ms)
+            first.input_start('late')
+            await live.wait(lambda: live.call.input_open, 30)
+            stop_without_transcript(first, 'late')
+            if engine == 'grok':
+                first.answer()  # xAI VAD owns this response
+            await live.wait(lambda: spoken(live) == said + 1 and not live.call.active_responses
+                            and len(live.call.audio_ms) > items, 30)
+            item, answer = list(live.call.audio_ms)[-1], first.spoken[-1]
+            await live.wait(lambda: live.call.heard(item), 30)
+            answers_only_on(monkeypatch)  # the newer words get no answer of their own here
+            first.input_start('more')
+            await live.wait(lambda: live.call.input_open, 30)
+            stop_without_transcript(first, 'more')
+            if recognition == 'newer-first':
+                transcript(first, 'more', more)
+                await live.wait(lambda: canonical(live, more) == 1, 30)
+                await asyncio.sleep(.1)
+                assert canonical(live, answer) == 0, 'newer words never release the answer to older ones'
+                transcript(first, 'late', QUESTION)
+                await live.wait(lambda: canonical(live, QUESTION) == 1 and canonical(live, answer) == 1, 30)
+                assert at(live, more) < at(live, QUESTION) < at(live, answer)
+            else:
+                await asyncio.sleep(.1)
+                assert canonical(live, answer) == 0, 'the answer waits for its own words'
+                first.put({'type': 'conversation.item.input_audio_transcription.failed', 'item_id': 'late'})
+                await live.wait(lambda: canonical(live, answer) == 1, 30)
+                transcript(first, 'more', more)
+                await live.wait(lambda: canonical(live, more) == 1, 30)
+                assert at(live, answer) < at(live, more)
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('words', ['said-before-the-answer', 'transcript-lagging-behind-it'])
 def test_real_gemini_answer_heard_before_its_turn_closes_follows_its_words(host_world, monkeypatch, words):
     """Ordinary Gemini closes the words and the answer at one turn completion, the answer's caption first, paced to the

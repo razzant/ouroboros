@@ -266,11 +266,14 @@ class _Call:
         # Speaking order. History is append-only, so an answer's row is placed before it is queued: it follows the owner's
         # words begun before its response and never waits for words begun after it; owner rows never wait. Recognition can
         # close words after their answer was heard (ordinary Gemini closes both captions at one turn completion paced to
-        # the end of playback; OpenAI and xAI transcribe beside the response). Utterances are counted as they begin and
-        # close in order: with a final owner caption, or once a converted batch leaves nothing said or awaiting
-        # recognition. ``answer_words`` is how many had begun when each response did (a response the adapter names for
-        # lagging words counts them too); ``spoken_rows`` holds heard or interrupted answers whose words are still open.
+        # the end of playback; OpenAI and xAI transcribe beside the response). Utterances are counted as they begin. A
+        # final owner caption closes the words it names (OpenAI and xAI name each utterance's item as it begins, and a
+        # failed recognition closes its item with no words: their transcripts of different utterances land in any order),
+        # else the oldest still open; once a converted batch leaves nothing said or awaiting recognition, all have
+        # closed. ``answer_words`` is how many had begun when each response did (a response the adapter names for
+        # lagging words counts them too); ``spoken_rows`` holds heard or interrupted answers until those have all closed.
         self.words_begun = self.words_closed = 0
+        self.word_items, self.words_shut = {}, set()  # item -> its utterance; utterances closed ahead of an older one
         self.answer_words, self.item_answer, self.spoken_rows, self.answering = {}, {}, [], ""
 
     async def run(self):
@@ -731,10 +734,13 @@ class _Call:
             await self.write_spoken(self.words_closed)
 
     async def write_spoken(self, closed):
-        """Queue every held answer whose words have closed, in the order they finished, once ``closed`` utterances have
-        closed; one still waiting holds back no other. Only an owner caption, the end of a converted batch and the
-        connection's end close words; a played receipt never decides it."""
+        """Queue every held answer whose words have closed, in the order they finished, once the first ``closed``
+        utterances have closed; one still waiting holds back no other. Only an owner caption, the end of a converted
+        batch and the connection's end close words; a played receipt never decides it."""
         self.words_closed = max(self.words_closed, closed)
+        while self.words_closed + 1 in self.words_shut:
+            self.words_closed += 1
+        self.words_shut = {number for number in self.words_shut if number > self.words_closed}
         ready = [row for need, row in self.spoken_rows if need <= self.words_closed]
         self.spoken_rows = [(need, row) for need, row in self.spoken_rows if need > self.words_closed]
         for row in ready:
@@ -757,9 +763,13 @@ class _Call:
                 if item in self.interrupted or self.heard(item):
                     await self.finish_spoken(item, interrupted=item in self.interrupted, completed=item not in self.interrupted)
             else:
-                await self.rows.put(dict(speaker=speaker, text=text, item_id=item, heard=heard,
-                    **({"speaker_label": ", ".join(sorted(self.meeting_speakers))} if heard and self.meeting_speakers else {})))
-                await self.write_spoken(min(self.words_closed + 1, self.words_begun))  # the oldest words still open
+                if data["text"]:  # an empty final is a recognition that failed: it closes its words and says none
+                    await self.rows.put(dict(speaker=speaker, text=text, item_id=item, heard=heard,
+                        **({"speaker_label": ", ".join(sorted(self.meeting_speakers))} if heard and self.meeting_speakers else {})))
+                words = self.word_items.get(item) or min(self.words_closed + 1, self.words_begun)  # else the oldest open
+                if words > self.words_closed:
+                    self.words_shut.add(words)
+                await self.write_spoken(self.words_closed)
             if speaker == "owner":
                 self.meeting_audio = False
                 self.meeting_speakers.clear()
@@ -988,6 +998,8 @@ class _Call:
                     self.input_open = True
                     self.spoken_answers = {data["response_id"]} if data.get("response_id") else set()
                     self.words_begun += 1
+                    if data.get("item_id"):  # the item its transcript will name
+                        self.word_items[data["item_id"]] = self.words_begun
                     if data.get("response_id"):  # begun already for these words: its spoken rows follow them
                         self.answer_words[data["response_id"]] = self.words_begun
                     await self.reader_wrote(self.input_frames())

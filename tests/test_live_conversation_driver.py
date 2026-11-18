@@ -1432,3 +1432,61 @@ def test_an_answer_held_for_newer_words_never_holds_an_older_answer(monkeypatch)
             host.hub.ended_by_owner = True
             await asyncio.wait_for(task, 2)
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('recognition', ['newer-first', 'older-failed'])
+def test_a_newer_transcript_landing_first_never_releases_an_older_answer(monkeypatch, recognition):
+    """#3633, OpenAI and xAI: transcripts of different utterances land in any order, so the adapter names each
+    utterance's item as it begins. The owner asked, heard the answer and spoke again while the question still awaited
+    its transcript. The newer words are written as they come and never release the answer; its own words do, as does
+    their failed recognition (an empty final), ahead of newer words."""
+    from skills.live_conversation import driver
+    calls = []
+
+    class Observed(driver._Call):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            calls.append(self)
+    monkeypatch.setattr(driver, '_Call', Observed)
+
+    def caption(speaker, item, text, final=True):
+        return LiveEvent('caption', {'speaker': speaker, 'item_id': item, 'text': text, 'final': final})
+
+    def texts(host):
+        return [row['text'] for row in host.captions]
+
+    async def scenario():
+        host = Host()
+        task, session = await started(host)
+        try:
+            session.emit('ready', input_rate=24000, output_rate=24000)
+            session.input_pending = True  # the adapter's fact: words awaiting their transcript
+            session.events.put_nowait([LiveEvent('input_started', {'item_id': 'asked'}), LiveEvent('input_done'),
+                                       LiveEvent('response_started', {'response_id': 'r1'}),
+                                       LiveEvent('audio', {'item_id': 'noon', 'rate': 24000, 'pcm': b'\0' * 960}),
+                                       caption('ouroboros', 'noon', 'Noon.')])
+            await until(lambda: 'noon' in calls[0].audio_ms)
+            host.hub.events.append(cp.PeerControl('peer', cp.PEER_OWNER, {'type': 'played', 'item_id': 'noon', 'played_ms': 20}))
+            await until(lambda: calls[0].spoken_rows)
+            session.events.put_nowait([LiveEvent('input_started', {'item_id': 'more'}), LiveEvent('input_done')])
+            if recognition == 'newer-first':
+                session.events.put_nowait([caption('owner', 'more', 'One more thing.')])
+                await until(lambda: texts(host))
+                await asyncio.sleep(.05)
+                assert texts(host) == ['One more thing.'], 'newer words never release the answer to older ones'
+                session.input_pending = False
+                session.events.put_nowait([caption('owner', 'asked', 'What time is it?')])
+                expected = ['One more thing.', 'What time is it?', 'Noon.']
+            else:
+                session.events.put_nowait([caption('owner', 'asked', '')])  # its recognition failed
+                await until(lambda: texts(host))
+                assert texts(host) == ['Noon.'], 'its own words, closed without text, release it at once'
+                session.input_pending = False
+                session.events.put_nowait([caption('owner', 'more', 'One more thing.')])
+                expected = ['Noon.', 'One more thing.']
+            await until(lambda: len(host.captions) == len(expected))
+            assert texts(host) == expected
+        finally:
+            host.hub.ended_by_owner = True
+            await asyncio.wait_for(task, 2)
+    asyncio.run(scenario())
