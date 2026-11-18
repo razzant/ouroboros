@@ -235,19 +235,16 @@ def _record_owner_directive(
 def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> None:
     """Capture the run's first user turn before system notices are added.
 
-    A task-authored objective copies its retained owner corpus, not the draft.
-    Other runs record the first user row, labelled only by what the host knows:
-    ``initial_user`` when the owner door stamped this run (``run_origin``'s
-    ``owner_ingress``), ``initial_text`` otherwise — a Presence event, a wake, a
-    schedule, a follow-up, a child's work order or an unmarked context; a first turn
-    the host composed for my human's press of a control (``objective_author`` kind
-    ``ui_control``) is ``initial_text`` although the press stamped the run; a late
-    answer's press without words is ``owner_press``, an act (``answer_facts``). A
-    schedule's text (its own schedule's, and its tree's by value) follows on every
-    path as ``schedule_text``: provenance, outside the owner sources, owed nothing.
-    The bytes of an owner row do not change, so ``owner_source_sha256`` stays what it
-    was; the label is read by the models that judge the corpus (acceptance, safety,
-    the post-task synthesis), never branched on by the host.
+    Drafted and continued work seed the retained owner corpus. Ordinary stamped first
+    turns are ``initial_user`` (``run_origin``'s ``owner_ingress``). Unstamped turns
+    and host-composed ``ui_control`` turns use ``initial_text``. A late quiz or
+    living-card press without words is ``owner_press``. A living form with words is
+    ``owner_mailbox`` and an unavailable living submission is ``owner_card_input``.
+    A private Presence quiz with words uses ``owner_quiz_answer``. Confirmed place
+    words and schedule text ride as ``place_confirmed`` and ``schedule_text`` outside
+    the owner sources. The host uses the source for owner-input counting and to keep
+    word verification to records of words. Models read the label beside the input when
+    judging acceptance, Safety or the work's result.
     """
     existing = getattr(ctx, "_owner_directives", None)
     if isinstance(existing, list) and existing:
