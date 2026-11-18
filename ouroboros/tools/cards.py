@@ -203,6 +203,13 @@ _OBJECT_PROTOTYPE_KEYS = frozenset({
     "constructor", "__proto__", "toString", "toLocaleString", "valueOf", "hasOwnProperty", "isPrototypeOf",
     "propertyIsEnumerable", "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__",
 })
+# String keys on JavaScript's Array.prototype. The reader below handles the array's own length and indices.
+_ARRAY_PROTOTYPE_KEYS = _OBJECT_PROTOTYPE_KEYS | {
+    "at", "concat", "copyWithin", "entries", "every", "fill", "filter", "find", "findIndex", "findLast",
+    "findLastIndex", "flat", "flatMap", "forEach", "includes", "indexOf", "join", "keys", "lastIndexOf",
+    "map", "pop", "push", "reduce", "reduceRight", "reverse", "shift", "slice", "some", "sort", "splice",
+    "toReversed", "toSorted", "toSpliced", "unshift", "values", "with",
+}
 
 
 def _js_truthy(value: Any) -> bool:
@@ -231,7 +238,7 @@ def _data_value(current: Any, path: Any) -> Any:
                 current = len(current)
                 continue
             if not (part.isascii() and part.isdecimal()):
-                return _PATH_UNKNOWN  # an array may also have a JavaScript property with this name
+                return _PATH_UNKNOWN if part in _ARRAY_PROTOTYPE_KEYS else None
             if (part != "0" and part.startswith("0")) or len(part) > len(str(len(current))):
                 return None
             index = int(part)
