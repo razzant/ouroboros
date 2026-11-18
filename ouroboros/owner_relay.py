@@ -246,6 +246,8 @@ def owner_quote(root, row: dict, *, address: str = "") -> dict:
     answered, asker = answered_card_source(row)
     if isinstance(answered, dict):  # a quiz row's card or a late answer's snapshot, under the asking task's name
         from ouroboros.owner_quiz import recorded_answer_frame
+        from ouroboros.answer_facts import row_source
+        quote["input_source"] = row_source(row, "owner_mailbox")
         quote["question_frame"] = recorded_answer_frame(answered, asker=str(asker or ""))
     return quote
 

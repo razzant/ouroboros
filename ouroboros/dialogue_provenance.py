@@ -704,8 +704,13 @@ def relation_text(entry: Mapping[str, Any]) -> str:
         lines.append(reference(_mapping(entry.get("reply_to"))))
     for quote in relay_quotes(entry):
         place = _mapping(quote.get("source"))
-        lines.append(f"[Owner words quoted from {_text(place.get('label')) or 'a chat'} "
-                     f"{_text(place.get('address'))}]\n{_text(quote.get('text'))}")
+        location = f"{_text(place.get('label')) or 'a chat'} {_text(place.get('address'))}"
+        text = str(quote.get("text") or "")
+        # Older quiz envelopes kept the host question frame without a separate act/words type.
+        if quote.get("input_source") == "owner_press" or (quote.get("question_frame") and not quote.get("input_source")):
+            lines.append(f"[Owner card answer from {location}]\n{quote.get('question_frame') or text}")
+        else:
+            lines.append(f"[Owner words quoted from {location}]\n{text}")
         if _mapping(quote.get("reply_to")):
             lines.append(reference(_mapping(quote.get("reply_to"))))
     return "".join("\n" + line for line in lines)
@@ -997,8 +1002,11 @@ def render_row_text(row: Mapping[str, Any]) -> str:
 
 def quote_words(row: Mapping[str, Any]) -> str:
     """The words an exact quote may take from one chat row (``chronicle_quotes``, ``memory_mark``): its
-    ``render_row_text``, except inbound place rows and reaction carriers offer only their own ``text``.
+    accepted comment for an answered quiz, plain text for inbound place rows and reactions, else ``render_row_text``.
     Connector facts and delivery details shown beside those words are the host's labels, never the speaker's."""
+    if row.get("type") == "quiz_answer":
+        quiz = _mapping(row.get("quiz"))
+        return "" if quiz.get("secret_request") else str(quiz.get("comment") or "")
     if (row.get("direction") == "in" and row_provenance(row) == "place"
             or reaction_fact(_mapping(row.get("transport")).get("message"))):
         return str(row.get("text") or "")

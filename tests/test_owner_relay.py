@@ -1026,3 +1026,23 @@ def test_running_work_content_contract_delivers_its_room_to_root_child_and_nanny
         drain(role)
         assert messages[role] == before
     assert own["text"] not in drain("other")
+
+
+@pytest.mark.parametrize("comment", ["", "  when the tide turns  "])
+def test_history_of_a_relay_preserves_the_act_or_exact_words(tmp_path, comment):
+    from ouroboros.dialogue_provenance import relation_text
+    from ouroboros.owner_relay import owner_quote, relay_envelope
+
+    card = {"quiz_id": "tide-card", "state": "answered", "question": "Which chart?",
+            "options": ["Use the tide chart"], "answered_index": 0, "comment": comment}
+    row = {"type": "quiz_answer", "task_id": "chart-maker", "quiz": card, "chat_id": 1, "ts": "2040-02-11T12:00:00Z"}
+    quote = owner_quote(tmp_path, row)
+    relay = relay_envelope("chart-handoff", [quote], chat_id=1)
+    assert relay["text"] == (comment or "1. Use the tide chart")
+    frame = relation_text({"relay": relay})
+    assert quote["source"]["address"] in frame
+    if comment:
+        assert "Owner words quoted" in frame and frame.endswith("\n" + comment)
+    else:
+        assert "pressed" in frame and "Use the tide chart" in frame and "chart-maker" in frame
+        assert "Owner words quoted" not in frame
