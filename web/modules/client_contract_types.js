@@ -429,6 +429,7 @@
  * @property {string=} ts
  * @property {string=} task_id
  * @property {'work'|'room'|'none'=} target_home  // what decides the quoted row's room; an older reference lacks it
+ * @property {string=} work_task_id  // addressed work, not the quoted author; empty means unresolved work
  * @property {boolean=} unresolved
  */
 

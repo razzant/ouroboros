@@ -297,13 +297,72 @@ class TestOwnerReplyLink:
         return types.SimpleNamespace(root=tmp_path, nova=nova, notice=notice, host=host,
                                      bridge=message_bus.get_bridge())
 
-    def test_a_direct_reply_in_main_to_a_project_message_is_in_that_project_and_dispatches_only_in_main(self, room):
+    @pytest.mark.parametrize("source", ["work_card", "notice", "handoff", "nested", "child"])
+    def test_explicit_work_wins_over_the_live_room_reader_and_replay_is_once(self, room, source, monkeypatch):
+        from ouroboros import server_owner_routing as router
+        from ouroboros.owner_mailbox import _mailbox_path
+        from ouroboros.task_results import write_task_result
+
+        target = "nova-root"
+        address = room.notice["row_address"]
+        if source == "work_card":
+            address = f"task:{target}"
+        elif source == "handoff":
+            write_task_result(room.root, "launcher", "completed", chat_id=1, _is_direct_chat=True)
+            row = ds.append(room.root, "chat", {"ts": "2026-11-01T10:00:00Z", "direction": "out", "chat_id": 1,
+                            "task_id": "launcher", "about_work_task_id": target, "text": "I sent that to the work."}).row
+            address = format_address(row_address(row))
+        elif source == "nested":
+            earlier, _ = _owner(room.bridge, room.root, "My first reply", address, message_id="earlier")
+            address = format_address(row_address(earlier))
+        elif source == "child":
+            target = "exact-child"
+            row = ds.append(room.root, "chat", {"ts": "2026-11-01T10:01:00Z", "direction": "system",
+                            "chat_id": 1, "task_id": target, "parent_task_id": "nova-root",
+                            "card_row": "timeline", "text": "A milestone from the child."}).row
+            address = format_address(row_address(row))
+        written, handover = _owner(room.bridge, room.root, "Only for this work", address, message_id="explicit")
+        repeat, duplicate = _owner(room.bridge, room.root, "Only for this work", address, message_id="explicit")
+        assert repeat == written and not duplicate
+        assert written["reply_to"]["work_task_id"] == target
+        assert written["reply_to"]["address"] == address
+        current = []
+        monkeypatch.setattr(router, "_route_main_followup", lambda *args, **kw: current.append(args[2]) or "")
+        monkeypatch.setattr(router, "_decision_turn_metadata", lambda _ctx, _chat, _id, metadata, _roots: metadata)
+        task = {"id": target, "chat_id": room.nova, "root_task_id": "nova-root",
+                "delegation_role": "subagent" if source == "child" else "root"}
+        context = types.SimpleNamespace(DRIVE_ROOT=room.root, RUNNING={target: {"task": task}}, PENDING=[],
+                                        handle_chat_direct=lambda *args, **kw: None)
+
+        def accept(text, passed):
+            router._route_owner_message(room.bridge, context,
+                {**passed, "text": text, "origin_message_ref": passed["accepted_source_ref"]})
+
+        accept("Only for this work", handover[0])
+        assert not current
+        mail = _mailbox_path(room.root, target).read_text(encoding="utf-8")
+        assert "Only for this work" in mail and address in mail
+        assert mail.count("Only for this work") == 1
+        if source == "child":
+            assert not _mailbox_path(room.root, "nova-root").exists()
+        _, ordinary = _owner(room.bridge, room.root, "Now something else", "", message_id="ordinary")
+        accept("Now something else", ordinary[0])
+        assert current == ["Now something else"]
+        assert _mailbox_path(room.root, target).read_text(encoding="utf-8") == mail
+        context.RUNNING.clear()
+        _, late = _owner(room.bridge, room.root, "Too late", address, message_id="closed")
+        accept("Too late", late[0])
+        assert current == ["Now something else"]
+        assert _mailbox_path(room.root, target).read_text(encoding="utf-8") == mail
+
+    def test_a_work_reply_keeps_one_canonical_row_and_targets_the_work(self, room):
         row, dispatched = _owner(room.bridge, room.root, "Why is this not in Nova?", room.notice["row_address"],
                                  message_id="owner-1")
         echo = next(f for f in room.host.frames if f.get("client_message_id") == "owner-1" and f.get("role") == "user")
         assert echo["chat_id"] == 1 and echo["also_rooms"] == [room.nova]
         assert row["reply_to"]["target_home"] == "work" and row["reply_to"]["task_id"] == "nova-root"
-        # Shown in both rooms at its one Main address; handed only to Main's ordinary routing.
+        assert row["reply_to"]["work_task_id"] == "nova-root"
+        # Shown in both rooms at its one Main address; ingress still hands over the original room.
         assert "Why is this not in Nova?" in _texts(room.root, 1)
         assert "Why is this not in Nova?" in _texts(room.root, room.nova)
         address = format_address(row_address(row))
@@ -312,18 +371,20 @@ class TestOwnerReplyLink:
         from ouroboros.owner_mailbox import _mailbox_path
         assert not _mailbox_path(room.root, "nova-root").exists()  # appearance is not a tell, wake or Resume
 
-    def test_unrelated_main_speech_and_the_reply_chain_stay_in_main(self, room):
+    def test_unrelated_main_speech_stays_in_main_and_an_addressed_reply_chain_keeps_the_work(self, room):
         # A Main direct turn's answer: not a Project message.
         ds.append(room.root, "chat", {"ts": "2026-10-28T06:00:00Z", "direction": "out", "chat_id": 1,
                                       "task_id": "main-turn", "text": "A Main answer."})
         main_answer = format_address(row_address(ds.rows_by_identity(room.root, 1, "2026-10-28T06:00:00Z")[0].row))
         _owner(room.bridge, room.root, "About the Main answer.", main_answer, message_id="owner-2")
         first, _ = _owner(room.bridge, room.root, "About the notice.", room.notice["row_address"], message_id="owner-3")
-        # A Reply to that Reply: one hop only, never the chain.
-        _owner(room.bridge, room.root, "And about my own reply.", format_address(row_address(first)), message_id="owner-4")
+        # The immediate quote stays the owner's row; its work address is inherited separately.
+        nested, _ = _owner(room.bridge, room.root, "And about my own reply.", format_address(row_address(first)),
+                           message_id="owner-4")
+        assert nested["reply_to"]["role"] == "user" and nested["reply_to"]["work_task_id"] == "nova-root"
         project = _texts(room.root, room.nova)
         assert "About the notice." in project
-        assert "About the Main answer." not in project and "And about my own reply." not in project
+        assert "About the Main answer." not in project and project.count("And about my own reply.") == 1
         assert {"About the Main answer.", "And about my own reply."} <= set(_texts(room.root, 1))
 
     def test_a_reply_to_an_owner_row_written_in_the_project_is_in_that_project(self, room):

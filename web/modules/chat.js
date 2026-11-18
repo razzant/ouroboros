@@ -7,7 +7,7 @@ import { bindScrollFade } from './scroll_fade.js';
 import { createRoomHeader, mainHeaderActionsHtml } from './chat_header.js';
 import { pageLabel } from './pages.js';
 import { showToast } from './toast.js';
-import { ORIGIN_ADDRESSED_NOTICE_TYPES, childRowPlacement, replayConcludesTask } from './chat_row_placement.js';
+import { ORIGIN_ADDRESSED_NOTICE_TYPES, childRowPlacement, placeWorkReply, replayConcludesTask } from './chat_row_placement.js';
 import { appendProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold, syncSavedProjectContext } from './project_answer.js';
 import { createWorkPortals, isPortal, reconcilePortalNotes } from './work_portal.js';
 import { createTaskEpisodes } from './task_episodes.js';
@@ -801,9 +801,9 @@ export function createChatInstance({
     }
 
     // Main blocks with work offer conversion unless their origin is bound (the same /api/state fact app.js
-    // reads); titles use the same work predicate. Every root work card offers Reply in its row menu.
+    // reads); card Reply selects the exact work, including a visible child.
     function syncBlockChrome(record) {
-        replies.syncCard(record, !record.isSubagent && (isPortal(record) || blockHasWork(record)));
+        replies.syncCard(record, record.isSubagent || isPortal(record) || blockHasWork(record));
         // A child is never a convertible unit (it inherits its root's Project by
         // lineage) and its title is its role: both root writers skip it.
         const work = !record.isSubagent && blockHasWork(record);
@@ -1223,6 +1223,7 @@ export function createChatInstance({
                 <div data-live-phase-detail hidden></div>
                 <dl class="chat-live-facts" data-live-facts hidden></dl>
                 <div data-live-cost-detail hidden></div>
+                <div data-live-work-replies hidden></div>
             </div>
             <div class="chat-live-timeline scroll-fade-y" data-live-timeline id="${escapeHtmlAttr(timelineId)}"></div>
             <div class="chat-live-episode-history" data-live-episode-history hidden></div>
@@ -2439,6 +2440,7 @@ export function createChatInstance({
                         renderLiveCardMeta(record);
                     }
                 }
+                for (const row of messages) if (row.role === 'user') placeWorkReply(messagesDiv, liveCardRecords, row);
                 for (const row of messages) {
                     const record = liveCardRecords.get(row.presentation_owner_task_id || row.task_id);
                     if (!record) continue;
@@ -3258,7 +3260,8 @@ export function createChatInstance({
                 textPlaceholder: msg.text_placeholder === true, reply: msg,
                 },
             ));
-            withStableViewport(() => markIngressSaved(messagesDiv, msg) | replies.adopt(msg) | markSwarmLabel(messagesDiv, msg));
+            withStableViewport(() => markIngressSaved(messagesDiv, msg) | replies.adopt(msg)
+                | markSwarmLabel(messagesDiv, msg) | placeWorkReply(messagesDiv, liveCardRecords, msg));
             unconfirmed.settle(msg);
             syncChatStatus();
             return;

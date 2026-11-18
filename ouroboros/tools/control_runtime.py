@@ -519,7 +519,7 @@ def _main_notice_refusal(ctx: ToolContext, chat_id: object, *, asked_main: bool 
 
 
 def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destination: str = "current",
-                       reply_to_relay: str | None = None, request_id: str = "") -> str:
+                       reply_to_relay: str | None = None, request_id: str = "", about_work: str = "") -> str:
     """Send a separate owner reply without completing the ongoing task.
 
     ``destination="main"`` addresses the owner's main chat from an owner-visible
@@ -584,6 +584,13 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
 
     relay = {}
     reply_meta = {}
+    work = str(about_work or "").strip()
+    if work:
+        if (reply_to_relay is not None or not getattr(ctx, "is_direct_chat", False)
+                or work not in getattr(ctx, "_confirmed_reply_works", ()) or owner_contact_refusal(ctx, chat_id)):
+            return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
+                "WORK_REPLY_TARGET_UNVERIFIED: choose a task this owner turn just started or told. Nothing was sent.")))
+        reply_meta["about_work_task_id"] = work
     if reply_to_relay is not None:
         from ouroboros.owner_relay import select_return
         from ouroboros.chat_references import resolve_reply

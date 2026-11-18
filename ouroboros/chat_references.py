@@ -100,9 +100,67 @@ def resolve_reply(root, address: str) -> dict:
     return {"address": address, "unresolved": True}
 
 
-def ingress_reply(root, metadata: dict) -> dict:
-    """Shared web/HTTP/skill seam. Raw input is resolved, never trusted as a preview."""
-    return resolve_reply(root, metadata.get("reply_to", ""))
+def ingress_reply(root, metadata: dict, *, route_work: bool = False) -> dict:
+    """Resolve the quoted row and its work separately, before the owner row is written.
+
+    A saved work id is an address, not an assertion that the work still reads.
+    An empty work id records a proven conflict or a read gap; absence leaves an
+    ordinary chat Reply alone. The next Reply can inherit this fact in one read.
+    """
+    address = metadata.get("reply_to", "")
+    if not route_work:
+        return resolve_reply(root, address)
+    if not isinstance(address, str) or not address or address.startswith("task:"):
+        ref = resolve_reply(root, address)
+        return {**ref, "work_task_id": ref["task_id"]} if ref.get("kind") == "work_card" else ref
+    try:
+        row, _ = resolve_history_row(root, address)
+    except (ValueError, StoreError, OSError):
+        row = None
+    if not row:
+        return {"address": address, "unresolved": True}
+    ref = reference_from_row(row)
+    try:
+        work = _reply_work(root, row)
+    except (StoreError, OSError):
+        work = ""
+    return {**ref, "work_task_id": work} if work is not None else ref
+
+
+def _reply_work(root, row: dict) -> str | None:
+    """Use host-stamped relationships, never a quote's wording or a task's title."""
+    from ouroboros.dialogue_provenance import row_provenance
+    from ouroboros.presence_owner_contact import private_main_row
+    from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES
+    from ouroboros.task_results import load_task_result
+
+    quote = row.get("reply_to") or {}
+    if row.get("direction") == "in":
+        return quote.get("work_task_id") if isinstance(quote, dict) else None
+    kind = row.get("type") or row.get("system_type") or ""
+    task_id = str(row.get("task_id") or "")
+    if (private_main_row(row) or row_provenance(row) == "place"
+            or kind in ORIGIN_ADDRESSED_NOTICE_TYPES - {"relay_reply"}):
+        return None
+    if linked := row.get("about_work_task_id"):
+        return linked
+    if not task_id:
+        return None
+    if row.get("card_row") or row.get("parent_task_id") or kind in {
+        "project_started", "project_handoff", "project_completion_summary", "task_summary", "proactive_message",
+        "main_notice", "relay_entry", "relay_reply",
+    }:
+        return task_id
+    task = load_task_result(root, task_id, strict=True)
+    if not task:
+        return task_id if row.get("is_progress") else None
+    if not task.get("_is_direct_chat"):
+        return task_id
+    from ouroboros.projects_registry import project_binding_for_task
+
+    if project_binding_for_task(root, task_id, strict=True):
+        return task_id  # conversion preserves the identity of the original turn
+    return None
 
 
 def origin_reply(root, task_id: str, metadata=None) -> dict:

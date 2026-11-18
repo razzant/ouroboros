@@ -707,7 +707,7 @@ def handle_web_message(
     metadata = dict(task_metadata or {})
     host_fact = metadata.get("host_fact") or {}  # host call admission; browser ingress constructs its own metadata
     call_open = isinstance(host_fact, dict) and host_fact.get("kind") == "call_open"
-    reply = ingress_reply(bus.DATA_DIR, metadata)
+    reply = ingress_reply(bus.DATA_DIR, metadata, route_work=not call_open)
     if reply:  # the obligation of a fresh acceptance replays the same reference
         metadata["reply_reference"] = reply
     if str(project_id or "").strip():

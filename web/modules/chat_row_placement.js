@@ -27,3 +27,16 @@ export function replayConcludesTask(row) {
         && (positiveTaskTerminalFact(row) || (!row.system_type && !row.msg_type && row.task_phase !== 'unfinished'))
         && !isNonTerminalMediaHistoryRow(row);
 }
+
+// Move the canonical bubble, with its quote and receipt, only if this room has the card.
+export function placeWorkReply(feed, cards, row) {
+    const work = row.reply_to?.work_task_id;
+    const slot = work && cards.get(work)?.root.querySelector('[data-live-work-replies]');
+    if (!slot?.isConnected || !row.client_message_id) return false;
+    const bubble = [...feed.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
+        .find(node => node.dataset.clientMessageId === row.client_message_id);
+    if (!bubble || bubble.parentElement === slot) return false;
+    slot.hidden = false;
+    slot.append(bubble);
+    return true;
+}

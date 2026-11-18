@@ -76,6 +76,8 @@ def _tell_task(ctx, task_id: str, note: str = "", quote: list | None = None, sum
     mode, receipt = _emit_and_wait_for_routing(ctx, event)
     status = receipt.get("status")
     if status in {"delivered", "read"}:
+        if getattr(ctx, "is_direct_chat", False) and not getattr(ctx, "task_metadata", {}).get("presence"):
+            ctx._confirmed_reply_works = {*getattr(ctx, "_confirmed_reply_works", ()), task_id}
         return (f"{handed} " if handed else "") + f"Message written to {target}; relay_id={relay_id}. Read acknowledgement follows when it drains."
     reason = receipt.get("reason") or ("target_not_steerable" if status in {"rejected", "needs_manual_target"}
                                       else "confirmation_timeout")

@@ -221,6 +221,7 @@ def _deliver_to_reader(
     lock's wait; a Project room's reader passes none."""
     owner_key, owner_meta = owner
     owner_attempt = int((owner_meta or {}).get("attempt") or 1)
+    message_written = False
     try:
         tid = str(candidate["task_id"])
         direct_agent = None
@@ -289,11 +290,10 @@ def _deliver_to_reader(
                 direct_lock_held = False
                 return ""
         task_drive = (pathlib.Path(ctx.DRIVE_ROOT) if direct_lock_held or remote_author
-                      else _task_drive_for_task(task_obj, tid))
+                      else _task_drive_for_task(task_obj, tid, canonical=ctx.DRIVE_ROOT))
         msg_id = f"{client_message_id}:{tid}" if client_message_id else None
         staged_manifest: list = []
         attachment_report = ""
-        message_written = False
         cancel_refused_in_txn = False
 
         def _drop_staged_inputs() -> None:
@@ -361,7 +361,7 @@ def _deliver_to_reader(
                     task_obj = live_meta.get("task") if isinstance(live_meta.get("task"), dict) else live_meta
                 from ouroboros.room_reader import is_reading
                 if not is_reading(task_drive, tid, task_obj, running=live_meta is not None,
-                                  fences=getattr(ctx, "BUDGET_ROOT_FENCES", None)):
+                                  fences=getattr(ctx, "BUDGET_ROOT_FENCES", None), canonical=ctx.DRIVE_ROOT):
                     return ""
                 # A worker may remain RUNNING to finish paid post-work after its
                 # answer/result settled. Its solve loop no longer drains this
@@ -463,8 +463,37 @@ def _deliver_to_reader(
         # from this stash carries the manifest; the task's mailbox carries the block.
         return tid
     except Exception:
-        log.debug("Mailbox follow-up routing failed; falling back to direct lane", exc_info=True)
+        log.debug("Mailbox follow-up routing raised", exc_info=True)
+        if message_written:
+            return tid  # bookkeeping cannot unsend a committed mailbox entry
     return ""
+
+
+def _reply_reader(ctx: Any, task_id: str) -> tuple[dict, tuple]:
+    """Read the exact work, including children, rather than enumerate the room's roots."""
+    from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
+    from ouroboros.projects_registry import project_chat_for_task
+    from ouroboros.task_carrier import execution_kind
+    from supervisor.workers import direct_chat_turn
+
+    running = getattr(ctx, "RUNNING", {})
+    meta = running.get(task_id)
+    task = meta.get("task", meta) if isinstance(meta, dict) else None
+    direct = direct_chat_turn(task_id) if task is None else None
+    task = task or direct
+    if not task or execution_kind(task) == "presence":
+        return {}, ("", None)
+    bound = project_chat_for_task(ctx.DRIVE_ROOT, task_id)
+    chat = int(bound or task.get("chat_id") or 0)
+    if not chat or is_a2a_chat_id(chat):
+        return {}, ("", None)
+    if (reserved := _reserved_project_for_chat(ctx, chat)) and reserved.get("lifecycle") != "active":
+        return {}, ("", None)
+    candidate = {"task_id": task_id, "chat_id": chat, "direct_chat": direct is not None, **{
+        key: task[key] for key in ("title", "project_id") if key in task
+    }}
+    key = _owner_turn_key(ctx, candidate, meta, chat) if not bound and isinstance(meta, dict) else ""
+    return candidate, (key, meta)
 
 
 def _owner_evolution_stop(ctx: Any, chat_id: int) -> str:
@@ -734,12 +763,32 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
 
     late, press = task_metadata.get("late_answer"), task_metadata.get("card_press")
     thread_of = (late_answer_ref(late) or late_press_ref(press) or {}).get("task_id", "")
+    # A proven explicit work address takes precedence over ordinary room readers.
+    # Missing/closed/ambiguous work is not permission to speak to somebody else.
+    raw_reply = task_metadata.get("reply_reference")
+    reply = raw_reply if isinstance(raw_reply, dict) else {}
+    addressed = (_ingress_source == "web" and realtime_turn is None and not (late or press or task_constraint or _is_a2a(chat_id))
+                 and bool(origin_ref) and ("work_task_id" in reply or reply.get("unresolved")))
+    routed_to_task, unnamed_label = "", "Task"
+    if addressed:
+        target = str(reply.get("work_task_id") or "")
+        try:
+            candidate, owner = _reply_reader(ctx, target) if target else ({}, ("", None))
+            if candidate:
+                routed_to_task = _deliver_to_reader(ctx, candidate, text or image_caption, client_message_id,
+                                                      task_metadata=task_metadata, image_data=image_data, owner=owner)
+        except (OSError, ValueError):
+            log.debug("Exact Reply destination unavailable", exc_info=True)
+        if not routed_to_task:
+            reason = "reply_work_not_reading" if target else "reply_work_unresolved"
+            _record_routing_receipt(bridge, ctx, chat_id=chat_id, client_message_id=client_message_id,
+                                    action="mailbox_delivery", target=target, status="rejected", reason=reason)
+            return
     # ONE read of the addressable roots for this message: the room's reader, Main's
     # manifest and the decision metadata all see the same projection.
-    roots = addressable_roots(ctx)
-    routed_to_task, unnamed_label = "", "Task"
+    roots = RootSnapshot() if addressed else addressable_roots(ctx)
     # A live call's admitted turn keeps the room it was opened in; it never re-routes.
-    if realtime_turn is None and ((project_id and not late) or thread_of):
+    if not addressed and realtime_turn is None and ((project_id and not late) or thread_of):
         routed_to_task = _route_project_chat_to_running_task(
             ctx,
             chat_id,
@@ -756,7 +805,7 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
             from ouroboros.owner_relay import carry_room_context
 
             carry_room_context(ctx.DRIVE_ROOT, chat_id, client_message_id, roots.rows(chat_id), routed_to_task)
-    elif realtime_turn is None and not (project_id or late or press or task_constraint):
+    elif not addressed and realtime_turn is None and not (project_id or late or press or task_constraint):
         # Main: my human's next words reach the one turn already answering them in this chat, else their own turn.
         routed_to_task = _route_main_followup(ctx, chat_id, text or image_caption, client_message_id,
                                               task_metadata=task_metadata, image_data=image_data, roots=roots)
