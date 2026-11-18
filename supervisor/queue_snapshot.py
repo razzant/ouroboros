@@ -913,6 +913,26 @@ def _direct_roots_caught(direct_roots: dict, snapshot_pending: list, running_row
             if task_id not in live_direct and task_id not in pending_ids and task_id not in running_ids]
 
 
+def _caught_with_saved_envelopes(direct_roots, pending, running):
+    from ouroboros.store_hot_facts import pausing_envelopes
+    direct = _direct_roots_caught(direct_roots, pending, running)
+    envelopes = pausing_envelopes(_queue().DRIVE_ROOT)
+    absent = _direct_roots_caught({"task_ids": envelopes}, pending, running)
+    rows = [{"id": tid, "task": envelopes[tid], "attempt": envelopes[tid]["_attempt"]} for tid in absent]
+    return running + rows, [tid for tid in direct if tid not in envelopes], absent
+
+
+def _publish_restored():
+    from supervisor.restart_retention import publish_pending_parks
+    q = _queue()
+    with q._queue_lock:
+        for task in q.PENDING:
+            if task.get("_budget_pause"):
+                task["_park_confirmation"] = "restart_during_pausing"
+    if not publish_pending_parks(q, "queue_restored"):
+        q.persist_queue_snapshot(reason="queue_restored")
+
+
 def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -> int:
     try:
         from ouroboros.queue_observation import load_queue_document, queue_stamp
@@ -954,8 +974,8 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
         # one fence call gives them the one cancel-intent path custody settles — except a direct root
         # whose exact budget pause was complete on disk, parked under its own id like a paused RUNNING row (#1196).
         direct_roots = dict(_queue().PRIOR_DIRECT_ROOTS)
-        direct_caught = _direct_roots_caught(direct_roots, snapshot_pending, running_rows)
-        if unread and not direct_caught:
+        running_rows, direct_caught, absent = _caught_with_saved_envelopes(direct_roots, snapshot_pending, running_rows)
+        if unread and not direct_caught and not absent:
             return 0
         snapshot_pending, unseen_pauses, consumed_rows, prior_roots = _retain_snapshot_pending(  # #1183 handoffs
             snapshot_pending, running_rows, stale=stale, certified=ts_unix is not None, direct_caught=direct_caught,
@@ -987,7 +1007,7 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
             if not unread:  # every row of a READ snapshot decided: this process's publications may replace it
                 _RESTORED.add(key)
             if restored > 0 or normalized:
-                _queue().persist_queue_snapshot(reason="queue_restored")
+                _publish_restored()
             return restored
         if stale and not snapshot_pending and not restored:
             _record_queue_restore(terminalized_running=fenced_running,
@@ -1200,7 +1220,7 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
         if not unread:
             _RESTORED.add(key)
         if restored > 0 or skipped_terminal > 0 or invalid_depth_restore or blocked_restore or normalized:
-            _queue().persist_queue_snapshot(reason="queue_restored")
+            _publish_restored()
         return restored
     except Exception:
         log.warning("Failed to restore pending queue from snapshot", exc_info=True)

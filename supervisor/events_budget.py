@@ -445,30 +445,16 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
                                defer_unknown_owner_fence: bool = False) -> Dict[str, Any]:
     """Park the SAME task id under its exact continuation: RUNNING -> PENDING.
 
-    Order: durable row must already say ``pausing`` for this pause_id/attempt
-    (the worker wrote it before raising) -> queue transition -> snapshot ->
-    row ``paused``. The WHOLE order — including the confirmation, the owner
-    projection and the event — runs under the queue lock a Resume grant also
-    holds, and the confirmation compare-and-sets the pause id AND its state, so
-    a park that completes late can never overwrite a grant or republish a
-    resumed task as paused (#1196, F1). A snapshot that cannot be persisted
-    leaves the row at ``pausing``: the pause is real (the source exists) but not
-    confirmed, and the next persisted snapshot or a restore completes it —
-    never a fake ``paused``. Also the crash-during-pausing completion path (``source``
-    names it), which is why nothing here reads the worker's event body — with
-    ONE exception: a direct turn with no RUNNING row parks from its event,
-    which carries the turn's own task record (``task`` beside ``_is_direct_chat``),
-    and THAT record is what the SAME task id is parked under (#1196). The row
-    check above still decides; the record only supplies the queue row.
+    Read the source-backed pausing row, park its attempt under Q, then publish outside Q.
+    Confirmation compares the pause, state and grant. The task projection checks the
+    same identity in its write transaction, so a late park cannot re-pause a Resume.
+    A direct turn carries its own envelope. A failed snapshot leaves it pausing.
 
-    An owner Pause's root latch names its current durable fence (``_owner_park_fence_id``).
-    When that read fails, the death recoveries (``defer_unknown_owner_fence``) raise
-    ``OwnerFenceUnknown`` before any change and replay from their retained reaper job; a
-    live or direct park, which nothing replays, keeps the standing latch and mints none:
-    the durable fence still refuses every launch, as for an accepted ``latch_pending``.
+    A reaper retries an unreadable owner fence. Live parks keep its existing latch.
+    The assignment pass retries unconfirmed placements from the retained task.
     """
     from ouroboros.budget_pause import (
-        STATE_PAUSED, STATE_PAUSING, budget_pause_row, exact_pause_marker, set_budget_pause,
+        BudgetPauseSuperseded, STATE_PAUSED, STATE_PAUSING, budget_pause_row, exact_pause_marker, set_budget_pause,
     )
     from ouroboros.model_detach import detached_fields
     from ouroboros.task_carrier import INLINE_EXECUTORS
@@ -500,21 +486,28 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
             direct_turn = True
         if task is None:
             raise RuntimeError(f"budget-paused task is not running: {task_id}")
-        result_root = pathlib.Path(task.get("budget_drive_root") or ctx.DRIVE_ROOT)
-        row = budget_pause_row(result_root, task_id)
-        attempt = int(meta.get("attempt") or task.get("_attempt") or 1)
-        if (row.get("pause_id") != pause_id or row.get("state") not in {STATE_PAUSING, STATE_PAUSED}
-                or int(row.get("task_attempt") or 0) != attempt or not row.get("source_ref")):
-            raise ValueError(f"exact budget pause {pause_id} has no live durable row for attempt {attempt}")
-        if row.get("external_custody"):
-            from ouroboros.sleep_custody import accepted_receipt
-            if not accepted_receipt(task_id, row):
-                raise ValueError("cold external custody has no exact body acceptance")
-        marker = exact_pause_marker(row, default_root=str(task.get("root_task_id") or task_id))
-        owner_fence = (_owner_park_fence_id(result_root, marker["root_task_id"])
-                       if marker["scope"] == "root" and row.get("reason") == "owner" else "")
-        if owner_fence is None and defer_unknown_owner_fence:
-            raise OwnerFenceUnknown(f"current owner fence of {marker['root_task_id']} is unreadable")
+    result_root = pathlib.Path(task.get("budget_drive_root") or ctx.DRIVE_ROOT)
+    row = budget_pause_row(result_root, task_id)
+    attempt = int(meta.get("attempt") or task.get("_attempt") or 1)
+    if (row.get("pause_id") != pause_id or row.get("state") not in {STATE_PAUSING, STATE_PAUSED}
+            or int(row.get("task_attempt") or 0) != attempt or not row.get("source_ref")):
+        raise ValueError(f"exact budget pause {pause_id} has no live durable row for attempt {attempt}")
+    if row.get("external_custody"):
+        from ouroboros.sleep_custody import accepted_receipt
+        if not accepted_receipt(task_id, row):
+            raise ValueError("cold external custody has no exact body acceptance")
+    marker = exact_pause_marker(row, default_root=str(task.get("root_task_id") or task_id))
+    paused_task = dict(task)
+    if task.get("_presence_turn"):
+        from ouroboros.presence_carrier import park_record
+        paused_task = park_record(task, result_root, evt.get("task"))
+    owner_fence = (_owner_park_fence_id(result_root, marker["root_task_id"])
+                   if marker["scope"] == "root" and row.get("reason") == "owner" else "")
+    if owner_fence is None and defer_unknown_owner_fence:
+        raise OwnerFenceUnknown(f"current owner fence of {marker['root_task_id']} is unreadable")
+    with _queue_lock:
+        if ctx.RUNNING.get(task_id) is not (None if direct_turn else meta):
+            raise BudgetPauseSuperseded(f"parking attempt changed: {task_id}")
         # Bind this exact park to its physical owner's fence: the parking pooled attempt/PID, or
         # the direct turn's own in-process fence (no pooled owner). On the in-memory fence it survives
         # marker reconstruction on revocation; a boot restores no fence row. No token enters cognition.
@@ -542,10 +535,6 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
                 marker["root_task_id"], {**marker, **({"fence_id": owner_fence} if owner_fence else {})})
             marker = {**marker, "fence_id": fence["fence_id"]}
         ctx.RUNNING.pop(task_id, None)
-        paused_task = dict(task)
-        if task.get("_presence_turn"):  # a Presence turn parks as its own built record, never the lane seed (#2566)
-            from ouroboros.presence_carrier import park_record
-            paused_task = park_record(task, result_root, evt.get("task"))
         paused_task["_budget_pause"] = marker
         # The detach stamps ride the durable pause row (``model_detach.detached_fields``): the row's
         # task never saw them, so a parked lane turn takes them here, as the direct turn's record did.
@@ -573,108 +562,118 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         worker_id = evt.get("worker_id") if evt else meta.get("worker_id")
         if worker_id in ctx.WORKERS and ctx.WORKERS[worker_id].busy_task_id == task_id:
             ctx.WORKERS[worker_id].busy_task_id = None
-        # The confirmation, the status projection and the owner-visible event
-        # stay under the SAME queue lock as the park. Resume holds that lock for
-        # its whole grant, so a late park completion can no longer publish a
-        # stale ``paused`` over a live grant; the state CAS below is the second
-        # rail, for a writer this lock does not cover (#1196, F1).
-        persisted = persist_snapshot(reason="budget_pause_exact_continuation")
-        if persisted and task.get("_presence_turn"):  # its custody is durable: the waiting transport hears so now
-            from ouroboros.presence_carrier import answer_parked_turn
-            answer_parked_turn(result_root, task_id)
-        confirmed, superseded = False, ""
-        from ouroboros.owner_pause import SETTLEMENT_EXTERNAL_RUNNING
+    grant_id = str((row.get("grant") or {}).get("grant_id") or "")
 
-        # An owner Pause whose sent delegated work still runs is saved but not
-        # cleanly Paused: its row stays ``pausing`` (never a false Paused) until
-        # a Resume's fresh observation finds that work settled.
-        unsettled = str(row.get("settlement") or "") == SETTLEMENT_EXTERNAL_RUNNING
-        if persisted and unsettled:
-            log.info("Owner pause of %s parked with sent work still running; row stays 'pausing'", task_id)
-        elif persisted:
-            try:
-                set_budget_pause(result_root, task_id, {**row, "state": STATE_PAUSED,
-                                                       "paused_confirmed_at": time.time(),
-                                                       "pause_source": source},
-                                 expected_pause_id=pause_id,
-                                 expected_state=(STATE_PAUSING, STATE_PAUSED))
-                confirmed = True
-            except Exception:
-                log.warning("Exact budget pause row for %s was not confirmed 'paused'",
-                            task_id, exc_info=True)
-                # A write that failed transiently leaves the row at ``pausing`` for
-                # THIS pause id — real, merely unconfirmed, and still this park's
-                # to project. A row that names another pause, or is no longer
-                # live, belongs to a newer writer and is never written over.
-                try:
-                    latest = budget_pause_row(result_root, task_id)
-                except Exception:
-                    superseded = "pause_record_unreadable"
-                else:
-                    latest_state = str(latest.get("state") or "")
-                    if str(latest.get("pause_id") or "") != pause_id:
-                        superseded = "pause_identity_changed"
-                    elif latest_state not in {STATE_PAUSING, STATE_PAUSED}:
-                        superseded = latest_state or "pause_record_missing"
-        else:
-            log.error("Exact budget pause for %s parked in memory but its snapshot was not persisted; "
-                      "the durable row stays 'pausing' until a later snapshot confirms it", task_id)
-        if not superseded:
-            # A row this park no longer owns keeps whatever the newer writer
-            # projected: a resumed task must never read as paused again. The
-            # projection carries the ledger-derived cumulative cost planes (the
-            # same ``reconstruct_task_cost`` projection every terminal write
-            # takes), so the public detail of a paused task reads its rounds and
-            # spend from the authority, never from a worker's pre-pause mirror.
-            try:
-                from supervisor.state import reconstruct_task_cost
+    def project_current(current, fields):
+        observed = current.get("budget_pause") or {}
+        if (observed.get("pause_id") != pause_id or observed.get("state") not in {STATE_PAUSING, STATE_PAUSED}
+                or str((observed.get("grant") or {}).get("grant_id") or "") != grant_id):
+            raise BudgetPauseSuperseded("park superseded")
+        return fields
 
-                reason = str(row.get("reason") or "")
-                cause = {"owner": "Pause", "sleep": "model sleep",
-                         "authority": str(row.get("rail") or "").replace("_", " ")}.get(reason, "budget")
-                cost_fields = reconstruct_task_cost(task_id, fields=True, drive_root=result_root)
-                write_task_result(
-                    result_root, task_id, STATUS_SCHEDULED, resource_limit=marker,
-                    reason_code={"owner": "owner_paused", "authority": "authority_paused", "sleep": "model_sleeping"}.get(reason, "budget_paused"),
-                    result=(f"Task {'sleeping' if reason == 'sleep' else 'paused exactly'} at a completed boundary ({cause})"
-                            + ("; delegated work it had already sent is still running" if unsettled else "")
-                            + ". Cumulative spend, rounds and execution time are retained; "
-                            + ("the selected wake condition continues the same task." if reason == "sleep" else
-                               "an explicit Resume continues the same task.")),
-                    # An unavailable projection is published too: it carries the
-                    # explicit unknown state that must replace any stale amount
-                    # write_task_result would otherwise keep merged in.
-                    **{**cost_fields, "cost_final": False},
-                )
-            except Exception:
-                log.warning("Failed to persist exact budget pause status for %s", task_id, exc_info=True)
-        event = {
-            "ts": (evt or {}).get("ts", utc_now_iso()),
-            "type": "budget_scope_paused",
-            "task_id": task_id,
-            "task_type": (evt or {}).get("task_type") or task.get("type"),
-            "pause_source": source,
-            "park_state": STATE_PAUSED if confirmed else STATE_PAUSING,
-            **({"pause_reason": str(row["reason"])} if row.get("reason") in {"owner", "authority", "sleep"} else {}),
-            **{key: value for key, value in marker.items() if key != "checkpoint"},
-            "pause_id": pause_id,
-            "external_runs": [
-                {k: run.get(k) for k in ("run_id", "state", "stop_outcome")}
-                for run in ((row.get("external_runs") or {}).get("runs") or []) if isinstance(run, dict)
-            ],
-        }
-        if superseded:
-            # Not an owner-visible pause: the durable row moved on (a grant, a
-            # newer pause, an abandoned row). The anomaly is recorded as itself.
-            event.update(type="budget_pause_park_superseded", park_state=superseded)
-        _address_task_event({task_id: meta} if isinstance(meta, dict) else None, ctx.DRIVE_ROOT, event)
-        append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", event)
+    persisted = persist_snapshot(reason="budget_pause_exact_continuation")
+    if persisted and task.get("_presence_turn"):  # its custody is durable: the waiting transport hears so now
+        from ouroboros.presence_carrier import answer_parked_turn
+        answer_parked_turn(result_root, task_id)
+    confirmed, superseded = False, ""
+    from ouroboros.owner_pause import SETTLEMENT_EXTERNAL_RUNNING
+
+    # An owner Pause whose sent delegated work still runs is saved but not
+    # cleanly Paused: its row stays ``pausing`` (never a false Paused) until
+    # a Resume's fresh observation finds that work settled.
+    unsettled = str(row.get("settlement") or "") == SETTLEMENT_EXTERNAL_RUNNING
+    if persisted and unsettled:
+        log.info("Owner pause of %s parked with sent work still running; row stays 'pausing'", task_id)
+    elif persisted:
         try:
-            bridge = getattr(ctx, "bridge", None)
-            if bridge is not None:
-                bridge.push_log(event)
+            set_budget_pause(result_root, task_id, {**row, "state": STATE_PAUSED,
+                                                   "paused_confirmed_at": time.time(),
+                                                   "pause_source": source},
+                             expected_pause_id=pause_id,
+                             expected_state=(STATE_PAUSING, STATE_PAUSED), expected_grant_id=grant_id)
+            confirmed = True
         except Exception:
-            log.warning("Failed to forward exact budget pause to Activity", exc_info=True)
+            log.warning("Exact budget pause row for %s was not confirmed 'paused'",
+                        task_id, exc_info=True)
+            # A write that failed transiently leaves the row at ``pausing`` for
+            # THIS pause id — real, merely unconfirmed, and still this park's
+            # to project. A row that names another pause, or is no longer
+            # live, belongs to a newer writer and is never written over.
+            try:
+                latest = budget_pause_row(result_root, task_id)
+            except Exception:
+                superseded = "pause_record_unreadable"
+            else:
+                latest_state = str(latest.get("state") or "")
+                if str(latest.get("pause_id") or "") != pause_id:
+                    superseded = "pause_identity_changed"
+                elif latest_state not in {STATE_PAUSING, STATE_PAUSED}:
+                    superseded = latest_state or "pause_record_missing"
+    else:
+        log.error("Exact budget pause for %s parked in memory but its snapshot was not persisted; "
+                  "the durable row stays 'pausing' until a later snapshot confirms it", task_id)
+    if not confirmed and not unsettled and superseded in {"", "pause_record_unreadable"}:
+        with _queue_lock:
+            if paused_task.get("_budget_pause") is marker:
+                paused_task["_park_confirmation"] = source
+    if not superseded:
+        # A row this park no longer owns keeps whatever the newer writer
+        # projected: a resumed task must never read as paused again. The
+        # projection carries the ledger-derived cumulative cost planes (the
+        # same ``reconstruct_task_cost`` projection every terminal write
+        # takes), so the public detail of a paused task reads its rounds and
+        # spend from the authority, never from a worker's pre-pause mirror.
+        try:
+            from supervisor.state import reconstruct_task_cost
+
+            reason = str(row.get("reason") or "")
+            cause = {"owner": "Pause", "sleep": "model sleep",
+                     "authority": str(row.get("rail") or "").replace("_", " ")}.get(reason, "budget")
+            cost_fields = reconstruct_task_cost(task_id, fields=True, drive_root=result_root)
+            write_task_result(
+                result_root, task_id, STATUS_SCHEDULED, resource_limit=marker, _field_projector=project_current,
+                reason_code={"owner": "owner_paused", "authority": "authority_paused", "sleep": "model_sleeping"}.get(reason, "budget_paused"),
+                result=(f"Task {'sleeping' if reason == 'sleep' else 'paused exactly'} at a completed boundary ({cause})"
+                        + ("; delegated work it had already sent is still running" if unsettled else "")
+                        + ". Cumulative spend, rounds and execution time are retained; "
+                        + ("the selected wake condition continues the same task." if reason == "sleep" else
+                           "an explicit Resume continues the same task.")),
+                # An unavailable projection is published too: it carries the
+                # explicit unknown state that must replace any stale amount
+                # write_task_result would otherwise keep merged in.
+                **{**cost_fields, "cost_final": False},
+            )
+        except BudgetPauseSuperseded:
+            superseded = "pause_identity_changed"
+        except Exception:
+            log.warning("Failed to persist exact budget pause status for %s", task_id, exc_info=True)
+    event = {
+        "ts": (evt or {}).get("ts", utc_now_iso()),
+        "type": "budget_scope_paused",
+        "task_id": task_id,
+        "task_type": (evt or {}).get("task_type") or task.get("type"),
+        "pause_source": source,
+        "park_state": STATE_PAUSED if confirmed else STATE_PAUSING,
+        **({"pause_reason": str(row["reason"])} if row.get("reason") in {"owner", "authority", "sleep"} else {}),
+        **{key: value for key, value in marker.items() if key != "checkpoint"},
+        "pause_id": pause_id,
+        "external_runs": [
+            {k: run.get(k) for k in ("run_id", "state", "stop_outcome")}
+            for run in ((row.get("external_runs") or {}).get("runs") or []) if isinstance(run, dict)
+        ],
+    }
+    if superseded:
+        # Not an owner-visible pause: the durable row moved on (a grant, a
+        # newer pause, an abandoned row). The anomaly is recorded as itself.
+        event.update(type="budget_pause_park_superseded", park_state=superseded)
+    _address_task_event({task_id: meta} if isinstance(meta, dict) else None, ctx.DRIVE_ROOT, event)
+    append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", event)
+    try:
+        bridge = getattr(ctx, "bridge", None)
+        if bridge is not None:
+            bridge.push_log(event)
+    except Exception:
+        log.warning("Failed to forward exact budget pause to Activity", exc_info=True)
     if str(row.get("reason") or "") == "owner":
         from supervisor.owner_pause_control import refresh_owner_pause_tree
 

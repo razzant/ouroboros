@@ -80,6 +80,8 @@ def wake_ready_sleepers(q: Any = None) -> List[Dict[str, Any]]:
 
     if q is None:
         from supervisor import queue as q
+    from supervisor.restart_retention import publish_pending_parks
+    publish_pending_parks(q, "budget_pause_exact_continuation")
     outcomes: List[Dict[str, Any]] = []
     sleepers = _sleepers(q)
     roots = {id(task): pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT) for task in sleepers}
@@ -124,6 +126,41 @@ def wake_ready_sleepers(q: Any = None) -> List[Dict[str, Any]]:
                 outcomes.append({"task_id": task_id, "ok": False, "error": "sleep_wake_vetoed", "veto": veto,
                                  "ready": ready})
                 continue
-            granted = grant_exact_sleep_resume(live, live["_budget_pause"], external=external)
+            pause = live["_budget_pause"]
+        granted = grant_exact_sleep_resume(live, pause, external=external)
         outcomes.append({"task_id": task_id, "ready": ready, **granted})
     return outcomes
+
+def publish_wake_grant(q, task, pause, row, handoff, record_grant):
+    """The snapshot carries the proposed handoff beside its blocking pause. Only the row CAS opens it."""
+    from supervisor.budget_resume import _sleep_policy_allows
+
+    def current():
+        return any(item is task for item in q.PENDING) and task.get("_budget_pause") is pause
+
+    with q._queue_lock:
+        if not current() or task.get("_budget_pause_resume"):
+            return {"ok": False, "error": "sleep_wake_vetoed"}
+        task["_budget_pause_resume"] = handoff
+    try:
+        if not q.publish_queue_snapshot(reason="budget_exact_resume_granted"):
+            return {"ok": False, "error": "snapshot_not_persisted"}
+        root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
+        if not _sleep_policy_allows(task, row, root):
+            return {"ok": False, "error": "sleep_wake_vetoed"}
+        record_grant()
+        with q._queue_lock:
+            if current() and task.get("_budget_pause_resume") is handoff:
+                task.pop("_budget_pause")
+                task["budget_resumed_at"] = handoff["granted_at"]
+                return None
+        from ouroboros.budget_pause import set_budget_pause
+        set_budget_pause(root, task["id"], row, expected_pause_id=handoff["pause_id"],
+                         expected_state="resume_granted", expected_grant_id=handoff["grant_id"])
+        return {"ok": False, "error": "selection_authority_changed"}
+    except Exception as exc:
+        return {"ok": False, "error": "grant_not_recorded", "detail": str(exc)[:200]}
+    finally:
+        with q._queue_lock:
+            if task.get("_budget_pause") is pause and task.get("_budget_pause_resume") is handoff:
+                task.pop("_budget_pause_resume", None)

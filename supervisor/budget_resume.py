@@ -462,6 +462,8 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         return {"ok": False, "error": "owner_held"}
     if result_row.get("status") in _TRULY_TERMINAL_STATUSES:
         return {"ok": False, "error": "task_terminal"}
+    if sleep_wake and (row.get("state") != STATE_PAUSED or row.get("pause_id") != pause_id):
+        return {"ok": False, "error": "sleep_wake_vetoed"}
     if (row and row.get("state") in LIVE_PAUSE_STATES and row.get("source_ref")
             and str(row.get("pause_id") or "") and str(row.get("pause_id") or "") != pause_id):
         # Refresh the stale locator from the durable pause, retaining the queue's fence id.
@@ -602,17 +604,7 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         **({"producer_allowance_lifted": lift} if lift else {}),
     }
     prior_pause = dict(pause)
-    try:
-        # CAS on the validated state: a concurrent writer refuses here, typed.
-        set_budget_pause(result_root, task_id,
-                         {**row, "state": STATE_RESUME_GRANTED, "grant": grant,
-                          "resume_generation": generation},
-                         expected_pause_id=pause_id, expected_state=str(row.get("state") or ""),
-                         row_update=(lambda current: lifted_record(current, lift)) if lift else None)
-    except Exception as exc:
-        return {"ok": False, "error": "grant_not_recorded", "detail": str(exc)[:200]}
-    task.pop("_budget_pause", None)
-    task["_budget_pause_resume"] = {
+    handoff = {
         **checkpoint, "grant_id": grant["grant_id"], "granted_at": grant["granted_at"],
         "grant_generation": generation, "pause_id": pause_id, "pause_generation": pause_generation,
         "paused_duration_sec": grant["paused_duration_sec"],
@@ -627,73 +619,92 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
             'selected_by', 'by', 'authority', 'sleep_id', 'root_grant_id',
             'root_resume_generation', 'root_fence_id', 'root_resume_basis')},
     }
-    task["budget_resumed_at"] = grant["granted_at"]
-    lifted_from = lift_allowance(task, lift)  # stands with the snapshot below, or is rolled back with the grant
-    # The exact handoff owns selection until consumption; old stops survive only
-    # in these local rollback copies, never in the new grant or selection.
-    released_hold = task.pop(BUDGET_HOLD_KEY, None)
-    prior_selection = task.pop(SELECTION_KEY, None)
-    fence = q.BUDGET_ROOT_FENCES.get(root_task_id)
-    fence_released = False
-    held_siblings: List[str] = []
-    released_markers: Dict[str, Dict[str, Any]] = {}
-    rebound_holds: Dict[str, Dict[str, Any]] = {}
-    if (actor and isinstance(fence, dict) and str(fence.get("fence_id") or "")
-            == str(owner_fence_id or prior_pause.get("fence_id") or fence.get("fence_id"))):
-        # The root's own Resume lifts its admission latch: exact descendants keep
-        # their OWN `_budget_pause` rows and are only ELIGIBLE; the model selects each (Q9).
-        q.BUDGET_ROOT_FENCES.pop(root_task_id, None)
-        fence_released = True
-        held_siblings, released_markers, rebound_holds = hold_root_resume_descendants(
-            q, root_task_id, fence, grant, actor_id=task_id)
-    elif actor and owner_fence_id and fence is None:
-        # The owner Pause's latch was never projected (``latch_pending``, or a park that could not
-        # read its fence): this Resume's fresh read of the closed current fence stands in for it,
-        # so its descendants wait for explicit selection exactly as when a latch lifts (Q9).
-        held_siblings, released_markers, rebound_holds = hold_root_resume_descendants(
-            q, root_task_id, {"fence_id": owner_fence_id, "cause": "owner_pause"}, grant, actor_id=task_id)
-    if not q.publish_queue_snapshot(reason="budget_exact_resume_granted"):  # durable before the grant stands
-        task.pop("_budget_pause_resume", None)
-        task.update(lifted_from, _budget_pause=prior_pause)  # the allowance a lift moved returns with the pause
-        if released_hold is not None:
-            task[BUDGET_HOLD_KEY] = released_hold
-        if prior_selection is not None:
-            task[SELECTION_KEY] = prior_selection
-        if fence_released:
-            q.BUDGET_ROOT_FENCES[root_task_id] = fence
-        for member in q.PENDING:
-            member_id = str(member.get("id") or "")
-            if member_id in set(held_siblings):
-                member.pop(BUDGET_HOLD_KEY, None)
-                if member_id in released_markers:
-                    member["_budget_pause"] = released_markers[member_id]
-            elif member_id in rebound_holds:
-                member[BUDGET_HOLD_KEY] = rebound_holds[member_id]
+
+    def record_grant():
+        set_budget_pause(result_root, task_id,
+                         {**row, "state": STATE_RESUME_GRANTED, "grant": grant,
+                          "resume_generation": generation},
+                         expected_pause_id=pause_id, expected_state=str(row.get("state") or ""),
+                         expected_grant_id=str((row.get("grant") or {}).get("grant_id") or ""),
+                         row_update=(lambda current: lifted_record(current, lift)) if lift else None)
+
+    held_siblings, rebound_holds, released_hold = [], {}, None
+    if sleep_wake:
+        from supervisor.sleep_wake import publish_wake_grant
+        if refusal := publish_wake_grant(q, task, pause, row, handoff, record_grant):
+            return refusal
+    else:
         try:
-            set_budget_pause(result_root, task_id, row, expected_pause_id=pause_id,
-                             expected_state=STATE_RESUME_GRANTED,
-                             expected_grant_id=str(grant["grant_id"]),
-                             row_update=(lambda current: _unlifted_record(current, lift)) if lift else None)
-            return {"ok": False, "error": "snapshot_not_persisted"}
-        except Exception as rollback_error:
-            detail = str(rollback_error)[:120]
-            log.warning("Exact resume grant rollback remains unpersisted for %s", task_id, exc_info=True)
-        # Rollback failed: the hold keeps this orphaned grant's identity so the
-        # next Resume writes its deferred revocation before minting.
-        hold_budget_row(
-            task, reason=HOLD_REVOCATION_UNWRITTEN,
-            detail=f"snapshot_not_persisted:{detail}",
-            extra={"pause_id": pause_id, "grant_id": str(grant["grant_id"]),
-                   "root_task_id": root_task_id},
-            result_root=result_root)
-        return {"ok": False, "error": "snapshot_not_persisted",
-                "held": HOLD_REVOCATION_UNWRITTEN, "grant_id": str(grant["grant_id"])}
+            record_grant()
+        except Exception as exc:
+            return {"ok": False, "error": "grant_not_recorded", "detail": str(exc)[:200]}
+        task.pop("_budget_pause", None)
+        task["_budget_pause_resume"] = handoff
+        task["budget_resumed_at"] = grant["granted_at"]
+        lifted_from = lift_allowance(task, lift)  # stands with the snapshot below, or is rolled back with the grant
+        # The exact handoff owns selection until consumption; old stops survive only
+        # in these local rollback copies, never in the new grant or selection.
+        released_hold = task.pop(BUDGET_HOLD_KEY, None)
+        prior_selection = task.pop(SELECTION_KEY, None)
+        fence = q.BUDGET_ROOT_FENCES.get(root_task_id)
+        fence_released = False
+        released_markers: Dict[str, Dict[str, Any]] = {}
+        if (actor and isinstance(fence, dict) and str(fence.get("fence_id") or "")
+                == str(owner_fence_id or prior_pause.get("fence_id") or fence.get("fence_id"))):
+            # The root's own Resume lifts its admission latch: exact descendants keep
+            # their OWN `_budget_pause` rows and are only ELIGIBLE; the model selects each (Q9).
+            q.BUDGET_ROOT_FENCES.pop(root_task_id, None)
+            fence_released = True
+            held_siblings, released_markers, rebound_holds = hold_root_resume_descendants(
+                q, root_task_id, fence, grant, actor_id=task_id)
+        elif actor and owner_fence_id and fence is None:
+            # The owner Pause's latch was never projected (``latch_pending``, or a park that could not
+            # read its fence): this Resume's fresh read of the closed current fence stands in for it,
+            # so its descendants wait for explicit selection exactly as when a latch lifts (Q9).
+            held_siblings, released_markers, rebound_holds = hold_root_resume_descendants(
+                q, root_task_id, {"fence_id": owner_fence_id, "cause": "owner_pause"}, grant, actor_id=task_id)
+        if not q.publish_queue_snapshot(reason="budget_exact_resume_granted"):  # durable before the grant stands
+            task.pop("_budget_pause_resume", None)
+            task.update(lifted_from, _budget_pause=prior_pause)  # the allowance a lift moved returns with the pause
+            if released_hold is not None:
+                task[BUDGET_HOLD_KEY] = released_hold
+            if prior_selection is not None:
+                task[SELECTION_KEY] = prior_selection
+            if fence_released:
+                q.BUDGET_ROOT_FENCES[root_task_id] = fence
+            for member in q.PENDING:
+                member_id = str(member.get("id") or "")
+                if member_id in set(held_siblings):
+                    member.pop(BUDGET_HOLD_KEY, None)
+                    if member_id in released_markers:
+                        member["_budget_pause"] = released_markers[member_id]
+                elif member_id in rebound_holds:
+                    member[BUDGET_HOLD_KEY] = rebound_holds[member_id]
+            try:
+                set_budget_pause(result_root, task_id, row, expected_pause_id=pause_id,
+                                 expected_state=STATE_RESUME_GRANTED,
+                                 expected_grant_id=str(grant["grant_id"]),
+                                 row_update=(lambda current: _unlifted_record(current, lift)) if lift else None)
+                return {"ok": False, "error": "snapshot_not_persisted"}
+            except Exception as rollback_error:
+                detail = str(rollback_error)[:120]
+                log.warning("Exact resume grant rollback remains unpersisted for %s", task_id, exc_info=True)
+            # Rollback failed: the hold keeps this orphaned grant's identity so the
+            # next Resume writes its deferred revocation before minting.
+            hold_budget_row(
+                task, reason=HOLD_REVOCATION_UNWRITTEN,
+                detail=f"snapshot_not_persisted:{detail}",
+                extra={"pause_id": pause_id, "grant_id": str(grant["grant_id"]),
+                       "root_task_id": root_task_id},
+                result_root=result_root)
+            return {"ok": False, "error": "snapshot_not_persisted",
+                    "held": HOLD_REVOCATION_UNWRITTEN, "grant_id": str(grant["grant_id"])}
     try:
         from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
 
         write_task_result(
             result_root, task_id, STATUS_SCHEDULED, reason_code="",
-            resource_limit={**task["_budget_pause_resume"]["pause"], "status": "resume_granted", "resumed_at": grant["granted_at"],
+            resource_limit={**handoff["pause"], "status": "resume_granted", "resumed_at": grant["granted_at"],
                             "grant_id": grant["grant_id"], "auto_resume": False},
         )
     except Exception:
@@ -787,23 +798,8 @@ def revalidate_consumed_resume_holds() -> None:
 
 
 def revoke_exact_budget_resume(task: Dict[str, Any], reason: str) -> bool:
-    """Return a granted-but-undispatched task to its exact pause (queue lock held).
-
-    Money can vanish between the grant and the dispatch (a sibling spent it) and
-    a restart may intervene; the grant is single-use and must not be dispatched
-    into a refused send. Identity decides what may be written: a revocation is
-    recorded ONLY against the pause, state and grant this handoff names
-    (compare-and-set on all three). A grant the durable row says was CONSUMED
-    is never re-armed: the task ran on, the queue row is stale — it takes a
-    typed hold, its handoff leaves, and no ``_budget_pause`` marker is
-    re-minted over a task that is not paused. If the durable row already
-    carries a NEWER pause (pauseA -> Resume -> pauseB), or a different grant,
-    nothing is written over it — the spent handoff simply leaves the queue
-    row, which re-reads the current pause or holds; at restore, a newer grant
-    that never reached a worker either is revoked too, so the next Resume finds
-    a pause, not a grant no row carries. A failed write leaves the row
-    un-dispatchable rather than carrying a stale grant.
-    """
+    """Revoke by pause, state and grant. A consumed grant never re-arms. A superseding
+    pause keeps its own authority. An unwritable revocation keeps the task held."""
     from ouroboros.budget_pause import (
         LIVE_PAUSE_STATES, STATE_PAUSED, STATE_RESUME_GRANTED, STATE_RESUMED, budget_pause_row,
         exact_pause_marker, set_budget_pause,
@@ -843,6 +839,10 @@ def revoke_exact_budget_resume(task: Dict[str, Any], reason: str) -> bool:
     current_pause_id = str(row.get("pause_id") or "")
     row_state = str(row.get("state") or "")
     grant = dict(row["grant"]) if isinstance(row.get("grant"), dict) else {}
+    if (row_state == STATE_PAUSED and current_pause_id == expected_pause_id and task.get("_budget_pause")
+            and handoff.get("authority") == "sleep_readiness"):
+        task.pop("_budget_pause_resume", None)  # saved proposal, never confirmed
+        return True
     if (not current_pause_id.strip() or (current_pause_id == expected_pause_id or row_state == STATE_RESUME_GRANTED)
             and not str(grant.get("grant_id") or "").strip()):
         task["_budget_pause"] = prior_pause

@@ -51,15 +51,8 @@ completed and otherwise-stopped members are never revived; a root's Resume
 only makes its own budget-paused descendants ELIGIBLE — the model selects
 each one explicitly through the same task control (Q9).
 
-A direct owner-chat turn pauses the SAME way and under the SAME task id: the
-live direct actor ends (its registry entry is released as on any other ending,
-so no second live actor ever exists for that id), its ``budget_pause`` event
-carries the turn's own task record with its ``_is_direct_chat`` lane fact, and
-the supervisor parks that record in the existing PENDING carrier under the
-same ``_budget_pause`` marker. The existing Resume endpoint grants it and a
-pooled worker continues the checkpointed cognition cold — origin, workspace,
-attempt, accounting and the opaque acceptance identities travel in the
-checkpoint; browser and service handles are never resurrected. Only a turn
+A direct turn's source-backed row keeps its parkable task envelope before the
+executor leaves. Restore can recover it even if no queue snapshot saw it. Only a turn
 with no task id or no durable root is excluded, and loudly
 (``resource_limit.exact_pause_unavailable``).
 
@@ -800,7 +793,10 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
     setattr(ctx, "_budget_pause_generation", generation)
     # Durable "pausing" FIRST (before any wait), so a death while the task is
     # still settling meets the crash-retry fence instead of a replay.
-    seed = {"pause_id": pause_id, "state": STATE_PAUSING,
+    carrier = getattr(getattr(ctx, "model_wait_context", None), "task", None)
+    envelope = ({"park_task": parkable_direct_task(carrier)} if isinstance(carrier, dict)
+                and carrier.get("id") == task_id and (carrier.get("_is_direct_chat") or carrier.get("_presence_turn")) else {})
+    seed = {**envelope, "pause_id": pause_id, "state": STATE_PAUSING,
             "reason": _RAIL_REASONS.get(rail, "budget"), "rail": rail,
             "pause_generation": generation,
             "scope": str(scope or "global"), "task_attempt": int(ctx.task_attempt or 1),
@@ -863,6 +859,7 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
                         prepared = _exact_continuation_row(
                             limit_ctx, ctx, pause_id=pause_id, rail=rail, scope=scope,
                             reason_text=reason_text, root_task_id=root_task_id, local=local, context_view=context_view)
+                        prepared.update(envelope)
                     # A publication that failed is retried with the SAME prepared
                     # snapshot: its custody stop requests and its stored source are
                     # one observation, not one per poll.
