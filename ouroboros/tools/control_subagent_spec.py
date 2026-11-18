@@ -205,11 +205,12 @@ def one_refusal(problems: list) -> str:
     return SCHEDULE_REFUSAL + "; ".join(str(problem).rstrip(". ") for problem in problems) + "."
 
 
-def _shape_problems(params: Dict[str, Any], unsupported: Any) -> list:
-    """The independent shape problems of a request: each checks one field alone (unknown names, the required fields,
-    mode, deadline, claims, memory mode, effort, memory view, and the folder fields' own values: directory strategy,
-    scope paths, workspace), so all of them are named together before any route is selected; checks that depend on
-    other fields or on the route follow once these pass."""
+def _shape_problems(params: Dict[str, Any], unsupported: Any) -> tuple[list[str], dict]:
+    """Independent problems and normalized selections before any route is selected.
+
+    The shape pass checks each field on its own. Checks that depend on other fields, the parent's grants
+    or the route follow once these pass.
+    """
     problems = [f"unsupported argument(s): {', '.join(unsupported)}. {_STRICT_SCHEMA}"] if unsupported else []
     if params.get("mode") not in (None, "ask", "plan", "agent"):
         problems.append("mode must be ask, plan or agent.")
@@ -254,7 +255,25 @@ def _shape_problems(params: Dict[str, Any], unsupported: Any) -> list:
         problems.append("scope_paths must be an array of nonempty relative paths.")
     if params.get("workspace") not in (None, "copy", "in_place"):
         problems.append("workspace must be copy or in_place.")
-    return problems
+
+    selections: dict = {}
+    if params.get("input_files") is not None:
+        from ouroboros.delegate_readonly_inputs import InputSelectionError, selection_entries
+
+        try:
+            selections["input_files"] = selection_entries(params["input_files"])
+        except InputSelectionError as exc:
+            problems.append(exc.detail)
+    if "allowed_origins" in params:
+        from ouroboros.contracts.task_contract import normalize_browser_origin
+
+        requested = params["allowed_origins"]
+        origins = [normalize_browser_origin(item, origin_only=True) for item in requested] if isinstance(requested, list) else None
+        if origins is None or not all(origins):
+            problems.append("allowed_origins must contain exact HTTP(S) origins without paths, credentials or wildcards.")
+        else:
+            selections["allowed_origins"] = list(dict.fromkeys(origins))
+    return problems, selections
 
 
 def _relative_paths(paths: Any) -> bool:
@@ -276,7 +295,8 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
     phase with one job, not a slice taken to shed lines. The independent shape problems,
     with the ``unsupported`` names the handler found, are refused together (``_shape_problems``).
     """
-    if problems := _shape_problems(params, unsupported):
+    problems, selections = _shape_problems(params, unsupported)
+    if problems:
         return {}, one_refusal(problems)
     deadline_at = str(params.get("deadline_at") or "").strip()
     memory_mode = str(params.get("memory_mode") or "forked").strip().lower()
@@ -311,13 +331,8 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
             import uuid
 
             directory_options["document_import_intent"] = uuid.uuid4().hex
-    if params.get("input_files") is not None:  # shape only: permission and copying happen with the queued child's identity
-        from ouroboros.delegate_readonly_inputs import InputSelectionError, selection_entries
-
-        try:
-            directory_options["input_files"] = selection_entries(params["input_files"])
-        except InputSelectionError as exc:
-            return {}, f"⚠️ TOOL_ARG_ERROR (schedule_subagent): {exc.detail}"
+    if "input_files" in selections:  # permission and copying happen with the queued child's identity
+        directory_options["input_files"] = selections["input_files"]
         if directory_options["input_files"] and str(params.get("write_surface") or "").strip().lower() not in {"", "read_only"}:
             return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): input_files_readonly_only: input_files prepares inputs "
                         "for a read-only child; omit it or write_surface.")
@@ -340,7 +355,7 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
             directory_options.get("directory_strategy"), directory_options.get("scope_paths"))
     ):
         return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): " + DIRECTORY_OPTIONS_NEED_WRITE
-    from ouroboros.contracts.task_contract import normalize_allowed_origins, normalize_browser_origin, normalize_resource_policy
+    from ouroboros.contracts.task_contract import normalize_resource_policy
     from ouroboros.presence_authority import presence_ceiling_from_context
     from ouroboros.tools.core import is_restricted_subagent_profile
 
@@ -368,11 +383,8 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
     except ValueError as exc:
         return {"reason": "INPUT_SOURCE_SELECTION_INVALID"}, f"⚠️ TOOL_ARG_ERROR (schedule_subagent): {exc}."
     resource_policy = normalize_resource_policy(parent.get("resource_policy") or metadata.get("resource_policy"))
-    if "allowed_origins" in params:
-        requested = params["allowed_origins"]
-        if not isinstance(requested, list) or any(not normalize_browser_origin(item, origin_only=True) for item in requested):
-            return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): allowed_origins must contain exact HTTP(S) origins without paths, credentials or wildcards."
-        origins = normalize_allowed_origins(requested)
+    if "allowed_origins" in selections:
+        origins = selections["allowed_origins"]
         # The host caller class supplies authority; neither a URL in page prose
         # nor an external Presence event may manufacture a new owner grant.
         subset_only = (ctx is None or is_restricted_subagent_profile(ctx)

@@ -91,3 +91,36 @@ def test_independent_folder_field_problems_join_the_shape_refusal(tmp_path, monk
     assert control._schedule_task(ctx, **base, directory_strategy="copy") == (
         "⚠️ TOOL_ARG_ERROR (schedule_subagent): copy requires scope_paths; use ['.'] to select the whole folder.")
     assert not ctx.pending_events
+
+
+def test_independent_file_and_origin_problems_join_the_deadline_refusal(tmp_path, monkeypatch):
+    selected = configure_test_subagent(monkeypatch)
+    ctx = _ctx(tmp_path)
+    base = {"subagent_id": selected, "objective": "Read the notes", "expected_output": "Findings"}
+    file_args = {"input_files": [{"root": "task_drive", "path": ""}]}
+    origin_args = {"allowed_origins": ["studio.example"]}
+    prefix = "⚠️ TOOL_ARG_ERROR (schedule_subagent): "
+    file_error = "input_files is a list of {root, path} objects with a nonempty path."
+    origin_error = "allowed_origins must contain exact HTTP(S) origins without paths, credentials or wildcards."
+
+    with monkeypatch.context() as unrouted:
+        unrouted.setattr(control_scheduling, "select_subagent_snapshot",
+                         lambda *_a, **_k: pytest.fail("a call with shape problems selects no route"))
+        refused = _published(ctx, "schedule_subagent", lambda: control._schedule_task(
+            ctx, **base, deadline_at="yesterday", **file_args, **origin_args))
+        assert refused.code == "TOOL_ARG_ERROR"
+        assert refused.text == (prefix + "deadline_at must be an ISO-8601 UTC instant such as "
+                                "2026-08-02T18:30:00Z (got: 'yesterday'); "
+                                f"{file_error.rstrip('.')}; {origin_error}")
+        assert control._schedule_task(ctx, **base, **file_args) == prefix + file_error
+        assert control._schedule_task(ctx, **base, **origin_args) == prefix + origin_error
+        assert not ctx.pending_events
+
+    suffix = "input_files_readonly_only: input_files prepares inputs for a read-only child; omit it or write_surface."
+    path = {"root": "task_drive", "path": "copper-notes.txt"}
+    assert control._schedule_task(ctx, **base, input_files=[path], write_surface="external_workspace") == prefix + suffix
+    assert not ctx.pending_events
+    control._schedule_task(ctx, **base, input_files=[], allowed_origins=["https://studio.example", "https://studio.example:443/"])
+    [event] = ctx.pending_events
+    assert event["type"] == "schedule_subagent"
+    assert event["task_contract"]["resource_policy"]["allowed_origins"] == ["https://studio.example:443"]
