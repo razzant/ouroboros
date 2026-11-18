@@ -593,6 +593,7 @@ def test_continue_normalizes_only_the_exact_forwarded_form_bubble(tmp_path, deci
 ])
 def test_only_the_complete_drawn_caption_proves_a_wordless_press(tmp_path, decide, component, caption, heading, bubble):
     from types import SimpleNamespace
+
     from ouroboros.card_store import load_card, write_card
     from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision
     from ouroboros.owner_words import cited_owner_basis, owner_words_contain
@@ -621,6 +622,7 @@ def test_only_the_complete_drawn_caption_proves_a_wordless_press(tmp_path, decid
 def test_form_fields_keep_their_word_boundaries_in_the_corpus_and_its_copies(tmp_path, decide):
     import queue
     from types import SimpleNamespace
+
     from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision
     from ouroboros.loop_round_limits import _drain_incoming_messages
     from ouroboros.owner_continue import owner_corpus_rows, owner_sources

@@ -291,6 +291,7 @@ def _start_answer(root: pathlib.Path, task_id: str, row: dict, drafter: str) -> 
     """Read a relay by its exact chat address, or a direct answer by its asker's delivery."""
     from ouroboros.answer_facts import answer_source
     from ouroboros.chat_chain import resolve_row
+    from ouroboros.chronicle_quotes import quote_in
     from ouroboros.owner_relay import quotable_owner_row
     from ouroboros.owner_source import answered_quiz_block
     from ouroboros.owner_words import answered_card_source
@@ -326,9 +327,19 @@ def _start_answer(root: pathlib.Path, task_id: str, row: dict, drafter: str) -> 
     card = answered_card(block, words)
     if (not card or not asker or not quiz_id or row.get("source_task_id", asker) != asker
             or row.get("quiz_id", quiz_id) != quiz_id
-            or row.get("reply_to", answered_card_reply(block, asker)) != answered_card_reply(block, asker)):
+            or "reply_to" in row and row["reply_to"] != answered_card_reply(block, asker)):
         return None
-    return {"source": answer_source(block), "content": words, "msg_id": msg_id, "source_task_id": asker,
+    source = answer_source(block)
+    if "cited" in row or row.get("basis") == "cited":
+        cite = row.get("cited")
+        if not isinstance(cite, str) or not cite.strip() or row.get("basis") != "cited":
+            return None
+        if source == OWNER_PRESS:
+            if cite.strip() != str(card["options"][card["answered_index"]]).strip():
+                return None
+        elif not quote_in(cite, words):
+            return None
+    return {"source": source, "content": words, "msg_id": msg_id, "source_task_id": asker,
             **{key: row[key] for key in ("basis", "cited") if row.get(key)},
             "quiz_id": quiz_id, "card": card, **({"request_id": block["request_id"]} if block.get("request_id") else {}),
             **({"relay_source_root": row["relay_source_root"]} if row.get("relay_source_root") else {})}
@@ -349,8 +360,8 @@ def _start_citations(rows: list) -> tuple[list, dict]:
                 and row.get("carried") is True and isinstance(row.get("cited"), str) and row["cited"].strip()
                 and isinstance(row.get("content"), str) and quote_in(row["cited"], row["content"])
                 and set(row) <= {"source", "content", "msg_id", "cited", "basis", "carried"}):
-            matches = [item for item in native if row_ref(item) == row.get("msg_id") and item.get("content") == row["content"]]
-            if len(matches) == 1:
+            matches = [item for item in native if row_ref(item) == row.get("msg_id")]
+            if len(matches) == 1 and matches[0].get("content") == row["content"]:
                 matches[0].update(basis="cited", cited=row["cited"])
                 aliases[row["msg_id"]] = (row["content"], True)
                 continue

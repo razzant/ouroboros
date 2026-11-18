@@ -432,6 +432,11 @@ def _settled_with_corpus(tmp_path, *rows, unavailable=(), late=False):
     _interrupted(tmp_path, root_phase_checkpoint={}, child_ref_promotion={})
     _owner_mail(tmp_path)
     if late:
+        from ouroboros.owner_quiz import record_answered, record_asked
+
+        record_asked(tmp_path, "asker-1", quiz_id="q-1", question="Which sheet?", options=["Sheet B"])
+        record_answered(tmp_path, "asker-1", quiz_id="q-1", option_index=0, comment="Option B, please",
+                        request_id="sheet-answer")
         write_owner_message(tmp_path, "Option B, please", "pred-1", msg_id="late-1",
                             late_answer={"task_id": "asker-1", "quiz_id": "q-1"})
     assert settle_task_mailbox(tmp_path, "pred-1", tmp_path)
@@ -1252,6 +1257,7 @@ def test_opening_answer_keeps_its_authorship_in_continue_and_start(tmp_path, mon
 def test_cold_opening_keeps_its_identity_through_a_routed_start(tmp_path, monkeypatch, kind):
     from pathlib import Path
     from types import SimpleNamespace
+
     from ouroboros.loop_messages import _initialize_owner_directives
     from ouroboros.owner_words import owner_words_contain
     from ouroboros.project_dialogue import build_owner_message_ref
@@ -1295,8 +1301,9 @@ def test_cold_opening_keeps_its_identity_through_a_routed_start(tmp_path, monkey
 @pytest.mark.parametrize("kind", ["press", "comment", "unavailable"])
 def test_a_reference_only_late_answer_keeps_its_type_on_every_opening(tmp_path, monkeypatch, kind):
     from types import SimpleNamespace
+
     from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision, owner_reply_owed
-    from ouroboros.owner_quiz import late_answer_model_text, record_asked, record_answered
+    from ouroboros.owner_quiz import late_answer_model_text, record_answered, record_asked
     from ouroboros.owner_words import carried_owner_corpus, cited_owner_basis, owner_words_contain
     from ouroboros.project_dialogue import build_owner_message_ref
     from supervisor.continuation_admission import admit_continuation

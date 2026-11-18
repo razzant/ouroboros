@@ -109,7 +109,8 @@ def _png():
     return out.getvalue()
 
 
-def _wake_started_root(tmp_path, monkeypatch, *, answers=True, image=None, relay=False, cite=""):
+def _wake_started_root(tmp_path, monkeypatch, *, answers=True, image=None, relay=False, cite="",
+                       scope_comment="Europe and Turkey, not Asia"):
     """A wake asks two cards, the owner answers both, the wake starts separate work.
 
     ``image``: the owner also sends the wake a mailbox message with that screenshot attached."""
@@ -126,7 +127,7 @@ def _wake_started_root(tmp_path, monkeypatch, *, answers=True, image=None, relay
         _ask(bridge, tmp_path, WAKE, "q-start", QUESTION, ["Yes, start it", "Not now"])
         _ask(bridge, tmp_path, WAKE, "q-scope", SCOPE_QUESTION, ["Europe", "Worldwide"])
         _answer(tmp_path, WAKE, "q-start", "req-start", option_index=0)
-        _answer(tmp_path, WAKE, "q-scope", "req-scope", comment="Europe and Turkey, not Asia")
+        _answer(tmp_path, WAKE, "q-scope", "req-scope", comment=scope_comment)
     if relay:
         from ouroboros.chat_chain import room_rows
         from ouroboros.owner_relay import owner_quote, write_relay
@@ -756,9 +757,9 @@ def test_restart_keeps_the_proven_answer_cited_by_a_start(tmp_path, monkeypatch,
     from ouroboros.owner_words import row_ref
     from supervisor.continuation_admission import admit_continuation
 
-    cite = "sundown" if relay else "Turkey"
+    cite = "sundown" if relay else "fernfall"
     q, workers, bridge, task, _ = _wake_started_root(tmp_path, monkeypatch, answers=not relay, relay=relay,
-                                                     cite="" if legacy else cite)
+                                                     cite="" if legacy else cite, scope_comment="  after fernfall  ")
     rows = task["metadata"]["owner_corpus"]
     worded = next(row for row in rows if row["source"] == "owner_quiz_answer")
     if legacy:
@@ -794,7 +795,7 @@ def test_continue_retypes_a_pre_upgrade_direct_answer_from_its_card(tmp_path, mo
     from ouroboros.owner_words import cited_owner_basis, owner_words_contain
     from supervisor.continuation_admission import admit_continuation
 
-    q, workers, bridge, task, _ = _wake_started_root(tmp_path, monkeypatch)
+    q, workers, bridge, task, _ = _wake_started_root(tmp_path, monkeypatch, scope_comment="  after fernfall  ")
     task["metadata"]["owner_corpus"][0]["source"] = "owner_quiz_answer"
     _run_interrupted_by_restart(tmp_path, monkeypatch, q, workers, bridge, task, own_card=False)
     ack = admit_continuation(task["id"], action_nonce=NONCE)
@@ -802,7 +803,36 @@ def test_continue_retypes_a_pre_upgrade_direct_answer_from_its_card(tmp_path, mo
     [successor] = workers.PENDING
     ctx = types.SimpleNamespace(task_metadata=successor["metadata"])
     _initialize_owner_directives(ctx, [{"role": "user", "content": successor["text"]}])
-    assert owner_words_contain(ctx, "Turkey")
+    assert owner_words_contain(ctx, "fernfall")
     assert not owner_words_contain(ctx, "start it")
     assert cited_owner_basis(ctx, "Yes, start it")[0]["source"] == "owner_press"
     assert cited_owner_basis(ctx, "start it")[0] is None
+
+
+def test_a_proven_answer_does_not_attest_a_conflicting_saved_citation(tmp_path, monkeypatch):
+    from ouroboros.owner_words import row_ref
+    from supervisor.continuation_admission import admit_continuation
+
+    workers, task = _interrupted_wake_root(tmp_path, monkeypatch, scope_comment="  after fernfall  ")
+    rid = task["id"]
+    press, worded = task["metadata"]["owner_corpus"]
+    ambiguous = {**press, "source": "owner_quiz_answer", "chat_id": worded["chat_id"],
+                 "client_message_id": worded["client_message_id"]}
+    alias = {"source": "owner_quiz_answer", "content": worded["content"], "msg_id": row_ref(worded),
+             "basis": "cited", "cited": "fernfall", "carried": True}
+    _edit_result(tmp_path, rid, lambda result: result["metadata"].update(owner_corpus=[ambiguous, worded, alias]))
+    _refused(tmp_path, workers, rid, "start_quiz_answer_unresolved")
+
+    def cite(act, words):
+        _edit_result(tmp_path, rid, lambda result: result["metadata"].update(owner_corpus=[
+            {**press, "source": "owner_quiz_answer", "basis": "cited", "cited": act},
+            {**worded, "basis": "cited", "cited": words}]))
+    cite("start it", "fernfall")
+    _refused(tmp_path, workers, rid, "start_quiz_answer_unresolved")
+    cite("Yes, start it", "elsewhere")
+    _refused(tmp_path, workers, rid, "start_quiz_answer_unresolved")
+    cite("Yes, start it", "fernfall")
+    assert admit_continuation(rid, action_nonce=NONCE)["ok"]
+    [successor] = workers.PENDING
+    assert [(r["source"], r["cited"]) for r in successor["metadata"]["owner_corpus"]] == [
+        ("owner_press", "Yes, start it"), ("owner_quiz_answer", "fernfall")]

@@ -1128,7 +1128,7 @@ def test_a_relay_built_before_act_labels_still_renders_a_press_as_a_press(tmp_pa
 @pytest.mark.parametrize("kind", ["press", "comment", "unavailable"])
 def test_reference_only_answer_uses_its_source_store_for_history_and_receipt(tmp_path, kind):
     from ouroboros.dialogue_provenance import quote_words, relation_text
-    from ouroboros.owner_quiz import record_asked, record_answered
+    from ouroboros.owner_quiz import record_answered, record_asked
     from ouroboros.owner_relay import inject_relay, owner_quote
     from ouroboros.owner_words import owner_words_contain
 
