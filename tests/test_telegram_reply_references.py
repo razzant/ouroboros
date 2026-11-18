@@ -323,6 +323,28 @@ def test_confirmed_lifecycle_card_survives_child_index_eviction(bridge, separate
     assert fields["transport"]["reply_child_message_id"] == 101
 
 
+def test_legacy_child_card_reply_uses_only_exact_bot_peer_message(bridge):
+    b = bridge
+    state = _state(b.plugin)
+    b.api.get_settings = lambda _keys: {"TELEGRAM_BOT_TOKEN": "123:test"}
+    legacy = {"chat_id": 1, "kind": "work_card", "task_id": "child"}
+    for mid in (101, 102):
+        state._remember_message(b.api, "123", 42, mid, legacy)
+    state._set_subagent_msg(b.api, "123", 42, "child", 101)
+    state._set_subagent_msg(b.api, "123", 43, "child", 102)
+    state._set_subagent_msg(b.api, "456", 42, "child", 102)
+    address = "row:42@2026-10-16T12:00:00Z#123456789abc"
+    for owner_mid, target_mid, expected in ((50, 101, 101), (51, 102, 51)):
+        fields = state._owner_ingress_fields(b.api, "123", 42, _owner(owner_mid, reply=target_mid), owner_mid)
+        assert fields["reply_to"] == "task:child"
+        asyncio.run(b.plugin._make_outbound(b.api)({
+            "chat_id": 1, "text": f"Answer {owner_mid}",
+            "reply_to": {"address": address, "role": "user", "chat_id": 42},
+            "transport": {**fields["transport"], "reply_address": address},
+        }))
+        assert b.calls[-1][1]["reply_to_message_id"] == expected
+
+
 @pytest.mark.parametrize("target_kind", [
     "main_row", "main_converted", "project_row", "project_card", "project_chain", "project_retired",
     "unavailable", "unavailable_chain", "unavailable_slash",
@@ -339,6 +361,8 @@ def test_telegram_reply_turn_uses_target_room_but_keeps_ingress_identity(bridge,
     root = b.api.state_dir / "data"
     _web_bridge(root, monkeypatch)
     project = create_project(root, "target-room")
+    monkeypatch.setattr("ouroboros.settings_integrity.effective_subagents_mode",
+                        lambda *, task, drive_root: "swarm" if task["chat_id"] == project["chat_id"] else "auto")
     expected_room = project["chat_id"] if target_kind.startswith("project") else 1
     if target_kind in {"project_card", "main_converted"}:
         write_task_result(root, "target-work", "completed", chat_id=expected_room)
@@ -363,6 +387,7 @@ def test_telegram_reply_turn_uses_target_room_but_keeps_ingress_identity(bridge,
     accepted, _ = bus.accept_local_message(receiver, root, text, chat_id=42, user_id=42,
                                              source="skill:telegram", client_message_id="tg:42:50", transport=telegram,
                                              task_metadata={"reply_to": address})
+    assert (accepted.get("subagents_mode") == "swarm") == target_kind.startswith("project")
     [incoming] = queued
     if target_kind == "main_converted":
         from ouroboros.chat_references import reference_from_row
@@ -440,9 +465,16 @@ def test_telegram_reply_turn_uses_target_room_but_keeps_ingress_identity(bridge,
     from supervisor import queue
 
     monkeypatch.setattr(queue, "RUNNING", {"new-turn": {"task": {"origin_message_ref": source_ref}}})
+    b.plugin.merge_settings(b.api.state_dir, {"TELEGRAM_MIRROR_PROGRESS": "on"})
+    bus.send_with_budget(expected_room, "Telegram narration", is_progress=True, task_id="new-turn")
+    bus.send_with_budget(expected_room, "Web narration", is_progress=True, task_id="unrelated-turn")
+    assert len(b.calls) == 2 and b.calls[-1][1]["text"].splitlines()[-1] == "Telegram narration"
+    b.plugin.merge_settings(b.api.state_dir, {"TELEGRAM_MIRROR_PROGRESS": "off"})
+    bus.send_with_budget(expected_room, "Hidden narration", is_progress=True, task_id="new-turn")
+    assert len(b.calls) == 2
     bus.send_with_budget(expected_room, "Scheduled child", is_progress=True, task_id="child",
                          role="system", system_type="task_scheduled", progress_meta=child_meta)
-    assert len(b.calls) == 2 and "[child]" in b.calls[-1][1]["text"]
+    assert len(b.calls) == 3 and "[child]" in b.calls[-1][1]["text"]
     monkeypatch.setattr(bus, "publish_event", lambda _topic, event: asyncio.run(b.plugin._make_photo(b.api)(event)))
     live.send_photo(expected_room, b"picture", "Here is a photo", task_id="new-turn")
     assert b.calls[-1][0] == "sendPhoto" and b.calls[-1][1]["reply_to_message_id"] == 50
@@ -738,6 +770,38 @@ def test_completion_notifier_maps_persisted_summary_and_keeps_episodes_separate(
     assert mapping._reply_reference(b.api, "", 42, 101) == "task:episode-1"
     assert mapping._message_ref(b.api, "", 42, 101)["row_address"] == format_address(row_address(summary))
     assert mapping._reply_reference(b.api, "", 42, 102) == "task:episode-2"
+
+
+@pytest.mark.parametrize("bot, peer, gap, delivered", [
+    ("123", "42", False, True), ("456", "42", False, False), ("123", "43", False, False),
+    ("", "42", False, True), ("", "43", False, False), ("123", "42", True, False),
+])
+def test_completion_notifier_keeps_the_original_bot_and_peer(bridge, monkeypatch, bot, peer, gap, delivered):
+    import sys
+    from ouroboros import dialogue_store
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.task_results import write_task_result
+    from ouroboros.terminal_projection import append_terminal_projection
+
+    b = bridge
+    b.api.get_settings = lambda _keys: {"TELEGRAM_BOT_TOKEN": "123:test"}
+    notifier = sys.modules[b.plugin.__package__ + ".lib.telegram_notifier"]
+    root = b.api.state_dir / "data"
+    message = {"direction": "in", "source": "skill:telegram", "chat_id": int(peer), "client_message_id": "tg:opening",
+               "ts": "2026-10-16T11:59:00Z", "text": "Start the work",
+               "transport": {"kind": "telegram", "bot_id": bot, "conversation_id": peer}}
+    if not gap:
+        dialogue_store.append(root, "chat", message)
+    origin = build_owner_message_ref(**{key: message[key] for key in ("chat_id", "client_message_id", "ts", "text")})
+    result = write_task_result(root, "episode-1", "completed", chat_id=1, result="Done", origin_message_ref=origin)
+    assert append_terminal_projection(root, "episode-1", {}, {}, result=result)
+    [(tid, summary)] = notifier._summary_ids_in_tail(b.api)
+    assert tid == "episode-1"
+    assert summary["transport"].get("origin_unresolved", False) is gap
+    state = {"notified_task_ids": []}
+    assert asyncio.run(notifier._check_tasks_notify(b.api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, state, "en")) == (None, delivered)
+    assert [name for name, _ in b.calls] == (["sendMessage"] if delivered else [])
+    assert state["notified_task_ids"] == ["episode-1"]
 
 
 def test_relay_success_silent_failure_one_line_and_its_system_row_only_when_no_ack_carried_it(bridge):

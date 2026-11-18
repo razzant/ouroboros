@@ -74,11 +74,13 @@ class TelegramRequestRejected(RuntimeError):
         status_code: int = 0,
         plain_retry_safe: bool = False,
         retry_after: int = 0,
+        missing_reply: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = int(status_code or 0)
         self.plain_retry_safe = bool(plain_retry_safe)
         self.retry_after = max(0, int(retry_after or 0))
+        self.missing_reply = missing_reply
 
     @property
     def transient(self) -> bool:
@@ -641,7 +643,7 @@ def message_chunks(text: str, parse_mode: str = "HTML", *, limit: int = _TELEGRA
 
 class TelegramClient:
     def __init__(self, token: str, *, trust_env: bool = False, proxy: Optional[str] = None,
-                 on_message=None, reply_to_message_id: int = 0,
+                 on_message=None, reply_to_message_id: int = 0, reply_fallback_id: int = 0, on_reply_changed=None,
                  api_base_url: Optional[str] = None, files_dir: Optional[str] = None, binding=None,
                  generation: Optional[int] = None, origin_label: str = ""):
         # A client of the bridge's accepted token (lib/telegram_token.py) is one identity: the token and
@@ -661,6 +663,8 @@ class TelegramClient:
         self.on_message = on_message
         self.origin_label = str(origin_label or "")
         self.reply_to_message_id = int(reply_to_message_id)
+        self.reply_fallback_id = reply_fallback_id
+        self.on_reply_changed = on_reply_changed
         if not self.token:
             raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")
         # An explicit proxy replaces ambient proxies for these calls only. With the default
@@ -759,6 +763,9 @@ class TelegramClient:
         except (TypeError, ValueError):
             api_status = response.status_code
         description = str(payload.get("description") or "").strip()
+        missing_reply = (api_status == 400 and description.casefold() in {
+            "bad request: message to be replied not found", "bad request: reply message not found",
+        })
         if safe_method == "editMessageText" and description.casefold().startswith(_NOT_MODIFIED_PREFIX):
             self._observe_message(data, data)
             # Preserve the one benign signal callers rely on without forwarding
@@ -771,15 +778,17 @@ class TelegramClient:
             raise self._failed(TelegramRequestRejected(
                 f"Telegram API {safe_method} returned HTTP {response.status_code}.",
                 status_code=response.status_code,
-                plain_retry_safe=(safe_method == "sendMessage" and response.status_code == 400),
+                plain_retry_safe=(safe_method == "sendMessage" and response.status_code == 400 and not missing_reply),
                 retry_after=_retry_after(payload),
+                missing_reply=missing_reply,
             ))
         if not payload.get("ok"):
             raise self._failed(TelegramRequestRejected(
                 f"Telegram API rejected {safe_method}.",
                 status_code=api_status,
-                plain_retry_safe=(safe_method == "sendMessage" and api_status == 400),
+                plain_retry_safe=(safe_method == "sendMessage" and api_status == 400 and not missing_reply),
                 retry_after=_retry_after(payload),
+                missing_reply=missing_reply,
             ))
         self.accepted += 1
         self._observe_message(data, payload.get("result"))

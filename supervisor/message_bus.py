@@ -489,6 +489,7 @@ class LocalChatBridge:
         cause: str = "", reasoning_effort: str = "",
         project_name: str = "", target_task_ids=None, target_titles=None,
         routing_notice_carrier: str = "", reply_to: Optional[Dict[str, Any]] = None,
+        transport: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Emit a typed routing receipt without creating an assistant bubble.
 
@@ -535,12 +536,7 @@ class LocalChatBridge:
             ]
         if self._broadcast_fn and not is_a2a_chat_id(chat_id):
             self._broadcast_fn(payload)
-        if not is_a2a_chat_id(chat_id):
-            publish_event(CHAT_OUTBOUND, {
-                **payload,
-                "text": "",
-                "transport": self.chat_transport(chat_id),
-            })
+        picker_address = {}
         if (
             str(status or "") == "needs_manual_target"
             and isinstance(options, list) and options
@@ -563,10 +559,20 @@ class LocalChatBridge:
                 lines.extend(f"{index}. {label}" for index, label in enumerate(shown, 1))
                 if len(labels) > len(shown):
                     lines.append(f"…and {len(labels) - len(shown)} more in the web chat.")
-                log_chat(
+                stored = log_chat(
                     "out", int(chat_id or 0), 0, "\n".join(lines),
                     source="routing_picker", record_type="routing_options",
                 )
+                if stored:
+                    from ouroboros.chat_references import projection_fields
+
+                    picker_address["row_address"] = projection_fields(stored)["row_address"]
+        if not is_a2a_chat_id(chat_id):
+            publish_event(CHAT_OUTBOUND, {
+                **payload, **picker_address,
+                "text": "",
+                "transport": self.chat_transport(chat_id) if transport is None else transport,
+            })
 
     def send_chat_action(
         self,
@@ -1248,10 +1254,12 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             meta["narration"] = bool(narration)
         meta.setdefault("narration", False)
         from ouroboros.chat_references import origin_reply, projection_fields, telegram_origin_transport
-        if is_progress and meta.get("subagent_event") and meta.get("root_task_id"):
-            if child_transport := telegram_origin_transport(DATA_DIR, str(meta["root_task_id"])):
-                meta.setdefault("transport", child_transport)
-        if not is_progress:
+        if is_progress:
+            origin_task_id = str(meta.get("root_task_id") or task_id) if meta.get("subagent_event") else task_id
+            if "transport" not in meta and origin_task_id:
+                if progress_transport := telegram_origin_transport(DATA_DIR, origin_task_id):
+                    meta["transport"] = progress_transport
+        else:
             source_transport: Dict[str, Any] = {}
             reply = origin_reply(DATA_DIR, task_id, meta if meta.get("origin_message_ref") else None,
                                  transport=source_transport)

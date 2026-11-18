@@ -244,7 +244,9 @@ def _chat_record(
 
             record["message_accepted_at"] = utc_now_iso()
             try:
-                if effective_subagents_mode(task={"chat_id": chat_id}, drive_root=root) == "swarm":
+                reply = (message_meta or {}).get("reply_to")
+                room = reply.get("telegram_room_chat_id", chat_id) if source == "skill:telegram" and isinstance(reply, dict) else chat_id
+                if room is not None and effective_subagents_mode(task={"chat_id": room}, drive_root=root) == "swarm":
                     record["subagents_mode"] = "swarm"
             except Exception:
                 log.debug("Subagents label unavailable for the inbound row", exc_info=True)

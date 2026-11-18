@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.17
+version: 1.4.18
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -63,8 +63,10 @@ reference through normal chat and opens a turn in the target's Main or Project r
 The same bot in the same Telegram chat answers the exact owner message, even the
 latest. A reply about a subagent's card uses that child's Telegram card when known.
 Unknown or expired reply targets are reported rather than routed elsewhere;
-Telegram must accept the native anchor when one is specified. A resumed delivery
-keeps its original anchor for all remaining parts.
+Telegram must accept the native anchor when one is specified. If Telegram definitely
+rejects a missing child card before any part is delivered or uncertain, the bridge
+can reply to the owner's original message in the same bot and chat. A resumed
+delivery keeps the recorded anchor for all remaining parts.
 Relay success stays silent; a host-reported failure arrives as one line. A relayed row quotes the owner's words verbatim as
 plain text, under where he wrote them and with the file names, above the note; a
 note between works that quotes none of his words stays in its room.

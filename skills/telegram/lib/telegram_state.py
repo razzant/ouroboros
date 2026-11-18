@@ -107,7 +107,11 @@ def _owner_ingress_fields(api, bot: str, chat_id: int, message: dict, update_id:
         transport["reply_target_unlinked"] = True
     if message_id:
         target = _message_ref(api, bot, chat_id, target_id) if address.startswith("task:") else {}
-        child = address[5:] if target.get("child_card") else ""
+        task_id = address[5:] if target else ""
+        legacy_child = (task_id and target.get("kind") == "work_card"
+                        and "child_card" not in target
+                        and _get_subagent_msg(api, bot, chat_id, task_id) == target_id)
+        child = task_id if target.get("child_card") or legacy_child else ""
         if bot:
             transport.update(bot_id=bot, owner_message_id=message_id)
             if child:
@@ -210,12 +214,20 @@ def _quiet_progress(event: dict) -> bool:
         event.get("system_type") == "host_progress" and not event.get("task_incident"))
 
 
+def _same_telegram_binding(transport: object, bot: str, chat_id: int) -> bool:
+    if not isinstance(transport, dict):
+        return True
+    if transport.get("origin_unresolved") is True:
+        return False
+    return (transport.get("kind") != "telegram" or
+            (transport.get("conversation_id") == str(chat_id) and transport.get("bot_id") in (None, "", bot)))
+
+
 def _mirror_options(api, bot: str, event: dict, chat_id: int) -> dict:
     """A client mirrors one host row; all of its physical parts share this fact, and the bot of
     the token this client is built from: a token saved during a long send never moves a part."""
     transport = event.get("transport")
-    if (isinstance(transport, dict) and transport.get("kind") == "telegram" and transport.get("bot_id")
-            and (transport["bot_id"] != bot or transport.get("conversation_id") != str(chat_id))):
+    if not _same_telegram_binding(transport, bot, chat_id):
         raise TelegramDestinationUnavailable("Original Telegram bot or chat is unavailable; the message remains in Ouroboros.")
     child = _child_card_target(event)
     task_id = child or str(event.get("task_id") or "")
@@ -234,8 +246,18 @@ def _mirror_options(api, bot: str, event: dict, chat_id: int) -> dict:
               "native_reply_id": native_reply_id, **({"child_card": True} if child else {})}
     if _quiet_progress(event) and kind not in ("work_card", "question"):
         record["progress"] = True  # the type fact Silent mode's replacement requires
-    return {"on_message": lambda chat, mid: _remember_message(api, bot, chat, mid, record),
-            "reply_to_message_id": native_reply_id}
+    options = {"on_message": lambda chat, mid: _remember_message(api, bot, chat, mid, record),
+               "reply_to_message_id": native_reply_id}
+    if reply:
+        options["on_reply_changed"] = lambda anchor: record.update(native_reply_id=anchor)
+    if (native_reply_id and isinstance(reply, dict) and reply.get("role") == "user" and reply.get("chat_id") == chat_id
+            and isinstance(transport, dict) and bot and transport.get("bot_id") == bot
+            and transport.get("conversation_id") == str(chat_id) and transport.get("reply_address") == record["reply_to"]
+            and transport.get("reply_child_task_id") and not _is_routing_notice(event)):
+        owner_id = transport.get("owner_message_id")
+        if type(owner_id) is int and owner_id > 0 and owner_id != native_reply_id:
+            options["reply_fallback_id"] = owner_id
+    return options
 
 
 def _replaceable_progress(api, bot: str, chat_id: int, message_id: int, event: dict) -> bool:

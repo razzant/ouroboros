@@ -153,35 +153,51 @@ def _live_origin_ref(task_id: str) -> dict | None:
         return task.get("origin_message_ref")
 
 
-def origin_reply(root, task_id: str, metadata=None, *, transport: dict | None = None) -> dict:
+def origin_reply(root, task_id: str, metadata=None, *, transport: dict | None = None, live_first: bool = False) -> dict:
     """The answer's host reference to the owner message that began its turn.
 
-    Best-effort enrichment: a busy or unreadable store omits the reference, never the message."""
+    A known origin with no readable source leaves the native destination unresolved;
+    the local message still lands without its reference."""
     if not root or not (task_id or metadata):
         return {}
     from ouroboros.task_status import load_effective_task_result
     from ouroboros.project_dialogue import resolve_owner_message_source
+    ref = _live_origin_ref(task_id) if live_first and task_id else None
     try:
-        task = metadata or load_effective_task_result(root, task_id, materialize_artifacts=False) or {}
-        ref = task.get("origin_message_ref") or (task.get("metadata") or {}).get("origin_message_ref")
+        if not ref:
+            if live_first:
+                from ouroboros.task_results import load_task_result
+
+                task = metadata or load_task_result(root, task_id) or {}
+            else:
+                task = metadata or load_effective_task_result(root, task_id, materialize_artifacts=False) or {}
+            ref = task.get("origin_message_ref") or (task.get("metadata") or {}).get("origin_message_ref")
         if not ref and task_id and transport is not None:
             ref = _live_origin_ref(task_id)
         row = resolve_owner_message_source(root, ref) if ref else None
     except StoreError:
-        return {}
+        row = None
+    if transport is not None and ref and not row:
+        transport["origin_unresolved"] = True
     reply = reference_from_row(row) if row else {}
-    if transport is not None and row and row.get("source") == "skill:telegram":
-        source_transport = row.get("transport")
-        if isinstance(source_transport, dict) and source_transport.get("kind") == "telegram":
-            transport.update(source_transport)
-            transport["reply_address"] = reply["address"]
+    if transport is not None and row:
+        transport.update(owner_reply_transport(row, reply))
     return reply
+
+
+def owner_reply_transport(row: dict, reply: dict) -> dict:
+    """Delivery fields proved by the accepted owner row, not by its execution room."""
+    transport = row.get("transport")
+    source = str(row.get("source") or "")
+    if not (source.startswith("skill:") and isinstance(transport, dict) and transport and reply.get("address")):
+        return {}
+    return {**transport, "reply_address": reply["address"]} if source == "skill:telegram" else dict(transport)
 
 
 def telegram_origin_transport(root, task_id: str) -> dict:
     transport: dict = {}
-    origin_reply(root, task_id, transport=transport)
-    return transport
+    origin_reply(root, task_id, transport=transport, live_first=True)
+    return transport if transport.get("kind") == "telegram" or transport.get("origin_unresolved") else {}
 
 
 def resolve_progress_row(root, address):

@@ -319,7 +319,8 @@ def reply_preparation(drive_root: Any) -> Dict[str, Any]:
         if origin:
             origin_reply(drive_root, task_id, {"origin_message_ref": origin}, transport=transport)
         transport = transport or (bridge.chat_transport(chat) if bridge else {})
-        key = (chat, str(transport.get("kind") or ""), str(transport.get("conversation_id") or ""))
+        key = (chat, str(transport.get("kind") or ""), str(transport.get("conversation_id") or ""),
+               str(transport.get("bot_id") or ""), transport.get("origin_unresolved") is True)
         chats.setdefault(key, {"chat_id": chat, "transport": transport})
     return {"complete": availability["complete"], "chats": list(chats.values()), "roots": sorted(roots)}
 

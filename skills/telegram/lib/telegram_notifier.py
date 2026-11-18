@@ -267,7 +267,8 @@ def _routing_notice_text(event: Dict[str, Any], lang: str) -> Tuple[str, bool]:
         lines.extend(f"{index}. {label}" for index, label in enumerate(labels, 1))
         if len(options) > len(labels):
             lines.append(texts.format("routing_more_targets", count=len(options) - len(labels)))
-        lines.append(texts["routing_reply_with_number"])
+        if event.get("row_address"):
+            lines.append(texts["routing_reply_with_number"])
     names = [str(row.get("label") or "file") for row in event.get("attachment_manifest") or []
              if isinstance(row, dict) and row.get("status") == "rejected"]
     if names:

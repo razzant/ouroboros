@@ -609,7 +609,7 @@ def test_the_notifier_scopes_its_mirror_to_the_token_it_sends_with(world):
     assert "messages" not in world.refs()
 
 
-def test_the_panic_path_names_the_bot_that_polled_it(world):
+def test_the_panic_path_forwards_only_the_authenticated_emergency_request(world):
     inject = AsyncMock()
     world.plugin._inject = inject
     world.plugin._POLL_GENERATION_STARTED = 1
@@ -622,7 +622,8 @@ def test_the_panic_path_names_the_bot_that_polled_it(world):
         }, 1, "full_access", "en")
 
     world.run(steps)
-    assert inject.await_args.args[1]["client_message_id"] == f"tg:{B_ID}:42:7"
+    inject.assert_awaited_once_with(world.api, {"text": "/panic", "chat_id": 42, "user_id": 42, "source": "telegram"})
+    assert not (Path(world.api.get_state_dir()) / "message_refs.json").exists()
 
 
 # --- 8: what was stored stays readable and is never rewritten; a botless record anchors nothing --
