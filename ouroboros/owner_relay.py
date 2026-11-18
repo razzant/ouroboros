@@ -889,7 +889,7 @@ def _pristine_form(ctx, row: dict, targets: dict | None = None) -> tuple:
         answer = {"source": row["source"], **{k: fact[k] for k in ("source_task_id", "quiz_id") if fact.get(k)}}
         if target:
             answer["reply_to"] = {"address": address, "author": target.get("author"), "text": target["text"],
-                                  **{k: fact[k] for k in ("card_id", "pressed_label") if fact.get(k)}}
+                                  **{k: fact[k] for k in ("card_id", "pressed_label", "submitted_values") if fact.get(k)}}
         if row["source"] == "owner_press" and "shown" not in fact:
             answer["rendered"] = True  # an older inherited field holds only the host's account
         pristine.update(text=fact.get("shown", row["text"]), corpus_answer=answer)

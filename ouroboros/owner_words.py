@@ -357,7 +357,7 @@ def _words_rows(item: Mapping[str, Any], *, carrier: str, task_id: str, content:
         rows[0]["answer_input"] = {**({"shown": shown} if item["source"] == OWNER_PRESS else {}),
                                    "reply_address": target.get("address", ""),
                                    **{k: item[k] for k in ("source_task_id", "quiz_id") if item.get(k)},
-                                   **{k: target[k] for k in ("card_id", "pressed_label") if target.get(k)}}
+                                   **{k: target[k] for k in ("card_id", "pressed_label", "submitted_values") if target.get(k)}}
     if target.get("address"):
         rows.append(_row(target.get("text"), source=REPLY_TARGET, carrier=carrier, task_id=task_id,
                          ref=target["address"], author=target.get("author") or "author not recorded"))
@@ -534,14 +534,16 @@ def cited_owner_basis(ctx: Any, owner_words: Any, *, call_speech: bool = False) 
     The owner's decision of 11 November 2026 admits their own call speech only for a model choice:
     its caller opts in with ``call_speech`` and carries the returned ``live_call`` span only on the lead,
     never as the new work's owner corpus (the caption rules of 7 November otherwise stand)."""
+    from ouroboros.answer_facts import word_spans
     from ouroboros.chronicle_quotes import quote_in
 
     wanted = str(owner_words or "").strip()
     if not wanted:
         return None, ""
     for row in directive_owner_rows(ctx):  # owner-door rows that reached this run (never a reply target's words)
-        if row["source"] in OWNER_WORD_SOURCES and quote_in(wanted, row["text"]):
-            if row["source"] == "owner_quiz_answer":
+        fact = _mapping(row.get("answer_input"))
+        if row["source"] in OWNER_WORD_SOURCES and quote_in(wanted, word_spans(row["text"], fact)):
+            if row["source"] == "owner_quiz_answer" or fact.get("card_id"):
                 for item, _, ref, _ in _dated_directives(ctx):
                     if (item["source"] == row["source"] and item.get("content") == row["text"]
                             and (ref or row_ref(item)) == row["ref"]):
@@ -591,10 +593,11 @@ def owner_words_contain(ctx: Any, text: Any) -> bool:
     """``text`` is my human's own words that reached this run: exact, as a quote is (``chronicle_quotes.quote_in``),
     inside one row of their words in the run, never a reply target (another author's words beside theirs) or a
     press (an act). Provenance of bytes, never their meaning."""
+    from ouroboros.answer_facts import word_spans
     from ouroboros.chronicle_quotes import quote_in
 
     wanted = str(text or "").strip()
-    return bool(wanted) and any(quote_in(wanted, row["text"])
+    return bool(wanted) and any(quote_in(wanted, word_spans(row["text"], _mapping(row.get("answer_input"))))
                                 for row in directive_owner_rows(ctx) if row["source"] in OWNER_WORD_SOURCES)
 
 

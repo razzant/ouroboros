@@ -1225,3 +1225,19 @@ def test_a_late_answer_bubble_offers_only_the_comment_for_a_human_quote(tmp_path
         assert check_quotes(tmp_path, [{"address": addr(row), "speaker": "human", "text": "Open the iris"}]) == (False, 0)
         if comment:
             assert check_quotes(tmp_path, [{"address": addr(row), "speaker": "human", "text": comment}]) == (True, None)
+
+
+def test_form_quotes_and_marks_stay_inside_one_submitted_field(tmp_path):
+    from ouroboros.dialogue_provenance import quote_words
+
+    values = {"from": "  at\nmoonrise", "to": "sunset  "}
+    press = {"task_id": "reed-desk", "card_id": "card_2a2b2c2d2e2f3031", "request_id": "reed-form",
+             "submission": {"label": "Submit", "title": "Reed dates", "values": values}}
+    [row] = chat(tmp_path, [{"chat_id": 1, "direction": "in", "ts": ts(1),
+                             "text": "Reed dates\nfrom:   at\nmoonrise\nto: sunset  ", "card_press": press}])
+    for words, accepted in (("moonrise\nsunset", False), ("at\nmoonrise", True), ("sunset  ", True), ("Submit", False)):
+        assert check_quotes(tmp_path, [{"address": addr(row), "speaker": "human", "text": words}]) == (
+            (True, None) if accepted else (False, 0))
+        mark = json.loads(_memory_mark(ctx_for(tmp_path), text="Record the dates", address=addr(row), quote=words))
+        assert mark["ok"] is accepted
+    assert "moonrise\nsunset" not in quote_words(row)

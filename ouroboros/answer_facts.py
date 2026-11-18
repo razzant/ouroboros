@@ -114,6 +114,19 @@ def forwarded_bubble_matches(row: Mapping, content: str, root: Any) -> bool:
     return content in (bubble, bubble.strip())
 
 
+def submitted_texts(values: Mapping) -> tuple[str, ...]:
+    """Each nonempty field as submitted, including interior newlines and the JSON spelling of scalars."""
+    return tuple(v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+                 for v in values.values() if v is not None and (not isinstance(v, str) or v.strip()))
+
+
+def word_spans(text: str, target: Mapping) -> tuple[str, ...]:
+    """The separate fields one quotation can come from. Older flattened forms prove only spans within a line."""
+    if isinstance(values := target.get("submitted_values"), Mapping):
+        return submitted_texts(values)
+    return tuple(text.split("\n")) if target.get("card_id") else (text,)
+
+
 def living_card_input(row: Any, root: Any = None) -> dict:
     """The submitted values or wordless action and its card. Older mail may carry only the store identity."""
     submission = _living_submission(row, root)
@@ -123,11 +136,11 @@ def living_card_input(row: Any, root: Any = None) -> dict:
     if snap is None:
         return {"source": OWNER_CARD_INPUT, "content": "Card input received. Its submission is unavailable."}
     label = snap["label"]
-    values = [v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
-              for v in snap["values"].values() if v is not None and (not isinstance(v, str) or v.strip())]
+    values = submitted_texts(snap["values"])
     target = {"address": f"card {card_id} of task {asker}", "author": f"Ouroboros, task {asker}",
               "text": "\n".join(part for part in (snap["title"], snap.get("form_title"), label) if part),
-              "pressed_label": label, "card_id": card_id}
+              "pressed_label": label, "card_id": card_id,
+              **({"submitted_values": snap["values"]} if snap["values"] else {})}
     return {"source": "owner_mailbox" if values else OWNER_PRESS, "content": "\n".join(values) if values else label,
             "source_task_id": asker, "reply_to": target}
 

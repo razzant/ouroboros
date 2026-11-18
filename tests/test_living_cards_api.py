@@ -616,3 +616,41 @@ def test_only_the_complete_drawn_caption_proves_a_wordless_press(tmp_path, decid
     assert not owner_words_contain(ctx, caption)
     assert cited_owner_basis(ctx, caption)[0]["source"] == "owner_press"
     assert cited_owner_basis(ctx, caption.strip()[1:])[0] is None
+
+
+def test_form_fields_keep_their_word_boundaries_in_the_corpus_and_its_copies(tmp_path, decide):
+    import queue
+    from types import SimpleNamespace
+    from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources
+    from ouroboros.owner_words import carried_owner_corpus, cited_owner_basis, owner_words_contain
+
+    card = _component_card(tmp_path)
+    values = {"from": "  at\nmoonrise", "to": "sunset  "}
+    assert decide({"request_id": "elm-fields", "revision": 1, "decision_id": f"card:{card['card_id']}:dates",
+                   "values": values}).json()["delivery"] == "delivered"
+    ctx = SimpleNamespace(task_id="task-1", drive_root=tmp_path)
+    _drain_incoming_messages([], queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
+    assert owner_input_revision(ctx) == 1
+    [original] = ctx._owner_directives
+    assert original["content"] == "\n".join(values.values())
+    def check(focus):
+        assert not owner_words_contain(focus, "moonrise\nsunset")
+        assert cited_owner_basis(focus, "moonrise\nsunset")[0] is None
+        for value in values.values():
+            assert owner_words_contain(focus, value) and cited_owner_basis(focus, value)[0]
+    check(ctx)
+    from ouroboros.owner_relay import _rows_to_carry, inject_relay, write_relay
+    [(_, _, quote, _, _)] = _rows_to_carry(ctx, tmp_path)
+    entry, created = write_relay(tmp_path, "elm-reader", relay_id="elm-fields", note="Read the dates",
+                                 quotes=[quote], teller_task_id=ctx.task_id, chat_id=1)
+    assert created
+    receiver = SimpleNamespace(task_id="elm-reader", drive_root=tmp_path)
+    inject_relay(receiver, entry, [])
+    check(receiver)
+    recovered = owner_corpus_rows(owner_sources(tmp_path, {"origin_message_text": "Read the dates"}, ctx.task_id))
+    for rows in (recovered, carried_owner_corpus(ctx), [cited_owner_basis(ctx, "moonrise")[0]]):
+        seed = SimpleNamespace(task_metadata={"objective_author": {"kind": "task"}, "owner_corpus": rows})
+        _initialize_owner_directives(seed, [{"role": "user", "content": "Read the calendar"}])
+        check(seed)
