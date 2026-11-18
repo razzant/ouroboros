@@ -217,9 +217,9 @@ def _list_working_parts(ctx: Any, parts: Dict[str, bytes]) -> int:
 
 
 def _encode_working(ctx: Any, state: Dict[str, Any], encode: Any) -> tuple:
-    """``(file bytes, whole bytes, parts written)``: the wrapper over a skeleton whose shareable
-    elements are CAS parts (written and listed before the file replaces the previous state), or
-    the whole state as before when nothing is shareable."""
+    """``(file bytes, whole bytes, parts written)``: the wrapper over a skeleton whose shareable elements are CAS parts
+    (written and listed before the file replaces the previous state), or the whole state as before when nothing is
+    shareable. The whole's length is its segments' (a repeated part at each place), never a hash of the whole state."""
     from ouroboros.shared_values import tokenize
 
     tokenized = tokenize(state, encode, part_bytes=lambda element: _shared_element(ctx, element))
@@ -228,7 +228,7 @@ def _encode_working(ctx: Any, state: Dict[str, Any], encode: Any) -> tuple:
         return data, len(data), 0
     written = _list_working_parts(ctx, tokenized.parts)
     data = encode({"format": WORKING_SHARED_FORMAT, "state": None}).replace(b"null", tokenized.skeleton, 1)
-    return data, tokenized.whole_digest()[1], written
+    return data, sum(map(len, tokenized.segments())), written
 
 
 def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -> None:
