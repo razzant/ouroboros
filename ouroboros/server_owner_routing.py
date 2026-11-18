@@ -417,6 +417,7 @@ def _deliver_to_reader(
                 ),
                 card_press=task_metadata.get("card_press") if isinstance(task_metadata, dict) else None,
                 reply_reference=task_metadata.get("reply_reference") if isinstance(task_metadata, dict) else None,
+                origin_message_ref=(task_metadata or {}).get("origin_message_ref"),
                 # Only while that author's loop still reads mail, checked under the mail lock its final drain closes
                 # the intake under (``conversation_lease.accept_author_mail``): else the words start their own turn.
                 # An owner turn's row must still be the one judged, its fact name the attempt judged, its result not

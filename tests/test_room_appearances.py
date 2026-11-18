@@ -347,8 +347,8 @@ class TestOwnerReplyLink:
             address = format_address(row_address(row))
         elif source == "child":
             target = "exact-child"
-            row = ds.append(room.root, "chat", {"ts": "2026-11-01T10:01:00Z", "direction": "system",
-                            "chat_id": 1, "task_id": target, "parent_task_id": "nova-root",
+            row = ds.append(room.root, "chat", {"ts": "2026-11-01T10:01:00Z", "direction": "out",
+                            "chat_id": 1, "task_id": target, "parent_task_id": "nova-root", "role": "system",
                             "card_row": "timeline", "text": "A milestone from the child."}).row
             address = format_address(row_address(row))
         written, handover = _owner(room.bridge, room.root, "Only for this work", address, message_id="explicit")
@@ -356,6 +356,8 @@ class TestOwnerReplyLink:
         assert repeat == written and not duplicate
         assert written["reply_to"]["work_task_id"] == target
         assert written["reply_to"]["address"] == address
+        if source == "child":
+            assert written["reply_to"]["role"] == written["reply_to"]["kind"] == "system"
         current = []
         monkeypatch.setattr(router, "_route_main_followup", lambda *args, **kw: current.append(args[2]) or "")
         monkeypatch.setattr(router, "_decision_turn_metadata", lambda _ctx, _chat, _id, metadata, _roots: metadata)
@@ -379,6 +381,24 @@ class TestOwnerReplyLink:
         mail = _mailbox_path(room.root, target).read_text(encoding="utf-8")
         assert "Only for this work" in mail and address in mail
         assert mail.count("Only for this work") == 1
+        if source == "notice":  # destination was born in the Project, not admitted in Main
+            from ouroboros.loop_round_limits import _drain_incoming_messages
+            from ouroboros.owner_relay import held_owner_messages
+            from ouroboros.project_dialogue import resolve_owner_message_source
+
+            ref = handover[0]["accepted_source_ref"]
+            assert json.loads(mail)["origin_message_ref"] == ref
+            assert resolve_owner_message_source(room.root, ref) == written
+            recipient = _ctx(room.root, target, room.nova)
+            transcript = []
+            _drain_incoming_messages(transcript, queue.Queue(), room.root, target, None, set(), recipient)
+            assert "Only for this work" in str(transcript)
+            held = held_owner_messages(recipient)[format_address(row_address(written))]
+            assert (held["chat_id"], held["ts"], held["text"]) == (1, written["ts"], "Only for this work")
+            directive = recipient._owner_directives[-1]
+            assert (directive["chat_id"], directive["ts"], directive["client_message_id"]) == (
+                "1", written["ts"], written["client_message_id"])
+            mail = _mailbox_path(room.root, target).read_text(encoding="utf-8")
         if source == "child":
             assert not _mailbox_path(room.root, "nova-root").exists()
         _, ordinary = _owner(room.bridge, room.root, "Now something else", "", message_id="ordinary")
@@ -403,6 +423,41 @@ class TestOwnerReplyLink:
         accept("Too late", late[0])
         assert current == ["Now something else"]
         assert _mailbox_path(room.root, target).read_text(encoding="utf-8") == mail
+
+    @pytest.mark.parametrize("source", ["missing_card", "unreadable_work"])
+    def test_reply_to_a_refused_address_stays_out_of_the_ordinary_conversation(self, room, source, monkeypatch):
+        from ouroboros import server_owner_routing as router, task_results
+
+        address = "task:missing-work"
+        if source == "unreadable_work":
+            task_results.write_task_result(room.root, "bad-work", "running", chat_id=1)
+            original = ds.append(room.root, "chat", {"ts": "2026-11-18T22:00:00Z", "chat_id": 1,
+                                "direction": "out", "text": "Exact quote, unknown work", "task_id": "bad-work"}).row
+            address = format_address(row_address(original))
+            original_reader = task_results.load_task_result
+
+            def read(root, task, *args, **kwargs):
+                if task == "bad-work" and kwargs.get("strict"):
+                    raise ValueError("Unreadable task authority")
+                return original_reader(root, task, *args, **kwargs)
+
+            monkeypatch.setattr(task_results, "load_task_result", read)
+        first, admitted = _owner(room.bridge, room.root, "First reply", address, message_id="first-refused")
+        nested, branch = _owner(room.bridge, room.root, "Following up", format_address(row_address(first)),
+                                message_id="second-refused")
+        assert first["reply_to"]["work_task_id"] == nested["reply_to"]["work_task_id"] == ""
+        assert "unresolved" not in nested["reply_to"] and nested["reply_to"]["snippet"] == "First reply"
+        if source == "unreadable_work":
+            assert first["reply_to"]["snippet"] == "Exact quote, unknown work"
+        receipts = []
+        monkeypatch.setattr(router, "_route_main_followup", lambda *_a, **_k: pytest.fail("wrong reader"))
+        monkeypatch.setattr(router, "_record_routing_receipt", lambda *_a, **k: receipts.append(k))
+        ctx = types.SimpleNamespace(DRIVE_ROOT=room.root, RUNNING={}, PENDING=[],
+                                    handle_chat_direct=lambda *_a, **_k: pytest.fail("wrong new conversation"))
+        for words, packet in [("First reply", admitted[0]), ("Following up", branch[0])]:
+            router._route_owner_message(room.bridge, ctx, {**packet, "text": words,
+                                                           "origin_message_ref": packet["accepted_source_ref"]})
+        assert [result["reason"] for result in receipts] == ["reply_work_unresolved"] * 2
 
     def test_a_work_reply_keeps_one_canonical_row_and_targets_the_work(self, room):
         row, dispatched = _owner(room.bridge, room.root, "Why is this not in Nova?", room.notice["row_address"],

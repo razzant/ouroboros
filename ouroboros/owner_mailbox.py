@@ -326,6 +326,7 @@ def write_owner_message(
     card_press: Optional[Dict[str, Any]] = None,
     admit: Optional[Any] = None,
     reply_reference: Optional[Dict[str, Any]] = None,
+    origin_message_ref: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Write an owner message or typed control entry to a task's mailbox.
 
@@ -341,7 +342,8 @@ def write_owner_message(
     finished author's card. ``card_delivery`` names the living-card press
     ``{card_id, request_id, canonical_root}`` its read settles. ``admit``: a check run under the
     mail lock before the append (a carried Presence author's intake), False writes nothing.
-    ``reply_reference``: the door's typed reference to the message these words reply to.
+    ``reply_reference`` names the quoted row; ``origin_message_ref`` names the
+    accepted row of these words, by value from the ingress door.
     """
     from ouroboros.install_identity import StoreForeign, require_owned_root
 
@@ -371,6 +373,8 @@ def write_owner_message(
         entry["late_answer"] = late_ref
     if isinstance(reply_reference, dict) and reply_reference.get("address"):
         entry["reply_reference"] = dict(reply_reference)
+    if origin_message_ref:
+        entry["origin_message_ref"] = dict(origin_message_ref)
     if isinstance(client_surface, dict) and client_surface:
         # Owner Surface Fact (additive, like ``ts``): which client surface sent
         # this follow-up, so the loop can note a mid-task device change.
@@ -766,9 +770,10 @@ def drain_owner_entries(
                 if str(entry.get("client_message_id") or ""):
                     drained["client_message_id"] = str(entry["client_message_id"])
                 # Same for a late quiz answer's typed provenance (the drain rebuilds the card frame
-                # for the model from it), a card press's read receipt and the message words reply to.
+                # for the model from it), a card press's read receipt, and both ends of a reply.
                 for relay_field in ("relay", "owner_rows", "source_task_id", "source_row", "quiz_delivery", "card_delivery",
-                                    "card_press", "relay_canonical_root", "sender_origin", "reply_reference", "host_carried"):
+                                    "card_press", "relay_canonical_root", "sender_origin", "reply_reference",
+                                    "origin_message_ref", "host_carried"):
                     if relay_field in entry:
                         drained[relay_field] = entry[relay_field]
                 if isinstance(entry.get("late_answer"), dict):

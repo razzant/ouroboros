@@ -7,12 +7,14 @@ card cannot pass by disappearing before the final assertion.
 """
 
 import json
+import re
 import uuid
+from pathlib import Path
 
 import pytest
 
 from tests.system_e2e.harness import (
-    ArtifactOracle, ScriptedStubModel, keyless_settings, message_text,
+    ArtifactOracle, ModelGate, ScriptedStubModel, keyless_settings, message_text,
     start_server, wait_durable_result, wait_until,
 )
 from tests.test_owner_wait_integration import wait_clone as clone_fixture
@@ -66,6 +68,134 @@ class ToolCallOnlyModel(ScriptedStubModel):
     def _answer(self, body, seq):
         kind, message = super()._answer(body, seq)
         return kind, ({**message, "content": None} if message.get("tool_calls") else message)
+
+
+def test_reply_to_finished_launcher_reaches_only_its_live_work(tmp_path):
+    """Real composer -> host ingress -> two independent readers -> next model wire -> replay."""
+    from playwright.sync_api import expect, sync_playwright
+    from tests.candidate_checkout import candidate_checkout
+
+    nonce = uuid.uuid4().hex[:10]
+    launch, work, neighbor, explicit, plain, final = [
+        f"{label}_{nonce}" for label in ("LAUNCH", "WORK", "NEIGHBOR", "EXPLICIT", "PLAIN", "HANDOFF")]
+    actors = {marker: [] for marker in (work, neighbor, launch)}
+    target = {}
+
+    def user_rows(body):
+        return [message_text(row) for row in body.get("messages", []) if row.get("role") == "user"]
+
+    def belongs(body, marker):
+        return bool(body.get("tools")) and any(_work_order(text).startswith(marker) for text in user_rows(body))
+
+    work_gate = ModelGate(lambda body: belongs(body, work), timeout=160)
+    neighbor_gate = ModelGate(lambda body: belongs(body, neighbor), timeout=160)
+
+    def response(body):
+        actor = next(marker for marker in actors if belongs(body, marker))
+        actors[actor].append(body)
+        first = len(actors[actor]) == 1
+        if actor == launch:
+            if first:
+                return {"tool": "start_task", "arguments": {"workspace": "none", "objective": work,
+                                                                  "title": "Exact Reply target"}}
+            for row in reversed(body["messages"]):
+                if row.get("role") == "tool" and (hit := re.search(
+                        r"finish_task\(about_work=['\"]([a-zA-Z0-9_-]+)", message_text(row))):
+                    target["id"] = hit[1]
+                    return {"tool": "finish_task", "arguments": {"action": "finish", "answer": final,
+                                                                     "about_work": hit[1]}}
+            raise AssertionError("No host-confirmed work in start_task's result")
+        return ({"tool": "read_file", "arguments": {"root": "system_repo", "path": "VERSION"}}
+                if first else {"final": f"Done {actor}"})
+
+    def send(page, words):
+        page.locator("#chat-input").fill(words)
+        page.locator("#chat-send").click()
+
+    evidence = producer_evidence_dir(tmp_path / "evidence", "reply-reader", env="OUROBOROS_BROWSER_EVIDENCE_OUT")
+    evidence.mkdir(parents=True, exist_ok=True)
+    with candidate_checkout(Path(__file__).resolve().parents[1], tmp_path / "clone", origin_proof=True) as clone, \
+            ToolCallOnlyModel([response] * 16, gate=lambda body: (work_gate(body), neighbor_gate(body))) as stub:
+        server = start_server(clone, tmp_path / "instance", keyless_settings(stub, OUROBOROS_MAX_WORKERS=1),
+                              ready_timeout=115)
+        print("REPLY_WITNESS_HOST_READY", flush=True)
+        oracle = ArtifactOracle(server.data_root)
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(timeout=15000)
+                print("REPLY_WITNESS_CHROMIUM_STARTED", flush=True)
+                try:
+                    page = browser.new_page(viewport={"width": 1280, "height": 850}, reduced_motion="reduce")
+                    page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+                    page.goto(server.base_url, wait_until="domcontentloaded", timeout=20000)
+                    page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === WebSocket.OPEN)",
+                                           timeout=20000)
+                    feed = page.locator("#chat-messages[data-history-hydrated=true]")
+                    feed.wait_for(state="attached", timeout=30000)
+                    print("REPLY_WITNESS_BROWSER_READY", flush=True)
+                    send(page, launch)
+                    assert work_gate.arrived.wait(55), "managed work never entered its actual first request"
+                    source = feed.locator("[data-row-address]").filter(has=page.get_by_text(final, exact=True)).last
+                    expect(source).to_be_visible(timeout=25000)
+                    address = source.get_attribute("data-row-address")
+                    launch_id = wait_until(lambda: next((r["task"]["id"] for r in oracle.events("task_received")
+                        if r.get("task", {}).get("text") == launch), None), 25)
+                    assert launch_id and wait_durable_result(oracle, launch_id, timeout=45)["status"] == "completed"
+                    assert launch_id != target["id"]
+                    send(page, neighbor)
+                    assert neighbor_gate.arrived.wait(55), "other Main turn never entered its actual first request"
+                    source.click(button="right")
+                    page.locator('body > .chat-row-menu[role="menu"] [data-row-action="reply"]').click()
+                    strip = page.locator("#page-chat .chat-quote--composer")
+                    expect(strip).to_have_attribute("data-address", address)
+                    send(page, explicit)
+                    expect(strip).to_have_count(0)
+                    send(page, plain)
+
+                    def delivered(words):
+                        rows = page.request.get(f"{server.base_url}/api/chat/history").json()["messages"]
+                        row = next((row for row in rows if row.get("text") == words and row.get("role") == "user"), None)
+                        if not row:
+                            return None
+                        receipt = next((r for r in oracle._jsonl("logs/chat_annotations.jsonl")
+                                        if r.get("client_message_id") == row.get("client_message_id")
+                                        and r.get("action") == "mailbox_delivery"), None)
+                        return (row, receipt) if receipt else None
+
+                    a, ar = wait_until(lambda: delivered(explicit), 25) or ({}, {})
+                    b, br = wait_until(lambda: delivered(plain), 25) or ({}, {})
+                    assert a.get("reply_to", {}).get("address") == address and not b.get("reply_to"), (a, b)
+                    assert ar.get("status") == "delivered" and ar.get("target") == target["id"], ar
+                    neighbor_id = wait_until(lambda: next((r["task"]["id"] for r in oracle.events("task_received")
+                        if r.get("task", {}).get("text") == neighbor), None), 25)
+                    assert neighbor_id and br.get("status") == "delivered" and br.get("target") == neighbor_id, br
+                    print("REPLY_WITNESS_EXACT_RECEIPTS", flush=True)
+                    work_gate.release.set()
+                    neighbor_gate.release.set()
+                    for actor, wanted, forbidden in ((work, explicit, plain), (neighbor, plain, explicit)):
+                        assert wait_until(lambda: len(actors[actor]) >= 2, 45), actor
+                        words = "\n".join(user_rows(actors[actor][1]))
+                        assert f"[Message from my human]: {wanted}" in words
+                        assert f"[Message from my human]: {forbidden}" not in words
+                    for replay in (False, True):
+                        if replay:
+                            page.reload(wait_until="domcontentloaded", timeout=20000)
+                            feed.wait_for(state="attached", timeout=30000)
+                        card = feed.locator(f'.chat-live-card[data-task-id="{target["id"]}"]')
+                        line = card.locator("[data-live-work-replies] .chat-bubble.user").filter(has_text=explicit)
+                        expect(feed.get_by_text(explicit, exact=True)).to_have_count(1, timeout=20000)
+                        expect(line).to_have_count(1)
+                        if not line.is_visible():
+                            card.locator(":scope > [data-live-summary-button] [data-live-disclosure]").click()
+                        expect(line.locator(".chat-quote")).to_have_attribute("data-address", address)
+                        expect(line).to_be_visible()
+                        page.screenshot(path=str(evidence / ("replay.png" if replay else "live.png")), animations="disabled")
+                finally:
+                    browser.close()
+        finally:
+            work_gate.release.set()
+            neighbor_gate.release.set()
+            server.stop()
 
 
 @pytest.mark.parametrize("case,width", [

@@ -57,11 +57,11 @@ def reference_from_row(row: dict) -> dict:
     # voice wherever Main shows it (project_answer.js::appendProjectRow); the
     # address still hashes the raw System row.
     answer = project_answer_text(row)
+    system = row.get("role") == "system" or row.get("direction") == "system"
     kind = ("question" if kind == "quiz" else "completion" if kind in
-            {"project_completion_summary", "task_summary"} else
-            "system" if row.get("direction") == "system" else "message")
-    role = "assistant" if answer else {"in": "user", "out": "assistant", "system": "system"}.get(
-        row.get("direction"), "system")
+            {"project_completion_summary", "task_summary"} else "system" if system else "message")
+    role = ("assistant" if answer else "system" if system else
+            {"in": "user", "out": "assistant"}.get(row.get("direction"), "system"))
     from ouroboros.room_membership import reply_target_home
     return {"address": format_address(row_address(row)), "chat_id": int(row.get("chat_id", 1)),
             "role": role, "author_label": (str(row.get("sender_label") or "You") if role == "user"
@@ -109,19 +109,24 @@ def ingress_reply(root, metadata: dict, *, route_work: bool = False) -> dict:
     address = metadata.get("reply_to", "")
     if not route_work:
         return resolve_reply(root, address)
-    if not isinstance(address, str) or not address or address.startswith("task:"):
-        ref = resolve_reply(root, address)
-        return {**ref, "work_task_id": ref["task_id"]} if ref.get("kind") == "work_card" else ref
+    if not isinstance(address, str) or not address:
+        return resolve_reply(root, address)
+    if address.startswith("task:"):
+        try:
+            ref = resolve_reply(root, address)
+        except (ValueError, StoreError, OSError):
+            ref = {"address": address, "unresolved": True}
+        return {**ref, "work_task_id": ref.get("task_id", "")}
     try:
         row, _ = resolve_history_row(root, address)
     except (ValueError, StoreError, OSError):
         row = None
     if not row:
-        return {"address": address, "unresolved": True}
+        return {"address": address, "unresolved": True, "work_task_id": ""}
     ref = reference_from_row(row)
     try:
         work = _reply_work(root, row)
-    except (StoreError, OSError):
+    except (ValueError, StoreError, OSError):
         work = ""
     return {**ref, "work_task_id": work} if work is not None else ref
 
