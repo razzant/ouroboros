@@ -29,6 +29,7 @@ from pathlib import Path
 import re
 
 from ouroboros import query_data_sql as sql, store
+from ouroboros.knowledge_versions import is_authored_write
 from ouroboros.tool_capabilities import RESULT_VIEW_PARAMS
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
@@ -401,9 +402,10 @@ def _knowledge_history(path, where, tail, gaps=None):
                     gaps["malformed_lines"] = gaps.get("malformed_lines", 0) + 1
                     gaps.setdefault("first_malformed_offset", at)
                 continue
-            if isinstance(value, dict):
-                for field in _HISTORY_BODY_FIELDS:
-                    value.pop(field, None)
+            if not is_authored_write(value):
+                continue
+            for field in _HISTORY_BODY_FIELDS:
+                value.pop(field, None)
             if where and not _matches(value, where):
                 continue
             rows.append(value)

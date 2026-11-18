@@ -828,6 +828,7 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
     its connector account confirms (``places.place_owner_accounts``), and readers that decide later read it again
     (``focus_owner_now``)."""
     from copy import deepcopy
+    from ouroboros.consciousness_authority import FOCUS_ROUTE_FIELDS, FOCUS_TRANSPORT_KEY
     from ouroboros.config import get_consciousness_autonomy, runtime_setting
     from ouroboros.knowledge import speaker_pages
     from ouroboros.presence_runner import presence_event_identity
@@ -852,7 +853,6 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
         "consciousness_autonomy": get_consciousness_autonomy(), "wake_cause": "focus",
         "consciousness_cause": "place:" + place.place_id, "work_kind": "consciousness",
         "focus": {"place_id": place.place_id, "conversation_key": event.conversation_key,
-                  "transport": {key: getattr(event, key) for key in ("provider", "account_id", "conversation_id", "thread_id")},
                   "identity": identity,
                   "identity_owner": writes_as_owner(place, identity, event.account_id, accounts[place.place_id]),
                   "room_chat_id": chat_id, "event_identity": presence_event_identity(admission.binding_id, event),
@@ -869,6 +869,7 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
                   # Display provenance every inheritor of this focus keeps, never the allowance or any authority: the
                   # words of its matched kinds, and that the Host routed it (several works read its conversation).
                   **({"routed": True} if allowance.get("route") is True else {})},
+        FOCUS_TRANSPORT_KEY: {key: getattr(event, key) for key in FOCUS_ROUTE_FIELDS},
         "focus_allowance": allowance,
     }
     remaining = allowance.get("remaining_usd")

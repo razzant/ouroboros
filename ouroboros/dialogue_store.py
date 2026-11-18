@@ -990,6 +990,25 @@ def latest_inbound_transport(root: Any, chat_ids: Iterable[int]) -> Dict[int, Di
             if chat is not None and isinstance(transport, dict)}
 
 
+def transport_witnesses(root: Any, *, skip_chat_ids: Iterable[int]) -> List[Tuple[int, Dict[str, Any]]]:
+    """Project the distinct coordinates of inbound routes and positive delivery receipts, with their stored rooms."""
+    fields = ("provider", "account_id", "conversation_id", "thread_id")
+    coordinates = ", ".join(f"json_extract(body, '$.transport.{field}')" for field in fields)
+    route = f"json_array(chat_id, {coordinates})"
+    rooms = "chat_id IN (SELECT chat_id FROM rooms WHERE chat_id NOT IN (SELECT value FROM json_each(?)))"
+    skipped = json.dumps(sorted(set(skip_chat_ids)))
+    with transaction(root, write=False) as conn:
+        rows = conn.execute(
+            f"SELECT {route} FROM dialogue INDEXED BY dialogue_inbound WHERE stream='chat' AND direction='in' "
+            f"AND {rooms} AND json_type(body, '$.transport')='object' UNION "
+            f"SELECT {route} FROM dialogue INDEXED BY dialogue_kind WHERE stream='chat' AND kind='presence_delivery' "
+            f"AND direction='out' AND {rooms} AND json_extract(body, '$.transport.delivery.state') IN ('accepted', 'delivered')",
+            (skipped, skipped),
+        ).fetchall()
+    decoded = (json.loads(encoded) for (encoded,) in rows)
+    return [(chat, dict(zip(fields, parts))) for chat, *parts in decoded]
+
+
 def newest(root: Any, stream: str, *, limit: int, before: Optional[int] = None) -> List[Row]:
     """The stream's newest rows below ``before`` (its end when None), oldest first."""
     with transaction(root, write=False) as conn:

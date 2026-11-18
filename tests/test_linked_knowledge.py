@@ -846,7 +846,7 @@ def test_history_stores_each_version_once_as_a_change_against_the_row_that_holds
 
 
 def test_history_finds_the_base_in_a_tail_that_starts_mid_journal_and_keeps_both_texts_past_it(tmp_path, monkeypatch):
-    monkeypatch.setattr(store, "_JOURNAL_TAIL_BYTES", 8192)
+    monkeypatch.setattr(knowledge_versions, "WRITE_TAIL_BYTES", 8192)
     target = address(tmp_path, "work/report")
     for index in range(12):  # other notes push the journal past the tail the writer reads
         store.write_knowledge_note(address(tmp_path, f"filler/{index}"), "x" * 1500)
@@ -1078,6 +1078,7 @@ def test_a_write_without_an_exact_mode_writes_nothing(tmp_path):
             assert reply.startswith(f"⚠️ TOOL_ARG_ERROR: {received[name]}. knowledge_write has no default operation: "
                                     "pass mode as exactly one of overwrite"), (name, reply)
             assert reply.splitlines()[0].endswith(" Nothing was written."), (name, reply)
+            assert reply.splitlines()[1:] == ["This situation's names: room:1 (Main)"], (name, reply)
     assert ("revert (puts back the earlier version named by version)" in reply
             and "expected_revision is the current revision a replacing write checks" in reply), reply
     assert _files(drive / "memory") == before  # the note, its history journal and the index, byte for byte
@@ -1085,6 +1086,7 @@ def test_a_write_without_an_exact_mode_writes_nothing(tmp_path):
     appended = _model_call(registry, json.dumps({"topic": "people/polina", "scope": "global", "mode": "append",
                                                  "content": news, "expected_revision": held.revision}))
     assert not appended["is_error"], appended["result"]
+    assert "This situation's names: room:1 (Main)" in appended["result"].splitlines()
     assert target.path.read_bytes() == held.raw + news.encode("utf-8")
     assert [row["mode"] for row in history(target)] == ["overwrite", "overwrite", "append"]
 
@@ -1426,9 +1428,12 @@ def test_a_stale_revision_gets_every_change_since_or_the_whole_note_never_a_clip
     assert "6 block(s)" in complete and complete.count("\n- old words ") == 6 and complete.count("\n+ new words ") == 6
     assert applied_blocks(held.text, complete) == current.text
     assert current.text not in complete and whole.endswith(current.text) and "What changed" not in whole
-    monkeypatch.setattr(tools, "tool_result_limit", lambda name: len(complete))
+    receipt = "\nThis situation's names: room:1 (Main)"
+    assert complete.count(receipt) == whole.count(receipt) == 1
+    payload_chars = len(complete) - len(receipt)
+    monkeypatch.setattr(tools, "tool_result_limit", lambda name: payload_chars)
     assert stale() == complete  # exactly at the bound: every change, whole
-    monkeypatch.setattr(tools, "tool_result_limit", lambda name: len(complete) - 1)
+    monkeypatch.setattr(tools, "tool_result_limit", lambda name: payload_chars - 1)
     assert stale() == whole  # one character over: the complete current source, exactly as today
     assert store.read_knowledge_note(target).raw == current.raw
 
@@ -1440,7 +1445,7 @@ def test_a_stale_revision_beyond_the_tail_gets_the_whole_note_as_before(tmp_path
     current = store.write_knowledge_note(target, "Two.", "edit", held.revision, old_str="One.").current
     for index in range(4):
         store.write_knowledge_note(address(tmp_path, f"filler/{index}"), "z" * 3000)
-    monkeypatch.setattr(store, "_JOURNAL_TAIL_BYTES", 4096)
+    monkeypatch.setattr(knowledge_versions, "WRITE_TAIL_BYTES", 4096)
     stale = tools._knowledge_write(ctx, "far", "Mine.", mode="overwrite", scope="global", expected_revision=held.revision)
     assert "revision_conflict" in stale and stale.endswith(current.text) and "What changed" not in stale
     lead = next(entry for entry in tools.get_tools() if entry.name == "knowledge_write").schema["description"]
@@ -1451,7 +1456,7 @@ def test_the_writer_reads_its_row_address_and_appends_under_the_shelf_lock(tmp_p
     target = address(tmp_path, "locked")
     first = store.write_knowledge_note(target, "# Locked\n\nFirst.\n").current
     held, seen = [], []
-    real_lock, real_tail, real_append = store.knowledge_write_lock, store._tail_read, store.append_jsonl
+    real_lock, real_tail, real_append = store.knowledge_write_lock, knowledge_versions.write_tail, store.append_jsonl
 
     @contextmanager
     def lock(shelf):
@@ -1463,7 +1468,7 @@ def test_the_writer_reads_its_row_address_and_appends_under_the_shelf_lock(tmp_p
                 held.pop()
 
     monkeypatch.setattr(store, "knowledge_write_lock", lock)
-    monkeypatch.setattr(store, "_tail_read", lambda *args: seen.append(("row address", list(held))) or real_tail(*args))
+    monkeypatch.setattr(knowledge_versions, "write_tail", lambda *args: seen.append(("row address", list(held))) or real_tail(*args))
     monkeypatch.setattr(store, "append_jsonl", lambda *args, **kwargs: seen.append(("append", list(held)))
                         or real_append(*args, **kwargs))
     assert store.write_knowledge_note(target, "# Locked\n\nSecond.\n", expected_revision=first.revision).ok

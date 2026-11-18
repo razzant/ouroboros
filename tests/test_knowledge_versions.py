@@ -36,24 +36,76 @@ def body(reply):
 def test_exact_version_survives_rename_and_the_unversioned_address_reports_the_missing_note(tmp_path, scope):
     target = store.resolve_knowledge_address(tmp_path, TOPIC, scope)
     first = store.write_knowledge_note(target, RIVER.replace("\n", "\r\n")).current
-    second = store.write_knowledge_note(target, RIVER + "New current facts.\n", expected_revision=first.revision).current
+    second = store.write_knowledge_note(target, RIVER.replace("## Мост", "## Пристань"), expected_revision=first.revision).current
     ctx = context(tmp_path)
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry.set_context(ctx)
     args = {"topic": target.topic, "scope": scope}
     assert body(registry.execute("knowledge_read", args)) == second.text
+    start, end = second.text.index("## Пристань"), second.text.index("## Конец")
+    bounds = {"start_char": start, "end_char": end}
+    pin = {**args, "version": second.revision}
+    note = registry.execute_result("knowledge_read", pin)
+    page = registry.execute_result("knowledge_read", {**pin, **bounds})
+    outline = registry.execute_result("knowledge_read", {**pin, "view": "outline"})
+    assert body(note.text) == second.text and body(page.text) == second.text[start:end]
+    assert "an earlier version" not in body(outline.text) and "## Пристань" in body(outline.text)
+    assert f"default view and version={second.revision}." in body(outline.text)
+    readers = [note.meta["knowledge_source"]["read"], page.meta["knowledge_source"]["read"],
+               outline.meta["knowledge_view"]["read"]]
+    assert all(reader == {"tool": "knowledge_read", "arguments": pin} for reader in readers)
     target.path.rename(target.path.with_name("new-name.md"))
 
     exact = registry.execute_result("knowledge_read", {**args, "version": first.revision})
     assert exact.status == "ok" and "The live note is absent at this address." in exact.text
     assert exact.text[exact.meta["knowledge_body_start"]:].encode("utf-8") == first.raw
     assert exact.meta["knowledge_source"]["read"]["arguments"] == {**args, "version": first.revision}
-    outline = registry.execute("knowledge_read", {**args, "version": second.revision, "view": "outline"})
-    assert "Earlier" not in body(outline) and "## Мост" in body(outline)
+    historical_outline = body(registry.execute("knowledge_read", {**args, "version": first.revision, "view": "outline"}))
+    assert "an earlier version, not the current note (live note absent at this address)" in historical_outline
+    assert "## Мост" in historical_outline and "## Пристань" not in historical_outline
+    assert f"Revision: {first.revision}" in historical_outline
     missing = registry.execute_result("knowledge_read", args)
     assert missing.meta["knowledge_missing"] is True and "Topic" in missing.text and "not found" in missing.text
     unknown = registry.execute_result("knowledge_read", {**args, "version": "0" * 64})
     assert unknown.status == "error" and "version_unavailable" in unknown.text
+
+    replacement = store.write_knowledge_note(target, "# Replacement\n\nCurrent contents.\n").current
+    current = registry.execute_result("knowledge_read", args)
+    assert body(current.text) == replacement.text and "version" not in current.meta["knowledge_source"]["read"]["arguments"]
+    assert "# Replacement" in registry.execute("knowledge_read", {**args, "view": "outline"})
+    for reader, options in zip(readers, ({}, bounds, bounds)):
+        recovered = registry.execute_result(reader["tool"], {**reader["arguments"], **options})
+        assert recovered.status == "ok" and f"The current revision is {replacement.revision}." in recovered.text
+        assert body(recovered.text) == (second.text[start:end] if options else second.text)
+
+
+@pytest.mark.parametrize("occupant", ["directory", "non-utf8"])
+def test_a_pinned_read_recovers_when_the_live_path_is_unreadable(tmp_path, occupant):
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(context(tmp_path))
+    target = address(tmp_path)
+    saved = store.write_knowledge_note(target, RIVER.replace("\n", "\r\n")).current
+    target.path.rename(target.path.with_name("moved.md"))
+    args = {"topic": target.topic, "scope": target.scope}
+    earlier = {**args, "version": saved.revision}
+    missing = registry.execute_result("knowledge_read", args)
+    assert missing.meta["knowledge_missing"] is True
+    assert "The live note is absent at this address." in registry.execute("knowledge_read", earlier)
+    if occupant == "directory":
+        target.path.mkdir()
+        expected_code = "TOOL_REPORTED_FAILURE"
+    else:
+        target.path.write_bytes(RIVER.encode("utf-16"))
+        expected_code = "TOOL_ARG_ERROR"
+    ordinary = registry.execute_result("knowledge_read", args)
+    assert ordinary.status == "error" and ordinary.code == expected_code
+    assert not ordinary.meta.get("knowledge_missing") and "The live note is" not in ordinary.text
+    exact = registry.execute_result("knowledge_read", earlier)
+    assert exact.status == "ok" and body(exact.text).encode() == saved.raw
+    assert "The live note is unreadable at this address." in exact.text
+    outline = registry.execute_result("knowledge_read", {**earlier, "view": "outline"})
+    assert "live note unreadable at this address" in body(outline.text)
+    assert body(registry.execute("knowledge_read", outline.meta["knowledge_view"]["read"]["arguments"])) == saved.text
 
 
 def test_knowledge_changes_skip_unchanged_journals_and_read_only_the_appended_window(tmp_path, monkeypatch):
@@ -491,6 +543,54 @@ def test_the_changes_since_a_held_version_show_every_block_whole(tmp_path):
     assert rendered.count("\n@ yours: 1 line(s) from line ") == 7 and "not shown" not in rendered
     assert applied_blocks(held.text, rendered) == current.text
     assert rendered.endswith("The complete current text is knowledge_read(topic='notes/река', scope='global').\n")
+
+
+def test_stale_write_chooses_diff_or_source_before_attaching_the_names_line(tmp_path, monkeypatch):
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.tool_result_delivery import project_tool_result_batch
+
+    monkeypatch.setattr(store, "utc_now_iso", lambda: "2026-11-18T12:00:00+00:00")
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    root = context(tmp_path)
+    child = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="child",
+                        task_metadata={"delegation_role": "subagent"})
+    names_line = "This situation's names: room:1 (Main)\n"
+
+    def conflict(topic, reason):
+        target = address(tmp_path, topic)
+        old = "# Plan\n\nBefore.\n\n" + "Steady words.\n" * 1600
+        held = store.write_knowledge_note(target, old).current
+        current = store.write_knowledge_note(target, held.text.replace("Before.", "After."),
+                                             expected_revision=held.revision, reason=reason).current
+        args = {"topic": topic, "scope": "global", "mode": "overwrite", "content": "Stale edit.",
+                "expected_revision": held.revision}
+        registry.set_context(child)
+        control = registry.execute_result("knowledge_write", args)
+        registry.set_context(root)
+        reply = registry.execute_result("knowledge_write", args)
+        assert control.status == reply.status == "error" and target.path.read_bytes() == current.raw
+        assert reply.text.count(names_line) == 1 and reply.text.replace(names_line, "", 1) == control.text
+        return control, reply, held, current
+
+    limit = tools.tool_result_limit("knowledge_write")
+    probe, _, _, _ = conflict("probe", "r")
+    padding = limit - len(probe.text)
+    assert probe.meta["knowledge_changes_since"] and padding > 0
+    fit, diff, held, current = conflict("equal", "r" * (padding + 1))
+    assert len(fit.text) == limit and len(diff.text) > limit
+    assert diff.meta["knowledge_changes_since"] == held.revision
+    assert applied_blocks(held.text, diff.text) == current.text
+    _, source, _, large_current = conflict("large", "r" * (padding + 2))
+    assert "knowledge_changes_since" not in source.meta
+    assert source.text[source.meta["knowledge_body_start"]:] == large_current.text
+
+    for position, result in enumerate((diff, source)):
+        row = {"tool_call_id": f"stale-{position}", "fn_name": "knowledge_write", "result": result.text,
+               "result_meta": result.meta, "is_error": True}
+        projected, receipt = project_tool_result_batch([row], [], [], drive_root=tmp_path, task_id=root.task_id,
+                                                       fit_candidate=lambda messages, _: {"accepted": len(messages[-1]["content"]) <= 2500})
+        assert receipt["status"] == "projected" and projected[0]["result_partial"]
+        assert read_actor_source_bytes(tmp_path, root.task_id, projected[0]["result_source_ref"]) == result.text.encode()
 
 
 @pytest.mark.parametrize("eol", ["\n", "\r\n"])

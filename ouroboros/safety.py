@@ -36,7 +36,7 @@ from ouroboros.safety_records import (
     _JUDGED, _PRIOR_LOCK, _PRIOR_VERDICTS, _RETURNED, _drop, _root_id, _track_returned, _work_key, tell_owner_over_flag,
 )
 from ouroboros.safety_records import clear_safety_work  # noqa: F401 - public re-export for task_results
-from ouroboros.consciousness_authority import work_kind, effective_runtime_mode
+from ouroboros.consciousness_authority import effective_runtime_mode, focus_evidence, work_kind
 
 log = logging.getLogger(__name__)
 
@@ -718,7 +718,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
                  "root_task_id": _root_id(ctx), "task_id": getattr(ctx, "task_id", ""), "runtime_mode": _runtime_mode(ctx),
                  "consciousness_autonomy": metadata.get("consciousness_autonomy"), "now": utc_now_iso("seconds")},
         "occasion": {"cause": occasion, "consciousness_cause": metadata.get("consciousness_cause"),
-                     "origin_wake_task_id": metadata.get("origin_wake_task_id"), "focus": focus,
+                     "origin_wake_task_id": metadata.get("origin_wake_task_id"), "focus": focus_evidence(focus),
                      "sources": sources, "retained_host_sources": isinstance(directives, list)},
         "subject": {"tool": tool_name, "physical_target": target, "place": place, **sends_as,
                     **({"returned_and_pending": {"note": _PENDING_NOTE, **pending}} if pending else {})},
