@@ -523,3 +523,26 @@ def test_a_placement_i_made_carries_my_humans_words_as_labelled_restriction_into
     # Their restriction still binds there; only consent needs their own placement (prompts/SAFETY.md).
     assert "(they still restrict here; consent needs your human's placement)" in lines[0] and "CIRCLE WORDS" in lines[0]
     assert "context" not in lines[0]
+
+
+@pytest.mark.parametrize("kind", ["press", "comment", "unavailable"])
+def test_a_held_reference_only_answer_keeps_the_safety_source_shape(tmp_path, kind):
+    from ouroboros.owner_quiz import record_answered, record_asked
+    from ouroboros.owner_words import safety_sources
+
+    asker, quiz, label = "birch-desk", "birch-choice", "Use birch paper"
+    comment = "  keep the sample  " if kind == "comment" else ""
+    if kind != "unavailable":
+        record_asked(tmp_path, asker, quiz_id=quiz, question="Which paper?", options=[label])
+        record_answered(tmp_path, asker, quiz_id=quiz, option_index=0, comment=comment, request_id="birch-answer")
+    row = {"direction": "in", "text": comment or "1. " + label, "ts": "2040-03-01T00:00:00Z",
+           "late_answer": {"task_id": asker, "quiz_id": quiz}, "carried": {"went_to": ""}}
+    ctx = SimpleNamespace(task_id="birch-reader", drive_root=tmp_path, _held_owner_messages={"birch-address": row})
+    [item] = safety_sources(ctx)
+    assert item["source"] == {"press": "owner_press", "comment": "owner_mailbox", "unavailable": "owner_card_input"}[kind]
+    assert (item["msg_id"], item["ts"]) == ("birch-address", row["ts"])
+    if kind == "unavailable":
+        assert set(item) == {"content", "source", "msg_id", "ts"} and label not in item["content"]
+    else:
+        assert set(item) == {"content", "source", "msg_id", "ts", "reply_to"}
+        assert item["content"] == row["text"] and item["reply_to"]["address"] == "quiz birch-choice of task birch-desk"

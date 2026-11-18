@@ -969,7 +969,7 @@ def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
     reached this work; one row per source (``source_refs``), the first kept with the card and time a later copy
     adds, and the opening message dated by its door (``_opening``). Never a room, context or marked row: a
     permission my human gave another work is not this one's. Reads the context's attributes and writes nothing."""
-    from ouroboros.answer_facts import row_source
+    from ouroboros.answer_facts import card_input, row_source
     from ouroboros.owner_relay import owner_text
 
     rows: List[Dict[str, Any]] = []
@@ -1001,12 +1001,12 @@ def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
     root = _data_root(ctx)
     for key, row in _mapping(getattr(ctx, "_held_owner_messages", None)).items():
         if isinstance(row, Mapping) and isinstance(row.get("carried"), dict) and not row["carried"].get("went_to"):
-            from ouroboros.answer_facts import card_input
             source_root = row.get("_owner_source_root") or root
-            item = card_input(row, source_root) or {"source": row_source(row, "owner_mailbox"), "content": owner_text(row)}
+            item = card_input(row, source_root)
             replied = item.get("reply_to") or answered_card_reply(*answered_card_source(row)) or reply_target(
                 source_root, row.get("reply_to"))
-            add({**item, "msg_id": str(key),
+            add({"source": item.get("source") or row_source(row, "owner_mailbox"),
+                 "content": item["content"] if item else owner_text(row), "msg_id": str(key),
                  **({"ts": when} if (when := _item_time(row)) else {}), **({"reply_to": replied} if replied else {})})
     return rows
 
