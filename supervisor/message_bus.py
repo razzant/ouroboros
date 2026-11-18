@@ -1247,7 +1247,10 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
         if narration is not None:
             meta["narration"] = bool(narration)
         meta.setdefault("narration", False)
-        from ouroboros.chat_references import origin_reply, projection_fields
+        from ouroboros.chat_references import origin_reply, projection_fields, telegram_origin_transport
+        if is_progress and meta.get("subagent_event") and meta.get("root_task_id"):
+            if child_transport := telegram_origin_transport(DATA_DIR, str(meta["root_task_id"])):
+                meta.setdefault("transport", child_transport)
         if not is_progress:
             source_transport: Dict[str, Any] = {}
             reply = origin_reply(DATA_DIR, task_id, meta if meta.get("origin_message_ref") else None,

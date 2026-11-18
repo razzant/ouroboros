@@ -97,6 +97,8 @@ def _owner_ingress_fields(api, bot: str, chat_id: int, message: dict, update_id:
     target_id = int(reply.get("message_id") or 0) if isinstance(reply, dict) else 0
     address = _reply_reference(api, bot, chat_id, target_id) if target_id else ""
     transport = {"kind": "telegram", "conversation_id": str(chat_id)}
+    if target_id and not address:
+        transport["reply_target_unlinked"] = True
     if message_id:
         target = _message_ref(api, bot, chat_id, target_id) if address.startswith("task:") else {}
         child = address[5:] if target.get("child_card") else ""
@@ -104,7 +106,8 @@ def _owner_ingress_fields(api, bot: str, chat_id: int, message: dict, update_id:
             transport.update(bot_id=bot, owner_message_id=message_id)
             if child:
                 transport.update(reply_child_task_id=child,
-                                 reply_child_message_id=_get_subagent_msg(api, bot, chat_id, child))
+                                 reply_child_message_id=(_get_subagent_msg(api, bot, chat_id, child)
+                                                         or (target_id if target.get("confirmed_lifecycle_card") else 0)))
         _remember_message(api, bot, chat_id, message_id, {
             **_message_ref(api, bot, chat_id, message_id), "direction": "in", "chat_id": chat_id,
             "kind": "message", "client_message_id": client_id,
@@ -604,3 +607,7 @@ async def _render_subagent_card(api, client, chat_id: int, event: Dict[str, Any]
     new_id = await client.send_message(chat_id, text, parse_mode="", **({"disable_notification": True} if quiet else {}))
     if new_id:
         _set_subagent_msg(api, client.bot_id, chat_id, child, new_id)
+        _remember_message(api, client.bot_id, chat_id, new_id, {
+            "chat_id": event.get("chat_id"), "kind": "work_card", "task_id": child,
+            "child_card": True, "confirmed_lifecycle_card": True,
+        })

@@ -292,7 +292,28 @@ def test_child_notice_replies_use_the_exact_child_card_not_the_notice_or_parent(
     assert b.calls[-1][1]["reply_to_message_id"] == 101
 
 
-@pytest.mark.parametrize("target_kind", ["main_row", "main_converted", "project_row", "project_card", "project_chain", "project_retired", "unavailable"])
+def test_confirmed_lifecycle_card_survives_child_index_eviction(bridge):
+    b = bridge
+    state = _state(b.plugin)
+    asyncio.run(b.plugin._make_outbound(b.api)({
+        "chat_id": 7, "task_id": "parent", "subagent_task_id": "child",
+        "subagent_event": "scheduled", "accepted": True, "is_progress": True,
+    }))
+    state._save_subagent_state(b.api, {})  # only the separate child index has lost the card
+    fields = state._owner_ingress_fields(b.api, "", 42, _owner(50, "About the child", reply=101), 50)
+    assert fields["reply_to"] == "task:child"
+    # The named, bot-qualified durable route carries the same fallback.
+    record = state._message_ref(b.api, "", 42, 101)
+    assert record["confirmed_lifecycle_card"] is True
+    state._remember_message(b.api, "bot-1", 42, 101, record)
+    fields = state._owner_ingress_fields(b.api, "bot-1", 42, _owner(50, "About the child", reply=101), 50)
+    assert fields["transport"]["reply_child_message_id"] == 101
+
+
+@pytest.mark.parametrize("target_kind", [
+    "main_row", "main_converted", "project_row", "project_card", "project_chain", "project_retired",
+    "unavailable", "unavailable_chain", "unavailable_slash",
+])
 def test_telegram_reply_turn_uses_target_room_but_keeps_ingress_identity(bridge, monkeypatch, target_kind):
     from ouroboros import server_owner_routing as routing
     from ouroboros.chat_chain import format_address, row_address
@@ -311,18 +332,22 @@ def test_telegram_reply_turn_uses_target_room_but_keeps_ingress_identity(bridge,
         address = "task:target-work"
     else:
         target = bus.log_chat("out", expected_room, 1, "The target message")
-        address = format_address(row_address(target)) if target_kind != "unavailable" else "task:missing-work"
+        address = "task:missing-work" if target_kind.startswith("unavailable") else format_address(row_address(target))
 
     queued = []
     receiver = SimpleNamespace(enqueue_local_message=lambda text, **payload: queued.append(payload))
     telegram = {"kind": "telegram", "conversation_id": "42"}
-    if target_kind == "project_chain":
-        first, _ = bus.accept_local_message(receiver, root, "First Project Reply", chat_id=42, user_id=42,
+    text = "Answer exactly here"
+    if target_kind == "unavailable_slash":
+        telegram["reply_target_unlinked"] = True
+        address, text = "", "/tmp/example.txt"
+    if target_kind.endswith("_chain"):
+        first, _ = bus.accept_local_message(receiver, root, "First Reply", chat_id=42, user_id=42,
                                             source="skill:telegram", client_message_id="tg:42:49", transport=telegram,
                                             task_metadata={"reply_to": address})
         address = format_address(row_address(first))
         queued.clear()
-    accepted, _ = bus.accept_local_message(receiver, root, "Answer exactly here", chat_id=42, user_id=42,
+    accepted, _ = bus.accept_local_message(receiver, root, text, chat_id=42, user_id=42,
                                              source="skill:telegram", client_message_id="tg:42:50", transport=telegram,
                                              task_metadata={"reply_to": address})
     [incoming] = queued
@@ -354,7 +379,7 @@ def test_telegram_reply_turn_uses_target_room_but_keeps_ingress_identity(bridge,
         "task_metadata": {**incoming["task_metadata"], "_host_operation": True},
     })
     assert bus.accepted_chat_message(root, 42, "tg:42:50")["reply_to"]["address"] == address
-    if target_kind in {"unavailable", "project_retired"}:
+    if target_kind.startswith("unavailable") or target_kind == "project_retired":
         assert not started and notices[0][0][0] == 42
         assert notices[0][1]["progress_meta"]["origin_message_ref"] == source_ref
         return
@@ -383,9 +408,14 @@ def test_telegram_reply_turn_uses_target_room_but_keeps_ingress_identity(bridge,
     assert method == "sendMessage" and form["reply_to_message_id"] == 50
     bus.send_with_budget(expected_room, "Another turn's web reply", task_id="unrelated-turn")
     assert len(b.calls) == 1
+    child_meta = {"root_task_id": "new-turn", "parent_task_id": "new-turn", "delegation_role": "subagent",
+                  "subagent_event": "scheduled", "subagent_task_id": "child", "accepted": True}
     from supervisor import queue
 
     monkeypatch.setattr(queue, "RUNNING", {"new-turn": {"task": {"origin_message_ref": source_ref}}})
+    bus.send_with_budget(expected_room, "Scheduled child", is_progress=True, task_id="child",
+                         role="system", system_type="task_scheduled", progress_meta=child_meta)
+    assert len(b.calls) == 2 and "[child]" in b.calls[-1][1]["text"]
     monkeypatch.setattr(bus, "publish_event", lambda _topic, event: asyncio.run(b.plugin._make_photo(b.api)(event)))
     live.send_photo(expected_room, b"picture", "Here is a photo", task_id="new-turn")
     assert b.calls[-1][0] == "sendPhoto" and b.calls[-1][1]["reply_to_message_id"] == 50

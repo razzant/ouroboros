@@ -283,19 +283,7 @@ def _chat_record(
         if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
             from ouroboros.chat_references import origin_reply
             origin_transport: dict = {}
-            # Live turns can emit a file or question before their result exists.
-            from supervisor.active_activity import get_direct_activity_registry
-            from supervisor import queue
-
-            activity = get_direct_activity_registry().get(task_id)
-            if activity:
-                ref = activity.origin_message_ref
-            else:
-                with queue._queue_lock:
-                    task = (queue.RUNNING.get(task_id) or {}).get("task") or {}
-                    ref = task.get("origin_message_ref")
-            meta["reply_to"] = origin_reply(root, task_id, {"origin_message_ref": ref} if ref else None,
-                                            transport=origin_transport)
+            meta["reply_to"] = origin_reply(root, task_id, transport=origin_transport)
             if origin_transport and record_type in {"photo", "video", "document", "links", "quiz", "card"} and not transport:
                 record["transport"] = origin_transport
         for key in ("reply_to", "relay"):
@@ -517,6 +505,10 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
         raise ValueError("message is empty")
     from ouroboros.chat_references import ingress_reply, telegram_reply_room
     reply = ingress_reply(drive_root, message.get("task_metadata") or {})
+    transport = message.get("transport")
+    if (not reply and source == "skill:telegram" and isinstance(transport, dict)
+            and transport.get("reply_target_unlinked") is True):
+        reply = {"address": "", "unresolved": True, "telegram_room_chat_id": None}
     if reply and source == "skill:telegram":
         from ouroboros.store import StoreError
 

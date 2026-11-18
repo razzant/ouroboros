@@ -610,7 +610,8 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
             raise ValueError("invalid call authority")
     reply_ref = task_metadata.get("reply_reference")
     telegram_reply = (incoming.get("source") == "skill:telegram" and task_metadata.get("_host_operation") is True
-                      and isinstance(reply_ref, dict) and bool(reply_ref.get("address")))
+                      and isinstance(reply_ref, dict)
+                      and (bool(reply_ref.get("address")) or "telegram_room_chat_id" in reply_ref))
     if telegram_reply:
         from ouroboros.chat_references import telegram_reply_room
         from ouroboros.store import StoreError

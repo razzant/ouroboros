@@ -65,16 +65,18 @@ def reference_from_row(row: dict) -> dict:
         row.get("direction"), "system")
     from ouroboros.room_membership import reply_target_home
     carried_reply = row.get("reply_to")
-    telegram_room = (carried_reply.get("telegram_room_chat_id")
-                     if row.get("source") == "skill:telegram" and row.get("direction") == "in"
-                     and isinstance(carried_reply, dict) else None)
+    room_decision = {}
+    if (row.get("source") == "skill:telegram" and row.get("direction") == "in"
+            and isinstance(carried_reply, dict) and "telegram_room_chat_id" in carried_reply):
+        room = carried_reply["telegram_room_chat_id"]
+        room_decision["telegram_room_chat_id"] = room if type(room) is int and room > 0 else None
     return {"address": format_address(row_address(row)), "chat_id": int(row.get("chat_id", 1)),
             "role": role, "author_label": (str(row.get("sender_label") or "You") if role == "user"
                                              else {"assistant": "Ouroboros", "system": "System"}[role]),
             "kind": kind, **_preview(answer or row.get("text") or row.get("caption")),
             "ts": str(row.get("ts") or ""), "task_id": str(row.get("task_id") or ""),
             "target_home": reply_target_home(row),
-            **({"telegram_room_chat_id": telegram_room} if type(telegram_room) is int and telegram_room > 0 else {})}
+            **room_decision}
 
 
 def resolve_reply(root, address: str) -> dict:
@@ -139,6 +141,18 @@ def telegram_reply_room(root, ref: dict, telegram_chat_id: int) -> int | None:
     return None
 
 
+def _live_origin_ref(task_id: str) -> dict | None:
+    from supervisor import queue
+    from supervisor.active_activity import get_direct_activity_registry
+
+    activity = get_direct_activity_registry().get(task_id)
+    if activity:
+        return activity.origin_message_ref
+    with queue._queue_lock:
+        task = (queue.RUNNING.get(task_id) or {}).get("task") or {}
+        return task.get("origin_message_ref")
+
+
 def origin_reply(root, task_id: str, metadata=None, *, transport: dict | None = None) -> dict:
     """The answer's host reference to the owner message that began its turn.
 
@@ -150,6 +164,8 @@ def origin_reply(root, task_id: str, metadata=None, *, transport: dict | None = 
     try:
         task = metadata or load_effective_task_result(root, task_id, materialize_artifacts=False) or {}
         ref = task.get("origin_message_ref") or (task.get("metadata") or {}).get("origin_message_ref")
+        if not ref and task_id and transport is not None:
+            ref = _live_origin_ref(task_id)
         row = resolve_owner_message_source(root, ref) if ref else None
     except StoreError:
         return {}
