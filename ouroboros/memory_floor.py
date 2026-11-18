@@ -599,8 +599,9 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     return dataclasses.replace(plan, **{f"{mode}_projection": projection})
 
 
-def owner_note_capsule(plan, addresses, note, request, *, drive_root, task_id, mode="max"):
-    """Keep the mind's account of selected owner commitments with their exact captured source."""
+def owner_note_capsule(plan, addresses, note, request, *, drive_root, task_id, mode="max", written_at=None):
+    """Keep the mind's account of selected owner commitments with their exact captured source, dated like the call's
+    other notes by ``written_at`` (when the mind wrote it; else now, as for a request queued before it carried one)."""
     from ouroboros import context_compaction as cc
     from ouroboros.context_budget import _Selection
 
@@ -623,7 +624,8 @@ def owner_note_capsule(plan, addresses, note, request, *, drive_root, task_id, m
     source = cc._persist_reclaim_checkpoint(rows, request, selection, drive_root=drive_root, task_id=task_id)
     if not source:
         raise ValueError("The exact owner-word source could not be retained")
-    return cc._capsule_message(unit, note, [cc._part(unit.unit_id, unit.source_text)], source, request)[0]
+    return cc._capsule_message(unit, note, [cc._part(unit.unit_id, unit.source_text)], source, request,
+                               written_at=written_at)[0]
 
 
 def view_inventory(plan, mode: str, *, memory_facts=None) -> List[Dict[str, Any]]:

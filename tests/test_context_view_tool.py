@@ -96,9 +96,11 @@ def test_receipt_itself_is_included_in_final_fit_before_publication(tmp_path, mo
         return {"accepted": not candidate[-1].get("content", "").startswith("[Context view receipt]")
                 if isinstance(candidate[-1].get("content"), str) else True}
     result = _run_round_compaction(messages, _context(tmp_path, ctx, schemas, monkeypatch, fit))
-    # The candidate, then with its receipt, then with the list of removed bodies counted instead of listed.
-    assert len(calls) == 3 and result is messages
+    # The candidate, then with its receipt, then with the list of removed bodies and then the list of notes counted
+    # instead of listed: a receipt that fits no window still undoes nothing it did not have to.
+    assert len(calls) == 4 and result is messages
     assert '"bodies_removed": ' in calls[1][-1]["content"] and '"bodies_removed_omitted": 1' in calls[2][-1]["content"]
+    assert '"notes_kept": ' in calls[2][-1]["content"] and '"notes_kept_omitted": 1' in calls[3][-1]["content"]
     assert ctx._context_view_receipt["status"] == "fit_rejected"
 
 
@@ -261,7 +263,7 @@ def _inspected(ctx, kind):
 def test_keep_last_n_keeps_unnamed_notes_and_never_re_protects_a_named_one(tmp_path, monkeypatch):
     """Unchanged for unnamed notes; the count's derived keep set does not protect a note the mind
     names, not even one inside the count's recent window."""
-    from tests.test_compaction import _note
+    from tests._working_notes import _note
 
     older, note = _note(tmp_path, "Goal: keep the owner's exact wording.", "older"), _note(tmp_path, "r2 checked.")
     messages = [*_source()[:2], older, *_read("r1"), *_read("r2"), note, *_read("r3")]
@@ -309,7 +311,7 @@ def test_inspect_identifies_capsule_authorship_and_first_line_for_a_named_merge(
 
 
 def test_keeping_and_replacing_one_note_or_naming_a_non_note_is_an_argument_error(tmp_path, monkeypatch):
-    from tests.test_compaction import _note
+    from tests._working_notes import _note
 
     note = _note(tmp_path, "An earlier note.")
     messages = [*_source(), note]
@@ -334,7 +336,7 @@ def test_a_request_restored_after_a_pause_without_replace_note_ids_names_no_note
     """A pending request an earlier release saved has no replace_note_ids: it names none and folds as
     before minus the notes; a request saved with it still names its note after the JSON continuation."""
     from ouroboros.owner_wait import continuation_state, restore_continuation_state
-    from tests.test_compaction import _note
+    from tests._working_notes import _note
 
     note, other = _note(tmp_path, "Goal: keep the owner's exact wording."), _note(tmp_path, "Another note.", "other")
     messages, schemas = [*_source(), note, other], []
@@ -401,10 +403,10 @@ def _receipt(rows):
 def test_a_fold_receipt_names_the_notes_in_view_and_each_body_that_left_by_a_restorable_address(tmp_path, monkeypatch):
     """Both directions: an applied fold's receipt lists every note in view (id, write time or "not recorded", first
     line) and every source body that left (what it was, its address), facts only; the address restores that body; a
-    restore that removes nothing names no body; a receipt the window cannot hold drops the list for a count rather
-    than undoing the view."""
+    restore that removes nothing names no body; a receipt the window cannot hold drops a list for a count (the bodies,
+    then the notes) rather than undoing the view, and the retained receipt keeps every list the notice counts."""
     from ouroboros.context_compaction import context_units
-    from tests.test_compaction import _note, _undated
+    from tests._working_notes import _note, _undated
 
     older = _undated(_note(tmp_path, "Goal: keep the owner's exact wording.", "older"))
     messages = [*_source(), older]
@@ -443,11 +445,22 @@ def test_a_fold_receipt_names_the_notes_in_view_and_each_body_that_left_by_a_res
     assert ctx._context_view_receipt["status"] == "applied" and counted["bodies_removed_omitted"] == 1
     assert "restore_checkpoint" not in counted and len(counted["notes_kept"]) == 2
 
+    def no_notes_list(rows, _tools):  # a window that holds the view and its receipt, but not the list of notes
+        return {"accepted": '"notes_kept": ' not in str(rows[-1].get("content"))}
+
+    record_context_view(ctx, messages, [])
+    _compact_context(ctx, working_note="The read confirms the goal.", keep_unit_ids=[])
+    fitted = _run_round_compaction(copy.deepcopy(messages), _context(tmp_path, ctx, [], monkeypatch, fit=no_notes_list))
+    assert ctx._context_view_receipt["status"] == "applied"  # the fold that fits is kept, never undone by a list
+    noted, _ = _receipt(fitted)
+    assert noted["notes_kept_omitted"] == 2 and noted["bodies_removed_omitted"] == 1 and "notes_kept" not in noted
+    assert len(ctx._context_view_receipt["notes_kept"]) == 2 and ctx._context_view_receipt["bodies_removed"]
+
 
 def test_inspect_sends_its_shared_fields_on_page_one_only_and_every_unit_once(tmp_path, monkeypatch):
     """Both directions: page one carries the fields every page shares; a later page carries only its units, the paging,
-    the view revision and the retained ordinary-memory map, within the page limit; together the pages list every unit
-    exactly once."""
+    the view revision, the checkpoint its units restore from and the retained ordinary-memory map, within the page
+    limit; together the pages list every unit exactly once."""
     from ouroboros import tool_capabilities
 
     messages = [*_source()[:2], *(row for index in range(80) for row in _read(f"r{index}"))]
@@ -463,7 +476,41 @@ def test_inspect_sends_its_shared_fields_on_page_one_only_and_every_unit_once(tm
     first, later = pages[0][1], pages[1:]
     assert len(later) >= 2 and {"rule", "schema_names", "inventory", "fit_measurement", "restore_checkpoint"} <= set(first)
     for text, page in later:
-        assert set(page) <= {"view_revision", "ordinary_memory", "offset", "total", "units", "next_offset"} and page["units"]
+        assert set(page) <= {"view_revision", "restore_checkpoint", "ordinary_memory", "offset", "total", "units",
+                             "next_offset"} and page["units"]
         assert page["view_revision"] == first["view_revision"] and len(text) <= 6000
+        assert page["restore_checkpoint"] == first["restore_checkpoint"]
     listed = [row["unit_id"] for _, page in pages for row in page["units"]]
     assert len(listed) == len(set(listed)) == first["total"] == first["inventory"]["units"]
+
+
+def test_a_later_inspect_page_names_the_checkpoint_its_units_restore_from(tmp_path, monkeypatch):
+    """Both directions: a later page read from a newer observation carries that observation's restore_checkpoint, and a
+    unit only that observation holds restores from the page alone; page one's checkpoint of the earlier observation
+    does not hold it. The large shared fields still come on page one only."""
+    from ouroboros import tool_capabilities
+
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 6000)
+    ctx = SimpleNamespace(active_context_mode="low", drive_root=tmp_path, budget_drive_root=tmp_path,
+                          task_id="view-task")  # the round context `_context` builds runs as this task
+    earlier = [*_source()[:2], *(row for index in range(55) for row in _read(f"r{index}"))]
+    record_context_view(ctx, earlier, [])
+    first = json.loads(_compact_context(ctx, inspect=True))
+    assert first.get("next_offset") and first.get("restore_checkpoint")
+    newer = [*earlier, {"role": "assistant", "tool_calls": [{"id": "inspect", "function": {
+        "name": "compact_context", "arguments": '{"inspect": true}'}}]},
+        {"role": "tool", "tool_call_id": "inspect", "content": json.dumps(first)}, *_read("newest")]
+    record_context_view(ctx, newer, [])
+    page = json.loads(_compact_context(ctx, inspect=True, offset=first["total"] + 1))
+    assert page["view_revision"] != first["view_revision"] and page.get("restore_checkpoint")
+    assert {"fit_measurement", "rule", "inventory", "schema_names", "work_room"}.isdisjoint(page)
+    unit = page["units"][-1]
+
+    def restore(checkpoint):
+        _compact_context(ctx, restore_unit_refs=[{"checkpoint_ref": checkpoint, "unit_id": unit["unit_id"],
+                                                  "raw_sha256": unit["raw_sha256"]}])
+        _run_round_compaction(copy.deepcopy(newer), _context(tmp_path, ctx, [], monkeypatch))
+        return ctx._context_view_receipt["status"]
+
+    assert restore(first["restore_checkpoint"]) == "source_unavailable"
+    assert restore(page["restore_checkpoint"]) == "applied"

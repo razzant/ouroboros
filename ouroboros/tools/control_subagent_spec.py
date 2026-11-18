@@ -207,8 +207,9 @@ def one_refusal(problems: list) -> str:
 
 def _shape_problems(params: Dict[str, Any], unsupported: Any) -> list:
     """The independent shape problems of a request: each checks one field alone (unknown names, the required fields,
-    mode, deadline, claims, memory mode, effort, memory view), so all of them are named together before any route is
-    selected; checks that depend on other fields or on the route follow once these pass."""
+    mode, deadline, claims, memory mode, effort, memory view, and the folder fields' own values: directory strategy,
+    scope paths, workspace), so all of them are named together before any route is selected; checks that depend on
+    other fields or on the route follow once these pass."""
     problems = [f"unsupported argument(s): {', '.join(unsupported)}. {_STRICT_SCHEMA}"] if unsupported else []
     if params.get("mode") not in (None, "ask", "plan", "agent"):
         problems.append("mode must be ask, plan or agent.")
@@ -247,7 +248,23 @@ def _shape_problems(params: Dict[str, Any], unsupported: Any) -> list:
     if isinstance(view, dict) and not set(view) <= set(MEMORY_VIEW_FIELDS):
         problems.append(f"memory_view fields are {', '.join(MEMORY_VIEW_FIELDS)} "
                         f"(got: {', '.join(sorted(map(str, set(view) - set(MEMORY_VIEW_FIELDS))))}).")
+    if "directory_strategy" in params and params["directory_strategy"] not in ("direct", "copy"):
+        problems.append("directory_strategy must be direct or copy.")
+    if "scope_paths" in params and not _relative_paths(params["scope_paths"]):
+        problems.append("scope_paths must be an array of nonempty relative paths.")
+    if params.get("workspace") not in (None, "copy", "in_place"):
+        problems.append("workspace must be copy or in_place.")
     return problems
+
+
+def _relative_paths(paths: Any) -> bool:
+    """``scope_paths`` as the folder geometry takes them: a list of nonempty relative paths inside the folder."""
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    return isinstance(paths, list) and not any(
+        not isinstance(path, str) or not path.strip() or "\x00" in path
+        or PurePosixPath(path).is_absolute() or PureWindowsPath(path).drive
+        or PureWindowsPath(path).root or ".." in PurePosixPath(path).parts for path in paths)
 
 
 def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
@@ -271,23 +288,11 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
         item.strip() for item in (params.get("acceptance_claims") or []) if isinstance(item, str) and item.strip()
     ]
     requested_effort = requested_child_effort(params.get("effort"), "schedule_subagent")[0]
-    directory_options = {}
+    directory_options = {}  # the folder fields' own values passed the shape pass
     if "directory_strategy" in params:
-        strategy = params["directory_strategy"]
-        if strategy not in ("direct", "copy"):
-            return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): directory_strategy must be direct or copy."
-        directory_options["directory_strategy"] = strategy
+        directory_options["directory_strategy"] = params["directory_strategy"]
     if "scope_paths" in params:
-        from pathlib import PurePosixPath, PureWindowsPath
-
-        paths = params["scope_paths"]
-        if not isinstance(paths, list) or any(
-            not isinstance(path, str) or not path.strip() or "\x00" in path
-            or PurePosixPath(path).is_absolute() or PureWindowsPath(path).drive
-            or PureWindowsPath(path).root or ".." in PurePosixPath(path).parts for path in paths
-        ):
-            return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): scope_paths must be an array of nonempty relative paths."
-        directory_options["scope_paths"] = list(paths)
+        directory_options["scope_paths"] = list(params["scope_paths"])
     if directory_options.get("directory_strategy") == "copy" and not directory_options.get("scope_paths"):
         return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): copy requires scope_paths; use ['.'] to select the whole folder."
     from ouroboros.delegate_directory import DIRECTORY_OPTIONS_NEED_WRITE, default_shaped_directory_options
@@ -316,8 +321,6 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
         if directory_options["input_files"] and str(params.get("write_surface") or "").strip().lower() not in {"", "read_only"}:
             return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): input_files_readonly_only: input_files prepares inputs "
                         "for a read-only child; omit it or write_surface.")
-    if params.get("workspace") not in (None, "copy", "in_place"):
-        return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace must be copy or in_place."
     if params.get("workspace") == "in_place":  # the documented default geometry is no folder request, as at delegate_start
         if str(params.get("write_surface") or "").strip().lower() not in {"self_worktree", "external_workspace", "genesis"} \
                 or not default_shaped_directory_options(directory_options.get("directory_strategy"),

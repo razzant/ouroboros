@@ -334,7 +334,7 @@ def test_a_question_with_materials_records_the_bytes_it_puts_up_and_one_without_
     receipt = _escalate(ctx, question="Choose?", options=["A"], assumption="Research", materials=[{"name": "choice.txt"}])
     assert receipt.startswith("OK:") and receipt.splitlines()[-1] == (
         f"Host fact: queued for delivery: choice.txt, sha256 {stored['sha256'][:12]}, 23 B. "
-        "Reviews on record naming these bytes: none.")
+        "Reviews on record naming these bytes: none in this task's recent records.")
     assert "Host fact" not in _escalate(ctx, question="Choose again?", options=["B"], assumption="Research")
 
 
