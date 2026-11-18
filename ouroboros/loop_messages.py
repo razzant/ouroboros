@@ -239,8 +239,8 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     turns are ``initial_user`` (``run_origin``'s ``owner_ingress``). Unstamped turns
     and host-composed ``ui_control`` turns use ``initial_text``. A late quiz or
     living-card press without words is ``owner_press``. A living form with words is
-    ``owner_mailbox`` and an unavailable living submission is ``owner_card_input``.
-    A private Presence quiz with words uses ``owner_quiz_answer``. Confirmed place
+    ``owner_mailbox``. An unavailable living submission or an unresolved late quiz answer
+    is ``owner_card_input``. A private Presence quiz with words uses ``owner_quiz_answer``. Confirmed place
     words and schedule text ride as ``place_confirmed`` and ``schedule_text`` outside
     the owner sources. The host uses the source for owner-input counting and to keep
     word verification to records of words. Models read the label beside the input when

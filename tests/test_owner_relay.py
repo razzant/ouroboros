@@ -1194,3 +1194,37 @@ def test_a_lost_submission_stays_an_input_through_carriage_and_onward_relay(tmp_
     assert receiver._owner_directives[0]["source"] == "owner_card_input"
     assert not owner_words_contain(receiver, words) and not cited_owner_basis(receiver, words)[0]
     assert owner_words_contain(receiver, ordinary["text"])
+
+
+@pytest.mark.parametrize("first_available", [False, True], ids=["gap-first", "answer-first"])
+@pytest.mark.parametrize("comment", ["", "  after moonrise  "], ids=["press", "comment"])
+def test_reference_only_relay_quotes_one_read_of_the_askers_store(tmp_path, monkeypatch, first_available, comment):
+    from ouroboros import owner_quiz
+    from ouroboros.dialogue_provenance import relation_text
+    from ouroboros.owner_relay import owner_quote, relay_envelope
+
+    source_drive, asker, quiz = tmp_path / "elm-room", "elm-desk", "reed-map"
+    label, question = "File the reed map", "Which map?"
+    owner_quiz.record_asked(source_drive, asker, quiz_id=quiz, question=question, options=[label])
+    owner_quiz.record_answered(source_drive, asker, quiz_id=quiz, option_index=0, comment=comment, request_id="elm-answer")
+    row = {"direction": "in", "chat_id": 3, "client_message_id": "elm-late", "text": comment or "1. " + label,
+           "late_answer": {"task_id": asker, "quiz_id": quiz}, "_owner_source_root": str(source_drive)}
+    original, reads = owner_quiz.quiz_states, []
+
+    def alternating(drive, task):
+        reads.append((str(drive), task))
+        return original(drive, task) if (len(reads) == 1) == first_available else {}
+
+    monkeypatch.setattr(owner_quiz, "quiz_states", alternating)
+    quote = owner_quote(tmp_path / "recipient", row)
+    history = relation_text({"relay": relay_envelope("reed-relay", [quote], chat_id=3)})
+    if first_available:
+        assert quote["input_source"] == ("owner_mailbox" if comment else "owner_press")
+        assert quote["text"] == row["text"] and question in quote["question_frame"]
+        assert ("Owner words quoted" in history) is bool(comment)
+        assert (comment or label) in history
+    else:
+        assert quote["input_source"] == "owner_card_input" and "question_frame" not in quote
+        assert "accepted answer is unavailable" in quote["text"] and quote["text"] in history
+        assert "Owner words quoted" not in history
+    assert reads == [(str(source_drive), asker)]

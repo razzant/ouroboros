@@ -287,11 +287,32 @@ def _retained_start_quote(root: pathlib.Path, drafter: str, address: str) -> Opt
     return None
 
 
+def _start_answer_source(card: dict, row: dict) -> Optional[str]:
+    """The type the accepted answer proves, including any citation carried on the answer."""
+    from ouroboros.answer_facts import answer_source
+    from ouroboros.chronicle_quotes import quote_in
+    from ouroboros.owner_quiz import late_answer_owner_text
+
+    words = row["content"]
+    if late_answer_owner_text(card) != words:
+        return None
+    source = answer_source(card)
+    if "cited" in row or row.get("basis") == "cited":
+        cite = row.get("cited")
+        if not isinstance(cite, str) or not cite.strip() or row.get("basis") != "cited":
+            return None
+        if source == OWNER_PRESS:
+            if cite.strip() != str(card["options"][card["answered_index"]]).strip():
+                return None
+        elif not quote_in(cite, words):
+            return None
+    return source
+
+
 def _start_answer(root: pathlib.Path, task_id: str, row: dict, drafter: str) -> Optional[dict]:
     """Read a relay by its exact chat address, or a direct answer by its asker's delivery."""
     from ouroboros.answer_facts import answer_source
     from ouroboros.chat_chain import resolve_row
-    from ouroboros.chronicle_quotes import quote_in
     from ouroboros.owner_relay import quotable_owner_row
     from ouroboros.owner_source import answered_quiz_block
     from ouroboros.owner_words import answered_card_source
@@ -329,16 +350,9 @@ def _start_answer(root: pathlib.Path, task_id: str, row: dict, drafter: str) -> 
             or row.get("quiz_id", quiz_id) != quiz_id
             or "reply_to" in row and row["reply_to"] != answered_card_reply(block, asker)):
         return None
-    source = answer_source(block)
-    if "cited" in row or row.get("basis") == "cited":
-        cite = row.get("cited")
-        if not isinstance(cite, str) or not cite.strip() or row.get("basis") != "cited":
-            return None
-        if source == OWNER_PRESS:
-            if cite.strip() != str(card["options"][card["answered_index"]]).strip():
-                return None
-        elif not quote_in(cite, words):
-            return None
+    source = _start_answer_source(card, row)
+    if source is None:
+        return None
     return {"source": source, "content": words, "msg_id": msg_id, "source_task_id": asker,
             **{key: row[key] for key in ("basis", "cited") if row.get(key)},
             "quiz_id": quiz_id, "card": card, **({"request_id": block["request_id"]} if block.get("request_id") else {}),
@@ -592,8 +606,17 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     if (original is None or not isinstance(original.get("content"), str) or not original["content"].strip()) \
             and not schedule:
         if chained_start is not None:  # a Continue of a Continue keeps the start it was admitted on
-            start = chained_start if valid_start(chained_start) else None
-            if start is None:
+            if valid_start(chained_start):
+                answers = []
+                for row in chained_start["answers"]:
+                    card = row["card"]
+                    source = _start_answer_source(card, row)
+                    if source is None or card.get("quiz_id") != row["quiz_id"]:
+                        gaps.append("start_quiz_answer_unresolved")
+                    else:
+                        answers.append({**row, "source": source})
+                start = {**chained_start, "answers": answers}
+            else:
                 gaps.append("start_source_malformed")
         elif chained_wake is not None:  # ...and the wake and API openings likewise
             wake = chained_wake if valid_wake(chained_wake) else None
@@ -1103,11 +1126,21 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         lines += [f"{label}: {api[key]}" for key, label in (("context", "Context"), ("expected_output", "Expected output"),
                                                             ("constraints", "Constraints")) if api.get(key)]
     if later:
-        lines += ["", "Other owner words in that task's record (verbatim, in order):"]
-        for row in later:  # a press without its card: the host's record of the act, never its label as words
-            lines += (_card_lines(row) if isinstance(row.get("card"), dict) else [f"- {row.get('ts') or ''} " + (
-                press_record(row["content"], who="the owner")
-                if row.get("source") == OWNER_PRESS else row["content"])])
+        has_notice = any(row.get("source") == OWNER_CARD_INPUT for row in later)
+        lines += ["", "Later inputs in that task's record (in order):" if has_notice else
+                      "Other owner words in that task's record (verbatim, in order):"]
+        for row in later:
+            text = row["content"]
+            if row.get("source") == OWNER_CARD_INPUT:
+                text = "Host record: " + text
+            elif isinstance(row.get("card"), dict):
+                lines.extend(_card_lines(row))
+                continue
+            elif row.get("source") == OWNER_PRESS:
+                text = press_record(text, who="the owner")
+            elif has_notice:
+                text = "Owner words (verbatim): " + text
+            lines.append(f"- {row.get('ts') or ''} {text}")
     confirmed = [row for row in sources.get("confirmed_place") or [] if isinstance(row, dict) and row.get("content")]
     if confirmed:  # my human's words are never shortened to a count or a pointer
         lines += ["", "Words from your human's confirmed account in that place (their words there, by provenance; an order "

@@ -555,9 +555,14 @@ def test_forwarded_card_keeps_its_bubble_and_opens_a_typed_head(tmp_path, decide
 
 
 def test_continue_normalizes_only_the_exact_forwarded_form_bubble(tmp_path, decide, monkeypatch):
+    import sys
+
+    # This API witness runs on its own, with the Continue suite unavailable.
+    monkeypatch.setitem(sys.modules, "tests.test_owner_continue", None)
     from ouroboros.owner_mailbox import write_owner_message
     from supervisor.continuation_admission import admit_continuation
-    from tests.test_owner_continue import NONCE, _install_queue, _interrupted
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests._owner_continue_helpers import NONCE, _interrupted
 
     card = _component_card(tmp_path)
     decide.state["live"] = False
@@ -656,3 +661,36 @@ def test_form_fields_keep_their_word_boundaries_in_the_corpus_and_its_copies(tmp
         seed = SimpleNamespace(task_metadata={"objective_author": {"kind": "task"}, "owner_corpus": rows})
         _initialize_owner_directives(seed, [{"role": "user", "content": "Read the calendar"}])
         check(seed)
+
+
+def test_start_task_seeds_one_cited_form_submission(tmp_path, decide, monkeypatch):
+    import queue
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.tools import control_routing
+    from ouroboros.tools.registry import ToolContext
+
+    card = _component_card(tmp_path)
+    values = {"from": "at moonrise", "to": "sunset"}
+    assert decide({"request_id": "elm-start", "revision": 1, "decision_id": f"card:{card['card_id']}:dates",
+                   "values": values}).json()["delivery"] == "delivered"
+    ctx = ToolContext(repo_dir=Path.cwd(), drive_root=tmp_path, task_metadata={})
+    ctx.task_id, ctx.current_chat_id = "task-1", 1
+    _drain_incoming_messages([], queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
+    events = []
+    monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing",
+                        lambda _, evt: (events.append(evt) or "live", {"status": "scheduled"}))
+    monkeypatch.setattr(control_routing, "_promotion_pool_disabled_from_snapshot", lambda _: "")
+    control_routing._start_task(ctx, "Read the elm dates", title="Elm dates", owner_words="moonrise\nsunset")
+    assert not events
+    control_routing._start_task(ctx, "Read the elm dates", title="Elm dates", owner_words="moonrise")
+    [event] = events
+    successor = SimpleNamespace(task_metadata=event)
+    _initialize_owner_directives(successor, [{"role": "user", "content": "Read the elm dates"}])
+    for rows in (event["owner_corpus"], successor._owner_directives):
+        [row] = rows
+        assert (row["msg_id"], row["basis"], row["cited"]) == (ctx._owner_directives[0]["msg_id"], "cited", "moonrise")
+        assert row["reply_to"]["submitted_values"] == values

@@ -13,29 +13,8 @@ from __future__ import annotations
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._owner_continue_helpers import NONCE, _interrupted
 from tests._store_shared import delete_result, seed_result
-
-NONCE = "press-0001-abcdef"
-
-
-def _interrupted(tmp_path, task_id="pred-1", *, origin=None, reason_code="", **extra):
-    from ouroboros.task_results import STATUS_CANCELLED, STATUS_RUNNING, write_task_result
-
-    from ouroboros.usage_admission import original_group_limit
-    prior = original_group_limit(tmp_path, task_id)
-    initial = {} if prior["source"] == "ledger_first_row" else {"billing_group": {
-        "billing_group_id": task_id, "billing_group_limit_usd": 20.0,
-        "billing_group_limit_source": "initial_task_admission", "billing_group_limit_revision": "admission-1"}}
-    write_task_result(tmp_path, task_id, STATUS_RUNNING, chat_id=7, project_id="", **initial,
-                      origin_message_text="Write the Friday report",
-                      origin_message_ref={"chat_id": 7, "client_message_id": "m-1"},
-                      root_task_id=task_id, title="Friday report", deadline_at="2099-01-01T00:00:00+00:00")
-    fields = {"cancel_origin": origin if origin is not None else {"source": "snapshot_restore",
-                                                                   "reason": "server_shutdown"}}
-    if reason_code:
-        fields = {"reason_code": reason_code}
-    write_task_result(tmp_path, task_id, STATUS_CANCELLED if not reason_code else "failed",
-                      result="interrupted", **fields, **extra)
 
 
 def _owner_mail(tmp_path, task_id="pred-1"):
@@ -1342,3 +1321,27 @@ def test_a_reference_only_late_answer_keeps_its_type_on_every_opening(tmp_path, 
                 assert owner_words_contain(focus, comment)
             else:
                 assert cited_owner_basis(focus, label)[0]["source"] == "owner_press"
+
+
+def test_continue_labels_a_later_unavailable_answer_and_preserves_the_words_around_it(tmp_path, monkeypatch):
+    from ouroboros.owner_mailbox import write_owner_message
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path)
+    notice = "Quiz answer received. Its accepted answer is unavailable."
+    after = "  keep the elm dates  "
+    assert write_owner_message(tmp_path, notice, "pred-1", msg_id="elm-copy")
+    assert write_owner_message(tmp_path, "1. Elm chart", "pred-1", msg_id="elm-late",
+                               late_answer={"task_id": "elm-desk", "quiz_id": "elm-chart"})
+    assert write_owner_message(tmp_path, after, "pred-1", msg_id="elm-after")
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    [successor] = workers.PENDING
+    rows = successor["metadata"]["owner_corpus"]
+    assert [(row["msg_id"], row["source"], row["content"]) for row in rows if row.get("msg_id")] == [
+        ("elm-copy", "owner_mailbox", notice), ("elm-late", "owner_card_input", notice),
+        ("elm-after", "owner_mailbox", after)]
+    order = successor["text"]
+    assert "Other owner words in that task's record (verbatim, in order):" not in order
+    assert order.count(notice) == 2 and order.count(after) == 1
+    assert order.index("Owner words (verbatim): " + notice) < order.index("Host record: " + notice) < order.index(after)

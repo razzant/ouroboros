@@ -453,7 +453,7 @@ def _start_task(
         _attach_client_surface(ctx, evt)
     _attach_drafted_objective(ctx, evt)
     if owner_basis:  # the cited words ride into the new root alone, never back into this run's own corpus
-        if owner_basis["source"] in ("owner_press", "owner_quiz_answer"):
+        if owner_basis["source"] in ("owner_press", "owner_quiz_answer") or (owner_basis.get("reply_to") or {}).get("card_id"):
             from ouroboros.owner_words import merged_corpus
             evt["owner_corpus"] = merged_corpus(evt.get("owner_corpus"), [owner_basis])
         else:
