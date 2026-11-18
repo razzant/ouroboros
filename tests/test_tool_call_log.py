@@ -511,6 +511,56 @@ def test_a_replayed_call_safety_held_settles_as_held_as_its_live_row_does(tmp_pa
     assert [row["status"] for row in replay_evidence(tmp_path, "t")["observations"]] == ["held", "held", "error"]
 
 
+def test_a_replayed_call_the_host_refused_a_further_step_settles_as_held_as_its_live_row_does(tmp_path):
+    """Replay holds only a non-error Stop; independent errors with the same refusal retain their error count.
+    The same refusal code without the host's mark (a Pause refusal) also keeps its previous classification."""
+    from ouroboros.tool_call_log import replay_evidence
+
+    refused = {"refused_step": True, "control_reason": "cancelled"}
+    rows = [_log_row("tool_call", "refused", tool="ext_stopper_send", is_error=True, status="blocked",
+                     tool_result_code="OWNER_OPERATION_REFUSED", tool_result_meta=refused),
+            _log_row("tool_call", "paused", tool="ext_stopper_send", is_error=True, status="blocked",
+                     tool_result_code="OWNER_OPERATION_REFUSED", tool_result_meta={})]
+    for status, code in [("error", "EXTENSION_ERROR"), ("timeout", "EXTENSION_TIMEOUT"),
+                         ("error", "TOOL_REPORTED_FAILURE")]:
+        result = ToolResult(status=status, code=code, text="independent failure", meta=refused)
+        rows.append(_log_row("tool_call", code, tool="ext_stopper_send", is_error=True,
+                             **execution._typed_result_metadata("ext_stopper_send", result.text, True, result)))
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "tools.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    assert [row["status"] for row in replay_evidence(tmp_path, "t")["observations"]] == [
+        "held", "error", "error", "error", "error"]
+
+
+def test_a_replayed_refused_call_carries_the_live_frames_own_refusal_projection(tmp_path):
+    """Reload draws the row the live ``tool_call_finished`` frame drew (``_emit_finished``): the
+    host's typed mark with its recorded reason — nothing else from the meta — and the stored
+    preview's head+tail at the live frame's own 500 bound, for a plain Stop and for an independent
+    error beside the refusal. A settled call without the mark projects neither field."""
+    from ouroboros.tool_call_log import replay_evidence
+    from ouroboros.utils import truncate_for_log
+
+    refused = {"refused_step": True, "control_reason": "cancelled", "artifact_registered": True}
+    stored = "part one sent.\n\n" + "r" * 1984  # the writer's sanitized 2000-char preview
+    result = ToolResult(status="error", code="EXTENSION_ERROR", text="independent failure", meta=refused)
+    rows = [_log_row("tool_call", "stopped", tool="ext_stopper_send", is_error=True, status="blocked",
+                     tool_result_code="OWNER_OPERATION_REFUSED", tool_result_meta=refused, result_preview=stored),
+            _log_row("tool_call", "failed", tool="ext_stopper_send", is_error=True, result_preview=stored,
+                     **execution._typed_result_metadata("ext_stopper_send", result.text, True, result)),
+            _log_row("tool_call", "plain", tool="ext_stopper_send", is_error=False, result_preview=stored)]
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "tools.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    stopped, failed, plain = replay_evidence(tmp_path, "t")["observations"]
+    assert stopped["status"] == "held" and failed["status"] == "error" and plain["status"] == "ok"
+    assert (stopped["recorded_status"], failed["recorded_status"]) == (rows[0]["status"], rows[1]["status"])
+    for observation in (stopped, failed):
+        # exactly the live frame's two-key projection; the rest of the producer meta stays in the row
+        assert observation["tool_result_meta"] == {"refused_step": True, "control_reason": "cancelled"}
+        assert observation["result_preview"] == truncate_for_log(stored, 500)
+        assert len(observation["result_preview"]) < len(stored) and "..." in observation["result_preview"]
+    assert "tool_result_meta" not in plain and "result_preview" not in plain
+
+
 def test_a_replayed_call_a_control_ended_settles_as_interrupted_as_its_live_row_does(tmp_path):
     """#3211: a call Pause, Stop or the spend rail ended replays as ``interrupted``, like the live step
     row, so a reloaded block counts no error for it; ``hostError`` still means the host's own failure only."""

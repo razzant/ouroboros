@@ -36,7 +36,9 @@ from ouroboros.skill_token import SkillToken
 #      2.x minimum negotiates them, a field-less legacy payload is refused them.
 # 2.5: no method changes; a connector's tool declarations may name exact target groups (``touches``,
 #      tool_effects.py). A payload using them declares at least 2.5, so an older host refuses it before import.
-PLUGIN_API_VERSION = "2.5"
+# 2.6: the running tool call's Stop (``get_stop_state``), read-only in both execution modes; a field-less legacy
+#      payload is refused it. A payload relying on it declares 2.6, so an older host refuses it before import.
+PLUGIN_API_VERSION = "2.6"
 # The generation an extension WITHOUT the manifest field binds against —
 # "absent ≡ 1.3 by construction" (owner-ratified §6.1-Δ; deliberately NOT 1.4).
 LEGACY_PLUGIN_API_GENERATION = "1.3"
@@ -90,7 +92,7 @@ MATRIX_CAPABILITIES: frozenset[str] = frozenset({
 # (the complement of MATRIX_CAPABILITIES over the PluginAPI surface).
 ALWAYS_AVAILABLE_CAPABILITIES: frozenset[str] = frozenset({
     "log", "get_settings", "get_state_dir", "skill_job_dir",
-    "get_skill_token", "get_runtime_info", "read_memory", "get_settings_state",
+    "get_skill_token", "get_runtime_info", "read_memory", "get_settings_state", "get_stop_state",
 })
 
 # Capabilities a short-lived OUT_OF_PROCESS child cannot use directly: a persistent
@@ -210,6 +212,7 @@ def plugin_api_surface_fingerprint() -> str:
 # change without a version bump) refuses negotiation until the version is
 # bumped and the new fingerprint recorded here.
 PLUGIN_API_SURFACE_FINGERPRINTS: Dict[str, str] = {
+    "2.6": "0f47e50817ed993991d5cf163af8bbc4de737d454fdb8f09eb962ed6bf2cf8fa",
     "2.5": "b1539cbdb03a6b4d05111f645c94f9de32c3113b36be68d21fd6cc8d809a5a52",
     "2.4": "c472950639f4467a21f4407d9416871e8f744f27392f1a8d5f711ade39579d7c",
     "2.3": "bd1062f96b99607b4651ba319e74f9620a5bae08ad1aa0d5dcb106d8ad542d12",
@@ -557,6 +560,29 @@ class PluginAPI(Protocol):
         anything) or ``access_closed`` (unloading, or no ``read_settings``). Keys the skill may not read
         appear in neither list. With nothing readable asked (``[]``) no settings are read and only the access
         answers (``ok`` or ``access_closed``): cheap enough to check before each outbound request.
+        """
+        ...
+
+    def get_stop_state(self) -> Dict[str, Any]:
+        """Whether the tool call running in this context may start a further action (2.6): a host read with no
+        argument, permission or grant. The host names the call and its task; the extension never does.
+
+        Ask as the last step before each new independent action of a call, after its preparation (the first one
+        included: the next request of a message sent in parts, the next key chord). The answer is exactly
+        ``{"status", "reason", "note"}``, all strings, and only ``status == "continue"`` lets the action start
+        (``reason`` ``no_task``: a call made for no task, which no Stop governs). ``stop`` names why:
+        ``cancelled`` (an immediate Stop of this task, or an immediate cascade over a task above it),
+        ``task_cancelled`` (the task already ended cancelled; no cause is claimed), ``operation_already_returned``
+        (this call has returned and a context copied from it asked later) or ``stop_unreadable`` (Stop could not
+        be read; unknown is never "no Stop"). ``unbound`` (``reason`` ``unbound``): no call of this skill is bound
+        where it asks; it permits nothing either. In process the binding is the call's context (its thread, its async
+        task and contexts copied from them), so a thread started without it, a route, a WebSocket handler or a
+        companion is unbound; out of process a tool call's child binds that one call for all its threads until
+        it returns. Graceful Stop (Wrap up), Pause, deadlines and the call's own end are not read.
+        The first ``stop`` holds for the rest of the call. The host preserves any independent error or timeout,
+        annotating it with the refusal; only a non-error completion is typed as a refusal. A returned report
+        stays the extension's data. On anything but ``continue`` start nothing more, return what ran with its
+        receipts, never resume the rest. Stop after this read does not reach an action that is already starting.
         """
         ...
 

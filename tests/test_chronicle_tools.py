@@ -324,6 +324,45 @@ def test_a_page_up_to_an_address_seals_exactly_the_rooms_open_rows_to_it(tmp_pat
     assert "not both" in _chronicle_write(ctx, kind="page", text="x", covers={"to": at[20], "task_ids": ["t2"]})
 
 
+def test_a_page_without_covers_refuses_unwritten_and_names_the_reader_of_real_addresses(tmp_path):
+    """Following the refusal gives the writer real bounds to choose from; it seals no other rows."""
+    from ouroboros import memory_inventory as mi
+
+    side = project_chat(tmp_path, "nightly builds")
+    rows = chat(tmp_path, [
+        {"chat_id": side, "direction": "in", "ts": ts(1), "text": "Check the nightly build", "client_message_id": "n1"},
+        {"chat_id": side, "direction": "out", "ts": ts(2), "task_id": "taskB001", "text": "The nightly build is green."},
+        {"chat_id": side, "direction": "in", "ts": ts(3), "text": "And the docs build?", "client_message_id": "n2"},
+    ])
+    store, ctx = ChronicleStore(tmp_path), ctx_for(tmp_path)
+    for missing in ({}, {"covers": {}}):
+        refused = _chronicle_write(ctx, kind="page", room_id=str(side), text="The nightly build passed.", **missing)
+        assert "TOOL_ARG_ERROR" in refused and "No page was written" in refused
+        assert f"memory_read(room_id='{side}', rows=true)" in refused
+        assert "entire inclusive room range" in refused and "{task_ids}" in refused
+        assert not any(addr(row) in refused for row in rows)  # no suggested bounds
+    assert store.room_records(str(side)) == []
+    # The reader the refusal names prints each row's exact address; the mind chooses from those.
+    printed = re.findall(rf"row:{side}@[^\s;\]]+#[0-9a-f]{{12}}", _memory_read(ctx, room_id=str(side), rows=True))
+    assert printed == [addr(row) for row in rows]
+    page = write(ctx, kind="page", room_id=str(side), text="The nightly build passed.",
+                 covers={"from": printed[0], "to": printed[1]})
+    assert page["ok"] and page["rows"] == 2 and (page["first"], page["last"]) == (printed[0], printed[1])
+    assert store.get(page["node_id"])["covers"]["rows"] == [sha(rows[0]), sha(rows[1])]
+    assert [a["row_sha256"] for a, _m, _p in mi.open_room_rows(tmp_path, str(side))] == [sha(rows[2])]
+    assert page["node_id"] in _memory_read(ctx, room_id=str(side))
+
+
+def test_legacy_page_without_covers_names_its_note_reader_not_chat_rows(tmp_path):
+    ctx = ctx_for(tmp_path)
+    note = write(ctx, kind="note", room_id="legacy", text="The previous build was green.")
+    refused = _chronicle_write(ctx, kind="page", room_id="legacy", text="The previous build was green.")
+    assert "memory_read(room_id='legacy')" in refused and "rows=true" not in refused
+    assert note["node_id"] in _memory_read(ctx, room_id="legacy")
+    page = write(ctx, kind="page", room_id="legacy", text="The previous build was green.", covers={"note_ids": [note["node_id"]]})
+    assert page["ok"] and page["notes"] == 1
+
+
 def test_default_room_is_own_room_and_chat_id_zero_is_an_address(tmp_path):
     assert write(ctx_for(tmp_path, current_chat_id=0), kind="note", text="hidden")["room_id"] == "0"
     meta_only = ctx_for(tmp_path, current_chat_id=None, task_metadata={"chat_id": 0})

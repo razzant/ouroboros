@@ -63,7 +63,6 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Change model or account | `btn btn-default` | modules/model_wait.js | 1 |
 | Check | `btn` | modules/skill_dialogs.js | 1 |
 | Check | `btn btn-ghost btn-sm` | modules/settings_accounts.js | 1 |
-| ↻ Check | `btn btn-ghost btn-sm updates-letter-refresh` | modules/updates.js | 1 |
 | Check again | `btn btn-default btn-sm` | modules/storage_free.js | 7 |
 | Check again | `btn btn-primary` | modules/harness_login_cards.js | 1 |
 | Check and publish | `btn` | modules/skill_dialogs.js | 1 |
@@ -250,6 +249,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Retry this range | `btn btn-default btn-sm` | modules/place_history.js | 1 |
 | Review & start | `btn btn-default` | modules/onboarding_wizard.js | 1 |
 | Reviewer origin | `(no class)` | modules/subagents_settings.js | 1 |
+| Rewrite | `btn btn-default btn-sm updates-letter-rewrite` | modules/updates.js | 1 |
 | Save | `btn` | modules/project_folder.js | 1 |
 | Save | `btn btn-default btn-sm` | modules/place_sheet.js | 3 |
 | Save | `btn btn-primary` | modules/files.js | 1 |

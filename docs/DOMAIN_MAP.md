@@ -133,9 +133,9 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
   - D10->D11
   - D10->D14
   - D10->D15
+  - D12->D01
   - D12->D05
   - D12->D06
-  - D12->D09
   - D12->D10
   - D12->D15
   - D12->D16

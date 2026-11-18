@@ -195,13 +195,38 @@ const interruptedBy = (reason) => {
     return tr(`task.interrupted.${kind}`, INTERRUPTED_BY[kind]);
 };
 
+// A call the host refused a further step (``extension_dispatch``: ``tool_result_meta.refused_step``), by the reason the
+// host gave (``extension_plugin_api._STOP_WORDS``). The host attests its refusal, never that the extension started
+// nothing more; what ran before stays the extension's report.
+const REFUSED_STEP = {
+    cancelled: 'A further step was refused by Stop',
+    task_cancelled: 'A further step was refused: the task had already ended as cancelled',
+    operation_already_returned: 'A further step was refused: the call had already returned',
+    stop_unreadable: "A further step was refused: the task's Stop could not be read", other: 'A further step was refused',
+};
+
+/** The headline of a call the host refused a further step, or '' for any other call. */
+export function refusedStepPhrase(evt = {}) {
+    if (evt.tool_result_meta?.refused_step !== true) return '';
+    const reason = String(evt.tool_result_meta.control_reason || '');
+    const kind = Object.hasOwn(REFUSED_STEP, reason) ? reason : 'other';
+    return `${tr(`task.refused_step.${kind}`, REFUSED_STEP[kind])}${evt.tool ? ` · ${evt.tool}` : ''}`;
+}
+
+/** A non-error completion refused further work by Stop reads neutral (DESIGN §4 "Status marks").
+ *  A failed call keeps its error; an unread Stop or other refusal alone stays a warning. */
+export function refusedByStop(evt = {}) {
+    return evt.status === 'blocked' && evt.tool_result_meta?.refused_step === true
+        && ['cancelled', 'task_cancelled'].includes(evt.tool_result_meta.control_reason);
+}
+
 /** The headline of a finished step that did not succeed: held by Safety (never "failed"), ended by a control (never
- *  "failed"), a command's exit, or a failed step. */
+ *  "failed"), refused further work without a call error, a command's exit, or a failed step. */
 export function failedStepHeadline(evt = {}) {
     const exitCode = Number(evt.exit_code);
     const tool = evt.tool ? ` · ${evt.tool}` : '';
     if (evt.status === 'interrupted') return `${interruptedBy(evt.control_reason)}${tool}`;
-    return heldCallPhrase(evt.tool, evt.status) || (evt.status === 'non_zero_exit'
+    return (evt.status === 'blocked' && refusedStepPhrase(evt)) || heldCallPhrase(evt.tool, evt.status) || (evt.status === 'non_zero_exit'
         ? `A command returned ${Number.isFinite(exitCode) ? `exit code ${exitCode}` : 'a non-zero exit code'}`
         : `One of the steps failed${tool}`);
 }

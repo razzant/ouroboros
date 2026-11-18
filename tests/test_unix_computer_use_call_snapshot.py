@@ -452,7 +452,8 @@ def test_unknown_or_contradictory_completion_never_replays_a_paste(desktop, body
     pytest.param("type_text", {"text": "text"}, False, "ssh", id='type_text-kwargs2-False-ssh'),
 ])
 def test_never_policy_requires_front_without_any_activation(tmp_path, monkeypatch, host, front, method, kwargs):
-    from tests.test_unix_computer_use_targeting import mac, x11, KEYNOTE, SAFARI
+    from tests._unix_computer_use import mac, KEYNOTE, SAFARI
+    from tests.test_unix_computer_use_targeting import x11
     from tests.test_unix_computer_use_remote_targeting import ssh, mac_over_ssh, osworld, listing, KEYNOTE_FRONT, FIREFOX_FRONT
     if host == "macos":
         _, api, state = mac(tmp_path, monkeypatch, front=KEYNOTE if front else SAFARI)
@@ -487,7 +488,8 @@ def test_never_policy_requires_front_without_any_activation(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("host", ["macos", "x11", "osworld"])
 def test_never_policy_with_an_unread_front_claims_no_switch(tmp_path, monkeypatch, host):
-    from tests.test_unix_computer_use_targeting import mac, x11
+    from tests._unix_computer_use import mac
+    from tests.test_unix_computer_use_targeting import x11
     from tests.test_unix_computer_use_remote_targeting import ssh, osworld, listing, LISTING
     if host == "macos":
         _, api, state = mac(tmp_path, monkeypatch, lsappinfo=False)
@@ -544,7 +546,7 @@ def test_never_policy_x11_hold_refused_before_the_press_is_not_dispatched(tmp_pa
 
 
 def test_never_policy_keeps_the_later_step_words(tmp_path, monkeypatch):
-    from tests.test_unix_computer_use_targeting import mac, inputs, KEYNOTE, SAFARI
+    from tests._unix_computer_use import mac, inputs, KEYNOTE, SAFARI
     def switch(argv, state):
         if "kp:tab" in argv:
             state["front"] = SAFARI
@@ -560,7 +562,7 @@ def test_never_policy_keeps_the_later_step_words(tmp_path, monkeypatch):
     ("osworld", "front_unread", "__FRONT_UNREAD__"),
 ])
 def test_remote_precheck_after_no_switch_claims_none(tmp_path, monkeypatch, host, reason, marker):
-    from tests.test_unix_computer_use_targeting import KEYNOTE
+    from tests._unix_computer_use import KEYNOTE
     from tests.test_unix_computer_use_remote_targeting import ssh, osworld, listing, info_line, LISTING, KEYNOTE_FRONT
     other = "1|4242|Browser" if reason == "target_lost" else ""
     if host == "ssh":
@@ -576,7 +578,7 @@ def test_remote_precheck_after_no_switch_claims_none(tmp_path, monkeypatch, host
 
 
 def test_a_requested_switch_that_could_not_be_verified_still_says_so(tmp_path, monkeypatch):
-    from tests.test_unix_computer_use_targeting import mac, inputs
+    from tests._unix_computer_use import mac, inputs
     _, api, state = mac(tmp_path, monkeypatch, helper=lambda args, state: {
         "ok": False, "reason": "front_unread", "activated": None, "verified": False, "method": "ax_frontmost",
         "target": {"app": "Keynote", "pid": 200}, "error": "lsappinfo named no frontmost application after the switch"})

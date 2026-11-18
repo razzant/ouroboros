@@ -4,7 +4,10 @@ The host process may safely catalog and dispatch extensions whose isolated
 dependencies include native wheels: plugin import and handler execution happen
 in a per-call child process, so Rust/C aborts cannot take down server.py.
 HTTP response children live through streaming and cleanup; one-shot calls keep
-their existing timeout and result-size contracts.
+their existing timeout and result-size contracts. A tool call's child binds
+that one call for its Stop (``get_stop_state``) and returns a refusal it handed
+out beside the extension's result (``step_stop``); the host joins it to its own
+invocation before typing the result.
 """
 
 from __future__ import annotations
@@ -52,6 +55,8 @@ _STDOUT_CAP = 512 * 1024
 _STDERR_CAP = 128 * 1024
 _INPUT_CAP = 1024 * 1024
 _RESULT_CAP = 512 * 1024
+_STEP_STOP_CAP = 512  # extra wire bytes for the host's refusal on a tool call
+_RESULT_SIZE_ERROR = "extension child protocol result exceeded safety cap"
 _CATALOG_TIMEOUT_SEC = 30
 _RUNTIME_MODE_ENV_KEYS = ("OUROBOROS_BOOT_RUNTIME_MODE", "OUROBOROS_RUNTIME_MODE")
 _POSIX_SIGABRT = 6
@@ -191,12 +196,57 @@ def _json_safe(value: Any) -> Any:
         return str(value)
 
 
-def _write_child_result(payload: Dict[str, Any], result: Dict[str, Any]) -> None:
+def _protocol_json(payload: Dict[str, Any]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def _write_child_result(payload: Dict[str, Any], result: Dict[str, Any], *,
+                        step_stop: Dict[str, Any] | None = None) -> None:
+    from ouroboros.extension_plugin_api import STEP_STOP
+
     raw_result_path = str(payload.get("result_path") or "")
     if not raw_result_path:
         return
-    result_path = pathlib.Path(raw_result_path)
-    _write_private_json(result_path, result, cap_bytes=_RESULT_CAP)
+    data = _protocol_json(result)
+    if len(data) > _RESULT_CAP:
+        result = {"ok": False, "error": _RESULT_SIZE_ERROR}
+        data = _protocol_json(result)
+    if step_stop is not None:
+        envelope = _protocol_json({**result, STEP_STOP: step_stop})
+        if len(envelope) - len(data) > _STEP_STOP_CAP:
+            raise ExtensionProcessError("extension child Stop record exceeded safety cap")
+        data = envelope
+    _write_private_bytes(pathlib.Path(raw_result_path), data)
+
+
+def _read_child_result(path: pathlib.Path, *, tool_call: bool) -> Dict[str, Any]:
+    from ouroboros.extension_plugin_api import STEP_STOP
+
+    limit = _RESULT_CAP + (_STEP_STOP_CAP if tool_call else 0)
+    with path.open("rb") as fh:
+        data = fh.read(limit + 1)
+    if len(data) > limit:
+        raise ExtensionProcessError(_RESULT_SIZE_ERROR)
+    try:
+        result = json.loads(data.decode("utf-8") or "{}")
+    except json.JSONDecodeError as exc:
+        raise ExtensionProcessError(f"extension child returned invalid JSON: {exc}") from exc
+    if not isinstance(result, dict):
+        raise ExtensionProcessError("extension child returned invalid protocol shape")
+    if tool_call and STEP_STOP in result:
+        stop = result[STEP_STOP]
+        # Only the canonical transport envelope may spend the reserve. Count every other field,
+        # including the opaque producer report, against the original byte limit.
+        if not isinstance(stop, dict) or data != _protocol_json(result):
+            raise ExtensionProcessError(_RESULT_SIZE_ERROR)
+        ordinary = _protocol_json({key: value for key, value in result.items() if key != STEP_STOP})
+        if len(data) - len(ordinary) > _STEP_STOP_CAP:
+            raise ExtensionProcessError(_RESULT_SIZE_ERROR)
+        if len(ordinary) > _RESULT_CAP:
+            return {"ok": False, "error": _RESULT_SIZE_ERROR, STEP_STOP: stop}
+    elif len(data) > _RESULT_CAP:
+        raise ExtensionProcessError(_RESULT_SIZE_ERROR)
+    return result
 
 
 def _ensure_private_dir(path: pathlib.Path) -> None:
@@ -207,13 +257,7 @@ def _ensure_private_dir(path: pathlib.Path) -> None:
         pass
 
 
-def _write_private_json(path: pathlib.Path, payload: Dict[str, Any], *, cap_bytes: int | None = None) -> None:
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    if cap_bytes is not None and len(data) > cap_bytes:
-        data = json.dumps(
-            {"ok": False, "error": "extension child protocol result exceeded safety cap"},
-            ensure_ascii=False,
-        ).encode("utf-8")
+def _write_private_bytes(path: pathlib.Path, data: bytes) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -236,6 +280,8 @@ def _tool_context_payload(ctx: ToolContext) -> Dict[str, Any]:
         "budget_drive_root": str(getattr(ctx, "budget_drive_root", "") or ""),
         "project_id": str(getattr(ctx, "project_id", "") or ""),
         "task_depth": int(ctx.task_depth or 0),
+        # A managed task's call whose row cannot be read has unknown Stop; a standalone call has no task.
+        "task_lifecycle_bound": getattr(ctx, "task_lifecycle_bound", False) is True,
         "task_metadata": _json_safe(dict(ctx.task_metadata or {})),
         "task_contract": _json_safe(dict(getattr(ctx, "task_contract", {}) or {})),
     }
@@ -259,6 +305,7 @@ def _apply_tool_context_payload(ctx: ToolContext, payload: Dict[str, Any]) -> To
         ctx.task_depth = int(payload.get("task_depth") or 0)
     except (TypeError, ValueError):
         ctx.task_depth = 0
+    ctx.task_lifecycle_bound = payload.get("task_lifecycle_bound") is True
     task_metadata = payload.get("task_metadata")
     ctx.task_metadata = dict(task_metadata) if isinstance(task_metadata, dict) else {}
     task_contract = payload.get("task_contract")
@@ -478,7 +525,7 @@ def _child_process(
     payload["result_path"] = str(result_path)
     call_input = ({key: value for key, value in payload.items() if key != "ctx"}
                   if payload.get("mode") == "tool" else payload)
-    if len(json.dumps(call_input, ensure_ascii=False).encode("utf-8")) > _INPUT_CAP:
+    if len(_protocol_json(call_input)) > _INPUT_CAP:
         raise ExtensionProcessError("extension child protocol input exceeded safety cap; nothing was launched")
     from ouroboros.process_custody import lifeline_parent_env
     env = {**env, **lifeline_parent_env()}
@@ -498,7 +545,7 @@ def _child_process(
     try:
         # Staging can fail after writing private bytes (for example, a full disk).
         # The existing pre-spawn cleanup owns that partial file too.
-        _write_private_json(input_path, payload)
+        _write_private_bytes(input_path, _protocol_json(payload))
         from ouroboros.owner_pause import operation_start
         confirmed = external_handoff("extension_process")
         with tracked_start() as publish, operation_start():
@@ -575,6 +622,7 @@ def _run_child(
     payload: Dict[str, Any], *, skill_dir: pathlib.Path, drive_root: pathlib.Path,
     repo_dir: pathlib.Path, env: Dict[str, str], timeout_sec: int,
     on_spawn: Callable[[], None] | None = None,
+    on_result: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Dict[str, Any]:
     with _child_process(payload, skill_dir=skill_dir, drive_root=drive_root,
                         repo_dir=repo_dir, env=env, on_spawn=on_spawn) as child:
@@ -621,14 +669,9 @@ def _run_child(
             raise ExtensionProcessError(f"extension child exited abnormally: {detail}")
         if not result_path.exists():
             raise ExtensionProcessError("extension child did not write protocol result")
-        if result_path.stat().st_size > _RESULT_CAP:
-            raise ExtensionProcessError("extension child protocol result exceeded safety cap")
-        try:
-            result = json.loads(result_path.read_text(encoding="utf-8") or "{}")
-        except json.JSONDecodeError as exc:
-            raise ExtensionProcessError(f"extension child returned invalid JSON: {exc}") from exc
-        if not isinstance(result, dict):
-            raise ExtensionProcessError("extension child returned invalid protocol shape")
+        result = _read_child_result(result_path, tool_call=payload.get("mode") == "tool")
+        if on_result is not None:
+            on_result(result)  # its transport facts reach the host before an ``ok: false`` turns into a raise
         _publish_child_facts(proc, child_started_ts, ws_relay_failures=result.get("ws_relay_failures"),
                              skill_name=str(payload.get("skill_name") or ""))
         if result.get("ok") is not True:
@@ -849,6 +892,8 @@ def _catalog_child(skill, drive_root, repo_dir, skills_repo_path, env, settings)
 
 
 def dispatch_extension_tool_subprocess(ext_tool: Dict[str, Any], ctx: ToolContext, args: Dict[str, Any]) -> str:
+    from ouroboros.extension_plugin_api import STEP_STOP, adopt_child_stop
+
     meta = getattr(ctx, "task_metadata", {})
     bound = current_usage_scope()
     dispatch_drive_root = pathlib.Path(
@@ -896,6 +941,8 @@ def dispatch_extension_tool_subprocess(ext_tool: Dict[str, Any], ctx: ToolContex
                 ctx=ctx,
             )
         ) if model_capable else None),
+        # The child's refused further action (``get_stop_state``) joins this host invocation before its typing.
+        on_result=lambda answer: adopt_child_stop(ctx, answer.get(STEP_STOP)),
     )
     if "result" not in result:
         raise _mark_child_spawned(ExtensionProcessError("extension child omitted tool result"))
@@ -1069,17 +1116,13 @@ async def _run_maybe_async(value: Any) -> Any:
     return value
 
 
-async def _call_tool(surface: str, args: Dict[str, Any], drive_root: pathlib.Path, repo_dir: pathlib.Path, ctx_payload: Dict[str, Any] | None = None) -> Any:
+async def _call_tool(surface: str, args: Dict[str, Any], ctx: ToolContext) -> Any:
     from ouroboros.extension_loader import get_tool
 
     tool = get_tool(surface)
     if not tool or not callable(tool.get("handler")):
         raise ExtensionProcessError(f"extension tool {surface!r} is not registered")
     handler = tool["handler"]
-    ctx = _apply_tool_context_payload(
-        ToolContext(repo_dir=repo_dir, drive_root=drive_root),
-        dict(ctx_payload or {}),
-    )
     # ctx calling-convention from the descriptor (decided on the RAW handler at
     # register time); fall back to inspecting the unwrapped handler for legacy
     # tools registered before the flag existed.
@@ -1179,8 +1222,20 @@ async def _call_ws(surface: str, msg: Dict[str, Any]) -> Any:
     return await _run_maybe_async(spec["handler"](dict(msg or {})))
 
 
+def _child_failure(skill_name: str, exc: BaseException) -> Dict[str, Any]:
+    from ouroboros.deployment_extensions import failure_words
+
+    return {"ok": False, "error": sanitize_tool_result_for_log(failure_words(skill_name, exc)),
+            **({"failure_kind": exc.failure_kind} if isinstance(exc, ExtensionProcessError) else {})}
+
+
 def _child_main(input_path: str) -> None:
-    from ouroboros.extension_plugin_api import take_child_ws_relay_failures
+    from ouroboros.extension_plugin_api import (
+        await_stop_bound_call,
+        bind_child_tool_call,
+        release_child_tool_call,
+        take_child_ws_relay_failures,
+    )
 
     payload = json.loads(pathlib.Path(input_path).read_text(encoding="utf-8"))
     drive_root = pathlib.Path(payload["drive_root"])
@@ -1189,7 +1244,7 @@ def _child_main(input_path: str) -> None:
     skill_name = str(payload["skill_name"])
     take_child_ws_relay_failures()
     mode = str(payload.get("mode") or "")
-    channel = None
+    channel = call = outcome = None
     if mode == "route":
         from ouroboros.extension_route_stream import ChildResponseChannel
         channel = ChildResponseChannel(skill_name)
@@ -1202,14 +1257,29 @@ def _child_main(input_path: str) -> None:
         if mode == "catalog":
             result = _surface_catalog(skill_name)
         elif mode == "tool":
-            result = {"result": _json_safe(asyncio.run(_call_tool(str(payload.get("surface") or ""), dict(payload.get("args") or {}), drive_root, repo_dir, dict(payload.get("ctx") or {}))))}
+            ctx = _apply_tool_context_payload(ToolContext(repo_dir=repo_dir, drive_root=drive_root),
+                                              dict(payload.get("ctx") or {}))
+            call = bind_child_tool_call(skill_name, ctx)  # this call's Stop, for every thread of the child
+
+            async def invoke():
+                nonlocal outcome
+                try:
+                    tool = _call_tool(str(payload.get("surface") or ""), dict(payload.get("args") or {}), ctx)
+                    value = await await_stop_bound_call(tool, ctx, call)
+                    # The wire snapshot owns even a mutable report while the loop finishes cleanup.
+                    frozen = value if type(value) is str else json.loads(json.dumps(_json_safe(value)))
+                    outcome = {"ok": True, "result": frozen}
+                except BaseException as exc:
+                    outcome = _child_failure(skill_name, exc)
+
+            asyncio.run(invoke())
         elif mode == "route":
             asyncio.run(_call_route(str(payload.get("surface") or ""), dict(payload.get("request") or {}), drive_root, repo_dir, skill, channel))
         elif mode == "ws":
             result = {"result": _json_safe(asyncio.run(_call_ws(str(payload.get("surface") or ""), dict(payload.get("message") or {}))))}
         else:
             raise ExtensionProcessError(f"unknown extension child mode {mode!r}")
-        if channel is None:
+        if channel is None and outcome is None:
             outcome = {"ok": True, **result}
     except BaseException as exc:
         if channel is not None:
@@ -1217,12 +1287,11 @@ def _child_main(input_path: str) -> None:
                 channel.error(exc)
             except OSError:
                 pass
-        else:
-            from ouroboros.deployment_extensions import failure_words
-
-            outcome = {"ok": False, "error": sanitize_tool_result_for_log(failure_words(skill_name, exc)),
-                       **({"failure_kind": exc.failure_kind} if isinstance(exc, ExtensionProcessError) else {})}
+        elif outcome is None:
+            outcome = _child_failure(skill_name, exc)
     finally:
+        # Ended before unload (an on_unload callback is no step of the call); a refusal survives the call's raise.
+        step_stop = release_child_tool_call(call)
         try:
             from ouroboros.extension_loader import unload_extension
             unload_extension(skill_name)
@@ -1241,7 +1310,7 @@ def _child_main(input_path: str) -> None:
         else:
             if failures:
                 outcome["ws_relay_failures"] = failures
-            _write_child_result(payload, outcome)
+            _write_child_result(payload, outcome, step_stop=step_stop)
 
 
 if __name__ == "__main__":

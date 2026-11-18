@@ -16,8 +16,8 @@ from types import SimpleNamespace
 import pytest
 
 from skills.unix_computer_use import macos_native as native
+from tests._unix_computer_use import KEYNOTE, SAFARI, app_dict, inputs, mac, receipt
 from tests.test_unix_computer_use_effects import marked, ssh_mac
-from tests.test_unix_computer_use_targeting import KEYNOTE, SAFARI, app_dict, inputs, mac, receipt
 
 # --- a fake accessibility surface --------------------------------------------------------------------------------
 

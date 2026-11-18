@@ -1531,7 +1531,7 @@ def test_a_work_tree_status_and_diff_run_their_filters_in_the_work_container(env
     repo, witness = _work_git_repo_with_clean_filter(env)
     docker = fake_docker(env, monkeypatch)
     registry = _registry(env, repo)
-    binding = git_vcs_ops._git()._vcs_binding(registry._ctx, None, root="active_workspace", path=".")
+    binding = git_vcs_ops._vcs_binding(registry._ctx, None, root="active_workspace", path=".")
     diff = git_vcs_ops._git_diff(registry._ctx, _resolved_binding=binding)
     assert "two" in diff  # the worktree change is seen
     assert witness.exists() and set(witness.read_text(encoding="utf-8").split()) == {"1"}  # the filter ran, and only in the container

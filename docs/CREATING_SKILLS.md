@@ -1884,19 +1884,19 @@ The frozen ABI is documented in
 This section shows the practical shape.
 
 Extensions declare the PluginAPI generation they bind against in the manifest
-(PluginAPI 2.5; a payload declaring any 2.x minimum negotiates the host's 2.5, methods included; a tool row
-with `touches` needs "2.5", which an older host refuses before import):
+(PluginAPI 2.6; a payload declaring any 2.x minimum negotiates the host's 2.6, methods included; a tool row
+with `touches` needs "2.5" and a payload relying on `get_stop_state` "2.6", which an older host refuses before import):
 
 ```yaml
-plugin_api: "2.5"            # major strict; minor = required minimum
+plugin_api: "2.6"            # major strict; minor = required minimum
 # or, with required capabilities (closed set, validated per execution mode):
 # plugin_api:
-#   version: "2.5"
+#   version: "2.6"
 #   capabilities: [register_tool, subscribe_event]
 ```
 
 A payload without the field binds the legacy "1.3" generation by
-construction (2.4's `get_settings_state` and `refresh_companion_process` refuse it): an already-reviewed payload keeps loading on its existing
+construction (`get_settings_state`, `refresh_companion_process` and `get_stop_state` refuse it): an already-reviewed payload keeps loading on its existing
 hash-bound review PASS, but a NEW review PASS (LLM review, owner attestation,
 or an install-basis acceptance) is refused until the field is declared.
 
@@ -1945,7 +1945,11 @@ start, finish, status and usage axes, including interrupted/tool-only responses.
 time. For optional delivery evidence, shared `JsonSession.hold_context` and `hold_tool_call` record rows only after delivery, and `capture_response_context(response_id)` snapshots what that response held before queued updates are released. They also bound answers: an ordinary result or typed room request is answered only by a response begun after its rows are held (after a fresh switch, the pointer asking for its answer) that ends without `continues` and, where captured, held them at its end (without hooks, after the send returns). Older/external providers without these hooks keep exposure unknown; setup or queued results never prove exposure.
 The factory's `observe("usage", raw)` reports JSON
 `{"usage": {...}, "raw_usage": {...}}` for that physical connection; `close()` emits
-its final sample before returning. Samples and responses share one watermark. The host
+its final sample before returning. Samples and responses share one watermark. The call's
+own thread writes connection samples to the ledger, so the call loop never waits on those
+writes; a connection keeps one valid sample waiting, which takes in its next. A connection's close
+waits for its own samples and fails if one could not be written; the money check reads what
+is written. The host
 settles growth after Stop/budget exhaustion without admitting work or inventing responses;
 response IDs dedupe across the call, including resumed connections. Reservations
 survive reconnects; final call teardown abandons responses without a receipt.
@@ -1973,7 +1977,12 @@ native input/transcription work and open calls; the feature also waits for playb
 never for a running tool. Optional `input_pending` reports words said or awaiting recognition, apart from open calls:
 a forced switch waits for it, and a loss with it set gives a fresh session the hearing-gap fact (absent, VAD events decide).
 `input_started` may name a `response_id` already begun for its words when no VAD start preceded them, so that response
-answers them. A native resume needs a handle published after the open calls and last native result; one history outran
+answers them. History keeps speaking order: a spoken row follows the owner's words begun before its response and never
+waits for words begun after it; owner rows are never held. Words are counted by `input_started`, which may name the
+`item_id` their transcript will carry (transcripts of different utterances can land in any order). A final owner
+caption closes the words of its item; one whose item was never named closes the oldest open words that no item names;
+a converted batch that leaves nothing said or awaiting recognition closes them all. A provider that names an item owes
+it one final owner caption: when recognition fails, an empty one, which closes the words and writes no row. A native resume needs a handle published after the open calls and last native result; one history outran
 while opening continues fresh. OpenAI withholds `response.create` while its own call awaits output: speech on the issuing
 connection, or after a further call behind a running effect, is answered once that output is written.
 `final_captions()` returns received unfinished words at teardown without new wire work.
@@ -2095,17 +2104,36 @@ objects are `ref`s whose `address` and `field` read the stored value whole; a lo
 (a title, a label) is a preview whose `derived_from` names its source. Search and inbound
 links are the skill's work over these reads, stating the coverage read.
 
+### Stop inside a multi-step tool call
+
+A Stop reaches a running call only when the call asks. `api.get_stop_state()` answers for the tool call running in this
+context, in both execution modes, with no permission or grant; the host names the call and its task. Ask it last before
+each new independent action of the call, after that action's preparation, the first one included: the next request of
+a message sent in parts, the next key chord. The answer is `{"status", "reason", "note"}`; only `continue` lets the
+action start (`reason` `no_task`: a call made for no task, which no Stop governs). `stop` names why it must not
+(`cancelled`, `task_cancelled`, `operation_already_returned`, `stop_unreadable`, each defined on the `PluginAPI`
+protocol), and `unbound` (no call of this skill is bound where it asks) permits nothing either. In process a call is
+bound to its context (its thread, its async task and contexts copied from them): a thread you start without that
+context, a route, a WebSocket handler or a companion reads `unbound`. Out of process a tool call's child binds that
+one call for all its threads until it returns.
+
+If not `continue`, start nothing more; return receipts (`observed_effect` only for actions that ran).
+Never retry or resume the rest. The first `stop` holds for the call. Host facts are `meta.control_reason` and
+`meta.refused_step`: only a non-error completion becomes `blocked` / `OWNER_OPERATION_REFUSED`. Errors and timeouts
+keep their status/code; `{"ok": false}` is an error even with `reason: stopped`. Result review
+reads your report unchanged; the host attests only its refusal. Return rather than raise: exceptions return no report
+of effects; only your state retains them. This reads immediate task Stop, not Wrap up, Pause, a deadline or the End of a live conversation.
+Stop after the read cannot reach an action already starting. Never split one action (key press/release, drag).
+The host checks between whole calls for extensions that never ask. Bundled `unix_computer_use` also checks before `key` can raise the target and before each chord.
+
 ### Async tool handlers
 
-Tool handlers can be plain functions OR `async def` coroutines —
-the registry detects coroutines and runs them on a helper thread with
-a fresh event loop under `asyncio.wait_for(timeout_sec)`. They do not
-execute on the server's main event loop, so do not rely on loop-local
-state captured at registration time, as for HTTP routes and WS handlers.
-Supervised tasks and async event subscribers share the host extension loop
-instead; do not share loop-local objects between that loop and a route or
-WebSocket handler. Blocking I/O on the extension loop still delays other
-extensions.
+Tool handlers may be plain functions or `async def`. A coroutine runs on a helper thread's own loop or in the
+per-call child's loop. Returning or raising closes the handler's Stop reader before loop cleanup. Its report is
+distinct from runner shutdown. If a child exits or times out before handing over its result, neither its report nor its refusal is confirmed.
+Do not rely on loop-local state captured at registration. Supervised tasks and async event subscribers share
+the host extension loop; do not share its loop-local objects with routes or WebSocket handlers. Blocking I/O
+on that loop delays other extensions.
 
 ```python
 async def do_search(ctx, query: str = ""):
@@ -2306,8 +2334,10 @@ HEAD/Range behavior and background actions. There is no total or pre-header
 request timer: finish, abort, disconnect or unloading that skill instance ends
 its response. Slow consumption is backpressure, not a timeout. A body failure
 breaks the stream; cleanup failure after the complete body is logged separately.
-The incoming request body retains its 512 KiB cap, and one-shot tool/catalog/WS
-results retain their existing caps and timeouts.
+The incoming request body and one-shot tool/catalog/WS results each have a
+512 KiB cap. A tool child's Stop record has a separate byte allowance. When
+the result exceeds its cap, the host receives the size error and any recorded
+refusal. One-shot timeouts still apply.
 
 The out-of-process / companion WS push (`POST /ui/ws-message`) admits
 a 60-message burst per skill and then one message per second (the excess gets a

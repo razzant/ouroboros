@@ -276,7 +276,7 @@ _ROW_PHRASES = {  # the two decisions the owner reads by name; any other key is 
     "OUROBOROS_CONSCIOUSNESS_DAILY_USD": "Consciousness allowance: {old} → {new} USD per rolling 24 hours.",
 }
 # Who changed it, in the owner's words; the surface and the task stay in the event (DESIGN principle 7).
-_ROW_ACTORS = {"ouroboros": "Changed by Ouroboros.", "owner": "Changed by you."}
+_ROW_ACTORS = {"ouroboros": "by Ouroboros", "owner": "by you"}
 
 
 def declared_settings_origin(request: Request) -> Dict[str, str]:
@@ -332,7 +332,8 @@ def settings_change_text(changes: Dict[str, Dict[str, Any]], origin: Dict[str, s
     parts = [f"{key} changed." if "withheld" in change or any("\n" in str(value) for value in change.values())
              else _ROW_PHRASES.get(key, key + ": {old} → {new}.").format(old=_shown(change, "old"), new=_shown(change, "new"))
              for key, change in changes.items()]
-    return " ".join(parts) + " " + _ROW_ACTORS.get(str(origin.get("actor") or ""), "Changed outside the app.")
+    actor = _ROW_ACTORS.get(str(origin.get("actor") or ""), "outside the app")
+    return " ".join([*parts, f"Changed {actor}."])
 
 
 def project_settings_changes(changes: dict, *, tokens: bool = False) -> dict:
@@ -391,6 +392,41 @@ def record_settings_change(request: Request | None, changes: Optional[Dict[str, 
                                          role="system", system_type="settings_changed")
     except Exception:
         log.warning("Settings saved; their change record or Main row failed", exc_info=True)
+
+
+_CONTEXT_MODE_NAMES = {"max": "Max", "low": "Low", "nano": "Nano"}
+
+
+def record_context_mode_change(request: Request, project_id: str, requested: str, old: str, new: str, *,
+                               at: str | None = None) -> None:
+    """Audit each save. A changed mode also reaches the room's history at its commit timestamp,
+    so the mind can read the same change the human sees in the composer."""
+    owner_audit(request, "context_mode", {"project_id": project_id, "context_mode": requested, "previous_context_mode": old})
+    if not old or not new or old == new:
+        return
+    try:
+        from supervisor import message_bus
+
+        if project_id:
+            from ouroboros.projects_registry import get_project
+
+            chat = (get_project(request_drive_root(request), project_id) or {}).get("chat_id")
+        else:  # the owner's primary chat once bound, else Main, as every owner notice is addressed
+            from supervisor.schedule_notes import owner_chat_id
+
+            chat = owner_chat_id(request_drive_root(request))
+        if not chat:
+            return
+        # The owner chose "changed by the owner" here (17.11): the room's readers (the mind, colleagues) are not
+        # all "you"; the settings rows keep their own bylines.
+        declared = declared_settings_origin(request)["actor"]
+        actor = "by the owner" if declared == "owner" else _ROW_ACTORS.get(declared)
+        attribution = f", changed {actor}" if actor else ""
+        transition = f"{_CONTEXT_MODE_NAMES.get(old, old)} → {_CONTEXT_MODE_NAMES.get(new, new)}"
+        text = f"New work in this room uses the updated context mode ({transition}{attribution})."
+        message_bus.send_with_budget(int(chat), text, ts=at, role="system", system_type="context_mode_changed")
+    except Exception:
+        log.warning("Context mode saved; its System row failed", exc_info=True)
 
 
 OWNER_SETTING_WRITERS = {
@@ -830,6 +866,7 @@ __all__ = [
     "_owner_write_settings",
     "owner_write_guard",
     "post_commit_failure_response",
+    "record_context_mode_change",
     "record_settings_change",
     "settings_document_digest",
     "unsaved_error",

@@ -200,10 +200,10 @@ def compute_managed_update_status(fetch: bool = False) -> Dict[str, Any]:
     only that or uncommitted work makes an available update unsafe to apply
     blindly. The apply path plans from Git on its own (``merge_plan``)."""
     branch_dev, _branch_stable = _go().managed_branch_defaults()
-    remote_name, remote_branch, branch_ref = _go()._managed_update_target()
     from ouroboros.update_channels import get_update_channel
 
     update_channel = get_update_channel()
+    remote_name, remote_branch, branch_ref = _go()._managed_update_target(update_channel)
     official_remote_ok = True
     official_remote_err = ""
     if fetch and remote_name:
@@ -450,10 +450,10 @@ def prepare_managed_update(
         }
     if not _go()._read_managed_repo_meta():
         return False, {"error": "Managed updates are unavailable for this checkout."}
-    remote_name, remote_branch, branch_ref = _go()._managed_update_target()
     from ouroboros.update_channels import get_update_channel
 
     update_channel = get_update_channel()
+    remote_name, remote_branch, branch_ref = _go()._managed_update_target(update_channel)
     target_ref, target_sha, target_error = _go()._resolve_managed_update_target(
         remote_name, remote_branch, branch_ref, update_channel
     )

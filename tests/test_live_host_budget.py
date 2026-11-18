@@ -23,9 +23,11 @@ def test_idle_budget_check_keeps_closing_tail_and_duplicate_samples(host_world):
             session.closed = True
         session.close = close
         sample(session, 4)
+        await asyncio.to_thread(host._connection_ledger.flush)  # the check reads what the call's ledger has written
         await host.check()  # still below the shared limit
         sample(session, 7)
         sample(session, 7)
+        await asyncio.to_thread(host._connection_ledger.flush)
         await host.check()  # no response_started event ever arrives
     async def run():
         with ua.usage_scope(ua.UsageScope(drive_root=host.ctx.drive_root, task_id=host.ctx.task_id, global_limit_usd=.05)):

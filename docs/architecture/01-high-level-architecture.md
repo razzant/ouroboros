@@ -471,7 +471,7 @@ ouroboros/ — agent core and shared runtime (§6)
     settings.py — /api/settings and /api/owner/*; `GET /api/review-pool` (`ReviewPoolResponse`); an unreadable catalog is a typed `config_error`, never a 500 (§7 Review pool)
     desktop_autostart.py — GET/POST /api/desktop/autostart and /api/desktop/background (§4)
     control.py — /api/reset, /api/command, /api/git/*, /api/update/*, /api/evolution-data
-    update_progress.py — Retained last-attempt observation, executor stages and boot conclusions; WS invalidation, never recovery authority (§3)
+    update_progress.py — Retained last-attempt observation, executor stages and boot conclusions; WS invalidation (§3)
     schedules.py — Cron schedule HTTP surface
     files.py — File Browser and chat upload
     ui_preferences.py — Install-wide `state/ui_preferences.json`: widgets, layout, welcome, voice choice and contribution arrangement
@@ -505,7 +505,7 @@ ouroboros/ — agent core and shared runtime (§6)
     shell.py — Process tools `run_command`/`run_script` (§9)
     shell_guards.py — Shared process-path inspection helpers and target extractors; registry_guard_process.py owns process admission (§6)
     registry_core.py, registry_guards.py, registry_guard_process.py, tool_context.py — registry load/schema/dispatch, the capability/resource/update/skill guards, process admission, `ToolContext`/`BrowserState` (protocol: contracts/tool_context.py) (§6 Safety and runtime mode)
-    git.py, git_plumbing.py, git_repo_edit.py, git_vcs_ops.py, vcs_read.py, git_review_cycle.py, git_managed_postcommit.py, git_evolution.py — Git/write tools with the deterministic, test and one-wave review commit gates and the author's optional preflight; its leaves: plumbing, repo write/edit, VCS inspection and rollback, the reviewed-commit cycle, managed-merge post-commit gates, evolution-campaign authority (§6 Git and commit review)
+    git.py, git_plumbing.py, git_repo_edit.py, git_vcs_ops.py, vcs_read.py, git_review_cycle.py, git_managed_postcommit.py, git_evolution.py — Git catalog and reviewed commits (deterministic, test and one-wave gates, optional author preflight), plumbing, repo edits, status/diff/pull/restore/revert, VCS reader, review cycle, managed-merge post-commit gates and evolution-campaign authority (§6 Git and commit review)
     search.py — `web_search` legs of the `search_routes.py` route (§6 Web access mechanisms)
     browser.py, browser_session.py — Playwright tools; a loop per session (§6 MCP)
     mcp_sign_in.py — the mind's MCP sign-in (§6 MCP)

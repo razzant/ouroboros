@@ -269,7 +269,7 @@ def test_active_chat_activity_contract_mirrors_direct_turn_shape():
         # An adopted answer's custody and origin, read beside the axes by the status fold.
         "finalization_recovery", "terminal_origin",
         # K8 census facts for every chat (project_id is already a direct-turn field).
-        "last_line", "last_line_at", "tool_calls", "detached", "project_name",
+        "last_line", "last_line_at", "tool_calls", "detached", "place_origin", "project_name",
         # A moved text Presence turn takes the owner's Pause (#2566).
         "presence_pause",
     }

@@ -1,10 +1,8 @@
-"""Generic VCS inspection and rollback operations.
+"""Git status, diff, fast-forward pull, restore and revert.
 
-The ``ouroboros/tools/git.py`` facade re-exports these definitions. Shared
-helpers are read through the call-time handle ``_git()`` so tests can patch the
-facade binding. Displayed diffs use this leaf's bytes runner; parsed output
-keeps ``run_cmd``. ``_sanitize_git_error`` and ``format_protected_paths`` bind
-their owners at import time, including calls from f-strings.
+``vcs_read`` calls the status and diff handlers here. ``git`` re-exports these
+operations and supplies their shared command, lock and policy bindings.
+Displayed diffs use the bytes runner, and parsed output uses ``run_cmd``.
 """
 
 from __future__ import annotations
@@ -14,6 +12,7 @@ import pathlib
 import posixpath
 from typing import List, Optional
 
+from ouroboros import tool_access
 from ouroboros.git_observation import host_git_env, numstat_paths
 from ouroboros.runtime_mode_policy import format_protected_paths
 from ouroboros.tools.registry import ToolContext
@@ -24,13 +23,7 @@ from ouroboros.tools.tool_result import ToolResult, LegacyTextResultAdapter, _pu
 
 
 def _git():
-    """The parent module, read at call time.
-
-    The parent owns the rebindable module state and the members tests
-    monkeypatch there; reading them through the module at each call keeps
-    one binding, where a from-import would freeze the value this leaf saw
-    at import time.
-    """
+    """Read the shared Git dependencies at call time so their bindings can be replaced."""
     from ouroboros.tools import git
 
     return git
@@ -97,7 +90,7 @@ def _vcs_binding(
     without making handler-local target selection part of the public contract.
     """
 
-    resolved = binding or _git().build_resolved_resource_binding(
+    resolved = binding or tool_access.build_resolved_resource_binding(
         ctx,
         root=root,
         operation="vcs",
@@ -139,13 +132,13 @@ def _git_status(
     _resolved_binding: Optional[ResolvedResourceBinding] = None,
 ) -> str:
     try:
-        binding = _git()._vcs_binding(ctx, _resolved_binding, root=root, path=path or ".")
+        binding = _vcs_binding(ctx, _resolved_binding, root=root, path=path or ".")
         cmd = ["git", "status", "--porcelain"]
-        if relative := _git()._binding_relative_path(ctx, binding, path):
+        if relative := _binding_relative_path(ctx, binding, path):
             cmd.extend(["--", relative])  # an ordinary pathspec, as before: globs keep working
         output = _git().run_cmd(cmd, cwd=binding.repository_path or binding.base_path)
-        return _git()._vcs_result(
-            _git()._limit_git_output(output, max_chars),
+        return _vcs_result(
+            _limit_git_output(output, max_chars),
             binding,
         )
     except Exception as e:
@@ -167,7 +160,7 @@ def _git_diff(
     **kwargs,
 ) -> str:
     try:
-        binding = _git()._vcs_binding(ctx, _resolved_binding, root=root, path=path or ".")
+        binding = _vcs_binding(ctx, _resolved_binding, root=root, path=path or ".")
         repo_dir = binding.repository_path or binding.base_path
         base, head = str(kwargs.get("base") or ""), str(kwargs.get("head") or "")
         # vcs_read refused head without base, or with staged, among the call's other argument problems.
@@ -189,7 +182,7 @@ def _git_diff(
         elif stat:
             cmd.append("--stat")
         cmd.extend(revisions)
-        if relative := _git()._binding_relative_path(ctx, binding, path):
+        if relative := _binding_relative_path(ctx, binding, path):
             cmd.extend(["--", relative])
         if not (stat or name_only):
             from ouroboros.tools.vcs_read import _protected_content_reason
@@ -197,21 +190,21 @@ def _git_diff(
             # A pathspec pattern can reach protected files its literal target does not name.
             scope = "" if any(ch in relative for ch in "*?[") else relative
             if reason := _protected_content_reason(ctx, binding, scope, "show"):
-                return _git()._vcs_result(reason, binding)
+                return _vcs_result(reason, binding)
         from ouroboros.protected_artifacts import shell_block_reason as protected_artifact_shell_block_reason
 
         protected_block = protected_artifact_shell_block_reason(
             ctx, cmd, cwd=str(repo_dir), default_cwd=repo_dir, binding=binding,
         )
         if protected_block:
-            return _git()._vcs_result(protected_block, binding)
+            return _vcs_result(protected_block, binding)
         # name_only paths are parsed, not displayed: only displayed output takes escapes.
         output, note = (_git().run_cmd(cmd, cwd=repo_dir), "") if name_only else _git_display_text(cmd, repo_dir)
         if name_only:
             paths = numstat_paths(output, cmd, lambda args: _git().run_cmd(args, cwd=repo_dir))
             output = "\n".join(json.dumps(path, ensure_ascii=False)
                                if any(ord(c) < 32 or c in '\\"' for c in path) else path for path in paths)
-        text = _git()._vcs_result(_git()._limit_git_output(output, max_chars) + note, binding)
+        text = _vcs_result(_limit_git_output(output, max_chars) + note, binding)
         if comparison:
             comparison["kind"] = "tree_to_tree" if head else "tree_to_index" if staged else "tree_to_worktree"
             text += "\nComparison: " + json.dumps(comparison, ensure_ascii=False, sort_keys=True)
@@ -285,8 +278,8 @@ def _pull_from_remote(
     _resolved_binding: Optional[ResolvedResourceBinding] = None,
 ) -> str:
     try:
-        binding = _git()._vcs_binding(ctx, _resolved_binding, root=root)
-        return _git()._vcs_result(_git()._ff_pull(binding.base_path), binding)
+        binding = _vcs_binding(ctx, _resolved_binding, root=root)
+        return _vcs_result(_ff_pull(binding.base_path), binding)
     except Exception as e:
         return f"⚠️ PULL_ERROR: {_sanitize_git_error(str(e))}"
 
@@ -296,7 +289,7 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
                      root: str = "system_repo",
                      _resolved_binding: Optional[ResolvedResourceBinding] = None) -> str:
     try:
-        binding = _git()._vcs_binding(ctx, _resolved_binding, root=root)
+        binding = _vcs_binding(ctx, _resolved_binding, root=root)
     except Exception as e:
         return f"⚠️ RESTORE_ERROR: {_sanitize_git_error(str(e))}"
     # Resolve each requested path to the SETTLED form git itself will act on, and
@@ -319,17 +312,17 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
             # Pathspec magic (":/", ":(glob)", ":!", ...) re-scopes or negates a
             # pathspec behind the gate's back; a plain repo-relative path never
             # needs it, so refuse rather than judge a string git reads differently.
-            return _vcs_validation_refusal(ctx, _git()._vcs_result(
+            return _vcs_validation_refusal(ctx, _vcs_result(
                 f"⚠️ RESTORE_ERROR: pathspec magic is not supported: {_raw}", binding,
             ))
         _collapsed = posixpath.normpath(_git().normalize_repo_path(_raw))
         if posixpath.isabs(_collapsed) or _collapsed == ".." or _collapsed.startswith("../"):
-            return _vcs_validation_refusal(ctx, _git()._vcs_result(
+            return _vcs_validation_refusal(ctx, _vcs_result(
                 f"⚠️ RESTORE_ERROR: path escapes the repository root: {_raw}", binding,
             ))
         normalized_paths.append(_collapsed)
     if paths and not normalized_paths:
-        return _vcs_validation_refusal(ctx, _git()._vcs_result("⚠️ RESTORE_ERROR: No valid paths provided.", binding))
+        return _vcs_validation_refusal(ctx, _vcs_result("⚠️ RESTORE_ERROR: No valid paths provided.", binding))
     repo_dir = binding.base_path
     # The paths, else this whole folder: never the rest of a repository that encloses it.
     scope = normalized_paths or ["."]
@@ -341,10 +334,10 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
         # acted on BIBLE.md.
         changes = _scope_changes(pathlib.Path(repo_dir), scope)
     except Exception as e:
-        return _git()._vcs_result(f"⚠️ RESTORE_ERROR: git status failed: {e}", binding)
+        return _vcs_result(f"⚠️ RESTORE_ERROR: git status failed: {e}", binding)
     dirty_files = [path for _state, path in changes]
     if not dirty_files:
-        return _git()._vcs_result("Nothing to restore — no uncommitted change matches paths." if normalized_paths
+        return _vcs_result("Nothing to restore — no uncommitted change matches paths." if normalized_paths
                                   else "Nothing to restore — working directory is already clean.", binding)
     targets_system = _git().binding_targets_system_repo(ctx, binding)
     affected_protected = _git().protected_paths_in(dirty_files) if targets_system else []
@@ -357,7 +350,7 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
         # by git itself from the requested pathspecs; the action below acts on exactly them.
         for norm in normalized_paths:
             if _git().is_protected_runtime_path(norm):
-                return _git()._vcs_result(
+                return _vcs_result(
                     f"⚠️ RESTORE_BLOCKED: Cannot restore protected file: {norm}. "
                     "Protected core/contract/release paths must be changed through reviewed commits.",
                     binding,
@@ -370,14 +363,14 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
             f for f in dirty_files if f and _git().is_protected_runtime_path(f)
         })
         if damage_protected:
-            return _git()._vcs_result(
+            return _vcs_result(
                 f"⚠️ RESTORE_BLOCKED: pathspec matches protected file(s) with uncommitted "
                 f"changes: {format_protected_paths(damage_protected)}. "
                 "Protected core/contract/release paths must be changed through reviewed commits.",
                 binding,
             )
     elif affected_protected:
-        return _git()._vcs_result(
+        return _vcs_result(
             f"⚠️ RESTORE_BLOCKED: Uncommitted changes touch protected file(s): "
             f"{format_protected_paths(affected_protected)}. "
             f"Use paths= to restore specific non-critical files, or resolve manually.",
@@ -396,7 +389,7 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
                 preview += [f"  … and {len(names) - 15} more"] if len(names) > 15 else []
         preview.append("")
         preview.append("Call again with confirm=true to proceed.")
-        return _git()._vcs_result("\n".join(preview), binding)
+        return _vcs_result("\n".join(preview), binding)
     from ouroboros.git_observation import _pathspec_batches
 
     tracked = [path for state, path in changes if state != "??"]
@@ -408,7 +401,7 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
         outside_index = {path for state, path in parent_rows if path in ancestors and path not in tracked
                          and state[0] not in {" ", "D", "?"}}
     except Exception as e:
-        return _git()._vcs_result(f"⚠️ RESTORE_ERROR: repository or index paths could not be read: {e}", binding)
+        return _vcs_result(f"⚠️ RESTORE_ERROR: repository or index paths could not be read: {e}", binding)
     # No overlay: an entry HEAD lacks (a staged addition, a rename's new side) leaves the index
     # and the files too. Exact literal names of the read rows, in argv-sized batches: a request
     # naming only untracked files is unknown to checkout, and the action stays the judged set.
@@ -427,7 +420,7 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
             _git().run_cmd([*checkout, *batch], cwd=top)
             restored += len(batch)
     except Exception as e:
-        return _git()._vcs_result(
+        return _vcs_result(
             f"⚠️ RESTORE_PARTIAL: restored {restored} of {len(tracked)} tracked path(s), then git checkout failed: {e}"
             if restored else f"⚠️ RESTORE_ERROR: git checkout failed: {e}", binding)
     # Only the original untracked names, never a new scan. -x keeps checkout's changed ignore
@@ -439,7 +432,7 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
     except Exception as e:
         # Do not swallow: the checkout landed but untracked cleanup did not, so the
         # working tree does NOT fully match HEAD; a swallowed failure once claimed it did.
-        return _git()._vcs_result(
+        return _vcs_result(
             f"⚠️ RESTORE_PARTIAL: checked out {restored} path(s), but `git clean` failed and "
             f"untracked files may remain: {e}", binding)
     _prune_emptied(top, untracked, pathlib.Path(repo_dir))
@@ -449,7 +442,7 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
             _git().run_cmd([*checkout, *batch], cwd=top)
             restored += len(batch)
     except Exception as e:
-        return _git()._vcs_result(
+        return _vcs_result(
             f"⚠️ RESTORE_PARTIAL: restored {restored} of {len(tracked)} tracked path(s) and removed the untracked "
             f"ones, then git checkout failed: {e}" if restored or untracked
             else f"⚠️ RESTORE_ERROR: git checkout failed: {e}", binding)
@@ -458,14 +451,14 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
     except Exception as e:
         remaining = [f"(the scope could not be re-read: {e})"]
     if remaining:
-        return _git()._vcs_result(
+        return _vcs_result(
             f"⚠️ RESTORE_PARTIAL: checkout and clean ran, but {len(remaining)} path(s) in scope still differ "
             f"from HEAD: {', '.join(remaining[:15])}" + (f" and {len(remaining) - 15} more" if len(remaining) > 15 else "")
             + (f". Not restored, to keep files or index entries that hold their path: {', '.join(map(_shown, kept))}" if kept else ""),
             binding)
     if normalized_paths:
-        return _git()._vcs_result(f"Restored {len(dirty_files)} path(s) to HEAD.", binding)
-    return _git()._vcs_result("All uncommitted changes discarded. Working directory matches HEAD.", binding)
+        return _vcs_result(f"Restored {len(dirty_files)} path(s) to HEAD.", binding)
+    return _vcs_result("All uncommitted changes discarded. Working directory matches HEAD.", binding)
 
 
 def _scope_changes(repo_dir: pathlib.Path, paths: List[str]) -> List[tuple]:
@@ -536,19 +529,19 @@ def _revert_commit(
     _resolved_binding: Optional[ResolvedResourceBinding] = None,
 ) -> str:
     try:
-        binding = _git()._vcs_binding(ctx, _resolved_binding, root=root)
+        binding = _vcs_binding(ctx, _resolved_binding, root=root)
     except Exception as e:
         return f"⚠️ REVERT_ERROR: {_sanitize_git_error(str(e))}"
     repo_dir = binding.base_path
     sha = sha.strip()
     if not sha:
-        return _vcs_validation_refusal(ctx, _git()._vcs_result("⚠️ REVERT_ERROR: sha parameter is required.", binding))
+        return _vcs_validation_refusal(ctx, _vcs_result("⚠️ REVERT_ERROR: sha parameter is required.", binding))
     try:
         full_sha = _git().run_cmd(
             ["git", "rev-parse", "--verify", sha], cwd=repo_dir,
         ).strip()
     except Exception:
-        return _git()._vcs_result(f"⚠️ REVERT_ERROR: Commit '{sha}' not found.", binding)
+        return _vcs_result(f"⚠️ REVERT_ERROR: Commit '{sha}' not found.", binding)
     try:
         parents = _git().run_cmd(
             ["git", "rev-list", "--parents", "-1", full_sha], cwd=repo_dir,
@@ -556,7 +549,7 @@ def _revert_commit(
     except Exception:
         parents = [full_sha]
     if len(parents) > 2:
-        return _git()._vcs_result(
+        return _vcs_result(
             f"⚠️ REVERT_ERROR: Commit {sha[:8]} is a merge commit ({len(parents)-1} parents). "
             "git revert on merge commits requires specifying a parent.",
             binding,
@@ -578,7 +571,7 @@ def _revert_commit(
 
     mode = effective_runtime_mode(_git()._current_runtime_mode(), getattr(ctx, "task_metadata", None))
     if protected_changes and not (mode_allows_protected_write(mode) or _git()._authorized_managed_update_resolver(ctx)):
-        return _git()._vcs_result(
+        return _vcs_result(
             f"⚠️ CORE_PROTECTION_BLOCKED: Runtime mode {mode} cannot revert protected file(s): "
             f"{format_protected_paths(protected_changes)}. "
             "Mechanical revert is review-exempt, but retains the caller's runtime-mode authority.",
@@ -597,7 +590,7 @@ def _revert_commit(
             ).strip()
         except Exception:
             diff_stat = "(could not generate diff)"
-        return _git()._vcs_result(
+        return _vcs_result(
             f"This will revert commit {full_sha[:8]}:\n"
             f"  Message: {commit_msg}\n"
             f"  Files changed:\n{diff_stat}\n\n"
@@ -610,7 +603,7 @@ def _revert_commit(
     except Exception:
         status = ""
     if status:
-        return _git()._vcs_result(
+        return _vcs_result(
             "⚠️ REVERT_ERROR: Working directory is not clean.\n"
             "Commit or discard changes first (use vcs_restore), then retry.",
             binding,
@@ -624,10 +617,10 @@ def _revert_commit(
                 _git().run_cmd(["git", "revert", "--abort"], cwd=repo_dir)
             except Exception:
                 pass
-            return _git()._vcs_result(f"⚠️ REVERT_ERROR: git revert failed: {e}", binding)
+            return _vcs_result(f"⚠️ REVERT_ERROR: git revert failed: {e}", binding)
     finally:
         _git()._release_git_lock(lock)
-    return _git()._vcs_result(
+    return _vcs_result(
         f"Reverted commit {full_sha[:8]}: {commit_msg}\nNew revert commit created.",
         binding,
     )

@@ -253,3 +253,17 @@
  * @typedef {Object} PlaceHistoryReaction
  * @property {string} summary
  */
+
+/**
+ * The host's `place_origin` on a work frame or census row. `wakes` lists matched kinds in place order;
+ * `labels` gives their connector's words when known. `routed` means no kind matched and the conversation's
+ * works were read instead. An absent or empty `actor` means the author could not be identified.
+ * @typedef {Object} PlaceOrigin
+ * @property {string} place_id
+ * @property {string=} place_label
+ * @property {string=} provider
+ * @property {{id?:string,label?:string,owner?:boolean,bot?:boolean}=} actor
+ * @property {string[]} wakes
+ * @property {Object<string,string>=} labels
+ * @property {boolean=} routed
+ */

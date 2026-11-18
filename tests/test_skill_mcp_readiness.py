@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import venv
 from types import SimpleNamespace
 
 import pytest
@@ -14,20 +15,21 @@ def test_agent_python_launch_prefers_valid_agent_interpreter_and_runs_isolated(t
     root = tmp_path / "skill"
     root.mkdir()
     entry = root / "server.py"
-    entry.write_text("import json, sys\nprint(json.dumps([sys.flags.isolated, sys.dont_write_bytecode]))\n")
-    alias = tmp_path / "agent-python"
-    try:
-        alias.symlink_to(sys.executable)
-    except OSError as exc:
-        pytest.skip(f"Interpreter symlink unavailable: {exc}")
-    monkeypatch.setenv("OUROBOROS_AGENT_PYTHON", str(alias))
+    entry.write_text("import json, sys\nprint(json.dumps([sys.prefix, sys.flags.isolated, sys.dont_write_bytecode]))\n")
+    # Keep the interpreter with its environment, including the Windows venv launcher and pyvenv.cfg.
+    env_dir = tmp_path / "agent"
+    venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(env_dir)
+    python = env_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    monkeypatch.setenv("OUROBOROS_AGENT_PYTHON", str(python))
     launch, reason = skill_mcp._derive_launch(SimpleNamespace(skill_dir=root),
                                              {"entry": "server.py", "runtime": "agent_python"})
     assert reason == ""
-    assert launch == {"command": str(alias), "args": ["-I", "-B", str(entry)], "cwd": str(root)}
+    assert launch == {"command": str(python), "args": ["-I", "-B", str(entry)], "cwd": str(root)}
     result = subprocess.run([launch["command"], *launch["args"]], cwd=launch["cwd"],
                             capture_output=True, text=True, check=True)
-    assert json.loads(result.stdout) == [1, True]
+    prefix, isolated, no_bytecode = json.loads(result.stdout)
+    assert os.path.samefile(prefix, env_dir)
+    assert (isolated, no_bytecode) == (1, True)
     assert not (root / "__pycache__").exists()
 
 
