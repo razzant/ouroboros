@@ -18,6 +18,7 @@ import contextvars
 import copy
 import math
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Mapping
 
@@ -370,18 +371,20 @@ class ConnectionLedger:
 
     xAI bills connected seconds and its session reports them every idle second. Each receipt is a ledger transaction:
     on Windows CI under load one took up to 32 s, and written on the call loop it froze the owner's microphone input,
-    the page's played receipts and a held tool's delivery for as long. The call loop only hands a receipt over. One
-    still waiting when the same connection's next arrives takes it in (the growth adds, the newest watermark stands),
-    so a slow ledger builds no backlog. A connection's close ``flush``es, so its receipts are on the ledger once it has
-    closed. Nothing on the call's way waits for a write: the money check reads what is written (a receipt in flight is
-    counted at its next reading), and ``failure`` keeps the first write that failed for that check to end the call."""
+    the page's played receipts and a held tool's delivery for as long. The call loop only hands a receipt over to one
+    writer thread that lives as long as the call (the store keeps a connection per thread). A receipt still waiting
+    when the same connection's next arrives takes it in (the growth adds, the newest watermark stands), so a slow
+    ledger builds no backlog. A connection's close ``flush``es, so its receipts are on the ledger once it has closed.
+    Nothing on the call's way waits for a write: the money check reads what is written (a receipt in flight is counted
+    at its next reading), and ``failure`` keeps the first write that failed for that check to end the call."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._waiting = []
         self._idle = threading.Event()
         self._idle.set()
-        self._thread = None
+        self._writing = False
+        self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="call-connection-ledger")
         self.failure = None
 
     def add(self, **receipt):
@@ -393,15 +396,18 @@ class ConnectionLedger:
                 receipt["usage"] = {"connected_seconds": earlier + receipt["usage"]["connected_seconds"]}
             self._waiting.append((context, receipt))
             self._idle.clear()
-            if self._thread is None:
-                self._thread = threading.Thread(target=self._write, name="call-connection-ledger", daemon=True)
-                self._thread.start()
+            start, self._writing = not self._writing, True
+        if start:
+            try:
+                self._writer.submit(self._write)
+            except RuntimeError:  # the call has ended: write it here rather than lose it
+                self._write()
 
     def _write(self):
         while True:
             with self._lock:
                 if not self._waiting:
-                    self._thread = None
+                    self._writing = False
                     self._idle.set()
                     return
                 context, receipt = self._waiting.pop(0)
@@ -414,6 +420,11 @@ class ConnectionLedger:
     def flush(self) -> None:
         """Wait until every receipt handed over is written or has failed (each write is bounded by the ledger lock)."""
         self._idle.wait()
+
+    def close(self) -> None:
+        """At the call's end: write what is waiting, then let the writer thread go."""
+        self._writer.shutdown(wait=True)
+        self.flush()
 
 
 def abandon_live_response(attempt: LiveAttempt, *, reason: str) -> None:

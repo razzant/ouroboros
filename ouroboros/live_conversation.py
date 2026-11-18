@@ -957,7 +957,7 @@ class ConversationHost:
                     self._response_text_estimates.clear()
                     self._density_input = 0
                     await joined(asyncio.to_thread(self.executor.shutdown, wait=True))
-                    await joined(asyncio.to_thread(self._connection_ledger.flush))  # every closing tail is written
+                    await joined(asyncio.to_thread(self._connection_ledger.close))  # every closing tail is written
                     if self._connection_ledger.failure is not None:
                         log.warning("call %s: connected time not recorded", self.turn.spec.call_id,
                                     exc_info=self._connection_ledger.failure)
