@@ -168,6 +168,8 @@ def test_inspect_reports_previous_request_not_accumulated_or_cache_added_input(t
     result = executor.execute()
     inspected = json.loads(_tool_result(llm.calls[-1], "inspect"))
     facts = inspected["context"]
+    assert inspected["selected_memory_mode"] is None
+    assert inspected["ordinary_memory"]["reason"] == "retained_snapshot_missing"
     assert facts["window"] == {
         "window_tokens": 200_000, "status": "asserted", "stale": True,
         "observed_at": "2026-10-01T00:00:00Z", "model": "openai/fake-reviewer",

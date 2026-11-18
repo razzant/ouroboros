@@ -311,6 +311,22 @@ def test_a_foreign_focus_reads_the_marks_source_by_the_named_reader_never_the_au
     assert "FOREIGN-CRITIQUE" in _memory_read(_ctx(tmp_path, "wake1", meta=WAKE), source_ref=shown)
     plain = json.loads(_memory_mark(_ctx(tmp_path, "main1"), text="mine", task_id="main1"))
     assert "\nsource: " not in _memory_read(_ctx(tmp_path, "main1"), node_id=plain["mark_id"])  # other targets unchanged
+    from ouroboros.memory_form_facts import ordinary_composition
+
+    task = {"id": "next-turn", "chat_id": 1}
+    snap = mv.capture_memory_view(tmp_path, task, mv.view_spec_for_task(task, tmp_path))
+    parts = ordinary_composition(snap)["blocks"]["room"]["parts"]
+    marks = {s["id"]: s for p in parts if p["kind"] in ("mark", "late_review") for s in p["sources"]}
+    wake = _ctx(tmp_path, "wake1", meta=WAKE)
+    assert "text:\nmine" in _memory_read(wake, **marks[plain["mark_id"]]["read"]["arguments"])
+    late = marks[mark_id]
+    assert "as of now" in late["read_basis"]
+    assert _memory_read(wake, **late["read"]["arguments"]) == node
+    assert late["review"]["read"]["arguments"] == {"source_ref": shown}
+    assert "FOREIGN-CRITIQUE" in _memory_read(wake, **late["review"]["read"]["arguments"])
+    assert _release(tmp_path, mark_id, direct=True)["ok"]
+    assert "mark_release" in _memory_read(wake, **late["read"]["arguments"])
+    assert "FOREIGN-CRITIQUE" in _memory_read(wake, **late["review"]["read"]["arguments"])
 
 
 def test_a_retained_source_is_read_without_the_chronicle_and_other_modes_still_wait(tmp_path, monkeypatch):

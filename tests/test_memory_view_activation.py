@@ -122,6 +122,8 @@ def test_the_snapshot_round_trips_through_its_canonical_json(tmp_path):
 def _old_snapshot_json(snapshot):
     data = dataclasses.asdict(snapshot)
     data.pop("chronicle_sequence")
+    if not data["owner_words_sources"]:
+        del data["owner_words_sources"]  # no coordinates: preserve the original wire document
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 

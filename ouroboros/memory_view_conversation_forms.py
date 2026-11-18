@@ -33,12 +33,26 @@ def _gist_records(group):
     return tuple(sorted(found.items(), key=lambda pair: (pair[1].get("ts", ""), pair[0])))
 
 
-def _gist_lines(group, excluded=(), *, gists=None, replies=None):
+def _gist_lines(group, excluded=(), *, gists=None, replies=None, part=None):
     """Each telling at its replies here, else at its own address: with that room's reader when no room here holds it."""
     from ouroboros.memory_view_work import first_sentence, gist_address
     rooms = [room["room_id"] for room in group["rooms"]]
-    return [f"[{(replies or {}).get(key) or gist_address(gist, rooms)}] «{first_sentence(gist['summary'])}»"
-            for key, gist in (_gist_records(group) if gists is None else gists) if key not in excluded]
+    members = {}
+    if part:
+        for room in group["rooms"]:
+            for word in room["words"]:
+                if word.get("gist"):
+                    members.setdefault(word.get("work_id") or word.get("task_id"), []).append(
+                        {"room_id": room["room_id"], "address": word["address"], "id": word["id"]})
+    lines = []
+    for key, gist in (_gist_records(group) if gists is None else gists):
+        if key in excluded:
+            continue
+        line = f"[{(replies or {}).get(key) or gist_address(gist, rooms)}] «{first_sentence(gist['summary'])}»"
+        # ``key`` may be a relay identity or the gist's row address, not a task ID.
+        sources = [{"work_id": key, "gist": gist}, *members.get(key, ())] if part else ()
+        lines += part([line], "conversation_gist", sources, "gist") if part else [line]
+    return lines
 
 
 def _latest_unread(words, *, first_line=True):
@@ -88,6 +102,19 @@ def _fold_line(room):
         span = (f"memory_read(room_id='{room['room_id']}', rows=true, "
                 f"from='{fold['from']}', to='{fold['to']}')")
     return f"[{span}] «{fold['sentence']}»: {fold['count']} words read and folded"
+
+
+def _overheard_lines(group, data, part, *, prefix=""):
+    line = _overheard_line(group, data)
+    if not line:
+        return []
+    lines = [prefix + line]
+    if not part:
+        return lines
+    words = [{"room_id": room["room_id"], "address": word["address"], "id": word["id"]}
+             for room in group["rooms"] if room.get("overheard")
+             for word in data["rooms"][room["room_id"]]["unread"]]
+    return part(lines, "conversation_unread", words, "host_fact")
 
 
 def _visible_gists(group, data, gone):
@@ -234,86 +261,112 @@ def identity_line(group: Mapping[str, Any]) -> str:
             f"{tasks} task{'' if tasks == 1 else 's'}{running}; {reader}")
 
 
+def _event_source(room, *, room_line=False):
+    """An event line's source: its room and captured arrivals, never that room's words, notes or tasks.
+    A zero-arrival room line also prints its room's captured last-activity scalar (``memory_view_events.room_line``),
+    so that one span carries it; the aggregate count line prints no room's own facts."""
+    source = {"room_id": room["room_id"], "events": room["events"]}
+    if room_line and not room["events"].get("count") and room["facts"].get("latest"):
+        source["facts"] = {"latest": room["facts"]["latest"]}
+    return source
+
+
 def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str], as_line: int, *, data=None,
-                 event_count=False) -> str:
+                 event_count=False, part=None) -> str:
     """Whole, every gist, every gist with untold counts, or last gist with counts; owner words survive each."""
     from ouroboros.memory_view import _facts_text, _note_lines, _note_pointer, _row_opening, _row_pointer
     from ouroboros.memory_view_work import conversation_task_lines
+    def emit(lines, kind="framing", sources=(), form="whole", room_id=None):
+        return part(lines, kind, sources, form, room_id) if part else lines
     data = data if data is not None else _sources(group)
     bare = {ident[5:] for ident in gone if ident.startswith("bare:")}
     gone = gone | bare
-    owner = data["owners"]
-    held = [_row_pointer(word, "words") if word["id"] in owners_gone else word["line"] for word in owner]
+    def held():
+        return [line for room in group["rooms"] for word in data["rooms"][room["room_id"]]["owner"]
+                for line in emit([_row_pointer(word, "words") if word["id"] in owners_gone else word["line"]],
+                    "conversation_row", [word], "address" if word["id"] in owners_gone else "whole", room["room_id"])]
     if as_line:
-        gists = _gist_lines(group, gists=data["gists"], replies=data["replies"])
-        lines = [identity_line(group), *(gists[-1:] if as_line == 3 else gists)]
+        lines = emit([identity_line(group)], "conversation_identity", [group], "facts")
+        shown = data["gists"][-1:] if as_line == 3 else data["gists"]
+        lines += _gist_lines(group, gists=shown, replies=data["replies"], part=part)
         if event_line := events.count_line(group):
-            lines.append(event_line)
+            lines += emit([event_line], "conversation_events", (_event_source(r) for r in group["rooms"] if r.get("events")), "count")
         if as_line >= 2:
             untold = data["untold"]
             notes = sum(len(room["notes"]) for room in group["rooms"])
-            if untold or notes or as_line == 3 and len(gists) > 1:  # each named omission is real; a zero names none
+            if untold or notes or as_line == 3 and len(data["gists"]) > 1:  # each named omission is real; a zero names none
                 parts = [f"{n} {what}" for n, what in ((untold, "untold rows"), (notes, "notes by count")) if n]
-                parts += [f"{len(gists)} works, " + ("only the last gist shown" if as_line == 3 else "every gist shown")] if gists else []
-                lines.append("Emergency: " + "; ".join(parts) + ".")
+                parts += [f"{len(data['gists'])} works, " + ("only the last gist shown" if as_line == 3 else "every gist shown")] if data["gists"] else []
+                lines += emit(["Emergency: " + "; ".join(parts) + "."], "conversation_omissions", [group], "count")
         for room in group["rooms"]:
-            lines += [_note_pointer(note) for note in room["notes"]] if as_line == 1 else []
+            if as_line == 1:
+                for note in room["notes"]:
+                    lines += emit([_note_pointer(note)], "conversation_note", [note],
+                                  "lead" if "lead_rule" in note else "opening", room["room_id"])
             if (unread := data["rooms"][room["room_id"]]["unread"]) and not room.get("overheard"):
-                lines.append(_unread_line(unread))
+                lines += emit([_unread_line(unread)], "conversation_unread", unread, "host_fact", room["room_id"])
             if fold := _fold_line(room):
-                lines.append(fold)
-        if overheard := _overheard_line(group, data):
-            lines.append(overheard)
+                lines += emit([fold], "conversation_fold", [room["folded"]], "gist", room["room_id"])
+        lines += _overheard_lines(group, data, part)
         for room in group["rooms"]:  # each count reads in the room that holds those tasks
             if no_gist := sum(not task.get("gist") for task in room["tasks"]):
-                lines.append(f"{no_gist} tasks without a gist; memory_read(room_id='{room['room_id']}', rows=true)")
-        return "\n".join([*lines, *held])
+                lines += emit([f"{no_gist} tasks without a gist; memory_read(room_id='{room['room_id']}', rows=true)"],
+                              "conversation_tasks", (t for t in room["tasks"] if not t.get("gist")), "count", room["room_id"])
+        return "\n".join([*lines, *held()])
     running = "".join(f"; running {work}" for work in group["running"])
-    lines = [f"### {group['label']}{running}"]
+    lines = emit([f"### {group['label']}{running}"], "conversation_identity", [group], "facts")
     if event_count and (event_line := events.count_line(group)):
-        lines.append(event_line)
-    tasks = conversation_task_lines(group)
+        lines += emit([event_line], "conversation_events", (_event_source(r) for r in group["rooms"] if r.get("events")), "count")
+    # Task form selection stays in its owner; observe it only when its lines are appended below.
+    tasks = conversation_task_lines(group, with_sources=bool(part))
     for room in group["rooms"]:
         if not room["engaged"]:
             if room.get("events"):
                 if not event_count:
-                    lines.append(events.room_line(room))
+                    lines += emit([events.room_line(room)], "conversation_events", [_event_source(room, room_line=True)], "host_fact")
             else:  # a saved view from before event facts were captured
-                lines.append(f"- {room['label']}; {room['silent']}")
+                lines += emit([f"- {room['label']}; {room['silent']}"], "conversation_room", [{"room_id": room["room_id"]}], "facts")
         else:
-            lines.append(f"{'#### ' + room['label'] + ' — ' if len(group['rooms']) > 1 else ''}{_facts_text(room['facts'], 'that room')}; "
-                         f"memory_read(room_id='{room['room_id']}', rows=true)")
-        lines += _note_lines(room["notes"])
+            lines += emit([f"{'#### ' + room['label'] + ' — ' if len(group['rooms']) > 1 else ''}{_facts_text(room['facts'], 'that room')}; "
+                         f"memory_read(room_id='{room['room_id']}', rows=true)"], "conversation_room", [room["facts"]], "facts", room["room_id"])
+        for note in room["notes"]:
+            lines += emit(_note_lines([note]), "conversation_note", [note], "whole", room["room_id"])
         if fold := _fold_line(room):
-            lines.append(fold)
+            lines += emit([fold], "conversation_fold", [room["folded"]], "gist", room["room_id"])
         unread = [word for word in data["rooms"][room["room_id"]]["unread"] if word["id"] in gone]
         if unread:
-            lines.append(_unread_line(unread))
+            lines += emit([_unread_line(unread)], "conversation_unread", unread, "host_fact", room["room_id"])
         for word in room["words"]:
             if word["id"] in owners_gone:
-                lines.append(_row_pointer(word, "words"))
+                lines += emit([_row_pointer(word, "words")], "conversation_row", [word], "address", room["room_id"])
+            elif word.get("again"):
+                lines += emit([word["line"]], "conversation_row", [word], "delivered_again", room["room_id"])
             elif word["id"] not in gone:
-                lines.append(word["line"])
+                lines += emit([word["line"]], "conversation_row", [word], "whole", room["room_id"])
             elif data["kinds"][word["id"]] == "untold":
                 render = _row_pointer if word["id"] in bare else _row_opening
-                lines.append(render(word, "my reply" if word["kind"] == "ouroboros" else "words"))
-            elif word.get("again") or word["kind"] == "place_fact":
-                lines.append(word["line"])
-        lines += tasks[room["room_id"]]
-    lines += _gist_lines(group, gists=_visible_gists(group, data, gone))
+                lines += emit([render(word, "my reply" if word["kind"] == "ouroboros" else "words")],
+                              "conversation_row", [word], "address" if word["id"] in bare else "opening", room["room_id"])
+            elif word["kind"] == "place_fact":
+                lines += emit([word["line"]], "conversation_row", [word], "whole", room["room_id"])
+        for item in tasks[room["room_id"]]:
+            lines += emit([item[0]], "conversation_task", [item[1]], item[2], room["room_id"]) if part else [item]
+    lines += _gist_lines(group, gists=_visible_gists(group, data, gone), part=part)
     return "\n".join(lines)
 
 
-def counted_unread_lines(group, data):
+def counted_unread_lines(group, data, part=None):
     """The local unread rows a conversation regains when it leaves the global window count."""
-    lines = [_unread_line(words) for room in group["rooms"] if not room.get("overheard")
-             and (words := data["rooms"][room["room_id"]]["unread"])]
-    if overheard := _overheard_line(group, data):
-        lines.append(group["label"] + ": " + overheard)
+    lines = []
+    for room in group["rooms"]:
+        if not room.get("overheard") and (words := data["rooms"][room["room_id"]]["unread"]):
+            line = _unread_line(words)
+            lines += part([line], "conversation_unread", words, "host_fact", room["room_id"]) if part else [line]
+    lines += _overheard_lines(group, data, part, prefix=group["label"] + ": ")
     return lines
 
 
-def _counted_text(groups, owners, aggregate_unread, *, index=None):
+def _counted_text(groups, owners, aggregate_unread, *, index=None, part=None):
     from ouroboros.memory_view import _rooms_line, _row_pointer
     index = index if index is not None else {g["key"]: _sources(g) for g in groups}
     sources = {rid: data for g in groups for rid, data in index[g["key"]]["rooms"].items()}
@@ -324,20 +377,26 @@ def _counted_text(groups, owners, aggregate_unread, *, index=None):
     lines = [f"{len(groups)} conversations by count: " + _rooms_line(rooms)
              + (f"; {event_rooms} event rooms, {arrivals} arrivals" if event_rooms else f"; {silent} silent rooms" if silent else "")
              + (f"; {folds} read-and-folded rows by count" if folds else "")]
+    if part:
+        lines = part(lines, "conversation_count", groups, "count")
     unread = [(room, word) for room in rooms for word in sources[room["room_id"]]["unread"]]
     if unread and aggregate_unread:
         latest, author, opening = _latest_unread([word for _room, word in unread], first_line=False)
         people = len({_person(word) for _room, word in unread})
         days = sorted(str(word["ts"])[:10] for _room, word in unread)
-        lines.append(f"Emergency window form: {len(unread)} words without recorded consideration, "
+        line = (f"Emergency window form: {len(unread)} words without recorded consideration, "
             f"{people} {'person' if people == 1 else 'people'}, "
             f"{len({room['room_id'] for room, _word in unread})} rooms, {days[0]} → {days[-1]}; "
             f"latest by {author} at {latest['ts']}: {opening}; memory_read(room_id='*')")
+        unread_sources = [{"room_id": room["room_id"], "address": word["address"], "id": word["id"]} for room, word in unread] if part else ()
+        lines += part([line], "conversation_unread", unread_sources, "count") if part else [line]
     elif unread:
         for group in groups:
-            lines += counted_unread_lines(group, index[group["key"]])
-    lines += [_row_pointer(word, "words") if word["id"] in owners else word["line"]
-              for room in rooms for word in sources[room["room_id"]]["owner"]]
+            lines += counted_unread_lines(group, index[group["key"]], part=part)
+    for room in rooms:
+        for word in sources[room["room_id"]]["owner"]:
+            line = _row_pointer(word, "words") if word["id"] in owners else word["line"]
+            lines += part([line], "conversation_row", [word], "address" if word["id"] in owners else "whole", room["room_id"]) if part else [line]
     return "\n".join(lines)
 
 
@@ -352,7 +411,7 @@ def local_key(group, gone, data):
 
 
 def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
-            piece: Callable[[Any, Callable[[], str]], Any], *, index=None) -> List[Any]:
+            piece: Callable[[Any, Callable[[], str]], Any], *, index=None, part=None) -> List[Any]:
     """Local form keys name every state their renderer reads; pricing never draws a complete view."""
     from ouroboros.memory_view_work import row_reader
     index = index if index is not None else {g["key"]: _sources(g) for g in groups}
@@ -367,14 +426,14 @@ def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
     if counted:
         ids = {w["id"] for g in counted for w in index[g["key"]]["owners"]}
         parts.append(piece(("conversations", "counted", tuple(g["key"] for g in counted), frozenset(ids & owners),
-                            "unread" in counts), lambda: _counted_text(counted, owners, "unread" in counts, index=index)))
+                            "unread" in counts), lambda: _counted_text(counted, owners, "unread" in counts, index=index, part=part)))
     for group, key in states:
         if group["key"] in counts:
             continue
         form, local_words, local_owners, event_count = key[3:]
         parts.append(piece(key,
                            lambda group=group, form=form, words=local_words, owners=local_owners, event_count=event_count:
-                           render_group(group, words, owners, form, data=index[group["key"]], event_count=event_count)))
+                           render_group(group, words, owners, form, data=index[group["key"]], event_count=event_count, part=part)))
     def foot():
         kinds = Counter("engaged" if room["engaged"] else "silent" for group in groups for room in group["rooms"])
         return (f"{len(groups)} other conversations, {kinds['engaged']} rooms where a person or I spoke, "

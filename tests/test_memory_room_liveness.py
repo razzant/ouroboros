@@ -186,6 +186,41 @@ def test_bound_running_work_holds_an_empty_room_without_reading_history_or_finis
     assert _room(_view(tmp_path, MAIN_TASK)[0], beta) is None
 
 
+def test_capture_keeps_running_ids_of_registered_project_without_rows_in_identity_metadata(tmp_path):
+    import json
+    from ouroboros.focus import normalize_focus
+    from ouroboros.memory_form_facts import memory_composition, ordinary_composition
+    from ouroboros.projects_registry import create_project
+
+    _install(tmp_path)
+    project = create_project(tmp_path, "empty-live", name="Empty live")
+    task = "only-live-work"
+    focus = normalize_focus("BODY_ONLY live focus", {"reader": "get_task_result", "task_id": task},
+                            task_id=task, authored_at="2026-11-17T17:00:00+00:00")
+    seed_result(tmp_path, task, {"status": "running", "project_id": project["id"], "focus": focus})
+    snapshot, text = _view(tmp_path, MAIN_TASK)
+    rid = str(project["chat_id"])
+    room = _room(snapshot, rid)
+    assert room["facts"]["rows"] == 0 and not room["words"] and not room["tasks"]
+    assert "running_tasks" not in room["facts"]  # the real room_facts producer never claimed this field
+    assert room["running_tasks"] == [task] and "BODY_ONLY live focus" in text
+    group = next(g for g in snapshot.conversations if any(r["room_id"] == rid for r in g["rooms"]))
+    for result in (ordinary_composition(snapshot), memory_composition(snapshot, mv.FULL_VIEW),
+                   memory_composition(snapshot, mv.FloorLevel((("F6a", (group["key"],)),)))):
+        parts = result["blocks"]["room"]["parts"]
+        part, source = next((p, s) for p in parts for s in p.get("sources", ()) if s.get("key") == group["key"])
+        held = next(r for r in source["rooms"] if r["room_id"] == rid)
+        assert held["running_tasks"] == [task]
+        assert held["running_work"] == [{"task_id": task, "navigation": {"tool": "get_task_result", "arguments": {"task_id": task}}}]
+        assert held["running_basis"] and ("running_focus_gap" in source) is (part["kind"] == "conversation_identity")
+        assert "BODY_ONLY live focus" not in json.dumps(result)
+    assert part["kind"] == "conversation_count"  # the counted form prints no focus and claims none
+    captured = mv.snapshot_from_json(mv.snapshot_json(snapshot))
+    seed_result(tmp_path, task, {"status": "completed", "project_id": project["id"]})
+    assert _room(captured, rid)["running_tasks"] == [task]
+    assert _room(_view(tmp_path, MAIN_TASK)[0], rid) is None
+
+
 def test_a_bot_event_is_one_line_and_a_room_where_i_spoke_once_keeps_its_words(tmp_path):
     from ouroboros.presence_bindings import conversation_key
     from ouroboros.presence_runner import presence_chat_id
@@ -213,6 +248,41 @@ def test_a_bot_event_is_one_line_and_a_room_where_i_spoke_once_keeps_its_words(t
     assert silent["events"]["count"] == 1 and f"memory_read(room_id='{rooms['i1']}', rows=true)" in text
     assert spoke["engaged"] and "thanks" in text  # my sealed answer there still makes it a room where I spoke
     assert [room["room_id"] for room in group["rooms"]] == [str(rooms["i1"]), str(rooms["i2"])]
+
+
+def test_event_composition_captures_arrival_bounds_not_a_fabricated_complete_membership(tmp_path):
+    import json
+    from ouroboros.memory_form_facts import ordinary_composition
+
+    _install(tmp_path)
+    room, said, _delivered = _thread()
+    arrivals = [said(40 + n, "BODY_ONLY event" if n == 0 else "") for n in range(3)]
+    for row in arrivals:
+        row["transport"]["actor"]["is_bot"] = True
+    arrivals[-1]["transport"].pop("actor")
+    shared.append(tmp_path / "logs" / "chat.jsonl", *arrivals)
+    note = ChronicleStore(tmp_path).write_note(room_id=room, task_id="event-note", text="Separate note.", author=shared.MIND)
+    assert note.ok
+    snapshot, text = _view(tmp_path, MAIN_TASK)
+    assert note.record["id"] in {n["id"] for n in _room(snapshot, room)["notes"]}
+    event = _room(snapshot, room)["events"]
+    assert event["count"] == 3
+    assert [b["address"] for b in event["bounds"]] == [_addr(arrivals[0]), _addr(arrivals[-1])]
+    parts = ordinary_composition(snapshot)["blocks"]["room"]["parts"]
+    source = next(s for p in parts if p["kind"] == "conversation_events" for s in p["sources"] if s["room_id"] == room)
+    held = source["events"]
+    assert held["count"] == 3 and held["membership_gap"] and "not an enumeration" in held["selection"]
+    assert held["range_read"]["arguments"] == {"room_id": room, "rows": True,
+        "from": _addr(arrivals[0]), "to": _addr(arrivals[-1])}
+    assert "BODY_ONLY" not in json.dumps(source)
+    assert set(source) <= {"room_id", "events", "read_gap"}  # its arrivals, never the room's other sources
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="event-reader", current_chat_id=1)
+    read = _memory_read(ctx, **held["range_read"]["arguments"])
+    assert all(_addr(row) in read for row in arrivals)
+    legacy = dataclasses.replace(snapshot, conversations=tuple({**g, "rooms": [
+        {**r, "events": {k: v for k, v in r["events"].items() if k != "bounds"}} if r.get("events") else r
+        for r in g["rooms"]]} for g in snapshot.conversations))
+    assert mv.render_room(legacy) == text
 
 
 def test_a_forward_from_my_humans_account_engages_the_room_and_still_waits_as_anothers_words(tmp_path):
@@ -507,6 +577,17 @@ def test_one_row_several_rooms_hold_is_whole_once_and_my_humans_copy_keeps_its_f
     assert copies[alpha]["line"] == (f"{copies[alpha]['head']} delivered again: the same row as in room 1: {address}; "
                                      f"memory_read(room_id='1', rows=true, from='{address}', to='{address}')")
     assert copies[alpha]["owner_side"] and copies[alpha]["again"] == address  # the author stays my human
+    from ouroboros.memory_form_facts import memory_composition
+
+    parts = memory_composition(snapshot, mv.FULL_VIEW)["blocks"]["room"]["parts"]
+    forms = {s["room_id"]: (p["form"], s) for p in parts if p["kind"] == "conversation_row"
+             for s in p["sources"] if s["address"] == address}
+    assert forms["1"][0] == "whole" and forms[alpha][0] == "delivered_again"
+    repeat = forms[alpha][1]
+    assert repeat["read"]["arguments"]["room_id"] == alpha and repeat["again"] == address
+    earlier = repeat["earlier"]["read"]["arguments"]
+    assert earlier == {"room_id": "1", "rows": True, "from": address, "to": address}
+    assert words in _memory_read(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="reader"), **earlier)
     assert sum(sha == chat_chain.row_address(origin)["row_sha256"] for sha, _pos in asked) == 1  # read once
     second = [word for group in snapshot.conversations for item in group["rooms"] for word in item["words"]
               if word["address"] == _addr(again)]

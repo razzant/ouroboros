@@ -1025,6 +1025,27 @@ _READER = re.compile(r"memory_read\(room_id='(-?\d+)', rows=true, from='([^']+)'
 _ROWS = re.compile(r"^\[[^;\n]+; [^\n]*?(row:-?\d+@[^\s;\]]+#[0-9a-f]{12})\]", re.M)
 
 
+def test_origin_capture_keeps_retained_source_identity_without_inventing_a_row_hash(tmp_path):
+    from ouroboros.memory_form_facts import ordinary_composition
+    from ouroboros.project_dialogue import project_origin_rows
+
+    rooms, _rows = _install(tmp_path)
+    rid = str(rooms["alpha"])
+    snapshot, _text = _view(tmp_path, {"id": "origin-root", "type": "task", "chat_id": int(rid)},
+                            room_lanes=False, room_page=False)
+    expected = project_origin_rows(tmp_path, int(rid))[0]["ref"]
+    assert snapshot.room["origins"][0]["origin_ref"] == expected
+    part = next(p for p in ordinary_composition(snapshot)["blocks"]["room"]["parts"] if p["kind"] == "origin")
+    source = part["sources"][0]
+    assert source["origin_ref"] == expected and source["read_gap"] and "read" not in source
+    assert "text" not in source and source["origin_ref"]["text_sha256"] == expected["text_sha256"]
+    old = dataclasses.replace(snapshot, room={**snapshot.room, "origins": [
+        {k: v for k, v in origin.items() if k != "origin_ref"} for origin in snapshot.room["origins"]]})
+    assert mv.render_room(old) == mv.render_room(snapshot)
+    legacy = next(p for p in ordinary_composition(old)["blocks"]["room"]["parts"] if p["kind"] == "origin")["sources"][0]
+    assert "origin_ref" not in legacy and legacy["read_gap"]
+
+
 def _returned(registry, room, first, last):
     """The addresses a literal row reader returns, read through the registered memory_read."""
     text = registry.execute("memory_read", {"room_id": room, "rows": True, "from": first, "to": last})

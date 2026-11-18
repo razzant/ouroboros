@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import copy
+import hashlib
 import json
+import threading
 from collections import Counter
 from pathlib import Path
 from typing import List
@@ -13,6 +15,7 @@ from ouroboros.tools.registry import ToolEntry
 
 log = logging.getLogger(__name__)
 _CANONICAL_OBSERVATION = object()
+_OBSERVATION_LOCK = threading.Lock()  # Only exchanges observation and map references.
 _NOTE_REQUIRED = ("authored_note_required: inspect the working view, then supply your own working_note "
                   "(keep_unit_ids or keep_last_n select what stays raw); no helper writes it for you.")
 
@@ -31,18 +34,19 @@ def record_context_view(ctx, messages, tool_schemas, *, physical_capture=_CANONI
     observed = copy.deepcopy(messages)
     plan, mode = getattr(ctx, "context_fit_plan", None), getattr(ctx, "active_context_mode", "") or "max"
     memory = bool(getattr(getattr(plan, "core", None), "memory_view_json", ""))
-    ctx._last_context_observation = {
+    observation = {
         "revision": context_reclaim_transcript_sha256(observed),
         "messages": observed, "tool_schemas": copy.deepcopy(tool_schemas),
         # Continuations retain values, never the live plan. The same core can
         # render this captured selection even after another form was chosen.
         "memory_core_sha256": plan.core_sha256 if memory else "",
+        "memory_mode": mode if memory else None,
         "memory_facts": copy.deepcopy(plan.projection(mode).memory_facts) if memory else {},
         "fit_measurement": copy.deepcopy(fit_measurement),
     }
+    publish_context_observation(ctx, observation)
     if physical_capture is _CANONICAL_OBSERVATION:
         return  # Existing non-Main actors retain their own observation boundary.
-    observation = ctx._last_context_observation
     ref = getattr(physical_capture, "candidate_manifest_ref", None)
     observation["chronicle_lead_rule"] = ref.get("chronicle_lead_rule") if isinstance(ref, dict) else None
     observation.update(exposed_units=[], physical_source_status="unavailable")
@@ -101,6 +105,126 @@ def residue_by_kind(messages: list) -> dict:
         row = residue.setdefault("protected" if unit.unit_id in protected else unit_kind(messages, unit), [0, 0])
         row[0], row[1] = row[0] + 1, row[1] + unit.context_size_tokens
     return {kind: {"units": units_, "tokens": tokens} for kind, (units_, tokens) in sorted(residue.items())}
+
+
+def _ordinary_frame(observed):
+    facts = observed.get("memory_facts") or {}
+    room = json.dumps(facts.get("max_room"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return {"core_sha256": observed.get("memory_core_sha256"), "forms_version": (facts.get("floor") or {}).get("forms_version"),
+            "max_room_sha256": hashlib.sha256(room.encode("utf-8")).hexdigest()}
+
+
+def _matches_frame(saved, frame):
+    return saved and frame["core_sha256"] and all(saved["identity"].get(k) == v for k, v in frame.items())
+
+
+def _last_map(observed):
+    return observed.get("ordinary_memory") or observed.get("previous_ordinary_memory")
+
+
+def publish_context_observation(ctx, observation, connection_ctx=None):
+    """Install a completed frame, taking the last inspected map at publication time."""
+    with _OBSERVATION_LOCK:
+        saved = _last_map(getattr(ctx, "_last_context_observation", None) or {})
+        if saved:
+            key = "ordinary_memory" if _matches_frame(saved, _ordinary_frame(observation)) else "previous_ordinary_memory"
+            observation[key] = saved
+        ctx._last_context_observation = observation
+        if connection_ctx is not None:
+            connection_ctx._last_context_observation = observation
+
+
+def _ordinary_memory(ctx, observed, *, continuation_page):
+    """Retain one on-demand metadata source, independent of transcript pagination and later tool pairs."""
+    from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+    from ouroboros.memory_view import snapshot_from_json
+    from ouroboros.memory_form_facts import ordinary_composition
+    from ouroboros.memory_floor import FORMS_VERSION
+
+    plan = getattr(ctx, "context_fit_plan", None)
+    raw = getattr(getattr(plan, "core", None), "memory_view_json", "")
+    frame = _ordinary_frame(observed)
+    with _OBSERVATION_LOCK:
+        current = getattr(ctx, "_last_context_observation", None) or {}
+        latest_map = _last_map(current)
+        saved = latest_map if _matches_frame(latest_map, frame) else _last_map(observed)
+
+    def publish(result):
+        with _OBSERVATION_LOCK:
+            latest = getattr(ctx, "_last_context_observation", None)
+            observed.pop("previous_ordinary_memory", None)
+            observed["ordinary_memory"] = result
+            if latest is not None and latest is not observed:
+                if _matches_frame(result, _ordinary_frame(latest)):
+                    latest.pop("previous_ordinary_memory", None)
+                    latest["ordinary_memory"] = result
+                elif not latest.get("ordinary_memory") and _last_map(latest) == saved:
+                    latest["previous_ordinary_memory"] = result
+
+    def unavailable(reason):
+        reply = {"status": "unavailable", "reason": reason, "observed_frame": frame}
+        if saved:
+            which = "retained" if _matches_frame(saved, frame) else "previous"
+            reply.update({which + "_source": saved["source"], which + "_identity": saved["identity"]})
+        return reply
+    if not raw or not observed.get("memory_core_sha256"):
+        return unavailable("retained_snapshot_missing")
+    if observed["memory_core_sha256"] != plan.core_sha256:
+        return unavailable("different_core")
+    if ((observed.get("memory_facts") or {}).get("floor") or {}).get("forms_version") != FORMS_VERSION:
+        return unavailable("different_forms")
+    if not getattr(ctx, "task_id", "") or not getattr(ctx, "drive_root", None):
+        return unavailable("actor_source_store_missing")
+    max_room = (observed.get("memory_facts") or {}).get("max_room")
+    snapshot_sha = (saved["identity"]["snapshot_sha256"] if saved and
+                    saved["identity"]["core_sha256"] == plan.core_sha256 else
+                    hashlib.sha256(raw.encode("utf-8")).hexdigest())
+    identity = {**frame, "snapshot_sha256": snapshot_sha, "map_version": 2}
+    if saved and all(saved["identity"].get(key) == value for key, value in identity.items()):
+        if not continuation_page:
+            try:
+                read_actor_source_bytes(Path(ctx.drive_root), ctx.task_id, saved["source"])
+            except (OSError, ValueError):
+                return unavailable("retained_metadata_source_unreadable")
+        publish(saved)
+        return {"status": "retained_unverified" if continuation_page else "available", **saved}
+    try:
+        snapshot = snapshot_from_json(raw)
+        composition = ordinary_composition(snapshot)
+        totals = {name: {"json_chars": block["json_chars"], "estimated_tokens": block["estimated_tokens"],
+                         "parts": len(block["parts"])} for name, block in composition["blocks"].items()}
+        largest = sorted(({"block": name, "part": index, "kind": part["kind"], "form": part["form"],
+                           "json_chars": part["json_chars"]}
+                          for name, block in composition["blocks"].items() for index, part in enumerate(block["parts"])),
+                         key=lambda part: -part["json_chars"])[:3]
+        measured = {"story": totals["story"]["estimated_tokens"], "room": totals["room"]["estimated_tokens"],
+                    "room_id": snapshot.spec.room_id, "levels": snapshot.spec.work_room_levels}
+        recorded = {key: max_room.get(key) for key in measured} if isinstance(max_room, dict) else None
+        comparison = {"status": "same_raw_measure" if recorded == measured else
+                      "different_raw_measure" if recorded is not None else "unavailable",
+                      "recorded": recorded, "measured": measured,
+                      "allowance": max_room.get("allowance") if isinstance(max_room, dict) else None,
+                      "basis": "Raw story/room and room identity only; calibrated need is not compared."}
+        identity.update(role=snapshot.spec.role, room_id=snapshot.spec.room_id)
+        document = {"schema_version": identity["map_version"], "identity": identity, "captured_max_room": max_room,
+                    "max_room_comparison": comparison, **composition}
+        data = (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        roots = dict.fromkeys((Path(getattr(ctx, "budget_drive_root", None) or ctx.drive_root).resolve(),
+                               Path(ctx.drive_root).resolve()))
+        for root in roots:
+            source = store_actor_source_bytes(root, ctx.task_id, category="context_checkpoints",
+                                             source_id="ordinary-memory", data=data, extension="json")
+        read_actor_source_bytes(Path(ctx.drive_root), ctx.task_id, source)
+        result = {"identity": identity, "blocks": totals, "largest": largest, "estimated_tokens": composition["estimated_tokens"],
+                  "max_room_comparison": comparison, "source": source,
+                  "basis": "ordinary; additive escaped chars, two block roundings, no floor note or savings estimate"}
+        publish(result)
+        return {"status": "different_source" if saved else "available", **result,
+                **({"previous_source_sha256": saved["source"]["sha256"], "previous_source": saved["source"],
+                    "previous_identity": saved["identity"]} if saved else {})}
+    except (OSError, ValueError, KeyError, TypeError):
+        log.debug("Ordinary memory metadata could not be retained", exc_info=True)
+        return unavailable("metadata_source_unavailable")
 
 
 def _inspect(ctx, observed: dict, *, offset: int) -> str:
@@ -172,10 +296,13 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
         from ouroboros.loop_model_call import _measure_main_context_view
         measurement = _measure_main_context_view(plan, messages, observed['tool_schemas'],
             getattr(ctx, 'active_context_mode', '') or 'max', getattr(ctx, 'active_effort', ''), 'inspect')
+    start = max(0, int(offset or 0))
     body = {
         "fit_measurement": measurement,
         "work_room": observed.get('work_room'),
         "resident_memory": (observed.get('memory_facts') or {}).get('blocks', {}),
+        "selected_memory_mode": observed.get("memory_mode") if observed.get("memory_core_sha256") else None,
+        "ordinary_memory": _ordinary_memory(ctx, observed, continuation_page=start > 0),
         **({"review_attachment_transfer": transfers} if transfers else {}),
         **({"review_decisions": decisions} if decisions else {}),
         "view_revision": observed["revision"],
@@ -197,7 +324,6 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
                  "view_address selects listed memory forms from this snapshot; a note's restore_view_address restores it whole. Core, governing words, the assignment "
                  "and newer owner/tool messages stay whole."),
     }
-    start = max(0, int(offset or 0))
 
     def render(page: list, next_offset) -> str:
         return json.dumps({**body, "offset": start, "total": len(rows), "units": page,

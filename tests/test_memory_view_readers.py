@@ -67,3 +67,53 @@ def test_folded_line_reads_all_related_rows_and_no_unrelated_room_words(tmp_path
     unit = next(text for _tokens, text in held['largest'] if text.startswith('read and folded,'))
     held_text, held_reader = _read_unit(tmp_path, unit)
     assert held_reader == reader and held_text == returned
+
+
+def test_map_separates_display_order_stored_bounds_and_the_finish_that_supplied_the_sentence(tmp_path):
+    from ouroboros.memory_form_facts import memory_composition
+
+    rooms = shared.world(tmp_path)
+    room = 87436
+    def append(minute, words, direction, **facts):
+        row = shared.msg(f'2026-09-10T00:{minute:02d}:00+00:00', words, chat_id=room, direction=direction,
+                         **{"source": "presence:test", **facts})
+        ds.append(tmp_path, 'chat', row)
+        return chat_chain.format_address(chat_chain.row_address(row))
+
+    first_task = append(8, 'First task fact.', 'system', type='task_summary', task_id='work-a')
+    first_reply = append(7, 'First stored reply.', 'out', task_id='work-a')
+    append(6, 'Foreign task fact.', 'system', type='task_summary', task_id='work-b')
+    append(5, 'Keep these owner words whole.', 'in', source='web')
+    last_reply = append(4, 'Second stored reply.', 'out', task_id='work-a')
+    append(3, 'Child task fact.', 'system', type='task_summary', task_id='child-a', root_task_id='work-a')
+    finish = append(2, 'Terminal row.', 'system', type='task_summary', task_id='work-a',
+                    summary_kind='terminal_root_projection', fold_read=True, wake_summary='Both replies settled.')
+    # An imported arrival makes this room read by send time, even for the other rows.
+    append(1, 'Imported arrival.', 'in', type='place_arrival', historical_import={'authorship': 'platform_account'})
+    def capture(focus):
+        task = {'id': 'reader01', 'chat_id': focus}
+        snapshot = mv.capture_memory_view(tmp_path, task, replace(mv.ROLE_DEFAULTS['integrator'], room_id=str(focus)))
+        if focus == rooms['beta']:
+            assert f'[{last_reply} → {first_reply}] «Both replies settled.»: 2 words read and folded' in mv.render_room(snapshot)
+        return memory_composition(mv.snapshot_from_json(mv.snapshot_json(snapshot)), mv.FULL_VIEW)['blocks']['room']['parts']
+
+    parts = capture(rooms['beta'])
+    fold = next(s for p in parts if p['kind'] == 'conversation_fold' for s in p['sources'] if s['room_id'] == str(room))
+    assert (fold['from'], fold['to'], fold['count']) == (last_reply, first_reply, 2)
+    args = fold['range_read']['arguments']
+    assert args == {'room_id': str(room), 'rows': True, 'from': first_reply, 'to': last_reply}
+    ctx = _ctx(tmp_path, 'reader01')
+    bounded = _memory_read(ctx, **args)
+    assert all(text in bounded for text in ('First stored reply.', 'Second stored reply.', 'Keep these owner words whole.'))
+    assert 'excluding owner speech' in fold['selection'] and fold['row_membership_gap']
+    gist = fold['gist_source']['read']['arguments']
+    assert gist == {'room_id': str(room), 'rows': True, 'from': finish, 'to': finish}
+    assert 'Terminal row.' in _memory_read(ctx, **gist) and 'Terminal row.' not in bounded
+    for source_parts, kind in ((parts, 'conversation_task'), (capture(room), 'task_fact')):
+        task = next(s for p in source_parts if p['kind'] == kind for s in p['sources'] if s['task'] == 'work-a')
+        assert (task['first'], task['last']) == (finish, first_task)
+        args = task['range_read']['arguments']
+        assert args == {'room_id': str(room), 'rows': True, 'from': first_task, 'to': finish, 'task_id': 'work-a'}
+        rows = _memory_read(ctx, **args)
+        assert all(text in rows for text in ('First task fact.', 'Child task fact.', 'Terminal row.', 'First stored reply.'))
+        assert 'Foreign task fact.' not in rows and 'lane-2' in task['selection'] and task['row_membership_gap']
