@@ -267,6 +267,16 @@ def _conversation_rows(root: Path, room: str, to_addr: Any) -> Tuple[str, List[T
                         for address, meta, pos, other in picked), key=lambda item: (item[2], item[3]))
 
 
+def _page_covers_hint(room: str) -> str:
+    if room == LEGACY_ROOM_ID:
+        return ("The legacy room has no chat rows. For a page about notes, use covers={note_ids} with the "
+                "exact note IDs; if available, memory_read(room_id='legacy') lists the room's records.")
+    return (f"If available, memory_read(room_id={room!r}, rows=true) prints row addresses; narrow by period or "
+            "task_id if needed. Use covers={from, to} only if your page retells the entire inclusive room range. "
+            "Use {task_ids} for selected tasks or {note_ids} for notes. {to} covers all open room rows up to "
+            "that address; {to, conversation: true} covers the conversation's open rows up to it.")
+
+
 def _expand(root: Path, room: str, lineage: Dict[str, Any], *, from_addr: Any = None, to_addr: Any = None,
             task_ids: Any = None, note_ids: Any = None,
             conversation: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any], List[Tuple[Dict[str, Any], Dict[str, Any], int]]]:
@@ -299,7 +309,7 @@ def _expand(root: Path, room: str, lineage: Dict[str, Any], *, from_addr: Any = 
         request, mode = {"to": to_addr}, "open_to"
     else:
         if not from_addr or not to_addr:
-            raise ValueError("covers is {from, to} (row addresses, inclusive), {to} (the open rows up to it) or {task_ids}")
+            raise ValueError(_page_covers_hint(room))
         found = list(chat_chain.iter_room_rows(root, room, from_addr=from_addr, to_addr=to_addr))
         request, mode = {"from": from_addr, "to": to_addr}, "range"
     seen, rows = set(), []
@@ -435,7 +445,8 @@ def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, An
     result = store.publish_page(room_id=room, text=text, covers=covers, author=author, quotes=quotes or (), host_stamp=stamp,
                                 metadata={"coverage_facts": facts, "room_label": label,
                                           **({"lead_rule": lead_rule} if lead_rule is not None else {}),
-                                          "terminal_after_pos": max((pos for _a, _r, pos in chat_chain.iter_room_rows(root, room)), default=-1),
+                                          "terminal_after_pos": (-1 if room == LEGACY_ROOM_ID else max(
+                                              (pos for _a, _r, pos in chat_chain.iter_room_rows(root, room)), default=-1)),
                                           **({"closes_project": closes_project, "closure_delivery": closure_delivery}
                                              if closes_project else {})},
                                 quote_resolver=resolver, expected_sequence=expected_sequence)
@@ -450,16 +461,18 @@ _STORY_MEASURE = ("My story's drawn size is not re-measured by a write: memory_r
 
 
 def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
+    room = _room(ctx, root, a["room_id"])
     covers_arg = a["covers"]
-    if not isinstance(covers_arg, dict):
-        return _arg_error(ctx, "a page needs covers: {from, to} row addresses, {to}, {task_ids} or {note_ids}")
+    if not isinstance(covers_arg, dict) or not covers_arg:
+        return _arg_error(ctx, "No page was written: supply covers. " + _page_covers_hint(room))
     try:
-        result, covers, facts, stamp = publish_covered_page(root, store, author, _room(ctx, root, a["room_id"]), a["text"],
+        result, covers, facts, stamp = publish_covered_page(root, store, author, room, a["text"],
                                                             covers_arg, quotes=a["quotes"] or (),
                                                             expected_sequence=a["expected_sequence"],
                                                             **chronicle_lead_metadata())
     except chat_chain.RowAddressError as exc:
-        return _refused(ctx, "target_missing", f"a covers bound does not resolve: {exc.resolution.get('status')}")
+        return _refused(ctx, "target_missing", f"a covers bound does not resolve: {exc.resolution.get('status')}. "
+                        + _page_covers_hint(room))
     if not result.ok:
         return _published(ctx, result)
     statuses = Counter(entry["status"] or "unknown" for entry in stamp["tasks"])

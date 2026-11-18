@@ -966,9 +966,16 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                 shown = view(selected, sent, forms, window, boundary, shortest=True)
                 held[0], price = floor.kept_level(snapshot, shown.facts), measure(selected, sent, forms, shown.story_chars, shown.room_chars)
             return price
+        def told(forms):  # ``max_room_lost``'s own test beside these host forms: memory at my shortest telling, the
+            shown = view(selected, sent, forms, window, boundary, level=floor.telling_level(snapshot))  # books as framed
+            work = 0 if kept is not None else math.ceil(  # a held frame's running tail asks no new work room
+                min(boundary or window, window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * levels
+            price = measure(selected, sent, forms, shown.story_chars, shown.room_chars)
+            return math.ceil(price * ratio) + reserve + work <= window
         receipts, _ = floor._host_steps(sections[selected], previous,  # every frame starts from what was shown
             measure=lambda addressed: measure(selected, sent, addressed, story_before, room_before),
             shortest=shortest if snapshot and kept is None else None,  # a held view was sent: it keeps its steps
+            told=told if snapshot and known_window else None,
             window=window if known_window else None, reserve=reserve, ratio=ratio, slack=slack,
             saving=owed(measure(selected, sent, section_views(sections[selected], previous)), reserve) if asked else 0,
             root=core.section_root, task_id=core.section_task_id, bare=lambda forms: measure(selected, sent, forms),

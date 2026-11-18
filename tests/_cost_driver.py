@@ -104,8 +104,8 @@ STATEMENT_SAMPLE = 80
 NEEDLES: Dict[str, List[str]] = {}
 # The clocks a measured process meets beside the work it counts: production bounds that the drive's own duration or the
 # stand's age crosses, so they split identical work by elapsed time, never by history (counting is not timing). Each is
-# held, before the server is imported, where the stand's intended state holds at every size: an install just restarted,
-# its supervisor alive. A spec's ``clocks`` replaces any of them in its own unit: the instrument's controls drive the
+# set for the stand's intended state at every size: an install just restarted, its supervisor and workers alive.
+# A spec's ``clocks`` replaces any of them in its own unit: the instrument's controls drive the
 # production values and see the work move.
 CLOCKS: Dict[str, float] = {
     # ``utils``, ``skill_identity`` and ``skill_discovery_reuse`` (a copy made at import) ``_RACY_NS``, 2 s: a file read
@@ -120,6 +120,9 @@ CLOCKS: Dict[str, float] = {
     # pass that outlasts it takes every queued task for live (B7: three evidence tasks wait, 336 VM steps and 16
     # statements each).
     "queue_alive_fresh_sec": math.inf,
+    # B8/B7 observe the live workers at their heartbeat. A finite age past
+    # the orphan grace exercises the genuine stale check on the same stand.
+    "duty_heartbeat_age_sec": 0.0,
     # ``restore_pending_from_snapshot``'s ``max_age_sec``, 900 s: the boot restores the stand's queue only while the
     # fixture's stamp is younger, so a stand restored 15 minutes after its build boots another way (B2, B3, B5, the
     # cancel sweep's first pass).
@@ -1032,6 +1035,17 @@ def _measure_duties(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pa
                child.request if duty.name == "maintenance-child" else (lambda: None))
 
 
+@contextlib.contextmanager
+def _duty_heartbeats(root: pathlib.Path, age_sec: float):
+    from unittest.mock import patch
+    from ouroboros import task_status
+
+    observed = heartbeats(root) + age_sec
+    clock = SimpleNamespace(time=lambda: observed, monotonic=time.monotonic, sleep=time.sleep)
+    with patch.object(task_status, "time", clock):
+        yield observed
+
+
 def _measure_contract(meter: CostMeter, srv: Any, client: Any, result: Dict[str, Any], root: pathlib.Path,
                       facts: Dict[str, Any], stubs: Dict[str, Any]) -> None:
     _chat_frame(meter, client, result, "B4", "cost-contract-1")
@@ -1044,9 +1058,9 @@ def _measure_contract(meter: CostMeter, srv: Any, client: Any, result: Dict[str,
     _request(meter, client, result, "B5", "POST", f"/api/tasks/{CURRENT['stop_root']}/cancel", json={"cascade": True})
     _boundary(meter, result, "B9", lambda: _addressed_stream(root, result))
     if facts.get("held_runs"):  # a root with the duties' shapes: B8 first, then B7
-        heartbeats(root)
-        _measure_boundaries(meter, srv, result, root, facts)
-        _measure_duties(meter, srv, result, root, facts, stubs)
+        with _duty_heartbeats(root, float(result["clocks"]["duty_heartbeat_age_sec"])):
+            _measure_boundaries(meter, srv, result, root, facts)
+            _measure_duties(meter, srv, result, root, facts, stubs)
     _measure_turns(meter, srv, result, root, facts)  # B10 last: no earlier law's inputs change
 
 

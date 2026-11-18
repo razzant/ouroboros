@@ -686,6 +686,8 @@ def finish_gate(evidence, verdict, phase, release, ctx=None) -> None:
     if cleanup:
         if hold:
             retain_tree(cleanup[1], hold)
+        cleanup_status = "unconfirmed"
+        held_root = cleanup[1]
         try:
             if release_allowed:
                 release(*cleanup[:4], hold)
@@ -694,15 +696,22 @@ def finish_gate(evidence, verdict, phase, release, ctx=None) -> None:
                     # the enclosing allocation goes; partial/nested holds never reach this branch.
                     _gate_container(cleanup[1], evidence["scratch_ownership"])
                     remove_scratch_tree(container)
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+                cleanup_status = "released"
+            if container.exists():
+                cleanup_status = "retained"
+        except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as exc:
             reason = hold = f"scratch release failed: {exc}"
-            retain_tree(container, reason)
-        remains = container.exists()
-        record.update(cleanup="retained" if remains else "released", retention_reason=reason)
-        if remains:
-            report_diagnostic(f"PREFLIGHT_RETAINED {cleanup[1]}: {reason or 'release incomplete'}")
+            held_root = container
+            # The directory can disappear during removal, or survive without a writable marker.
+            if retain_tree(container, reason) and os.path.lexists(container):
+                cleanup_status = "retained"
+            else:
+                cleanup_status = "unconfirmed"
+        record.update(cleanup=cleanup_status, retention_reason=reason)
+        if cleanup_status == "retained":
+            report_diagnostic(f"PREFLIGHT_RETAINED {held_root}: {reason or 'release incomplete'}")
             facts = kept_facts(kept) if kept and not hold else [
-                {"path": str(cleanup[1]), "reasons": [(reason or "release incomplete").split("\n")[0]]}]
+                {"path": str(held_root), "reasons": [(reason or "release incomplete").split("\n")[0]]}]
             tokens = [token for token in evidence.get("containment_tokens", ()) if token]
             record.update(kept=facts, containment_tokens=tokens)
             try:
@@ -711,6 +720,8 @@ def finish_gate(evidence, verdict, phase, release, ctx=None) -> None:
                 record["diagnostics_incomplete"] = True
                 record["evidence_errors"].append(f"no scratch record: {exc}")
                 report_diagnostic(f"PREFLIGHT_EVIDENCE_INCOMPLETE {cleanup[1]}: no scratch record: {exc}")
+        elif cleanup_status == "unconfirmed":
+            report_diagnostic(f"PREFLIGHT_CLEANUP_UNCONFIRMED {container}: {reason}")
         try:
             write_record(evidence["path"] / "result.json", record)
         except OSError as exc:

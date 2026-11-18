@@ -51,11 +51,9 @@ def _context(tmp_path, deadline_sec=None):
 
 def _dispatch_registry(tmp_path, monkeypatch, scaled_tool=None, deadline_sec=None):
     """A real registry; ``scaled_tool``'s entry window is scaled from minutes to one second."""
-    from ouroboros import config, safety
+    from ouroboros import safety
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
-    monkeypatch.setattr(safety, "get_runtime_mode", lambda: "advanced")
     monkeypatch.setattr(safety, "get_safety_mode", lambda kind="owner": "off")
     ctx = _context(tmp_path, deadline_sec)
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)

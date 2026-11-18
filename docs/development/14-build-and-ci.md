@@ -87,9 +87,9 @@ Full is required for managed updates (their forced run), non-candidate evolution
 
 `preflight_runner.run_hermetic_pytest` runs Node, the bytecode warm, the xdist pass (`not exclusive`, resource groups), then `serial("exclusive")` alone in one disposable checkout at background priority, its workers leased in the ledger. Node and the passes share one budget (`OUROBOROS_PREFLIGHT_TIMEOUT_SEC`; none for the full suite), the warm takes none; a Node test has pytest's 300 s bound (`--test-timeout`); a full suite's collection and warm have none (a blocking import holds a full gate until Stop); `result.json` records `workers`, the budget and `elapsed_seconds`. `LANE_EXCLUSION_EXPR`/`*_PASS_FLAGS` own exclusions/flags. Missing Node/plugins blocks. `preflight_node.node_environment` fingerprints the lane's Node on gate/CLI child PATH; other environments keep their policy. Acorn (`web/tests/no_undef.test.js`) and lockfile-frozen CI ESLint stay independent. Gate temp defaults match `safe_test`, without `--temp-parent`; small/noexec `/tmp` can fail.
 
-Candidate capture uses one hardened worktree-vs-`HEAD` binary diff; assembly failure is `PREFLIGHT_CANDIDATE_ASSEMBLY`. It scrubs `PYTEST_*`, `NODE_OPTIONS`, settings and credentials; plugin probes run outside candidate control. Post-commit baselines include `HEAD~1` to catch suite deletion; exit status owns the verdict. `OUROBOROS_PREFLIGHT_SERIAL=1` is an explicit rollback lever, never silent fallback.
+Capture uses one hardened worktree-vs-`HEAD` binary diff or reports `PREFLIGHT_CANDIDATE_ASSEMBLY`. Scrub `PYTEST_*`, `NODE_OPTIONS`, settings and credentials; probe plugins outside candidate control. Post-commit adds `HEAD~1` to catch suite deletion. Serial rollback is explicit (`OUROBOROS_PREFLIGHT_SERIAL=1`), never silent fallback.
 
-Containment is checked even after green (§9 "Test runs"); unknown or surviving members block and retain the tree. Proof binding: ARCHITECTURE §6.
+Lane exits decide the verdict; surviving or unconfirmed processes block green and retain the tree (§9). `result.json` records worktree removal timeouts separately. Proof binding: ARCHITECTURE §6.
 
 ### GitHub Actions: secrets in step-level `if:` conditions
 

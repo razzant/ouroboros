@@ -244,14 +244,17 @@ def test_latch_final_answer_marker_captures_explicit_marker_only():
     assert trace["best_valid_final_answer"] == "123"
 
 
-def test_latch_final_answer_marker_counts_same_turn_tool_calls():
+def test_latch_final_answer_marker_goes_stale_once_its_rounds_tool_calls_complete():
+    from ouroboros.outcomes import selected_final_answer
+
     trace = {"tool_calls": [{"tool": "read_file"}]}
-    current = [{"function": {"name": "run_command"}}, {"function": {"name": "verify_and_record"}}]
-    _latch_final_answer_marker(trace, "FINAL ANSWER: draft", current_tool_calls=current)
+    _latch_final_answer_marker(trace, "FINAL ANSWER: draft")
     assert trace["best_valid_final_answer"] == "draft"
+    assert trace["best_valid_final_answer_tools"] == 1 and selected_final_answer("", trace) == "draft"
     # Same-turn tool calls are newer grounding and must invalidate this latch unless
     # the model re-emits the marker after those tools complete.
-    assert trace["best_valid_final_answer_tools"] == 1
+    trace["tool_calls"] += [{"tool": "run_command"}, {"tool": "verify_and_record"}]
+    assert selected_final_answer("", trace) == ""
 
 
 def test_server_web_allowed_respects_task_resource_contract():

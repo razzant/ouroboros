@@ -964,6 +964,18 @@ def last_inbound(root: Any, chat_id: Optional[int], *, before: Optional[int] = N
     return None if record is None else _row(record)
 
 
+def newest_owner_candidates(root: Any, *, before: int, limit: int) -> List[Row]:
+    """The newest rows below ``before`` across every chat that may be my human's words to me, newest first: untyped
+    inbound rows (Main, a room, a bound chat) and card answers and closures (``quiz_answer``, ``quiz_closed``); the
+    caller confirms the speaker. The primary key is read backwards over the columns before the body; only matches
+    fetch it."""
+    with transaction(root, write=False) as conn:
+        records = conn.execute(f"{_SELECT} WHERE stream='chat' AND seq<? AND ((direction='in' AND kind IS NULL) "
+                               "OR kind IN ('quiz_answer', 'quiz_closed')) ORDER BY seq DESC LIMIT ?",
+                               (_bound(before), int(limit))).fetchall()
+    return [_row(record) for record in records]
+
+
 def latest_inbound_transport(root: Any, chat_ids: Iterable[int]) -> Dict[int, Dict[str, Any]]:
     """Each chat's newest inbound row's ``transport``, by chat id, in one read (``dialogue_inbound``: one seek a chat):
     only that object leaves the store, never the row (what names a room, ``RoomLabelResolver.warm``)."""

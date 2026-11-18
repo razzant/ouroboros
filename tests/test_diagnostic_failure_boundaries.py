@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import errno
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -131,6 +132,29 @@ def test_gate_record_and_stderr_failure_still_releases_with_a_retention_reason(t
         assert (root / RETENTION_MARKER).is_file()
     finally:
         (root / RETENTION_MARKER).unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("scratch_exists", [False, True], ids=["removed", "marker-write-failed"])
+def test_unconfirmed_retention_after_release_timeout(tmp_path, monkeypatch, capsys, scratch_exists):
+    from ouroboros.test_evidence import finish_gate
+
+    monkeypatch.delenv("OUROBOROS_PREFLIGHT_KEEP", raising=False)
+    root = tmp_path / "scratch"
+    root.mkdir()
+    run = {"path": tmp_path, "execution": "executed", "cleanup": (tmp_path, root, root / "repo", True, "")}
+
+    def release(repo, scratch, worktree, added, hold):
+        if scratch_exists:
+            (scratch / RETENTION_MARKER).mkdir()  # The directory remains, but writing a hold fails.
+        else:
+            scratch.rmdir()  # The directory disappeared before the caller learned the Git outcome.
+        raise subprocess.TimeoutExpired(["git", "worktree", "remove", "--force", str(worktree)], 30)
+
+    finish_gate(run, None, "pre_commit", release)
+    record = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
+    assert (record["execution"], record["verdict"], record["cleanup"]) == ("executed", None, "unconfirmed")
+    assert record["kept"] == [] and root.exists() == scratch_exists
+    assert "timed out" in record["retention_reason"] and "PREFLIGHT_CLEANUP_UNCONFIRMED" in capsys.readouterr().err
 
 
 def test_standalone_record_and_stderr_failure_keeps_command_status(tmp_path, monkeypatch):

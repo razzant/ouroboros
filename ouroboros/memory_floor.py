@@ -841,15 +841,20 @@ def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: 
 # Host producers before the whole-or-outline sections, then the memory walk, all under the same
 # start budget. Running views narrow only under physical pressure or a refusal.
 HOST_STEPS = ("runtime", "review_pool", "review_continuity", "installed_skills",
-              "drive_state", "world", "subagents", "architecture_map", "development_map")
+              "drive_state", "world", "subagents", "architecture_map", "development_map", "return_facts_words")
 # Host forms only the window's own start bound takes: my WORLD map stays whole while that bound holds the request with
 # memory at its shortest forms, whatever soft frame the start has (memory audit 15.11.2026, F7); when the bound cannot
 # hold it, it still steps before memory.
 WINDOW_ONLY = ("world",)
+# The facts beside my human's word (``return_facts``) and the people's newest words beside them (``return_facts_words``,
+# owner 18.11.2026, 1A): they stand while the window's start bound holds the request with memory at my shortest telling
+# and the books as the frame holds them, whatever a target or a selected Low asks; past it the words step first to their
+# readers, then the facts to their totals, before the books or a telling would (owner 15.11.2026, 4A: steps 3 and 4).
+TELLING_SPARED = ("return_facts", "return_facts_words")
 
 
 def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, root, task_id, allowance=None,
-                shortest=None, budget_mode=None, slack=0, bare=None, retain=None, window_bound=None):
+                shortest=None, budget_mode=None, slack=0, bare=None, retain=None, window_bound=None, told=None):
     """First steps of mode_views, using the same physical allowance as memory.
 
     Producers own meaning; this walk selects only explicit smaller views. Retained
@@ -878,6 +883,8 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     never reach Low, and books that paid a deficit leave no host step to pay it again.
     A ``WINDOW_ONLY`` section steps only while the request with memory at its shortest forms (``shortest``) exceeds
     ``window_bound``, the window's own start bound: neither an owner's target nor the start's own room shortens it.
+    A ``TELLING_SPARED`` section steps only while the window cannot hold the request with memory at my shortest telling
+    and the books as the frame holds them (``told``: ``max_room_lost``'s own test), so before the books or a telling.
     """
     if measure is None or not window or not root or not task_id:
         return list(previous), saving
@@ -914,15 +921,18 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
             fits = sent_least <= physical
         if part.section_id in WHOLE_OR_OUTLINE_STEPS and fits and (soft or initial - current >= excess):
             continue  # an outline is a physical step, never a start-room or slack choice
-        spared = part.section_id in WINDOW_ONLY
-        if spared and window_bound is not None and sent_least <= window_bound:
+        spared = part.section_id in WINDOW_ONLY or part.section_id in TELLING_SPARED
+        if part.section_id in WINDOW_ONLY and window_bound is not None and sent_least <= window_bound:
             continue  # the window's start bound holds it beside memory's shortest forms: no soft frame shortens it
+        if part.section_id in TELLING_SPARED and (told(addressed) if told else window_bound is None or current <= window_bound):
+            continue  # the window holds it beside my shortest telling and the books: neither yields to it
         try:
             row = (retain or retain_section)(part, root=root, task_id=task_id)
         except (OSError, ValueError):
             log.warning("Host section capture unavailable; keeping %s whole", part.section_id, exc_info=True)
             continue
-        start_room = (not spared and budget_mode or True) if soft and fits else False  # spared: the window's own room
+        start_room = ((not spared and budget_mode or True) if soft and fits else False) \
+            if part.section_id not in TELLING_SPARED else False  # spared: the window's own room; told: the window's fact
         short = relocated_text(part, row["reader"], start_room=start_room)
         saved = view_tokens(part.full_text) - view_tokens(short)
         if saved <= 0:

@@ -518,8 +518,8 @@ def _dispatch_extension_tool_untagged(
         receipt: Future[str | ToolResult] = Future()
         timeout = max(1, int(ext_tool.get("timeout_sec") or 60))
 
-        def timed_out(detail: str) -> ToolResult:
-            text = f"⚠️ TOOL_ERROR ({name}): extension async handler failed: TimeoutError: {detail}"
+        def timed_out() -> ToolResult:
+            text = f"⚠️ TOOL_ERROR ({name}): extension async handler failed: TimeoutError: handler exceeded timeout"
             return _refused_failure(ctx, handoff, _extension_result(
                 "timeout", "EXTENSION_TIMEOUT", text, timeout_sec=timeout, dispatched=True))
 
@@ -552,7 +552,7 @@ def _dispatch_extension_tool_untagged(
                 raise
             done, _pending = await asyncio.wait({task}, timeout=timeout)
             if task not in done:
-                receipt.set_result(timed_out(""))
+                receipt.set_result(timed_out())
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
             else:
@@ -593,7 +593,7 @@ def _dispatch_extension_tool_untagged(
                 return saved
             return _extension_completion(saved, _ext_safety_msg, handoff=handoff, ctx=ctx, joined=not alive)
         if alive:
-            return timed_out("handler exceeded timeout")
+            return timed_out()
         return _refused_failure(ctx, handoff, _extension_result("error", "EXTENSION_ERROR",
             f"⚠️ TOOL_ERROR ({name}): extension async runner ended without a result", dispatched=True))
 

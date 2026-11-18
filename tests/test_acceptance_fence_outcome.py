@@ -64,7 +64,7 @@ def test_one_lost_ack_and_resend_puts_the_fence_up(monkeypatch, tmp_path, short_
         supervisor.stop()
     assert fence_ok and token == ctx._task_acceptance_fence_token
     assert queue_mod.ACCEPTANCE_FENCES["root-1"]["token"] == token
-    assert ctx._task_acceptance_fence_outcome.status == "ok"
+    assert fence_ok.status == "ok"
     assert _unavailable_rows(tmp_path) == []  # the fence is up: no model round was owed
 
 
@@ -77,7 +77,7 @@ def test_never_acked_begin_is_typed_unknown_with_one_durable_row(monkeypatch, tm
     assert not outcome and token is None
     assert (outcome.status, outcome.op) == ("unknown", "begin")
     assert outcome.waited_sec >= WAIT_SEC * 2 - 0.1
-    assert ctx._task_acceptance_fence_outcome is outcome  # the next package reads it here
+    assert not hasattr(ctx, "_task_acceptance_fence_outcome"), "the outcome is returned; no copy waits for a reader"
     rows = _unavailable_rows(tmp_path)
     assert len(rows) == 1
     assert {key: rows[0][key] for key in ("task_id", "root_task_id", "op", "outcome")} == {

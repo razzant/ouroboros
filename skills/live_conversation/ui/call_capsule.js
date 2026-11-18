@@ -185,11 +185,19 @@ function ending(view) {
  * caption after its answer began) leaves no thinking behind it. */
 export function createTalkFacts() {
     const facts = { ownerSpeaking: false, thinking: false, answered: false };
+    let speaking = null;  // the owner item whose words set ownerSpeaking
     return {
         facts,
         caption(msg, heardNow = false) {
+            if (msg.speaker === 'owner' && msg.final && !String(msg.text || '').trim()) {  // a recognition with no words
+                if (msg.item_id === speaking) facts.ownerSpeaking = false;  // its own words ended with none
+                return;  // it asks and answers nothing
+            }
             if (msg.speaker === 'owner') {
-                if (!msg.final && msg.text) Object.assign(facts, { ownerSpeaking: true, thinking: false, answered: false });
+                if (!msg.final && msg.text) {
+                    speaking = msg.item_id;
+                    Object.assign(facts, { ownerSpeaking: true, thinking: false, answered: false });
+                }
                 if (msg.final) Object.assign(facts, { ownerSpeaking: false,
                     thinking: Boolean(String(msg.text || '').trim()) && !facts.answered && !heardNow });
             } else {

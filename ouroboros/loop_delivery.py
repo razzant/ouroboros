@@ -650,14 +650,13 @@ def _hold_cause(tool_ctx: Any) -> str:
 
 
 def completion_observation(ctx: Any, trace: dict) -> dict:
-    """Freeze facts Main observed, before any sibling of its response executes."""
+    """Freeze facts Main observed, before any sibling of its response executes: only what selection reads.
+    Delivery evidence is read fresh by the delivery that needs it (``_delivery_evidence_state``)."""
     import copy
     from ouroboros.loop_messages import owner_source_sha256
     return {"subject": copy.deepcopy(getattr(ctx, "_acceptance_observation", {})),
             "tool_count": len(trace.get("tool_calls") or []),
-            "owner_directives": len(getattr(ctx, "_owner_directives", []) or []),
-            "owner_source_sha256": owner_source_sha256(ctx),
-            "evidence_fingerprint": observed_delivery_evidence(ctx, trace)}
+            "owner_source_sha256": owner_source_sha256(ctx)}
 
 
 def selected_completion_text(request: dict, candidate: Any, messages: list,

@@ -587,14 +587,12 @@ def prepare_acceptance_observation(ctx: Any, trace: dict, incoming: Any, message
     messages.append({"role": "user", "content": note, "acceptance_observation": True})
 
 
-def _latch_final_answer_marker(llm_trace: Dict[str, Any], content: str | None,
-                               current_tool_calls: list | None = None) -> None:
+def _latch_final_answer_marker(llm_trace: Dict[str, Any], content: str | None) -> None:
     """Anytime capture of an explicit FINAL ANSWER marker; marker-only, never mined prose. The
     tool-call count stamp keeps the stale-answer invariant: later grounding invalidates this
     fallback unless the model emits a newer marker."""
     from ouroboros.outcomes import FINAL_ANSWER_MARKER, extract_final_answer
 
-    del current_tool_calls
     text = content or ""
     answer = extract_final_answer(text)
     if not answer:

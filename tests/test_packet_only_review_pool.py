@@ -98,7 +98,7 @@ def _post(monkeypatch, body: dict, stored: dict | None = None, mode: str = "adva
     monkeypatch.setattr(gws, "_owner_settings_document", lambda: dict(saved))  # the document the fake write keeps
     monkeypatch.setattr(gws, "_unrecognised_review_models", lambda models: [])
     monkeypatch.setattr(gws, "_apply_settings_to_env", lambda *a, **k: None)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: mode)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
 
     async def _receive():
         return {"type": "http.request", "body": json.dumps(body).encode()}

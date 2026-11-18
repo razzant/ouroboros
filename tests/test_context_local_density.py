@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import capability_evidence as ce, context, loop
+from ouroboros import capability_evidence as ce, config, context, loop
 from ouroboros.context_fit import build_context_fit_plan
 from tests._memory_view_context import world
 from tests.test_context_comparable_density import _witness
@@ -16,6 +16,7 @@ MODEL = "local-fixture"
 @pytest.fixture
 def routes(monkeypatch, tmp_path):
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(ce, "_DENSITY_MEMO", {})
     local = ce.route_fingerprint(provider="local", base_url="", model=MODEL)
     remote = ce.route_fingerprint(provider="openai", base_url="", model=MODEL)

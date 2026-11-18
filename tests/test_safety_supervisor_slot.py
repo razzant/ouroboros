@@ -17,7 +17,7 @@ def settings_root(tmp_path, monkeypatch):
     path = tmp_path / "settings.json"
     monkeypatch.setattr(config, "SETTINGS_PATH", path)
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv(config.BOOT_RUNTIME_MODE_ENV_KEY, "advanced")
     for key in config.SETTINGS_DEFAULTS:
         monkeypatch.delenv(key, raising=False)
     path.write_text(json.dumps({"OUROBOROS_MODEL": "main", "OUROBOROS_MODEL_LIGHT": "light",
@@ -180,7 +180,7 @@ def test_owner_endpoints_keep_mode_response_shape_and_audit(settings_root):
 def test_generic_cyber_change_is_permitted_and_audited(settings_root, monkeypatch):
     config, path = settings_root
     from ouroboros.gateway import settings
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setenv(config.BOOT_RUNTIME_MODE_ENV_KEY, "cyber_pro")
     monkeypatch.setattr(settings, "_apply_settings_save_side_effects", lambda *a, **kw: None)
     monkeypatch.setattr(settings, "_start_supervisor_if_needed_for_request", lambda *a, **kw: False)
     app = Starlette(routes=[Route("/api/settings", settings.api_settings_post, methods=["POST"])])

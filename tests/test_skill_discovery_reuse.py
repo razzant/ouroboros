@@ -190,7 +190,7 @@ def test_a_load_is_the_same_in_every_runtime_mode(install, monkeypatch):
     plain = _dump(discover_skills(data))
     assert not loader.find_skill(data, "beta").load_error
     held = dict(counts)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     cyber = _dump(discover_skills(data))
     assert (counts == held) is KEEPS  # the switch read nothing again where change keys are trusted
     assert cyber == plain == _fresh(data)

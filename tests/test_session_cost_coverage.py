@@ -737,7 +737,7 @@ def test_settled_money_reaches_the_rendered_card_and_survives_reload(tmp_path, m
         close = (lambda: _close_absent(tmp_path, entry)) if ending == "absent" else (lambda: _collect(tmp_path, entry, 0))
     pending, settled, stored = _terminal_frames(tmp_path, monkeypatch, close, parent=parent)
     assert pending["cost_presentation"]["accounting_open"]
-    with playwright.sync_playwright() as pw, card_room(pw, engine, "light", 1100, 750) as room:
+    with playwright.sync_playwright() as pw, card_room(pw, engine, "light", 1100, 750, now=None) as room:
         page = room["page"]
         anchors = ([_say(parent, "Parent work", old)] if parent else []) + [_say(task_id, "Cost settlement", old, **({
             "parent_task_id": parent, "root_task_id": parent, "delegation_role": "subagent",

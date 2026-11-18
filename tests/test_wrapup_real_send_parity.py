@@ -625,7 +625,7 @@ def test_pricing_view_does_not_survive_exact_budget_resume(tmp_path, monkeypatch
     monkeypatch.setenv('OUROBOROS_TASK_REVIEW_MODE', 'off')
     monkeypatch.setenv('OUROBOROS_TASK_ABS_CEILING_SEC', '21600')
     monkeypatch.setenv('OPENAI_API_KEY', 'unused')
-    monkeypatch.setattr('ouroboros.config.get_runtime_mode', lambda: 'cyber_pro')
+    monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'cyber_pro')
     monkeypatch.setattr(LLMClient, 'available_models', lambda _: [small, wide])
     monkeypatch.setattr(LLMClient, '_SUPPORTED_PARAMS_FETCHED', True, raising=False)
     monkeypatch.setattr('ouroboros.pricing._fetch_live_rows', lambda *a, **kw: {})

@@ -155,7 +155,8 @@ def test_unselected_question_exposure_waits_for_the_exact_wake_source(tmp_path, 
     assert json.loads(next_wait["result"])["reason"] == "sleep_armed"
 
 
-def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request(tmp_path, reads):
+@pytest.mark.parametrize("sleep_mode,mode", [(None, "cold"), ("warm", "warm")])
+def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request(tmp_path, reads, sleep_mode, mode):
     """Nothing there yet: the call arms the task's ordinary sleep on its runs (no slot, no tick, no read) and owes its
     result; the run's terminal wakes the sleep, and the first request after it carries one wake, published then and
     acknowledged only after the next saved state, never before."""
@@ -165,8 +166,8 @@ def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request
 
     ctx, limit = _nanny(tmp_path)
     _run(tmp_path, "run-1")
-    armed = _armed(ds.run_wait(ctx, "run-1"))
-    assert armed["reason"] == "sleep_armed" and armed["mode"] == "cold", "the body takes the run: nothing keeps it"
+    armed = _armed(ds.run_wait(ctx, "run-1", sleep_mode=sleep_mode))
+    assert armed["reason"] == "sleep_armed" and armed["mode"] == mode, "omitted: the body takes the run, nothing keeps it"
     assert ctx._model_sleep["runs"] == ["run-1"] and ctx._model_sleep["any_mail"] and ctx._model_sleep["run_wait"]
     assert ctx._pending_task_wait["tool"] == "delegate_wait" and ctx._pending_task_wait["runs"] == ["run-1"]
     assert reads == [] and _pending(ctx, "run-1") == ("", ""), "arming reads no run and publishes no wake"
@@ -174,7 +175,7 @@ def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request
 
     trail = [row for row in map(json.loads, custody.event_log_path(tmp_path).read_text(encoding="utf-8").splitlines())
              if row["type"] == "delegate_supervision_wait_entered"]
-    assert [(row["run_id"], row["outcome"], row["mode"]) for row in trail] == [("run-1", "sleep_armed", "cold")]
+    assert [(row["run_id"], row["outcome"], row["mode"]) for row in trail] == [("run-1", "sleep_armed", mode)]
     chosen = dict(ctx._model_sleep)
     assert model_sleep.wake_reason(ctx, chosen) == "", "a quiet run does not wake its sleep"
     _ended(tmp_path, "run-1")
@@ -207,6 +208,91 @@ def test_what_is_already_there_answers_at_once_and_nothing_parks(tmp_path, reads
     asked = _armed(ds.run_wait(ctx, "run-asks"))
     assert asked["status"] == "waiting_on_user" and asked["sleep"]["woke_by"] == "run_question:run-asks"
     assert [iid for row in asked["pending_interactions"] for iid in [row["interaction_id"]]] == ["q1"]
+
+
+@pytest.mark.parametrize("sleep_mode,mode", [(None, "cold"), ("cold", "cold"), ("warm", "warm")])
+def test_a_named_sleep_mode_arms_that_sleep_omitted_keeps_the_default_and_ready_answers_at_once(
+        tmp_path, reads, sleep_mode, mode):
+    """``delegate_wait`` chooses its sleep as the task waits do (``native_task_wait.sleep_choice``): warm keeps the
+    process, cold releases it, and an omitted mode keeps the owner's default (here cold: nothing keeps the process).
+    A run that already ended answers through the result in that mode, and nothing parks."""
+    from ouroboros import delegate_supervision as ds
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-done")
+    _ended(tmp_path, "run-done")
+    assert _armed(ds.run_wait(ctx, "run-done", sleep_mode=sleep_mode))["status"] == "terminal"
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+    _run(tmp_path, "run-quiet")
+    armed = _armed(ds.run_wait(ctx, "run-quiet", sleep_mode=sleep_mode))
+    assert armed["reason"] == "sleep_armed" and armed["mode"] == mode == ctx._model_sleep["mode"]
+    assert ctx._pending_task_wait["arguments"].get("sleep_mode") == sleep_mode and reads == [("run-done", 0)]
+
+
+@pytest.mark.parametrize("sleep_mode", ["warm", "cold"])
+def test_with_no_continuation_owner_what_is_there_answers_in_a_named_sleep_mode_and_only_a_sleep_is_refused(
+        tmp_path, reads, sleep_mode):
+    """A result already there needs nothing to sleep under: it answers in whatever mode was named, owner or not. Only
+    a call that would arm a sleep is refused when the task has no continuation owner; an unknown mode is refused
+    first, even over a ready run."""
+    from ouroboros import delegate_custody as custody, delegate_supervision as ds
+    from ouroboros.delegate_shared import AGENT_FAULT_CODE
+
+    ctx, _limit = _nanny(tmp_path)
+    owner, ctx.owner_wait_callback = ctx.owner_wait_callback, None
+    _run(tmp_path, "run-done")
+    _ended(tmp_path, "run-done")
+    unknown = ds.run_wait(ctx, "run-done", sleep_mode="hot")
+    assert _armed(unknown)["reason"] == "sleep_mode_refused" and unknown.code == AGENT_FAULT_CODE and not reads
+    assert _armed(ds.run_wait(ctx, "run-done", sleep_mode=sleep_mode))["status"] == "terminal"
+    _run(tmp_path, "run-quiet")
+    refused = ds.run_wait(ctx, "run-quiet", sleep_mode=sleep_mode, checkpoint_after_sec=300, checkpoint_reason="look")
+    assert _armed(refused)["reason"] == "sleep_mode_refused" and refused.code == AGENT_FAULT_CODE
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+    assert reads == [("run-done", 0)]
+    kinds = [json.loads(line)["type"] for line in custody.event_log_path(tmp_path).read_text().splitlines()]
+    assert "delegate_supervision_checkpoint_scheduled" not in kinds, "a refused wait schedules no checkpoint"
+    ctx.owner_wait_callback = owner  # the same call that is accepted and armed does schedule one
+    assert _armed(ds.run_wait(ctx, "run-quiet", sleep_mode=sleep_mode, checkpoint_after_sec=300,
+                              checkpoint_reason="look"))["reason"] == "sleep_armed"
+    kinds = [json.loads(line)["type"] for line in custody.event_log_path(tmp_path).read_text().splitlines()]
+    assert kinds.count("delegate_supervision_checkpoint_scheduled") == 1
+
+
+def test_an_in_slot_wait_keeps_the_call_after_what_an_earlier_call_of_the_batch_armed_or_staged(
+        tmp_path, monkeypatch, reads):
+    """``in_slot`` waits in this call on the sleep's own sources although the task could sleep. What an earlier call
+    of the batch armed or staged comes first, before any slot is taken, as the task waits do: its unshown hold answers
+    at once as ``dependency_held`` in any mode (once delivered, the same wait sleeps), and its armed wait refuses the
+    next one (``armed_conflict``), which would otherwise hold that wait's wake behind this call."""
+    from ouroboros import delegate_custody as custody, delegate_supervision as ds, model_sleep
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-1")
+    beats, waited_on = [], ["run-1"]  # each beat ends the run the slot waits on
+    monkeypatch.setattr(model_sleep, "declare_in_slot_wait", lambda *_a, **_k: None)
+    monkeypatch.setattr(model_sleep, "end_in_slot_wait", lambda *_a, **_k: None)
+    monkeypatch.setattr("supervisor.owner_stop.in_process_stop_now", lambda _ctx: False)
+    monkeypatch.setattr(ds.time, "sleep", lambda _sec: beats.append(waited_on[0]) or _ended(tmp_path, waited_on[0]))
+    assert _armed(ds.run_wait(ctx, "run-1", sleep_mode="in_slot"))["status"] == "terminal" and beats == ["run-1"]
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+    _run(tmp_path, "run-2")
+    model_sleep.hold_notice(ctx, [{"task_id": "held-child", "identity": "hold-1"}])
+    for sleep_mode in ("in_slot", None):
+        waited_on[0] = "run-2"
+        held = ds.run_wait(ctx, "run-2", sleep_mode=sleep_mode, checkpoint_after_sec=300, checkpoint_reason="look")
+        assert _armed(held)["reason"] == "dependency_held" and held.meta == {model_sleep.HOLD_NOTICE: True}
+    rows = custody.event_log_path(tmp_path).read_text().splitlines()
+    assert not any(json.loads(row)["type"] == "delegate_supervision_checkpoint_scheduled" for row in rows), "held: none"
+    assert beats == ["run-1"] and not getattr(ctx, "_model_sleep", None)
+    assert not getattr(ctx, "_pending_task_wait", None)
+    ctx._held_dependencies_pending = []  # the batch delivered the hold
+    assert _armed(ds.run_wait(ctx, "run-2"))["reason"] == "sleep_armed"
+    _run(tmp_path, "run-3")
+    waited_on[0] = "run-3"
+    refused = _armed(ds.run_wait(ctx, "run-3", sleep_mode="in_slot"))
+    assert refused["reason"] == "wait_already_armed" and beats == ["run-1"]
+    assert ctx._pending_task_wait["runs"] == ["run-2"] and reads == [("run-1", 0)]
 
 
 @pytest.mark.parametrize("local_first", [False, True])
@@ -599,22 +685,40 @@ def test_a_hold_resumed_on_owner_words_after_its_park_sleeps_again_on_its_next_l
 
 def test_the_frozen_delegate_wait_contract_says_its_result_is_owed_to_the_next_request(tmp_path):
     """Frozen ABI: the five delegate verbs, delegate_wait's arguments and its str publisher are unchanged; the meaning of
-    its result changed and the description says so (a signature equality alone would not show that)."""
+    its result changed and the description says so (a signature equality alone would not show that). What each mode
+    keeps is said in the tool's own lead, in wait_task's words: the custom-tool wire drops parameter descriptions; the
+    parameter says it in the one wording the task waits splice in."""
     import inspect
 
     from ouroboros.delegate_supervision import delegate_wait_entry
+    from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
     from ouroboros.tools import delegate
 
     entries = {entry.name: entry for entry in delegate.get_tools()}
     assert set(entries) == {"delegate_start", "delegate_wait", "delegate_cancel", "delegate_answer", "delegate_message"}
+    from ouroboros.native_task_wait import SLEEP_MODE_WORDS, SLEEP_MODES, SLEEP_PARAMS
+
     wait = entries["delegate_wait"]
-    assert set(wait.schema["parameters"]["properties"]) == {
-        "run_id", "runs", "since_seq", "checkpoint_after_sec", "checkpoint_reason"}
+    properties = wait.schema["parameters"]["properties"]
+    assert set(properties) == {"run_id", "runs", "since_seq", "checkpoint_after_sec", "checkpoint_reason", "sleep_mode"}
+    assert set(properties["sleep_mode"]["enum"]) == set(SLEEP_MODES), "the task waits' modes, no other"
+    held = properties["sleep_mode"]["description"]
+    assert SLEEP_MODE_WORDS in held and SLEEP_MODE_WORDS in SLEEP_PARAMS["sleep_mode"]["description"], "one wording"
+    assert "with no continuation owner it waits in this call" in held
+    assert not any(character.isdigit() for character in held), "what stays held, in words and no numbers"
     assert list(inspect.signature(wait.handler).parameters) == list(inspect.signature(delegate_wait_entry).parameters)
     assert wait.handler.__wrapped__ is delegate_wait_entry, "the one ToolResult->str publisher wraps the entry"
     text = " ".join(wait.schema["description"].split())
+    modes = "Explicit in_slot keeps the process and same-call result while yielding acting capacity; warm/cold choose"
+    wire = project_function_tools_to_openai_custom([{"type": "function", "function": wait.schema}]).wire_tools()
+    lead = wire[0]["custom"]["description"]  # some providers see only this projection: it must say what each mode does
+    no_owner = "Without a continuation owner an omitted or in_slot mode waits in-process on the same sources, and warm"
+    for said in (modes, "(warm keeps your process, cold releases it)", no_owner):
+        assert said in text and said in lead, said
     assert "this wait's result is then owed to your next model request" in text
-    assert "it returns sleep_armed" in text and "yields acting capacity" in text and "with no further call" in text
+    assert "Otherwise a sleep returns sleep_armed" in text and "it returns sleep_armed" not in text
+    assert "unless named live custody or a conversation turn keeps it warm" in text
+    assert "yields acting capacity" in text and "with no further call" in text
     assert "Each wake is delivered once and counts as shown only when shown whole" in text
     assert "a wait_sec an old transcript passes is accepted and sizes nothing" in text
     assert "wait_sec" in inspect.signature(delegate_wait_entry).parameters, "accepted, though the schema offers none"

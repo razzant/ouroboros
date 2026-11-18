@@ -35,6 +35,8 @@ HOST_CONTEXT_KIND_KEY = "_host_context_kind"
 # merged with other content, and no host or helper rewrite takes them.
 OWNER_WORDS_KIND = "owner_words"
 OWNER_ROW_KINDS = frozenset({OWNER_WORDS_KIND, "owner_dialogue"})
+# The host's facts beside my human's words reaching running work (``return_facts``): one line of that run, never a word.
+RETURN_FACTS_KIND = "return_facts"
 
 # A host-produced state row (round facts, clock, roster) is bound to its visible text at
 # production. Only a row whose text still matches is retirable host state; a row written

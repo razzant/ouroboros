@@ -1945,7 +1945,11 @@ start, finish, status and usage axes, including interrupted/tool-only responses.
 time. For optional delivery evidence, shared `JsonSession.hold_context` and `hold_tool_call` record rows only after delivery, and `capture_response_context(response_id)` snapshots what that response held before queued updates are released. They also bound answers: an ordinary result or typed room request is answered only by a response begun after its rows are held (after a fresh switch, the pointer asking for its answer) that ends without `continues` and, where captured, held them at its end (without hooks, after the send returns). Older/external providers without these hooks keep exposure unknown; setup or queued results never prove exposure.
 The factory's `observe("usage", raw)` reports JSON
 `{"usage": {...}, "raw_usage": {...}}` for that physical connection; `close()` emits
-its final sample before returning. Samples and responses share one watermark. The host
+its final sample before returning. Samples and responses share one watermark. The call's
+own thread writes connection samples to the ledger, so the call loop never waits on those
+writes; a connection keeps one valid sample waiting, which takes in its next. A connection's close
+waits for its own samples and fails if one could not be written; the money check reads what
+is written. The host
 settles growth after Stop/budget exhaustion without admitting work or inventing responses;
 response IDs dedupe across the call, including resumed connections. Reservations
 survive reconnects; final call teardown abandons responses without a receipt.
@@ -1973,7 +1977,12 @@ native input/transcription work and open calls; the feature also waits for playb
 never for a running tool. Optional `input_pending` reports words said or awaiting recognition, apart from open calls:
 a forced switch waits for it, and a loss with it set gives a fresh session the hearing-gap fact (absent, VAD events decide).
 `input_started` may name a `response_id` already begun for its words when no VAD start preceded them, so that response
-answers them. A native resume needs a handle published after the open calls and last native result; one history outran
+answers them. History keeps speaking order: a spoken row follows the owner's words begun before its response and never
+waits for words begun after it; owner rows are never held. Words are counted by `input_started`, which may name the
+`item_id` their transcript will carry (transcripts of different utterances can land in any order). A final owner
+caption closes the words of its item; one whose item was never named closes the oldest open words that no item names;
+a converted batch that leaves nothing said or awaiting recognition closes them all. A provider that names an item owes
+it one final owner caption: when recognition fails, an empty one, which closes the words and writes no row. A native resume needs a handle published after the open calls and last native result; one history outran
 while opening continues fresh. OpenAI withholds `response.create` while its own call awaits output: speech on the issuing
 connection, or after a further call behind a running effect, is answered once that output is written.
 `final_captions()` returns received unfinished words at teardown without new wire work.

@@ -55,8 +55,7 @@ def _root_task_id(ctx: Any, task_id: str) -> str:
 
 
 def _settle_fence_outcome(ctx: Any, outcome: FenceOutcome) -> FenceOutcome:
-    """Expose the outcome on ctx; a refusal or a gap leaves ONE durable worker-side row."""
-    ctx._task_acceptance_fence_outcome = outcome
+    """Return the outcome; a refusal or a gap leaves ONE durable worker-side row."""
     if not outcome:
         from ouroboros import task_pacing
         from ouroboros.utils import append_jsonl, utc_now_iso

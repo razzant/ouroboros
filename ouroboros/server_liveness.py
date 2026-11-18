@@ -22,7 +22,6 @@ import threading
 import time
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Tuple
 
-from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.runtime_limits import (
     BUDGET_PROJECTION_RETRY_SEC, SUPERVISOR_EVENT_BATCH_MAX_EVENTS, SUPERVISOR_EVENT_BATCH_MAX_SEC,
 )
@@ -114,9 +113,9 @@ def loop_phase_facts(liveness: list, phase: str, *, new_tick: bool = False) -> d
     is the thread's cumulative CPU at this stamp, so the watchdog can charge a
     whole stall (onset stamp to recovery stamp) without seeing every stamp in
     between. Read beside the wall gap they separate a thread that BURNED it from
-    one blocked on a lock or starved of the GIL. ``max_event_lag_sec`` is the worst worker-stamped lag of
-    the most recently completed drain, absent when no drained event carried a
-    worker stamp. ``new_tick`` opens a fresh drain maximum (the events phase opens
+    one blocked on a lock or starved of the GIL. ``max_event_lag_sec`` is the worst event wait
+    (``observe_worker_event_lag``) of the most recently completed drain, absent when the
+    bus measured none. ``new_tick`` opens a fresh drain maximum (the events phase opens
     the tick), so a lag can never outlive the tick that observed it. No
     registered-project count rides here: the set the retire sweep walks exists
     only as a full custody-log replay, and a measurement may not pay disk on the
@@ -138,21 +137,14 @@ def loop_phase_facts(liveness: list, phase: str, *, new_tick: bool = False) -> d
     return facts
 
 
-def observe_worker_event_lag(liveness: list, evt: Any) -> Optional[float]:
-    """Record and return how far behind the loop is on the worker event it is draining now.
-
-    The worker stamps ``ts`` in its OWN process when it queues the event, so this
-    is a cross-process wall-clock gap — a measurement, never the watchdog's
-    monotonic trigger. An event without a parsable worker stamp is skipped: the
-    host's own clock is not evidence about when a worker spoke (None).
-    """
-    stamped = parse_deadline_ts(evt.get("ts")) if isinstance(evt, dict) else None
-    if stamped is None:
-        return None
-    lag = (utc_now() - stamped).total_seconds()
-    if liveness[_LAG] is None or lag > liveness[_LAG]:
-        liveness[_LAG] = lag
-    return lag
+def observe_worker_event_lag(liveness: list, waited_sec: Optional[float]) -> Optional[float]:
+    """Record and return how long the event served now waited since the bus took it in: the bus's own measure from
+    its put stamp to the take (``event_observation.drain``) plus the wait in this pass's batch, each on one process's
+    monotonic clock; a measurement, never the watchdog's trigger. A producer's ``ts`` (when it made the event, not
+    when it queued it) measures no wait; a bus without put stamps (a plain queue) measures none (None)."""
+    if waited_sec is not None and (liveness[_LAG] is None or waited_sec > liveness[_LAG]):
+        liveness[_LAG] = waited_sec
+    return waited_sec
 
 
 def drain_worker_events(event_q: Any, ctx: Any, liveness: list, *, on_restart: Callable[..., Any]) -> bool:
@@ -186,7 +178,7 @@ def drain_worker_events(event_q: Any, ctx: Any, liveness: list, *, on_restart: C
     deadline = time.monotonic() + SUPERVISOR_EVENT_BATCH_MAX_SEC
     take = getattr(event_q, "drain", None)
     batch = take(SUPERVISOR_EVENT_BATCH_MAX_EVENTS) if callable(take) else None
-    drained = 0
+    drained, drained_at, waited = 0, time.monotonic(), None
     try:
         while drained < SUPERVISOR_EVENT_BATCH_MAX_EVENTS and time.monotonic() < deadline:
             if batch is None:
@@ -195,7 +187,7 @@ def drain_worker_events(event_q: Any, ctx: Any, liveness: list, *, on_restart: C
                 except queue.Empty:
                     return False
             elif drained < len(batch):
-                evt = batch[drained][0]
+                evt, waited = batch[drained][0], batch[drained][2]
             else:
                 return False  # the bus held fewer than the bound when the batch was taken
             drained += 1
@@ -205,7 +197,7 @@ def drain_worker_events(event_q: Any, ctx: Any, liveness: list, *, on_restart: C
                 if evt.get("type") == "restart_request":
                     on_restart(evt, ctx)
                     continue
-                lag = observe_worker_event_lag(liveness, evt)
+                lag = observe_worker_event_lag(liveness, None if waited is None else waited + taken - drained_at)
                 dispatch_event(evt, ctx)
             finally:
                 served = time.monotonic() - taken
@@ -290,8 +282,8 @@ def publish_supervisor_load(event_q: Any, drive_root: Any) -> Optional[dict]:
     long, so an idle install adds no rows), else the row: ``window_sec``;
     ``handlers`` (event type -> count, total_sec, max_sec of service time, take to handler
     return); ``lanes`` (control/telemetry -> ``depth`` and ``oldest_age_sec`` of the bus at
-    this moment, None when the bus cannot say, and ``max_lag_sec``, the worst producer-stamp
-    lag the drain saw); ``max_event_lag_sec`` over both lanes; then one key per
+    this moment, None when the bus cannot say, and ``max_lag_sec``, the worst event wait the
+    drain saw, from the bus's own put stamp); ``max_event_lag_sec`` over both lanes; then one key per
     ``_load_sections`` entry (Q: outermost waits, holds, longest hold's site, and per site its
     count, total and longest hold, ``hold_by_site``), a failing
     source answering ``{"error": <type>}``. The whole store-site table has its own cadence and

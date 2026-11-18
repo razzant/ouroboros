@@ -864,6 +864,10 @@ def _capture_context_core(
     # A declared request draws the role's view without the story and the parent's room;
     # the rest it withholds (identity, WORLD, health, registry, skills, review continuity)
     # is gated below and named in its receipt (``declared_receipt_section``).
+    if not is_child:  # where this view begins to be told later (``return_facts``): read before the view itself
+        from ouroboros.return_facts import reach
+
+        seen = reach(canonical_root)
     view_spec, view, view_json = _capture_memory_view(task, canonical_root, ctx, declared=declared)
 
     # Max keeps the full capability/WHY map even for external work: binding a
@@ -887,7 +891,7 @@ def _capture_context_core(
     try:
         from ouroboros.subagent_runtime import review_facts_block
 
-        semi_stable_parts.append(review_facts_block(activity_out=review_activity))
+        semi_stable_parts.append(timed("review_facts", review_facts_block, activity_out=review_activity))
     except Exception:
         log.warning("Failed to build the Review block", exc_info=True)
     if not declared:
@@ -1028,6 +1032,10 @@ def _capture_context_core(
             dynamic_parts.append(presence_section)
     except Exception:
         log.debug("Failed to inject presence context", exc_info=True)
+    if not is_child:  # the facts beside my human's word that started this turn (``return_facts``), else nothing
+        from ouroboros.return_facts import turn_sections
+
+        dynamic_parts.extend(turn_sections(task, canonical_root, ctx, seen=seen))
 
     return _ContextCore(
         base_prompt=base_prompt,

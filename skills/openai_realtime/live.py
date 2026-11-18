@@ -298,7 +298,8 @@ class OpenAISession(JsonSession):
                 # interrupt_response=true makes VAD cancel before notifying us.
                 # Keep the response active until its final usage receipt arrives.
                 self.cancelled.add(self.active_response)
-            return [LiveEvent("input_started")] + ([LiveEvent("speech_started", {"item_id": item})] if self.options.interruptions else [])
+            return ([LiveEvent("input_started", {"item_id": item} if item else {})]
+                    + ([LiveEvent("speech_started", {"item_id": item})] if self.options.interruptions else []))
         if kind == "input_audio_buffer.speech_stopped":
             self.speech_active = False
             return [LiveEvent("input_done")]
@@ -345,7 +346,8 @@ class OpenAISession(JsonSession):
             return [LiveEvent("caption", {"speaker": speaker, "item_id": item, "text": text, "final": True})]
         if kind == "conversation.item.input_audio_transcription.failed":
             self.input_transcripts.discard(item)
-            return []  # This caption failed; the model still received the audio.
+            # The model still received the audio; these words close with no text, wherever newer ones stand.
+            return [LiveEvent("caption", {"speaker": "owner", "item_id": item, "text": "", "final": True})]
         if kind == "response.done":
             response = event["response"]
             rid = response["id"]

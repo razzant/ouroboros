@@ -36,11 +36,10 @@ def _attach_dir(drive, task_id):
 
 class TestStageTaskAttachments:
     def test_cyber_owner_attachment_can_stage_credential_named_source(self, tmp_path, monkeypatch):
-        from ouroboros import config
         from ouroboros.artifacts import stage_task_attachments
         from ouroboros.runtime_mode_policy import _RUNTIME_MODE_RANK
 
-        monkeypatch.setattr(config, "get_runtime_mode", lambda: "cyber_pro")
+        monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
         monkeypatch.setitem(_RUNTIME_MODE_RANK, "cyber_pro", 3)
         monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
         drive = _drive(tmp_path)

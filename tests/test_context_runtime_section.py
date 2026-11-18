@@ -81,7 +81,7 @@ def test_managed_legacy_force_plan_leaves_exact_owner_text(obsolete_marker):
 
 def test_runtime_section_includes_light_runtime_mode_rule(tmp_path, monkeypatch):
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     section = build_runtime_section(env, {"id": "task-1", "type": "task"})
     payload = json.loads(section.split("\n\n", 1)[1])
 
@@ -136,7 +136,7 @@ def test_runtime_section_includes_filesystem_affordances_with_ctx(tmp_path, monk
     from ouroboros.tools.registry import ToolContext
 
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path)
 
     section = build_runtime_section(env, {"id": "task-1", "type": "task"}, ctx=ctx)
@@ -155,7 +155,7 @@ def test_runtime_section_external_workspace_includes_user_files_shell_affordance
     from ouroboros.tools.registry import ToolContext
 
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     drive = tmp_path / "data"
     repo = tmp_path / "repo"
     workspace = tmp_path / "workspace"
@@ -179,7 +179,7 @@ def test_runtime_section_external_workspace_includes_user_files_shell_affordance
 
 def test_runtime_section_workspace_rule_preserves_system_review_commit_authority(tmp_path, monkeypatch):
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     section = build_runtime_section(
@@ -202,7 +202,7 @@ def test_runtime_section_workspace_rule_preserves_system_review_commit_authority
 
 def test_runtime_section_omits_light_rule_for_advanced(tmp_path, monkeypatch):
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     section = build_runtime_section(env, {"id": "task-1", "type": "task"})
     payload = json.loads(section.split("\n\n", 1)[1])
 
@@ -212,7 +212,7 @@ def test_runtime_section_omits_light_rule_for_advanced(tmp_path, monkeypatch):
 
 def test_runtime_section_includes_non_workspace_memory_boundary(tmp_path, monkeypatch):
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     section = build_runtime_section(
         env,
         {
@@ -232,7 +232,7 @@ def test_runtime_section_includes_non_workspace_memory_boundary(tmp_path, monkey
 
 def test_runtime_section_exposes_host_routing_manifest_and_manual_contract(tmp_path, monkeypatch):
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     task = {
         "id": "decision-1",
         "type": "task",
@@ -269,7 +269,7 @@ def test_runtime_section_offers_the_rooms_own_continuation_hint(tmp_path, monkey
     own interrupted root at all and promoted again, minting a duplicate root.
     """
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     room = {
         "final_results": [{"task_id": "racer-old", "status": "completed"}],
         "active_roots": [{"task_id": "racer-live", "status": "running",
@@ -491,7 +491,7 @@ def _delegation_data_root(tmp_path, monkeypatch):
 
 def _delegation_fact(tmp_path, monkeypatch):
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     section = build_runtime_section(env, {"id": "task-1", "type": "task"})
     payload = json.loads(section.split("\n\n", 1)[1])
     return payload["capabilities"]
@@ -912,10 +912,13 @@ class TestVitalsFact:
         monkeypatch.setenv("OUROBOROS_IN_WORKER", "1")  # a deep self-review's pooled worker: no ring of its own
         _section, data = self._runtime(env)
         assert data["vitals"]["owner_turns_note"] == "none in the journal's tail" and "owner_turns" not in data["vitals"]
+        resumed = {"resumed": "exact_pause", "origin_accepted_at": "2026-10-24T14:00:00+00:00", "handler_wait_sec": 33.9}
         self._journal(tmp_path, [{"ts": f"2026-10-25T19:5{n}:00+00:00", "type": "direct_turn", "execution_id": f"turn_{n}",
-                                  "chat_id": 1, "owner_wait_sec": float(n), "dispatch": "observed_send"} for n in range(3)])
+                                  "chat_id": 1, **(resumed if n == 2 else {"owner_wait_sec": float(n)}),
+                                  "dispatch": "observed_send"} for n in range(3)])
         _section, data = self._runtime(env)
-        assert data["vitals"]["owner_turns"] == ["19:51 chat 1 waited 1.0 s", "19:52 chat 1 waited 2.0 s"]
+        assert data["vitals"]["owner_turns"] == ["19:51 chat 1 waited 1.0 s",
+                                                 "19:52 chat 1 resumed (exact_pause) 33.9 s from its own entry, its message accepted 10-24 14:00"]
         assert "owner_turns_note" not in data["vitals"]
 
     def test_the_journal_per_store_and_the_wal_gate_only_for_a_rollback_store(self, tmp_path, monkeypatch):
