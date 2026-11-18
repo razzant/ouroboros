@@ -16,8 +16,7 @@ that only review does, and points to ARCHITECTURE for mechanism.
   state. Tools stay thin `{verb}_{noun}` functions (validate input, call the owner,
   format a result); no universal `{Domain}Service`, `{Platform}Gateway` or class layer.
 - Dependency direction: UI/CLI → inbound gateway → domain owner; runtime policy →
-  host-owned contract → outbound adapter (`ouroboros/gateway/` in,
-  `ouroboros/gateways/` out; ARCHITECTURE §1 "Gateway Boundary v1"). Provider- and
+  host-owned contract → outbound adapter (ARCHITECTURE §1 "Gateway Boundary v1"). Provider- and
   transport-specific decisions never flow back into core policy.
 - Chat authorship is stamped by the producer and survives persistence and replay; never
   infer it from text or promote host-selected intermediate output to a model final
@@ -38,7 +37,7 @@ review-only.
   relative path is never sanitized before an outside address is refused.
 - Project focus changes the default target, not the tool surface: advisory, reviewed
   commit, rollback, promotion, restart and runtime control keep their
-  system-repository contracts; `executor_ref` selects a process backend, not a sandbox;
+  system-repository contracts;
   GitHub tools default to the focused folder's repository over ambient `GH_REPO`
   (`ouroboros/tools/github.py`).
 - A process cwd decides relative paths, not the root task's write authority; semantic
@@ -173,10 +172,7 @@ per-change base and skip this comparison. Local qualification supplies
 contribution. The owner's `book-growth` label can exempt it. Local surfaces
 never block: the edit tools, `plan_task`, the free
 `preflight_review(deterministic_only=True)` diagnostic and `codebase_health`
-report the balance as a fact. Contribution is measured from the displayed
-merge-base of the cached official development ref; an unknown base stays
-unknown and nothing is fetched. Free diagnostics label book
-bytes as worktree separately from the selected release-metadata source.
+report the balance as a fact.
 
 ### Generality and emergence (P13)
 
