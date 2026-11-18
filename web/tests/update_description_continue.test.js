@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { bindUpdateRefreshEvents, checkFailure, lastObservedAttempt, retainUnreadLetter, updateLetterView } from '../modules/updates.js';
+import { bindUpdateRefreshEvents, checkFailure, lastObservedAttempt, retainUnreadLetter, updateLetterView, updateVerdict } from '../modules/updates.js';
 
 const source = readFileSync(new URL('../modules/updates.js', import.meta.url), 'utf8');
 const start = source.indexOf('    let statusRefreshPromise = null;');
@@ -165,6 +165,34 @@ for (const outcome of ['cancelled', 'completed']) {
     });
 }
 
+
+test('a failed queued progress read releases the loading or checking phase and restores the plain recovery check', async () => {
+    const recovery = { managed: true, update_tx: { active: true, phase: 'gate_blocked' } };
+    for (const fetchRemote of [false, true]) {
+        const calls = [];
+        const request = method => new Promise((resolve, reject) => calls.push({ method, resolve, reject }));
+        const state = harness({ updateStatus: () => request('GET'), updateCheck: () => request('POST') }, recovery);
+        const events = new Map();
+        const binding = bindUpdateRefreshEvents({
+            ws: { on(name, handler) { events.set(name, handler); } }, getPhase: state.getPhase, loadStatus: state.loadStatus,
+        });
+        try {
+            const finished = state.loadStatus({ fetchRemote });
+            assert.equal(state.getPhase(), fetchRemote ? 'checking' : 'loading');
+            events.get('update_progress_changed')();
+            assert.equal(calls.length, 1);
+            if (fetchRemote) calls[0].reject(new Error('Check interrupted'));
+            else calls[0].resolve(recovery);
+            await tick();
+            assert.deepEqual(calls.map(c => c.method), [fetchRemote ? 'POST' : 'GET', 'GET']);
+            calls[1].reject(new Error('HTTP 503'));
+            await finished;
+            const data = state.getStatus();
+            assert.match(data.lastObservedAttempt.guidance, /Quit and reopen/);
+            assert.deepEqual(updateVerdict(data, state.getPhase()).action, { id: 'check', label: 'Check again' });
+        } finally { binding.dispose(); }
+    }
+});
 
 // An explicit check that fails while a status notice queued behind it: the notice's newer read is shown (its writer
 // included), and the check's own failure stays in the transient slot the panel says it from, until a later check

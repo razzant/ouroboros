@@ -1266,8 +1266,10 @@ export function initUpdates({ mount, state, ws }) {
                         check_ok: options.fetchRemote ? false : null,
                         checked_at: options.fetchRemote ? latestStatus?.checked_at : null,
                     }, latestStatus);
-                    if (!options.preservePhase) setPhase(restartNeeded ? 'restart_needed' : '');
-                    else render();
+                    // A queued notice may preserve an installation phase, but never a read that has now finished.
+                    if (!options.preservePhase || phase === 'loading' || phase === 'checking') {
+                        setPhase(restartNeeded ? 'restart_needed' : '');
+                    } else render();
                 }
             }
         })().finally(() => { statusRefreshPromise = null; });
