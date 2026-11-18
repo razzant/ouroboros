@@ -943,3 +943,24 @@ def test_a_card_returns_an_uncited_cyber_start_to_its_own_primary(host, monkeypa
     assert ctx.primary_route == {"model": B, "use_local": False, "role": "lead"}
     assert ctx.route_wait_on_primary is (action == "wait")
     assert lead_fact.primary_basis(ctx) == "mind"
+
+
+def test_a_model_selected_on_a_card_retains_the_press_as_its_basis(host, monkeypatch):
+    from ouroboros.tools.control_runtime import _switch_model
+    from ouroboros.owner_words import answered_card_reply
+    from supervisor.events_mind_controls import handle_mind_task_control
+
+    task = queued(host)
+    _, ctx = turn(host, monkeypatch)
+    label = "Choose the violet route"
+    card = {"question": "Which route?", "options": [label, "Wait"], "answered_index": 0, "quiz_id": "violet-route"}
+    ctx._owner_directives = [{"source": "owner_press", "content": "1. " + label,
+                              "reply_to": answered_card_reply(card, "route-desk"), "quiz_id": "violet-route"}]
+    ctx.event_queue = SimpleNamespace(put_nowait=lambda event: handle_mind_task_control(
+        event, SimpleNamespace(DRIVE_ROOT=host[0], bridge=SimpleNamespace(push_log=lambda row: None))))
+    assert "requires verified owner_words" in _switch_model(ctx, B, owner_words="violet")
+    result = _switch_model(ctx, B, owner_words=label)
+    assert '"ok": true' in result
+    carrier = task["metadata"]["lead"]
+    assert carrier["source"] == "owner_press" and carrier["cited"] == label
+    assert "press" in lead_fact.chooser_words(carrier["source"], carrier)

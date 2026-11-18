@@ -113,6 +113,10 @@ def resolve_model(model: str, *, model_as_typed: bool = False) -> tuple[dict, st
     return choice, "Model id not verified: used as typed. Local configuration and available host-cached catalogues only; no live catalog check."
 
 
+def _cited_choice(basis):
+    return {"source": "owner_press" if basis["source"] == "owner_press" else "owner_words", "cited": basis["cited"]}
+
+
 def start_choice(ctx, model: str, basis: dict | None, project_id: str, *, model_as_typed: bool = False) -> tuple[dict, str]:
     if not model:
         return {}, ""
@@ -120,8 +124,7 @@ def start_choice(ctx, model: str, basis: dict | None, project_id: str, *, model_
         raise ValueError("A model requires your human's verified owner_words. Nothing was started; cite their exact words.")
     choice, note = resolve_model(model, model_as_typed=model_as_typed)
     if basis:
-        return {"lead": {"source": "owner_words", "model": choice["model"], "use_local": choice["use_local"],
-                         "cited": basis["cited"]}}, note
+        return {"lead": {**_cited_choice(basis), "model": choice["model"], "use_local": choice["use_local"]}}, note
     room = read_model_choice(canonical_data_root(ctx), project_id)
     if room["kind"] == "model":
         if (room["model"], room["use_local"]) != (choice["model"], choice["use_local"]):
@@ -147,7 +150,7 @@ def request_work_model(ctx, choice: dict) -> tuple[str, bool]:
     event = {"type": "mind_task_control", "action": "switch_model", "task_id": actor,
              "actor_task_id": actor, "action_nonce": nonce, "model": choice["model"],
              "use_local": choice["use_local"], "cited": choice["cited"],
-             "reason": "My human's cited words chose this work's primary."}
+             "cited_source": choice["source"], "reason": "My human chose this work's primary."}
     mode = _emit_control_event(ctx, event)
     if mode == "serialization_failed":
         return refuse(ctx, "Model request was not emitted. The primary has not changed."), False
@@ -216,7 +219,7 @@ def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: s
     except ValueError as exc:
         return refuse(ctx, str(exc))
     if scope == "work":
-        text, accepted = request_work_model(ctx, {**choice, "cited": basis["cited"]})
+        text, accepted = request_work_model(ctx, {**choice, **_cited_choice(basis)})
         return finished(text + "\n" + note) if accepted else text
     result = None
     try:

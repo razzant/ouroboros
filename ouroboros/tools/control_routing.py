@@ -456,7 +456,8 @@ def _start_task(
         evt["owner_corpus"] = [*evt.get("owner_corpus", []), owner_basis]
     kind_note = " " + model_note if model_note else ""
     if is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
-        kind_note += (" Started as your human's work on their cited words." if owner_basis else
+        kind_note += (" Started as your human's work on their pressed choice." if owner_basis and owner_basis["source"] == "owner_press"
+                      else " Started as your human's work on their cited words." if owner_basis else
                      " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
                      "the Off switch stops it.")
     mode, confirmation = _emit_and_wait_for_routing(ctx, evt)

@@ -520,7 +520,8 @@ def cited_owner_basis(ctx: Any, owner_words: Any, *, call_speech: bool = False) 
     human's words) with the cited span as ``cited``, labelled by its real source: the owner door it came through,
     or ``place_owner`` for a confirmed account's place words, read again at the cite: a row my send receipt now names
     is my own echo (``_my_post``). Words not found: a typed refusal, nothing started.
-    Whether the words ask for this work is the citing mind's reading, visible on the card.
+    A wordless choice can instead cite its complete pressed label. Its original typed act and card ride together.
+    The citing mind judges whether the words or choice apply to the work.
     The owner's decision of 11 November 2026 admits their own call speech only for a model choice:
     its caller opts in with ``call_speech`` and carries the returned ``live_call`` span only on the lead,
     never as the new work's owner corpus (the caption rules of 7 November otherwise stand)."""
@@ -533,6 +534,21 @@ def cited_owner_basis(ctx: Any, owner_words: Any, *, call_speech: bool = False) 
         if row["source"] in OWNER_WORD_SOURCES and quote_in(wanted, row["text"]):
             return {"source": row["source"], "content": row["text"], "cited": wanted, "basis": CITED, "carried": True,
                     **({"msg_id": row["ref"]} if row.get("ref") else {})}, ""
+    for item, _, _, _ in _dated_directives(ctx):
+        if item["source"] != OWNER_PRESS:
+            continue
+        # A quiz bubble has the host's one-based display prefix. A living action's label is already whole.
+        content = item.get("content")
+        if not isinstance(content, str):
+            continue
+        if item.get("quiz_id") or is_answered_card(item.get("reply_to")):
+            number, sep, label = content.partition(". ")
+            if not sep or not number.isascii() or not number.isdecimal() or number.startswith("0"):
+                continue
+        else:
+            label = _mapping(item.get("reply_to")).get("pressed_label")
+        if wanted == label:
+            return {**item, "cited": wanted, "basis": CITED, "carried": True}, ""
     for item in getattr(ctx, "_owner_directives", None) or []:  # confirmed place events, with what they replied to
         if (isinstance(item, dict) and item.get("source") == PLACE_CONFIRMED
                 and quote_in(wanted, str(item.get("content") or "")) and not _my_post(ctx, item)):

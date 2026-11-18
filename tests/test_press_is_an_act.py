@@ -107,7 +107,11 @@ def test_a_live_answer_stays_an_owner_input_and_only_words_are_their_words(tmp_p
                 "«1. Publish it» and wrote no words; the label is the asking task's text)\n") in rendered
         assert not ow.owner_words_contain(ctx, "Publish it")  # the label is never cited or attested as their words
         basis, error = ow.cited_owner_basis(ctx, "Publish it")
-        assert basis is None and error.startswith("owner_words were not found verbatim")
+        assert not error and basis["source"] == "owner_press" and basis["basis"] == "cited"
+        assert basis["cited"] == "Publish it" and basis["msg_id"] == row["msg_id"] and basis["reply_to"] == row["reply_to"]
+        for other in ("Publish", "Not now", "Sends it now", "1. Publish it"):
+            assert ow.cited_owner_basis(ctx, other)[0] is None
+        assert not ow.owner_words_contain(SimpleNamespace(_owner_directives=[basis]), "Publish it")
 
 
 def test_safety_still_reads_a_press_as_my_humans_answer_to_the_card():
