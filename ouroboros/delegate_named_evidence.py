@@ -46,44 +46,88 @@ def _raise(error):
     raise error  # a skipped subtree is not a complete inventory
 
 
-def evidence_settings(source, *, fallback=False):
-    """The exact bytes a capture may retain. A fallback patch also holds out unverifiable settings."""
-    from io import BytesIO
-    from ouroboros import work_domain
-    from ouroboros.config import SETTINGS_DEFAULTS
-    from ouroboros.review_checking import _open_regular
-    from ouroboros.secret_masking import MASKED_SECRET_SETTING_KEYS, is_custom_secret_setting_key
+def private_git_blobs(references, values, dump_blob):
+    """Check immutable Git sides, including deleted content, without loading a whole blob into memory."""
+    from tempfile import TemporaryFile
+    from ouroboros.secret_masking import SecretScan
+    gaps = {}
+    for name, refs in references:
+        for ref in refs:
+            with TemporaryFile() as blob:
+                dump_blob(ref, blob)
+                blob.seek(0)
+                scan = SecretScan(values)
+                if scan.read_from(blob):
+                    gaps[name] = {"path": name, "reason": "installation_settings", "size": scan.size}
+                    break
+    return gaps
 
-    try:
-        if work_domain.is_work(source):
-            sink = BytesIO()
-            work_domain.measure(source, sink, strict=True)
-            data = sink.getvalue()
-        else:
-            with _open_regular(source) as handle:
-                data = handle.read()
-    except (OSError, RuntimeError):
-        if fallback:
-            return None
-        raise
-    try:
-        settings = json.loads(data)
-    except (ValueError, UnicodeError):
-        return data
-    if isinstance(settings, dict):
-        installation = bool(settings.keys() & SETTINGS_DEFAULTS.keys())
-        for key, value in settings.items():
-            if value and (key in MASKED_SECRET_SETTING_KEYS or installation and
-                          is_custom_secret_setting_key(key, known_setting_keys=SETTINGS_DEFAULTS)):
-                return None
-    return data
+
+def _private_evidence_paths(root, paths, base_ref, base_sizes):
+    import subprocess
+    from ouroboros import work_domain
+    from ouroboros.git_observation import host_git_env
+    from ouroboros.review_checking import _open_regular
+    from ouroboros.secret_masking import SecretScan, installation_secret_bytes
+
+    values = installation_secret_bytes()
+    private = {}
+    for rel in sorted(paths) if values else ():
+        path = root / rel
+        scan = SecretScan(values)
+        kind = work_domain.kind(path)
+        if kind == "file":
+            if work_domain.is_work(path):
+                work_domain.measure(path, scan, strict=True)
+            else:
+                with _open_regular(path) as handle:
+                    scan.read_from(handle)
+        elif kind == "link":
+            scan.write(os.fsencode(work_domain.readlink(path)))
+        if scan.found:
+            private[rel] = {"path": rel, "reason": "installation_settings", "size": scan.size}
+    if values:
+        before = ((rel, [f"{base_ref}:{rel}"]) for rel in sorted((paths & base_sizes.keys()) - private.keys()))
+        def dump(ref, blob):
+            work_domain.run(["git", "cat-file", "blob", ref], cwd=str(root), env=host_git_env(),
+                            stdout=blob, stderr=subprocess.DEVNULL, check=True)
+        private.update(private_git_blobs(before, values, dump))
+    return private
+
+
+def _held_named_evidence(root, host_evidence, paths, products, destination, previous):
+    """Retain new named evidence. A failed capture returns public files to the patch."""
+    prefix = pathlib.PurePosixPath(EVIDENCE_DIRNAME if destination is not None else (host_evidence or EVIDENCE_DIRNAME).strip("/"))
+    held = {name for name in paths - products if pathlib.PurePosixPath(name).is_relative_to(prefix)}
+    if not held or destination is None:
+        return held, None
+    summary = retain_workspace_evidence(root, destination, previous=previous, product_paths=products)
+    if summary["status"] == "retained":
+        return held, summary
+    private = _private_evidence_paths(root, held, None, {})
+    seen = {gap["path"] for gap in summary["gaps"]}
+    summary["gaps"].extend(gap for name, gap in private.items() if name not in seen)
+    return set(private), summary
+
+
+def workspace_evidence_exclusions(root, host_evidence, paths, base_ref, base_sizes, file_baseline, destination, previous):
+    """Classify named evidence and check both versions of remaining patch inputs against Settings."""
+    from ouroboros.workspace_patch_rules import NAMED_EVIDENCE_EXCLUSION
+
+    held, summary = _held_named_evidence(root, host_evidence, paths, base_sizes.keys() | file_baseline.keys(),
+                                        destination, previous)
+    excluded = {name: {"path": name, "reason": NAMED_EVIDENCE_EXCLUSION} for name in held}
+    excluded.update((gap["path"], gap) for gap in (summary or {}).get("gaps", []) if gap["reason"] == "installation_settings")
+    return {**excluded, **_private_evidence_paths(root, paths - held, base_ref, base_sizes)}, summary
 
 
 def retain_files(area, paths, files_dir, *, gaps, preserve_mode=True):
-    """Stream regular evidence. Inspect a settings file's very same bytes before retaining them."""
+    """Stream regular evidence and inspect the exact copy before publishing its receipt."""
     from ouroboros import work_domain
     from ouroboros.review_checking import _open_regular, _sha
 
+    from ouroboros.secret_masking import SecretScan, installation_secret_bytes
+    secrets = installation_secret_bytes()
     work = work_domain.is_work(area)
     kept = []
     for relative in paths:
@@ -93,21 +137,19 @@ def retain_files(area, paths, files_dir, *, gaps, preserve_mode=True):
             continue
         info = work_domain.lstat(source) if work else source.stat()
         private_directory(target.parent, files_dir.parent)
-        if source.name.casefold() == "settings.json":
-            data = evidence_settings(source)
-            if data is None:
-                gaps.append({"path": relative, "reason": "installation_settings"})
-                continue
-            with target.open("xb") as dst:
-                dst.write(data)
-            measured = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-        elif work:
-            with target.open("xb") as dst:
-                measured = work_domain.measure(source, dst)
-        else:
-            with _open_regular(source) as src, target.open("xb") as dst:
-                shutil.copyfileobj(src, dst, 1 << 20)
-            measured = {"size": target.stat().st_size, "sha256": _sha(target)}
+        with target.open("xb") as dst:
+            scan = SecretScan(secrets, dst)
+            if work:
+                measured = work_domain.measure(source, scan, strict=True)
+            else:
+                with _open_regular(source) as src:
+                    shutil.copyfileobj(src, scan, 1 << 20)
+        if scan.found:
+            target.unlink()
+            gaps.append({"path": relative, "reason": "installation_settings", "size": scan.size})
+            continue
+        if not work:
+            measured = {"size": scan.size, "sha256": _sha(target)}
         mode = stat.S_IMODE(info.st_mode)
         if preserve_mode:
             target.chmod(mode)

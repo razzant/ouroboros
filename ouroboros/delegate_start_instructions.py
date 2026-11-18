@@ -143,7 +143,7 @@ def disposable_state_instruction(evidence_root: str, *, investigation: bool = Fa
             "downloads go only to the shared download cache your host names. Keep verification evidence worth "
             f"returning under {evidence_root}: the host retains new files there before it releases the copy and "
             "never applies them; files the project already tracks there stay ordinary work product. That folder "
-            "keeps reports, logs, sources and intended binaries indefinitely. The receipt gives your parent the "
+            "keeps reports, logs, sources, binaries and accidental byproducts indefinitely. The receipt gives your parent the "
             "bytes retained. For a large reproducible file give its address, byte size and hash. A link or "
             "special entry is recorded as a gap.")
 

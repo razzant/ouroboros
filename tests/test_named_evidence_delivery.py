@@ -82,12 +82,15 @@ def test_a_run_that_retained_no_named_evidence_shows_none(tmp_path, monkeypatch)
     assert "named_evidence" not in capture_projection(data, custody.replay(data)[held.run_id], reader_task_id="retry-c")
 
 
-def test_only_installation_settings_with_keys_are_excluded_from_evidence(tmp_path, monkeypatch):
+@pytest.mark.parametrize("settings", [
+    {"MCP_SERVERS": [{"auth_token": "fixture-value"}]},
+    {"MCP_SERVERS": [{"url": "https://fixture-value@example.invalid/"}]},
+    {"OUROBOROS_CONNECTIONS": [{"kind": "openai", "name": "test", "api_key": "fixture-value"}]},
+])
+def test_only_installation_settings_with_keys_are_excluded_from_evidence(tmp_path, monkeypatch, settings):
     from ouroboros import config
 
-    monkeypatch.setattr(
-        config, "load_settings", lambda **kw: {"MCP_SERVERS": [{"id": "test", "auth_token": "fixture-value"}]}
-    )
+    monkeypatch.setattr(config, "load_settings", lambda **kw: settings)
     from ouroboros.delegate_named_evidence import retain_workspace_evidence
 
     copy = tmp_path / "copy"
@@ -174,7 +177,7 @@ def test_workspace_patch_filters_both_versions_and_arbitrary_names(tmp_path, mon
     (copy / "old.txt").write_text(key)
     _git(copy, "add", "old.txt")
     _git(copy, "commit", "-m", "fixture with earlier value")
-    task["base_sha"] = _git(copy, "rev-parse", "HEAD")
+    task["metadata"]["workspace_preflight"]["git"]["head"] = _git(copy, "rev-parse", "HEAD")
     (copy / "old.txt").unlink()
     (copy / "copy.txt").write_bytes(b"x" * ((1 << 20) - 4) + key.encode())
     (copy / "sample.json").write_text('{"OPENAI_API_KEY": "example"}')

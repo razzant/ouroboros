@@ -25,6 +25,7 @@ from hashlib import sha256
 from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ouroboros import work_domain
+from ouroboros.delegate_named_evidence import _held_named_evidence as _held_named_evidence, workspace_evidence_exclusions
 from ouroboros.artifact_storage import compress_in_place
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.git_observation import numstat_paths
@@ -35,7 +36,6 @@ from ouroboros.headless_status import (
 )
 from ouroboros.utils import atomic_write_json, utc_now_iso
 from ouroboros.workspace_patch_rules import (
-    NAMED_EVIDENCE_EXCLUSION,
     _PATCH_EXCLUDE_RULES_VERSION,
     _PATCH_MAX_UNTRACKED_FILE_BYTES,
     _incidental_lockfile_excludes,
@@ -72,28 +72,6 @@ def build_workspace_patch(workspace_root: pathlib.Path) -> str:
     return ""
 
 
-def _held_named_evidence(root: pathlib.Path, host_evidence: str, changed: set, baseline: set,
-                         retain_dir: Optional[pathlib.Path], previous: Optional[Dict[str, Any]],
-                         ) -> Tuple[set, Optional[Dict[str, Any]]]:
-    """New paths under the copy's named evidence belong to its receipt. Baseline paths stay product.
-    If retaining the folder fails, eligible files go back into the patch."""
-    from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
-
-    evidence = pathlib.PurePosixPath((EVIDENCE_DIRNAME if retain_dir is not None else host_evidence or EVIDENCE_DIRNAME).strip("/"))
-    under = lambda rel: pathlib.PurePosixPath(rel).is_relative_to(evidence)  # noqa: E731
-    held = {rel for rel in changed if rel not in baseline and under(rel)}
-    if not held or retain_dir is None:  # a run, not this capture, retains the folder (or there is nothing new)
-        return held, None
-    from ouroboros.delegate_named_evidence import evidence_settings, retain_workspace_evidence
-
-    products = {pathlib.PurePosixPath(rel).relative_to(evidence.parent).as_posix() for rel in baseline if under(rel)}
-    summary = retain_workspace_evidence(root / evidence.parent, retain_dir, product_paths=products, previous=previous)
-    if summary.get("status") != "retained":
-        held = {rel for rel in held if (path := root / rel).name.casefold() == "settings.json"
-                and evidence_settings(path, fallback=True) is None}
-    return held, summary
-
-
 def _evidence_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
     """The manifest's compact row for a retained (or unretained) evidence folder."""
     return {**{key: summary[key] for key in ("status", "evidence_dir", "summary_path", "error", "retained_bytes") if key in summary},
@@ -109,7 +87,7 @@ def write_workspace_patch_artifacts(
     retain_evidence_dir: Optional[pathlib.Path] = None, retained_evidence: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Stream workspace patch and manifest artifacts into ``artifact_dir``; the copy's evidence folder is held out
-    (``_held_named_evidence``) and, given ``retain_evidence_dir``, retained once (``retained_evidence``: last summary)."""
+    (``workspace_evidence_exclusions``) and, given ``retain_evidence_dir``, retained once (``retained_evidence``: last summary)."""
 
     from ouroboros.artifacts import stream_artifact_file
 
@@ -177,14 +155,15 @@ def write_workspace_patch_artifacts(
     # v6.52.2: declared ephemeral scratch (run_command/run_script `scratch=[...]`) never leaks into the patch.
     scratch = _declared_scratch(scratch_dir or artifact_dir, root)
     base_sizes = baseline_blob_sizes(root, base_ref, errors=errors)
-    held, named_evidence = _held_named_evidence(
-        root, str(metadata.get("host_evidence") or ""), {*untracked, *changed_tracked}, {*base_sizes, *file_baseline},
-        retain_evidence_dir, retained_evidence)
-    excluded.extend({"path": rel, "reason": NAMED_EVIDENCE_EXCLUSION} for rel in sorted(held & set(untracked)))
-    held_tracked = sorted(held - set(untracked))
-    tracked_excluded.extend({"path": rel, "reason": NAMED_EVIDENCE_EXCLUSION} for rel in held_tracked)
-    untracked = [rel for rel in untracked if rel not in held]
+    held, named_evidence = workspace_evidence_exclusions(
+        root, metadata.get("host_evidence"), set(untracked + changed_tracked + file_input_paths),
+        base_ref, base_sizes, file_baseline, retain_evidence_dir, retained_evidence)
+    excluded.extend(held[rel] for rel in untracked if rel in held)
+    held_tracked = sorted(held.keys() - set(untracked))
+    tracked_excluded.extend(held[rel] for rel in held_tracked)
     changed_tracked = [rel for rel in changed_tracked if rel not in held]
+    untracked = [rel for rel in untracked if rel not in held]
+    file_input_paths = [rel for rel in file_input_paths if rel not in held]
     # git's binary verdict for the whole inventory in one process (two when empty
     # files need their attribute verdict; #1241); the loop below keeps its per-file
     # order and reads the verdict instead of spawning ``git diff --numstat`` per file.
@@ -223,12 +202,7 @@ def write_workspace_patch_artifacts(
     excluded.extend({"path": rel, "reason": "incidental lockfile without sibling manifest change"}
                     for rel in included_untracked if rel in incidental_lock_excludes)
     included_untracked = [rel for rel in included_untracked if rel not in incidental_lock_excludes]
-    # A sensitive-shaped untracked file is a PER-FILE exclusion (disclosed in
-    # ``sensitive_blocked``), never a manifest error: the error path suppressed
-    # the ENTIRE patch write, so one credential-shaped NAME (public.pem,
-    # token_count.json) annihilated the whole tracked diff. The snapshot path
-    # (untracked_capture_veto_reason → provision_execution_snapshot) always
-    # treated the same hit as a per-file skip; the patch now matches it (#447).
+    # One sensitive untracked name cannot suppress unrelated product changes (#447).
 
     # Large generated data rides a file artifact, never a giant binary Git patch.
     large_tracked = []

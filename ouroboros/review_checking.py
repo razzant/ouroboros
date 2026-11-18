@@ -482,14 +482,11 @@ def _git_delta(area: pathlib.Path, source: Mapping[str, Any], evidence: pathlib.
     )
 
     # A linked worktree's objects are where its marker recorded them; its own ``.git`` file is never read.
-    refusal = "" if git else payload_git_metadata_refusal(area)
-    if refusal:
+    if not git and (refusal := payload_git_metadata_refusal(area)):
         raise CheckingAreaUnavailable(refusal)
     excluded = (EVIDENCE_DIRNAME, *_IGNORED_EVIDENCE_DIRS)
     patch = evidence / "delta.patch"
-    # The reviewer owns its config and index. Capture through the existing
-    # host-owned control directory: only immutable objects are borrowed, and
-    # raw hashing never invokes .gitattributes clean/process/eol conversions.
+    # Host-owned index and raw hashes keep the reviewer's Git config and filters out of capture.
     with payload_capture_git_env(area, objects=pathlib.Path(str(git["objects"])) if git else None) as env:
         _git(area, "read-tree", str(source["tree"]), env=env)
         gitlinks = {}
@@ -501,23 +498,15 @@ def _git_delta(area: pathlib.Path, source: Mapping[str, Any], evidence: pathlib.
                        **{key: "0" for key in os.environ if key.startswith("GIT_TRACE")}}
         inventory = _git(area, "ls-files", "--cached", "--others", "--exclude-standard", "-z", env=listing_env)
         listing_warning = inventory.stderr.decode("utf-8", "replace").strip()
-        # Git exits zero for an unlistable directory. Other warnings (for example
-        # a symlinked ignore file) do not prove missing entries and must not block
-        # the next reviewer turn. Pin the diagnostic locale for this CLI boundary.
+        # Git exits zero for unlistable directories. Other listing warnings still permit capture.
         if any(line.startswith("warning: could not open directory ") for line in listing_warning.splitlines()):
-            raise CheckingAreaUnavailable("the checking copy could not be fully listed: "
-                                          + listing_warning)
+            raise CheckingAreaUnavailable(f"the checking copy could not be fully listed: {listing_warning}")
         paths, kept_gitlinks = set(), []
-        for raw in sorted(set(inventory.stdout.split(b"\0"))):
-            if not raw:
-                continue
+        for raw in sorted(set(inventory.stdout.split(b"\0")) - {b""}):
             relative = raw.decode("utf-8", "surrogateescape")
             rel = pathlib.PurePosixPath(relative)
-            if rel.parts[0] in excluded:
-                continue
-            # A tracked directory replaced with a link contributes that link,
-            # never reads files through it (possibly outside the checking copy).
-            if any((area / parent).is_symlink() for parent in rel.parents if str(parent) != "."):
+            # Capture a replacement link itself and never descend through it.
+            if rel.parts[0] in excluded or any((area / parent).is_symlink() for parent in rel.parents if str(parent) != "."):
                 continue
             path = area / relative
             if path.is_symlink() or path.is_file():
@@ -525,9 +514,7 @@ def _git_delta(area: pathlib.Path, source: Mapping[str, Any], evidence: pathlib.
             elif path.is_dir() and relative in gitlinks:
                 kept_gitlinks.append(b"160000 " + gitlinks[relative] + b"\t" + raw)
                 if any(path.iterdir()):
-                    # The frozen gitlink is retainable without trusting a
-                    # nested repository's controls. Its populated worktree is
-                    # not in this patch: the receipt discloses that gap.
+                    # Retain the frozen gitlink and account for its omitted worktree.
                     gaps.append({"path": relative, "reason": "nested_git_worktree_not_captured"})
             elif path.is_dir() and os.path.lexists(path / ".git"):
                 raise CheckingAreaUnavailable(f"cannot retain new nested Git checking output {relative}")
@@ -541,13 +528,24 @@ def _git_delta(area: pathlib.Path, source: Mapping[str, Any], evidence: pathlib.
             _git(area, "update-index", "-z", "--index-info", env=env,
                  input_bytes=b"\0".join(kept_gitlinks) + b"\0")
         after = _out(_git(area, "write-tree", env=env))
-        # Stream while the host control ODB is alive. The patch is the retained
-        # artifact; neither reviewer Git metadata nor source controls are written.
+        from ouroboros.delegate_named_evidence import private_git_blobs
+        from ouroboros.secret_masking import installation_secret_bytes
+        trees, pathspec = [str(source["tree"]), after], ["--"]
+        if secrets := installation_secret_bytes():
+            raw = _git(area, "diff", "--no-renames", "--raw", "--no-abbrev", "-z", *trees, env=env).stdout.split(b"\0")
+            references = []
+            for change, name in zip(raw[::2], raw[1::2]):
+                old_mode, new_mode, old, new, _ = change.lstrip(b":").split()
+                refs = [oid.decode() for mode, oid in ((old_mode, old), (new_mode, new)) if mode not in {b"000000", b"160000"}]
+                references.append((os.fsdecode(name), refs))
+            private = private_git_blobs(references, secrets, lambda ref, out: _git(area, "cat-file", "blob", ref, env=env, stdout=out))
+            gaps.extend(private.values())
+            pathspec.extend(f":(exclude,literal){name}" for name in private)
         with patch.open("wb") as output:
             _git(area, "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames",
-                 str(source["tree"]), after, env=env, stdout=output)
+                 *trees, *pathspec, env=env, stdout=output)
         changed = _out(_git(area, "diff", "--name-status", "--no-ext-diff", "--no-textconv",
-                            "--no-renames", str(source["tree"]), after, env=env))
+                            "--no-renames", *trees, *pathspec, env=env))
         ignored = [raw.decode("utf-8", "surrogateescape") for raw in _git(
             area, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z",
             env=env).stdout.split(b"\0") if raw]
@@ -733,6 +731,8 @@ def _capture_locked(data_root: Any, task_id: str, operation_id: str, *, hold: bo
             errors.append(f"{type(exc).__name__}: {exc}")
         summary = {"status": "capture_failed" if errors else "partial" if gaps else "retained",
                    "evidence_dir": str(evidence), "source": dict(source), "gaps": gaps, **delta}
+        summary["retained_bytes"] = delta.get("patch_bytes", 0) + sum(
+            {f["path"]: f["size"] for f in [*delta.get("files", []), *delta.get("named_evidence", [])]}.values())
         if errors:
             summary.update(error="; ".join(errors), area=str(area))
         if errors and {k: v for k, v in summary.items() if k != "evidence_dir"} == {

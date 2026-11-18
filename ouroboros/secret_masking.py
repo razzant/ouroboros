@@ -58,6 +58,66 @@ def is_custom_secret_setting_key(key: Any, *, known_setting_keys: Collection[str
     )
 
 
+def installation_secret_bytes():
+    """Exact configured values that Settings masks, including connection and MCP credentials."""
+    from urllib.parse import unquote, urlsplit
+    from ouroboros.config import SETTINGS_DEFAULTS, load_settings
+    from ouroboros.gateway.secret_rows import typed_connection_secrets
+
+    settings = load_settings(strict=True)
+    values = {v for k, v in settings.items() if isinstance(v, str) and v and (
+        k in MASKED_SECRET_SETTING_KEYS or is_custom_secret_setting_key(k, known_setting_keys=SETTINGS_DEFAULTS))}
+    values.update(typed_connection_secrets(settings.get("OUROBOROS_CONNECTIONS")))
+    for server in settings.get("MCP_SERVERS") or ():
+        if not isinstance(server, dict):
+            continue
+        if isinstance(token := server.get("auth_token"), str):
+            values.add(token)
+        headers = server.get("headers")
+        if isinstance(headers, dict):
+            values.update(v for v in headers.values() if isinstance(v, str))
+            values.update(value.split(" ", 1)[1] for name, value in headers.items() if isinstance(value, str)
+                          and str(name).lower() == "authorization" and value.lower().startswith("bearer "))
+        url = str(server.get("url") or "")
+        if url != mask_mcp_url(url):
+            values.add(url)
+            try:
+                parsed = urlsplit(url)
+                credential = parsed.password or parsed.username
+                if credential:
+                    values.update((credential, unquote(credential)))
+            except ValueError:
+                pass
+    return {form.encode() for value in values if value and value != CONFIGURED_SECRET_PLACEHOLDER
+            for form in (value, json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1])}
+
+
+class SecretScan:
+    """A binary stream sink matching configured values even across copy chunks."""
+    def __init__(self, values, sink=None):
+        self.sink = sink
+        self.values = values
+        self.overlap = max(map(len, values), default=1) - 1
+        self.tail = b""
+        self.found = False
+        self.size = 0
+
+    def write(self, data):
+        self.size += len(data)
+        if self.values and not self.found:
+            chunk = self.tail + data
+            self.found = any(value in chunk for value in self.values)
+            self.tail = chunk[-self.overlap:] if self.overlap else b""
+        if self.sink is not None and not self.found:
+            self.sink.write(data)
+        return len(data)
+
+    def read_from(self, handle):
+        while data := handle.read(1 << 20):
+            self.write(data)
+        return self.found
+
+
 def mask_prefixed_secret(value: Any, *, visible_chars: int) -> str:
     """Mask a token, retaining the prefix used by its calling surface."""
     text = str(value or "")
