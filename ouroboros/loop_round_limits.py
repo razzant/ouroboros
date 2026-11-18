@@ -313,25 +313,14 @@ def _drain_incoming_messages(
                 ack_content(entry)
                 continue
             if kind == KIND_QUIZ_ANSWER:
-                from ouroboros.answer_facts import answer_source, wordless_press
-                from ouroboros.owner_quiz import late_answer_owner_text
-                from ouroboros.owner_words import answered_card_reply
-                delivery = entry.get("quiz_delivery") or {}
-                answer = delivery.get("answer_snapshot")
-                owner_words = late_answer_owner_text(answer) if isinstance(answer, dict) else dmsg
-                from ouroboros.owner_relay import retain_owner_message
-                held = retain_owner_message(owner_ctx, (answer.get("delivery") or {}).get("answer_row")) if isinstance(answer, dict) else None
-                _loop()._record_owner_directive(  # the card it answers rides beside it, the asking task's words
-                    owner_ctx, source=answer_source(answer), content=owner_words, msg_id=str(entry.get("msg_id") or ""),
-                    origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id"), **_arrival(held, entry.get("ts"))},
-                    reply_to=answered_card_reply(answer, delivery.get("task_id")))
+                source = _record_quiz_delivery(owner_ctx, entry, dmsg)
                 deliver_quiz_answer(
                     entry, task_id, event_queue,
                     lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx,
                                                                        kind=OWNER_WORDS_KIND),
                 )
                 arrivals.append(len(messages) - 1)
-                if wordless_press(answer):
+                if source == OWNER_PRESS:
                     mark_press_arrival(owner_ctx, messages[-1])
                 ack_content(entry)
                 continue
@@ -418,6 +407,29 @@ def _drain_incoming_messages(
                 "[Host fact: owner_quote_handles held by this turn]\n" + json.dumps(handles), slot=owner_ctx)
             owner_ctx._quote_handles_shown = handles
     return controls
+
+
+def _record_quiz_delivery(ctx, entry: dict, text: str) -> str:
+    """Record the live answer and its card before delivery. Return its input type for the new arrival row."""
+    from ouroboros.answer_facts import answer_source
+    from ouroboros.owner_quiz import late_answer_owner_text
+    from ouroboros.owner_relay import retain_owner_message
+    from ouroboros.owner_words import answered_card_reply
+
+    delivery = entry.get("quiz_delivery") or {}
+    answer = delivery.get("answer_snapshot")
+    held = None
+    if isinstance(answer, dict):
+        text = late_answer_owner_text(answer)
+        held = retain_owner_message(ctx, (answer.get("delivery") or {}).get("answer_row"))
+    source = answer_source(answer)
+    _loop()._record_owner_directive(
+        ctx, source=source, content=text, msg_id=str(entry.get("msg_id") or ""),
+        origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id"),
+                **_arrival(held, entry.get("ts"))},
+        reply_to=answered_card_reply(answer, delivery.get("task_id")),
+    )
+    return source
 
 
 def _context_overflow_retries(tool_ctx: Any, record: str = "_context_overflow_retries") -> set:
