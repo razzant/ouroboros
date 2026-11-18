@@ -177,3 +177,22 @@ def test_a_carried_answer_reaches_a_member_as_an_act_or_as_their_words(block):
         assert words == ("(host record: my human pressed «1. Publish it» and wrote no words; the label is the text of "
                          "task asker)")
     assert "The label «Publish it» is the text of task asker" in body or "the text of task asker) and wrote" in body
+
+
+@pytest.mark.parametrize("door, reference", [
+    ("late quiz answer", {"late_answer": {"task_id": "elm-desk", "quiz_id": "elm-map"}}),
+    ("living submission", {"card_press": {"task_id": "elm-desk", "card_id": "card_0123456789abcdef", "request_id": "elm-press"}}),
+])
+def test_first_turn_guide_names_the_source_of_each_unavailable_input(tmp_path, door, reference):
+    from ouroboros.loop_messages import _initialize_owner_directives
+
+    origin = {"origin_message_ref": {"chat_id": 3, "client_message_id": "elm-opening"}}
+    ctx = SimpleNamespace(drive_root=tmp_path, task_metadata={**origin, **reference})
+    _initialize_owner_directives(ctx, [{"role": "user", "content": "Elm map"}])
+    [unavailable] = ctx._owner_directives
+    assert unavailable["source"] == "owner_card_input"
+    typed = SimpleNamespace(drive_root=tmp_path, task_metadata=origin)
+    _initialize_owner_directives(typed, [{"role": "user", "content": unavailable["content"]}])
+    assert typed._owner_directives[0]["source"] == "initial_user"
+    sentences = " ".join(_initialize_owner_directives.__doc__.split()).lower().split(". ")
+    assert any(door in sentence and f"``{unavailable['source']}``" in sentence for sentence in sentences)
