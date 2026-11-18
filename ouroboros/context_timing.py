@@ -19,7 +19,7 @@ receipt (a context build, a round's preparation); windows nest and never mix.
 
 ``host_step`` marks where one named step of a round's window ends; ``llm_observability.round_window`` opens
 that window and receipts the steps on the round's ``llm_round``. ``carry_spans`` names there the sections of a window
-measured before it (a resumed turn's prologue: restore, route rebind, tools).
+measured before it (its prologue: a turn's restore, route rebind and tools, a retained answer's evidence read).
 """
 
 from __future__ import annotations

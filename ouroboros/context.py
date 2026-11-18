@@ -891,7 +891,7 @@ def _capture_context_core(
     try:
         from ouroboros.subagent_runtime import review_facts_block
 
-        semi_stable_parts.append(review_facts_block(activity_out=review_activity))
+        semi_stable_parts.append(timed("review_facts", review_facts_block, activity_out=review_activity))
     except Exception:
         log.warning("Failed to build the Review block", exc_info=True)
     if not declared:

@@ -44,15 +44,17 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 log = logging.getLogger(__name__)
 
 SLEEP_MODES = ("in_slot", "warm", "cold")
+# What each named mode keeps, in the one wording every sleep_mode says (the task waits below, ``delegate_wait``).
+SLEEP_MODE_WORDS = ("in_slot keeps the process/call, yielding acting capacity. warm keeps your process; cold saves "
+                    "your continuation and releases it (non-transferable work refuses it). ")
 # The schema fragment both task-wait catalog entries splice in (``tools/control.py``).
 SLEEP_PARAMS: Dict[str, Dict[str, Any]] = {
     "sleep_mode": {"type": "string", "enum": list(SLEEP_MODES), "description": (
         "Omitted: you sleep; your process is released once nothing live keeps it (what does is named and the "
-        "process stays) and timeout_sec is the wake time. in_slot keeps the process/call, yielding acting capacity. "
-        "warm keeps your process; cold saves your continuation and releases it (non-transferable work refuses "
-        "it). A sleep wakes when this wait is satisfied, a waited child raises an attention beacon, addressed mail "
-        "or owner input arrives or an executor of yours asks a question, and the wait's result then reaches your "
-        "next request. A selected task whose record is lost wakes it as unknown, never success.")},
+        "process stays) and timeout_sec is the wake time. " + SLEEP_MODE_WORDS + "A sleep wakes when this wait is "
+        "satisfied, a waited child raises an attention beacon, addressed mail or owner input arrives or an executor "
+        "of yours asks a question, and the wait's result then reaches your next request. A selected task whose "
+        "record is lost wakes it as unknown, never success.")},
     "wake_after_sec": {"type": "integer", "minimum": 1, "description": (
         "A sleep only (not in_slot): also wake to inspect after this many seconds (not with wake_at). Omit to wake on events.")},
     "wake_at": {"type": "string", "description": "A sleep only (not in_slot): an absolute ISO-8601 inspection time with timezone."},
