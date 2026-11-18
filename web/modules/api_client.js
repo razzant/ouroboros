@@ -663,7 +663,7 @@ export const apiClient = {
     previewOnboardingSubagents: (payload) => jsonPost('/api/onboarding/subagents/preview', payload),
     ownerRuntimeMode: (mode) => jsonPost('/api/owner/runtime-mode', { mode }),
     ownerAutoGrant: (enabled) => jsonPost('/api/owner/auto-grant', { enabled: Boolean(enabled) }),
-    ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }),
+    ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }, { headers: APP_SETTINGS_ORIGIN }),
     /** Save room primary effort and ordered helper bounds. @param {import('./client_contract_types.js').OwnerEffortRangeRequest} range */
     ownerEffortRange: (range) => jsonPost('/api/owner/effort-range', range),
     /** @param {import('./client_contract_types.js').OwnerSubagentsModeRequest} choice
