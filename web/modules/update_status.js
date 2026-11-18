@@ -58,21 +58,13 @@ export function verifiedUpdatePlan(preflight) {
     return { plan, strategy };
 }
 
-// The plan pins the prose: only a description of exactly its range is shown. The owner's request is
-// not prose: it stays the live status's own, so a task that saves or ends meanwhile is still followed.
-export function bindPreflightDescription(status, preflight) {
-    const plan = preflight?.merge_plan || {};
-    const letter = preflight?.letter;
-    const matches = letter?.key?.base_sha === plan.base_sha && letter?.key?.target_sha === plan.target_sha;
-    const request = status?.letter?.request || null;
-    return { ...status, preflight_range: plan, checked_target_sha: plan.target_sha,
-        latest_sha: plan.target_sha, letter: matches ? { ...letter, request } : (request && { request }) };
-}
-
-/** The saved description of exactly these preflight pins, as Markdown to render; '' when there is none. */
+/** Only the saved Markdown for the confirmation's exact pins. The panel follows its own status reads. */
 export function preflightDescription(preflight) {
-    const letter = bindPreflightDescription({}, preflight).letter;
-    return letter?.description_current && letter.text ? String(letter.text) : '';
+    const plan = preflight?.merge_plan;
+    const letter = preflight?.letter;
+    return plan?.base_sha && plan.target_sha && letter?.description_current && letter.text
+        && letter.key?.base_sha === plan.base_sha && letter.key?.target_sha === plan.target_sha
+        ? String(letter.text) : '';
 }
 
 // The receipt's review keys this reader words; any other key is shown verbatim, never dropped.

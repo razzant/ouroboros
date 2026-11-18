@@ -1537,6 +1537,7 @@
 /** @typedef {import('./update_types.js').UpdateApplyErrorResponse} UpdateApplyErrorResponse */
 /** @typedef {import('./update_types.js').UpdateDescriptionRequest} UpdateDescriptionRequest */
 /** @typedef {import('./update_types.js').UpdateDescriptionResponse} UpdateDescriptionResponse */
+/** @typedef {import('./update_types.js').UpdateDescriptionLatestResponse} UpdateDescriptionLatestResponse */
 /** @typedef {import('./update_types.js').UpdateDescriptionErrorResponse} UpdateDescriptionErrorResponse */
 /** @typedef {import('./management_contract_types.js').UpdateProgress} UpdateProgress */
 /** @typedef {import('./update_types.js').UpdateProgressChangedOutbound} UpdateProgressChangedOutbound */

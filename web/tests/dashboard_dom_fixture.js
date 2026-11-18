@@ -23,6 +23,7 @@ export class NodeStub {
                 return enabled;
             },
             add: (name) => this.classList.toggle(name, true),
+            remove: (...names) => names.forEach((name) => this.classList.toggle(name, false)),
         };
     }
     get id() { return this.attrs.id || ''; }
