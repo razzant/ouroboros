@@ -1328,7 +1328,7 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
     generation between phases. ``admission_rollback`` additionally lets a never-started
     task's drive go without a settled row. Returns ``{"status": "removed" | "retained",
     "reason", "published"}`` and, given a prune ``report``, records a kept drive and Phase B's step seconds
-    (``under_q_sec``, on the pass's ``headless_task_drive_prune`` event, not its job row). ``owed``: the pass's one
+    (``under_q_sec``, on the event of a pass that writes its ``headless_task_drive_prune`` event, never its job row). ``owed``: the pass's one
     read of the kept-output debts (``owed_declarations``) for the first gate; the move rechecks with its own.
     """
     canonical = pathlib.Path(canonical_root).resolve(strict=False)

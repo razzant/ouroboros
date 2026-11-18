@@ -1320,7 +1320,7 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
     the sleep is armed in the mode named (``native_task_wait.sleep_choice``, as the task waits choose; omitted:
     ``model_sleep.request_default_sleep``) and its result is owed to the first model request after the wake, or it
     waits in this call (``in_slot``). An earlier call of the batch comes first: its armed wait refuses this one, its
-    staged hold is shown at once; with no continuation owner only arming is refused. A run this task holds only in this
+    staged hold is shown before anything waits (an in-slot wait shows it first); with no continuation owner only arming is refused. A run this task holds only in this
     process (``started_uncustodied``: its STARTED row never landed) is one no durable source can wake a sleep on, so a
     wait selecting it answers now: with what is already there, else with that run's one addressed read."""
     from ouroboros import model_sleep

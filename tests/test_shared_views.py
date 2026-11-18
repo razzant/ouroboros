@@ -521,7 +521,7 @@ def test_a_part_with_keys_of_mixed_types_is_redacted_as_the_whole_walk(tmp_path,
 @pytest.mark.parametrize("count", [2, 80])
 def test_shared_publication_prepares_directories_once_per_operation(tmp_path, monkeypatch, count, umask):
     """Actual mkdir/chmod traffic stays constant and every part ends private, whatever the install's umask: a new
-    file is moded at most once (one that starts private is left as it is), an existing private one only checked
+    file is moded at most once, an existing private one only checked
     (POSIX), and an existing file of any other mode repaired."""
     mkdir, chmod = pathlib.Path.mkdir, obs.os.chmod
     directories, modes = [], []
