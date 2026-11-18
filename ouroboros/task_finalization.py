@@ -270,6 +270,9 @@ def prepare_terminal_send_event(
         )
     usage["delegate_terminal_reconciliation"] = custody_audit
     origin = str(usage.get("terminal_origin") or "")
+    if (not presence and task.get("_is_direct_chat") and origin == TERMINAL_ORIGIN_MODEL_FINAL
+            and (work := usage.get("about_work_task_id"))):
+        send_event.setdefault("progress_meta", {})["about_work_task_id"] = work
     notice = str(usage.get("terminal_provider_notice") or "")
     # One voice: the host disclosure stays a typed field OF THE RESULT (CLI
     # stderr, --jsonl, parent handoff, reviewers, synthesis, the child-result

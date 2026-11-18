@@ -478,8 +478,9 @@ def _start_task(
                "and it is not this turn's deferred work." if private else "")
             + (f"\n{effort_note}" if effort_note else "")
         )
-        if not private and not presence_carrier and getattr(ctx, "is_direct_chat", False):
+        if not private and not presence_carrier and _routing_issuer(ctx)["kind"] == ISSUER_OWNER_TURN:
             ctx._confirmed_reply_works = {*getattr(ctx, "_confirmed_reply_works", ()), tid}
+            response += f"\nFor a reply confirming this handoff, use finish_task(about_work={tid!r}, …) so Replies address it."
         return _finish_swarm_handoff(ctx, evt, response, status="scheduled")
     if confirmation_status in {"rejected", "needs_manual_target", "not_started"}:
         shown_reason = (

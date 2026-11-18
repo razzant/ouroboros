@@ -308,10 +308,33 @@ class TestOwnerReplyLink:
         if source == "work_card":
             address = f"task:{target}"
         elif source == "handoff":
+            from ouroboros.task_finalization import TERMINAL_ORIGIN_MODEL_FINAL, prepare_terminal_send_event
+            from ouroboros.tools.control_runtime import completion_request
+
+            # Simulate a confirmed start receipt, not a pre-stamped dialogue row. Publish through the
+            # terminal event, bus and canonical store used by the owner's actual launcher.
+            launcher = _ctx(room.root, "launcher", 1)
+            launcher.is_direct_chat = True
+            launcher.task_metadata = {"origin_suppressed": True}
+            launcher._confirmed_reply_works = {target}
+            words = "I sent that to the work."
+            args = {"action": "finish", "answer": words}
+            plain, error = completion_request(launcher, args)
+            assert not error and "about_work_task_id" not in plain
+            rejected, error = completion_request(launcher, {**args, "about_work": "not-a-confirmed-work"})
+            assert error and rejected is None
+            selected, error = completion_request(launcher, {**args, "about_work": target})
+            assert not error
+            event = prepare_terminal_send_event(room.root, {"id": "launcher", "chat_id": 1, "_is_direct_chat": True},
+                       words, {"terminal_origin": TERMINAL_ORIGIN_MODEL_FINAL,
+                               "about_work_task_id": selected["about_work_task_id"]},
+                       {"type": "send_message", "chat_id": 1, "task_id": "launcher", "text": words},
+                       presence=False, custody_audit={})
+            from supervisor.message_bus import send_with_budget
+
+            send_with_budget(1, words, task_id="launcher", progress_meta=event["progress_meta"])
             write_task_result(room.root, "launcher", "completed", chat_id=1, _is_direct_chat=True)
-            row = ds.append(room.root, "chat", {"ts": "2026-11-01T10:00:00Z", "direction": "out", "chat_id": 1,
-                            "task_id": "launcher", "about_work_task_id": target, "text": "I sent that to the work."}).row
-            address = format_address(row_address(row))
+            address = next(frame["row_address"] for frame in room.host.frames if frame.get("content") == words)
         elif source == "nested":
             earlier, _ = _owner(room.bridge, room.root, "My first reply", address, message_id="earlier")
             address = format_address(row_address(earlier))
@@ -329,8 +352,13 @@ class TestOwnerReplyLink:
         current = []
         monkeypatch.setattr(router, "_route_main_followup", lambda *args, **kw: current.append(args[2]) or "")
         monkeypatch.setattr(router, "_decision_turn_metadata", lambda _ctx, _chat, _id, metadata, _roots: metadata)
-        task = {"id": target, "chat_id": room.nova, "root_task_id": "nova-root",
-                "delegation_role": "subagent" if source == "child" else "root"}
+        task = {"id": target, "chat_id": 1 if source == "child" else room.nova,
+                "root_task_id": "nova-root", "delegation_role": "subagent" if source == "child" else "root"}
+        if source == "child":
+            _bound(room.root, "nova-root", "nova", room.nova)
+            task["parent_task_id"] = "nova-root"
+            assert router._reply_reader(types.SimpleNamespace(DRIVE_ROOT=room.root, RUNNING={target: {"task": task}}),
+                                        target)[0]["chat_id"] == room.nova
         context = types.SimpleNamespace(DRIVE_ROOT=room.root, RUNNING={target: {"task": task}}, PENDING=[],
                                         handle_chat_direct=lambda *args, **kw: None)
 
@@ -372,11 +400,15 @@ class TestOwnerReplyLink:
         assert not _mailbox_path(room.root, "nova-root").exists()  # appearance is not a tell, wake or Resume
 
     def test_unrelated_main_speech_stays_in_main_and_an_addressed_reply_chain_keeps_the_work(self, room):
-        # A Main direct turn's answer: not a Project message.
+        # A Main direct turn's ordinary proactive words: not a work address.
+        from ouroboros.task_results import write_task_result
+
+        write_task_result(room.root, "main-turn", "completed", chat_id=1, _is_direct_chat=True)
         ds.append(room.root, "chat", {"ts": "2026-10-28T06:00:00Z", "direction": "out", "chat_id": 1,
-                                      "task_id": "main-turn", "text": "A Main answer."})
+                                      "type": "proactive_message", "task_id": "main-turn", "text": "A Main answer."})
         main_answer = format_address(row_address(ds.rows_by_identity(room.root, 1, "2026-10-28T06:00:00Z")[0].row))
-        _owner(room.bridge, room.root, "About the Main answer.", main_answer, message_id="owner-2")
+        ordinary, _ = _owner(room.bridge, room.root, "About the Main answer.", main_answer, message_id="owner-2")
+        assert "work_task_id" not in ordinary["reply_to"]
         first, _ = _owner(room.bridge, room.root, "About the notice.", room.notice["row_address"], message_id="owner-3")
         # The immediate quote stays the owner's row; its work address is inherited separately.
         nested, _ = _owner(room.bridge, room.root, "And about my own reply.", format_address(row_address(first)),

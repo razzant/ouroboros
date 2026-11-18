@@ -1495,6 +1495,8 @@ def _no_tool_final_answer(
         limit_ctx.accumulated_usage.update(wake_silent=True, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
     if summary := (getattr(tools._ctx, "_completion_selected", None) or {}).get("wake_summary"): limit_ctx.accumulated_usage["wake_summary"] = summary
     if (getattr(tools._ctx, "_completion_selected", None) or {}).get("fold_read") is True: limit_ctx.accumulated_usage["fold_read"] = True
+    if work := (getattr(tools._ctx, "_completion_selected", None) or {}).get("about_work_task_id"):
+        limit_ctx.accumulated_usage["about_work_task_id"] = work
     if getattr(tools._ctx, "_owner_message_sent", False): limit_ctx.accumulated_usage["owner_message_sent"] = True
     from ouroboros.swarm_receipt import retain_comparison
     retain_comparison(tools._ctx)

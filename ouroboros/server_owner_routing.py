@@ -472,7 +472,7 @@ def _deliver_to_reader(
 def _reply_reader(ctx: Any, task_id: str) -> tuple[dict, tuple]:
     """Read the exact work, including children, rather than enumerate the room's roots."""
     from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
-    from ouroboros.projects_registry import project_chat_for_task
+    from ouroboros.projects_registry import RoomResolver
     from ouroboros.task_carrier import execution_kind
     from supervisor.workers import direct_chat_turn
 
@@ -483,7 +483,7 @@ def _reply_reader(ctx: Any, task_id: str) -> tuple[dict, tuple]:
     task = task or direct
     if not task or execution_kind(task) == "presence":
         return {}, ("", None)
-    bound = project_chat_for_task(ctx.DRIVE_ROOT, task_id)
+    bound = RoomResolver(ctx.DRIVE_ROOT, strict=True)(task_id, task.get("parent_task_id"), task.get("root_task_id"))
     chat = int(bound or task.get("chat_id") or 0)
     if not chat or is_a2a_chat_id(chat):
         return {}, ("", None)

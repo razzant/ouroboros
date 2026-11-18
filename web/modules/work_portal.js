@@ -41,7 +41,13 @@ export function bindWorkPortal(record, project = {}) {
     const projectId = key(project?.id);
     if (!root || record.isSubagent || !projectId) return false;
     let changed = false;
-    if (root.dataset.portal !== '1') { root.dataset.portal = '1'; changed = true; }
+    if (root.dataset.portal !== '1') {
+        root.dataset.portal = '1';
+        // A portal cannot expand Details. Keep replies navigable in the source room.
+        const replies = root.querySelector('[data-live-work-replies]');
+        if (replies?.childElementCount) root.after(...replies.children);
+        changed = true;
+    }
     if (root.dataset.projectId !== projectId) { root.dataset.projectId = projectId; changed = true; }
     // In this form the card discloses nothing (the room holds what it would open): its "Details"
     // button is hidden (style.css) and the summary stays reading content. The reference below is the one door.

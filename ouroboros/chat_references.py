@@ -1,9 +1,8 @@
 """Host-owned message addresses and Reply facts, shared by every owner ingress.
 
-References describe what the sender pointed at. They do not select work or grant
-authority. Hash the persisted row before adding any history/view fields. A row the
-dialogue store cannot answer yet (its archive still importing, or unreadable) leaves
-the reference unresolved; it never blocks the message that carries it.
+References keep the quoted row distinct from any proven work address. Neither grants
+authority to act for the sender. Hash the persisted row before adding view fields;
+an importing or unreadable source leaves the quote unresolved, never guessed.
 """
 from __future__ import annotations
 
@@ -147,7 +146,7 @@ def _reply_work(root, row: dict) -> str | None:
     if not task_id:
         return None
     if row.get("card_row") or row.get("parent_task_id") or kind in {
-        "project_started", "project_handoff", "project_completion_summary", "task_summary", "proactive_message",
+        "project_started", "project_handoff", "project_completion_summary", "task_summary",
         "main_notice", "relay_entry", "relay_reply",
     }:
         return task_id

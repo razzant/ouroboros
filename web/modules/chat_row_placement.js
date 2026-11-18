@@ -2,6 +2,7 @@
 // and on replay (DESIGN "Unread"). A row's task_id names a task; by itself
 // it says neither who speaks, nor whether the row stands alone, nor whether it ends that task.
 import { isNonTerminalMediaHistoryRow, positiveTaskTerminalFact } from './chat_activity.js';
+import { isPortal } from './work_portal.js';
 
 // project_dialogue.ORIGIN_ADDRESSED_NOTICE_TYPES: a routing refusal names the task it
 // refused, never its speaker; it stays the issuing chat's own row.
@@ -31,7 +32,8 @@ export function replayConcludesTask(row) {
 // Move the canonical bubble, with its quote and receipt, only if this room has the card.
 export function placeWorkReply(feed, cards, row) {
     const work = row.reply_to?.work_task_id;
-    const slot = work && cards.get(work)?.root.querySelector('[data-live-work-replies]');
+    const record = work && cards.get(work);
+    const slot = record && !isPortal(record) && record.root.querySelector('[data-live-work-replies]');
     if (!slot?.isConnected || !row.client_message_id) return false;
     const bubble = [...feed.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
         .find(node => node.dataset.clientMessageId === row.client_message_id);

@@ -288,6 +288,8 @@ def _chat_record(
                 record[key] = dict(meta[key])
         if meta.get("reply_to_relay"):
             record["reply_to_relay"] = str(meta["reply_to_relay"])
+        if direction == "out" and isinstance(meta.get("about_work_task_id"), str) and meta["about_work_task_id"]:
+            record["about_work_task_id"] = meta["about_work_task_id"]
         if isinstance(meta.get("presence_contact"), dict):
             record["presence_contact"] = dict(meta["presence_contact"])
         if meta.get("late_answer"):
