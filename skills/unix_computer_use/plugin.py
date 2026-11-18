@@ -16,9 +16,9 @@ Input receipt semantics and partial-failure limits: see SKILL.md, "Input receipt
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-import hashlib
 import os
 import pathlib
 import platform
@@ -32,10 +32,20 @@ import uuid
 from types import MappingProxyType
 from typing import Any
 
+from .capture import CaptureMixin
 from .place import PlaceMixin
 from .remote import (  # noqa: F401 - re-exported names the tests and the key/hold_key remote branches use
-    _MAX_REMOTE_SHOT_BYTES, _OSWORLD_PKGS_PREFIX, _PYAUTOGUI_BASE_ALIASES, _PYAUTOGUI_MODS, PASTE_CHORD_ARGV,
-    RemoteBackends, _osworld_result_ok, cliclick_point, cliclick_keys, command_chord_argv, PBCOPY_LOCALE,
+    _MAX_REMOTE_SHOT_BYTES,
+    _OSWORLD_PKGS_PREFIX,
+    _PYAUTOGUI_BASE_ALIASES,
+    _PYAUTOGUI_MODS,
+    PASTE_CHORD_ARGV,
+    PBCOPY_LOCALE,
+    RemoteBackends,
+    _osworld_result_ok,
+    cliclick_keys,
+    cliclick_point,
+    command_chord_argv,
 )
 
 _TIMEOUT_SEC = 10
@@ -48,6 +58,7 @@ _TRANSFORM_FILE = "coord_transform.json"
 _CONNECTIONS_FILE = "connections.json"
 _ACTIVE_CONNECTION_FILE = "active_connection.txt"
 _REMOTE_BACKENDS = {"osworld_http", "ssh_macos"}
+_DISPLAY_CAPTURE = object()  # Only an omitted window selects the display. A malformed target never widens capture.
 
 
 def _png_dimensions(path: pathlib.Path) -> tuple[int, int]:
@@ -263,7 +274,7 @@ _MAC_MODS = {
 _ALL_MODS = {**_MAC_MODS, "super": "super", "meta": "meta"}
 
 
-class _ComputerUse(PlaceMixin, RemoteBackends):
+class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
     _MAX_IMAGE_W = _MAX_IMAGE_W
     _MAX_IMAGE_H = _MAX_IMAGE_H
 
@@ -750,11 +761,14 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
         return dest, (got_w or new_w), (got_h or new_h)
 
     def screenshot(self, *, job_id: str = "manual", max_width: int = _MAX_IMAGE_W,
-                   max_height: int = _MAX_IMAGE_H, app: str = "") -> str:
+                   max_height: int = _MAX_IMAGE_H, app: str = "", window: Any = _DISPLAY_CAPTURE) -> str:
         connection = self._connection_snapshot()
         _conn_name, conn = connection
         if conn.get("disabled"):
             return self._disabled_connection_error(_conn_name, conn)
+        if window is not _DISPLAY_CAPTURE:  # before any remote or display path
+            return self._window_screenshot(connection=connection, job_id=job_id, app=app, window=window,
+                                           max_width=max_width, max_height=max_height)
         backend = str(conn.get("backend") or "local").lower()
         if backend in ("osworld_http", "ssh_macos"):
             shot = (self._osworld_screenshot if backend == "osworld_http" else self._ssh_macos_screenshot)(
@@ -901,37 +915,6 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
     # ------------------------------------------------------------------
     # pointer actions
     # ------------------------------------------------------------------
-
-    def _capture_display(self, app: str = "") -> dict[str, Any]:
-        """The display to capture: the main one, or the one holding ``app``'s front window (bounds from CoreGraphics).
-
-        The answer says how the display was chosen (``selected_by``: default, app, or fallback when the RESOLVED app's
-        window could not be located) so a main-display capture is never presented as the named app's display. With a
-        display list, an app not resolved (refused, or no answer naming its ``target``) is an ``error``, uncaptured;
-        without one the app is not looked up (``app_display_unread``): the default capture stays capture-only."""
-        res = self._native("displays", timeout=10)
-        displays = res.get("displays") if res.get("ok") else None
-        query = str(app or "").strip()
-        if not displays:
-            reason = res.get("error") or "no display list"
-            return {"display_unread": reason, **({"app_display_unread": reason} if query else {})}
-        chosen = {**next((d for d in displays if d.get("main")), displays[0]), "selected_by": "default"}
-        if query:
-            tree = self._native("observe", json.dumps({"app": query, "max_nodes": 1, "timeout_ms": 1500}), timeout=15)
-            target = tree.get("target")
-            if tree.get("stage") == "resolve" or not isinstance(target, dict):  # unresolved or unknown: never a fallback
-                return {"error": self._target_error(query, tree)}
-            node = (tree.get("nodes") or [{}])[0] if tree.get("ok") else {}
-            if "x" in node and "w" in node:
-                cx, cy = node["x"] + node["w"] // 2, node["y"] + node["h"] // 2
-                for d in displays:
-                    if d["x"] <= cx < d["x"] + d["width"] and d["y"] <= cy < d["y"] + d["height"]:
-                        return {**d, "selected_by": "app", "app": target}
-                chosen["app_window_unread"] = f"the window's centre ({cx},{cy}) lies on no active display"
-            else:
-                chosen["app_window_unread"] = str(tree.get("error") or tree.get("reason") or "the window's bounds could not be read")
-            chosen["selected_by"] = "fallback"
-        return chosen
 
     def _backend_unavailable(self, action: str) -> str:
         return _json({
@@ -1570,7 +1553,7 @@ def register(api: Any) -> None:
     api.register_tool("activate_connection", impl.activate_connection, description="Select a configured connection as the active target for screenshot/input tools.", schema={"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}, timeout_sec=5)
     api.register_tool("use_local", lambda: impl.use_local(), description="Return computer-use tools to the local desktop backend.", schema={"type": "object", "properties": {}}, timeout_sec=5)
     api.register_tool("capabilities", lambda: impl.capabilities(), description="Who is in front, which OS grants this process holds (prompt-free preflights on macOS), whether app= targeting works here, and the installed backends.", schema={"type": "object", "properties": {}}, timeout_sec=45)
-    api.register_tool("screenshot", impl.screenshot, description="Capture the main display (or, with app=, the display holding that app's window on macOS; display.selected_by says which was captured), downscale to <=WXGA. mapped_input_available=true supplies an observation_id for coordinate input; otherwise capture-only, without a mapping. The image is attached automatically; an engine without vision gets its path.", schema={"type": "object", "properties": {"job_id": {"type": "string", "default": "manual"}, "max_width": {"type": "integer", "default": _MAX_IMAGE_W}, "max_height": {"type": "integer", "default": _MAX_IMAGE_H}, **_app}}, timeout_sec=90)
+    api.register_tool("screenshot", impl.screenshot, description="Capture the main display (or, with app=, the display holding that app's window on macOS; display.selected_by says which was captured), downscale to <=WXGA. mapped_input_available=true supplies an observation_id for coordinate input; otherwise capture-only, without a mapping. window= with app= (local macOS 14+) captures that one window even when covered, capture-only, never a display. The image is attached automatically; an engine without vision gets its path.", schema={"type": "object", "properties": {"job_id": {"type": "string", "default": "manual"}, "max_width": {"type": "integer", "default": _MAX_IMAGE_W}, "max_height": {"type": "integer", "default": _MAX_IMAGE_H}, **_app, "window": {"type": ["integer", "string"], "description": "Positive integer window ID or exact title string. Omit for a display capture."}}}, timeout_sec=90)
     # y is deliberately NOT in `required` for click/move: models recurringly emit the
     # whole point inside x ("663, 500") with y omitted, and a required-field rejection
     # then fires BEFORE the handler's _coerce_point can recover the pair.

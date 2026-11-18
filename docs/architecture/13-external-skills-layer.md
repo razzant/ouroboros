@@ -1,6 +1,6 @@
 # 13. External Skills Layer
 
-Discovery, review, grants, dependencies and enablement stay separate: a toggle grants no execution authority. Context snapshots: §6; protocol: `CREATING_SKILLS.md`.
+Discovery/review/grants/dependencies/enablement are separate; toggles grant no authority. Snapshots: §6; protocol: `CREATING_SKILLS.md`.
 
 ### Skill gates
 
@@ -10,7 +10,7 @@ State reads share an inventory for canonical identity and fresh peers (`skill_pe
 
 ### Skill review authority
 
-A reviewer's configured rights separately govern checks of untrusted code in its private copy: Full is not an OS sandbox, and checking grants no skill activation.
+Reviewer rights govern untrusted-code checks in private copies: Full is no OS sandbox; checking grants no activation.
 
 `skill_review.py` freezes loader-hashed bytes for the shared `tools/review_skill.py` wave. The skill ledger projects into `review.json`; seats return checklist findings. Change-focused re-review counts per root or manual content version. Install/update captures caller/scope before return; async review retains task, room, authority and budget. Skills-page calls are manual.
 
@@ -34,7 +34,7 @@ ClawHub lands atomically with file hashes; direct review attempts precede `skill
 
 ### Desktop actions and result views
 
-`skills/unix_computer_use/`: one macOS helper: quiet AX, app-local exposure, same-window reads, `until_text`. `paste_chord.js`: Command-plane V/shortcuts, local/SSH. Targeting, grants, receipts: `SKILL.md`; owned native fixtures.
+`skills/unix_computer_use/`: macOS quiet AX/exposure/same-window `until_text`; `macos_capture.py`/`macos_stream.py`: capture-only ScreenCaptureKit exact-window snapshot/task MCP stream. `paste_chord.js`: local/SSH Command-plane V/shortcuts. Targets/grants/receipts: `SKILL.md`; owned native fixtures.
 
 Composition/`PRODUCER_RESULT_SOURCE_JSON` vs `FULL_RESULT_SOURCE_JSON`: `tools/tool_result.py`, `loop_tool_execution.py`.
 

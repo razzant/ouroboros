@@ -1,9 +1,44 @@
 """Skill binding reads reviewed entry paths and lightweight conflict facts."""
+import json
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros import mcp_catalog, skill_mcp
+
+
+def test_agent_python_launch_prefers_valid_agent_interpreter_and_runs_isolated(tmp_path, monkeypatch):
+    root = tmp_path / "skill"
+    root.mkdir()
+    entry = root / "server.py"
+    entry.write_text("import json, sys\nprint(json.dumps([sys.flags.isolated, sys.dont_write_bytecode]))\n")
+    alias = tmp_path / "agent-python"
+    try:
+        alias.symlink_to(sys.executable)
+    except OSError as exc:
+        pytest.skip(f"Interpreter symlink unavailable: {exc}")
+    monkeypatch.setenv("OUROBOROS_AGENT_PYTHON", str(alias))
+    launch, reason = skill_mcp._derive_launch(SimpleNamespace(skill_dir=root),
+                                             {"entry": "server.py", "runtime": "agent_python"})
+    assert reason == ""
+    assert launch == {"command": str(alias), "args": ["-I", "-B", str(entry)], "cwd": str(root)}
+    result = subprocess.run([launch["command"], *launch["args"]], cwd=launch["cwd"],
+                            capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == [1, True]
+    assert not (root / "__pycache__").exists()
+
+
+def test_agent_python_invalid_override_falls_back_to_process_interpreter(tmp_path, monkeypatch):
+    entry = tmp_path / "server.py"
+    entry.write_text("pass\n")
+    monkeypatch.setenv("OUROBOROS_AGENT_PYTHON", str(tmp_path / "missing-python"))
+    launch, reason = skill_mcp._derive_launch(SimpleNamespace(skill_dir=tmp_path),
+                                             {"entry": entry.name, "runtime": "agent_python"})
+    assert reason == "" and launch["command"] == os.path.abspath(sys.executable)
+    assert launch["args"] == ["-I", "-B", str(entry)]
 
 
 def test_entry_alias_cannot_select_unreviewed_dependency(tmp_path, monkeypatch):
