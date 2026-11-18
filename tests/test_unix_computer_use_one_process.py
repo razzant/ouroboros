@@ -17,9 +17,9 @@ import sys
 import pytest
 
 from skills.unix_computer_use import macos_native as native
+from tests._unix_computer_use import KEYNOTE, SAFARI, app_dict, helper_op, inputs, mac, receipt
 from tests.test_unix_computer_use_effects import marked, ssh_mac
 from tests.test_unix_computer_use_element_act import LONG_BEFORE, LONG_LABEL, TIMEOUT, FakeAX, deck
-from tests.test_unix_computer_use_targeting import KEYNOTE, SAFARI, app_dict, helper_op, inputs, mac, receipt
 
 URL = "https://chat.example.test/archives/C0SYNTH/p1700000000000100?thread_ts=1700000000.000100&cid=C0SYNTH"
 

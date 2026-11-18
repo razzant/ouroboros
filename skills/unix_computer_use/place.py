@@ -222,7 +222,7 @@ class PlaceMixin:
             return [], err.strip() or out.strip() or f"wmctrl exit {rc}"
         return parse_wmctrl_rows(out), ""
 
-    def _x11_activate(self, query: str, wait_ms: int) -> dict[str, Any]:
+    def _x11_activate(self, query: str, wait_ms: int, *, ask_stop: bool = False) -> dict[str, Any]:
         rows, err = self._x11_windows()
         if err:
             return {"ok": False, "reason": "unsupported", "error": err}
@@ -237,6 +237,8 @@ class PlaceMixin:
         if not self._which_tool("xdotool"):
             return {"ok": False, "reason": "unsupported", "target": target, "front_before": before,
                     "error": "xdotool is not installed, so a switch cannot be verified"}
+        if ask_stop and (stopped := self._stop_before_activation(query, before, target)):
+            return stopped
         rc, _out, err2 = self._try(["wmctrl", "-i", "-a", target["window_id"]], timeout=10)
         if rc != 0:
             return {"ok": False, "reason": "activate_failed", "error": err2.strip() or f"wmctrl exit {rc}", "target": target, "front_before": before}
@@ -299,6 +301,8 @@ class PlaceMixin:
     def _ctx_from_activation(self, app: str, res: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         """An activation result (helper, X11 or remote) -> (refusal, context). ``delivered_to`` is only ever the
         verified front read, never the requested target."""
+        if res.get("reason") == "stopped":
+            return res, {}
         target: dict[str, Any] = {"requested": app, "resolved": res.get("target"), "activated": res.get("activated"),
                                   "verified": bool(res.get("verified"))}
         if res.get("already_front"):
@@ -321,7 +325,7 @@ class PlaceMixin:
         return None, ctx
 
     def _begin(self, app: str, wait_ms: int = 2000, *, raise_policy: str = "allow",
-               connection: tuple[str, dict[str, Any]] | None = None) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+               connection: tuple[str, dict[str, Any]] | None = None, ask_stop: bool = False) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         """Before an input: resolve and bring ``app`` forward (launch-free) and verify it is in front.
 
         Returns ``(refusal, context)``: a refusal sends nothing. With no ``app`` the context only records who
@@ -338,7 +342,8 @@ class PlaceMixin:
         if name != "local":
             if not app:
                 return None, {}
-            return self._ctx_from_activation(app, self._remote_activate_dict(conn, app, int(wait_ms), raise_policy=raise_policy))
+            res = self._remote_activate_dict(conn, app, int(wait_ms), raise_policy=raise_policy, ask_stop=ask_stop)
+            return self._ctx_from_activation(app, res)
         ctx: dict[str, Any] = {}
         if not app:
             ctx["front_before"] = ctx["delivered_to"] = self._front_local()
@@ -356,6 +361,8 @@ class PlaceMixin:
                     res = {"ok": same, "target": target, "front_before": front, "front": front,
                            "activated": False, "already_front": same, "verified": same,
                            "reason": "target_lost" if front else "front_unread", "resolved": target}
+            elif ask_stop and (stopped := self._stop_before_activation(app)):
+                return stopped, {}
             else:
                 res = self._native("activate", app, int(wait_ms), timeout=max(12, 3 * int(wait_ms) // 1000 + 10))
         elif plat == "linux" and self._session() != "wayland":
@@ -370,7 +377,7 @@ class PlaceMixin:
                            "activated": False, "already_front": same, "verified": same,
                            "reason": "target_lost" if front else "front_unread", "resolved": target}
             else:
-                res = self._x11_activate(app, int(wait_ms))
+                res = self._x11_activate(app, int(wait_ms), ask_stop=ask_stop)
         else:
             res = {"ok": False, "reason": "unsupported", "error": f"no application targeting on {plat}/{self._session()}"}
         return self._ctx_from_activation(app, res)
@@ -396,6 +403,38 @@ class PlaceMixin:
                 res = {"reason": "target_lost", "front": front, "resolved": target, **facts}
                 return {"ok": False, "reason": "target_lost", "error": self._target_error(app, res), "target": ctx["target"], "front": front}, step
         return None, step
+
+    def _stop_before_activation(self, app: str, front: dict[str, Any] | None = None,
+                                resolved: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """The native Mac helper resolves and may raise in one call. Other transports already read the target and front."""
+        target = {"requested": app, "resolved": resolved, "activated": False, "verified": False}
+        return self._stop_refusal({"target": target, "delivered_to": front}, first=True, after=front)
+
+    def _stop_refusal(self, step: dict[str, Any], *, first: bool, after: Any = _UNREAD) -> dict[str, Any] | None:
+        """Read Stop before a possible switch and again before each chord. For a chord this follows the local
+        front re-read and precedes the remote guest's front probe. PluginAPI 2.6 ``get_stop_state``: only
+        ``continue`` lets the chord start; any other answer sends nothing more and never resumes the rest. A refused
+        first chord is its own receipt (a switch that ran before it keeps its mark); a later one leaves the receipts of
+        the chords that ran to the sequence. What makes one action (a held key and its release, a drag) never asks. A
+        host without the method keeps the earlier contract: this skill declares plugin_api 2.0. ``after``: the front a
+        remote input has not read (None) instead of the local one."""
+        read = getattr(self.api, "get_stop_state", None)
+        state = read() if read is not None else {"status": "continue"}
+        if state.get("status") == "continue":
+            return None
+        refusal: dict[str, Any] = {"ok": False, "reason": "stopped", "dispatched": False,
+                                   "error": f"the host refused this step ({state.get('reason')}): {state.get('note')}"}
+        if (step.get("target") or {}).get("activated"):
+            refusal.update(observed_effect=True, activation_done=True)  # the switch ran before the input was withheld
+        return self._finish(refusal, step, after=after) if first else refusal
+
+    def _key_result(self, payload: dict[str, Any]) -> str:
+        """Serialize a control stop after the loop and _finish read its internal ok:false receipt."""
+        if payload.get("reason") == "stopped" and payload.get("dispatched") is False:
+            payload = {**payload, "status": "stopped"}
+            payload.pop("ok", None)
+            payload["note"] = f"{payload['note']}; {payload.pop('error')}"
+        return self._json_text(payload)
 
     def _finish(self, payload: dict[str, Any], ctx: dict[str, Any], stderr: str = "", *, after: Any = _UNREAD) -> dict[str, Any]:
         """Compose the place facts of an input receipt (any transport) and demote a dispatch the helper itself

@@ -316,16 +316,38 @@ def replay_evidence(drive_root: pathlib.Path, task_id: str, want: int = 200, *, 
             if row is not None:
                 observations.append({**base, "fact": fact, "live": False,
                     "receipt": base["receipt"] or row.get("completion_control") is True,
-                    # the live step row's reading; a call a control ended is no failure of the call (#3211)
-                    "status": ("held" if row.get("status") in SAFETY_HELD_STATUSES else row["status"]
+                    # As in the live row, controls and ordinary Stop are no failures. An independent error
+                    # stays an error even when the host also refused a further step.
+                    "status": ("held" if row.get("status") in SAFETY_HELD_STATUSES or is_plain_step_refusal(row) else row["status"]
                                if row.get("status") == HOST_INTERRUPTED else "error" if row.get("is_error")
                                else "ok") if slot == "settled" else "unknown",
                     "hostError": row.get("status") == "host_error",
                     # The row's own recorded host time, as written; a row without one stays without
                     # (never reconstructed), so a reader can order a call by its first observation.
                     **({"ts": row["ts"]} if isinstance(row.get("ts"), str) and row["ts"] else {}),
-                    **(_check_verdict(row) if slot == "settled" else {})})
+                    **(_check_verdict(row) if slot == "settled" else {}),
+                    **(_refusal_evidence(row) if slot == "settled" else {})})
     return {"observations": observations, "legacy": legacy, "coverage": coverage}
+
+
+def has_refused_step(row: Dict[str, Any]) -> bool:
+    meta = row.get("tool_result_meta")
+    return isinstance(meta, dict) and meta.get("refused_step") is True
+
+
+def is_plain_step_refusal(row: Dict[str, Any]) -> bool:
+    """A non-error completion refused a further step; an independent error keeps its own recorded status."""
+    return row.get("status") == "blocked" and has_refused_step(row)
+
+
+def _refusal_evidence(row: Dict[str, Any]) -> Dict[str, Any]:
+    """History renders the host's refusal beside the sanitized producer preview, as the live card does."""
+    if not has_refused_step(row):
+        return {}
+    meta = row["tool_result_meta"]
+    return {"recorded_status": row.get("status"),
+            "tool_result_meta": {k: meta[k] for k in ("refused_step", "control_reason") if k in meta},
+            "result_preview": truncate_for_log(str(row.get("result_preview") or ""), 500)}
 
 
 def _check_verdict(row: Dict[str, Any]) -> Dict[str, Any]:

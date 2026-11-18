@@ -1253,7 +1253,7 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
             self._validate_remote_keys(conn, remote_tokens)
         return prepared
 
-    def _send_key(self, prepared, connection, *, ctx, recheck=False, raise_policy="allow", timeout=None, keys=""):
+    def _send_key(self, prepared, connection, *, ctx, recheck=False, raise_policy="allow", timeout=None, keys="", ask_stop=False):
         timeout = timeout or (30 if connection[0] != "local" else _TIMEOUT_SEC)
         # A Command chord's receipt says so: its refusal (no key, no right to post) is a known "nothing was posted".
         method = {"method": "command_chord"} if isinstance(prepared, list) and prepared[0] == "osascript" else {}
@@ -1261,9 +1261,9 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
             import shlex
             ssh = shlex.join(prepared) if isinstance(prepared, list) else ""
             return self._remote_input(connection[1], prepared if not ssh else "", ssh_command=ssh, note=method or None,
-                                      ctx=ctx, later=recheck, raise_policy=raise_policy, timeout=timeout)
+                                      ctx=ctx, later=recheck, ask_stop=ask_stop, raise_policy=raise_policy, timeout=timeout)
         return self._exec_input_dict(prepared, ctx=ctx, recheck=recheck, extra={"keys": keys, **method},
-                                     raise_policy=raise_policy, timeout=timeout)
+                                     raise_policy=raise_policy, timeout=timeout, ask_stop=ask_stop)
 
     def key(self, *, keys: str, app: str = "", raise_policy: str = "allow") -> str:
         combo = str(keys or "").strip()
@@ -1276,18 +1276,17 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
         except ValueError as exc:
             return _json({"ok": False, "reason": "invalid_key_sequence", "error": str(exc),
                           "steps_done": 0, "steps_total": len(steps), "dispatched": False, "note": "the input was not sent"})
-        # The target is brought forward once; before every later step the front is read again and a targeted
-        # call stops, sending nothing more, when its application is no longer in front. The aggregate names
-        # every step's recipient when they differ: the 27.10 shape (cmd+tab, then an arrow) must not read as
-        # "both went to the same app".
-        refusal, ctx = self._begin(app, raise_policy=raise_policy, connection=connection)
+        # Raising the target and sending each chord are independent actions of this call.
+        refusal, ctx = self._begin(app, raise_policy=raise_policy, connection=connection, ask_stop=True)
         if refusal:
-            return _json(refusal)
+            if refusal.get("reason") == "stopped" and len(steps) > 1:
+                refusal.update(steps_done=0, steps_total=len(steps), keys=combo)
+            return self._key_result(refusal)
         if len(prepared) == 1:
-            return _json(self._send_key(prepared[0], connection, ctx=ctx, raise_policy=raise_policy, keys=combo))
+            return self._key_result(self._send_key(prepared[0], connection, ctx=ctx, raise_policy=raise_policy, keys=combo, ask_stop=True))
         results: list[dict[str, Any]] = []
         for index, command in enumerate(prepared):
-            results.append(self._send_key(command, connection, ctx=ctx, recheck=index > 0,
+            results.append(self._send_key(command, connection, ctx=ctx, recheck=index > 0, ask_stop=True,
                                            raise_policy=raise_policy, keys=steps[index]))
             if not results[-1].get("ok"):
                 break
@@ -1332,7 +1331,7 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
                 payload["note"] = last["note"]
         if len({json.dumps(r, sort_keys=True) if isinstance(r, dict) else "unknown" for r in recipients}) > 1:
             payload["steps_delivered_to"] = recipients
-        return _json(payload)
+        return self._key_result(payload)
 
     def hold_key(self, *, keys: str, duration_ms: int = 500, app: str = "", raise_policy: str = "allow") -> str:
         connection = self._connection_snapshot()
@@ -1441,13 +1440,13 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
                                            raise_policy=raise_policy, connection=connection))
 
     def _exec_input_dict(self, cmd: list[str], *, timeout: int = _TIMEOUT_SEC, extra: dict[str, Any] | None = None,
-                         app: str = "", ctx: dict[str, Any] | None = None, recheck: bool = False,
+                         app: str = "", ctx: dict[str, Any] | None = None, recheck: bool = False, ask_stop: bool = False,
                          before: Any = None, raise_policy: str = "allow", connection=None) -> dict[str, Any]:
         """One input process. Its successful exit is the receipt (``observed_effect``); a failed or timed-out
         process has an unknown outcome and carries none. With ``app`` the target is brought forward and verified
-        first; nothing is sent when that fails. With ``ctx`` (a later step of one call) the earlier switch is
-        reused and ``recheck`` reads the front again first. ``before`` runs after the target is verified and
-        before the input (the clipboard write of via=paste); its error message cancels the input."""
+        first; nothing is sent when that fails. With ``ctx`` (a later step of one call) the earlier switch is reused
+        and ``recheck`` reads the front again first. ``before`` runs after the target is verified and before the input
+        (the clipboard write of via=paste); its error cancels the input. ``ask_stop``: a key chord asks the Stop last."""
         if ctx is None:
             refusal, ctx = self._begin(app, raise_policy=raise_policy, connection=connection)
             if refusal:
@@ -1470,6 +1469,8 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
                     payload["observed_effect"] = True  # the switch ran before the input was cancelled
                     payload["activation_done"] = True
                 return self._finish(payload, step)
+        if ask_stop and (stopped := self._stop_refusal(step, first=not recheck)):
+            return stopped  # a key chord, the first included: the host's Stop, read last before its input
         rc, stdout, stderr = self._try(cmd, timeout=timeout)
         if rc != 0:
             payload = {"ok": False, "error": stderr.strip() or stdout.strip() or f"exit {rc}", "cmd": cmd,
