@@ -1364,7 +1364,7 @@ def test_history_keeps_speaking_order_between_the_owners_words_and_the_answer(mo
                 assert not host.captions, 'a heard answer waits for the words begun before it'
                 assert 'pending_spoken' in calls[0].quiet_blockers(), 'a held answer keeps the call from switching'
                 session.input_pending = False
-                # A failed transcript converts to no event: the words close once nothing is said or awaited.
+                # A failed transcript reported with no caption: the words close once nothing is said or awaited.
                 session.events.put_nowait([] if engine == 'never-recognised' else [caption('owner', 'asked', 'What time is it?')])
             expected = ['Noon.'] if engine == 'never-recognised' else ['What time is it?', 'Noon.']
             await until(lambda: len(host.captions) == len(expected))
@@ -1434,12 +1434,13 @@ def test_an_answer_held_for_newer_words_never_holds_an_older_answer(monkeypatch)
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('recognition', ['newer-first', 'older-failed'])
+@pytest.mark.parametrize('recognition', ['newer-first', 'newer-unnamed', 'older-failed'])
 def test_a_newer_transcript_landing_first_never_releases_an_older_answer(monkeypatch, recognition):
     """#3633, OpenAI and xAI: transcripts of different utterances land in any order, so the adapter names each
     utterance's item as it begins. The owner asked, heard the answer and spoke again while the question still awaited
-    its transcript. The newer words are written as they come and never release the answer; its own words do, as does
-    their failed recognition (an empty final), ahead of newer words."""
+    its transcript. The newer words are written as they come and never release the answer, also when their start named
+    no item; its own words do, as does their failed recognition (an empty final), ahead of newer words, and that empty
+    final leaves the meeting's evidence to the words it describes."""
     from skills.live_conversation import driver
     calls = []
 
@@ -1468,8 +1469,9 @@ def test_a_newer_transcript_landing_first_never_releases_an_older_answer(monkeyp
             await until(lambda: 'noon' in calls[0].audio_ms)
             host.hub.events.append(cp.PeerControl('peer', cp.PEER_OWNER, {'type': 'played', 'item_id': 'noon', 'played_ms': 20}))
             await until(lambda: calls[0].spoken_rows)
-            session.events.put_nowait([LiveEvent('input_started', {'item_id': 'more'}), LiveEvent('input_done')])
-            if recognition == 'newer-first':
+            named = {} if recognition == 'newer-unnamed' else {'item_id': 'more'}  # xAI may name no item at its start
+            session.events.put_nowait([LiveEvent('input_started', named), LiveEvent('input_done')])
+            if recognition in ('newer-first', 'newer-unnamed'):
                 session.events.put_nowait([caption('owner', 'more', 'One more thing.')])
                 await until(lambda: texts(host))
                 await asyncio.sleep(.05)
@@ -1478,6 +1480,11 @@ def test_a_newer_transcript_landing_first_never_releases_an_older_answer(monkeyp
                 session.events.put_nowait([caption('owner', 'asked', 'What time is it?')])
                 expected = ['One more thing.', 'What time is it?', 'Noon.']
             else:
+                host.hub.events.extend([  # the newer words are a meeting participant's
+                    cp.PeerControl('meeting', cp.PEER_MEETING, {'type': 'participant', 'label': 'Alice', 'speaking': True}),
+                    cp.PeerAudio('meeting', cp.PEER_MEETING, b'\0\0'),
+                    cp.PeerControl('meeting', cp.PEER_MEETING, {'type': 'participant', 'label': 'Alice', 'speaking': False})])
+                await until(lambda: not host.hub.events)
                 session.events.put_nowait([caption('owner', 'asked', '')])  # its recognition failed
                 await until(lambda: texts(host))
                 assert texts(host) == ['Noon.'], 'its own words, closed without text, release it at once'
@@ -1486,6 +1493,8 @@ def test_a_newer_transcript_landing_first_never_releases_an_older_answer(monkeyp
                 expected = ['Noon.', 'One more thing.']
             await until(lambda: len(host.captions) == len(expected))
             assert texts(host) == expected
+            if recognition == 'older-failed':
+                assert host.captions[-1]['heard'] and host.captions[-1].get('speaker_label') == 'Alice'
         finally:
             host.hub.ended_by_owner = True
             await asyncio.wait_for(task, 2)

@@ -361,8 +361,11 @@ class GrokSession(JsonSession):
             self.input_transcripts.add(item)
         if kind == 'conversation.item.input_audio_transcription.failed':
             self.input_transcripts.discard(item)
-            # The model still received the audio; these words close with no text, wherever newer ones stand.
-            return [LiveEvent('caption', {'speaker': 'owner', 'item_id': item, 'text': '', 'final': True})]
+            # The model still received the audio. These words close once, wherever newer ones stand, with what was
+            # received of them, or with no text.
+            text = self.text.pop(('owner', item), '')
+            return [LiveEvent('caption', {'speaker': 'owner', 'item_id': item, 'text': text, 'final': True,
+                                          **({'replace': True, 'incomplete': True} if text else {})})]
         if kind in {'response.audio.delta', 'response.output_audio.delta'}:
             self.output_transcripts.add(item)
             self.item_responses[item] = event.get('response_id') or self.active_response

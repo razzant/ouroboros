@@ -766,11 +766,17 @@ class _Call:
                 if data["text"]:  # an empty final is a recognition that failed: it closes its words and says none
                     await self.rows.put(dict(speaker=speaker, text=text, item_id=item, heard=heard,
                         **({"speaker_label": ", ".join(sorted(self.meeting_speakers))} if heard and self.meeting_speakers else {})))
-                words = self.word_items.get(item) or min(self.words_closed + 1, self.words_begun)  # else the oldest open
+                words = self.word_items.get(item)
+                if words is None:  # an item never named: the oldest words still open that no item names
+                    named = set(self.word_items.values())
+                    words = next((number for number in range(self.words_closed + 1, self.words_begun + 1)
+                                  if number not in self.words_shut and number not in named), 0)
+                    if words and item:
+                        self.word_items[item] = words  # its repeat closes nothing more
                 if words > self.words_closed:
                     self.words_shut.add(words)
                 await self.write_spoken(self.words_closed)
-            if speaker == "owner":
+            if speaker == "owner" and data["text"]:  # words carry the meeting's evidence; an empty final has none
                 self.meeting_audio = False
                 self.meeting_speakers.clear()
 
@@ -1063,8 +1069,8 @@ class _Call:
                         raise RealtimeSetupError("provider_closed", data.get("detail") or "provider ended the live connection")
                     self.lost_connection(resuming=resumable and self.resume_allowed())
                     return
-            # Every input fact this batch moved is applied: words no longer said or awaited have closed, a failed
-            # recognition included, which converts to no event of its own.
+            # Every input fact this batch moved is applied: words no longer said or awaited have closed, including a
+            # failed recognition that its adapter reports with no caption.
             await self.write_spoken(self.words_closed if self.input_unsettled() else self.words_begun)
             if refusal is not None:
                 raise refusal

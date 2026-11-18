@@ -1973,12 +1973,13 @@ native input/transcription work and open calls; the feature also waits for playb
 never for a running tool. Optional `input_pending` reports words said or awaiting recognition, apart from open calls:
 a forced switch waits for it, and a loss with it set gives a fresh session the hearing-gap fact (absent, VAD events decide).
 `input_started` may name a `response_id` already begun for its words when no VAD start preceded them, so that response
-answers them. History keeps speaking order: a spoken row follows the owner's words begun before its response, never
-words begun after it, and owner rows are never held. Words are counted by `input_started`, which may name the `item_id`
-their transcript will carry (transcripts of different utterances can land in any order); a final owner caption closes
-the words of its item, else the oldest still open, and a converted batch that leaves nothing said or awaiting
-recognition closes them all. A recognition that failed is an empty final owner caption: it closes its words and writes
-none. A native resume needs a handle published after the open calls and last native result; one history outran
+answers them. History keeps speaking order: a spoken row follows the owner's words begun before its response and never
+waits for words begun after it; owner rows are never held. Words are counted by `input_started`, which may name the
+`item_id` their transcript will carry (transcripts of different utterances can land in any order); a final owner caption
+closes the words of its item, else the oldest still open, and a converted batch that leaves nothing said or awaiting
+recognition closes them all; a caption whose item was never named closes the oldest open words no item names. A
+provider that names an item owes it one final owner caption: when recognition fails, the words received so far
+(`incomplete`) or an empty text, which closes the words and writes no row. A native resume needs a handle published after the open calls and last native result; one history outran
 while opening continues fresh. OpenAI withholds `response.create` while its own call awaits output: speech on the issuing
 connection, or after a further call behind a running effect, is answered once that output is written.
 `final_captions()` returns received unfinished words at teardown without new wire work.
