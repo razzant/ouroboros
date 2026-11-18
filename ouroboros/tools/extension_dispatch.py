@@ -240,7 +240,28 @@ def _extension_result(
     return ToolResult(status=status, code=code, text=text, meta=meta)
 
 
-def _extension_completion(result: str, safety_msg: str, *, handoff: Optional[Dict[str, Any]] = None) -> ToolResult:
+def _refusal_note(latch: Dict[str, Any], account: str) -> str:
+    return (f"⚠️ OWNER_OPERATION_REFUSED: the host refused this call a further action: {latch['note']} "
+            f"({latch['reason']}). It confirms only that refusal; {account}. Reconcile what ran before "
+            "repeating any of it.")
+
+
+def _refused_failure(ctx: Any, handoff: Optional[Dict[str, Any]], result: ToolResult) -> ToolResult:
+    """Keep a failure's type and provenance; a refusal of further work is a separate host fact.
+    No returned report means no producer receipt, including when a timed-out handler has yet to unwind."""
+    from ouroboros.extension_plugin_api import close_stop_binding
+
+    latch = close_stop_binding(ctx, handoff)
+    if latch is None:
+        return result
+    note = _refusal_note(latch, "no extension report was returned to establish what ran")
+    return ToolResult(status=result.status, code=result.code, text=f"{result.text}\n\n{note}",
+                      meta={**result.meta, "control_reason": latch["reason"], "refused_step": True},
+                      producer_text=result.producer_text, host_annotations=(*result.host_annotations, note))
+
+
+def _extension_completion(result: str, safety_msg: str, *, handoff: Optional[Dict[str, Any]] = None,
+                          ctx: Any = None, joined: bool = True) -> ToolResult:
     """Type one completed extension body, reading its own failure self-report.
 
     The dispatcher used to declare success without looking at the body, so a
@@ -248,7 +269,15 @@ def _extension_completion(result: str, safety_msg: str, *, handoff: Optional[Dic
     call (measured on the v6.81.1 OSWorld run: 329 such calls, including HTTP
     500s from every screenshot after the guest control server died). The
     structured check is the adapter's, so there is exactly one implementation of
-    what a self-reported failure is."""
+    what a self-reported failure is.
+
+    A host refusal of further work annotates the result without hiding its failure.
+    Only an otherwise successful completion becomes ``OWNER_OPERATION_REFUSED``:
+    neither full success nor proof of no effects. The body stays the producer's
+    data (``producer_text``); the trailing host note attests only the refusal."""
+    from ouroboros.extension_plugin_api import close_stop_binding
+
+    latch = close_stop_binding(ctx, handoff)
     reported_failure = _structured_failure(result)
     base = _extension_result(
         "error" if reported_failure else "ok",
@@ -261,11 +290,18 @@ def _extension_completion(result: str, safety_msg: str, *, handoff: Optional[Dic
             _compose_execute_result_result("", base, "", safety_msg),
             meta_updates={"safety_warning": True},
         )
-    if handoff is not None:
+    if handoff is not None and joined:
         # Host-owned invocation sidechannel, never extension text/metadata.
         # Only the supported local call ended; independent effects keep custody.
         handoff["local_extension_returned"] = True
-    return base
+    if latch is None:
+        return base
+    note = _refusal_note(latch, "the report above is the extension's own account of what ran")
+    return ToolResult(status=base.status if reported_failure else "blocked",
+                      code=base.code if reported_failure else "OWNER_OPERATION_REFUSED", text=f"{base.text}\n\n{note}",
+                      meta={**base.meta, "control_reason": latch["reason"], "refused_step": True},
+                      producer_text=base.text if base.producer_text is None else base.producer_text,
+                      host_annotations=(*base.host_annotations, note))
 
 
 def _generation_digest_for(ext_tool: Dict[str, Any]) -> str:
@@ -420,7 +456,7 @@ def _dispatch_extension_tool_untagged(
             # The child refused a payload other than the bound one before any handler ran (typed, retryable).
             status, code = {"timeout": ("timeout", "EXTENSION_TIMEOUT"),
                             PAYLOAD_REPLACED: ("unavailable", "EXTENSION_UNAVAILABLE")}.get(kind, ("error", "EXTENSION_ERROR"))
-            return _extension_result(
+            return _refused_failure(ctx, handoff, _extension_result(
                 status,
                 code,
                 text,
@@ -429,8 +465,8 @@ def _dispatch_extension_tool_untagged(
                 # pre-Popen failure (resolve/load/env/payload staging) never
                 # stamps physical_dispatch — the child never existed.
                 dispatched=extension_child_was_spawned(exc),
-            )
-        return _extension_completion(result_str, _ext_safety_msg, handoff=handoff)
+            ))
+        return _extension_completion(result_str, _ext_safety_msg, handoff=handoff, ctx=ctx)
 
     handler = ext_tool["handler"]
     try:
@@ -470,38 +506,63 @@ def _dispatch_extension_tool_untagged(
         if isinstance(exc, StoreError) and handoff is not None and handoff.get("not_started") is True:
             raise  # registry snapshots the shared positive no-entry fact
         text = f"⚠️ TOOL_ERROR ({name}): extension tool failed: {failure_words(skill_name, exc)}"
-        return _extension_result("error", "EXTENSION_ERROR", text, dispatched=True)
+        return _refused_failure(ctx, handoff, _extension_result("error", "EXTENSION_ERROR", text, dispatched=True))
 
     if inspect.iscoroutine(result):
+        from concurrent.futures import Future
+        from ouroboros.extension_plugin_api import await_stop_bound_call, close_stop_binding
         from ouroboros.tool_custody import hold_invocation
         if handoff is not None:
             handoff["settled"] = False  # constructing a coroutine did not execute it
         release_runner = hold_invocation()
-        box: Dict[str, Any] = {}
+        receipt: Future[str | ToolResult] = Future()
         timeout = max(1, int(ext_tool.get("timeout_sec") or 60))
+
+        def timed_out(detail: str) -> ToolResult:
+            text = f"⚠️ TOOL_ERROR ({name}): extension async handler failed: TimeoutError: {detail}"
+            return _refused_failure(ctx, handoff, _extension_result(
+                "timeout", "EXTENSION_TIMEOUT", text, timeout_sec=timeout, dispatched=True))
+
+        def failed(exc: BaseException) -> None:
+            if receipt.done():
+                return
+            if isinstance(exc, controls):
+                close_stop_binding(ctx, handoff)
+                receipt.set_exception(exc)
+            else:
+                text = f"⚠️ TOOL_ERROR ({name}): extension async handler failed: {failure_words(skill_name, exc)}"
+                receipt.set_result(_refused_failure(ctx, handoff, _extension_result(
+                    "error", "EXTENSION_ERROR", text, dispatched=True)))
+
+        async def invoke():
+            try:
+                value = await await_stop_bound_call(result, ctx, handoff)
+                if not receipt.done():
+                    text = str.__str__(value) if isinstance(value, str) else str(value)
+                    receipt.set_result(text)
+            except BaseException as exc:
+                failed(exc)
+
+        async def bounded():
+            try:
+                task = submit_async_operation(ctx, invoke)
+            except BaseException:
+                close_stop_binding(ctx, handoff)
+                result.close()
+                raise
+            done, _pending = await asyncio.wait({task}, timeout=timeout)
+            if task not in done:
+                receipt.set_result(timed_out(""))
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            else:
+                task.result()
 
         def _runner() -> None:
             try:
-                async def _bounded():
-                    try:
-                        task = submit_async_operation(ctx, lambda: result)
-                    except controls:
-                        result.close()
-                        raise
-                    done, _pending = await asyncio.wait({task}, timeout=timeout)
-                    if task not in done:
-                        task.cancel()
-                        await asyncio.gather(task, return_exceptions=True)
-                        return False, None
-                    return True, task.result()
-
-                completed, value = asyncio.run(_bounded())
-                if completed:
-                    box["value"] = value
-                else:
-                    box["host_timeout"] = True
+                asyncio.run(bounded())
             except BaseException as exc:
-                box["error"] = exc
+                failed(exc)
             finally:
                 if handoff is not None:
                     handoff["settled"] = True
@@ -518,43 +579,26 @@ def _dispatch_extension_tool_untagged(
         try:
             thread.start()
         except BaseException:
+            close_stop_binding(ctx, handoff)
             result.close()
             if handoff is not None:
                 handoff["settled"] = True
             release_runner()
             raise
         thread.join(timeout=timeout + 2)
-        if thread.is_alive():
-            text = f"⚠️ TOOL_ERROR ({name}): extension async handler failed: TimeoutError: handler exceeded timeout"
-            return _extension_result(
-                "timeout",
-                "EXTENSION_TIMEOUT",
-                text,
-                timeout_sec=timeout,
-                dispatched=True,
-            )
-        if box.get("host_timeout"):
-            text = f"⚠️ TOOL_ERROR ({name}): extension async handler failed: TimeoutError: "
-            return _extension_result(
-                "timeout",
-                "EXTENSION_TIMEOUT",
-                text,
-                timeout_sec=timeout,
-                dispatched=True,
-            )
-        if "error" in box:
-            exc = box["error"]
-            if isinstance(exc, controls):
-                raise exc
-            text = f"⚠️ TOOL_ERROR ({name}): extension async handler failed: {failure_words(skill_name, exc)}"
-            return _extension_result("error", "EXTENSION_ERROR", text, dispatched=True)
-        if "value" not in box:
-            return _extension_result("error", "EXTENSION_ERROR",
-                f"⚠️ TOOL_ERROR ({name}): extension async runner ended without a result", dispatched=True)
-        result = box["value"]
+        alive = thread.is_alive()
+        if receipt.done():
+            saved = receipt.result()
+            if isinstance(saved, ToolResult):
+                return saved
+            return _extension_completion(saved, _ext_safety_msg, handoff=handoff, ctx=ctx, joined=not alive)
+        if alive:
+            return timed_out("handler exceeded timeout")
+        return _refused_failure(ctx, handoff, _extension_result("error", "EXTENSION_ERROR",
+            f"⚠️ TOOL_ERROR ({name}): extension async runner ended without a result", dispatched=True))
 
     result_str = result if isinstance(result, str) else str(result)
-    return _extension_completion(result_str, _ext_safety_msg, handoff=handoff)
+    return _extension_completion(result_str, _ext_safety_msg, handoff=handoff, ctx=ctx)
 
 
 def dispatch_extension_tool(

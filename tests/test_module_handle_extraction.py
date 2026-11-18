@@ -216,10 +216,8 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "ouroboros/tools/git_vcs_ops.py": ("ouroboros/tools/git.py", "_git", frozenset({
         "_acquire_git_lock", "_authorized_managed_update_resolver",
-        "_binding_relative_path", "_current_runtime_mode", "_ff_pull",
-        "_limit_git_output", "_release_git_lock",
-        "_run_git_network_cmd", "_vcs_binding", "_vcs_result",
-        "binding_targets_system_repo", "build_resolved_resource_binding",
+        "_current_runtime_mode", "_release_git_lock", "_run_git_network_cmd",
+        "binding_targets_system_repo",
         "is_protected_runtime_path", "normalize_repo_path", "protected_paths_in",
         "run_cmd",
     })),

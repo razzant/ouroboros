@@ -24,6 +24,7 @@ from ouroboros.observability import without_finalization_timing
 from ouroboros.outcomes import SAFETY_HELD_STATUSES, normalize_outcome_axes
 from ouroboros.subagent_messages import initiator_meta
 from ouroboros.synthesis_cost_text import _summary_row_cost_fields
+from ouroboros.tool_call_log import has_refused_step, is_plain_step_refusal
 from ouroboros.tool_capabilities import routing_action_for_tool
 from ouroboros.utils import append_jsonl, truncate_review_artifact as _truncate_with_notice, utc_now_iso
 
@@ -50,9 +51,9 @@ def task_tool_metrics(llm_trace: dict) -> dict:
     calls = llm_trace.get("tool_calls") or []
     metrics = {
         "tool_calls": None if unavailable else len(calls),
-        "tool_errors": None if unavailable else sum(  # a call Safety held took no effect, and is no tool error
+        "tool_errors": None if unavailable else sum(  # a host refusal alone is not a failed tool
             1 for call in calls if isinstance(call, dict) and call.get("is_error")
-            and call.get("status") not in SAFETY_HELD_STATUSES),
+            and call.get("status") not in SAFETY_HELD_STATUSES and not is_plain_step_refusal(call)),
         # The addressing calls among them (tool_capabilities owns the family), so
         # a replayed block can tell a receipt-only turn from real work without
         # a client list of tool names.
@@ -190,7 +191,13 @@ def build_trace_summary(llm_trace: dict) -> str:
                 facts.append(f"signal={tc.get('signal')}")
             fact_suffix = f" [{', '.join(facts)}]" if facts else ""
             held = status in SAFETY_HELD_STATUSES  # it carries is_error, yet it is no error
-            suffix = " → HELD BY SAFETY" if held else " → ERROR" if tc.get("is_error") else ""
+            suffix = ""
+            if held:
+                suffix = " → HELD BY SAFETY"
+            elif tc.get("is_error") and not is_plain_step_refusal(tc):
+                suffix = " → ERROR"
+            if has_refused_step(tc):
+                suffix += " → FURTHER STEP REFUSED"
             return f"{index + 1}. {name}({args_str}){fact_suffix}{suffix}"
 
         if n > 30:

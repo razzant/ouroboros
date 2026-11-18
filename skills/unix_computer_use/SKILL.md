@@ -1,7 +1,7 @@
 ---
 name: unix_computer_use
 description: Local and remote desktop observation and input, with macOS semantic actions, explicit foreground control, screenshot-bound coordinates and honest outcome receipts.
-version: 0.7.3
+version: 0.8.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -302,7 +302,14 @@ Acting in a named application (`app=`):
   not be sent keeps its mark (`activation_done`). Without `app=` every step
   goes to whatever is in front at that moment, and the receipt names each
   step's recipient when they differ (`steps_delivered_to`, `"unknown"` for a
-  step whose front could not be read). On a sequence that stopped, `dispatched`
+  step whose front could not be read). `key` asks `get_stop_state` before a
+  command that can raise the target and again before each chord. On macOS the
+  activation helper also resolves the app. X11, OSWorld and SSH check after
+  resolving it, just before requesting the switch. Each chord checks after
+  the local front recheck or before the guest's own front probe. A refusal
+  returns `status: stopped` with the host's reason. A confirmed switch keeps
+  its receipt. The remaining chords stay unsent. Stop can arrive between
+  a check and its command. A hold includes the release, and a drag stays whole. On a sequence that stopped, `dispatched`
   is the fact for the step that failed (`steps_done` counts the steps that ran
   before it; a step whose remote call did not answer is `null`, and the note
   says so, never "not sent"). A tool's registered budget covers one

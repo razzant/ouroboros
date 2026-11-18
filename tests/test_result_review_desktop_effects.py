@@ -29,10 +29,10 @@ from ouroboros.tools import review_result as rr
 from skills.unix_computer_use import macos_native as native
 from tests._review_session_route_shared import _owned_gateway_uses_each_test_transport  # noqa: F401
 from tests._tool_result_delivery_shared import measured_fit
+from tests._unix_computer_use import KEYNOTE, app_dict
 from tests.test_result_review import CRITICAL, _floor_ctx, _seam
 from tests.test_unix_computer_use_effects import API, TIMEOUT, Guest, Transport, fail_at, load_plugin
 from tests.test_unix_computer_use_element_act import LONG_BEFORE, LONG_LABEL, LONG_TEXT, NORMALIZED, FakeAX, long_field
-from tests.test_unix_computer_use_targeting import KEYNOTE, app_dict
 
 WARNING = ("⚠️ SAFETY_WARNING: The Safety Supervisor flagged this action as suspicious.\nReason: fixture\n"
            "The command was allowed, but consider whether this is the right approach.")

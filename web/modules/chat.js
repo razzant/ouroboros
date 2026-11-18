@@ -765,7 +765,7 @@ export function createChatInstance({
                 const summary = noteToolHostMetrics(record, { calls, errors, routing, completion, counts: metrics.tool_call_counts, evidence: metrics.tool_evidence });
                 if (summary.calls > 0 || record.toolCalls != null) record.toolCalls = summary.calls;
                 record.toolErrors = summary.errors;
-                changed = placeReplayedEvidence(record, summary, metrics.tool_evidence, rawTs, normalizeLogTs)
+                changed = placeReplayedEvidence(record, summary, metrics.tool_evidence, rawTs, normalizeLogTs, summarizeChatLiveEvent)
                     && renderLiveCardTimeline(record);
             }
             updateLiveCardCount(record);
@@ -1628,7 +1628,7 @@ export function createChatInstance({
         if (closedPhase && !initialContent) {
             if (foldView) {
                 upsertToolFoldRow(record, foldView, ts, rawTs);
-                if (summary.dedupeKey?.endsWith(':check')) placeCheckRow(record, summary, ts, rawTs);
+                if (summary.dedupeKey?.endsWith(':check') || summary.hostRefusedStep) placeCheckRow(record, summary, ts, rawTs);
                 renderLiveCardTimeline(record);
                 updateLiveCardCount(record);
             }
