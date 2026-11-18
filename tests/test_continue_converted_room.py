@@ -158,7 +158,11 @@ def test_continue_of_a_converted_task_admits_its_new_root_in_the_converted_room(
     assert meta["origin_message_ref"] == worker_task["origin_message_ref"]
     assert meta["origin_message_ref"]["chat_id"] == raw_chat, "conversion never relabels authorship"
     assert meta["continuation"]["owner_sources"]["original"]["content"] == TEXT
-    assert meta["owner_corpus"] == [{"source": "origin_message", "content": TEXT}]
+    corpus = meta["owner_corpus"]
+    assert [{key: item[key] for key in ("source", "content")} for item in corpus] == [{"source": "origin_message", "content": TEXT}]
+    # The seed keeps the opening's own address, where and when my human wrote it, never the converted room's.
+    assert (corpus[0]["client_message_id"], str(corpus[0]["chat_id"]), corpus[0]["ts"]) == (
+        "m-1", str(raw_chat), "2026-10-01T00:00:00Z")
     assert {key: meta["continuation"][key] for key in BILLING} == BILLING
     assert row["root_task_id"] == successor and not row.get("parent_task_id")
     after = load_task_result(host.root, "pred-1")
