@@ -1289,8 +1289,8 @@ def owed_wake(ctx: Any, descriptor: dict[str, Any]) -> tuple[str, dict[str, Any]
 
 
 def _wait_in_slot(ctx: Any, descriptor: dict[str, Any]) -> ToolResult:
-    """A turn with no continuation owner to sleep under (a Presence turn) waits in its slot for the same
-    sources, read on the body's beat; its owner's Stop of the in-process turn ends the wait too."""
+    """A wait named ``in_slot``, or a turn with no continuation owner to sleep under (a Presence turn), waits in its
+    slot for the same sources, read on the body's beat; its owner's Stop of the in-process turn ends the wait too."""
     from ouroboros import model_sleep
     from supervisor.owner_stop import in_process_stop_now
 
@@ -1316,10 +1316,11 @@ def _wait_in_slot(ctx: Any, descriptor: dict[str, Any]) -> ToolResult:
 
 def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = None, sleep_mode: Any = None,
              checkpoint_after_sec: Optional[int] = None, checkpoint_reason: str = "") -> ToolResult:
-    """``delegate_wait`` as a sleep on runs: what is already there answers through this result; otherwise the task's
-    sleep is armed in the mode the wait names (``native_task_wait.sleep_choice``, as the task waits choose; omitted:
-    ``model_sleep.request_default_sleep``, its process released once nothing live keeps it) and this wait's result is
-    owed to the first model request after the wake; ``in_slot`` waits in this call. A run this task holds only in this
+    """``delegate_wait`` as a sleep on runs: what is already there answers through this result, in any mode; otherwise
+    the sleep is armed in the mode named (``native_task_wait.sleep_choice``, as the task waits choose; omitted:
+    ``model_sleep.request_default_sleep``) and its result is owed to the first model request after the wake, or it
+    waits in this call (``in_slot``). An earlier call of the batch comes first: its armed wait refuses this one, its
+    staged hold is shown at once; with no continuation owner only arming is refused. A run this task holds only in this
     process (``started_uncustodied``: its STARTED row never landed) is one no durable source can wake a sleep on, so a
     wait selecting it answers now: with what is already there, else with that run's one addressed read."""
     from ouroboros import model_sleep
@@ -1327,9 +1328,8 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
     from ouroboros.native_task_wait import sleep_choice
 
     mode, refusal = sleep_choice(sleep_mode, None, None, None, ctx)
-    if refusal or (mode in ("warm", "cold") and not callable(getattr(ctx, "owner_wait_callback", None))):
-        return _fail("delegate_wait", "sleep_mode_refused",
-                     refusal or "this task has no continuation owner to sleep under; use sleep_mode=in_slot")
+    if refusal:
+        return _fail("delegate_wait", "sleep_mode_refused", refusal)
     reason_text = str(checkpoint_reason or "").strip()
     ignored_note = ""
     if checkpoint_after_sec == 0 and not reason_text and not isinstance(checkpoint_after_sec, bool):
@@ -1406,13 +1406,23 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
         entered(mode="answered_at_call", held_in_process=in_process)
         return _publish(ctx, {**descriptor, "runs": in_process + [rid for rid in run_ids if rid not in in_process]},
                         woke_by)
+    from ouroboros.native_task_wait import armed_conflict
+
+    if conflict := armed_conflict(ctx, native=True):  # before any slot: an earlier call's wait is owed first
+        return _fail("delegate_wait", "wait_already_armed", conflict)
+    if mode == "in_slot" and (held := model_sleep.unshown_holds(ctx, {})):  # an earlier call's: shown first
+        meta, withdrawn = model_sleep.hold_notice(ctx, held)
+        return delegate_result({"reason": "dependency_held", "slept": False, "mode": mode, "held": held,
+                                "runs": run_ids, "note": model_sleep.IN_SLOT_HOLD_NOTE + withdrawn}, meta=meta)
     if mode == "in_slot":  # named, or no continuation owner to sleep under
         entered(mode="in_slot")
         return _wait_in_slot(ctx, descriptor)
-    from ouroboros.native_task_wait import armed_conflict
-
-    if conflict := armed_conflict(ctx, native=True):
-        return _fail("delegate_wait", "wait_already_armed", conflict)
+    if not callable(getattr(ctx, "owner_wait_callback", None)):  # named warm/cold: only what is there answers
+        if not (woke_by := model_sleep.wake_reason(ctx, chosen)):
+            return _fail("delegate_wait", "sleep_mode_refused",
+                         "this task has no continuation owner to sleep under; use sleep_mode=in_slot")
+        entered(outcome="ready", mode=mode)
+        return _publish(ctx, descriptor, woke_by)
     try:
         outcome = (model_sleep.request_default_sleep(ctx, chosen) if mode == "default"
                    else model_sleep.request_sleep(ctx, chosen, mode))

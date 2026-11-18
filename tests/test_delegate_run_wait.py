@@ -229,36 +229,61 @@ def test_a_named_sleep_mode_arms_that_sleep_omitted_keeps_the_default_and_ready_
     assert ctx._pending_task_wait["arguments"].get("sleep_mode") == sleep_mode and reads == [("run-done", 0)]
 
 
-def test_an_in_slot_wait_keeps_the_call_and_an_unshown_hold_answers_before_any_sleep(tmp_path, monkeypatch, reads):
-    """``in_slot`` waits in this call on the sleep's own sources although the task could sleep; a hold an earlier call
-    of the batch returned answers at once as ``dependency_held`` with no sleep armed, and the same wait then sleeps.
-    A mode the wait cannot take is the caller's refusal: an unknown one, or warm/cold with no continuation owner."""
-    from ouroboros import delegate_supervision as ds, model_sleep
+@pytest.mark.parametrize("sleep_mode", ["warm", "cold"])
+def test_with_no_continuation_owner_what_is_there_answers_in_a_named_sleep_mode_and_only_a_sleep_is_refused(
+        tmp_path, reads, sleep_mode):
+    """A result already there needs nothing to sleep under: it answers in whatever mode was named, owner or not. Only
+    a call that would arm a sleep is refused when the task has no continuation owner; an unknown mode is refused
+    first, even over a ready run."""
+    from ouroboros import delegate_supervision as ds
     from ouroboros.delegate_shared import AGENT_FAULT_CODE
 
     ctx, _limit = _nanny(tmp_path)
+    ctx.owner_wait_callback = None
+    _run(tmp_path, "run-done")
+    _ended(tmp_path, "run-done")
+    unknown = ds.run_wait(ctx, "run-done", sleep_mode="hot")
+    assert _armed(unknown)["reason"] == "sleep_mode_refused" and unknown.code == AGENT_FAULT_CODE and not reads
+    assert _armed(ds.run_wait(ctx, "run-done", sleep_mode=sleep_mode))["status"] == "terminal"
+    _run(tmp_path, "run-quiet")
+    refused = ds.run_wait(ctx, "run-quiet", sleep_mode=sleep_mode)
+    assert _armed(refused)["reason"] == "sleep_mode_refused" and refused.code == AGENT_FAULT_CODE
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+    assert reads == [("run-done", 0)]
+
+
+def test_an_in_slot_wait_keeps_the_call_after_what_an_earlier_call_of_the_batch_armed_or_staged(
+        tmp_path, monkeypatch, reads):
+    """``in_slot`` waits in this call on the sleep's own sources although the task could sleep. What an earlier call
+    of the batch armed or staged comes first, before any slot is taken, as the task waits do: its unshown hold answers
+    at once as ``dependency_held`` in any mode (once delivered, the same wait sleeps), and its armed wait refuses the
+    next one (``armed_conflict``), which would otherwise hold that wait's wake behind this call."""
+    from ouroboros import delegate_supervision as ds, model_sleep
+
+    ctx, _limit = _nanny(tmp_path)
     _run(tmp_path, "run-1")
-    with monkeypatch.context() as slot:
-        beats = []
-        slot.setattr(model_sleep, "declare_in_slot_wait", lambda *_a, **_k: None)
-        slot.setattr(model_sleep, "end_in_slot_wait", lambda *_a, **_k: None)
-        slot.setattr("supervisor.owner_stop.in_process_stop_now", lambda _ctx: False)
-        slot.setattr(ds.time, "sleep", lambda _sec: beats.append(1) or _ended(tmp_path, "run-1"))
-        assert _armed(ds.run_wait(ctx, "run-1", sleep_mode="in_slot"))["status"] == "terminal" and beats == [1]
+    beats, waited_on = [], ["run-1"]  # each beat ends the run the slot waits on
+    monkeypatch.setattr(model_sleep, "declare_in_slot_wait", lambda *_a, **_k: None)
+    monkeypatch.setattr(model_sleep, "end_in_slot_wait", lambda *_a, **_k: None)
+    monkeypatch.setattr("supervisor.owner_stop.in_process_stop_now", lambda _ctx: False)
+    monkeypatch.setattr(ds.time, "sleep", lambda _sec: beats.append(waited_on[0]) or _ended(tmp_path, waited_on[0]))
+    assert _armed(ds.run_wait(ctx, "run-1", sleep_mode="in_slot"))["status"] == "terminal" and beats == ["run-1"]
     assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
     _run(tmp_path, "run-2")
     model_sleep.hold_notice(ctx, [{"task_id": "held-child", "identity": "hold-1"}])
-    held = ds.run_wait(ctx, "run-2")
-    assert _armed(held)["reason"] == "dependency_held" and held.meta == {model_sleep.HOLD_NOTICE: True}
-    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+    for sleep_mode in ("in_slot", None):
+        waited_on[0] = "run-2"
+        held = ds.run_wait(ctx, "run-2", sleep_mode=sleep_mode)
+        assert _armed(held)["reason"] == "dependency_held" and held.meta == {model_sleep.HOLD_NOTICE: True}
+    assert beats == ["run-1"] and not getattr(ctx, "_model_sleep", None)
+    assert not getattr(ctx, "_pending_task_wait", None)
     ctx._held_dependencies_pending = []  # the batch delivered the hold
     assert _armed(ds.run_wait(ctx, "run-2"))["reason"] == "sleep_armed"
-    for sleep_mode, owner in (("hot", True), ("warm", False), ("cold", False)):
-        ctx._model_sleep = ctx._pending_task_wait = None
-        ctx._owner_wait_requested = ""
-        ctx.owner_wait_callback = (lambda *_a, **_k: "unknown") if owner else None
-        refused = ds.run_wait(ctx, "run-2", sleep_mode=sleep_mode)
-        assert _armed(refused)["reason"] == "sleep_mode_refused" and refused.code == AGENT_FAULT_CODE
+    _run(tmp_path, "run-3")
+    waited_on[0] = "run-3"
+    refused = _armed(ds.run_wait(ctx, "run-3", sleep_mode="in_slot"))
+    assert refused["reason"] == "wait_already_armed" and beats == ["run-1"]
+    assert ctx._pending_task_wait["runs"] == ["run-2"] and reads == [("run-1", 0)]
 
 
 @pytest.mark.parametrize("local_first", [False, True])
