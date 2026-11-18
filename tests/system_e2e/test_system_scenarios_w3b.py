@@ -14,9 +14,10 @@ DURABLE artifact or a recorded WIRE fact (never an HTTP 200 alone):
   no ``execution`` block for a read-only run), the honest requested-vs-applied
   ``state/subagent_last_delegation.json`` receipt, the terminal facts reaching
   the model (cost_final, FAKE_RUN_RESULT, the requested-vs-applied
-  capability_delta disclosure), and two TYPED START refusals (a scripted 400 and
-  the pinned-profile 409) landing as definite START_FAILED rows that retire
-  their invocations — three POSTs, three DISTINCT logical invocation ids.
+  capability_delta disclosure). The first boot retires the fresh pre-POST refusal's
+  registration. The second retires the finished survey's registration. The 400
+  and pinned-profile 409 retain their keys, bodies and respective existing and
+  new registrations. Three starts reach the wire across both boots.
 * S12 — NO-ORPHANS RESTART RECOVERY: the nanny's ``delegate_wait`` on a hung run
   is a COLD sleep (owner Q2 = A): its process is released once the body accepted
   the run's custody, and it parks as a sleeper. The WHOLE server tree is then
@@ -74,6 +75,7 @@ from tests.system_e2e.harness import (
     body_text,
     classify_call,
     keyless_settings,
+    message_text,
     pids_with_env_value,
     process_tree_pids,
     require_lane,
@@ -110,6 +112,7 @@ def test_fake_daemon_serves_the_real_gateway_contract(tmp_path):
             body = gateway.handshake()
             assert body.get("compatible") is True
             assert gateway.engine_version == daemon.engine_version
+            assert all(op["path"] != "/v2/runs/lookup" for op in gateway.operations())
             # The dispatcher's ONE health reader sees a healthy route: catalog row
             # present + enabled, quota empty => fail-open healthy.
             assert route_health(
@@ -134,10 +137,11 @@ def test_fake_daemon_run_replay_refusals_and_cancel(tmp_path):
         final_attempt_facts,
     )
 
-    with FakeClaudexorDaemon(runs_dir=tmp_path / "runs") as daemon:
+    with FakeClaudexorDaemon(runs_dir=tmp_path / "runs", start_lookup_unavailable=True) as daemon:
         daemon.install(tmp_path / "cx")
         with ClaudexorGateway(discover_daemon_at(tmp_path / "cx")) as gateway:
             gateway.handshake()
+            project_id = gateway.register_project(str(tmp_path))
             request = {
                 "prompt": "probe", "instructions": "i", "authPreference": "subscription",
                 "mode": "ask", "scope": {"kind": "project", "root": str(tmp_path)},
@@ -167,6 +171,21 @@ def test_fake_daemon_run_replay_refusals_and_cancel(tmp_path):
                     idempotency_key="inv-e2e-3")
             assert ghost.value.code == "credential_profile_unknown"
             assert ghost.value.status_code == 409
+            operation, = [op for op in gateway.operations() if op["path"] == "/v2/runs/lookup"]
+            assert (operation["method"], operation["mutability"], operation["idempotency"]) == (
+                "POST", "read_only", "key_required")
+            posts = daemon.run_start_posts()
+            refused_posts = posts[-2:]
+            assert [post["idempotency_key"] for post in refused_posts] == ["inv-e2e-2", "inv-e2e-3"]
+            for post in refused_posts:
+                with pytest.raises(ClaudexorUnavailable) as unreadable:
+                    gateway.lookup_run(post["body"], idempotency_key=post["idempotency_key"])
+                assert (unreadable.value.status_code, unreadable.value.code) == (503, "lookup_unavailable")
+            lookups = daemon.calls("POST", "/v2/runs/lookup")
+            assert [(row["idempotency_key"], row["body"]) for row in lookups] == [
+                (post["idempotency_key"], post["body"]) for post in refused_posts]
+            assert all((row["status"], row["response"]["code"]) == (503, "lookup_unavailable") for row in lookups)
+            assert daemon.run_start_posts() == posts
             # Success run: terminal detail carries the settlement facts.
             detail = gateway.get_run(run_id)
             summary = detail.get("summary") or {}
@@ -190,9 +209,25 @@ def test_fake_daemon_run_replay_refusals_and_cancel(tmp_path):
                                      idempotency_key="inv-e2e-4")
             hung_id = str(hung.get("runId") or "")
             assert (gateway.get_run(hung_id).get("summary") or {}).get("state") == "running"
+            with pytest.raises(ClaudexorUnavailable) as active:
+                gateway.remove_project(project_id)
+            assert (active.value.code, active.value.status_code) == ("project_has_active_run", 409)
+            assert gateway.find_project_id(str(tmp_path)) == project_id
             receipt = gateway.cancel_run(hung_id, reason="e2e probe")
             assert receipt.get("accepted") is True
             assert (gateway.get_run(hung_id).get("summary") or {}).get("state") == "cancelled"
+            daemon.set_busy_project(tmp_path)
+            with pytest.raises(ClaudexorUnavailable) as busy:
+                gateway.remove_project(project_id)
+            assert (busy.value.status_code, busy.value.code) == (409, "project_has_active_run")
+            assert gateway.find_project_id(str(tmp_path)) == project_id
+            other = gateway.register_project(str(tmp_path / "other"))
+            assert gateway.remove_project(other)["registryRemoved"] is True
+            daemon.set_busy_project(None)
+            removed = gateway.remove_project(project_id)
+            assert removed["projectId"] == project_id and removed["registryRemoved"] is True
+            assert removed["artifactsRetained"] is True and removed["root"] == str(tmp_path)
+            assert not gateway.find_project_id(str(tmp_path))
 
 
 def test_skill_review_classification_and_canned_verdict():
@@ -263,165 +298,360 @@ def _custody_rows(oracle: ArtifactOracle, event_type: str, run_id: str = "") -> 
 
 S11_PARENT_MARKER = "S11_PARENT_FINAL_e2e_w3b"
 
-S11_SCRIPT = [
-    {"tool": "delegate_start", "arguments": {
-        "subagent_id": "cx-scout",
-        "prompt": "Survey the repository root and report what you find."}},
-    _wait_step,
-    {"tool": "delegate_start", "arguments": {
-        "subagent_id": "cx-scout",
-        "prompt": FAKE_REFUSE_MARKER + " this start must be refused typed"}},
-    {"tool": "delegate_start", "arguments": {
-        "subagent_id": "cx-pinned",
-        "prompt": "the pinned-profile start must be refused typed"}},
-]
+
+def _s11_start(actor, prompt, **options):
+    return {"tool": "delegate_start", "arguments": {"subagent_id": actor, "prompt": prompt, **options}}
+
+
+def _s11_tool_messages(body):
+    issued = {}
+    for message in body["messages"]:
+        if message["role"] == "assistant":
+            issued = {call["id"]: call["function"]["name"] for call in message.get("tool_calls") or ()}
+        elif message["role"] == "tool":
+            call_id = message["tool_call_id"]
+            if call_id in issued:
+                yield (call_id, issued.pop(call_id)), message
+        elif message["role"] == "user":
+            issued.clear()
+
+
+def _s11_payload(message):
+    # The producer's JSON can be followed by a host delivery note.
+    return json.JSONDecoder().raw_decode(message_text(message).lstrip())[0]
+
+
+def _s11_task_replies(oracle, task_id, objective, model_calls, *tools):
+    calls = [(row["tool_call_id"], row["tool"]) for row in oracle.task_drive(task_id).tools_rows()
+             if row.get("type") == "tool_call" and row["task_id"] == task_id
+             and row["tool"] in ("delegate_start", "delegate_wait")]
+    assert [name for _, name in calls] == list(tools), (task_id, calls)
+    assert len({call_id for call_id, _ in calls}) == len(calls)
+    replies = {}
+    for kind, body in model_calls:
+        # The scripted stub labels an ordinary tool-bearing turn by its answer: agent or final.
+        if kind not in ("agent", "final") or not body.get("tools"):
+            continue
+        if not any(m["role"] == "user" and objective in message_text(m) for m in body["messages"]):
+            continue
+        for key, message in _s11_tool_messages(body):
+            if key in calls and key not in replies:
+                replies[key] = _s11_payload(message)
+    assert set(calls) == replies.keys(), (task_id, set(calls) - replies.keys())
+    return [replies[key] for key in calls]
+
+
+def _assert_s11_removed(row, project_id):
+    assert row["path"] == f"/v2/projects/{project_id}" and 200 <= row["status"] < 300
+    assert row["response"]["projectId"] == project_id and row["response"]["registryRemoved"] is True
+
+
+def _assert_s11_refusal(receipt, failure, *, actor, task, pin, outcome):
+    assert receipt["selected_subagent_id"] == failure["selected_subagent_id"] == actor
+    assert receipt["invocation_id"] == receipt["run_id"] == failure["invocation_id"]
+    assert receipt["task_id"] == failure["task_id"] == task
+    assert receipt["occurred_at"] == failure["ts"]
+    assert receipt["outcome"] == outcome
+    assert receipt["failure_code"] == failure["reason"]
+    assert receipt["route"] == failure["route"] == "fake-harness"
+    assert receipt["requested_model"] == failure["model"] == "mock-model"
+    assert receipt["requested_profile"] == pin
+    assert receipt["applied_model"] == receipt["applied_profile"] == ""
 
 
 @pytest.mark.integration
 def test_s11_delegated_transport_wire_custody_and_typed_refusals(
         e2e_clone, tmp_path_factory):
+    from ouroboros.delegate_custody import invocation_record, replay
+    from ouroboros.delegate_pending import pending_invocations, request_body
+    from ouroboros.gateways.claudexor import ClaudexorGateway, discover_daemon_at
+    from ouroboros.subagent_history import subagent_last_delegation
+
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s11")
-    data_root = pathlib.Path(root) / "data"
-    successful_receipts = []
+    data_root = root / "data"
+    survey, existing, pinned = root / "survey", root / "existing", root / "pinned"
+    for workspace in (survey, existing, pinned):
+        workspace.mkdir()
+    document = pinned / "survey.txt"
+    original_input = f"S11 survey {uuid.uuid4().hex}\n".encode()
+    document.write_bytes(original_input)
+    roster = _roster(_SCOUT_ROW, _PINNED_ROW)
+    captured = {}
+    oracle = ArtifactOracle(data_root)
 
-    def capture_success_before_refusal(_body):
-        # This existing next step runs after delegate_wait and before either
-        # refusal: latest-observation history will correctly replace the success.
-        successful_receipts.append(
-            ArtifactOracle(data_root)._json("state/subagent_last_delegation.json"))
-        return S11_SCRIPT[2]
+    def json_value(value):
+        return json.dumps(value, sort_keys=True)
 
-    script = [*S11_SCRIPT[:2], capture_success_before_refusal, S11_SCRIPT[3]]
-    with FakeClaudexorDaemon() as daemon, \
-            ScriptedStubModel(script,
-                              final_answer=f"{S11_PARENT_MARKER}: delegated run absorbed.") as stub:
+    def events_by_type(oracle):
+        by_type = {}
+        custody_payloads = {}
+        for row in oracle.events():
+            kind = str(row.get("type") or "")
+            event_id = row.get("event_id")
+            if kind.startswith("delegate_run_") and event_id:
+                # An outbox redelivery preserves the entire event, including JSON value types.
+                payload = json_value(row)
+                if event_id in custody_payloads:
+                    assert payload == custody_payloads[event_id], f"Conflicting custody event {event_id}"
+                    continue
+                custody_payloads[event_id] = payload
+            by_type.setdefault(kind, []).append(row)
+        return by_type, custody_payloads
+
+    def start_pinned(_body):
+        captured["unrun"] = subagent_last_delegation(data_root)
+        return _s11_start("cx-pinned", "Survey the selected file.", max_seconds=60,
+                          input_files=[{"root": "active_workspace", "path": document.name}])
+
+    def finish_survey(_body):
+        # The settled run can still be continued at this point in its owner's turn.
+        captured["success"] = subagent_last_delegation(data_root)
+        captured["live_deletes"] = [row["path"] for row in daemon.calls("DELETE", "/v2/projects/")]
+        return {"final": S11_PARENT_MARKER}
+
+    def wait_for_survey(body):
+        starts = [msg for (_, name), msg in _s11_tool_messages(body) if name == "delegate_start"]
+        if len(starts) != 1 or not (run_id := _s11_payload(starts[0]).get("run_id")):
+            return {"final": "E2E_SCRIPT_ERROR: expected one delegate_start result with a run id"}
+        # The body collects the fake's immediate success independently. Ask for an
+        # already-ready result so delegate_wait itself returns it in this call.
+        if not wait_until(lambda: _custody_rows(oracle, "delegate_run_settled", run_id), timeout=60):
+            return {"final": f"E2E_SCRIPT_ERROR: survey run {run_id} never settled"}
+        return {"tool": "delegate_wait", "arguments": {"run_id": run_id}}
+
+    script = [_s11_start("cx-scout", "Survey the repository root and report what you find."),
+              wait_for_survey, finish_survey]
+    with (
+        FakeClaudexorDaemon(reports_created=True, require_registration=True, start_lookup_unavailable=True) as daemon,
+        ScriptedStubModel(script, final_answer=S11_PARENT_MARKER) as stub,
+    ):
         daemon.install(data_root / "claudexor")
-        settings = keyless_settings(stub, OUROBOROS_SUBAGENTS=_roster(_SCOUT_ROW, _PINNED_ROW))
+        daemon.set_busy_project(survey)
+        with ClaudexorGateway(discover_daemon_at(data_root / "claudexor")) as gateway:
+            existing_id, created_here = gateway.project_registration(str(existing))
+            assert created_here is True
+        settings = keyless_settings(stub, OUROBOROS_SUBAGENTS=roster, OUROBOROS_TASK_ABS_CEILING_SEC="unlimited")
         server = start_server(e2e_clone, root, settings)
         try:
-            task_id = submit_running(
-                server, "Delegate the survey to your configured scout, wait it out, then finish.")
-            result = server.wait_task(task_id, timeout=600)
-            # Read before anything else: the periodic custody sweep (600 s cadence)
-            # may retire the registration any time after the owner's finish.
-            deletes_at_finish = daemon.calls("DELETE", "/v2/projects/")
-            assert result.get("status") == "completed", result
-            oracle = ArtifactOracle(server.data_root)
-            stored = wait_durable_result(oracle, task_id)
-            assert S11_PARENT_MARKER in str(stored.get("result") or ""), stored
-            assert stub.script_consumed(), "S11 script was not fully consumed"
+            objective = "Delegate the survey to your configured scout, wait for the result, then finish."
+            task = server.submit(objective, workspace_root=str(survey), timeout_sec=0)
+            stored = wait_durable_result(oracle, task, timeout=600)
+            assert stored["status"] == "completed" and S11_PARENT_MARKER in stored["result"], stored
+            assert stub.script_consumed()
+            start_reply, wait_reply = _s11_task_replies(
+                oracle, task, objective, stub.calls[:], "delegate_start", "delegate_wait")
 
-            # -- durable custody chain (canonical events.jsonl) --------------
-            requested = _custody_rows(oracle, "delegate_run_start_requested")
-            started = _custody_rows(oracle, "delegate_run_started")
-            assert len(requested) == 3, requested   # every POST had its pre-wire row
-            assert len(started) == 1, started
-            entry = started[0]
-            run_id = str(entry.get("run_id") or "")
-            invocation_id = str(entry.get("invocation_id") or "")
-            assert re.fullmatch(r"[0-9a-f]{16}", run_id), entry
-            assert invocation_id, entry
-            assert entry.get("task_id") == task_id, entry
-            assert entry.get("route") == "fake-harness", entry
-            assert entry.get("model") == "mock-model", entry
-            assert entry.get("access") == "readonly" and entry.get("mode") == "ask", entry
-            assert entry.get("selected_subagent_id") == "cx-scout", entry
-            assert _custody_rows(oracle, "delegate_run_ledger_recorded", run_id)
-            settled = _custody_rows(oracle, "delegate_run_settled", run_id)
-            assert settled, "no durable settlement row"
-            assert settled[-1].get("state") == "succeeded", settled[-1]
-            assert settled[-1].get("model") == daemon.applied_model, settled[-1]
-            assert settled[-1].get("cost_usd") == 0.0, settled[-1]
-            assert settled[-1].get("cost_final") is True, settled[-1]
-            assert settled[-1].get("credential_profile_id") == daemon.applied_profile, settled[-1]
+            # This task adopts a registration that predates the host. The completed
+            # survey has a separate, exclusively owned registration it may retire.
+            with stub._lock:
+                stub.script.append(_s11_start("cx-scout", FAKE_REFUSE_MARKER + " refuse this survey"))
+            objective = "Delegate a survey of the existing project to the scout."
+            existing_task = server.submit(objective, workspace_root=str(existing), timeout_sec=0)
+            stored = wait_durable_result(oracle, existing_task, timeout=600)
+            assert stored["status"] == "completed" and S11_PARENT_MARKER in stored["result"], stored
+            assert stub.script_consumed()
+            refused_reply, = _s11_task_replies(oracle, existing_task, objective, stub.calls[:], "delegate_start")
 
-            # Typed refusals: durable, DEFINITE, invocation-retiring.
-            failed = _custody_rows(oracle, "delegate_run_start_failed")
-            assert len(failed) == 2, failed
-            reasons = {str(row.get("reason") or "") for row in failed}
-            assert "fake_route_refused" in reasons, failed
-            assert "credential_profile_unknown" in reasons, failed
-            assert all(row.get("definite") is True for row in failed), failed
+            # The engine has no keyed document import. Selecting a staged input
+            # refuses before submission, retiring the new registration. The next
+            # start on this same root must acquire its own, distinct registration.
+            with stub._lock:
+                stub.script.extend([_s11_start("cx-pinned", "Read the attached survey.",
+                                              attachment_paths=["attachments/survey.txt"]), start_pinned])
+            objective = "Try the configured pinned profile with the survey, then without the attachment."
+            created = _api(server.base_url, "POST", "/api/tasks", {
+                "description": objective,
+                "workspace_mode": "external", "workspace_root": str(pinned), "memory_mode": "forked",
+                "attachments": [{"path": str(document)}], "allow_partial_attachments": False,
+            })
+            pinned_task = created["task_id"]
+            attachment, = created["attachment_manifest"]
+            assert (attachment["status"], attachment["relpath"]) == ("staged", "attachments/survey.txt")
+            stored = wait_durable_result(oracle, pinned_task, timeout=600)
+            assert stored["status"] == "completed" and S11_PARENT_MARKER in stored["result"], stored
+            assert stub.script_consumed()
+            unrun_reply, ghost_reply = _s11_task_replies(
+                oracle, pinned_task, objective, stub.calls[:], "delegate_start", "delegate_start")
 
-            # -- wire truth (the daemon's own recording) ---------------------
+            events, _ = events_by_type(oracle)
+            refused, unrun, ghost = events["delegate_run_start_failed"]
+            assert [row["reason"] for row in (refused, unrun, ghost)] == [
+                "fake_route_refused", "document_import_unsupported", "credential_profile_unknown"]
+            assert unrun["definite"] is True and unrun["project_retired"] is True
+            assert all(row["definite"] is False and row["project_retired"] is False for row in (refused, ghost))
+            blocked, = events["delegate_run_start_blocked"]
+            assert (blocked["task_id"], blocked["reason"]) == (pinned_task, unrun["reason"])
+            entry, = events["delegate_run_started"]
+            run_id, success_id = entry["run_id"], entry["invocation_id"]
+            assert re.fullmatch(r"[0-9a-f]{16}", run_id)
             posts = daemon.run_start_posts()
-            assert len(posts) == 3, [p["body"].get("prompt") for p in posts]
-            keys = [p["idempotency_key"] for p in posts]
-            assert len(set(keys)) == 3, keys        # fresh logical invocation per intended start
-            assert keys[0] == invocation_id, (keys, invocation_id)
-            body = posts[0]["body"]
-            assert body.get("authPreference") == "subscription", body
-            assert body.get("mode") == "ask" and body.get("access") == "readonly", body
-            assert body.get("harnesses") == [daemon.harness_id], body
-            assert body.get("primaryHarness") == daemon.harness_id, body
-            assert body.get("model") == "mock-model", body
-            assert "execution" not in body, body    # readonly run carries no isolation block
-            assert int(body.get("maxSeconds") or 0) > 0, body
-            assert str(body.get("instructions") or "").strip(), body
-            assert (body.get("scope") or {}).get("kind") == "project", body
-            project_posts = daemon.calls("POST", "/v2/projects")
-            assert project_posts and all(p["idempotency_key"] for p in project_posts)
-            # Owner decision 1A: settlement keeps the engine project while the owning
-            # task line can still continue the run; generation B proves its retirement.
-            assert not deletes_at_finish, (
-                "the settled run's project was retired while its owner still ran", deletes_at_finish)
+            assert [post["status"] for post in posts] == [200, 400, 409]
+            wire_keys = [post["idempotency_key"] for post in posts]
+            assert wire_keys == [success_id, refused["invocation_id"], ghost["invocation_id"]]
+            all_keys = [unrun["invocation_id"], *wire_keys]
+            assert all(all_keys) and len(set(all_keys)) == 4
+            requested = events["delegate_run_start_requested"]
+            assert [row["invocation_id"] for row in requested] == wire_keys
+            success, adopted, owned = requested
+            assert [row["task_id"] for row in requested] == [task, existing_task, pinned_task]
+            assert entry["task_id"] == task and entry["selected_subagent_id"] == "cx-scout"
+            assert (entry["route"], entry["model"], entry["access"], entry["mode"]) == (
+                daemon.harness_id, "mock-model", "readonly", "ask")
+            ledger, = events["delegate_run_ledger_recorded"]
+            settled, = events["delegate_run_settled"]
+            assert ledger["run_id"] == settled["run_id"] == run_id
+            assert (settled["state"], settled["model"], settled["credential_profile_id"]) == (
+                "succeeded", daemon.applied_model, daemon.applied_profile)
+            assert settled["cost_usd"] == 0.0 and settled["cost_final"] is True
 
-            # -- successful receipt, captured before the later refusals ------
-            assert len(successful_receipts) == 1, successful_receipts
-            receipt = successful_receipts[0]
-            assert receipt.get("run_id") == run_id, receipt
-            assert receipt.get("route") == "fake-harness", receipt
-            assert receipt.get("requested_model") == "mock-model", receipt
-            assert receipt.get("applied_model") == daemon.applied_model, receipt
-            assert receipt.get("requested_profile") == "", receipt
-            assert receipt.get("applied_profile") == daemon.applied_profile, receipt
-            assert receipt.get("selected_subagent_id") == "cx-scout", receipt
-            assert receipt.get("invocation_id") == invocation_id, receipt
-            assert receipt.get("task_id") == task_id, receipt
-            assert receipt.get("outcome") == "succeeded", receipt
+            registrations = daemon.calls("POST", "/v2/projects")
+            registration_keys = [row["idempotency_key"] for row in registrations]
+            assert all(registration_keys) and len(set(registration_keys)) == 5
+            assert [(row["body"]["root"], row["response"]["created"]) for row in registrations] == [
+                (str(existing), True), (str(survey), True), (str(existing), False), (str(pinned), True), (str(pinned), True)]
+            seeded, project, borrowed, pre_project, held = [row["response"]["id"] for row in registrations]
+            assert seeded == borrowed == existing_id
+            assert all((project, borrowed, pre_project, held)) and len({project, borrowed, pre_project, held}) == 4
+            assert (unrun["project_id"], refused["project_id"], ghost["project_id"]) == (pre_project, "", held)
+            assert [(row["project_id"], row["project_owned"]) for row in requested] == [
+                (project, True), (borrowed, False), (held, True)]
+            assert entry["project_id"] == project and entry["project_owned"] is True
+            assert captured["live_deletes"] == []
 
-            # -- latest observations include definite starts that never ran --
-            receipt = oracle._json("state/subagent_last_delegation.json")
-            latest = receipt.get("latest_by_subagent") or {}
-            assert set(latest) == {"cx-scout", "cx-pinned"}, receipt
-            assert [row.get("selected_subagent_id") for row in failed] == ["cx-scout", "cx-pinned"], failed
-            for failure, post, pin in zip(failed, posts[1:], ("", "ghost-profile")):
-                observed = latest[failure["selected_subagent_id"]]
-                assert observed.get("selected_subagent_id") == failure["selected_subagent_id"], observed
-                assert observed.get("run_id") == failure["invocation_id"] == post["idempotency_key"], observed
-                assert observed.get("invocation_id") == failure["invocation_id"], observed
-                assert observed.get("task_id") == failure["task_id"] == task_id, observed
-                assert observed.get("occurred_at") == failure["ts"], observed
-                assert observed.get("outcome") == "not_started", observed
-                assert observed.get("failure_code") == failure["reason"], observed
-                assert observed.get("route") == failure["route"] == daemon.harness_id, observed
-                assert observed.get("requested_model") == post["body"]["model"] == "mock-model", observed
-                assert observed.get("requested_profile") == (post["body"].get("credentialProfileId") or "") == pin, observed
-                assert observed.get("applied_model") == observed.get("applied_profile") == "", observed
-            assert {key: value for key, value in receipt.items() if key != "latest_by_subagent"} == latest["cx-pinned"], receipt
-
-            # -- the terminal facts REACHED the model (transcript truth) -----
-            transcript = "\n".join(body_text(call_body) for _kind, call_body in stub.calls)
-            assert f"FAKE_RUN_RESULT {run_id}" in transcript
-            assert '"cost_final": true' in transcript
-            assert "session_route_resolves_its_own_model" in transcript
-            assert "fake_route_refused" in transcript
+            receipt = captured["success"]
+            assert (receipt["task_id"], receipt["invocation_id"], receipt["run_id"]) == (task, success_id, run_id)
+            assert (receipt["outcome"], receipt["selected_subagent_id"], receipt["route"]) == (
+                "succeeded", "cx-scout", daemon.harness_id)
+            assert (receipt["requested_model"], receipt["applied_model"]) == ("mock-model", daemon.applied_model)
+            assert (receipt["requested_profile"], receipt["applied_profile"]) == ("", daemon.applied_profile)
+            _assert_s11_refusal(captured["unrun"], unrun, actor="cx-pinned", task=pinned_task,
+                                pin=daemon.ghost_profile, outcome="not_started")
+            receipt = subagent_last_delegation(data_root)
+            latest = receipt["latest_by_subagent"]
+            assert set(latest) == {"cx-scout", "cx-pinned"}
+            _assert_s11_refusal(latest["cx-scout"], refused, actor="cx-scout", task=existing_task,
+                                pin="", outcome="unknown")
+            _assert_s11_refusal(latest["cx-pinned"], ghost, actor="cx-pinned", task=pinned_task,
+                                pin=daemon.ghost_profile, outcome="unknown")
+            assert {k: v for k, v in receipt.items() if k != "latest_by_subagent"} == latest["cx-pinned"]
+            assert (start_reply["status"], start_reply["run_id"], start_reply["invocation_id"]) == (
+                "started", run_id, success_id)
+            assert (wait_reply["status"], wait_reply["run_id"], wait_reply["state"]) == ("terminal", run_id, "succeeded")
+            assert f"FAKE_RUN_RESULT {run_id}" in wait_reply["primary_output"]["text"]
+            assert wait_reply["cost"]["cost_final"] is True
+            assert any(delta["reason"] == "session_route_resolves_its_own_model" for delta in wait_reply["capability_delta"])
+            for reply, row in ((refused_reply, refused), (unrun_reply, unrun), (ghost_reply, ghost)):
+                assert (reply["status"], reply["tool"], reply["reason"]) == ("refused", "delegate_start", row["reason"])
+                assert reply["project_retired"] is row["project_retired"]
+            assert unrun_reply["definitely_unrun"] is True and "pending_invocation_id" not in unrun_reply
+            assert (unrun_reply["project_id"], ghost_reply["project_id"]) == (pre_project, held)
+            for reply, row in ((refused_reply, refused), (ghost_reply, ghost)):
+                assert reply["pending_invocation_id"] == row["invocation_id"]
+                assert reply.get("definitely_unrun", False) is False
+            assert {row["invocation_id"] for row in pending_invocations(data_root)} == set(wire_keys[1:])
         finally:
             server.stop()
 
-        # Generation B, same data root: the boot custody sweep reads the owner's
-        # normal finish from its durable result and retires the registration.
+        # Include A's shutdown. An early sweep could try the busy survey, but
+        # only the pre-POST registration could actually be removed in A.
+        assert not server.stop_unconfirmed and server.proc.poll() is not None
+        deletes_a = daemon.calls("DELETE", "/v2/projects/")
+        survey_path = f"/v2/projects/{project}"
+        pre_delete, = [row for row in deletes_a if row["path"] != survey_path]
+        _assert_s11_removed(pre_delete, pre_project)
+        for row in deletes_a:
+            if row["path"] == survey_path:
+                assert (row["status"], row["response"]["code"]) == (409, "project_has_active_run")
+        events_a, original_events = events_by_type(oracle)
+        assert not events_a.get("delegate_run_project_retired")
+        before_boot = replay(data_root)[run_id]
+        assert before_boot.settled and before_boot.ledger_recorded and before_boot.project_owned
+        assert before_boot.project_id == project
+        with ClaudexorGateway(discover_daemon_at(data_root / "claudexor")) as gateway:
+            assert gateway.find_project_id(str(survey)) == project
+        previous_lookups = len(daemon.calls("POST", "/v2/runs/lookup"))
+        document.write_text("Revised after the original submission.\n", encoding="utf-8")
+        # Boot must read both original requests. An unavailable lookup leaves them pending.
+        daemon.set_busy_project(None)
         with ScriptedStubModel([]) as stub_b:
-            server_b = start_server(e2e_clone, root, keyless_settings(
-                stub_b, OUROBOROS_SUBAGENTS=_roster(_SCOUT_ROW, _PINNED_ROW)))
+            server_b = start_server(e2e_clone, root, keyless_settings(stub_b, OUROBOROS_SUBAGENTS=roster))
             try:
-                assert wait_until(lambda: daemon.calls("DELETE", "/v2/projects/"), 240), (
-                    "the boot custody sweep never retired the finished owner's registration")
-                assert wait_until(lambda: _custody_rows(
-                    ArtifactOracle(server_b.data_root), "delegate_run_project_retired", run_id), 60)
+                def boot_observed():
+                    reads = daemon.calls("POST", "/v2/runs/lookup")[previous_lookups:]
+                    return (set(wire_keys[1:]) <= {row["idempotency_key"] for row in reads}
+                            and _custody_rows(oracle, "delegate_run_project_retired", run_id))
+
+                assert wait_until(boot_observed, timeout=60), "missing boot lookup or settled project retirement"
+                boot_events, restored_events = events_by_type(ArtifactOracle(server_b.data_root))
+                for event_id, payload in original_events.items():
+                    assert restored_events[event_id] == payload, f"Changed custody event {event_id} after restart"
+                assert [row["event_id"] for row in boot_events["delegate_run_start_requested"]] == [
+                    row["event_id"] for row in requested]
+                assert [row["event_id"] for row in boot_events["delegate_run_start_blocked"]] == [blocked["event_id"]]
+                retired, = boot_events["delegate_run_project_retired"]
+                assert retired["event_id"] not in original_events
+                assert (retired["task_id"], retired["run_id"], retired["project_id"]) == (task, run_id, project)
+                assert not retired.get("project_kept")
+                bound, = replay(data_root).values()
+                assert bound.settled and bound.ledger_recorded and not bound.project_owned
+                assert (bound.task_id, bound.run_id, bound.invocation_id, bound.project_id) == (
+                    task, run_id, success_id, project)
+                assert json_value(daemon.calls("POST", "/v2/projects")) == json_value(registrations)
+                deletions = daemon.calls("DELETE", "/v2/projects/")
+                boot_delete, = deletions[len(deletes_a):]
+                _assert_s11_removed(boot_delete, project)
+                with ClaudexorGateway(discover_daemon_at(data_root / "claudexor")) as gateway:
+                    assert gateway.find_project_id(str(existing)) == borrowed
+                    assert gateway.find_project_id(str(pinned)) == held
+                    assert not gateway.find_project_id(str(survey))
+                assert json_value(subagent_last_delegation(data_root)) == json_value(receipt)
+
+                assert json_value(daemon.run_start_posts()) == json_value(posts)
+                assert posts[0]["response"]["runId"] == run_id
+                assert [post["response"]["code"] for post in posts[1:]] == [refused["reason"], ghost["reason"]]
+                for row, post in zip(requested, posts, strict=True):
+                    body = post["body"]
+                    assert json_value(request_body(data_root, row)) == json_value(body)
+                    assert body["authPreference"] == "subscription"
+                    assert body["mode"] == "ask" and body["access"] == "readonly" and "execution" not in body
+                    assert body["harnesses"] == [body["primaryHarness"]] == [daemon.harness_id]
+                    assert body["model"] == "mock-model" and body["instructions"].strip()
+                    assert body["scope"]["kind"] == "project"
+                    if row["max_seconds_basis"] == "unbounded":
+                        assert row["max_seconds"] == 0 and "maxSeconds" not in body
+                    else:
+                        assert body["maxSeconds"] == row["max_seconds"] > 0
+                assert [row["max_seconds_basis"] for row in requested] == ["unbounded", "unbounded", "requested"]
+                assert entry["max_seconds_basis"] == success["max_seconds_basis"] and entry["max_seconds"] == 0
+                assert [post["body"]["scope"]["root"] for post in posts] == [str(survey), str(existing), str(pinned)]
+                assert [post["body"].get("credentialProfileId", "") for post in posts] == ["", "", daemon.ghost_profile]
+                assert FAKE_REFUSE_MARKER in posts[1]["body"]["prompt"] and posts[2]["body"]["maxSeconds"] == 60
+
+                # Both open requests keep the original body and registration.
+                pending = {row["invocation_id"]: row for row in pending_invocations(data_root)}
+                assert set(pending) == set(wire_keys[1:])
+                lookups = daemon.calls("POST", "/v2/runs/lookup")[previous_lookups:]
+                assert {row["idempotency_key"] for row in lookups} == set(pending)
+                for lookup in lookups:
+                    assert lookup["status"] == 503 and lookup["response"]["code"] == "lookup_unavailable"
+                    assert json_value(lookup["body"]) == json_value(request_body(data_root, pending[lookup["idempotency_key"]]))
+                for row, post in zip((adopted, owned), posts[1:], strict=True):
+                    survivor = pending[post["idempotency_key"]]
+                    assert json_value(request_body(data_root, survivor)) == json_value(post["body"])
+                    assert (survivor["task_id"], survivor["project_id"], survivor["project_owned"]) == (
+                        row["task_id"], row["project_id"], row["project_owned"])
+                selected, = invocation_record(data_root, ghost["invocation_id"])["input_files"]
+                assert [selected] == owned["input_files"]
+                assert selected["source"] == str(document)
+                assert selected["sha256"] == hashlib.sha256(original_input).hexdigest()
+                assert selected["local"] in posts[2]["body"]["instructions"]
+                assert pathlib.Path(selected["retained"]).read_bytes() == original_input
             finally:
                 server_b.stop()
+        assert not server_b.stop_unconfirmed and server_b.proc.poll() is not None
+        assert json_value(daemon.run_start_posts()) == json_value(posts)
+        assert json_value(daemon.calls("DELETE", "/v2/projects/")) == json_value(deletions)
 
 
 # ===========================================================================
