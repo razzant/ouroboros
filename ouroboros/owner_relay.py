@@ -432,7 +432,8 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
                                      msg_id=address, carried=True,
                                      origin={"source_task_id": entry.get("source_task_id"),
                                              "client_message_id": row.get("client_message_id"),
-                                             "chat_id": row.get("chat_id"), "ts": row.get("ts")},
+                                             "chat_id": row.get("chat_id"), "ts": row.get("ts"),
+                                             "relay_source_root": str(source_root) if source_root and str(source_root) != str(root) else ""},
                                      reply_to=replied)
         content = quote_content(ctx, entry, row, _quote_body(row, carried_quote_line(quote, address=address)))
         loop._append_or_merge_user_message(messages, content, slot=ctx, kind=OWNER_WORDS_KIND)

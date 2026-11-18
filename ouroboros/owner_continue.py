@@ -122,7 +122,7 @@ CORPUS_SCHEDULE_SOURCES = frozenset({SCHEDULE_TEXT})
 # relaying sibling, an owner answer's card, the chat row it is and that id's room, a place message's provider
 # identity (``owner_words.place_row_facts``); its ``reply_to`` rides beside them.
 PLACE_ROW_IDS = ("conversation_id", "message_id")  # a confirmed place row's provider identity, read again at a cite
-ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id", *PLACE_ROW_IDS)
+ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id", "relay_source_root", *PLACE_ROW_IDS)
 
 
 def row_identity(row: Dict[str, Any]) -> str:
@@ -268,6 +268,42 @@ def _mail_rows(drive_root: pathlib.Path, task_id: str) -> Tuple[List[Dict[str, A
     return rows, whole and (not content or content.endswith("\n")), True
 
 
+def _start_answer(root: pathlib.Path, task_id: str, row: dict) -> Optional[dict]:
+    """Read a relay by its exact chat address, or a direct answer by its asker's delivery."""
+    from ouroboros.chat_chain import resolve_row
+    from ouroboros.owner_relay import quotable_owner_row
+    from ouroboros.owner_source import answered_quiz_block
+    from ouroboros.owner_words import answered_card_source
+    from ouroboros.question_answers import answer_message_id
+    from ouroboros.store import StoreError
+
+    asker, quiz_id, words, msg_id = (row.get(key) for key in ("source_task_id", "quiz_id", "content", "msg_id"))
+    if not isinstance(msg_id, str) or not isinstance(words, str):
+        return None
+    if msg_id.startswith("row:"):
+        source_root = row.get("relay_source_root") or root
+        try:
+            quoted, _ = resolve_row(source_root, msg_id)
+        except (StoreError, OSError, ValueError, TypeError):
+            return None
+        if not quoted or not quotable_owner_row(quoted, source_root) or row_source(quoted, "owner_mailbox") != row["source"]:
+            return None
+        block, asker = answered_card_source(quoted)
+        quiz_id = (block or {}).get("quiz_id")
+    else:
+        if not all(isinstance(x, str) and x.strip() for x in (asker, quiz_id, msg_id)) or asker == task_id:
+            return None
+        block = answered_quiz_block(root, asker, quiz_id)
+        if msg_id not in (answer_message_id(asker, quiz_id), (block.get("delivery") or {}).get("msg_id")):
+            return None
+    card = answered_card(block, words)
+    if not card or not asker or not quiz_id:
+        return None
+    return {"source": row["source"], "content": words, "msg_id": msg_id, "source_task_id": asker,
+            "quiz_id": quiz_id, "card": card, **({"request_id": block["request_id"]} if block.get("request_id") else {}),
+            **({"relay_source_root": row["relay_source_root"]} if row.get("relay_source_root") else {})}
+
+
 def _drafted_start(root: pathlib.Path, result: Dict[str, Any], task_id: str, metadata: Dict[str, Any],
                    gaps: List[str]) -> Optional[Dict[str, Any]]:
     """The start ``start_task`` recorded without an owner message (``origin_message_absent``).
@@ -278,9 +314,6 @@ def _drafted_start(root: pathlib.Path, result: Dict[str, Any], task_id: str, met
     re-route, or the delivery the card records); otherwise the answer is a named gap. A drafted start without an
     answered card opens on its drafted objective alone (#1376): the drafting task's words, never owner words.
     """
-    from ouroboros.owner_source import answered_quiz_block
-    from ouroboros.question_answers import answer_message_id
-
     author, objective = metadata.get("objective_author"), result.get("objective") or result.get("description")
     if not (isinstance(author, dict) and author.get("kind") == "task" and isinstance(author.get("task_id"), str)
             and author["task_id"].strip() and isinstance(objective, str) and objective.strip()):
@@ -290,17 +323,11 @@ def _drafted_start(root: pathlib.Path, result: Dict[str, Any], task_id: str, met
     for row in metadata.get("owner_corpus") if isinstance(metadata.get("owner_corpus"), list) else []:
         if not isinstance(row, dict) or row.get("source") not in CARD_ANSWER_SOURCES:
             continue  # the corpus pass names a malformed row; other owner words stay later sources
-        asker, quiz_id, words, msg_id = (row.get(key) for key in ("source_task_id", "quiz_id", "content", "msg_id"))
-        typed = all(isinstance(value, str) and value.strip() for value in (asker, quiz_id, words, msg_id))
-        block = answered_quiz_block(root, asker, quiz_id) if typed and asker != task_id else {}
-        delivered = typed and (msg_id == answer_message_id(asker, quiz_id)
-                               or (block.get("delivery") or {}).get("msg_id") == msg_id)
-        card = answered_card(block, words) if delivered else None
-        if card is None:
+        answer = _start_answer(root, task_id, row)
+        if answer is None:
             gaps.append("start_quiz_answer_unresolved")
-            continue
-        answers.append({"source": row["source"], "content": words, "msg_id": msg_id, "source_task_id": asker,
-                        "quiz_id": quiz_id, "request_id": block["request_id"], "card": card})
+        else:
+            answers.append(answer)
     expected = result.get("expected_output")
     return {"source": "drafted_start", "task_id": task_id, "objective": objective,
             **({"expected_output": expected} if isinstance(expected, str) and expected.strip() else {}),
