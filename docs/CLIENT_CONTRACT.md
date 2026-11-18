@@ -751,9 +751,9 @@ rows expose `connects` (boolean) and `icon` (the same spec); absent catalog fiel
 remain compatible. `icons` is the host glyph catalog. `offers.stt` lists non-live built-in providers as
 `{skill, skill_label, id, label, destination, install_size, enabled: false, installed}`;
 `installed: false` names a built-in this install has not installed (clients send the
-owner to the Skills page's Browse, where the built-in source installs it).
+owner to Extensions › Browse to install it from the built-in source).
 There is no marketplace offer until its catalog exposes contribution metadata;
-clients can link to the Skills entry instead.
+clients can link to the skill's entry in Extensions instead.
 
 `render.kind: host` runs trusted same-origin code and requires an extension with
 `page_module` permission and its ordinary hash-bound grant/review authority.
@@ -895,7 +895,7 @@ A package-manager copy may only advise: display the vendor sentence, never run i
 - `POST /api/local-model/test` runs two real completions; a failed probe is still 200. `POST /api/local-model/stop` stops it (and an install in progress) and is safe to repeat.
 
 **MCP servers:**
-- `GET /api/mcp/status` lists the configured servers and their last listed tools; it makes no network call. Server rows add `skill` (owning skill, else `""`) and `skill_error` (why its binding is unavailable, else `""`); configuration-error rows omit both.
+- `GET /api/mcp/status` lists the configured servers and their last listed tools; it makes no network call. Server rows add `skill` (owning skill, else `""`) and `skill_error` (why its binding is unavailable, else `""`); configuration-error rows omit both. One `MCP_ID_AMBIGUOUS` row can represent several configured entries: optional `configured_count` gives their number. None is loaded.
 - `POST /api/mcp/refresh` lists one server's tools (`{server_id}`) or every server's (`{}`); it is safe to repeat.
 - `POST /api/mcp/sign-in` runs one step of a remote server's sign-in: `{action: "begin", server_id}` returns the provider's `url` and the `redirect_uri` it returns to (an owner's own app adds `client_id`, `client_secret`); `{action: "complete", state, code|error, iss}` (or `returned_url`, the address the browser stopped on) finishes it and lists the server; `{action: "sign_out", server_id}` forgets the tokens, with `revoked` saying what the provider confirmed. A refusal is 200 with `ok: false`, `code: "MCP_AUTH_REQUIRED"` and its `reason`.
 - `POST /api/mcp/test` connects once to a draft server (`{server}`, with `server_id` to fill masked secrets from that saved server) and saves nothing. A failed test is 200 with `ok: false`.

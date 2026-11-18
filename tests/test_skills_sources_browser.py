@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from tests._skills_page_harness import (
+    open_view,
     URL,
     capture,
     fixture,
@@ -49,11 +50,80 @@ def _open(page, *, sources=None, catalog=None, listing=None):
 
 
 def _tab(page, name):
-    page.locator(f'.skills-tab[data-tab="{name}"]').click()
+    open_view(page, name)
 
 
 def _card(page, item_id):
     return page.locator(f'[data-browse-board] .marketplace-card[data-item="{item_id}"]').first
+
+
+@pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
+def test_addressed_installed_card_opens_through_search_and_filter(skills_browser, browser_name):
+    from playwright.sync_api import expect
+
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    page = browser.new_page(viewport={"width": 1280, "height": 900})
+    listing = [_row("telegram"), _row("weather"), {"name": "calendar", "enabled": False}]
+    listing[0]["secret_config"] = {"fields": [{"id": "example", "key": "EXAMPLE", "state": "missing"}]}
+    skills = _open(page, listing=listing)
+    try:
+        off = page.locator('[data-installed-filter="off"]')
+        search = page.locator("#skills-installed-search")
+        off.click()
+        search.fill("other words")
+        _tab(page, "browse")
+        _card(page, "builtin/telegram").locator('[data-browse-action="installed"]').click()
+        expect(page.locator('.skills-card[data-skill="telegram"]')).to_be_in_viewport()
+
+        off.click()
+        search.fill("still filtering")
+        _tab(page, "browse")
+        _tab(page, "installed")
+        expect(off).to_have_attribute("aria-pressed", "true")
+        expect(search).to_have_value("still filtering")
+        _tab(page, "browse")
+        skills.hold.add("/api/extensions")
+        page.evaluate("""() => window.dispatchEvent(new CustomEvent('ouro:open-skills', { detail: { skill: 'notes' } }))""")
+        skills.wait_for_request("/api/extensions")
+        skills.release("/api/extensions", {"skills": [*listing, {"name": "notes", "enabled": True}], "live": {}})
+        expect(page.locator('.skills-card[data-skill="notes"]')).to_be_in_viewport()
+    finally:
+        skills.close(browser)
+
+
+@pytest.mark.parametrize("width", [390, 1280])
+def test_skills_count_follows_the_visible_extensions_list(skills_browser, width):
+    from playwright.sync_api import expect
+
+    browser = skills_browser.chromium.launch(headless=True)
+    page = browser.new_page(viewport={"width": width, "height": 900})
+    skills = open_skills(page, extensions=[{"name": "notes", "enabled": False}])
+    try:
+        skills.answers["/api/ui/contributions"] = {}
+        page.goto(URL + "?host_modules", wait_until="networkidle")
+        _tab(page, "tools")
+        answer = page.locator('[data-extensions-open="installed"] [data-extensions-answer]')
+        rows = [{"name": name, "enabled": False} for name in ("notes", "calendar")]
+        skills.set_skills(rows)
+        reads = skills.requests.count(("GET", "/api/extensions"))
+        page.evaluate("""() => window.dispatchEvent(new CustomEvent('ouro:skill-lifecycle', { detail: { action: 'install', name: 'calendar' } }))""")
+        if width == 390:
+            expect(answer).to_be_hidden()
+            page.wait_for_timeout(450)  # beyond the coalesced lifecycle notification
+            assert skills.requests.count(("GET", "/api/extensions")) == reads
+            page.evaluate("() => window.skillsView.pressedAgain()")
+        expect(answer).to_contain_text("2 installed")
+        assert skills.requests.count(("GET", "/api/extensions")) == reads + 1
+        visibility = """hidden => {
+            Object.defineProperty(document, 'hidden', {configurable: true, value: hidden});
+            document.dispatchEvent(new Event('visibilitychange'));
+        }"""
+        page.evaluate(visibility, True)
+        skills.set_skills([*rows, {"name": "index", "enabled": False}])
+        page.evaluate(visibility, False)
+        expect(answer).to_contain_text("3 installed")
+    finally:
+        skills.close(browser)
 
 
 @pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 1280), ("webkit", 390)])
@@ -202,8 +272,16 @@ def test_the_hub_rows_are_confirmed_once_with_their_suggested_trust(skills_brows
 
         for source_id in ("ouroboros", "ouroboros-community"):
             skills.answers[f"/api/skill-sources/{source_id}"] = change
-        _tab(page, "browse")
         dialog = page.locator(".skills-dialog")
+        skills.hold.add("/api/skill-catalog")
+        _tab(page, "sources")
+        skills.wait_for_request("/api/skill-catalog")
+        _tab(page, "installed")
+        skills.hold.clear()
+        skills.release("/api/skill-catalog")
+        page.locator('[data-source-action="first_start"]').wait_for(state="attached")
+        assert dialog.count() == 0 and skills.posts == []
+        _tab(page, "browse")
         dialog.wait_for()
         assert "How should skills from the Ouroboros hub install?" in dialog.inner_text()
         assert "Suggested choices apply until you choose." in dialog.inner_text()
@@ -509,6 +587,11 @@ def test_show_more_keeps_the_reader_in_place_in_an_overflowing_shell(skills_brow
         assert top >= 0 and bottom <= height, "the focused new card is on screen"
         assert no_overflow(page)
         capture(page, browser_name, width, "clawhub-show-more-long")
+        # Sources is shorter. Returning to Browse restores its place against the tall Browse panel.
+        _tab(page, "sources")
+        page.locator('[data-source-action="add"]').wait_for()
+        _tab(page, "browse")
+        assert page.evaluate(f"{scroller}.scrollTop") >= before - 1
     finally:
         if skills:
             skills.close(browser)

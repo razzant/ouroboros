@@ -244,8 +244,8 @@ def test_an_unrelated_save_authors_no_model_lane(real_settings, connections):
     ui = real_settings
     _seed(ui, {CONNECTIONS_KEY: connections})
     shown = {key: _read(ui)[key] for key in SLOTS}
-    page = _open(ui, "tools")
-    open_settings(page, 'tools', 'OUROBOROS_TOOL_TIMEOUT_SEC')
+    page = _open(ui, "computer/advanced")
+    open_settings(page, 'computer/advanced', 'OUROBOROS_TOOL_TIMEOUT_SEC')
     before = len(ui['exchanges'])
     assert commit_row(page, 'OUROBOROS_TOOL_TIMEOUT_SEC', 601).startswith('Saved')
     posts = [exchange for exchange in ui['exchanges'][before:] if exchange[0] == 'POST']

@@ -919,10 +919,10 @@ def test_ui_smoke_phase3_declarative_widgets_and_settings(direct_server_with_dat
                 page.set_viewport_size({"width": 1440, "height": 1000})
                 page.wait_for_timeout(100)
 
-                # The skill's form stands on its own Settings page, titled by its one section.
+                # The skill's form stands on its own page in Extensions, titled by its one section.
                 page.wait_for_function("() => Boolean(window.__ouroSettings)")
                 assert page.evaluate("() => window.__ouroSettings.open('skill/phase3_widget_smoke')") is not False
-                page.locator('#page-settings [data-settings-lead-name]').filter(has_text="Phase 3 settings").wait_for(
+                page.locator('#page-skills [data-extensions-lead-name]').filter(has_text="Phase 3 settings").wait_for(
                     state="visible", timeout=30_000)
                 section = page.locator('.settings-extension-section')
                 section.wait_for(state="visible", timeout=30_000)

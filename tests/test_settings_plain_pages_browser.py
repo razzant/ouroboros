@@ -374,10 +374,12 @@ def test_voice_and_calls_says_the_saved_choices_and_opens_the_form_of_the_skill_
     assert door.locator(".ui-row-title").inner_text() == "Calls (beta)", "the door is named by the form's own title"
     setup_browser.capture(page, "c2-voice-with-calls-1087x740-dark")
     door.click()
+    # The skill's form is a page of Extensions (over Skills): the door leaves Settings, and its Back leads to Settings,
+    # to the page the door stood on (DESIGN "Settings").
     opened = settings_page(page, "skill/live_conversation")
     opened.wait_for(state="visible")
-    assert page.locator("#page-settings > .app-page-header [data-shell-back]").get_attribute("aria-label") == "Back to Voice and calls"
-    assert page.locator("#page-settings [data-settings-lead-name]").inner_text().strip() == "Calls (beta)"
+    assert page.locator("#page-skills > .app-page-header [data-shell-back]").get_attribute("aria-label") == "Back to Settings › Voice and calls"
+    assert page.locator("#page-skills [data-extensions-lead-name]").inner_text().strip() == "Calls (beta)"
     form = opened.locator('[data-extension-settings-form][data-skill="live_conversation"]')
     form.wait_for(state="visible")
     assert form.locator('[name="enabled"]').count() == 1 and form.locator('button[type="submit"]').count() == 1

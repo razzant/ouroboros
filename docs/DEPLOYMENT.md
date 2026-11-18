@@ -511,8 +511,8 @@ Supervisor route checks.
 - `extensions.when_unmet` is required with any row. `hold` (the sample): queued work stays queued
   while the server's own copy does not run a requirement, and each process that starts work (a
   pool worker or the server) checks the extensions it has loaded itself; a turn it cannot serve
-  ends before any model call with a typed notice (`deployment_requirement_unmet`). Stop, Panic,
-  Settings and Skills stay available. `warn`: work goes on and the gap is shown. Either way each
+  ends before any model call with a typed notice (`deployment_requirement_unmet`); Stop, Panic,
+  Settings and Extensions stay. `warn`: work goes on and the gap is shown. Either way each
   process logs a change of its gap once (`deployment_requirement_unmet`, `deployment_requirement_met`
   in `logs/events.jsonl`); nothing polls, retries or repairs.
 - `settings` fixes custom settings (`A_KEY`, never a built-in or `OUROBOROS_` one) for that

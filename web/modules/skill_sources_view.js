@@ -1,4 +1,4 @@
-// Skills → Sources (UX §6, boards B3, B4, B9): where skills come from and how
+// Extensions › Sources (UX §6, boards B3, B4, B9): where skills come from and how
 // much each place is trusted. Rows are equivalent (no row is heavier for being
 // first or official); the trust value on the right is the setting the owner
 // chose once, the health sentence in the meta line is live evidence — two axes,
@@ -147,10 +147,10 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
         if (message) host.toast(message, 'ok');
     }
 
-    async function confirmFirstStart() {
+    async function confirmFirstStart(canOpen = () => true) {
         if (!sources.length || !catalog) await load();
         const rows = unconfirmedHubRows(sources);
-        if (!rows.length) return;
+        if (!rows.length || destroyed || !canOpen()) return;
         const items = itemsBySource();
         const choice = await openFirstStartDialog(rows.map((row) => ({
             id: row.id, name: row.name, trust: row.trust,
@@ -227,8 +227,8 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
                 if (added) await afterChange(`${added.name || 'The source'} added. Its skills are in Browse.`);
             } else if (action === 'first_start') await confirmFirstStart();
             else if (action === 'made_here') host.showMadeHere();
-            else if (action === 'auto_grant') host.openSettings('permissions', { row: 'OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS' });
-            else if (action === 'skill_sources') host.openSettings('skill-sources');
+            else if (action === 'auto_grant') host.openSettings('permissions', { row: 'OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS', opener: target });
+            else if (action === 'skill_sources') host.openSettings('skill-sources', { opener: target });
             else if (source) await run(action, source);
         } catch (err) {
             host.toast(err?.message || String(err), 'danger');

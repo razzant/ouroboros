@@ -1,4 +1,4 @@
-// Settings › Tools and Settings › Models (docs/DESIGN.md "Settings"), against a fake settings server that answers
+// Extensions › MCP servers and Settings › Models (docs/DESIGN.md "Settings"), against a fake settings server that answers
 // like the real one (`changes` with a token per key, `_meta.effects`, `_meta.tokens`, a 409 for a stale list).
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -79,7 +79,7 @@ function fakeServer(routes, values = {}) {
     return server;
 }
 
-async function open(t, path, { values = {}, meta = {} } = {}) {
+async function open(t, path, { values = {}, meta = {}, onScreen = null } = {}) {
     forgetSettingRows();
     const env = setup(t);
     const server = fakeServer(env.routes, values);
@@ -90,6 +90,7 @@ async function open(t, path, { values = {}, meta = {} } = {}) {
     const asked = [];
     const ctx = { readSettings, openSettings: (to, options) => { opened.push(to); return true; }, state: { activePage: 'settings', settingsPath: path },
         ask: async (question) => { asked.push(question); return true; } };
+    if (onScreen) ctx.onScreen = onScreen;  // the section's fact (section_levels.js): is this page the one on screen
     const container = new NodeStub();
     const handle = await settingsPageFor(path).mount(container, { path, row: '', ctx });
     await settle();
@@ -103,10 +104,14 @@ const head = (container, id) => container.querySelectorAll('[data-entry-id]').fi
 const inside = (node, selector) => node.querySelectorAll(selector)[0] || null;
 const serversPosted = (post) => post.settings.MCP_SERVERS.map((entry) => [entry.id, entry.enabled]);
 
-test('the Tools list: the client switch is a plain row, each server is a head with its state, and the fold holds the two waits', async (t) => {
+test('the MCP servers list: the client switch is a plain row, each server is a head with its state, and the fold holds the servers\' wait', async (t) => {
     const page = await open(t, 'tools');
-    assert.deepEqual(rowsOf('tools', { fold: false }).map((row) => row.id), ['MCP_ENABLED', 'tools:door:skills', 'tools:door:circles']);
-    assert.deepEqual(rowsOf('tools', { fold: true }).map((row) => row.id), ['MCP_TOOL_TIMEOUT_SEC', 'OUROBOROS_TOOL_TIMEOUT_SEC', 'tools:import', 'tools:refresh']);
+    // Skills is the page beside it in Extensions, so its door is gone; the global tool timeout is one row of This
+    // computer › Advanced, the MCP wait stays with the servers.
+    assert.deepEqual(rowsOf('tools', { fold: false }).map((row) => row.id), ['MCP_ENABLED', 'tools:door:circles']);
+    assert.deepEqual(rowsOf('tools', { fold: true }).map((row) => row.id), ['MCP_TOOL_TIMEOUT_SEC', 'tools:import', 'tools:refresh']);
+    assert.deepEqual(rowById('OUROBOROS_TOOL_TIMEOUT_SEC').page, 'computer/advanced');
+    assert.equal(inside(page.container.querySelector('[data-setting-row="MCP_SERVERS"]'), '.settings-card-title').textContent, 'Servers');
     const client = rowById('MCP_ENABLED');
     assert.deepEqual([client.control.kind, client.writer, client.codec, client.keys], ['switch', 'generic', 'bool', ['MCP_ENABLED']]);
     const row = page.container.querySelector('[data-setting-row="MCP_ENABLED"]');
@@ -206,6 +211,43 @@ test('a server\'s page saves its one entry and keeps the switch out of the form;
     assert.deepEqual(page.opened, ['tools']);
 });
 
+test('a server\'s page is drawn again only while it is the page on screen: a read that lands after it was left or covered draws nothing', async (t) => {
+    let top = 'tools/files';  // the page Extensions shows on top, '' while another place is shown
+    const page = await open(t, 'tools/files', { onScreen: (path) => top === path });
+    const card = () => page.container.querySelector('[data-mcp-card]');
+    const name = () => card().querySelectorAll('[data-mcp-field]').find((node) => node.dataset.mcpField === 'name').getAttribute('value');
+    assert.equal(name(), 'Files');
+    const real = page.routes.get('/api/settings');
+    const shown = async () => { page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'tools/files', place: 'skills' } })); await settle(); };
+    const late = async (away) => {
+        const held = deferred();
+        page.routes.set('/api/settings', async (url, init = {}) => { if (!init.method) await held.promise; return real(url, init); });
+        await shown();  // the page's read starts while it is on screen...
+        top = away;     // ...and the owner leaves the place, or a level covers the page, before it lands
+        held.resolve();
+        await settle();
+        page.routes.set('/api/settings', real);
+    };
+    // Renamed elsewhere; the read lands after the owner left: the form stands as it was drawn.
+    page.server.values.MCP_SERVERS[1].name = 'Files (shared)';
+    const drawn = card();
+    await late('');
+    assert.equal(card(), drawn, 'a read that lands after the owner left draws nothing');
+    assert.equal(name(), 'Files');
+    // Back: the shell says "shown" for this path, and the form is read and drawn.
+    top = 'tools/files';
+    await shown();
+    assert.equal(name(), 'Files (shared)');
+    // Covered by another level: the same.
+    page.server.values.MCP_SERVERS[1].name = 'Files (team)';
+    const again = card();
+    await late('tools/files/other');
+    assert.equal(card(), again, 'a read that lands under another level draws nothing');
+    top = 'tools/files';
+    await shown();
+    assert.equal(name(), 'Files (team)');
+});
+
 test('a new server is saved as one more entry with an ID, and a taken ID is refused before anything is sent', async (t) => {
     const page = await open(t, 'tools/new');
     const card = page.container.querySelector('[data-mcp-card]');
@@ -225,6 +267,444 @@ test('a new server is saved as one more entry with an ID, and a taken ID is refu
     assert.deepEqual(post.settings.MCP_SERVERS.map((entry) => [entry.id, entry.enabled]), [['slack', true], ['files', false], ['git_hub', false]]);
     assert.deepEqual(page.opened, ['tools'], 'the list shows the new head');
     assert.equal(collectMcpSettings().MCP_SERVERS.length, 3);
+});
+
+for (const action of ['save', 'add', 'remove']) test(`late MCP ${action} leaves the current entry and its focus alone`, async t => {
+    let path = action === 'add' ? 'tools/new' : 'tools/files';
+    const page = await open(t, path, { onScreen: candidate => candidate === path });
+    if (action === 'save') {
+        const name = page.container.querySelector('[data-mcp-field="name"]');
+        name.value = 'Local files';
+        await name.fire('input');
+    }
+    if (action === 'add') {
+        for (const [field, value] of [['name', 'Inbox'], ['url', 'https://example.test/inbox']]) {
+            const input = page.container.querySelector(`[data-mcp-field="${field}"]`);
+            input.value = value;
+            await input.fire('input');
+        }
+    }
+    const write = deferred(), endpoint = page.routes.get('/api/settings');
+    page.routes.set('/api/settings', async (url, init) => {
+        if (init?.method === 'POST') await write.promise;
+        return endpoint(url, init);
+    });
+    const button = page.container.querySelector(action === 'remove' ? '[data-editor-remove]' : '[data-editor-save]');
+    const pending = button.fire('click', { target: button });
+    await settle();
+    path = 'tools/slack';
+    const next = new NodeStub();
+    const handle = await settingsPageFor(path).mount(next, { path, ctx: page.ctx });
+    t.after(() => handle.unmount());
+    const input = next.querySelector('[data-mcp-field="name"]');
+    if (action !== 'remove') {
+        input.value = 'My working draft';
+        await input.fire('input');
+    }
+    input.focus();
+    write.resolve();
+    await pending;
+    await settle();
+    assert.equal(page.server.posts.length, 1);
+    assert.deepEqual(page.opened, []);
+    assert.equal(next.querySelector('[data-editor-result]').textContent, '');
+    assert.equal(page.document.activeElement, input);
+    assert.equal(next.querySelector('[data-mcp-field="name"]'), input);
+    if (action !== 'remove') assert.equal(input.value, 'My working draft');
+    if (action === 'remove') return;
+    // The owner's own Discard releases this page's draft, so no typed form outlives the test.
+    await next.querySelector('[data-editor-discard]').fire('click');
+    await settle();
+    assert.equal(next.querySelector('[data-mcp-field="name"]').getAttribute('value'), 'Slack');
+});
+
+// Two windows over one settings server: this page's Save can be held on its way, and its reads answer as the backend's
+// do, a stored header value masked. Every value is an inert local fixture string.
+const MASK = '***set***';
+function sharedSettings(page) {
+    const endpoint = page.routes.get('/api/settings');
+    const gate = { held: null };
+    page.routes.set('/api/settings', async (url, init = {}) => {
+        if (init.method === 'POST' && gate.held) await gate.held.promise;
+        const answer = await endpoint(url, init);
+        if (init.method === 'POST') return answer;
+        const data = await answer.json();
+        for (const entry of data.MCP_SERVERS || []) {
+            for (const name of Object.keys(entry?.headers || {})) if (entry.headers[name]) entry.headers[name] = MASK;
+        }
+        return response(data);
+    });
+    return gate;
+}
+const typeInto = async (input, text) => { input.value = text; await input.fire('input'); };
+
+test('a header value one Save stored is kept, not sent again, when another row was typed while that Save was on its way', async (t) => {
+    const docs = { id: 'docs', name: 'Docs', enabled: true, transport: 'streamable_http', url: 'https://docs.example.test/mcp',
+        headers: { 'X-A': MASK, 'X-B': MASK } };
+    const page = await open(t, 'tools/docs', { values: { MCP_SERVERS: [docs] } });
+    const gate = sharedSettings(page);
+    const value = (n) => page.container.querySelectorAll('[data-mcp-header-row]')[n].querySelector('[data-mcp-header-field="value"]');
+    const result = () => page.container.querySelector('[data-editor-result]').textContent;
+    await typeInto(value(0), 'synthetic-a');
+    gate.held = deferred();
+    const pending = page.container.querySelector('[data-editor-save]').fire('click');
+    await settle();
+    await typeInto(value(1), 'synthetic-b');  // the other row, while the Save is on its way
+    gate.held.resolve();
+    gate.held = null;
+    await pending;
+    await settle();
+    assert.deepEqual(page.server.posts[0].settings.MCP_SERVERS[0].headers, { 'X-A': 'synthetic-a', 'X-B': MASK });
+    assert.match(result(), /latest edits are unsaved/);
+    assert.deepEqual([value(0).getAttribute('value'), value(1).getAttribute('value')], [MASK, 'synthetic-b'],
+        'the stored row now shows its mask; the row typed meanwhile keeps its draft');
+    // Another window replaces X-A; its masked read looks the same. The next Save keeps whatever X-A now holds.
+    page.server.values.MCP_SERVERS[0].headers['X-A'] = 'other-window-a';
+    page.server.tokens.MCP_SERVERS += 1;
+    await page.container.querySelector('[data-editor-save]').fire('click');
+    await settle();
+    assert.equal(page.asked.length, 1, 'the newer list cannot identify which masked header changed');
+    assert.equal(page.server.posts.length, 2);
+    assert.deepEqual(page.server.posts[1].settings.MCP_SERVERS[0].headers, { 'X-A': MASK, 'X-B': 'synthetic-b' });
+    assert.deepEqual(page.server.posts[1].precondition, { MCP_SERVERS: 'MCP_SERVERS@2' });
+    assert.equal(result(), 'Saved');
+    // A Save that sent a typed value is stored, but its answer is lost: the form is held, never sent again for
+    // another field, until Discard loads what the server holds.
+    await typeInto(value(0), 'synthetic-a2');
+    page.server.answers.push((settings) => {
+        page.server.values.MCP_SERVERS = structuredClone(settings.MCP_SERVERS);
+        page.server.tokens.MCP_SERVERS += 1;
+        return response({ error: 'reply lost' }, 502);
+    });
+    await page.container.querySelector('[data-editor-save]').fire('click');
+    await settle();
+    assert.match(result(), /^Not confirmed: this Save may have been stored\. Your edits are kept here/);
+    await typeInto(page.container.querySelector('[data-mcp-field="url"]'), 'https://docs.example.test/v2');
+    await page.container.querySelector('[data-editor-save]').fire('click');
+    await settle();
+    assert.equal(page.server.posts.length, 3, 'the literal is not sent again');
+    assert.match(result(), /^Not confirmed/);
+    await page.container.querySelector('[data-editor-discard]').fire('click');
+    await settle();
+    assert.equal(value(0).getAttribute('value'), MASK);
+});
+
+for (const tokenAvailable of [true, false]) {
+    test(`clearing an opaque header asks about the observed list, version available: ${tokenAvailable}`, async t => {
+        const docs = { id: 'docs', name: 'Docs', url: 'https://docs.example.test', headers: { Mode: MASK } };
+        const page = await open(t, 'tools/docs', { values: { MCP_SERVERS: [docs] }, meta: tokenAvailable ? {} : { tokens: {} } });
+        sharedSettings(page);
+        const save = () => page.container.querySelector('[data-editor-save]').fire('click');
+        await page.container.querySelector('[data-mcp-header-clear]').fire('click');
+        page.server.values.MCP_SERVERS[0].headers.Mode = 'external-mode';
+        page.server.tokens.MCP_SERVERS = 1;
+        page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'tools/docs' } }));
+        await settle();
+        const questions = [];
+        page.ctx.ask = async question => { questions.push(question); return false; };
+        await save();
+        await settle();
+        assert.equal(questions.length, 1);
+        assert.match(questions[0].body, tokenAvailable ? /list changed/ : /version is unavailable/);
+        assert.equal(page.server.posts.length, 0);
+        assert.equal(page.container.querySelector('[data-mcp-header-field="value"]').value, '');
+        page.ctx.ask = async () => {
+            if (tokenAvailable) page.server.tokens.MCP_SERVERS = 2;  // a third edit during confirmation
+            return true;
+        };
+        await save();
+        await settle();
+        assert.equal(page.server.posts.length, 1);
+        const [post] = page.server.posts;
+        assert.equal(post.settings.MCP_SERVERS[0].headers.Mode, '');
+        if (tokenAvailable) {
+            assert.deepEqual(post.precondition, { MCP_SERVERS: 'MCP_SERVERS@1' });
+            assert.equal(page.server.values.MCP_SERVERS[0].headers.Mode, 'external-mode');
+            assert.match(page.container.querySelector('[data-editor-result]').textContent, /Not saved/);
+            await page.container.querySelector('[data-editor-discard]').fire('click');
+        } else {
+            assert.equal(post.precondition, undefined);
+            assert.equal(page.server.values.MCP_SERVERS[0].headers.Mode, '');
+        }
+    });
+}
+
+for (const newer of [true, false]) {
+    test(`no_changes settles the submitted row to its mask, newer typing: ${newer}`, async t => {
+        const docs = { id: 'docs', name: 'Docs', url: 'https://docs.example.test', headers: { Mode: MASK, Colour: MASK } };
+        const page = await open(t, 'tools/docs', { values: { MCP_SERVERS: [docs] } });
+        const gate = sharedSettings(page);
+        page.server.values.MCP_SERVERS[0].headers.Mode = 'plain';
+        const values = () => page.container.querySelectorAll('[data-mcp-header-field="value"]');
+        const save = () => page.container.querySelector('[data-editor-save]').fire('click');
+        await typeInto(values()[0], 'plain');
+        page.server.answers.push(() => response({ status: 'saved', no_changes: true, changes: {} }));
+        gate.held = deferred();
+        await save();
+        await settle();
+        if (newer) await typeInto(values()[1], 'green');
+        gate.held.resolve();
+        gate.held = null;
+        await settle();
+        assert.equal(values()[0].getAttribute('value'), MASK);
+        assert.equal(page.handle.unsaved(), newer);
+        const result = page.container.querySelector('[data-editor-result]').textContent;
+        if (newer) {
+            assert.match(result, /latest edits are unsaved/);
+            assert.equal(values()[1].getAttribute('value'), 'green');
+            await save();
+            await settle();
+            assert.deepEqual(page.server.posts[1].settings.MCP_SERVERS[0].headers, { Mode: MASK, Colour: 'green' });
+        } else assert.equal(result, 'Already saved.');
+    });
+}
+
+test('Discard waits for the same Save after returning to the server and then loads the stored address', async t => {
+    let path = 'tools/slack';
+    const page = await open(t, path, { onScreen: candidate => path === candidate });
+    const gate = sharedSettings(page);
+    const first = 'https://docs.example.test/first';
+    await typeInto(page.container.querySelector('[data-mcp-field="url"]'), first);
+    gate.held = deferred();
+    await page.container.querySelector('[data-editor-save]').fire('click');
+    await settle();
+    assert.equal(page.container.querySelector('[data-editor-discard]').disabled, true);
+    path = 'tools/files';
+    const away = await settingsPageFor(path).mount(new NodeStub(), { path, ctx: page.ctx });
+    t.after(() => away.unmount());
+    path = 'tools/slack';
+    page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path } }));
+    await settle();
+    const field = () => page.container.querySelector('[data-mcp-field="url"]');
+    const discard = () => page.container.querySelector('[data-editor-discard]');
+    assert.equal(discard().disabled, true);
+    await discard().fire('click');
+    const second = 'https://docs.example.test/second';
+    await typeInto(field(), second);
+    gate.held.resolve();
+    gate.held = null;
+    await settle();
+    assert.equal(field().getAttribute('value'), second);
+    assert.equal(page.server.values.MCP_SERVERS[0].url, first);
+    assert.equal(discard().disabled, false);
+    await discard().fire('click');
+    assert.equal(field().getAttribute('value'), first);
+    assert.equal(page.handle.unsaved(), false);
+    assert.equal(page.server.posts.length, 1);
+});
+
+for (const body of ['invalid JSON', 'missing receipt']) test(`an address save with ${body} stays unknown through a failed Discard`, async t => {
+    const page = await open(t, 'tools/slack');
+    const endpoint = page.routes.get('/api/settings');
+    const save = () => page.container.querySelector('[data-editor-save]').fire('click');
+    const discard = () => page.container.querySelector('[data-editor-discard]').fire('click');
+    const url = () => page.container.querySelector('[data-mcp-field="url"]');
+    const result = () => page.container.querySelector('[data-editor-result]').textContent;
+    const address = 'https://edited.example.test';
+    await typeInto(url(), address);
+    page.server.answers.push(settings => {
+        page.server.values.MCP_SERVERS = structuredClone(settings.MCP_SERVERS);
+        return body === 'invalid JSON' ? { ok: true, status: 200, json: async () => { throw new SyntaxError(); } }
+            : response({ unexpected: true });
+    });
+    await save();
+    await settle();
+    assert.match(result(), /^Not confirmed/);
+    await typeInto(url(), 'https://newer.example.test');
+    await save();
+    await settle();
+    assert.equal(page.server.posts.length, 1);
+    page.routes.set('/api/settings', async () => response({ error: 'temporarily unavailable' }, 503));
+    await discard();
+    assert.match(result(), /Press Discard changes again/);
+    assert.equal(page.handle.unsaved(), true);
+    assert.equal(url().value, 'https://newer.example.test');
+    page.routes.set('/api/settings', endpoint);
+    await discard();
+    assert.equal(url().getAttribute('value'), address);
+    assert.equal(result(), 'Current settings loaded.');
+    assert.equal(page.handle.unsaved(), false);
+    assert.equal(page.server.posts.length, 1);
+});
+
+const HELD = /^Not saved: the server list changed elsewhere\. Your edits are kept here, unsaved; discard them/;
+
+for (const [how, change] of [['save', 'renamed'], ['save', 'removed'], ['read', 'renamed'], ['read', 'removed']]) {
+    test(`a typed form whose server was ${change} in another window is kept after a ${how} until Discard`, async (t) => {
+        const page = await open(t, 'tools/files');
+        sharedSettings(page);
+        const name = page.container.querySelector('[data-mcp-field="name"]');
+        const discard = page.container.querySelector('[data-editor-discard]');
+        const result = () => page.container.querySelector('[data-editor-result]').textContent;
+        await typeInto(name, 'Local files');
+        if (change === 'renamed') page.server.values.MCP_SERVERS[1].name = 'Files (other window)';
+        else page.server.values.MCP_SERVERS.pop();
+        page.server.tokens.MCP_SERVERS = 1;
+        try {
+            if (how === 'save') await page.container.querySelector('[data-editor-save]').fire('click');
+            else page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'tools/files' } }));
+            await settle();
+            assert.equal(page.server.posts.length, 0, 'nothing is written over the other window');
+            assert.equal(page.container.querySelector('[data-mcp-field="name"]'), name, 'the form is not drawn again');
+            assert.equal(name.value, 'Local files');
+            assert.match(result(), HELD);
+            assert.equal(discard.hasAttribute('hidden'), false);
+            const toggle = page.container.querySelector('[data-entry-switch]');
+            const remove = page.container.querySelector('[data-editor-remove]');
+            for (const control of [toggle, remove, page.container.querySelector('[data-mcp-test]'), page.container.querySelector('[data-mcp-refresh]')]) {
+                assert.equal(control.disabled, true, 'a held form has no action on a saved entry');
+            }
+            await toggle.fire('change', { target: toggle });
+            await remove.fire('click', { target: remove });
+            await page.container.querySelector('[data-editor-save]').fire('click');
+            await settle();
+            assert.equal(page.asked.length, 0);
+            assert.equal(page.server.posts.length, 0, 'Save waits for Discard; it never retries with the newer list');
+            assert.match(result(), HELD);
+        } finally {
+            await discard.fire('click');  // the module's held identity never outlives this test
+            await settle();
+        }
+        if (change === 'renamed') {
+            assert.equal(page.container.querySelector('[data-mcp-field="name"]').getAttribute('value'), 'Files (other window)');
+            assert.equal(result(), 'Current settings loaded.');
+        } else assert.match(page.container.textContent, /no longer on the list/);
+    });
+}
+
+for (const typedMeanwhile of [false, true]) {
+    test(`a Save refused with a 409 holds the form as typed until Discard${typedMeanwhile ? ', with the typing done while it was refused' : ''}`, async (t) => {
+        const page = await open(t, 'tools/files');
+        const gate = sharedSettings(page);
+        const name = page.container.querySelector('[data-mcp-field="name"]');
+        const discard = page.container.querySelector('[data-editor-discard]');
+        const result = () => page.container.querySelector('[data-editor-result]').textContent;
+        const latest = typedMeanwhile ? 'Local files 2' : 'Local files';
+        await typeInto(name, 'Local files');
+        // Another window writes the list between this page's read and its write; this entry still reads the same.
+        page.server.answers.push(() => {
+            page.server.values.MCP_SERVERS[0].name = 'Slack (other window)';
+            page.server.tokens.MCP_SERVERS = 1;
+            return response({ saved: false, code: 'settings_changed_elsewhere', error: 'MCP_SERVERS changed' }, 409);
+        });
+        try {
+            gate.held = deferred();
+            const pending = page.container.querySelector('[data-editor-save]').fire('click');
+            await settle();
+            if (typedMeanwhile) await typeInto(name, latest);
+            gate.held.resolve();
+            gate.held = null;
+            await pending;
+            await settle();
+            assert.equal(page.container.querySelector('[data-mcp-field="name"]'), name, 'the form is not drawn again');
+            assert.equal(name.value, latest);
+            assert.match(result(), HELD);
+            assert.equal(discard.hasAttribute('hidden'), false);
+            // Neither another Save nor a later read that looks like the old entry releases it.
+            await page.container.querySelector('[data-editor-save]').fire('click');
+            page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'tools/files' } }));
+            await settle();
+            assert.equal(page.server.posts.length, 1, 'one refused write and no second one');
+            assert.equal(page.container.querySelector('[data-mcp-field="name"]'), name);
+            assert.equal(name.value, latest);
+            assert.match(result(), HELD);
+        } finally {
+            await discard.fire('click');
+            await settle();
+        }
+        assert.equal(page.container.querySelector('[data-mcp-field="name"]').getAttribute('value'), 'Files');
+        assert.equal(result(), 'Current settings loaded.');
+        assert.equal(page.server.posts.length, 1);
+        // A clean form refused the same way stays clean: it is read again and says so, nothing is held.
+        page.server.answers.push(() => {
+            page.server.values.MCP_SERVERS[1].command = 'npx-other';
+            page.server.tokens.MCP_SERVERS = 2;
+            return response({ saved: false, code: 'settings_changed_elsewhere', error: 'MCP_SERVERS changed' }, 409);
+        });
+        await page.container.querySelector('[data-editor-save]').fire('click');
+        await settle();
+        assert.equal(page.server.posts.length, 2);
+        assert.equal(result(), 'Changed on another device. This is the current value.');
+        assert.equal(page.container.querySelector('[data-mcp-field="command"]').getAttribute('value'), 'npx-other');
+        assert.equal(page.container.querySelector('[data-editor-discard]').hasAttribute('hidden'), true);
+    });
+}
+
+test('a new server refused with a 409 keeps its form and its Discard; the page of its ID shows the server saved there', async (t) => {
+    const page = await open(t, 'tools/new');
+    const field = (name) => page.container.querySelector(`[data-mcp-field="${name}"]`);
+    const result = () => page.container.querySelector('[data-editor-result]').textContent;
+    await typeInto(field('name'), 'Inbox');
+    await typeInto(field('url'), 'https://inbox.example.test/mcp');
+    page.server.answers.push(() => {  // another window adds a server of the same ID first
+        page.server.values.MCP_SERVERS.push({ id: 'inbox', name: 'Inbox (other window)', enabled: false, transport: 'stdio', command: 'inbox' });
+        page.server.tokens.MCP_SERVERS = 1;
+        return response({ saved: false, code: 'settings_changed_elsewhere', error: 'MCP_SERVERS changed' }, 409);
+    });
+    const discard = page.container.querySelector('[data-editor-remove]');
+    try {
+        await page.container.querySelector('[data-editor-save]').fire('click');
+        await settle();
+        assert.equal(field('name').value, 'Inbox');
+        assert.match(result(), HELD);
+        await page.container.querySelector('[data-editor-save]').fire('click');
+        await settle();
+        assert.equal(page.server.posts.length, 1, 'Save waits for Discard');
+        assert.equal(discard.textContent, 'Discard');
+        // The page of that very ID opens the server saved there, never this unsaved form.
+        const saved = new NodeStub();
+        const handle = await settingsPageFor('tools/inbox').mount(saved, { path: 'tools/inbox', ctx: page.ctx });
+        t.after(() => handle.unmount());
+        await settle();
+        assert.equal(saved.querySelector('[data-mcp-field="name"]').getAttribute('value'), 'Inbox (other window)');
+        assert.equal(field('name').value, 'Inbox');
+    } finally {
+        await discard.fire('click');
+        await settle();
+    }
+    assert.deepEqual(page.opened, ['tools']);
+});
+
+test('a form kept for a server removed elsewhere stays reachable from the list and is not replaced by a new server of its ID', async (t) => {
+    const page = await open(t, 'tools/files');
+    const name = page.container.querySelector('[data-mcp-field="name"]');
+    const discard = page.container.querySelector('[data-editor-discard]');
+    await typeInto(name, 'Local files');
+    page.server.values.MCP_SERVERS.pop();
+    page.server.tokens.MCP_SERVERS = 1;
+    page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'tools/files' } }));
+    await settle();
+    const mount = async (path) => {
+        const container = new NodeStub();
+        const handle = await settingsPageFor(path).mount(container, { path, ctx: page.ctx });
+        t.after(() => handle.unmount());
+        await settle();
+        return container;
+    };
+    const fresh = await mount('tools/new');
+    const newDiscard = fresh.querySelector('[data-editor-remove]');
+    try {
+        // The list offers one opener for the kept form: its typed name, no switch, and it opens that server's page.
+        const list = await mount('tools');
+        const kept = head(list, 'files');
+        assert.match(kept.textContent, /Local files.*Unsaved changes · not on the saved list/s);
+        assert.equal(inside(kept, '[data-entry-switch]'), null);
+        await list.fire('click', { target: inside(kept, '[data-entry-open]') });
+        await settle();
+        assert.deepEqual(page.opened, ['tools/files']);
+        // A new server under the same ID is refused before anything is sent; the kept form is untouched.
+        await typeInto(fresh.querySelector('[data-mcp-field="name"]'), 'Files');
+        await typeInto(fresh.querySelector('[data-mcp-field="url"]'), 'https://files.example.test/mcp');
+        await fresh.querySelector('[data-editor-save]').fire('click');
+        await settle();
+        assert.equal(page.server.posts.length, 0);
+        assert.match(fresh.querySelector('[data-editor-result]').textContent, /Unsaved changes are kept for the ID files\. Open them from the list and discard them first\./);
+        assert.equal(name.value, 'Local files');
+    } finally {
+        await newDiscard.fire('click');
+        await discard.fire('click');
+        await settle();
+    }
 });
 
 // Which endpoint each key went to: the guard of the checker's transaction.

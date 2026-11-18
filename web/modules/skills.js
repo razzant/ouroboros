@@ -1,6 +1,11 @@
-// Skills' Installed view reads the local listing and lifecycle queue without waiting for a source.
-// Browse and Sources own their views; every action keeps its words, confirmation and refusal.
-import { bindPageHeader, bindTabStrip, renderPageHeader, renderTabStrip } from './page_header.js';
+// The skill views of Extensions (extensions.js draws the place): Skills, the installed skills (what Ouroboros can do
+// now), and the skill catalog's Browse (what else it could do, from every connected source) and Sources (where skills
+// come from and how much each place is trusted) are three of its pages, never tabs; MCP servers is its fourth. The
+// views stay one mounted block; the section says which one is on screen (`showView`, `hideViews`). Skills never waits
+// for a source or GitHub: it reads the local listing and the serialized lifecycle queue, and every owner action keeps
+// its own words, confirmation and refusal. Browse and Sources live in their own modules. A skill's own form opens over
+// Skills as a level of the section; Accounts and Permissions open in Settings with Back to Extensions.
+import { createExtensions } from './extensions.js';
 import { bindMenu } from './ui_interactions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
@@ -22,17 +27,13 @@ import {
 import { plural, popularityText, repoLabel, routeExternalLink, skillTitle, versionText } from './skill_presentation.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
 import { installedTime } from './ui_helpers.js';
+import { readConnectedServers } from './mcp_settings.js';
 import { bindScrollFade } from './scroll_fade.js';
 import {
     boundedText, emitSkillLifecycle, escapeHtmlAttr as escapeHtml, grantReady, renderSkillRepairPrompt,
     reviewTone, reviewReady,
 } from './utils.js';
 
-const SKILLS_TABS = [
-    { value: 'installed', label: 'Installed', pillId: 'skills-tab-pill-installed', tabId: 'skills-tab-installed', panelId: 'skills-pane-installed' },
-    { value: 'browse', label: 'Browse', pillId: 'skills-tab-pill-browse', tabId: 'skills-tab-browse', panelId: 'skills-pane-browse' },
-    { value: 'sources', label: 'Sources', tabId: 'skills-tab-sources', panelId: 'skills-pane-sources' },
-];
 const LIFECYCLE_VISIBLE_STATUSES = new Set(['queued', 'running', 'failed']);
 const INSTALLED_FILTERS = [
     ['all', 'All'], ['needs', 'Needs you'], ['updates', 'Updates'], ['off', 'Off'], ['made', 'Made here'],
@@ -43,24 +44,19 @@ const NOTHING_NEEDS_YOU = 'Nothing needs you now.';
 const WORK_POLL_MS = 3000;
 const REVIEW_POLL_MS = 15000;
 
-export function skillsPageTemplate() {
+// The band's end over a skill view: its own actions, where they stood beside the tabs.
+export const SKILLS_ACTIONS = '<button id="skills-update-all" class="btn btn-default btn-sm" hidden>Update all</button><button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>';
+
+// The three skill views as one block of the section's page column: each view's search row, then their one scroller.
+export function skillsViewsTemplate() {
     return `
-        <section class="page app-page-glass" id="page-skills">
-            ${renderPageHeader({
-                page: 'skills',
-                actionsHtml: '<button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>',
-                tabsHtml: renderTabStrip({
-                    items: SKILLS_TABS, active: 'installed', dataAttr: 'data-tab', activeClass: 'is-active',
-                    ariaLabel: 'Skills views', stripClass: 'skills-tabs', tabClass: 'skills-tab',
-                }) + '<button id="skills-update-all" class="btn btn-default btn-sm" hidden>Update all</button>',
-            })}
-            <div class="skills-scroll scroll-fade-y">
-                <div class="skills-search-chrome" data-chrome-pane="installed">
+            <div class="skills-search-chrome" data-chrome-pane="installed">
                 <input type="search" class="ui-control skills-search" id="skills-installed-search" placeholder="Find an installed skill" aria-label="Find an installed skill" autocomplete="off">
                 <div class="skills-filter-strip" id="skills-installed-filters" role="group" aria-label="Show" data-scroll-x></div>
             </div>
             <div class="skills-search-chrome" data-chrome-pane="browse" id="skills-browse-chrome" hidden></div>
-                <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed" role="tabpanel" aria-labelledby="skills-tab-installed">
+            <div class="skills-scroll scroll-fade-y">
+                <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed">
                     <div id="skills-status" class="ui-status skills-list-status" role="status" aria-live="polite"></div>
                     <div id="skills-org-requirements" hidden></div>
                     <div id="skills-list" class="skills-list"></div>
@@ -70,10 +66,9 @@ export function skillsPageTemplate() {
                         <button type="button" class="btn btn-primary btn-sm" data-skills-goto="browse">Browse skills</button>
                     </div>
                 </div>
-                <div class="skills-tab-panel" id="skills-pane-browse" data-pane="browse" role="tabpanel" aria-labelledby="skills-tab-browse" hidden></div>
-                <div class="skills-tab-panel" id="skills-pane-sources" data-pane="sources" role="tabpanel" aria-labelledby="skills-tab-sources" hidden></div>
+                <div class="skills-tab-panel" id="skills-pane-browse" data-pane="browse" hidden></div>
+                <div class="skills-tab-panel" id="skills-pane-sources" data-pane="sources" hidden></div>
             </div>
-        </section>
     `;
 }
 
@@ -280,12 +275,14 @@ async function fetchSkills() {
 }
 
 export function initSkills(ctx = {}) {
-    // A Settings page opened from here leads back to Skills, where it was opened.
-    const page = document.createElement('div');
-    page.innerHTML = skillsPageTemplate();
-    document.getElementById('content').appendChild(page.firstElementChild);
+    // The section draws the place: its list of pages, the band and the page column these views stand in.
+    const section = createExtensions({ ctx, viewsHtml: skillsViewsTemplate(), toolbarHtml: SKILLS_ACTIONS,
+        views: { show: (view) => showView(view), hide: () => hideViews(), placeShown: () => placeShown(),
+            rowsShown: () => readInstalled({ quiet: true, join: true }) },
+        facts: () => sectionFacts() });
 
     const root = document.getElementById('page-skills');
+    const viewsRoot = root.querySelector('[data-extensions-views]');   // the views' own box: their presses stay theirs
     const container = document.getElementById('skills-list');
     const status = document.getElementById('skills-status');
     const requirementsEl = document.getElementById('skills-org-requirements');
@@ -303,6 +300,8 @@ export function initSkills(ctx = {}) {
     let destroyed = false;
     let renderGeneration = 0;
     let filter = 'all';
+    let requestedSkill = '';
+    let openRequest = 0;
     let filterEmptySentence = FILTER_EMPTY;  // the English last written, so a translated line is not rewritten each paint
     let snapshot = null;   // { rawSkills, live, queue, githubTokenConfigured }
     let activeMenu = null;
@@ -312,7 +311,11 @@ export function initSkills(ctx = {}) {
     let firstStartAsked = false;
     const contributions = getContributions();
     const hostModules = getHostModules();
-    const onPageModuleFacts = () => { if (!destroyed && visible && snapshot) paintInstalled(); };
+    const onPageModuleFacts = () => {
+        if (destroyed || document.hidden || !snapshot) return;
+        if (visible) paintInstalled();
+        else if (section.rowsOnScreen()) section.paintAnswers();
+    };
     const stopContributionFacts = contributions?.onChange?.(onPageModuleFacts);
     const stopHostFacts = hostModules?.onFactsChange?.(onPageModuleFacts);
 
@@ -324,6 +327,7 @@ export function initSkills(ctx = {}) {
                 cache.sources = skillSourcesApi.list().then((data) => {
                     const list = Array.isArray(data) ? data : (Array.isArray(data?.sources) ? data.sources : []);
                     cache.sourcesValue = list;
+                    queueMicrotask(() => section.paintAnswers());
                     cache.sourcesProblem = String(data?.problem || '');
                     cache.sourceSuggestions = Array.isArray(data?.suggestions) ? data.suggestions : [];
                     return list;
@@ -354,6 +358,16 @@ export function initSkills(ctx = {}) {
     };
     const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts(),
         contributionVisibility: (name) => contributions?.visibilityForSkill?.(name) || [] });
+
+    // What the section's list says about these views, from reads already made (never a read of its own).
+    function sectionFacts() {
+        return {
+            installed: snapshot?.rawSkills ? snapshot.rawSkills.length : null,
+            needs: snapshot?.rawSkills ? installedFilterCounts(projected(), pageModuleFacts()).needs : 0,
+            working: inFlightCount(lifecycleEventsFromQueue(snapshot?.queue)),
+            sources: Array.isArray(cache.sourcesValue) ? cache.sourcesValue.length : null,
+        };
+    }
 
     // ---- Installed view -------------------------------------------------------------------------
     function paintFilters(skills) {
@@ -393,9 +407,8 @@ export function initSkills(ctx = {}) {
         updateAllBtn.hidden = !(activeTab === 'installed' && candidates.length >= 2);
         updateAllBtn.textContent = `Update ${candidates.length}`;
         updateAllBtn.setAttribute('aria-label', `Update ${candidates.length} trusted skills`);
-        const pill = document.getElementById('skills-tab-pill-installed');
-        const count = inFlightCount(lifecycleEventsFromQueue(snapshot?.queue));
-        if (pill) { pill.hidden = !count; pill.textContent = count ? String(count) : ''; }
+        // Work in flight and what needs the owner are said by the Skills row of the section's list.
+        section.paintAnswers();
     }
 
     function paintInstalled({ replace = false } = {}) {
@@ -453,7 +466,27 @@ export function initSkills(ctx = {}) {
         schedulePoll();
     }
 
-    async function readInstalled({ quiet = false } = {}) {
+    // The rail and a view shown together share one read. Refresh and lifecycle changes supersede an older read.
+    let listingOnWay = null;
+    const sayLoading = () => { status.dataset.tone = 'muted'; status.textContent = 'Loading installed skills…'; };
+    function readInstalled({ quiet = false, join = false } = {}) {
+        if (join && listingOnWay) {
+            if (!quiet && !snapshot) sayLoading();
+            return listingOnWay;
+        }
+        const read = readListing({ quiet });
+        const settled = listed => {
+            if (listingOnWay !== read) return;
+            listingOnWay = null;
+            if (listed) revealRequestedSkill();
+            requestedSkill = '';  // a failure or an absent skill ends the request too
+        };
+        listingOnWay = read;
+        read.then(settled, () => settled(false));
+        return read;
+    }
+
+    async function readListing({ quiet = false } = {}) {
         if (destroyed) return;
         const generation = ++renderGeneration;
         const current = () => generation === renderGeneration && !destroyed;
@@ -478,11 +511,18 @@ export function initSkills(ctx = {}) {
             if (!current()) return;
             const ok = Array.isArray(data?.events) || (data?.active && typeof data.active === 'object');
             optional.queue = ok ? 'ready' : 'failed';
-            if (ok) next.queue = data;
+            if (ok) {
+                const connected = (job) => job?.kind === 'connect_mcp' && job.status === 'succeeded';
+                const previous = lifecycleEventsFromQueue(next.queue).filter(connected);
+                const justConnected = lifecycleEventsFromQueue(data).some((job) => connected(job)
+                    && !previous.some((old) => old.id === job.id));
+                next.queue = data;
+                if (justConnected) readConnectedServers();
+            }
             if (snapshot === next) paintInstalled();
             showReads();
         }, () => { if (current()) { optional.queue = 'failed'; showReads(); } });
-        if (!quiet && !snapshot) { status.dataset.tone = 'muted'; status.textContent = 'Loading installed skills…'; }
+        if (!quiet && !snapshot) sayLoading();
         try {
             const primary = await fetchSkills();
             if (!current()) return;
@@ -503,6 +543,7 @@ export function initSkills(ctx = {}) {
         if (firstPaint) status.textContent = '';
         paintInstalled({ replace: firstPaint });
         showReads();
+        return true;
     }
 
     // Local progress only (never GitHub): lifecycle work and pending MCP listings,
@@ -824,7 +865,16 @@ export function initSkills(ctx = {}) {
             void ctx.openSettings?.('accounts', { row: String(options.keys || '').split(',')[0].trim() });
             return false;
         }
-        if (action === 'open_settings') { void ctx.openSettings?.(`skill/${encodeURIComponent(name)}`); return false; }
+        // The skill's own form stays with the skill: a level over Skills; Back returns to its card, to the pressed control
+        // while it still stands, else (an item of the card's menu is gone by then) to the menu's button.
+        if (action === 'open_settings') {
+            const pressed = options.node;
+            section.go(`skill/${encodeURIComponent(name)}`, {
+                opener: () => (pressed?.isConnected && pressed.getClientRects().length ? pressed
+                    : viewsRoot.querySelector(`.skills-card[data-skill="${CSS.escape(name)}"] [data-skill-menu-trigger]`)),
+            });
+            return false;
+        }
         if (action === 'read_findings') { openFindings(name); return false; }
         if (action === 'find_in_browse') { selectTab('browse'); browse?.searchFor(name); return false; }
         if (action === 'review' || action === 'rereview') {
@@ -864,7 +914,10 @@ export function initSkills(ctx = {}) {
         if (action === 'connect_tools') {
             const result = await connectSkillTools(await currentSkill(name));
             if (stillWorking(name, result)) return true;  // not confirmed yet: the card follows its job
-            if (result?.ok) showToast(`${name}: ${result.changed === false ? 'tools already configured' : 'tools configured'}. Its own instructions say what else they need.`, 'ok');
+            if (result?.ok) {
+                readConnectedServers();
+                showToast(`${name}: ${result.changed === false ? 'tools already configured' : 'tools configured'}. Its own instructions say what else they need.`, 'ok');
+            }
             return Boolean(result);
         }
         if (action === 'grant') {
@@ -915,7 +968,7 @@ export function initSkills(ctx = {}) {
         const goto = event.target.closest('[data-skills-goto]');
         if (goto) { selectTab(goto.dataset.skillsGoto); return; }
         const chip = event.target.closest('[data-installed-filter]');
-        if (chip) { filter = chip.dataset.installedFilter; paintFilters(snapshot?.rawSkills ? projected() : null); applyInstalledFilter(); return; }
+        if (chip) { requestedSkill = ''; filter = chip.dataset.installedFilter; paintFilters(snapshot?.rawSkills ? projected() : null); applyInstalledFilter(); return; }
         const menuTrigger = event.target.closest('[data-skill-menu-trigger]');
         if (menuTrigger) { openSkillMenu(menuTrigger); return; }
         const actionTarget = event.target.closest('[data-skill-action]');
@@ -977,7 +1030,30 @@ export function initSkills(ctx = {}) {
     // A findings block is rendered collapsed; its list is built on first open
     // from the row already in memory (`toggle` does not bubble: capture).
     const onToggle = (event) => fillFindingsOnOpen(event.target, snapshot?.rawSkills);
-    const onSearch = () => applyInstalledFilter();
+    const onSearch = () => { requestedSkill = ''; applyInstalledFilter(); };
+
+    function revealRequestedSkill() {
+        if (!requestedSkill || !visible || document.hidden || activeTab !== 'installed') return;
+        const card = container.querySelector(`.skills-card[data-skill="${CSS.escape(requestedSkill)}"]:not([data-lifecycle-virtual])`);
+        if (!card) return;
+        if (card.hidden) {
+            searchInput.value = requestedSkill;
+            applyInstalledFilter();
+            if (card.hidden) {
+                filter = 'all';
+                paintFilters(projected());
+                applyInstalledFilter();
+            }
+        }
+        card.scrollIntoView({ block: 'nearest' });
+    }
+
+    // Opening Skills may already have started a fresh read. A read started before this request
+    // cannot settle it: the requested card may just have been installed.
+    function requestInstalledSkill(name, beforeOpen) {
+        requestedSkill = name;
+        void readInstalled({ quiet: true, join: renderGeneration > beforeOpen });
+    }
 
     // ---- Browse and Sources ---------------------------------------------------------------------
     const host = {
@@ -998,11 +1074,14 @@ export function initSkills(ctx = {}) {
                 if (!err.cancelled) showToast(`${name}: ${err.message || err}`, 'danger');
             }
         },
-        confirmFirstStart: async (sourceId) => {
+        confirmFirstStart: async (sourceId, canOpen = () => true) => {
             const sources = await store.sources().catch(() => []);
-            if (firstStartAsked || !unconfirmedHubRows(sources).some((row) => !sourceId || row.id === sourceId)) return;
-            firstStartAsked = true;
-            await sourcesView.confirmFirstStart();
+            if (firstStartAsked || !canOpen() || !unconfirmedHubRows(sources).some((row) => !sourceId || row.id === sourceId)) return;
+            await sourcesView.confirmFirstStart(() => {
+                if (firstStartAsked || !canOpen()) return false;
+                firstStartAsked = true;
+                return true;
+            });
         },
         compare: (item, installed) => openCompareDialog({
             mine: { name: installed?.name, official: installed?.install?.official, source: installedSourceLabel(installed || {}),
@@ -1013,9 +1092,16 @@ export function initSkills(ctx = {}) {
         }),
         toast: (message, tone) => showToast(message, tone),
         pageModuleFacts,
-        showInstalled: (name) => { selectTab('installed'); searchInput.value = name; applyInstalledFilter(); },
+        showInstalled: (name) => {
+            const beforeOpen = renderGeneration;
+            selectTab('installed');
+            searchInput.value = name;
+            applyInstalledFilter();
+            requestInstalledSkill(name, beforeOpen);
+        },
         showMadeHere: () => { filter = 'made'; selectTab('installed'); },
-        openSettings: (path, options = {}) => ctx.openSettings?.(path, options),
+        // Skill sources open here as a level over Sources; the rest of Settings with Back to Extensions.
+        openSettings: (path, options = {}) => section.fromPage(path, options),
     };
     const browse = createSkillBrowse({ pane: document.getElementById('skills-pane-browse'), chrome: document.getElementById('skills-browse-chrome'), host });
     const sourcesView = createSkillSources({ pane: document.getElementById('skills-pane-sources'), host });
@@ -1026,29 +1112,45 @@ export function initSkills(ctx = {}) {
     }
 
     async function showActive({ refresh = false } = {}) {
-        if (activeTab === 'installed') return readInstalled({ quiet: Boolean(snapshot) });
+        if (activeTab === 'installed') return readInstalled({ quiet: Boolean(snapshot), join: true });
+        const view = activeTab;
+        const stillHere = () => !destroyed && visible && !document.hidden && activeTab === view;
         // Browse and Sources need the installed listing for every card's state.
-        const listing = snapshot ? Promise.resolve() : readInstalled();
+        const listing = snapshot ? Promise.resolve() : readInstalled({ join: true });
         if (activeTab === 'browse') await Promise.all([browse.show({ refresh }), listing]);
         else await Promise.all([sourcesView.show({ refresh }), listing]);
-        if (!firstStartAsked) host.confirmFirstStart();
+        if (!firstStartAsked && stillHere()) void host.confirmFirstStart(undefined, stillHere);
     }
 
-    function selectTab(tabName) {
+    // A view is the section's open page (extensions.js calls this when Skills, Browse or Sources comes on screen).
+    function showView(view) {
         closeMenus();
-        activeTab = tabName;
-        tabs.select(tabName);
-        activateTab(tabName);
+        requestedSkill = '';
+        activeTab = view;
+        visible = true;
+        activateTab(view);
         paintChrome();
         showActive();
     }
 
-    const tabs = bindTabStrip(root.querySelector('.skills-tabs'), {
-        dataAttr: 'data-tab', activeClass: 'is-active',
-        onChange(tabName) { closeMenus(); activeTab = tabName; activateTab(tabName); paintChrome(); showActive(); },
-    });
-    // On a desk Installed, Browse and Sources start the bar that Update all and Refresh end (DESIGN "Page header").
-    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'), { actions: updateAllBtn });
+    // No view is on screen: another page of the section, a level over a view, or another place.
+    function hideViews() {
+        closeMenus();
+        requestedSkill = '';
+        visible = false;
+        clearTimeout(pollTimer);
+        sheet?.close();
+    }
+
+    // Sources also supplies the trust facts used by the skill views.
+    function placeShown() {
+        store.sources(true).catch(() => null);
+    }
+
+    // Another part of a view asks for a view: the section opens it as its page.
+    function selectTab(view) {
+        section.go(view);
+    }
 
     const onRefresh = async () => {
         refreshBtn.disabled = true;
@@ -1064,57 +1166,56 @@ export function initSkills(ctx = {}) {
             refreshBtn.textContent = 'Refresh';
         }
     };
-    const onPageShown = (event) => {
-        closeMenus();
-        visible = event.detail?.page === 'skills';
-        if (!visible) { clearTimeout(pollTimer); sheet?.close(); return; }
-        tabs.select(activeTab);
-        store.sources(true).catch(() => null);
-        showActive();
-    };
     let wsTimer = 0;
+    const needsListing = () => !destroyed && !document.hidden && (visible || section.rowsOnScreen());
     const onLifecycle = () => {
-        if (!visible) return;
+        if (!needsListing()) {
+            listingOnWay = null;  // on return, read past the change instead of joining a read started before it
+            return;
+        }
         clearTimeout(wsTimer);
-        wsTimer = setTimeout(() => readInstalled({ quiet: true }), 300);
+        const before = renderGeneration;
+        wsTimer = setTimeout(() => {
+            if (needsListing() && renderGeneration === before) void readInstalled({ quiet: true });
+        }, 300);
     };
-    const unsubscribe = typeof ctx.ws?.on === 'function' ? ctx.ws.on('extension_lifecycle', onLifecycle) : null;
+    const offLifecycle = contributions.onLifecycle(onLifecycle);
+    const unsubscribe = ctx.ws?.on?.('extension_lifecycle', event => {
+        if (event?.action === 'connect_mcp') readConnectedServers();
+    });
+    const onVisibilityChange = () => {
+        if (document.hidden) { ++openRequest; requestedSkill = ''; }
+        schedulePoll();
+    };
 
     refreshBtn.addEventListener('click', onRefresh);
     updateAllBtn.addEventListener('click', updateAll);
     searchInput.addEventListener('input', onSearch);
-    root.addEventListener('click', onClick);
+    viewsRoot.addEventListener('click', onClick);
     container.addEventListener('change', onChange);
     container.addEventListener('toggle', onToggle, true);
-    window.addEventListener('ouro:page-shown', onPageShown);
-    document.addEventListener('visibilitychange', schedulePoll);
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     // Another surface asks for one installed skill's entry ({skill}), a Browse search ({query}) or a Browse category
-    // ({category}): the dictation chooser's engines (dictation_chooser.js), a place's connector (place_sheet.js).
+    // ({category}): the dictation chooser's engines (dictation_chooser.js), a place's connector (place_sheet.js). The
+    // asked page opens whatever page this device last left the section on.
     const onOpenSkills = async (event) => {
         const { skill = '', query = '', category = '' } = event?.detail || {};
+        const request = ++openRequest;
+        const beforeOpen = renderGeneration;
+        requestedSkill = '';
         closeMenus();
-        if (!await ctx.showPage?.('skills')) return;
-        if (!skill && category) { selectTab('browse'); await browse?.showCategory(category); return; }
-        if (!skill) { selectTab('browse'); await browse?.searchFor(query); return; }
-        selectTab('installed');
-        const found = () => container.querySelector(`.skills-card[data-skill="${CSS.escape(skill)}"]`);
-        if (found()) return found().scrollIntoView({ block: 'nearest' });
-        const observer = new MutationObserver(() => {
-            if (!found()) return;
-            observer.disconnect();
-            found().scrollIntoView({ block: 'nearest' });
-        });
-        observer.observe(document.getElementById('page-skills'), { childList: true, subtree: true });
-        setTimeout(() => observer.disconnect(), 10000);  // an entry that never comes leaves the page as it is
+        if (!await section.open(skill ? 'installed' : 'browse') || request !== openRequest || destroyed) return;
+        if (!skill && category) { await browse?.showCategory(category); return; }
+        if (!skill) { await browse?.searchFor(query); return; }
+        if (!visible || activeTab !== 'installed') return;
+        requestInstalledSkill(skill, beforeOpen);
     };
     window.addEventListener('ouro:open-skills', onOpenSkills);
     paintFilters(null);
 
-    return { capture() {
-        const tab = activeTab;
-        return () => { if (activeTab !== tab) selectTab(tab); };
-    }, destroy() {
+    // `open` and `pressedAgain` are the app's doors to the section (app.js `openExtensions`, the sidebar's row).
+    return { open: section.open, capture: section.capture, pressedAgain: section.pressedAgain, destroy() {
         destroyed = true;
         renderGeneration += 1;
         clearTimeout(pollTimer);
@@ -1123,19 +1224,18 @@ export function initSkills(ctx = {}) {
         sheet?.close();
         browse.destroy();
         sourcesView.destroy();
-        tabs.destroy();
-        disposeBar();
+        section.destroy();
         unsubscribe?.();
+        offLifecycle();
         stopContributionFacts?.();
         stopHostFacts?.();
         refreshBtn.removeEventListener('click', onRefresh);
         updateAllBtn.removeEventListener('click', updateAll);
         searchInput.removeEventListener('input', onSearch);
-        root.removeEventListener('click', onClick);
+        viewsRoot.removeEventListener('click', onClick);
         container.removeEventListener('change', onChange);
         container.removeEventListener('toggle', onToggle, true);
-        window.removeEventListener('ouro:page-shown', onPageShown);
-        document.removeEventListener('visibilitychange', schedulePoll);
+        document.removeEventListener('visibilitychange', onVisibilityChange);
         window.removeEventListener('ouro:open-skills', onOpenSkills);
     } };
 }

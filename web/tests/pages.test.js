@@ -12,7 +12,7 @@ import { statusMarkHtml } from '../modules/status_mark.js';
 test('the registry: unique ids, today\'s order, one place in the head and the tools in the foot', () => {
     // Circles leads the tools: the one home of the places Ouroboros lives in (DESIGN "Circles").
     assert.deepEqual(PAGES.map((p) => p.id), ['chat', 'circles', 'files', 'skills', 'widgets', 'dashboard', 'settings']);
-    assert.deepEqual(PAGES.map((p) => p.label), ['Main Chat', 'Circles', 'Files', 'Skills', 'Widgets', 'Dashboard', 'Settings']);
+    assert.deepEqual(PAGES.map((p) => p.label), ['Main Chat', 'Circles', 'Files', 'Extensions', 'Widgets', 'Dashboard', 'Settings']);
     assert.deepEqual(pagesInZone('head').map((p) => p.id), ['chat']);
     assert.deepEqual(pagesInZone('foot').map((p) => p.id), ['circles', 'files', 'skills', 'widgets', 'dashboard', 'settings']);
     assert.deepEqual(ZONES, ['head', 'foot']);

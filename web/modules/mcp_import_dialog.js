@@ -1,4 +1,4 @@
-/** Import an MCP client file into the tool servers of Settings: preview, select, then Apply saves the chosen ones. */
+/** Import an MCP client file on the MCP servers page of Extensions: preview, select, then Apply saves the chosen ones. */
 import { previewMcpImport } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { bindDialogFocus } from './ui_interactions.js';
@@ -127,7 +127,7 @@ export function openMcpImportDialog({ draftServers, draftFreshness, draftUrl, on
         let settled = false;
         let disposeFocus = () => {};
         let controller = null;
-        const pageChanged = (event) => { if (event.detail?.page !== 'settings') finish(null); };
+        const pageChanged = (event) => { if (event.detail?.page !== 'skills') finish(null); };
         const pageHidden = () => finish(null);
         const setStatus = (message, tone = 'muted') => {
             statusEl.textContent = message || '';

@@ -87,6 +87,7 @@ export class NodeStub {
         return node;
     }
     append(...nodes) { nodes.forEach((node) => this.appendChild(node)); }
+    prepend(...nodes) { nodes.forEach((node, at) => this.insertBefore(node, this.children[at] || null)); }
     replaceChildren(...nodes) {
         this.children.forEach((child) => { child.parentElement = null; });
         this.children = [];
