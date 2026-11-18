@@ -19,7 +19,7 @@ from ouroboros.extension_companion import CompanionDescriptor, CompanionSupervis
 from ouroboros.extension_loader import PluginAPIImpl, _PluginAPIConfig
 from ouroboros.tools.extension_dispatch import dispatch_extension_tool
 from ouroboros.skill_loader import compute_content_hash, save_skill_grants
-from ouroboros.tools import skill_exec
+from ouroboros.tools import shell_process, skill_exec
 from ouroboros.tools.registry import ToolContext
 from ouroboros.usage_accounting import UsageScope, usage_scope
 from tests.test_skill_exec import _build_skill, _make_ctx, _mark_reviewed_and_enabled
@@ -170,6 +170,8 @@ def test_skill_exec_preflight_and_spawn_failures_do_not_disclose(tmp_path, monke
 
 def test_skill_exec_timeout_keeps_one_post_spawn_disclosure(tmp_path, monkeypatch):
     class HangingProcess:
+        pid = 765432
+
         def __init__(self):
             self.stdout = io.BytesIO()
             self.stderr = io.BytesIO()
@@ -184,6 +186,9 @@ def test_skill_exec_timeout_keeps_one_post_spawn_disclosure(tmp_path, monkeypatc
 
     spawned = {"value": False}
     process = HangingProcess()
+    read_tree = shell_process._tree_remains
+    # The simulated kill settles this fake's tree, not just its root exit.
+    monkeypatch.setattr(shell_process, "_tree_remains", lambda p: False if p is process else read_tree(p))
 
     def fake_popen(*_args, **_kwargs):
         spawned["value"] = True
@@ -227,6 +232,7 @@ def test_skill_exec_timeout_keeps_one_post_spawn_disclosure(tmp_path, monkeypatc
     rows = _external_rows(tmp_path)
     assert len(rows) == 1
     assert rows[0]["task_id"] == "task-1"
+    assert process not in shell_process._active_subprocesses
 
 
 def test_skill_exec_uses_bound_lineage_when_tool_context_is_sparse(tmp_path):
@@ -878,6 +884,8 @@ def test_extension_child_spawn_failure_records_nothing(tmp_path, monkeypatch):
 
 def test_extension_child_timeout_keeps_one_post_spawn_disclosure(tmp_path, monkeypatch):
     class HangingProcess:
+        pid = 765433
+
         def __init__(self):
             self.stdin = None
             self.stdout = io.BytesIO()
@@ -899,6 +907,9 @@ def test_extension_child_timeout_keeps_one_post_spawn_disclosure(tmp_path, monke
     repo_dir.mkdir()
     process = HangingProcess()
     spawned = {"value": False}
+    read_tree = shell_process._tree_remains
+    # Keep other live/unknown children governed by the real containment reader.
+    monkeypatch.setattr(shell_process, "_tree_remains", lambda p: False if p is process else read_tree(p))
 
     def fake_popen(*_args, **_kwargs):
         spawned["value"] = True
@@ -937,6 +948,7 @@ def test_extension_child_timeout_keeps_one_post_spawn_disclosure(tmp_path, monke
         )
 
     assert len(_external_rows(drive_root)) == 1
+    assert process not in shell_process._active_subprocesses
 
 
 def test_a_host_dispatch_is_its_own_group_and_a_task_dispatch_without_lineage_is_refused(tmp_path):

@@ -24,6 +24,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import time
 from typing import Any, Dict, Iterator
 
 import pytest
@@ -169,5 +170,11 @@ def stand(k: int, journal: str = "") -> Iterator[pathlib.Path]:
 @contextlib.contextmanager
 def measuring(k: int, **plan: Any) -> Iterator[Dict[str, Any]]:
     """What the driver measured over the stand of ``k``; the root stays the caller's while it runs tests on it."""
+    from ouroboros.utils import _RACY_NS
+
     with stand(k, str(plan.get("journal") or "")) as home:
+        # Build/restore refreshes ctime even when mtime is preserved. Let both sizes leave
+        # json_snapshot's recent-file window before counting: otherwise identical reads
+        # trade opens for stats according to fixture age, not the amount of history.
+        time.sleep((_RACY_NS + 1) / 1e9)
         yield drive(home, **plan)

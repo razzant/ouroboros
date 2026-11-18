@@ -398,6 +398,7 @@ def test_neither_half_of_the_settlement_protocol_alone_is_quiescence(tmp_path):
     from ouroboros import budget_pause
 
     ctx, _limit = _loop_ctx(tmp_path, "tool-3")
+    owner_pinned = None
     try:
         running = Future()
         owner_running = budget_pause.register_tool_future(ctx, "call_running", "run_command", running)
@@ -411,7 +412,7 @@ def test_neither_half_of_the_settlement_protocol_alone_is_quiescence(tmp_path):
         # registration must prune only the released row, never the pinned one.
         pinned = Future()
         pinned.set_result("x")
-        budget_pause.register_tool_future(ctx, "call_pinned", "read_file", pinned)  # pin kept
+        owner_pinned = budget_pause.register_tool_future(ctx, "call_pinned", "read_file", pinned)  # pin kept
         third = Future()
         third.set_result("y")
         owner_third = budget_pause.register_tool_future(ctx, "call_third", "read_file", third)
@@ -424,6 +425,8 @@ def test_neither_half_of_the_settlement_protocol_alone_is_quiescence(tmp_path):
         assert [row["operation_id"] for row in drain["unsettled"]] == ["call_pinned"]
         assert [row["operation_id"] for row in drain["settled"]] == ["call_third"]
     finally:
+        if owner_pinned is not None:
+            owner_pinned()
         budget_pause.forget_tool_scope(ctx)
 
 

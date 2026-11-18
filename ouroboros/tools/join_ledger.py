@@ -19,7 +19,6 @@ from __future__ import annotations
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 
 import hashlib
-import json
 import logging
 from pathlib import Path
 from typing import Any, Dict
@@ -36,7 +35,7 @@ from ouroboros.task_tree_ledger import (
     tree_ledger_append,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import json_dumps_utf8, utc_now_iso
 
 log = logging.getLogger("ouroboros.tools.join_ledger")
 
@@ -96,7 +95,7 @@ def _child_result_sha256(result: Dict[str, Any]) -> str:
                 identity["name"] = Path(raw_path).name
         if not identity:
             continue
-        encoded_identity = json.dumps(identity, ensure_ascii=False, sort_keys=True, default=str)
+        encoded_identity = json_dumps_utf8(identity, ensure_ascii=False, sort_keys=True, default=str)
         if encoded_identity in seen:
             continue
         seen.add(encoded_identity)
@@ -108,7 +107,7 @@ def _child_result_sha256(result: Dict[str, Any]) -> str:
         "artifact_status": str(semantic_result.get("artifact_status") or bundle.get("status") or ""),
         "artifacts": sorted(
             identities,
-            key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, default=str),
+            key=lambda item: json_dumps_utf8(item, ensure_ascii=False, sort_keys=True, default=str),
         ),
     }
     from ouroboros.task_finalization import terminal_host_notice_text
@@ -116,7 +115,7 @@ def _child_result_sha256(result: Dict[str, Any]) -> str:
     notice = terminal_host_notice_text(semantic_result, include_empty=True)
     if "terminal_host_notice" in semantic_result or notice:
         payload["terminal_host_notice"] = notice
-    encoded = json.dumps(
+    encoded = json_dumps_utf8(
         payload,
         ensure_ascii=False,
         sort_keys=True,
@@ -531,7 +530,7 @@ def _peek_task(ctx: ToolContext, task_id: str, view: str = "summary") -> str:
     ]
     # A queued status is no permission to run: what holds the task now, and who may release it.
     if stop := stop_for_reader(data.get("current_stop") or {}, data, str(getattr(ctx, "task_id", "") or "")):
-        parts.append("current_stop=" + json.dumps(stop, ensure_ascii=False, sort_keys=True))
+        parts.append("current_stop=" + json_dumps_utf8(stop, ensure_ascii=False, sort_keys=True))
     # Latest beacons this child posted to the shared ledger (partial_finding / blocker /
     # question / milestone), newest last.
     try:
@@ -821,7 +820,7 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "", stop_action_i
             "be recorded; nothing was cancelled. Retry, or report the failure."
         )
     observation["matches_cancel_target"] = observation.get("observed_task_id") == str(intent.get("task_id") or tid)
-    observed_note = ("\n[OBSERVED_TARGET]\n" + json.dumps(observation, ensure_ascii=False)
+    observed_note = ("\n[OBSERVED_TARGET]\n" + json_dumps_utf8(observation, ensure_ascii=False)
                      + "\n[/OBSERVED_TARGET]\nThese source observations are separate from the caller's reason; "
                      "missing or stale facts do not prove that no work or spending occurred.")
     if intent.get("already_settled"):

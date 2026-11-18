@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -224,3 +225,84 @@ def test_continuation_envelope_and_projection_digests_have_distinct_names_and_re
     result, unchanged = _read(ctx, **{k: v for k, v in arguments.items() if k != "task_id"})
     assert result.status == "ok" and unchanged["status"] == "available"
     assert unchanged["authority_projection_sha256"] == metadata["authority_projection_sha256"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX raw-byte filename")
+@pytest.mark.parametrize("fields", [None, [], ["artifacts"]])
+def test_raw_byte_artifact_names_round_trip_through_authority_and_ranges(tmp_path, fields):
+    from ouroboros.headless import task_artifacts_dir
+
+    ctx = _ctx(tmp_path)
+    _write(ctx, future_unknown={"é🪶": "normal Unicode stays literal", "padding": "p" * 40000})
+    folder = task_artifacts_dir(ctx.drive_root, "child")
+    folder.mkdir(parents=True, exist_ok=True)
+    names = ["fixture_\udcff.dat", "literal_\\udcff.dat", "é🪶.dat"]
+    for name in names:
+        (folder / name).write_bytes(b"retained evidence")
+    args = {"include_authority": True} if fields is None else {"authority_fields": fields}
+    result, view = _read(ctx, **args)
+    result.text.encode("utf-8")  # the loop's hashing/retention boundary
+    assert result.status == "ok"
+    if fields != []:
+        assert {row["name"] for row in view["authority"]["artifacts"]} == set(names)
+    if fields is None:
+        from ouroboros.artifacts import read_actor_source_bytes
+        from ouroboros.tool_result_delivery import project_tool_result_batch
+
+        rows, _ = project_tool_result_batch(
+            [{"tool_call_id": "authority-read", "fn_name": "get_task_result", "result": result.text,
+              "tool_args": {"view_head_chars": 20000, "view_tail_chars": 10000}}], [], [],
+            drive_root=ctx.drive_root, task_id="parent", policy="measured_frame",
+            fit_candidate=lambda *_a: {"accepted": True, "capacity_total_tokens": None})
+        rows[0]["result"].encode("utf-8")
+        assert rows[0]["result_partial"] and rows[0]["result_source_status"] == "ready"
+        assert read_actor_source_bytes(ctx.drive_root, "parent", rows[0]["result_source_ref"]).decode() == result.text
+    _, metadata = _read(ctx, **args, source_only=True)
+    total = metadata["authority_source"]["complete_chars"]
+    _, ranged = _read(ctx, **args, source_only=True, source_start_char=0, source_end_char=total,
+                      authority_projection_sha256=metadata["authority_projection_sha256"])
+    text = ranged["authority_source"]["text"]
+    assert hashlib.sha256(text.encode("utf-8")).hexdigest() == metadata["authority_source"]["complete_sha256"]
+    assert json.loads(text) == view["authority"]
+    if fields == ["artifacts"]:
+        split = text.index("\\udcff") + 3  # a page may end inside a JSON escape
+        parts = []
+        for start, end in [(0, split), (split, total)]:
+            _, page = _read(ctx, **args, source_only=True, source_start_char=start, source_end_char=end,
+                            authority_projection_sha256=metadata["authority_projection_sha256"])
+            parts.append(page["authority_source"]["text"])
+        assert "".join(parts) == text
+    if fields == []:
+        omitted = next(row for row in view["omitted_fields"] if row["field"] == "artifacts")
+        _, page = _read(ctx, authority_fields=["artifacts"], source_only=True,
+                        source_start_char=0, source_end_char=omitted["complete_chars"])
+        assert hashlib.sha256(page["authority_source"]["text"].encode()).hexdigest() == omitted["complete_sha256"]
+    if fields != []:
+        assert "é🪶" in result.text  # no whole-document ASCII conversion
+    assert all((folder / name).read_bytes() == b"retained evidence" for name in names)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX raw-byte filename")
+@pytest.mark.parametrize("tool,args", [
+    ("get_task_result", {}),
+    *(("get_task_result", {"view": view}) for view in ("full", "answer", "summary", "evidence")),
+    ("wait_task", {"timeout_sec": 1}),
+    ("wait_tasks", {"task_ids": ["child"], "timeout_sec": 1}),
+])
+def test_raw_byte_artifact_names_reach_every_child_result_reader(tmp_path, tool, args):
+    from ouroboros.headless import task_artifacts_dir
+
+    ctx = _ctx(tmp_path)
+    _write(ctx)
+    folder = task_artifacts_dir(ctx.drive_root, "child")
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "fixture_\udcff.dat"
+    path.write_bytes(b"retained evidence")
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    request = {**({"task_id": "child"} if tool != "wait_tasks" else {}), **args}
+    result = registry.execute_result(tool, request)
+    assert result.status == "ok", result.text
+    result.text.encode("utf-8")
+    assert "child_result_sha256" in result.text
+    assert path.read_bytes() == b"retained evidence"

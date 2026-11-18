@@ -30,7 +30,7 @@ from ouroboros.task_status import (
     wait_for_effective_tasks,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import truncate_review_artifact
+from ouroboros.utils import json_dumps_utf8, truncate_review_artifact
 from ouroboros.work_stop import stop_for_reader, task_current_stop
 from ouroboros.cost_projection import current_cost, current_costs
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
@@ -202,7 +202,7 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None,
         summary.update(disclosed_list_projection(
             ordered, key="verification_receipts", limit=10, item=_receipt_row,
         ))
-    return json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    return json_dumps_utf8(summary, ensure_ascii=False, indent=2, default=str)
 
 
 def _unchanged_result_reference(task_id: str, current_hash: str, known_hash: Any) -> Dict[str, Any]:
@@ -351,7 +351,7 @@ def _get_task_result(
         except (OSError, ValueError, TypeError):
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR",
                 text="Retained call source is unreadable or failed verification."))
-        text = json.dumps({"call_source": source}, ensure_ascii=False, sort_keys=True)
+        text = json_dumps_utf8({"call_source": source}, ensure_ascii=False, sort_keys=True)
         if source.get("reason") == "source_range_invalid":
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=text))
         return text
@@ -360,7 +360,7 @@ def _get_task_result(
 
         source = reentry_source_projection(status_drive_root, str(task_id), presence_reentry_sha256,
                                             source_start_char, source_end_char, presence_reentry_offset)
-        text = json.dumps({"presence_reentry_source": source}, ensure_ascii=False, sort_keys=True)
+        text = json_dumps_utf8({"presence_reentry_source": source}, ensure_ascii=False, sort_keys=True)
         if source.get("reason") == "source_range_invalid":
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=text))
         return text
@@ -374,7 +374,7 @@ def _get_task_result(
         source = delegated_output_source_projection(
             status_drive_root, physical if isinstance(physical, dict) else {},
             delegated_output_sha256, source_start_char, source_end_char)
-        text = json.dumps({"delegated_output_source": source}, ensure_ascii=False, sort_keys=True)
+        text = json_dumps_utf8({"delegated_output_source": source}, ensure_ascii=False, sort_keys=True)
         if source.get("reason") == "source_range_invalid":
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=text))
         return text
@@ -383,7 +383,7 @@ def _get_task_result(
 
         source = review_source_projection(status_drive_root, str(task_id), review_source_sha256,
                                           source_start_char, source_end_char)
-        text = json.dumps({"review_source": source}, ensure_ascii=False, sort_keys=True)
+        text = json_dumps_utf8({"review_source": source}, ensure_ascii=False, sort_keys=True)
         if source.get("reason") == "source_range_invalid":
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=text))
         return text
@@ -442,7 +442,7 @@ def _get_task_result(
             )
         if source_only and isinstance(payload["source"].get("arguments"), dict):
             payload["source"]["arguments"]["source_only"] = True
-        text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        text = json_dumps_utf8(payload, ensure_ascii=False, sort_keys=True)
         if any(isinstance(view, dict) and view.get("reason") == "source_range_invalid"
                for view in (payload.get("work_order_source"), payload.get("completion_source"), payload.get("focus_source"))):
             # The requested text was NOT returned: same JSON (it names complete_chars and
@@ -500,7 +500,7 @@ def _get_task_result(
             f"Task {task_id} [{status}]: cost={cost_display(data)}\n"
             f"child_result_sha256={child_result_sha256}\n\n"
             f"[SUBTASK_OUTCOME]\n{outcome_summary}\n[/SUBTASK_OUTCOME]\n\n"
-            f"{json.dumps(unchanged, ensure_ascii=False)}\n"
+            f"{json_dumps_utf8(unchanged, ensure_ascii=False)}\n"
             "Result and trace are unchanged; omit known_result_sha256 to read them in full."
         )
     elif status == STATUS_COMPLETED:
@@ -529,10 +529,10 @@ def _get_task_result(
         origin = data["cancel_origin"]
         command = {"immediate": "stop_now", "finalize_then_cancel": "wrap_up"}.get(origin.get("stop_policy"), "unknown")
         marker = "[CANCELLED_BY]" if status == STATUS_CANCELLED else f"[OWNER_CONTROL] command={command}"
-        output += f"\n\n{marker} {json.dumps(origin, ensure_ascii=False)}"
+        output += f"\n\n{marker} {json_dumps_utf8(origin, ensure_ascii=False)}"
     if data.get("retired_tool_invocations"):
         output += ("\n\n[INTERRUPTED_TOOL_CALLS] Local execution ended; external effects remain unknown.\n"
-                   + json.dumps(data["retired_tool_invocations"], ensure_ascii=False))
+                   + json_dumps_utf8(data["retired_tool_invocations"], ensure_ascii=False))
     from ouroboros.task_custody import unread_mail_notice
 
     if unread := unread_mail_notice(data.get("unread_mailbox")):
@@ -756,11 +756,11 @@ def _single_wait_text(ctx: Any, tid: str, waited: Dict[str, Any], *, view: str, 
         extra = "\n\n" + _wait_early_return_note(early)
     elif early and early.get("reason") == "dependency_held":
         header = "Task wait returned to show a held dependency"
-        extra = (f"\n\n[HELD_DEPENDENCY]\n{json.dumps(early['held'], ensure_ascii=False, indent=2)}\n"
+        extra = (f"\n\n[HELD_DEPENDENCY]\n{json_dumps_utf8(early['held'], ensure_ascii=False, indent=2)}\n"
                  f"[/HELD_DEPENDENCY]\n{_wait_early_return_note(early)}{withdrawn}")
     elif early:
         header = "Task wait interrupted by a child attention beacon"
-        extra = f"\n\n[CHILD_BEACONS]\n{json.dumps(early, ensure_ascii=False, indent=2)}\n[/CHILD_BEACONS]"
+        extra = f"\n\n[CHILD_BEACONS]\n{json_dumps_utf8(early, ensure_ascii=False, indent=2)}\n[/CHILD_BEACONS]"
     else:
         header = "Task wait completed" if waited.get("all_terminal") else f"Task wait {unfinished}"
         extra = ""
@@ -781,7 +781,7 @@ def _single_wait_text(ctx: Any, tid: str, waited: Dict[str, Any], *, view: str, 
     if horizon_note:
         extra += f"\n\n{horizon_note}"
     if window:
-        extra += f"\n\n[WAIT_WINDOW] {json.dumps(window)}"
+        extra += f"\n\n[WAIT_WINDOW] {json_dumps_utf8(window)}"
     tasks = waited.get("tasks") if isinstance(waited.get("tasks"), dict) else {}
     result = body or _unsettled_wait_body(
         status_drive_root, tid, tasks.get(tid),
@@ -818,7 +818,7 @@ def _unsettled_wait_body(drive_root: Path, tid: str, data: Any, known_result_sha
     projection["delegated_runs"] = _delegated_run_facts(drive_root, projection["task_id"])
     return (
         f"Task {tid} [{status}]\nchild_result_sha256={sha}\n\n[CHILD_PROJECTION]\n"
-        f"{json.dumps(projection, ensure_ascii=False, indent=2, default=str)}\n[/CHILD_PROJECTION]\n"
+        f"{json_dumps_utf8(projection, ensure_ascii=False, indent=2, default=str)}\n[/CHILD_PROJECTION]\n"
         f"Compact projection of an unsettled child; get_task_result({tid}) returns the full envelope."
     )
 
@@ -979,7 +979,7 @@ def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: str = "in_slot
         ))
     if held := unshown_holds(ctx, {}):  # only what an earlier call of this batch returned: no read, no wait
         meta, withdrawn = hold_notice(ctx, held)
-        return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", meta=meta, text=json.dumps(
+        return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", meta=meta, text=json_dumps_utf8(
             {"reason": "dependency_held", "elapsed_sec": 0.0, "held": held, "note": IN_SLOT_HOLD_NOTE + withdrawn},
             ensure_ascii=False)))
     window, bound = _wait_window(ctx, requested, clamp=None, minimum=1, margin=1)
@@ -1015,7 +1015,7 @@ def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: str = "in_slot
     horizon_note = cache_horizon_note(ctx, elapsed)
     if horizon_note:
         out["cache_horizon"] = horizon_note
-    return json.dumps(out, ensure_ascii=False)
+    return json_dumps_utf8(out, ensure_ascii=False)
 
 
 def _await_as_sleep(ctx: ToolContext, mode: str, **chosen: Any) -> str:
@@ -1041,7 +1041,7 @@ def _await_as_sleep(ctx: ToolContext, mode: str, **chosen: Any) -> str:
     held, withdrawn = hold_notice(ctx, outcome["held"]) if outcome.get("held") else ({}, "")
     if withdrawn:
         outcome["note"] += withdrawn
-    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=json.dumps(outcome, ensure_ascii=False),
+    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=json_dumps_utf8(outcome, ensure_ascii=False),
                                                 meta={"sleep_question_notice": bool(outcome.get("questions")), **held}))
 
 
@@ -1479,7 +1479,7 @@ def _wait_for_tasks(
     hold_meta, withdrawn = _held_return(ctx, waited.get("early_return"))
     _batch_wait_payload(ctx, waited, normalized_ids, known_result_sha256_by_task, entry_unknown_ids, view=selected_view,
                         withdrawn=withdrawn, expiry=(requested_timeout, float(timeout), bound))
-    return _with_held(ctx, json.dumps(waited, ensure_ascii=False, indent=2), hold_meta)
+    return _with_held(ctx, json_dumps_utf8(waited, ensure_ascii=False, indent=2), hold_meta)
 
 
 def _batch_wait_payload(ctx: Any, waited: Dict[str, Any], normalized_ids: List[str], known_result_sha256_by_task: Any,

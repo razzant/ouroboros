@@ -30,7 +30,7 @@ from ouroboros.llm_capability_policy import (
     normalize_reasoning_effort,
 )
 from ouroboros.reasoning_artifacts import transcript_has_sealed_reasoning
-from ouroboros.llm_routing import _resolve_or_provider
+from ouroboros.llm_routing import _resolve_or_provider, provider_session_headers
 from ouroboros.provider_models import (
     normalize_deepseek_reasoning_effort,
     normalize_minimax_reasoning_effort,
@@ -270,6 +270,11 @@ class _OpenAICompatibleLaneMixin:
             if prepared_tools:
                 kwargs["tools"] = prepared_tools
                 kwargs["tool_choice"] = tool_choice
+            session_headers = provider_session_headers(target, cache_affinity)
+            if session_headers:
+                # Per request, never a pooled client's default: one cached client serves
+                # every conversation on the route (``provider_session_headers``).
+                kwargs["extra_headers"] = session_headers
             if bypass_response_cache and provider == "openai-compatible":
                 # Must ride in extra_body: the OpenAI SDK rejects unknown top-level
                 # kwargs with TypeError, so a raw `cache=` argument never reaches

@@ -892,7 +892,9 @@ def _is_workspace_result(result: Dict[str, Any]) -> bool:
 
 
 def _sse(event: Dict[str, Any], *, event_id: int) -> str:
-    payload = json.dumps(event, ensure_ascii=False)
+    from ouroboros.utils import json_dumps_utf8
+
+    payload = json_dumps_utf8(event, ensure_ascii=False)
     return f"id: {event_id}\nevent: task_event\ndata: {payload}\n\n"
 
 

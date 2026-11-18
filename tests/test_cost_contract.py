@@ -162,6 +162,41 @@ def test_a_restored_stand_measures_what_its_build_measured(built_small, small):
         assert not contract_breaches(small[tag]["counts"], built_small[tag]["counts"], K_SMALL), tag
 
 
+def test_the_restored_stand_settles_its_file_clock_before_the_driver(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from ouroboros import utils
+    from tests import _stand_cache as cache
+
+    events = []
+    window = utils._RACY_NS
+
+    @contextlib.contextmanager
+    def restored(k, journal):
+        events.append(("restored", k, journal))
+        yield tmp_path
+        events.append("released")
+
+    def slept(seconds):
+        assert events == [("restored", 30, "PERSIST")]
+        assert seconds > window / 1e9
+        events.append("settled")
+
+    def driven(home, **plan):
+        assert events[-1] == "settled"
+        assert home == tmp_path and plan == {"journal": "PERSIST"}
+        assert utils._RACY_NS == window  # no production cache-policy override
+        events.append("driven")
+        return {"observed": True}
+
+    monkeypatch.setattr(cache, "stand", restored)
+    monkeypatch.setattr(cache, "time", SimpleNamespace(sleep=slept))
+    monkeypatch.setattr(cache, "drive", driven)
+    with cache.measuring(30, journal="PERSIST") as observed:
+        assert observed == {"observed": True}
+    assert events == [("restored", 30, "PERSIST"), "settled", "driven", "released"]
+
+
 def boundary(measured: Dict[Any, Any], tag: str, k: int) -> Dict[str, Any]:
     entry = measured[k].get(tag)
     assert entry is not None, f"boundary {tag} was not reached at k={k}"
@@ -938,6 +973,25 @@ def contained_meter():
     if _cost_meter._ACTIVE is not None:
         with contextlib.suppress(Exception):  # the test's own failure is the one to report
             _cost_meter.uninstall(_cost_meter._ACTIVE)
+
+
+def test_the_meter_counts_glob_and_restores_cached_scandir(tmp_path, contained_meter):
+    import glob
+
+    history = tmp_path / "task_results"
+    history.mkdir()
+    (history / "finished.json").write_text("{}", encoding="utf-8")
+    globber = getattr(glob, "_StringGlobber", None)
+    cached = vars(globber).get("scandir") if globber is not None else None
+    real_scandir = os.scandir
+    with CostMeter(tmp_path) as meter:
+        found = tagged("glob", lambda: list(history.glob("*.json")))
+    assert found == [history / "finished.json"]
+    counts = meter.snapshot("glob")["counts"]
+    assert counts["scandir:task_results"] == 1 and counts["dir_entries:task_results"] == 1
+    assert os.scandir is real_scandir
+    if globber is not None:
+        assert vars(globber).get("scandir") is cached, "restore the descriptor, not a bound method"
 
 
 def test_the_meter_installs_where_a_door_is_missing_and_never_records_a_wrapper_as_the_original(

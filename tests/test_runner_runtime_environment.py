@@ -199,7 +199,8 @@ def test_real_manager():
     assert preflight_runner.run_hermetic_pytest(repo, timeout=120, max_output=12000) is None
     assert Path(json.loads(node_report.read_text(encoding="utf-8"))["node"]).resolve() == Path(selected).resolve()
     facts = json.loads(manager_report.read_text(encoding="utf-8"))
-    assert Path(facts["tmpdir"]).is_relative_to(Path("/tmp").resolve())
+    owner = os.environ.get("OUROBOROS_TEST_TEMP_ROOT") or test_environment.default_temp_parent()
+    assert Path(facts["tmpdir"]).is_relative_to(Path(owner).resolve())
     assert facts["engine"] is None
 
 

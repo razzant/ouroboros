@@ -6,6 +6,34 @@ import pytest
 
 from supervisor import git_ops, git_ops_reset
 from ouroboros import startup_migrations as m
+from ouroboros.tools import shell_process
+
+
+def _pip_processes(monkeypatch, calls, code):
+    """Dependency-sync doubles include the root and tree settlement the owner consumes."""
+    children = []
+
+    class PipProcess:
+        def __init__(self, cmd):
+            self.args, self.pid, self.returncode = list(cmd), 765432 + len(children), None
+
+        def wait(self, **_kwargs):
+            self.returncode = code[0]
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    def start(_popen, cmd, **_kwargs):
+        calls.append(cmd)
+        child = PipProcess(cmd)
+        children.append(child)
+        return child
+
+    read_tree = shell_process._tree_remains
+    monkeypatch.setattr(shell_process, "contained_popen", start)
+    monkeypatch.setattr(shell_process, "_tree_remains", lambda p: False if p in children else read_tree(p))
+    return children
 
 
 def test_success_fingerprint_skips_only_unchanged_install(tmp_path, monkeypatch):
@@ -16,7 +44,7 @@ def test_success_fingerprint_skips_only_unchanged_install(tmp_path, monkeypatch)
     monkeypatch.delenv("OUROBOROS_PYTEST_ACTIVE")
     monkeypatch.setattr("ouroboros.platform_layer.pip_install_target_args", lambda _exe: ["--target", str(tmp_path / "env")])
     calls, code = [], [0]
-    monkeypatch.setattr(git_ops_reset.subprocess, "Popen", lambda cmd, **kw: calls.append(cmd) or Mock(wait=lambda **kw: code[0]))
+    children = _pip_processes(monkeypatch, calls, code)
     assert git_ops_reset.sync_runtime_dependencies("test")[0]
     assert git_ops_reset.sync_runtime_dependencies("test")[1].startswith("unchanged:")
     assert len(calls) == 1
@@ -31,6 +59,7 @@ def test_success_fingerprint_skips_only_unchanged_install(tmp_path, monkeypatch)
     code[0] = 0
     assert git_ops_reset.sync_runtime_dependencies("test")[0]
     assert len(calls) == 4
+    assert all(child not in shell_process._active_subprocesses for child in children)
 
 
 def test_send_path_never_invokes_readback(tmp_path, monkeypatch):
@@ -104,8 +133,9 @@ def test_torn_watermarks_never_fail_a_checkout_or_a_sync(tmp_path, monkeypatch):
     monkeypatch.delenv("OUROBOROS_PYTEST_ACTIVE")
     monkeypatch.setattr("ouroboros.platform_layer.pip_install_target_args", lambda _exe: ["--target", str(tmp_path / "env")])
     calls = []
-    monkeypatch.setattr(git_ops_reset.subprocess, "Popen", lambda cmd, **kw: calls.append(cmd) or Mock(wait=lambda **kw: 0))
+    children = _pip_processes(monkeypatch, calls, [0])
     assert git_ops_reset.sync_runtime_dependencies("test")[0] and len(calls) == 1  # not known synced: pip runs
+    assert all(child not in shell_process._active_subprocesses for child in children)
 
 
 def _old_fingerprint(req, cmd):

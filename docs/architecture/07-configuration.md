@@ -6,7 +6,7 @@ Settings have one home and default; the table projects `config.SETTINGS_DEFAULTS
 
 Each path constant takes its `OUROBOROS_*` override, else derives from `APP_ROOT` (`~/Ouroboros`) in `launch_roots` before imports; a direct server's implicit `REPO_DIR` is its executing checkout, and given only `APP_ROOT` it refuses while `~/Ouroboros/data` may hold memory; `resolve_port_file` relocates only the hosting root's port file. Unset work roots follow the witness basis: `~/Ouroboros` for older data, else `APP_ROOT`; unknown refuses. The document is `settings.json` under the data root. Writes need the settings file lock. Secret placeholders are repaired only when recognized on disk, before environment precedence resolves, so a real environment credential never reads as a mask (`secret_masking.py`). While `OUROBOROS_SETTINGS_SHA256` is set (`settings_integrity.py`) the seeded snapshot is an owner-authored trust root for an isolated child: every read verifies the whole byte stream without creating a sibling lock file, and every writer refuses.
 
-`openrouter_attribution.py` is the app-identity SSOT of every first-party paid OpenRouter request (canonical URL + `X-OpenRouter-Title`); a fork uses its own URL, never renaming one app record.
+`openrouter_attribution.py` owns first-party paid OpenRouter identity (canonical URL + `X-OpenRouter-Title`); forks use their own URL, never renaming one app record. `llm_routing.provider_session_headers` owns OpenCode Go conversation identity; its routing leaf also supplies client attribution.
 
 ### Reading and writing the settings document
 

@@ -297,6 +297,9 @@ def test_an_owner_restart_never_replaces_a_panic_flag_still_owed_its_controls(ro
     import ouroboros.server_restart as restart
     from supervisor import worker_chat_lane
 
+    # The stubbed exit leaves this test process alive, not a restarting generation.
+    monkeypatch.setattr(restart, "_OWNER_STOP_BEGAN", threading.Event())
+    monkeypatch.setattr(restart, "_LAST_RETURN_TX", {"id": ""})
     flag = root / "state" / "panic_stop.flag"
     _write(flag, b"panic")  # boot kept it: the disabled controls were not durable yet
     monkeypatch.setattr(restart, "DATA_DIR", root)

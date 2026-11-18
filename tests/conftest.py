@@ -569,8 +569,8 @@ def _pin_lane_groups(items, config) -> None:
 
     A `serial("<resource>")` test joins its resource's group (`serial:<resource>`): the resource's tests take
     turns on one worker while the other resources and every parallel-safe test run beside them. Every other
-    test keeps the scope `--dist loadscope` would give it (file, or class when there is one). The group rides
-    the item's id only in the collection report (`_GroupsInTheCollectionReport`). Groups are handed
+    test keeps its collector parent's file/class scope (`loadscope`), not structure parsed from parameter text.
+    The group rides the item's id only in the collection report (`_GroupsInTheCollectionReport`). Groups are handed
     out longest-first by their files' recorded seconds (the run's durations table as the controller read it,
     `pytest_configure_node`), resource groups first among equals, so no long group starts after the queue drains.
     """
@@ -580,7 +580,7 @@ def _pin_lane_groups(items, config) -> None:
     groups, files = {}, {}
     for item in items:
         resource = serial_resource(item)
-        group = f"serial:{resource}" if resource else item.nodeid.rsplit("::", 1)[0]
+        group = f"serial:{resource}" if resource else item.parent.nodeid
         item.stash[_LANE_GROUP] = group
         groups[item.nodeid] = group
         files.setdefault(group, set()).add(item.nodeid.split("::", 1)[0])

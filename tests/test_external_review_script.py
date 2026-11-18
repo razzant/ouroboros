@@ -38,14 +38,6 @@ from tests import _contributor_packet_shared as shared
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.fixture(autouse=True)
-def _own_tracked_registry(monkeypatch):
-    """The wrapper's real Git commands are tracked children (#2841) that only an idle probe retires; a private
-    registry keeps them out of later tests in the same worker (tests/test_extension_ws_stream_diagnostics.py)."""
-    from ouroboros.tools import shell_process
-    monkeypatch.setattr(shell_process, "_active_subprocesses", set())
-
-
 @pytest.mark.parametrize('delivery,refused', [('native', False), ('packet', True), ('', False)])
 def test_contributor_config_roundtrip_keeps_direct_api_delivery(monkeypatch, delivery, refused):
     from scripts.run_external_review import _diff_size_refusal, _frozen_pool_catalog
@@ -265,20 +257,21 @@ def _run_golden_contributor_review(tmp_path: Path, monkeypatch) -> SimpleNamespa
 
     monkeypatch.setattr(module, "run_review_change", review_change)
     spawned: list[dict] = []
-    popen = subprocess.Popen
+    run_process = subprocess.run
 
-    class RecordingPopen(popen):
-        def __init__(self, args, *rest, **kwargs):
-            if wrapper_running[0]:
-                command = [str(part) for part in args] if isinstance(args, (list, tuple)) else [str(args)]
-                env = kwargs.get("env")
-                # Rewritten: an inherited variable changed, or a non-git variable added.
-                spawned.append({"command": command, "env": env, "env_rewritten": env is not None and any(
-                    os.environ[key] != value if key in os.environ else not key.startswith("GIT_")
-                    for key, value in env.items())})
-            super().__init__(args, *rest, **kwargs)
+    def recording(args, *rest, **kwargs):
+        if wrapper_running[0]:
+            command = [str(part) for part in args] if isinstance(args, (list, tuple)) else [str(args)]
+            env = kwargs.get("env")
+            # Rewritten: an inherited variable changed, or a non-git variable added.
+            spawned.append({"command": command, "env": env, "env_rewritten": env is not None and any(
+                os.environ[key] != value if key in os.environ else not key.startswith("GIT_")
+                for key, value in env.items())})
+        return run_process(args, *rest, **kwargs)
 
-    monkeypatch.setattr(subprocess, "Popen", RecordingPopen)
+    # Observe this wrapper's subprocess boundary, not the runtime's group-measurement
+    # children. No global Popen replacement may bypass genuine containment.
+    monkeypatch.setattr(module, "subprocess", SimpleNamespace(**{**vars(subprocess), "run": recording}))
     monkeypatch.setattr(module.sys, "argv", [
         "run_external_review.py", "--contributor", "--base-ref=base", f"--head-ref={fixture['head_sha']}",
         f"--output={output}", f"--drive-root={drive}", "--run-cap-usd=5", "--attach-host-engine",

@@ -79,15 +79,16 @@ def test_catalog_reload_counts_and_declared_input_invalidation(tmp_path, monkeyp
         )
         _mark_isolated_deps_installed(drive, skill)
     children = []
-    popen = subprocess.Popen
+    initialize = subprocess.Popen.__init__
 
-    def counted(cmd, *args, **kwargs):
+    def counted(proc, cmd, *args, **kwargs):
         if "ouroboros.extension_process_runner" in cmd:
             payload = json.loads(pathlib.Path(cmd[-1]).read_text(encoding="utf-8"))
             children.append(payload["skill_name"])
-        return popen(cmd, *args, **kwargs)
+        initialize(proc, cmd, *args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "Popen", counted)
+    # Constructor observation must not turn a contained child into a raw Popen.
+    monkeypatch.setattr(subprocess.Popen, "__init__", counted)
     settings = {"FIRST_LABEL": "one", "SECOND_LABEL": "one"}
 
     def reload():

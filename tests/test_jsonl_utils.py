@@ -3,7 +3,22 @@ from __future__ import annotations
 import json
 import os
 
+import pytest
+
 from ouroboros import utils
+
+
+@pytest.mark.parametrize("writer", ["compact", "pretty", "jsonl"])
+def test_json_writers_preserve_surrogateescaped_names_and_normal_unicode(tmp_path, writer):
+    payload = {"fixture_\udcff.dat": ["literal_\\udcff.dat", "é🪶"]}
+    path = tmp_path / ("settings.json" if writer == "pretty" else "state.json")
+    if writer == "jsonl":
+        assert utils.append_jsonl(path, payload)
+    else:
+        utils.atomic_write_json(path, payload)
+    text = path.read_bytes().decode("utf-8")
+    assert json.loads(text) == payload
+    assert "é🪶" in text and "\\udcff" in text
 
 
 def test_iter_jsonl_objects_skips_bad_lines_and_non_dict_by_default(tmp_path):

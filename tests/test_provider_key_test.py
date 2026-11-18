@@ -505,6 +505,31 @@ def test_openai_class_probe_is_one_minimal_attempt(monkeypatch, model, settings,
     assert remote.closed is True
 
 
+def test_opencode_go_provider_tests_have_fresh_sessions_even_inside_a_task(monkeypatch):
+    observed = _bypass_accounting(monkeypatch)
+    settings = {"OUROBOROS_CONNECTIONS": [{
+        "kind": "openai-compatible", "name": "go", "api_key": "key",
+        "base_url": "https://opencode.ai/inference/go/openai/v1"}]}
+    remote = _Remote([_Completion(), _Completion()])
+    client = LLMClient()
+    built = []
+
+    def new_client(target):
+        built.append(dict(target.get("default_headers") or {}))
+        return remote
+
+    monkeypatch.setattr(client, "_new_remote_client", new_client)
+    from ouroboros.usage_accounting import UsageScope, usage_scope
+
+    assert client.probe_provider_readiness("openai-compatible@go::deepseek-v4.1-flash", settings=settings)["ok"]
+    with usage_scope(UsageScope(task_id="task")):
+        assert client.probe_provider_readiness("openai-compatible@go::deepseek-v4.1-flash", settings=settings)["ok"]
+    assert len(remote.calls) == len(observed) == 2
+    sessions = [call["extra_headers"]["x-opencode-session"] for call in remote.calls]
+    assert len(set(sessions)) == 2
+    assert all(headers["User-Agent"].startswith("Ouroboros/") for headers in built)
+
+
 @pytest.mark.parametrize("model", [
     "openai::gpt-6-astra",
     "deepseek::deepseek-v4-flash",

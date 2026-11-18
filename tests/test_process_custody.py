@@ -474,8 +474,11 @@ def test_lifeline_kills_child_when_parent_dies(tmp_path):
         "import time; time.sleep(60)"
     ) % str(REPO_ROOT)
     parent_src = (
-        "import subprocess, sys, pathlib;"
-        f"child = subprocess.Popen([sys.executable, '-c', {child_src!r}]);"
+        "import subprocess, sys, pathlib, os;"
+        f"sys.path.insert(0, {str(REPO_ROOT)!r});"
+        "from ouroboros.process_custody import lifeline_parent_env;"
+        f"child = subprocess.Popen([sys.executable, '-c', {child_src!r}], "
+        "env={**os.environ, **lifeline_parent_env()});"
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid));"
     )
     pid_file = tmp_path / "child_pid"
@@ -486,10 +489,10 @@ def test_lifeline_kills_child_when_parent_dies(tmp_path):
     child_pid = int(pid_file.read_text())
     deadline = time.time() + 10
     while time.time() < deadline:
-        try:
-            os.kill(child_pid, 0)
-        except ProcessLookupError:
-            return  # lifeline fired
+        # A container init may leave an exited orphan unreaped. Use the same
+        # death observation as the supervisor-lifeline cases below, not PID presence.
+        if _process_gone(child_pid):
+            return
         time.sleep(0.2)
     try:
         os.kill(child_pid, 9)

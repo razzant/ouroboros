@@ -866,6 +866,77 @@ def test_resolve_openai_compatible_target_prefers_dedicated_credentials(monkeypa
     assert target["usage_model"] == "openai-compatible/meta-llama/compatible"
 
 
+def test_go_request_identity_is_per_task_slot_model_and_caller_affinity():
+    from dataclasses import replace
+    from ouroboros.usage_accounting import UsageScope, usage_scope
+    from ouroboros.llm_routing import OPENCODE_CLIENT_HEADERS, provider_session_headers
+
+    rows = [{"kind": "openai-compatible", "name": "any-label", "api_key": "key",
+             "base_url": "https://opencode.ai/inference/go/openai/v1"}]
+    client = LLMClient()
+    target = client._resolve_remote_target("openai-compatible@any-label::unfamiliar-model",
+                                           settings={"OUROBOROS_CONNECTIONS": rows})
+    task = UsageScope(task_id="task", root_task_id="root")
+    with usage_scope(task):
+        first = provider_session_headers(target)
+        assert provider_session_headers(target) == first
+        affinity = provider_session_headers(target, "independent-conversation")
+        model = provider_session_headers({**target, "usage_model": "other-model"})
+        pooled = client._get_remote_client(target)
+    others = []
+    for scope in [replace(task, task_id="child", parent_task_id="task"),
+                  replace(task, review_slot_id="review-a"), replace(task, review_slot_id="review-b")]:
+        with usage_scope(scope):
+            others.append(provider_session_headers(target))
+            assert client._get_remote_client(target) is pooled
+    with usage_scope(replace(task, non_task_operation=True)):
+        others.extend([provider_session_headers(target), provider_session_headers(target)])
+    for slot in ("review-a", "review-b"):
+        with usage_scope(replace(task, non_task_operation=True, review_slot_id=slot)):
+            header = provider_session_headers(target, "shared-review-affinity")
+            assert provider_session_headers(target, "shared-review-affinity") == header
+            others.append(header)
+    others.extend([provider_session_headers(target), provider_session_headers(target, one_shot=True)])
+    values = [headers["x-opencode-session"] for headers in [first, affinity, model, *others]]
+    assert len(set(values)) == len(values)
+    assert target["default_headers"] == OPENCODE_CLIENT_HEADERS
+    assert pooled.default_headers["User-Agent"].startswith("Ouroboros/")
+    assert "x-opencode-session" not in pooled.default_headers
+    assert "x-opencode-session" not in client._get_async_remote_client(target).default_headers
+
+
+@pytest.mark.parametrize(("url", "is_go"), [
+    ("https://opencode.ai/inference/go/openai/v1", True),
+    ("https://opencode.ai/inference/go/openai/v1/", True),
+    ("HTTPS://OpenCode.ai/inference/go/openai/v1", True),
+    ("https://opencode.ai/zen/v1", False),
+    ("https://opencode.ai/zen/go/v1", False),
+    ("https://opencode.ai/inference/go/openai", False),
+    ("https://opencode.ai/inference/go/openai/v1/extra", False),
+    ("https://opencode.ai/inference/go/openai/v1?x=1", False),
+    ("http://opencode.ai/inference/go/openai/v1", False),
+    ("https://opencode.ai:8443/inference/go/openai/v1", False),
+    ("https://api.opencode.ai/inference/go/openai/v1", False),
+    ("https://opencode.ai.example/inference/go/openai/v1", False),
+    ("https://vllm.example/inference/go/openai/v1", False),
+])
+def test_go_headers_follow_the_endpoint_not_connection_or_model_names(url, is_go):
+    from ouroboros.usage_accounting import UsageScope, usage_scope
+
+    client = LLMClient()
+    rows = [{"kind": "openai-compatible", "name": "any-label", "api_key": "key", "base_url": url}]
+    with usage_scope(UsageScope(task_id="task")):
+        target = client._resolve_remote_target("openai-compatible@any-label::unfamiliar-model",
+                                               settings={"OUROBOROS_CONNECTIONS": rows})
+        kwargs = client._build_remote_kwargs(target, [{"role": "user", "content": "hi"}],
+                                             "medium", 64, "auto", None, None,
+                                             skip_capability_fetch=True)
+    assert ("User-Agent" in target["default_headers"]) is is_go
+    assert ("extra_headers" in kwargs) is is_go
+    if not is_go:
+        assert target["default_headers"] == {}
+
+
 def test_resolve_cloudru_target_uses_default_base_url(monkeypatch):
     monkeypatch.setenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", "cloudru-key")
     monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_BASE_URL", raising=False)

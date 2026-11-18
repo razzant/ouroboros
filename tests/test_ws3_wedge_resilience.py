@@ -134,6 +134,7 @@ def test_watchdog_alerts_on_chat_turn_wedge(monkeypatch):
     monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: _Bridge())
     monkeypatch.setattr("supervisor.state.load_state", lambda: {"owner_chat_id": 7})
     monkeypatch.setattr("supervisor.state.append_jsonl", lambda *a, **k: None)
+    monkeypatch.setattr("ouroboros.dialogue_store.append_quietly", lambda *a, **k: None)
     # The heartbeat stamp is MONOTONIC (OB-03) — seed it on the same clock.
     from supervisor.active_activity import get_direct_activity_registry
 
@@ -222,6 +223,7 @@ def _collect_alerts(monkeypatch, chat_id: int) -> list:
     monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: _Bridge())
     monkeypatch.setattr("supervisor.state.load_state", lambda: {"owner_chat_id": chat_id})
     monkeypatch.setattr("supervisor.state.append_jsonl", lambda *a, **k: None)
+    monkeypatch.setattr("ouroboros.dialogue_store.append_quietly", lambda *a, **k: None)
     return alerts
 
 

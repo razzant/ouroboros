@@ -16,11 +16,14 @@ import copy
 import hashlib
 import json
 import os
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from ouroboros.request_wire_recovery import request_wire_scoped
 from ouroboros.model_wait import dispatch_deadline_remaining_sec
-from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS
+from ouroboros import __version__
+from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS, OPENROUTER_APP_URL
 from ouroboros.provider_connections import connection_rows, connection_values
 from ouroboros.provider_models import (
     CONNECTIONS_KEY,
@@ -41,6 +44,54 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Asks OpenRouter to report its upstream attempts, so a router's final status
 # cannot hide the cause an upstream returned (the attribution headers stay their own SSOT).
 OPENROUTER_METADATA_HEADERS = {"X-OpenRouter-Metadata": "enabled"}
+
+
+# OpenCode's Go endpoint asks every client to name itself in User-Agent and to send one
+# stable ``x-opencode-session`` per conversation (https://opencode.ai/docs/console/go/);
+# without the session a chat request is refused (HTTP 400 ``MissingSessionID``,
+# ``openai-compatible@<connection>`` on ``/inference/go/openai/v1``, 2026-11-16). The
+# facts are keyed on that parsed endpoint, never a model name or a connection label.
+OPENCODE_CLIENT_HEADERS = {"User-Agent": f"Ouroboros/{__version__} (+{OPENROUTER_APP_URL})"}
+OPENCODE_SESSION_HEADER = "x-opencode-session"
+OPENCODE_GO_PATH = "/inference/go/openai/v1"
+
+
+def _opencode_go_endpoint(base_url: Any) -> bool:
+    """Exactly the documented Go endpoint (a trailing slash aside), whatever the connection's name."""
+    try:
+        parts = urlsplit(str(base_url or "").strip())
+        exact = (parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), parts.query, parts.fragment)
+    except ValueError:
+        return False
+    return exact == ("https", "opencode.ai", OPENCODE_GO_PATH, "", "")
+
+
+def provider_session_headers(target: Dict[str, Any], cache_affinity: str = "", *,
+                             one_shot: bool = False) -> Dict[str, str]:
+    """Per-request headers naming the conversation one compatible send belongs to.
+
+    Only the OpenCode Go endpoint takes one. The conversation is the bound task (never
+    its root, which would merge children) and its review slot, plus a caller-declared
+    affinity, under the route's model: every round and retry of one task's tool loop (and
+    a resume that keeps the task id) shares a session while tasks, children, slots and
+    models never do; nothing is derived from prompt content. Taskless reviews retain their
+    slot and caller affinity, not repeating system task IDs. A ``one_shot`` call (the Provider
+    Test) or an unscoped call without that identity gets a fresh session. Credential-free; it is sent
+    per request and rides the physical payload, so pooled clients stay shared.
+    """
+    if target.get("provider") != "openai-compatible" or not _opencode_go_endpoint(target.get("base_url")):
+        return {}
+    from ouroboros.usage_accounting import current_usage_scope
+
+    scope = None if one_shot else current_usage_scope()
+    parts = (("", "") if scope is None else
+             ("" if scope.non_task_operation else str(scope.task_id or ""), str(scope.review_slot_id or "")))
+    affinity = "" if one_shot else str(cache_affinity or "").strip()
+    if not any(parts) and not affinity:
+        return {OPENCODE_SESSION_HEADER: f"ouroboros-{uuid.uuid4().hex}"}
+    model = str(target.get("usage_model") or target.get("resolved_model") or "")
+    digest = hashlib.sha256("\0".join((model, *parts, affinity)).encode("utf-8")).hexdigest()[:32]
+    return {OPENCODE_SESSION_HEADER: f"ouroboros-session-{digest}"}
 
 
 _OR_PROVIDER_PRESETS = {
@@ -191,7 +242,9 @@ def _kind_target(provider: str, get: Any, connection: str, configured: Any, *,
             keyless = not api_key and compatible_endpoint_configured(setting)
         # A pair configured without a key is the endpoint's no-auth setting; its
         # transport sends no credential (net_transport.openai_client_class).
-        return {"api_key": api_key, "base_url": base_url, "keyless": keyless, "default_headers": {}, **_DIRECT_LANE}
+        return {"api_key": api_key, "base_url": base_url, "keyless": keyless,
+                "default_headers": dict(OPENCODE_CLIENT_HEADERS) if _opencode_go_endpoint(base_url) else {},
+                **_DIRECT_LANE}
     return {
         "api_key": get("api_key", "") if connection or api_key_override is None else api_key_override,
         "base_url": openrouter_base_url,
@@ -466,6 +519,7 @@ class _ProviderRoutingMixin:
 
     # Non-chat provider facets share the same route, credential and header owner.
     resolve_remote_target = _resolve_remote_target
+    provider_session_headers = staticmethod(provider_session_headers)
 
     def _get_client(self):
         target = self._resolve_remote_target("openrouter::")

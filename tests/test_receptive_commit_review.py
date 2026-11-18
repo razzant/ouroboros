@@ -348,11 +348,21 @@ def test_frozen_wave_rejoin_keeps_the_actual_uncertain_candidate(author, monkeyp
     assert attribution["uncertain"] == ["maybe.txt"] and _git(a.repo, "ls-files", "-s", "-z") == entries
     a.reviewer.release()
     _join(second)
+    if "reviewers are still running" in outcome["second"]:
+        notices = until(lambda: _notices(a))
+        assert len(notices) == 1 and notices[0]["review_feedback"]["record_id"] == reference["review_record_id"], notices
+        _read_mail(a)
+        _join(_produce(a, lambda: call("second", review_reference=reference)))
     assert outcome["second"].startswith("Review outcome returned before commit."), outcome["second"]
     assert (uncertain in outcome["second"]) is ("maybe.txt" in first_paths), outcome["second"]
     assert sorted(a.reviewer.rounds) == ["m1", "m2"], "the same frozen subject is collected without another send"
     assert _git(a.repo, "diff", "--cached", "--name-only") == "", "the handback leaves nothing of the wave staged"
     (a.repo / "other.py").write_text("value = 3\n", encoding="utf-8")
+    # Collection can finish before its asynchronous notifier publishes. The next
+    # subject must start after the exact prior notice has arrived and been read.
+    notices = until(lambda: _notices(a))
+    assert len(notices) == 1 and "[Review settled]" in notices[0]["text"], notices
+    assert notices[0]["review_feedback"]["record_id"] == reference["review_record_id"]
     _read_mail(a)  # the [Review settled] notice, read before the next call as the loop reads it
     _join(_produce(a, lambda: call("next", paths=["other.py"])))
     assert outcome["next"].startswith("Review outcome returned before commit."), outcome["next"]

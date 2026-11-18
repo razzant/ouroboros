@@ -250,6 +250,10 @@ def probe_provider_readiness(
                 "exception_type": "ProviderNotConfigured",
             }
         candidate = _probe_candidate(target)
+        # Each test is its own conversation on a route that requires one.
+        session_headers = client.provider_session_headers(target, one_shot=True)
+        if session_headers:
+            candidate["extra_headers"] = session_headers
         provider = str(target.get("provider") or "")
 
         if provider in {

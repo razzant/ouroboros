@@ -6,6 +6,8 @@ import json
 from pathlib import PurePath
 from typing import Any, Dict, Mapping
 
+from ouroboros.utils import json_dumps_utf8
+
 RESULT_VIEWS = ("answer", "summary", "evidence", "full")
 _EVIDENCE_ARTIFACT_LIMIT = 10
 
@@ -75,7 +77,7 @@ def authority_selection_response(ctx: Any, data: Dict[str, Any], drive_root: Any
             end=selectors["source_end_char"], presence_scope=str(selectors["presence_scope"] or ""))
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=str(exc)))
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    text = json_dumps_utf8(payload, ensure_ascii=False, sort_keys=True)
     if payload.get("authority_source", {}).get("reason") == "source_range_invalid":
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=text))
     return text
@@ -85,22 +87,22 @@ def authority_selection(authority: Dict[str, Any], task_id: str, fields: Any, *,
                         digest: str, start: Any, end: Any, presence_scope: str = "") -> Dict[str, Any]:
     """Exact mechanical view of the SAME current authority, never a new dossier/store.
 
-    All digests/ranges describe sorted ensure_ascii=False JSON in Unicode code
-    points, not bytes. The full projection identity is separate from the chosen
+    Digests/ranges describe sorted UTF-8 JSON with surrogate code units escaped;
+    ranges count Unicode code points, not bytes. The identity is separate from the chosen
     fields' serialization and child_result_sha256; receipts/plans may change
     while that result identity stays fixed. Re-reads are current, not immutable.
     """
     from ouroboros.artifacts import text_source_range_projection
 
     def encode(value):
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return json_dumps_utf8(value, ensure_ascii=False, sort_keys=True)
 
     full_text = encode(authority)
     projection_sha = hashlib.sha256(full_text.encode("utf-8")).hexdigest()
     keys = sorted(authority) if fields is None else fields
     missing = [key for key in keys if key not in authority]
     if missing:
-        raise ValueError("unknown authority_fields: " + json.dumps(missing, ensure_ascii=False))
+        raise ValueError("unknown authority_fields: " + json_dumps_utf8(missing, ensure_ascii=False))
     arguments: Dict[str, Any] = {"task_id": task_id, "source_only": True,
                                  "authority_projection_sha256": projection_sha}
     arguments.update({"include_authority": True} if fields is None else {"authority_fields": list(keys)})
@@ -350,7 +352,7 @@ def render_result_view(
             payload["result_source"] = current_answer
         else:
             payload["answer"] = answer
-        return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        return json_dumps_utf8(payload, ensure_ascii=False, indent=2, default=str)
 
     # Dynamic views deliberately do not take the unchanged-body branch.
     payload["known_result_matches"] = bool(
@@ -359,7 +361,7 @@ def render_result_view(
     summary = _add_dynamic_summary(payload, data, outcome_summary)
     if view == "summary":
         payload["answer_source"] = current_answer
-        return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        return json_dumps_utf8(payload, ensure_ascii=False, indent=2, default=str)
 
     # Evidence layers current authorized recipes on the same dynamic summary;
     # no trace_refs, manifest paths, or copied stored rows.  Both recipes stay
@@ -377,7 +379,7 @@ def render_result_view(
             "coverage": "current_authorized_projection_only",
         },
     ]
-    return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    return json_dumps_utf8(payload, ensure_ascii=False, indent=2, default=str)
 
 
 __all__ = ["RESULT_VIEWS", "render_result_view", "validate_result_view"]

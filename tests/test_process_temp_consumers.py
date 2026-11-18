@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from ouroboros.test_environment import SCRATCH_MARKER, isolated_environment, owned_process_temp
+from ouroboros.test_environment import SCRATCH_MARKER, default_temp_parent, isolated_environment, owned_process_temp
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 REPO = Path(__file__).resolve().parents[1]
@@ -98,7 +98,8 @@ def test_a_process_temp_gives_a_long_named_case_the_manager_its_own_root_cannot(
 def test_launcher_sessions_give_a_long_named_case_its_process_temp(tmp_path, flags):
     node = "tests/test_process_temp_consumers.py::test_a_process_temp_gives_a_long_named_case_the_manager_its_own_root_cannot"
     result = subprocess.run(
-        [sys.executable, "-I", "-S", str(REPO / "scripts" / "safe_test.py"), "--evidence-dir", str(tmp_path / "evidence"),
+        [sys.executable, "-I", "-S", str(REPO / "scripts" / "safe_test.py"),
+         "--temp-parent", str(owned_process_temp() or default_temp_parent()), "--evidence-dir", str(tmp_path / "evidence"),
          "--timeout", "280", "--", sys.executable, "-m", "pytest", node, "-o", "addopts=", "-rP", *flags],
         cwd=REPO, env={**os.environ, "OURO_TEST_WORKER_BUDGET": "2"}, text=True, capture_output=True, timeout=300)
     assert result.returncode == 0 and "1 passed" in result.stdout, result.stdout + result.stderr

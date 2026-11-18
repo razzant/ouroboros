@@ -11,6 +11,7 @@ import sys
 import pytest
 
 from ouroboros.test_evidence import diagnostic_directory
+from ouroboros.test_environment import owned_process_temp
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -37,7 +38,7 @@ def test_native(tmp_path):
 ''', encoding='utf-8')
     (evidence_parent / 'probe.py').write_bytes(probe.read_bytes())
     result = subprocess.run([sys.executable, '-I', '-S', str(REPO / 'scripts/safe_test.py'),
-        '--temp-parent', '/tmp' if os.name == 'posix' else str(tmp_path),
+        '--temp-parent', str(owned_process_temp() or ('/tmp' if os.name == 'posix' else tmp_path)),
         '--evidence-dir', str(evidence_parent), '--', sys.executable, '-m', 'pytest',
         '-p', 'tests.conftest', '--rootdir', str(tmp_path), '--confcutdir', str(tmp_path),
         '-o', 'addopts=', '-q', '-s', str(probe)], cwd=REPO, capture_output=True, timeout=120)

@@ -37,6 +37,16 @@ _DESCRIPTION_CHARS_BEFORE = 481  # measured on ef33a0a956c2; T1 allowance ~80
 _ALLOWANCE = 80
 
 
+@pytest.fixture(autouse=True)
+def _own_cleanup_threads():
+    yield
+    ps.wait_for_cleanups(15)
+    from ouroboros.tools.shell_process import unsettled_tracked_children
+    leaked = unsettled_tracked_children()
+    assert leaked is None, (leaked, [(proc.pid, proc.args, proc.returncode)
+                                    for proc in list(_active_subprocesses)])
+
+
 def _schema() -> dict:
     return next(entry.schema for entry in get_tools() if entry.name == "run_command")
 

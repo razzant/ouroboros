@@ -36,17 +36,19 @@ def refuse_long_pytest_launches(monkeypatch, limit=WINDOWS_COMMAND_LINE):
     """Refuse a pytest launch whose command line reaches ``limit`` characters, as Windows does (WinError 206)
     before the program starts: this platform takes such a line, so the guard is what makes a long scope fail
     here. Returns the argv of every pytest launch that was accepted."""
-    real, accepted = subprocess.Popen, []
+    from ouroboros.process_containment import ProcessContainer
 
-    class Bounded(real):
-        def __init__(self, args, *rest, **options):
-            if list(args[1:3]) == ["-m", "pytest"]:
-                if len(subprocess.list2cmdline(args)) >= limit:
-                    raise FileNotFoundError(2, "[WinError 206] The filename or extension is too long")
-                accepted.append(list(args))
-            super().__init__(args, *rest, **options)
+    spawn, accepted = ProcessContainer.spawn, []
 
-    monkeypatch.setattr(subprocess, "Popen", Bounded)
+    def bounded(container, args, *rest, **options):
+        if list(args[1:3]) == ["-m", "pytest"]:
+            if len(subprocess.list2cmdline(args)) >= limit:
+                raise FileNotFoundError(2, "[WinError 206] The filename or extension is too long")
+            accepted.append(list(args))
+        return spawn(container, args, *rest, **options)
+
+    # Observe the pytest door without replacing the class tracked Git births need.
+    monkeypatch.setattr(ProcessContainer, "spawn", bounded)
     return accepted
 
 

@@ -167,14 +167,13 @@ class LiveConversationTurn(RealtimeTurn):
                     for child in children:
                         if not child.done():
                             child.cancel()
-                    for child in children:
-                        try:
-                            await joined(child)
-                        except (asyncio.CancelledError, Exception):
-                            pass
-                    # join any already-started tool invocation; cancellation of
-                    # its await cannot make an executing effect disappear.
-                    await host.finish()
+                    try:
+                        # Collect failures without re-raising the same exception and
+                        # replacing the handler's original traceback during cleanup.
+                        await joined(asyncio.gather(*children, return_exceptions=True))
+                    finally:
+                        # Cancellation of child collection still owes host custody.
+                        await host.finish()
 
         reason, status, detail = "finished", "ok", ""
         failure = None

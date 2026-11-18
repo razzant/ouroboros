@@ -1,6 +1,7 @@
 
 from tests import _dialogue as dialogue_test
 import json
+import os
 import pathlib
 from types import SimpleNamespace
 
@@ -583,6 +584,27 @@ def _synthesis_root(tmp_path):
 def _finalized_events(root, task_id):
     rows = [json.loads(line) for line in (root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     return [row for row in rows if row.get("type") == "task_cost_finalized" and row.get("task_id") == task_id]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX raw-byte filename")
+def test_terminal_result_with_raw_byte_artifact_names_reaches_the_store(tmp_path):
+    from ouroboros.headless import task_artifacts_dir
+
+    root, env = _synthesis_root(tmp_path)
+    task = {"id": "raw-artifact-final", "type": "task", "chat_id": 1,
+            "_is_direct_chat": True, "text": "Retain the evidence"}
+    pipeline.write_task_result(root, task["id"], "running")
+    folder = task_artifacts_dir(root, task["id"])
+    folder.mkdir(parents=True, exist_ok=True)
+    names = ["fixture_\udcff.dat", "literal_\\udcff.dat", "é🪶.dat"]
+    for name in names:
+        (folder / name).write_bytes(b"retained evidence")
+    pipeline._store_task_result(env, task, "Evidence retained.", {"rounds": 1}, {"tool_calls": []})
+    stored = pipeline.load_task_result(root, task["id"])
+    assert stored["status"] == "completed", stored
+    assert set(names) <= {row["name"] for row in stored["artifacts"]}
+    assert stored["result"] == "Evidence retained."
+    assert all((folder / name).read_bytes() == b"retained evidence" for name in names)
 
 
 @pytest.mark.parametrize("stop", ["intent", "live_marker"])

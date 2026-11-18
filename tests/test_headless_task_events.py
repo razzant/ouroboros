@@ -8,6 +8,7 @@ projection that waits for workspace artifacts.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from starlette.applications import Starlette
@@ -27,6 +28,33 @@ from tests._headless_cli_shared import (  # noqa: F401  (autouse fixture applies
     _managed_worker_pool_available,
 )
 from tests._store_shared import seed_result
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX raw-byte filename")
+def test_task_detail_returns_raw_byte_artifact_names_losslessly(tmp_path):
+    from ouroboros.headless import task_artifacts_dir
+
+    data = tmp_path / "data"
+    write_task_result(data, "raw-artifact", "completed", result="é🪶 retained")
+    folder = task_artifacts_dir(data, "raw-artifact")
+    folder.mkdir(parents=True, exist_ok=True)
+    names = ["fixture_\udcff.dat", "literal_\\udcff.dat", "é🪶.dat"]
+    for name in names:
+        (folder / name).write_bytes(b"evidence")
+    app = Starlette(routes=[Route("/api/tasks/{task_id}", api_task_get),
+                            Route("/api/tasks/{task_id}/events", api_task_events)])
+    app.state.drive_root = data
+    response = TestClient(app).get("/api/tasks/raw-artifact")
+    assert response.status_code == 200
+    assert response.content.decode("utf-8") == response.text
+    assert {row["name"] for row in response.json()["artifacts"]} == set(names)
+    assert response.json()["result"] == "é🪶 retained"
+    assert all((folder / name).read_bytes() == b"evidence" for name in names)
+    stream = TestClient(app).get("/api/tasks/raw-artifact/events?wait=0")
+    events = [json.loads(line.removeprefix("data: ")) for line in stream.text.splitlines()
+              if line.startswith("data: ")]
+    final = next(row["data"] for row in events if row["type"] == "task_result")
+    assert {row["name"] for row in final["artifacts"]} == set(names)
 
 
 def test_task_event_replay_uses_existing_logs_and_result(tmp_path):

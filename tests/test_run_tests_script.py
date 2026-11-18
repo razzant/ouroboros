@@ -49,10 +49,12 @@ def standalone_budget(monkeypatch, tmp_path):
     return tmp_path / "slots"
 
 
-def _item(nodeid, *, serial):
+def _item(nodeid, *, serial, parent=None):
     """A collected item; ``serial`` is None (no mark), "" (a bare mark) or the resource the mark names."""
     markers = [] if serial is None else [types.SimpleNamespace(name="serial", args=(serial,) if serial else ())]
-    item = types.SimpleNamespace(nodeid=nodeid, stash={})
+    item = types.SimpleNamespace(nodeid=nodeid, stash={},
+                                 parent=types.SimpleNamespace(nodeid=parent if parent is not None
+                                                              else nodeid.rsplit("::", 1)[0]))
     item.get_closest_marker = lambda name: next((m for m in markers if m.name == name), None)
     return item
 
@@ -492,6 +494,14 @@ def test_lane_groups_pin_resources_and_keep_other_files_whole(run_tests, monkeyp
     assert plain.workerinput == {}
 
 
+@pytest.mark.parametrize("parent", ["tests/test_a.py", "tests/test_a.py::TestBox"])
+@pytest.mark.parametrize("parameter", ["openai@work::future", "x::y", "scope]@other::future"])
+def test_lane_groups_use_the_collector_not_parameter_text(parent, parameter):
+    item = _item(f"{parent}::test_one[{parameter}]", serial=None, parent=parent)
+    conftest._pin_lane_groups([item], _config())
+    assert _group(item) == parent
+
+
 def test_lane_groups_are_inert_outside_the_one_xdist_pass():
     """A worker of a plain `-n` run (no `--dist loadgroup`) and a session without workers leave scheduling and
     order untouched."""
@@ -513,6 +523,7 @@ def test_a_real_xdist_pass_runs_a_resources_tests_in_its_group_on_one_worker(tmp
     import subprocess
     import sys
 
+    from ouroboros import preflight_inventory as inventory, preflight_probe
     from ouroboros.test_environment import isolated_environment
     from ouroboros.test_parallelism import NESTED_WORKERS_ENV
     from tests.ci_verdicts import TEST_DURATIONS_ENV, platform_name
@@ -533,30 +544,38 @@ def test_a_real_xdist_pass_runs_a_resources_tests_in_its_group_on_one_worker(tmp
         f"    pathlib.Path({str(seen)!r}, 'reported-' + node.gateway.id).write_text(json.dumps(list(ids)))\n",
         encoding="utf-8")
     for name in ("a", "b"):
+        who = "x@y" if name == "a" else "openai@work::future"
         (suite / "tests" / f"test_{name}.py").write_text(
             "import json, os, pathlib, pytest\n\n\n"
             f"def note(request, name):\n    pathlib.Path({str(seen)!r}, name).write_text(json.dumps([\n"
             "        request.node.nodeid, os.environ['PYTEST_XDIST_WORKER'],\n"
             "        request.config.workerinput['lane_group_seconds']]), encoding='utf-8')\n\n\n"
             f"@pytest.mark.serial('port')\ndef test_shared(request):\n    note(request, {name + '-shared'!r})\n\n\n"
-            f"@pytest.mark.parametrize('who', ['x@y'])\ndef test_free(request, who):\n"
+            f"@pytest.mark.parametrize('who', [{who!r}])\ndef test_free(request, who):\n"
             f"    note(request, {name + '-free'!r})\n", encoding="utf-8")
     env = {**isolated_environment(owner, REPO), "OUROBOROS_TEST_TEMP_ROOT": str(owner), NESTED_WORKERS_ENV: "2",
            TEST_DURATIONS_ENV: str(tmp_path / "durations.json")}
-    run = subprocess.run([sys.executable, "-m", "pytest", "-p", "tests.conftest", "--rootdir", str(suite), "--confcutdir",
+    scratch = tmp_path / "inventory"
+    spec = inventory.selection_passes(types.SimpleNamespace(tier="full", files=()), temp_root=scratch)[0]
+    env["PYTHONPATH"] = os.pathsep.join((str(preflight_probe.probe_dir(scratch)), env.get("PYTHONPATH", "")))
+    run = subprocess.run([sys.executable, "-m", "pytest", "-p", "tests.conftest", "-p", spec.args[-1],
+                          "--rootdir", str(suite), "--confcutdir",
                           str(suite), "-o", "addopts=", "-q", "-p", "no:cacheprovider", "-n", "2", "--dist", "loadgroup",
                           str(suite / "tests")], cwd=REPO, env=env, text=True, capture_output=True, timeout=300)
     assert run.returncode == 0, run.stdout + run.stderr
+    recorded_inventory, problem = inventory.read_inventory(scratch, "parallel")
+    assert not problem, problem
     ran = {path.name: json.loads(path.read_text(encoding="utf-8")) for path in seen.iterdir()}
     reported = [ran.pop(name) for name in sorted(ran) if name.startswith("reported-")]
     assert len(reported) == 2 and reported[0] == reported[1], "two workers reported two collections"
     # Longest group first: the resource's (its two files' 5010 ms), then b's (5000), then a's (10).
     assert reported[0] == ["tests/test_a.py::test_shared@serial:port", "tests/test_b.py::test_shared@serial:port",
-                           "tests/test_b.py::test_free[x@y]@tests/test_b.py",
+                           "tests/test_b.py::test_free[openai@work::future]@tests/test_b.py",
                            "tests/test_a.py::test_free[x@y]@tests/test_a.py"]
     assert {name: row[0] for name, row in ran.items()} == {
         "a-shared": "tests/test_a.py::test_shared", "b-shared": "tests/test_b.py::test_shared",
-        "a-free": "tests/test_a.py::test_free[x@y]", "b-free": "tests/test_b.py::test_free[x@y]"}
+        "a-free": "tests/test_a.py::test_free[x@y]", "b-free": "tests/test_b.py::test_free[openai@work::future]"}
+    assert set(recorded_inventory["expected"]) == {row[0] for row in ran.values()}
     assert ran["a-shared"][1] == ran["b-shared"][1], "one resource's tests ran on two workers"
     assert [row[2] for row in ran.values()] == [seconds] * 4
 

@@ -131,6 +131,17 @@ def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
+def json_dumps_utf8(value: Any, **kwargs: Any) -> str:
+    """UTF-8 JSON text, losslessly escaping surrogate code units only.
+
+    POSIX filesystem names can contain surrogateescape characters. JSON escapes
+    preserve those decoded names without replacing bytes or ASCII-escaping normal
+    Unicode; already-valid JSON text and its existing hashes stay byte-identical.
+    Apply this to serialized JSON, never directly to an unquoted path or prose.
+    """
+    return json.dumps(value, **kwargs).encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def jsonl_generation_signature(path: pathlib.Path) -> dict:
     """Identity signature of a JSONL log generation: first-line hash + size.
 
@@ -333,13 +344,13 @@ def write_text_atomic(path: pathlib.Path, content: str, *, fsync: bool = False) 
 
 def machine_json(payload: Any) -> str:
     """The one compact text of machine JSON state (files and the current store's task bodies)."""
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return json_dumps_utf8(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def atomic_write_json(path: pathlib.Path, payload: Any, *, trailing_newline: bool = False,
                       fsync: bool = False) -> None:
     """Atomically persist ``machine_json``; keep settings.json human-readable."""
-    content = json.dumps(payload, ensure_ascii=False, indent=2) if pathlib.Path(path).name == "settings.json" else machine_json(payload)
+    content = json_dumps_utf8(payload, ensure_ascii=False, indent=2) if pathlib.Path(path).name == "settings.json" else machine_json(payload)
     if trailing_newline:
         content += "\n"
     write_text_atomic(pathlib.Path(path), content, fsync=fsync)
@@ -558,7 +569,7 @@ def append_jsonl(
         raise TypeError(f"append_jsonl: path must be pathlib.Path, got {type(path).__name__}")
     assert_test_data_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(obj, ensure_ascii=False)
+    line = json_dumps_utf8(obj, ensure_ascii=False)
     data = (line + "\n").encode("utf-8")
 
     write_retries = 3

@@ -61,12 +61,13 @@ def _process_state(identity):
 def test_cold_launcher_panic_stops_task_bound_skill_with_slow_census(tmp_path):
     from ouroboros.process_census import is_scope_name
     from ouroboros.process_containment import ProcessContainer
-    from ouroboros.test_environment import isolated_environment, retain_tree
+    from ouroboros.test_environment import isolated_environment, owned_process_temp, retain_tree
 
     repo = Path(__file__).resolve().parents[1]
     # A fresh source prevents live scope markers, engine homes or credentials
     # from reaching this disposable installation. Container custody is inherited.
-    env = isolated_environment(tmp_path, repo, source={"PATH": os.environ.get("PATH", os.defpath)})
+    env = isolated_environment(tmp_path, repo, source={"PATH": os.environ.get("PATH", os.defpath)},
+                               process_temp=owned_process_temp())
     assert not any(is_scope_name(key) or key.startswith("CLAUDEXOR_") for key in env)
     root = Path(env["OUROBOROS_DATA_DIR"])
     container, launcher = ProcessContainer(), None

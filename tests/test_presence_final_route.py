@@ -556,8 +556,16 @@ def test_room_label_cache_keeps_source_failure_and_ambiguous_names_unknown(tmp_p
 
 
 @pytest.mark.parametrize("event_queue", [None, _Refusing()], ids=["no_queue", "refused"])
-def test_an_inline_turn_with_no_consumer_is_told_nothing_was_delivered(fired_context, tmp_path, event_queue):
+def test_an_inline_turn_with_no_consumer_is_told_nothing_was_delivered(fired_context, tmp_path, event_queue, monkeypatch):
     from ouroboros.tools.control_runtime import _send_user_message
+    from supervisor import workers
+
+    def unattached(*, create):
+        assert create is False
+        raise RuntimeError("controlled unattached server bus")
+
+    monkeypatch.setattr("ouroboros.utils.in_worker_process", lambda: False)
+    monkeypatch.setattr(workers, "get_event_q", unattached)
 
     root, _pending, _first_request = fired_context
     ctx, _turn = _turn_ctx(root, event_queue=event_queue)

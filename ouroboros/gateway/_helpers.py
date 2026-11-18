@@ -13,7 +13,15 @@ import anyio
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ouroboros.utils import iter_jsonl_objects
+from ouroboros.utils import iter_jsonl_objects, json_dumps_utf8
+
+
+class UTF8JSONResponse(JSONResponse):
+    """JSON response that preserves surrogate-escaped filesystem names."""
+
+    def render(self, content: Any) -> bytes:
+        return json_dumps_utf8(content, ensure_ascii=False, allow_nan=False,
+                               indent=None, separators=(",", ":")).encode("utf-8")
 
 
 _TRUE_LITERALS = frozenset({"1", "true", "yes", "on"})

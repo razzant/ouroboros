@@ -177,6 +177,63 @@ def test_feature_renewal_joins_cancelled_real_mailbox(monkeypatch, tmp_path):
     asyncio.run(run())
 
 
+def test_extension_cancel_during_child_collection_still_finishes_the_host(host_world, monkeypatch):
+    """A naturally ending handler drains a real control read when extension cancellation arrives."""
+    from ouroboros import call_peers, extension_registry_state as registry
+
+    host = host_world.host
+    entered, release = threading.Event(), threading.Event()
+    reader = host.ctx.model_wait_context.control_reason
+    controls, finished, reads = [], [], []
+    watch, finish = ConversationHost.watch_controls, ConversationHost.finish
+
+    def control_reason(**kwargs):
+        result = reader(**kwargs)
+        reads.append(result)
+        if len(reads) == 2:  # the first read admits the call; the second belongs to its watcher
+            entered.set()
+            assert release.wait(30)
+        return result
+
+    async def watching(port):
+        controls.append(asyncio.current_task())
+        await watch(port)
+
+    async def finishing(port):
+        await finish(port)
+        finished.append(port)
+
+    async def ending(port):
+        assert await asyncio.to_thread(entered.wait, 30)
+
+        async def cancel_collection():
+            try:
+                async def collecting():
+                    while not controls[0].cancelling():
+                        await asyncio.sleep(0)
+                await asyncio.wait_for(collecting(), 2)
+                registry._extensions['fixture'].supervised_futures[0].cancel()
+                await asyncio.sleep(0)  # deliver extension cancellation while the read still owns custody
+            finally:
+                release.set()
+        asyncio.create_task(cancel_collection())
+
+    monkeypatch.setattr(host.ctx.model_wait_context, 'control_reason', control_reason)
+    monkeypatch.setattr(ConversationHost, 'watch_controls', watching)
+    monkeypatch.setattr(ConversationHost, 'finish', finishing)
+    monkeypatch.setattr(call_peers, 'get_hub', lambda _: host.hub)
+    monkeypatch.setattr(call_peers, 'close_hub', lambda *a, **kw: None)
+    monkeypatch.setitem(host.turn.feature, 'handler', ending)
+    try:
+        _, metadata, _ = host.turn.run(host.ctx, host.messages, host.tools,
+                                      task=host.task, initial_effort='')
+        assert metadata['reason_code'] == 'cancelled'
+        assert len(finished) == 1, 'extension cancellation must not skip final host custody'
+        assert controls[0].done() and len(reads) == 2
+    finally:
+        release.set()
+
+
 @pytest.mark.parametrize('cancel', [False, True])
 def test_caption_completes_history_handoff_before_cancel(host_world, monkeypatch, cancel):
     from ouroboros import dialogue_store

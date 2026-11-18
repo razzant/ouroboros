@@ -65,6 +65,7 @@ import collections
 import concurrent.futures
 import contextvars
 import functools
+import glob
 import io
 import json
 import os
@@ -647,6 +648,10 @@ def _install(meter: CostMeter) -> None:
             meter._patched.append((os, attr, supported))
     for attr, wrapper in _ACCESSOR_PATCHES:
         _ORIG["accessor." + attr] = _replace(meter, _ACCESSOR, attr, staticmethod(wrapper))
+    # Python 3.13 glob caches the OS door on its string-path strategy class.
+    globber = getattr(glob, "_StringGlobber", None)
+    if globber is not None and "scandir" in vars(globber):
+        _replace(meter, globber, "scandir", staticmethod(_w_scandir))
     _ORIG["Popen.__init__"] = _replace(meter, subprocess.Popen, "__init__", _w_popen_init)
     _ORIG["Thread.start"] = _replace(meter, threading.Thread, "start", _w_thread_start)
     _ORIG["Thread._bootstrap_inner"] = _replace(meter, threading.Thread, "_bootstrap_inner", _w_bootstrap_inner)
