@@ -48,10 +48,10 @@ class _Response:
         return copy.deepcopy(self._payload)
 
 
-def _scope(root: pathlib.Path, task_id: str) -> ua.UsageScope:
+def _scope(root: pathlib.Path, task_id: str, category: str = 'task') -> ua.UsageScope:
     return ua.UsageScope(
         drive_root=root, task_id=task_id, root_task_id=task_id,
-        category="task", source="test.model_send",
+        category=category, source="test.model_send",
     )
 
 
@@ -81,9 +81,9 @@ def _rows(root: pathlib.Path):
     return ledger_rows(root)
 
 
-def _dispatch(root: pathlib.Path, task_id: str, payload=None, target=None):
+def _dispatch(root: pathlib.Path, task_id: str, payload=None, target=None, *, category='task'):
     client = LLMClient(api_key="unused")
-    with ua.usage_scope(_scope(root, task_id)):
+    with ua.usage_scope(_scope(root, task_id, category)):
         client._create_chat_completion_with_retries(
             lambda **_candidate: _Response(),
             payload if payload is not None else _payload(),
@@ -94,6 +94,107 @@ def _dispatch(root: pathlib.Path, task_id: str, payload=None, target=None):
 
 def _manifest(final: Dict[str, Any]) -> Dict[str, Any]:
     return json.loads(pathlib.Path(final["candidate_manifest_ref"]["path"]).read_text())
+
+
+def test_local_request_reader_selects_one_sealed_attempt(data_root, capsys):
+    from ouroboros.context_attempt_reader import main, read_attempt
+
+    first = _dispatch(data_root, 'reader-test')
+    payload = _payload()
+    payload['messages'][0]['content'][0]['text'] = 'Different request'
+    last = _dispatch(data_root, 'reader-test', payload=payload, category='evolution')
+    assert last['category'] == 'evolution'
+    foreign = _dispatch(data_root, 'foreign-test')
+    args = ['--data-root', str(data_root), 'reader-test']
+    assert main(args) == 0
+    page = json.loads(capsys.readouterr().out)
+    assert [row['attempt_id'] for row in page['attempts']] == [last['attempt_id'], first['attempt_id']]
+    assert main([*args, '--attempt', first['attempt_id']]) == 0
+    selected = capsys.readouterr()
+    assert 'sk-secret-model-send-seal' not in selected.out and 'summarize this' in selected.out
+    assert 'Different request' not in selected.out
+    assert json.loads(selected.err)['provider_body'] == 'not_observed'
+    for flag in ('--attempt', '--after'):
+        assert main([*args, flag, foreign['attempt_id']]) == 2
+        assert not capsys.readouterr().out
+    with pytest.raises(ValueError, match='does not belong'):
+        read_attempt(data_root, 'reader-test', foreign['attempt_id'])
+    assert main([*args, '--after', last['attempt_id']]) == 0
+    assert [row['attempt_id'] for row in json.loads(capsys.readouterr().out)['attempts']] == [first['attempt_id']]
+    bound = [*args, '--attempt', last['attempt_id'], '--max-bytes']
+    assert main([*bound, '1']) == 2
+    bounded = capsys.readouterr()
+    details = json.loads(bounded.err)
+    assert not bounded.out and details['body'] == 'over_limit'
+    assert details['redacted_ref'] == _manifest(last)['redacted_projection_ref']
+    assert main([*bound, str(details['recorded_bytes'])]) == 0
+    assert 'Different request' in capsys.readouterr().out
+    # An otherwise admitted ref to truncated gzip must not print partial request bytes.
+    blob = pathlib.Path(_manifest(first)['redacted_projection_ref']['path'])
+    from ouroboros.evidence_packs import SHARED_PLACEMENT_SUFFIX
+
+    if not blob.exists():
+        blob = blob.with_name(blob.name.removesuffix('.gz') + SHARED_PLACEMENT_SUFFIX)
+    blob.write_bytes(blob.read_bytes()[:12])
+    assert main([*args, '--attempt', first['attempt_id']]) == 2
+    failed = capsys.readouterr()
+    assert not failed.out and 'unavailable' in failed.err
+
+
+def test_local_request_reader_logical_bound_is_not_shared_skeleton_bound(data_root, capsys):
+    from ouroboros.context_attempt_reader import main
+    from ouroboros.evidence_packs import shared_placement_path
+
+    attempt = _dispatch(data_root, 'short-reader-test', payload={
+        'model': 'gpt-x', 'messages': [{'role': 'user', 'content': 'go'}],
+    })
+    ref = _manifest(attempt)['redacted_projection_ref']
+    placement = shared_placement_path(data_root, ref['sha256'])
+    assert len(gzip.decompress(placement.read_bytes())) > ref['size']
+    assert main(['--data-root', str(data_root), 'short-reader-test', '--attempt', attempt['attempt_id'],
+                 '--max-bytes', str(ref['size'])]) == 0
+    assert 'go' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('claudexor_shape', [False, True])
+def test_local_request_reader_reports_selected_file_not_current_file(data_root, tmp_path, claudexor_shape):
+    import hashlib
+    from ouroboros.capability_evidence import CapabilityEvidence
+    from ouroboros.context import build_context_fit_plan
+    from ouroboros.context_attempt_reader import read_attempt
+    from ouroboros.physical_attempt_context import PhysicalAttemptContext
+    from tests._memory_view_context import world
+
+    env, mem, _rooms = world(tmp_path / 'capture')
+    prompt = env.repo_path('prompts/SYSTEM.md')
+    before = b'System revision seventeen.\r\n'
+    prompt.write_bytes(before)
+
+    def route(_task, *, allow_fetch):
+        return {'provider': 'openai', 'model': 'openai/gpt-x'}, CapabilityEvidence(
+            872000, 'confirmed', 'metadata', 'test-model')
+
+    plan = build_context_fit_plan(env, mem, {'id': 'reader-test', 'type': 'task', 'chat_id': 1, 'text': 'hello'},
+                                  preferred_mode='max', route_resolver=route)
+    payload = _payload()
+    payload['messages'] = plan.messages_for(plan.initial_mode)
+    if claudexor_shape:
+        from ouroboros.llm_claudexor import _request
+
+        # Exercise the deployed route's system-prefix transform, without a provider call.
+        ready = _request({'source': 'codex', 'resolved_model': 'gpt-x'}, payload['messages'],
+                         payload['tools'], {'prospective': True})
+        payload['messages'] = ready['messages']
+    prompt.write_bytes(b'System revision eighteen.\r\n')
+    physical = PhysicalAttemptContext('owner_max', 'max', 'cold_estimate', '', '', None, None, False, False,
+                                      base_prompt_source=plan.core.base_prompt_source)
+    with ua.bind_physical_attempt_context(physical):
+        first = _dispatch(data_root, 'reader-test', payload=payload)
+        later = _dispatch(data_root, 'reader-test', payload=_payload())
+    facts, body = read_attempt(data_root, 'reader-test', first['attempt_id'])
+    assert body and b'System revision seventeen.' in body and b'System revision eighteen.' not in body
+    assert facts['file_trace'][0]['source_sha256'] == hashlib.sha256(before).hexdigest()
+    assert read_attempt(data_root, 'reader-test', later['attempt_id'])[0]['file_trace'] == 'not_recorded'
 
 
 def _violation_files(root: pathlib.Path):

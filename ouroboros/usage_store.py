@@ -426,9 +426,11 @@ class Txn:
         return capture(self.conn, f"SELECT {', '.join(_BUCKET_CAPTURE)} FROM summaries "
                        f"WHERE {' OR '.join(terms) or '0'}", params, _BUCKET_CAPTURE)
 
-    def task_attempt_page(self, task_id: str, category: str, *, after: str = "",
+    def task_attempt_page(self, task_id: str, category: Optional[str], *, after: str = "",
                           limit: int) -> Optional[List[Dict[str, Any]]]:
-        """Lifecycle facts of one task's attempts in one category, newest first, ``limit`` rows older than ``after``.
+        """Lifecycle facts of one task's attempts, newest first, ``limit`` rows older than ``after``.
+
+        ``None`` selects all billing categories for this physical task.
 
         ``after`` must name an attempt of this task and category (else ``None``): its first
         record is the cursor, so older rows stay reachable while newer ones join a fresh list.
@@ -436,13 +438,18 @@ class Txn:
         ledger); ordering still sorts the task's matching rows before the bounded page returns.
         No money, usage or payload fields."""
         before = 2 ** 63 - 1
+        cursor_sql, page_sql = _TASK_CURSOR_SQL, _TASK_PAGE_SQL
+        scope = (str(task_id), str(category))
+        if category is None:
+            cursor_sql = cursor_sql.replace(" AND category=?", "")
+            page_sql = page_sql.replace(" AND category=?", "")
+            scope = (str(task_id),)
         if after:
-            cursor = self.conn.execute(_TASK_CURSOR_SQL, (str(after), str(task_id), str(category))).fetchone()
+            cursor = self.conn.execute(cursor_sql, (str(after), *scope)).fetchone()
             if cursor is None:
                 return None
             before = cursor["seq_first"]
-        return [dict(record) for record in self.conn.execute(_TASK_PAGE_SQL, (
-            str(task_id), str(category), before, int(limit)))]
+        return [dict(record) for record in self.conn.execute(page_sql, (*scope, before, int(limit)))]
 
     def review_seat_costs(self, category: str, *, limit: int) -> List[Dict[str, Any]]:
         """What one reviewer seat cost in one wave: per (wave, row), the summed cost of every

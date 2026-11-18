@@ -136,6 +136,32 @@ def _exposure_atoms_manifest(candidate: Dict[str, Any]) -> Dict[str, Any]:
     return {"exposure_atoms": atoms, "exposure_atoms_basis": EXPOSURE_ATOMS_BASIS}
 
 
+def _file_trace(candidate: Dict[str, Any], facts: Dict[str, Any]) -> Dict[str, Any]:
+    """Bind the captured SYSTEM file to the actual leading system part only.
+
+    Scope is intentionally narrow. A different wire shape, repriced fallback
+    or recovered transcript that cannot prove this prefix simply gets no trace.
+    No offsets are asserted in the redacted body.
+    """
+    source = (facts.get("physical_context") or {}).get("base_prompt_source")
+    messages = candidate.get("messages")
+    if not source or not isinstance(messages, list) or not messages:
+        return {}
+    leading = messages[0]
+    if not isinstance(leading, dict) or leading.get("role") != "system":
+        return {}
+    content = leading.get("content")
+    if isinstance(content, list) and content and isinstance(content[0], dict) and content[0].get("type") == "text":
+        content = content[0].get("text")
+    path, digest, chars, text_sha = source
+    if (not isinstance(content, str) or len(content) < chars
+            or len(content) > chars and not content.startswith("\n\n## BIBLE.md\n\n", chars)
+            or hashlib.sha256(content[:chars].encode("utf-8")).hexdigest() != text_sha):
+        return {}
+    return {"file_trace": [{"source_path": path, "source_sha256": digest,
+                            "contribution": "leading_system_prefix", "text_sha256": text_sha}]}
+
+
 def persist_physical_candidate(
     drive_root: pathlib.Path,
     *,
@@ -185,6 +211,7 @@ def persist_physical_candidate(
             "anthropic_native_custody_projected": custody_projected,
             **_exposure_atoms_manifest(candidate),
             **dict(candidate_facts),
+            **_file_trace(candidate, candidate_facts),
         },
         finalize_manifest=lambda redacted: {
             "model_send_seal": build_model_send_seal(

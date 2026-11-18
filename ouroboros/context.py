@@ -3,6 +3,7 @@ from __future__ import annotations
 from ouroboros.config import runtime_setting
 from ouroboros.tool_access_reads import canonical_runtime_reader as _canonical_runtime_reader
 
+import hashlib
 import json
 import logging
 import os
@@ -797,10 +798,17 @@ def _capture_context_core(
         _validate_declared_input_task(task)
     captured_at = utc_now_iso()  # one capture instant for the runtime fact and every snapshot label
     supplementary_messages: List[Dict[str, Any]] = []
-    base_prompt = safe_read(
-        env.repo_path("prompts/SYSTEM.md"),
-        fallback="You are Ouroboros. Your base prompt could not be loaded."
-    )
+    base_prompt_path = "prompts/SYSTEM.md"
+    base_prompt_source = None
+    try:
+        raw_prompt = env.repo_path(base_prompt_path).read_bytes()
+        base_prompt = raw_prompt.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        if base_prompt:
+            base_prompt_source = (base_prompt_path, hashlib.sha256(raw_prompt).hexdigest(),
+                                  len(base_prompt), hashlib.sha256(base_prompt.encode("utf-8")).hexdigest())
+    except (OSError, UnicodeError) as exc:
+        log.debug("Base prompt unavailable at capture: %s", type(exc).__name__)
+        base_prompt = "You are Ouroboros. Your base prompt could not be loaded."
     bible_md = safe_read(env.repo_path("BIBLE.md"))
     from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
 
@@ -1039,6 +1047,7 @@ def _capture_context_core(
 
     return _ContextCore(
         base_prompt=base_prompt,
+        base_prompt_source=base_prompt_source,
         bible_md=bible_md,
         architecture_md=architecture_md,
         development_md=development_md,

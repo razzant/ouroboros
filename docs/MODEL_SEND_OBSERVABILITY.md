@@ -8,6 +8,12 @@ audit, never launched by boot);
 `tests/test_model_send_seal.py` verifies it. The claim is deliberately narrow:
 a reconstruction mismatch is an observability fact, not a dispatch gate.
 
+## Local request inspection
+
+From a **separate matching source checkout** without an adoption pointer, run `python -m ouroboros.context_attempt_reader --data-root DATA TASK` to list a task's physical attempts. Do not use the serving checkout: Python imports its startup hook before even `--help`, and may finish a pending body adoption. Pass the original installation's data root explicitly. Add `--attempt ID` to print the selected redacted body to standard output and its lifecycle, exclusions and file trace to standard error. The tool uses local OS file access; it is not an HTTP or extension API. The body is private even after default redaction, so keep it out of shared terminals and logs.
+
+If the selected body exceeds the 16 MiB default, the reader reports its recorded size and redacted reference without printing a partial body. `--attempt ID --max-bytes N` explicitly raises the bound for that object; integrity verification still comes before output. A recorded candidate can have been released without dispatch. The reader never replaces a missing selection with a subsequent attempt and never reads the raw blob. A file trace names the captured `prompts/SYSTEM.md` SHA-256 when the leading system message still carries its exact normalized text. Native top-level `system`/other serializers and older attempts without that witness report no trace. The digest describes the file at capture, not its present contents, and no offset in the redacted body or provider receipt is asserted.
+
 ## 1. Scope of the claim
 
 The invariant binds exactly one object: **`model_send` — the physical
