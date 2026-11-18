@@ -207,6 +207,32 @@ def test_one_read_in_flight_per_key(tariff, monkeypatch):
     assert catalog.account_currency(KEY) is None and calls == []
 
 
+
+def _wallet(currency: str, total: str = "0", granted: str = "0", topped: str = "0") -> dict:
+    """One documented entry: its currency beside the three amounts the billing rule reads."""
+    return {"currency": currency, "total_balance": total, "granted_balance": granted,
+            "topped_up_balance": topped}
+
+
+@pytest.mark.parametrize("infos, currency, reason", [
+    # A key whose USD wallet reports nothing while its CNY wallet holds the credit bills in CNY.
+    ([_wallet("USD"), _wallet("CNY", "1200.00", topped="900.00")], "CNY", None),
+    # Two funded wallets stay ambiguous: a charge could land in either.
+    ([_wallet("USD", "1.00", topped="1.00"), _wallet("CNY", "2.00", topped="2.00")], None,
+     "currency_not_single"),
+    # Amounts nobody can read are not zero, so such an entry keeps its currency a candidate.
+    ([{"currency": "USD"}, _wallet("CNY", "5.00")], None, "currency_not_single"),
+    # Nothing holds money anywhere: the account names no single billing currency, so none is claimed.
+    ([_wallet("USD"), _wallet("CNY")], None, "currency_unfunded"),
+    # One wallet with nothing in it still names the currency the account bills in.
+    ([_wallet("USD")], "USD", None),
+])
+def test_a_wallet_that_provably_holds_nothing_does_not_make_the_currency_ambiguous(tariff, monkeypatch, infos,
+                                                                                 currency, reason):
+    _balance(monkeypatch, {"is_available": True, "balance_infos": infos})
+    fact = catalog.account_currency(KEY)
+    assert (fact["currency"], fact.get("reason")) == (currency, reason)
+
 # --- the pin ---------------------------------------------------------------------------------------------------
 
 def test_the_pin_is_made_for_the_selected_deepseek_key_only(tariff, monkeypatch):

@@ -298,8 +298,40 @@ def wholly_off_peak(windows: tuple, start: datetime, end: datetime) -> bool:
     return False
 
 
+def _holds_no_money(info: Mapping) -> bool:
+    """An entry that provably carries nothing: every documented amount parses and is zero.
+
+    An amount that is absent or unreadable is not zero here, so such an entry stays a candidate currency: an
+    unknown shape can never erase a currency that might bill the call."""
+    amounts = []
+    for field in ("total_balance", "granted_balance", "topped_up_balance"):
+        try:
+            amounts.append(float(str(info.get(field))))
+        except (TypeError, ValueError):
+            return False
+    return all(amount == 0 for amount in amounts)
+
+
+def _billing_currency(infos: list) -> tuple:
+    """``(currency, reason)`` from the documented ``balance_infos``: the one wallet that holds the credit.
+
+    An empty wallet is not a second billing currency: a key whose USD wallet reports ``0.00`` while its CNY
+    wallet carries the credit bills in CNY, and reading that pair as an ambiguity left every call on such an
+    account unpriced. Two *funded* wallets stay ambiguous, because a charge could land in either, and so does
+    any entry whose amounts cannot be read -- unknown is not zero."""
+    currencies = {info["currency"] for info in infos}
+    funded = {info["currency"] for info in infos if not _holds_no_money(info)}
+    if len(funded) == 1:
+        return funded.pop(), ""
+    if len(funded) > 1:
+        return None, "currency_not_single"
+    if len(currencies) == 1:  # every wallet empty, but the account still names exactly one currency
+        return currencies.pop(), ""
+    return None, "currency_unfunded"
+
+
 def _fetch_currency(api_key: str) -> tuple:
-    """One documented ``GET /user/balance`` with the selected key: its single billing currency, else None and why.
+    """One documented ``GET /user/balance`` with the selected key: the currency that bills it, else None and why.
     A redirect is an answer (unknown), never followed with the key."""
     import requests
 
@@ -319,8 +351,7 @@ def _fetch_currency(api_key: str) -> tuple:
     if not isinstance(infos, list) or not 1 <= len(infos) <= 8 or not all(
             isinstance(info, dict) and info.get("currency") in ("USD", "CNY") for info in infos):
         return None, "balance_unreadable"  # the documented shape only: one or a few objects, each USD or CNY
-    found = {info["currency"] for info in infos}
-    return (found.pop(), "") if len(found) == 1 else (None, "currency_not_single")
+    return _billing_currency(infos)
 
 
 def account_currency(api_key: str, *, allow_live_fetch: bool = True) -> dict | None:
