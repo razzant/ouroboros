@@ -234,6 +234,8 @@ def quote_rows(ctx, handles) -> tuple[list, str]:
 
 def owner_quote(root, row: dict, *, address: str = "") -> dict:
     """One retained owner row as a quote: exact words, attachments and where/when."""
+    from ouroboros.answer_facts import late_quiz_input, living_card_input
+    from ouroboros.owner_quiz import late_answer_ref, recorded_answer_frame, resolved_late_quiz
     from ouroboros.owner_words import answered_card_source
     from ouroboros.projects_registry import list_reserved_projects
     root = row.get("_owner_source_root") or root
@@ -246,14 +248,20 @@ def owner_quote(root, row: dict, *, address: str = "") -> dict:
              "owner_row": copy.deepcopy(row)}
     if root and row.get("late_answer"):
         quote["owner_row"].setdefault("_owner_source_root", str(root))
+    if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
+        quote["reply_to"] = copy.deepcopy(row["reply_to"])
+    if late := late_answer_ref(row.get("late_answer")):
+        block = resolved_late_quiz(root, late)
+        fact = late_quiz_input(late, block)
+        quote.update(input_source=fact["source"], text=fact["content"])
+        if fact.get("quiz_id"):
+            quote["question_frame"] = recorded_answer_frame(block, asker=late["task_id"])
+        return quote
     if carried := row.get("corpus_answer"):
         quote["input_source"] = carried["source"]
         if card := carried.get("reply_to"):
             quote["question_frame"] = f"{card.get('author')}: {card.get('text')}"
-    if isinstance(row.get("reply_to"), dict) and row["reply_to"]:  # what the owner was replying to, as the host resolved it
-        quote["reply_to"] = copy.deepcopy(row["reply_to"])
-    from ouroboros.answer_facts import card_input
-    if living := card_input(row, root):
+    if living := living_card_input(row, root):
         quote.update(input_source=living["source"], text=living["content"])
         if target := living.get("reply_to"):
             quote["question_frame"] = f"Card of task {living['source_task_id']}: {target['text']}"
@@ -261,8 +269,7 @@ def owner_quote(root, row: dict, *, address: str = "") -> dict:
                 from ouroboros.answer_facts import press_record
                 quote["question_frame"] += "\n" + press_record(living["content"], living["source_task_id"])
     answered, asker = answered_card_source(row, root)
-    if isinstance(answered, dict):  # a quiz row's card or a late answer's snapshot, under the asking task's name
-        from ouroboros.owner_quiz import recorded_answer_frame
+    if isinstance(answered, dict):  # the delivered quiz snapshot, under the asking task's name
         from ouroboros.answer_facts import row_source
         quote["input_source"] = row_source(row, "owner_mailbox", root)
         quote["question_frame"] = recorded_answer_frame(answered, asker=str(asker or ""))

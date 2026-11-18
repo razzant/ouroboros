@@ -145,19 +145,25 @@ def living_card_input(row: Any, root: Any = None) -> dict:
             "source_task_id": asker, "reply_to": target}
 
 
-def card_input(row: Any, root: Any, words_source: str = "owner_mailbox") -> dict:
-    """A living submission or a late quiz input as one corpus row, resolving its own source store."""
-    from ouroboros.owner_quiz import late_answer_owner_text, late_answer_ref, resolved_late_quiz
+def late_quiz_input(ref: Mapping, block: dict, words_source: str = "owner_mailbox") -> dict:
+    """The corpus fact for one reading of a late answer, including an unavailable answer."""
+    from ouroboros.owner_quiz import late_answer_owner_text
     from ouroboros.owner_words import answered_card_reply
 
-    if not isinstance(row, Mapping) or not (ref := late_answer_ref(row.get("late_answer"))):
-        return living_card_input(row, root)
-    block = resolved_late_quiz(root, ref)
     content = late_answer_owner_text(block)
     if not content:
         return {"source": OWNER_CARD_INPUT, "content": "Quiz answer received. Its accepted answer is unavailable."}
     return {"source": answer_source(block, words_source), "content": content, "source_task_id": ref["task_id"],
             "quiz_id": ref["quiz_id"], "reply_to": answered_card_reply(block, ref["task_id"])}
+
+
+def card_input(row: Any, root: Any, words_source: str = "owner_mailbox") -> dict:
+    """A living submission or a late quiz input as one corpus row, resolving its own source store."""
+    from ouroboros.owner_quiz import late_answer_ref, resolved_late_quiz
+
+    if isinstance(row, Mapping) and (ref := late_answer_ref(row.get("late_answer"))):
+        return late_quiz_input(ref, resolved_late_quiz(root, ref), words_source)
+    return living_card_input(row, root)
 
 
 def row_source(row: Any, words_source: str, root: Any = None) -> str:
