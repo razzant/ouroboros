@@ -54,6 +54,7 @@ def test_a_retry_successor_is_shown_the_named_evidence_and_can_open_its_summary(
     assert waited.status == "ok", waited.text
     named = json.loads(waited.text)["workspace_capture"]["named_evidence"]
     assert named["status"] == "retained" and [row["path"] for row in named["files"]] == [".review-evidence/result.json"]
+    assert named["retained_bytes"] == 3
     assert named["summary_read"] == {"root": "artifact_store", "path": str(summary)}
     opened = call(ctx, "read_file", **named["summary_read"])
     assert opened.status == "ok" and '"status": "retained"' in opened.text, opened.text
@@ -79,3 +80,46 @@ def test_a_run_that_retained_no_named_evidence_shows_none(tmp_path, monkeypatch)
 
     _ctx, held, data, _summary = _captured(tmp_path, monkeypatch, named=False)
     assert "named_evidence" not in capture_projection(data, custody.replay(data)[held.run_id], reader_task_id="retry-c")
+
+
+def test_only_installation_settings_with_keys_are_excluded_from_evidence(tmp_path):
+    from ouroboros.delegate_named_evidence import retain_workspace_evidence
+
+    copy = tmp_path / "copy"
+    declared = copy / ".review-evidence"
+    private = declared / "state/settings.json"
+    public = declared / "examples/settings.json"
+    for path in (private, public):
+        path.parent.mkdir(parents=True)
+    private.write_text(json.dumps({"OPENROUTER_API_KEY": "fixture-value"}))
+    public.write_text(json.dumps({"theme": "dark"}))
+    retained = tmp_path / "saved"
+    summary = retain_workspace_evidence(copy, retained)
+    assert summary["status"] == "retained"
+    assert [f["path"] for f in summary["files"]] == [".review-evidence/examples/settings.json"]
+    assert not (retained / "files" / private.relative_to(copy)).exists()
+    assert any(gap["path"] == private.relative_to(copy).as_posix() for gap in summary["gaps"])
+
+
+def test_private_settings_do_not_enter_the_fallback_workspace_patch(tmp_path, monkeypatch):
+    from ouroboros import delegate_named_evidence
+    from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
+    from tests.test_headless_workspace_patch import _evidence_copy
+
+    copy, task, _ = _evidence_copy(tmp_path)
+    for folder, content in (("private", {"OPENROUTER_API_KEY": "fixture-private"}),
+                            ("example", {"theme": "fixture-public"})):
+        settings = copy / ".review-evidence" / folder / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text(json.dumps(content))
+
+    def full(*args, **kwargs):
+        raise OSError(28, "volume full")
+
+    monkeypatch.setattr(delegate_named_evidence, "retain_named_evidence", full)
+    artifacts = tmp_path / "artifacts"
+    _, manifest = write_workspace_patch_artifacts(copy, artifacts, task=task, retain_evidence_dir=tmp_path / "saved")
+    assert manifest["named_evidence"]["status"] == "capture_failed"
+    patch = (artifacts / "workspace.patch").read_text()
+    assert "fixture-public" in patch
+    assert "fixture-private" not in patch

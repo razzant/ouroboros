@@ -694,8 +694,10 @@ class TestStorageFact:
         storage.save_count(tmp_path, first)
         section, data = self._runtime(env)
         fact = data["storage"]
-        assert set(fact) == {"counted_at", "bytes", "unreadable", "basis", "previous_at", "growth_bytes", "free_bytes",
+        assert set(fact) - {"previous_free"} == {"counted_at", "bytes", "unreadable", "basis", "previous_at", "growth_bytes", "free_bytes",
                              "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"}
+        assert fact.pop("previous_free") == {"free_bytes": first["volume"]["free_bytes"],
+                                              "observed_at": first["volume"]["observed_at"]}
         assert fact["counted_at"] == first["finished_at"] and fact["bytes"] == first["bytes"] > 0
         assert fact["unreadable"] == 0 and "growth_flag" not in fact
         assert fact["previous_at"] is None and fact["growth_bytes"] is None

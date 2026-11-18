@@ -1567,3 +1567,14 @@ def test_an_enclosing_binding_is_unknown_never_the_module_literal(tmp_path):
         "    return inner, deeper, store\n",
         encoding='utf-8')
     assert scan_data_paths(tmp_path) == frozenset({'state/*', 'logs/*'})
+
+
+def test_wait_and_pause_source_prefixes_have_lifetime_rows():
+    for name in ("owner_wait", "budget_pause"):
+        tree = ast.parse((REPO / "ouroboros" / (name + ".py")).read_text())
+        prefixes = [node.args[2].left.value for node in ast.walk(tree) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == "store_continuation_source"]
+        assert prefixes
+        for prefix in prefixes:
+            assert any("/context_checkpoints/" + prefix in line.split("|")[1] and "[record]" in line
+                       for line in DOC.read_text().splitlines() if line.startswith("|"))
