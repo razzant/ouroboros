@@ -1342,3 +1342,27 @@ def test_a_reference_only_late_answer_keeps_its_type_on_every_opening(tmp_path, 
                 assert owner_words_contain(focus, comment)
             else:
                 assert cited_owner_basis(focus, label)[0]["source"] == "owner_press"
+
+
+def test_continue_labels_a_later_unavailable_answer_and_preserves_the_words_around_it(tmp_path, monkeypatch):
+    from ouroboros.owner_mailbox import write_owner_message
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path)
+    notice = "Quiz answer received. Its accepted answer is unavailable."
+    after = "  keep the elm dates  "
+    assert write_owner_message(tmp_path, notice, "pred-1", msg_id="elm-copy")
+    assert write_owner_message(tmp_path, "1. Elm chart", "pred-1", msg_id="elm-late",
+                               late_answer={"task_id": "elm-desk", "quiz_id": "elm-chart"})
+    assert write_owner_message(tmp_path, after, "pred-1", msg_id="elm-after")
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    [successor] = workers.PENDING
+    rows = successor["metadata"]["owner_corpus"]
+    assert [(row["msg_id"], row["source"], row["content"]) for row in rows if row.get("msg_id")] == [
+        ("elm-copy", "owner_mailbox", notice), ("elm-late", "owner_card_input", notice),
+        ("elm-after", "owner_mailbox", after)]
+    order = successor["text"]
+    assert "Other owner words in that task's record (verbatim, in order):" not in order
+    assert order.count(notice) == 2 and order.count(after) == 1
+    assert order.index("Owner words (verbatim): " + notice) < order.index("Host record: " + notice) < order.index(after)

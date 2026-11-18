@@ -1126,11 +1126,21 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         lines += [f"{label}: {api[key]}" for key, label in (("context", "Context"), ("expected_output", "Expected output"),
                                                             ("constraints", "Constraints")) if api.get(key)]
     if later:
-        lines += ["", "Other owner words in that task's record (verbatim, in order):"]
-        for row in later:  # a press without its card: the host's record of the act, never its label as words
-            lines += (_card_lines(row) if isinstance(row.get("card"), dict) else [f"- {row.get('ts') or ''} " + (
-                press_record(row["content"], who="the owner")
-                if row.get("source") == OWNER_PRESS else row["content"])])
+        has_notice = any(row.get("source") == OWNER_CARD_INPUT for row in later)
+        lines += ["", "Later inputs in that task's record (in order):" if has_notice else
+                      "Other owner words in that task's record (verbatim, in order):"]
+        for row in later:
+            text = row["content"]
+            if row.get("source") == OWNER_CARD_INPUT:
+                text = "Host record: " + text
+            elif isinstance(row.get("card"), dict):
+                lines.extend(_card_lines(row))
+                continue
+            elif row.get("source") == OWNER_PRESS:
+                text = press_record(text, who="the owner")
+            elif has_notice:
+                text = "Owner words (verbatim): " + text
+            lines.append(f"- {row.get('ts') or ''} {text}")
     confirmed = [row for row in sources.get("confirmed_place") or [] if isinstance(row, dict) and row.get("content")]
     if confirmed:  # my human's words are never shortened to a count or a pointer
         lines += ["", "Words from your human's confirmed account in that place (their words there, by provenance; an order "
