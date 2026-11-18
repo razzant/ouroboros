@@ -293,7 +293,9 @@ def test_host_claim_splices_only_its_name_in_source_and_by_name_readers(tmp_path
     "claims: room:1\n",
     "source: &names ['room:1']\nclaims: *names\n",
     "claims: &names ['room:1']\nshared: *names\n",
-], ids=["scalar", "alias", "shared-anchor"])
+    "null # keep this\n",
+    "authored scalar\n",
+], ids=["scalar-field", "alias", "shared-anchor", "null-document", "scalar-document"])
 def test_host_claim_keeps_an_unextendable_note_pending_with_no_write(tmp_path, preamble):
     target = knowledge.resolve_knowledge_address(tmp_path, "bound", "global")
     target.path.parent.mkdir(parents=True)
@@ -410,7 +412,8 @@ def test_authored_history_and_return_facts_count_claimed_writes_once(tmp_path, m
     def counts(index, expected):
         facts = return_facts.facts(tmp_path, owner_word(index), return_facts.Own(room=1))
         full = return_facts.render(facts)[0]
-        assert f"- knowledge global/nova: {expected} {'write' if expected == 1 else 'writes'} by" in full
+        [page] = [line for line in full.splitlines() if line.startswith("- knowledge ")]
+        assert page.startswith(f"- knowledge global/nova: {expected} {'write' if expected == 1 else 'writes'} by")
 
     def edit(index, content, **kwargs):
         monkeypatch.setattr(knowledge, "utc_now_iso", lambda: stamp(index))
@@ -422,16 +425,29 @@ def test_authored_history_and_return_facts_count_claimed_writes_once(tmp_path, m
         return result["data"]
 
     owner_word(0)
-    edit(1, _markdown(["room:1"]), reason="Adopt the claim")
+    target.shelf.mkdir(parents=True)
+    legacy = {"ts": stamp(1), "topic": target.topic, "mode": "overwrite", "reason": "Legacy write"}
+    journal.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
     counts(2, 1)
+    assert history(tail=1) == [legacy]
+
+    legacy_index = "# Authored index before upgrading\n"
+    (target.shelf / knowledge.INDEX_FILE).write_text(legacy_index, encoding="utf-8")
+    edit(3, _markdown(["room:1"]), reason="Adopt the claim")
+    counts(4, 1)
     [first] = history(tail=1)
     assert first["reason"] == "Adopt the claim" and first["delta"]["body_changed"] is True
-    edit(3, "Second.\n", mode="append", reason="Second write")
-    edit(4, "Third.\n", mode="append", reason="Third write")
-    counts(5, 2)
+    edit(5, "Second.\n", mode="append", reason="Second write")
+    edit(6, "Third.\n", mode="append", reason="Third write")
+    counts(7, 2)
     assert [row["reason"] for row in history(tail=2)] == ["Second write", "Third write"]
-    edit(6, _markdown([]), expected_revision=knowledge.read_knowledge_note(target).revision, reason="Remove the claim")
-    counts(7, 1)
-    assert [row["reason"] for row in history()] == ["Adopt the claim", "Second write", "Third write", "Remove the claim"]
+    edit(8, _markdown([]), expected_revision=knowledge.read_knowledge_note(target).revision, reason="Remove the claim")
+    counts(9, 1)
+    assert [row["reason"] for row in history()] == [
+        "Legacy write", "Adopt the claim", "Second write", "Third write", "Remove the claim",
+    ]
     assert history(filter={"field": "publication", "op": "eq", "value": "claims_published"}) == []
-    assert json.loads(journal.read_bytes().splitlines()[-1])["publication"] == "claims_published"
+    raw = [json.loads(line) for line in journal.read_bytes().splitlines()]
+    [backup] = [row for row in raw if row.get("type") == "knowledge_index_source"]
+    assert backup["old_content"] == legacy_index and "publication" not in backup
+    assert raw[-1]["publication"] == "claims_published"

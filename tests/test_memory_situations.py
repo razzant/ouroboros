@@ -5,7 +5,7 @@ import json
 from copy import deepcopy
 from types import SimpleNamespace
 
-from ouroboros import dialogue_store, places
+from ouroboros import dialogue_import, dialogue_store, places
 from ouroboros.consciousness_authority import consciousness_origin_metadata
 from ouroboros.memory_view_events import situation_names
 from ouroboros.places import connect_place, conversation_chat_id
@@ -15,6 +15,7 @@ from ouroboros.presence_events import PresenceTurnEvent
 from ouroboros.projects_registry import create_project
 from ouroboros.tools.knowledge import _knowledge_read, _knowledge_write
 from ouroboros.tools.registry import ToolContext
+from tests._dialogue import seed
 
 
 def test_knowledge_receipts_show_the_project_room_in_integrating_foci_and_are_quiet_for_helpers(tmp_path):
@@ -130,7 +131,8 @@ def test_place_transport_stays_out_of_safety_and_continue_bytes_but_reaches_succ
     assert b'"display_name":"Sam"' in before or b'"display_name": "Sam"' in before
     base_task, base_sources = successor(base)
     carried, _ = successor(metadata)
-    assert carried["text"].encode() == successor(retained)[0]["text"].encode() == base_task["text"].encode()
+    legacy, _ = successor(retained)
+    assert carried["text"].encode() == legacy["text"].encode() == base_task["text"].encode()
     assert event.text in carried["text"] and "Later owner words, verbatim." in carried["text"]
     saved_sources = deepcopy(base_sources)
     saved_sources["wake"]["focus"]["transport"] = route
@@ -138,22 +140,24 @@ def test_place_transport_stays_out_of_safety_and_continue_bytes_but_reaches_succ
         "transport-predecessor", "cancelled", base_sources)
 
     names = ("conversation:chat/acct:%2Fwest@team/project%2F%25", "thread:chat/acct:%2Fwest@team/project%2F%25/w%2F17")
-    for task, expected in ((carried, True), (base_task, False)):
+    for task, expected in ((carried, True), (legacy, True), (base_task, False)):
         assert "presence" not in task["metadata"]
+        assert "transport" not in task["metadata"]["focus"]
+        assert task["metadata"].get("focus_transport") == (route if expected else None)
         ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=task["id"], task_metadata=task["metadata"])
         reply = _knowledge_read(ctx, "unwritten", scope="global")
         assert all((name in reply) == expected for name in names)
 
 
-def _append_witness(root, conversation, *, thread="17", direction="in", state=None, stored_room=None):
-    route = {"provider": "chat", "account_id": "T", "conversation_id": conversation, "thread_id": thread}
+def _append_witness(root, conversation, *, account="T", thread="17", direction="in", state=None, stored_room=None):
+    route = {"provider": "chat", "account_id": account, "conversation_id": conversation, "thread_id": thread}
     chat = conversation_chat_id(conversation_key(**route))
     row = {"chat_id": chat if stored_room is None else stored_room, "transport": route, "direction": direction,
            "type": "place_arrival" if state is None else "presence_delivery", "text": f"{conversation} evidence"}
     if state is not None:
         route["delivery"] = {"state": state}
     dialogue_store.append(root, "chat", row)
-    return [f"room:{chat}", f"conversation:chat/T/{conversation}", f"thread:chat/T/{conversation}/{thread}"]
+    return [f"room:{chat}", f"conversation:chat/{account}/{conversation}", f"thread:chat/{account}/{conversation}/{thread}"]
 
 
 def _write_claims(root, names, topic="nova"):
@@ -170,7 +174,7 @@ def test_only_positive_typed_routes_that_derive_their_rooms_match_claims(tmp_pat
     connect_place(tmp_path, connector="fixture", provider="chat", account_id="T", place_id="team")
     arrived = _append_witness(tmp_path, "inbound", thread="0")
     accepted = _append_witness(tmp_path, "accepted", direction="out", state="accepted")
-    delivered = _append_witness(tmp_path, "delivered", direction="out", state="delivered")
+    delivered = _append_witness(tmp_path, "delivered", account="acct ", direction="out", state="delivered")
     for names in (arrived, accepted, delivered):
         dialogue_store.append(tmp_path, "chat", {"chat_id": int(names[0][5:]), "direction": "in", "text": "No transport here"})
 
@@ -178,7 +182,9 @@ def test_only_positive_typed_routes_that_derive_their_rooms_match_claims(tmp_pat
     wrong = _append_witness(tmp_path, "wrong-room", stored_room=other_room)
     failed = _append_witness(tmp_path, "failed", direction="out", state="failed")
     unaccepted = _append_witness(tmp_path, "pending", direction="system", state="accepted")
-    unread = [*wrong, f"room:{other_room}", *failed, *unaccepted]
+    trimmed = conversation_chat_id(conversation_key("chat", "acct", "delivered", "17"))
+    unread = [*wrong, f"room:{other_room}", *failed, *unaccepted,
+              f"room:{trimmed}", "conversation:chat/acct/delivered", "thread:chat/acct/delivered/17"]
     live = ["room:1", "place:team", *arrived, *accepted, *delivered]
     reply = _write_claims(tmp_path, live + unread)
     assert reply.startswith("✅")
@@ -221,3 +227,31 @@ def test_claim_receipt_distinguishes_unreadable_evidence_from_proved_absence(tmp
     solely_unknown = _write_claims(tmp_path, route, topic="unknown")
     assert _claim_diagnostic(solely_unknown, matched_prefix) == "unverified"
     assert unmatched_prefix not in solely_unknown
+
+
+def test_claim_receipt_leaves_archive_routes_unverified_until_import(tmp_path):
+    route = {"provider": "chat", "account_id": "T", "conversation_id": "archive", "thread_id": "17"}
+    chat = conversation_chat_id(conversation_key(**route))
+    delivery = {"chat_id": chat, "direction": "out", "type": "presence_delivery", "text": "Earlier delivery",
+                "transport": {**route, "delivery": {"state": "delivered"}}}
+    seed(tmp_path, archives={"chat_20261118T000000.jsonl": [delivery]})
+    dialogue_store.ensure(tmp_path)
+    [segment] = dialogue_import.pending_segments(tmp_path)
+    names = [f"room:{chat}", "conversation:chat/T/archive", "thread:chat/T/archive/17"]
+    missing = "room:343434"
+    matched_prefix = "Present situations holding this note: "
+    unmatched_prefix = "Claims with no matching situation found: "
+    unknown_prefix = "Claims with unverified situations: "
+
+    pending = _write_claims(tmp_path, [*names, missing], topic="pending")
+    assert pending.startswith("✅")
+    assert _claim_diagnostic(pending, matched_prefix) == "unverified"
+    assert _claim_diagnostic(pending, unknown_prefix) == ", ".join(map(repr, [*names, missing]))
+    assert unmatched_prefix not in pending
+
+    dialogue_import.import_segment(tmp_path, "chat", segment["name"])
+    imported = _write_claims(tmp_path, [*names, missing], topic="imported")
+    assert imported.startswith("✅")
+    assert _claim_diagnostic(imported, matched_prefix) == ", ".join(names)
+    assert _claim_diagnostic(imported, unmatched_prefix) == repr(missing)
+    assert unknown_prefix not in imported

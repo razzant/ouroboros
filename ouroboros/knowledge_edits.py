@@ -248,6 +248,8 @@ def _flow_insertion(front: str, node: yaml.Node, content: str) -> tuple[int, str
 
 def _claim_insertion(front: str, field: str, scalar: str, newline: str, present: bool) -> tuple[int, str]:
     root = yaml.compose(front, Loader=yaml.SafeLoader)
+    if root is not None and not isinstance(root, yaml.MappingNode):
+        raise HostClaimPending("a host claim requires a frontmatter mapping")
     if not present:
         if root is not None and root.flow_style:
             return _flow_insertion(front, root, field)

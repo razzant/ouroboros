@@ -219,13 +219,16 @@ class SituationReceipt:
         unresolved = {name for name in wanted - known if name.startswith(("room:", "conversation:", "thread:"))}
         if unresolved:
             try:
-                skip = self.room_labels.project_chat_ids | {WEB_UI_CHAT_ID, HIDDEN_CHAT_ID}
-                transports = dialogue_store.transport_witnesses(self.root, skip_chat_ids=skip) if dialogue_store.present(self.root) else ()
-                for chat, route in transports:
-                    route_names = _route_names(route)
-                    if route_names and _derives(route, chat):
-                        known.add(f"room:{chat}")
-                        known.update(route_names)
+                if dialogue_store.present(self.root):
+                    coverage = dialogue_store.range_coverage(self.root, "chat")
+                    skip = self.room_labels.project_chat_ids | {WEB_UI_CHAT_ID, HIDDEN_CHAT_ID}
+                    for chat, route in dialogue_store.transport_witnesses(self.root, skip_chat_ids=skip):
+                        route_names = _route_names(route)
+                        if route_names and _derives(route, chat):
+                            known.add(f"room:{chat}")
+                            known.update(route_names)
+                    if not coverage["imported"] or coverage["gaps"]:
+                        unverified.update(unresolved - known)
             except (OSError, StoreError):
                 unverified.update(unresolved - known)
         return wanted & known, unverified

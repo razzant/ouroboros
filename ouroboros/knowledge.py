@@ -613,7 +613,7 @@ def rebuild_knowledge_index(address: KnowledgeAddress) -> None:
     # Preserve the exact old source before changing its first generated view.
     # Later rebuilds retain that same source, never a recursively nested index.
     if old and not modern and not append_jsonl(address.shelf.parent / "knowledge_history.jsonl", {
-        "ts": utc_now_iso(), "type": "knowledge_index_source", "topic": "index-full",
+        "ts": utc_now_iso(), "type": knowledge_versions.INDEX_SOURCE_TYPE, "topic": "index-full",
         "scope": address.scope, "old_content": text,
         "old_sha256": hashlib.sha256(old).hexdigest(),
     }, ensure_record_boundary=True, require_lock=True):

@@ -35,6 +35,7 @@ from ouroboros.knowledge_edits import yaml_form
 from ouroboros.utils import jsonl_window
 
 JOURNAL_NAME = "knowledge_history.jsonl"
+INDEX_SOURCE_TYPE = "knowledge_index_source"
 UNKNOWN = "unknown"  # knowledge.UNKNOWN_STAMP: a fact the row does not carry
 _BLOCK = 8 * 1024 * 1024  # one backward read of the journal; a longer line grows across reads
 WRITE_TAIL_BYTES = 8 * 1024 * 1024  # a write keeps both texts whole on a miss
@@ -66,8 +67,9 @@ def _needle(address: Any) -> bytes:
 
 
 def is_authored_write(row: Any) -> bool:
-    """A source write, including legacy unstamped writes. Recovery markers are separate facts."""
-    return isinstance(row, dict) and row.get("publication", "source_capture") == "source_capture"
+    """A source write, including unstamped writes. Index backups and claim commits have their own roles."""
+    return (isinstance(row, dict) and row.get("type") != INDEX_SOURCE_TYPE
+            and row.get("publication", "source_capture") == "source_capture")
 
 
 def _belongs(row: Any, address: Any) -> bool:
