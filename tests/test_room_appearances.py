@@ -297,7 +297,7 @@ class TestOwnerReplyLink:
         return types.SimpleNamespace(root=tmp_path, nova=nova, notice=notice, host=host,
                                      bridge=message_bus.get_bridge())
 
-    @pytest.mark.parametrize("source", ["work_card", "notice", "handoff", "nested", "child"])
+    @pytest.mark.parametrize("source", ["work_card", "notice", "handoff", "nested", "child", "detached"])
     def test_explicit_work_wins_over_the_live_room_reader_and_replay_is_once(self, room, source, monkeypatch):
         from ouroboros import server_owner_routing as router
         from ouroboros.owner_mailbox import _mailbox_path
@@ -338,6 +338,13 @@ class TestOwnerReplyLink:
         elif source == "nested":
             earlier, _ = _owner(room.bridge, room.root, "My first reply", address, message_id="earlier")
             address = format_address(row_address(earlier))
+        elif source == "detached":
+            target = "detached-turn"
+            write_task_result(room.root, target, "running", chat_id=1, _is_direct_chat=True,
+                              detached_at="2026-11-01T09:59:00Z")
+            row = ds.append(room.root, "chat", {"ts": "2026-11-01T10:00:00Z", "direction": "out", "chat_id": 1,
+                            "task_id": target, "type": "proactive_message", "text": "An update from the detached turn."}).row
+            address = format_address(row_address(row))
         elif source == "child":
             target = "exact-child"
             row = ds.append(room.root, "chat", {"ts": "2026-11-01T10:01:00Z", "direction": "system",
@@ -352,8 +359,9 @@ class TestOwnerReplyLink:
         current = []
         monkeypatch.setattr(router, "_route_main_followup", lambda *args, **kw: current.append(args[2]) or "")
         monkeypatch.setattr(router, "_decision_turn_metadata", lambda _ctx, _chat, _id, metadata, _roots: metadata)
-        task = {"id": target, "chat_id": 1 if source == "child" else room.nova,
-                "root_task_id": "nova-root", "delegation_role": "subagent" if source == "child" else "root"}
+        task = {"id": target, "chat_id": 1 if source in {"child", "detached"} else room.nova,
+                "root_task_id": "nova-root" if source == "child" else target,
+                "delegation_role": "subagent" if source == "child" else "root"}
         if source == "child":
             _bound(room.root, "nova-root", "nova", room.nova)
             task["parent_task_id"] = "nova-root"
@@ -399,13 +407,14 @@ class TestOwnerReplyLink:
         from ouroboros.owner_mailbox import _mailbox_path
         assert not _mailbox_path(room.root, "nova-root").exists()  # appearance is not a tell, wake or Resume
 
-    def test_unrelated_main_speech_stays_in_main_and_an_addressed_reply_chain_keeps_the_work(self, room):
+    @pytest.mark.parametrize("kind", ["proactive_message", "main_notice"])
+    def test_unrelated_main_speech_stays_in_main_and_an_addressed_reply_chain_keeps_the_work(self, room, kind):
         # A Main direct turn's ordinary proactive words: not a work address.
         from ouroboros.task_results import write_task_result
 
         write_task_result(room.root, "main-turn", "completed", chat_id=1, _is_direct_chat=True)
         ds.append(room.root, "chat", {"ts": "2026-10-28T06:00:00Z", "direction": "out", "chat_id": 1,
-                                      "type": "proactive_message", "task_id": "main-turn", "text": "A Main answer."})
+                                      "type": kind, "task_id": "main-turn", "text": "A Main answer."})
         main_answer = format_address(row_address(ds.rows_by_identity(room.root, 1, "2026-10-28T06:00:00Z")[0].row))
         ordinary, _ = _owner(room.bridge, room.root, "About the Main answer.", main_answer, message_id="owner-2")
         assert "work_task_id" not in ordinary["reply_to"]

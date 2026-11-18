@@ -7,7 +7,7 @@ import { bindScrollFade } from './scroll_fade.js';
 import { createRoomHeader, mainHeaderActionsHtml } from './chat_header.js';
 import { pageLabel } from './pages.js';
 import { showToast } from './toast.js';
-import { ORIGIN_ADDRESSED_NOTICE_TYPES, childRowPlacement, placeWorkReply, replayConcludesTask } from './chat_row_placement.js';
+import { ORIGIN_ADDRESSED_NOTICE_TYPES, childRowPlacement, placeWorkReply, releaseWorkReplyOrigin, replayConcludesTask, restoreWorkReplies } from './chat_row_placement.js';
 import { appendProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold, syncSavedProjectContext } from './project_answer.js';
 import { createWorkPortals, isPortal, reconcilePortalNotes } from './work_portal.js';
 import { createTaskEpisodes } from './task_episodes.js';
@@ -362,7 +362,10 @@ export function createChatInstance({
         record?.regions?.forEach((dispose) => dispose());
         record?.episodeDisclosureDispose?.();
         if (record?.episodeDisclosure) releaseMessageNode(record.episodeDisclosure);
-        if (record?.root) releaseMessageNode(record.root);
+        if (record?.root) {
+            restoreWorkReplies(record.root);
+            releaseMessageNode(record.root);
+        }
         liveCardRecords.delete(id);
     }
     const markReviewAnchor = (r, on = false) => setReviewAnchor(r, on, setLiveCardPhase);
@@ -2881,6 +2884,7 @@ export function createChatInstance({
 
     // One retirement path per message node: media, decision views and markdown go with it.
     function releaseMessageNode(node) {
+        releaseWorkReplyOrigin(node);
         sharedRead.release(node);
         chatMedia.release(node); chatDecision.releaseViews(node); destroyChatMarkdown(node); node.remove();
     }

@@ -31,6 +31,7 @@ import { admittedSuccessor } from './task_episodes.js';
 import { noteOrigin } from './task_origin.js';
 import { continueControlSuccessor } from './task_continue.js';
 import { closingLine } from './settled_card.js';
+import { restoreWorkReplies } from './chat_row_placement.js';
 
 const key = (value) => String(value || '').trim();
 export const isPortal = (record) => record?.root?.dataset?.portal === '1';
@@ -44,8 +45,7 @@ export function bindWorkPortal(record, project = {}) {
     if (root.dataset.portal !== '1') {
         root.dataset.portal = '1';
         // A portal cannot expand Details. Keep replies navigable in the source room.
-        const replies = root.querySelector('[data-live-work-replies]');
-        if (replies?.childElementCount) root.after(...replies.children);
+        restoreWorkReplies(root);
         changed = true;
     }
     if (root.dataset.projectId !== projectId) { root.dataset.projectId = projectId; changed = true; }

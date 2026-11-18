@@ -103,6 +103,7 @@ export function cardRowSummary(msg, phase, rawTs = '') {
     return {
         phase, headline: lines[0].trim(), body: lines.slice(1).join('\n').trim(), dedupeKey: `cardrow|${rowId}`,
         cardRowRevision: msg.card_row_revision, evidenceRef: cardRowEvidenceRef(msg),
+        systemReplyAddress: msg.role === 'system' ? msg.row_address || '' : '',
         cardReview: msg?.late_evidence?.kind === 'merge_review' ? msg.late_evidence : null,
     };
 }
@@ -156,6 +157,7 @@ export function buildTimelineItemHtml(item, record) {
             ${item.historyId ? `data-history-id="${escapeHtmlAttr(item.historyId)}"`
         : item.sourceHistoryId ? `data-source-history-id="${escapeHtmlAttr(item.sourceHistoryId)}"` : ''}
             data-expanded="${expanded ? '1' : '0'}"
+            ${item.systemReplyAddress ? `data-work-reply-row tabindex="0" data-row-address="${escapeHtmlAttr(item.systemReplyAddress)}"` : ''}
         >
             ${headHtml}
             ${delegated ? `<div class="chat-live-line-body chat-delegated-activity" id="${escapeHtmlAttr(bodyId)}">${delegatedActivityBodyHtml(delegated, { expanded })}</div>`

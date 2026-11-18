@@ -90,6 +90,7 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
                 && compareHistoryPosition(row.history_position, existingPosition) < 0)) return adoptedSource;
         const update = { headline: summary.headline || item.headline,
             cardRowRevision: summary.cardRowRevision,
+            systemReplyAddress: summary.systemReplyAddress,
             cardReview: summary.cardReview || null, evidenceRef: summary.evidenceRef || null,
             fullHeadline: summary.fullHeadline || summary.headline || item.fullHeadline,
             body: summary.body || '', fullBody: summary.fullBody || summary.body || '',
@@ -111,6 +112,7 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
     } else {
         record.items.push({
             cardRowRevision: summary.cardRowRevision,
+            systemReplyAddress: summary.systemReplyAddress,
             cardReview: summary.cardReview || null,
             phase: summary.phase || 'working', headline: summary.headline || 'Update',
             fullHeadline: summary.fullHeadline || summary.headline || 'Update',

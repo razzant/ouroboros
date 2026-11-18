@@ -2036,8 +2036,9 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 ### Replies
 
 Reply keeps the exact quote. In the app, a proven work address takes the words to that work, not the room's
-reader; its card shows the same saved message. A closed or uncertain destination is reported, never resumed.
-Ordinary quotes retain their room and Project appearances. Saved bubbles offer Reply beside Copy; work cards in
+reader. Its card shows the same saved message; a Main portal leaves it visible in the feed and the Project
+card shows it inside. A closed or uncertain destination is reported, never resumed. Ordinary quotes keep
+their room appearances. Saved bubbles offer Reply beside Copy, and addressed System rows and work cards in
 menus only, never hover-only. Reply stages the composer's first-line strip (`Replying to`, quoted author,
 one line, ×; Esc cancels). Send carries the address; the host builds the snippet. Questions use their own field.
 

@@ -147,13 +147,13 @@ def _reply_work(root, row: dict) -> str | None:
         return None
     if row.get("card_row") or row.get("parent_task_id") or kind in {
         "project_started", "project_handoff", "project_completion_summary", "task_summary",
-        "main_notice", "relay_entry", "relay_reply",
+        "relay_entry", "relay_reply",
     }:
         return task_id
     task = load_task_result(root, task_id, strict=True)
     if not task:
         return task_id if row.get("is_progress") else None
-    if not task.get("_is_direct_chat"):
+    if not task.get("_is_direct_chat") or task.get("detached_at"):
         return task_id
     from ouroboros.projects_registry import project_binding_for_task
 

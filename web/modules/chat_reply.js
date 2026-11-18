@@ -324,6 +324,10 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     function bubbleRef(bubble) {
         const address = bubble?.dataset?.rowAddress || '';
         if (!address) return null;
+        if (bubble.hasAttribute('data-work-reply-row')) {
+            return { address, chat_id: chatId, role: 'system', kind: 'message',
+                author_label: authorOf('system'), snippet: replySnippet(bubble.querySelector('.chat-live-line-title')?.textContent || '') };
+        }
         const role = ROLE_NAMES.find((name) => bubble.classList.contains(name)) || '';
         const words = bubble.querySelector(':scope > .message')?.textContent
             || bubble.querySelector('.chat-quiz-question')?.textContent || bubble.dataset.rowWords || '';

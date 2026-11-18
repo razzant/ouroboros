@@ -2,7 +2,27 @@
 // and on replay (DESIGN "Unread"). A row's task_id names a task; by itself
 // it says neither who speaks, nor whether the row stands alone, nor whether it ends that task.
 import { isNonTerminalMediaHistoryRow, positiveTaskTerminalFact } from './chat_activity.js';
-import { isPortal } from './work_portal.js';
+
+const replyOrigins = new WeakMap();
+const WORK_REPLY_SLOT = ':scope > .chat-live-details > [data-live-work-replies]';
+
+export function releaseWorkReplyOrigin(node) {
+    replyOrigins.get(node)?.remove();
+    replyOrigins.delete(node);
+}
+
+// Card lifetime is independent of saved owner rows. Restore the actual node (not a copy)
+// before the card loses its visible slot, at the reply's original position in the feed.
+export function restoreWorkReplies(root) {
+    const slot = root?.querySelector(WORK_REPLY_SLOT);
+    for (const bubble of Array.from(slot?.children || [])) {
+        const origin = replyOrigins.get(bubble);
+        if (origin?.isConnected) origin.replaceWith(bubble);
+        else root.after(bubble);
+        replyOrigins.delete(bubble);
+    }
+    if (slot) slot.hidden = true;
+}
 
 // project_dialogue.ORIGIN_ADDRESSED_NOTICE_TYPES: a routing refusal names the task it
 // refused, never its speaker; it stays the issuing chat's own row.
@@ -33,11 +53,16 @@ export function replayConcludesTask(row) {
 export function placeWorkReply(feed, cards, row) {
     const work = row.reply_to?.work_task_id;
     const record = work && cards.get(work);
-    const slot = record && !isPortal(record) && record.root.querySelector('[data-live-work-replies]');
+    const slot = record?.root?.dataset.portal !== '1' && record?.root?.querySelector(WORK_REPLY_SLOT);
     if (!slot?.isConnected || !row.client_message_id) return false;
     const bubble = [...feed.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
         .find(node => node.dataset.clientMessageId === row.client_message_id);
     if (!bubble || bubble.parentElement === slot) return false;
+    if (!replyOrigins.has(bubble)) {
+        const origin = document.createComment('work reply');
+        bubble.before(origin);
+        replyOrigins.set(bubble, origin);
+    }
     slot.hidden = false;
     slot.append(bubble);
     return true;

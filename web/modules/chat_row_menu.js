@@ -24,7 +24,7 @@ const LONG_PRESS_MS = 450;
 const HOLD_MS = 150;  // a still finger this long starts the sink, so a tap or a scroll never shows it
 const RELEASE_MS = 260;  // the lift's way back (style.css), after which the row is at rest
 const MOVE_TOLERANCE_PX = 10;
-const ROW = '.chat-bubble, .chat-live-card:not(.subagent)';
+const ROW = '.chat-bubble, .chat-live-card[data-task-id], [data-work-reply-row]';
 const NATIVE = 'a[href], input, textarea, select, [contenteditable="true"], video, audio';
 
 const shown = (node) => Boolean(node?.isConnected && !node.hidden && !node.disabled);

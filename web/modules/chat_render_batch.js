@@ -898,6 +898,7 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
         }
         const patch = {
             cardRowRevision: summary.cardRowRevision,
+            systemReplyAddress: summary.systemReplyAddress,
             phase: summary.phase || it.phase,
             headline: headline || it.headline,
             fullHeadline: summary.fullHeadline || headline || it.fullHeadline,
@@ -948,6 +949,7 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
         const lineKey = `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         record.items.push({
             cardRowRevision: summary.cardRowRevision,
+            systemReplyAddress: summary.systemReplyAddress,
             phase: summary.phase || 'working',
             headline: headline || 'Update',
             fullHeadline: summary.fullHeadline || headline || 'Update',
