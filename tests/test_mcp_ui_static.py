@@ -52,12 +52,17 @@ env.routes.set('/api/settings', async (_url, init = {}) => {
 env.routes.set('/api/mcp/status', async () => (server.status ? json(server.status) : { ok: false }));
 env.routes.set('/api/mcp/test', async (_url, init) => { server.tests.push(JSON.parse(init.body)); return json({ ok: true, tool_count: 1 }); });
 let mounted = null;
+let shown = null;
 async function open(path, settings, status = null) {
+    // A form's unsaved text outlives its visit, even its server's removal: each scene first discards it, as a person would.
+    const discard = shown?.querySelector('[data-editor-discard]');
+    if (discard && !discard.hasAttribute('hidden') && !discard.disabled) { await discard.fire('click', { target: discard }); await settle(); }
     mounted?.unmount?.();
     forgetSettingRows();
-    applyMcpSettings({ MCP_SERVERS: [] });  // a form's unsaved text is kept across visits: each scene starts without one
+    applyMcpSettings({ MCP_SERVERS: [] });
     Object.assign(server, { settings, status });
     const container = new NodeStub();
+    shown = container;
     mounted = await settingsPageFor(path).mount(container, { path, row: '', ctx: { readSettings, openSettings: () => true, ask: async () => true, state: {} } });
     await settle();
     const all = (selector) => container.querySelectorAll(selector);

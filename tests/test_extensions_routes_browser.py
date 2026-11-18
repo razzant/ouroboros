@@ -87,6 +87,10 @@ def test_settings_and_extensions_lead_to_each_other_and_back(subscription_ui, wi
     # The door: Extensions with Back to Settings. Two panes: beside the page last opened (Skills the first time);
     # one column: the list alone, Back where ☰ stood.
     before = top_path(page)
+    page.evaluate("""() => {
+        window.testPageLandings = [];
+        window.addEventListener('ouro:page-shown', ({detail}) => window.testPageLandings.push([detail.page, detail.reveal]));
+    }""")
     door.click()
     page.locator(EXTENSIONS).wait_for(state="visible")
     if wide:
@@ -100,6 +104,7 @@ def test_settings_and_extensions_lead_to_each_other_and_back(subscription_ui, wi
     back.click()
     page.locator(HOME).wait_for(state="visible")
     assert top_path(page) == before, "Back returns to the Settings page the door stood on"
+    assert page.evaluate("window.testPageLandings") == [["skills", False], ["settings", True]]
 
     # An old address, here a search result on MCP servers: its page in Extensions at its row, Back to Settings.
     before = top_path(page)
