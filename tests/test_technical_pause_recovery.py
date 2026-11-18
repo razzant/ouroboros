@@ -289,7 +289,8 @@ def test_consumed_notice(tmp_path, monkeypatch):
     assert "explicit Resume" not in notice and ("dispatch_fence_invalid" in notice or "stopped for" in notice)
 
 
-def test_working_recovery_keeps_same_auto_resume_policy(tmp_path):
+@pytest.mark.parametrize("technical_wait", [False, True])
+def test_working_recovery_keeps_same_auto_resume_policy(tmp_path, technical_wait):
     from ouroboros import working_checkpoint as wc, budget_pause as bp
     from ouroboros.task_results import write_task_result
     from tests._budget_pause_exact_helpers import _loop_ctx
@@ -300,20 +301,20 @@ def test_working_recovery_keeps_same_auto_resume_policy(tmp_path):
     seed = {
         "pause_id": "p1",
         "state": bp.STATE_PAUSING,
-        "reason": "authority",
-        "rail": bp.RAIL_CONTROL_AUTHORITY,
+        "reason": "authority" if technical_wait else "budget",
+        "rail": bp.RAIL_CONTROL_AUTHORITY if technical_wait else "soft_land",
         "pause_generation": 1,
         "scope": "member",
         "task_attempt": 1,
         "source_ref": None,
-        "cause": "dispatch_fence_invalid",
-        "auto_resume": True,
-        "resume_policy": "authority_readable",
+        **({"cause": "dispatch_fence_invalid", "auto_resume": True, "resume_policy": "authority_readable"}
+           if technical_wait else {}),
     }
     bp.set_budget_pause(tmp_path, "pause-task", seed)
     row = wc.complete_pause_from_working(tmp_path, "pause-task", seed, 1)
-    assert row["source_ref"] and row["cause"] == seed["cause"]
-    assert row["auto_resume"] and row["resume_policy"] == "authority_readable"
+    assert row["source_ref"] and row.get("cause") == seed.get("cause")
+    assert row["auto_resume"] is technical_wait
+    assert row["resume_policy"] == ("authority_readable" if technical_wait else bp.RESUME_POLICY)
 
 
 def test_recovered_park_confirms_the_source_that_moved_it(tmp_path, monkeypatch):

@@ -500,10 +500,8 @@ def release_refusal(stop: dict | None, actor: dict | None) -> dict | None:
 
 
 def door_can_replace(task: dict, reason: str) -> bool:
-    """The existing door matrix: only sleep recovery / writer waits are weak.
-
-    Sleep recovery itself replaces nothing. Exact money/owner pauses keep their
-    own rule; a sleep marker is a wait and can acquire the door's stop.
+    """Panic and owner Restart hold automatically returning technical pauses and sleeps.
+    Existing holds follow their door policy. Exact money and owner pauses keep their own rule.
     """
     prior = hold_fact(task)
     if prior:
