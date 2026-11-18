@@ -659,7 +659,7 @@ def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path) -> None:
         raise DispatchFenced(
             f"model dispatch fenced: task {scope.task_id} is entering an exact pause",
             limit_scope="pausing", root_task_id=scope.root_task_id)
-    from ouroboros.queue_observation import dispatch_probe
+    from ouroboros.queue_observation import dispatch_probe, valid_dispatch_facts
 
     root_task_id = str(scope.root_task_id or "").strip()
     snapshot_path = root / "state" / "queue_dispatch.json"
@@ -667,12 +667,9 @@ def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path) -> None:
         snapshot = dispatch_probe(root)
         if snapshot is None:
             raise ControlAuthorityUnavailable(f"root budget fence authority unavailable: {snapshot_path}", cause="dispatch_fence_unreadable")
-        rows = snapshot.get("budget_root_fences")
-        if not isinstance(rows, list):
+        if not valid_dispatch_facts(snapshot):
             raise ControlAuthorityUnavailable(f"invalid root budget fence authority: {snapshot_path}", cause="dispatch_fence_invalid")
-        for row in rows:
-            if not isinstance(row, dict):
-                raise ControlAuthorityUnavailable(f"invalid root budget fence row: {snapshot_path}", cause="dispatch_fence_invalid")
+        for row in snapshot["budget_root_fences"]:
             if (str(row.get("root_task_id") or "") != root_task_id or row.get("cause") == "owner_pause"
                     or str(row.get("status") or "") not in {"active", "paused"}):
                 continue  # an owner Pause gates launches itself (owner_pause.py): never a money stop

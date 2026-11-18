@@ -465,7 +465,7 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
     # The event-loop ctx and the reaper's pool module expose the same queue
     # state; the snapshot/sort seams fall back to the queue module's own.
     sort_pending = getattr(ctx, "sort_pending", None) or queue_mod.sort_pending
-    from supervisor.queue_publication import barrier_of
+    from supervisor.queue_publication import barrier_of, mark_dirty_locked
 
     # The park is confirmed ``paused`` only once its queue row is on disk: the barrier, never the mark.
     persist_snapshot = barrier_of(ctx) or queue_mod.publish_queue_snapshot
@@ -478,9 +478,7 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         direct_turn = False
         if task is None and evt.get("_is_direct_chat") and isinstance(evt.get("task"), dict) \
                 and str(evt["task"].get("id") or "") == task_id:
-            # A direct turn ends its live actor on the way out (no second live
-            # actor for this id); the queue row is minted from its own record,
-            # already projected by ``pause_event`` (``parkable_direct_task``).
+            # The direct turn's event carries its complete queue envelope.
             task = dict(evt["task"])
             meta = {"task": task, "attempt": int(task.get("_attempt") or 1), "worker_id": None}
             direct_turn = True
@@ -562,6 +560,7 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         worker_id = evt.get("worker_id") if evt else meta.get("worker_id")
         if worker_id in ctx.WORKERS and ctx.WORKERS[worker_id].busy_task_id == task_id:
             ctx.WORKERS[worker_id].busy_task_id = None
+        mark_dirty_locked("budget_pause_exact_continuation")
     grant_id = str((row.get("grant") or {}).get("grant_id") or "")
 
     def project_current(current, fields):
@@ -595,10 +594,7 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         except Exception:
             log.warning("Exact budget pause row for %s was not confirmed 'paused'",
                         task_id, exc_info=True)
-            # A write that failed transiently leaves the row at ``pausing`` for
-            # THIS pause id — real, merely unconfirmed, and still this park's
-            # to project. A row that names another pause, or is no longer
-            # live, belongs to a newer writer and is never written over.
+            # A newer pause or grant owns both the result projection and the notice.
             try:
                 latest = budget_pause_row(result_root, task_id)
             except Exception:
@@ -618,17 +614,13 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
                 paused_task["_park_confirmation"] = source
     if not superseded:
         # A row this park no longer owns keeps whatever the newer writer
-        # projected: a resumed task must never read as paused again. The
-        # projection carries the ledger-derived cumulative cost planes (the
-        # same ``reconstruct_task_cost`` projection every terminal write
-        # takes), so the public detail of a paused task reads its rounds and
-        # spend from the authority, never from a worker's pre-pause mirror.
+        # projected. Spend and rounds come from the ledger.
         try:
             from supervisor.state import reconstruct_task_cost
 
             reason = str(row.get("reason") or "")
             cause = {"owner": "Pause", "sleep": "model sleep",
-                     "authority": str(row.get("rail") or "").replace("_", " ")}.get(reason, "budget")
+                     "authority": str(row.get("cause") or row.get("rail") or "").replace("_", " ")}.get(reason, "budget")
             cost_fields = reconstruct_task_cost(task_id, fields=True, drive_root=result_root)
             write_task_result(
                 result_root, task_id, STATUS_SCHEDULED, resource_limit=marker, _field_projector=project_current,
@@ -637,10 +629,8 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
                         + ("; delegated work it had already sent is still running" if unsettled else "")
                         + ". Cumulative spend, rounds and execution time are retained; "
                         + ("the selected wake condition continues the same task." if reason == "sleep" else
+                           "the same task returns when the authority is readable." if row.get("auto_resume") else
                            "an explicit Resume continues the same task.")),
-                # An unavailable projection is published too: it carries the
-                # explicit unknown state that must replace any stale amount
-                # write_task_result would otherwise keep merged in.
                 **{**cost_fields, "cost_final": False},
             )
         except BudgetPauseSuperseded:
@@ -678,6 +668,9 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         from supervisor.owner_pause_control import refresh_owner_pause_tree
 
         refresh_owner_pause_tree(str(task.get("root_task_id") or task_id))
+    elif confirmed and row.get("reason") == "authority" and row.get("cause"):
+        from supervisor.sleep_wake import wake_ready_sleepers
+        wake_ready_sleepers(queue_mod, only=task_id)
     return marker
 
 
@@ -839,28 +832,26 @@ def budget_resume_dispatch_allowed(q: Any, task: Dict[str, Any], *, actor_id: Op
     fence_id = str((q.BUDGET_ROOT_FENCES.get(root_id) or {}).get("fence_id") or "")
     if fence_id != str(carrier.get("root_fence_id" if exact else "fence_id") or ""):
         return False
-    if carrier.get("authority") == "sleep_readiness":
+    if carrier.get("authority") in {"sleep_readiness", "authority_readable"}:
         from ouroboros.budget_pause import budget_pause_row
-        from ouroboros.owner_pause import member_fence
-        from types import SimpleNamespace
+        from supervisor.sleep_wake import _vetoed
 
         result_root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
         try:
             row = budget_pause_row(result_root, str(task.get("id") or ""))
             grant = row.get("grant") or {}
-            return bool(row.get("reason") == "sleep" and row.get("sleep_ready")
-                        and grant.get("authority") == "sleep_readiness"
+            ready = (row.get("reason") == "authority" and row.get("cause") if carrier["authority"] == "authority_readable"
+                     else row.get("reason") == "sleep" and row.get("sleep_ready"))
+            return bool(ready and row.get("state") == "resume_granted" and grant.get("authority") == carrier["authority"]
                         and grant.get("grant_id") == carrier.get("grant_id")
                         and grant.get("sleep_id") == carrier.get("sleep_id")
                         and not grant.get("revoked_at") and not grant.get("consumed_at")
-                        and budget_hold_fact(task) is None
-                        and not member_fence(SimpleNamespace(task_id=task.get("id"),
-                            root_task_id=root_id, budget_drive_root=result_root))
+                        and not _vetoed(q, task)
                         and not any(str(t.get("id") or "") == root_id and t.get("_budget_pause")  # a sleep: a wait
                                     and t["_budget_pause"].get("reason") != "sleep" for t in q.PENDING))
         except Exception:
             return False
-    if carrier.get("selected_by") == "sleep_wake":
+    if carrier.get("selected_by") in {"sleep_wake", "authority_readable"}:
         return False
     if root_id == str(task.get("id") or ""):
         return True
@@ -1374,7 +1365,7 @@ def _root_resume_state(q: Any, root_task_id: str, result_root: pathlib.Path, *,
 
     actor = (actor_id if actor_id is not None else
              _validated_single_cancel_target(result_root, root_task_id))
-    rows = [meta['task'] for meta in q.RUNNING.values()
+    rows = [meta['task'] for meta in q.RUNNING.copy().values()
             if isinstance(meta, dict) and isinstance(meta.get('task'), dict)
             and str(meta['task'].get('id') or '') == actor]
     rows += [row for row in q.PENDING

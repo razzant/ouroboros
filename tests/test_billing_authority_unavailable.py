@@ -310,7 +310,7 @@ def test_unreadable_authority_parks_the_same_thought_and_only_a_strict_reread_re
     parked = workers.PENDING[0]
     assert parked["_budget_pause"]["reason"] == "authority" and "tech" not in queue.BUDGET_ROOT_FENCES
     row = load_task_result(tmp_path, "tech")
-    assert row["reason_code"] == "authority_paused" and "billing authority unreadable" in row["result"]
+    assert row["reason_code"] == "authority_paused" and "malformed binding" in row["result"]
     assert row["budget_pause"]["state"] == budget_pause.STATE_PAUSED
     assert [notice["reason"] for notice in row["pause_notices"].values()] == ["authority"]
     assert pushed[0]["pause_reason"] == "authority" and _activity_pause_cause(parked, {}) == "authority"
@@ -579,6 +579,7 @@ def test_an_unreadable_dispatch_fence_parks_on_the_control_rail_not_as_money(tmp
         _run(loop_mod, registry, tmp_path, "fence")
     pause = paused.value.pause
     assert (pause["reason"], pause["rail"], pause["scope"]) == ("authority", "control_authority_unreadable", "task")
+    assert pause["auto_resume"] and pause["resume_policy"] == "authority_readable"
     assert pause["cause"] == "dispatch_fence_unreadable"
     assert budget_pause.exact_pause_marker(pause)["cause"] == pause["cause"]
     assert "root budget fence authority unavailable" in pause["reason_text"] and _kinds(tmp_path, "attempt") == []
@@ -694,6 +695,8 @@ def test_control_readability_wakes_only_the_saved_work_and_obeys_owner_pause(tmp
     path = tmp_path / "state/queue_dispatch.json"
     path.write_text("{", encoding="utf-8")
     assert not any(item["ok"] for item in wake_ready_sleepers(q))
+    refused = q.resume_budget_paused_task(task["id"])
+    assert not refused["ok"] and refused["cause"] == row["cause"] and "dispatch fence" in refused["message"]
     atomic_write_json(path, {"generation": "g", "budget_root_fences": [], "members": {}})
     owner_pause.install_fence(tmp_path, task["id"], request_id="owner")
     assert not any(item["ok"] for item in wake_ready_sleepers(q))
@@ -701,7 +704,55 @@ def test_control_readability_wakes_only_the_saved_work_and_obeys_owner_pause(tmp
     path.write_text("{}", encoding="utf-8")
     assert not any(item["ok"] for item in wake_ready_sleepers(q)), "readiness is re-read"
     atomic_write_json(path, {"generation": "again", "budget_root_fences": [], "members": {}})
+    task["deadline_at"] = "2000-01-01T00:00:00+00:00"
+    assert not any(item["ok"] for item in wake_ready_sleepers(q))
+    task.pop("deadline_at")
+    panic = tmp_path / "state/panic_stop.flag"
+    panic.write_text("panic")
+    assert not any(item["ok"] for item in wake_ready_sleepers(q))
+    panic.unlink()
+    task["deadline_at"] = "2040-01-01T00:00:00+00:00"
+    from datetime import datetime, timezone
+    from ouroboros import deadline_utils
+    with monkeypatch.context() as delayed:
+        now = [datetime(2039, 1, 1, tzinfo=timezone.utc)]
+        delayed.setattr(deadline_utils, "utc_now", lambda: now[0])
+        publish = q.publish_queue_snapshot
+
+        def crosses_deadline(reason):
+            persisted = publish(reason=reason)
+            now[0] = datetime(2041, 1, 1, tzinfo=timezone.utc)
+            return persisted
+
+        delayed.setattr(q, "publish_queue_snapshot", crosses_deadline)
+        assert wake_ready_sleepers(q)[0]["error"] == "deadline_passed"
+        assert bp.budget_pause_row(tmp_path, task["id"])["state"] == "paused"
+        assert "_budget_pause_resume" not in task
+    task.pop("deadline_at")
     assert wake_ready_sleepers(q)[0]["ok"]
     handoff = task["_budget_pause_resume"]
     assert handoff["source_ref"] == row["source_ref"] and handoff["pause_id"] == row["pause_id"]
     assert handoff["selected_by"] != "owner" and handoff["by"].get("actor") != "owner"
+
+
+def test_dispatch_repaired_before_parking_returns_the_exact_work_at_entry(tmp_path, monkeypatch):
+    from ouroboros import budget_pause as bp
+    from ouroboros.utils import atomic_write_json
+    from supervisor.events_budget import install_exact_budget_pause
+    from tests._budget_pause_exact_helpers import _install_queue, _parked, _supervisor_ctx
+
+    q, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 5.0)
+    task, row = _parked(tmp_path, monkeypatch, task_id="repaired")
+    workers.PENDING.remove(task)
+    task.pop("_budget_pause")
+    workers.RUNNING[task["id"]] = {"task": task, "attempt": 1}
+    bp.set_budget_pause(tmp_path, task["id"], {**row, "state": "pausing", "reason": "authority",
+                        "rail": bp.RAIL_CONTROL_AUTHORITY, "cause": "dispatch_fence_invalid"})
+    atomic_write_json(tmp_path / "state/queue_dispatch.json", {"generation": "g", "budget_root_fences": [], "members": {}})
+    ctx = _supervisor_ctx(tmp_path, workers, q, [], [])
+    ctx.publish_queue_snapshot = q.publish_queue_snapshot
+    install_exact_budget_pause(ctx, task["id"], {"pause_id": row["pause_id"]})
+    grant = bp.budget_pause_row(tmp_path, task["id"])["grant"]
+    assert grant["authority"] == "authority_readable" and grant["by"] == {}
+    assert workers.PENDING[0]["_budget_pause_resume"]["source_ref"] == row["source_ref"]

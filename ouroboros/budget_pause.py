@@ -479,22 +479,39 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
     return dict(row)
 
 
+def saved_budget_pause(result: dict) -> dict:
+    """Read the typed cause, including the exact host messages kept by older pause writers."""
+    pause = result.get("budget_pause")
+    row = dict(pause) if isinstance(pause, dict) else {}
+    if row.get("reason") != REASON_AUTHORITY or row.get("cause"):
+        return row
+    text, rail = str(row.get("reason_text") or ""), row.get("rail")
+    cause = ""
+    if rail == RAIL_CONTROL_AUTHORITY:
+        if text.startswith("root budget fence authority unavailable: "):
+            cause = "dispatch_fence_unreadable"
+        elif text.startswith(("invalid root budget fence authority: ", "invalid root budget fence row: ")):
+            cause = "dispatch_fence_invalid"
+        elif text.startswith("control authority unreadable: "):
+            saved = text.partition(": ")[2]
+            if saved.partition(":")[0] in {"owner_pause_authority_unreadable", "owner_launch_authority_unavailable"}:
+                cause = saved
+    elif rail == RAIL_BILLING_AUTHORITY and text.startswith("billing group authority unavailable for root ") and text.endswith(")"):
+        saved = text.partition(" (unreadable: ")[2][:-1]
+        if saved.partition(":")[0] in {"read_failed", "malformed_binding", "start_custody_unreadable"}:
+            cause = saved
+    if cause:
+        row.update(cause=cause, auto_resume=True, resume_policy="authority_readable")
+    return row
+
+
 def budget_pause_row(root: Any, task_id: str) -> Dict[str, Any]:
     from ouroboros.store_hot_facts import controls
-
-    row = controls(root, str(task_id))
-    pause = row.get("budget_pause")
-    return dict(pause) if isinstance(pause, dict) else {}
+    return saved_budget_pause(controls(root, str(task_id)))
 
 
 def death_returns_to_pause(row: Dict[str, Any], attempt: Any) -> bool:
-    """A live pause of this very attempt whose grant, if any, nothing consumed.
-
-    The window of ``worker_health._complete_exact_budget_pause_after_death``
-    (#1196, F4): a worker death here returns the SAME task id to its exact pause
-    (or that recovery decides the death itself), so the worker records no
-    terminal of its own for a ``handle_task`` exception inside it.
-    """
+    """Worker health recovers this attempt's live unconsumed pause instead of completing the task."""
     grant = row.get("grant") if isinstance(row.get("grant"), dict) else {}
     return bool(str(row.get("state") or "") in LIVE_PAUSE_STATES
                 and int(row["task_attempt"]) == int(attempt) and not grant.get("consumed_at"))
@@ -796,15 +813,15 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
     carrier = getattr(getattr(ctx, "model_wait_context", None), "task", None)
     envelope = ({"park_task": parkable_direct_task(carrier)} if isinstance(carrier, dict)
                 and carrier.get("id") == task_id and (carrier.get("_is_direct_chat") or carrier.get("_presence_turn")) else {})
-    if cause:
-        envelope["cause"] = cause
-    seed = {**envelope, "pause_id": pause_id, "state": STATE_PAUSING,
+    if cause and authority:
+        envelope.update(cause=cause, auto_resume=True, resume_policy="authority_readable")
+    seed = { "pause_id": pause_id, "state": STATE_PAUSING,
             "reason": _RAIL_REASONS.get(rail, "budget"), "rail": rail,
             "pause_generation": generation,
             "scope": str(scope or "global"), "task_attempt": int(ctx.task_attempt or 1),
             "source_ref": None, "started_at": getattr(ctx, "task_started_at", None),
             "pausing_since": time.time(), "exact_continuation": True,
-            "replay_safe": False, "auto_resume": False}
+            "replay_safe": False, "auto_resume": False, **envelope}
     hold: Dict[str, Any] = {}
     prepared: Optional[Dict[str, Any]] = None
     published, opened, interrupted = "", False, None
@@ -1113,8 +1130,8 @@ def exact_pause_marker(row: Dict[str, Any], *, default_root: str = "") -> Dict[s
         "physical_calls": row.get("physical_calls"),
         "replay_safe": False,
         "exact_continuation": True,
-        "auto_resume": False,
-        "resume_policy": RESUME_POLICY,
+        "auto_resume": bool(row.get("auto_resume")),
+        "resume_policy": str(row.get("resume_policy") or RESUME_POLICY),
         "rail": str(row.get("rail") or ""),
         **({"cause": row["cause"]} if row.get("cause") else {}),
         "reason": str(row.get("reason") or "budget"),
@@ -1139,24 +1156,10 @@ BUDGET_HOLD_KEY = "_budget_pause_hold"
 
 
 def budget_fence_selected(task: Any, fence: Any) -> bool:
-    """Whether THIS row carries an explicit selection recorded against THIS fence.
-
-    A root's admission latch keeps a whole tree out of the queue and off the
-    money gate (``usage_accounting`` reads this predicate from queue_dispatch.json). The
-    owner (or, under the root's live grant, the model) may select ONE member
-    without lifting the latch for its siblings: the selection names the fence
-    generation it was granted against, so a later fence — a root that paused
-    again — is never pre-released by an older selection (#1196, owner Q9).
-
-    The exact Resume handoff, when present, decides alone (an older selection
-    never rescues it): an ``explicit_resume`` grant naming its pause, its grant
-    and this fence, issued by the owner or under a named root grant generation.
-    Sleep readiness is never money. A row paused again, a stale consumed carrier
-    or an active hold is not selected. Consumption does not spend the selection:
-    single use forbids consuming the continuation twice, not the resumed worker's
-    later sends. Dispatch still rechecks the live root grant
-    (``events_budget.budget_resume_dispatch_allowed``).
-    """
+    """A monetary latch selects one member against its current fence identity. An exact
+    handoff takes precedence and requires an explicit grant. A pause, hold or stale
+    handoff blocks selection. Consumption keeps later sends eligible. Dispatch rechecks
+    the live root grant in events_budget.budget_resume_dispatch_allowed."""
     from ouroboros.work_stop import continuation_refusal, direct_selection, hold_fact
 
     fence_id = str((fence or {}).get("fence_id") or "") if isinstance(fence, dict) else ""
@@ -1178,11 +1181,7 @@ def budget_fence_selected(task: Any, fence: Any) -> bool:
 # --- resume (loop side) -----------------------------------------------------------------
 
 def load_budget_pause(ctx: Any, handoff: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Consume ONE granted resume: the row must carry this exact single-use grant.
-
-    Refuses (raises) a missing or corrupt source, a spent or foreign grant and
-    an attempt mismatch: a stale snapshot must never revive a continuation.
-    """
+    """Consume this attempt's exact grant once. A missing source, mismatched identity or spent grant refuses."""
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
 

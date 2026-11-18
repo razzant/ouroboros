@@ -156,6 +156,13 @@ def load_queue_document(drive_root, name="queue_snapshot.json", *, fresh: bool =
     return document
 
 
+def valid_dispatch_facts(document):
+    rows = document.get("budget_root_fences")
+    members = document.get("members", {})
+    return (isinstance(rows, list) and all(isinstance(row, dict) for row in rows)
+            and isinstance(members, dict) and all(isinstance(member, dict) for member in members.values()))
+
+
 def dispatch_probe(drive_root):
     """A generated dispatch document stands from its atomic replacement."""
     document = load_queue_document(drive_root, "queue_dispatch.json")
