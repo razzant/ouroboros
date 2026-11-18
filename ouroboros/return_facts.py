@@ -46,12 +46,12 @@ from ouroboros.chat_chain import format_address, row_address
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.deadline_utils import ago_text
 from ouroboros.dialogue_provenance import RoomLabelResolver, owner_speech, recorded_person, row_author, row_provenance
+from ouroboros.knowledge_versions import JOURNAL_NAME, is_authored_write
 from ouroboros.text_sentences import first_sentence
 
 SECTION_ID = "return_facts"  # = ``context_budget.RETURN_FACTS_KIND``, the running row's kind
 HEADING = "## Since my human's previous word"
 REACH_KEY = "_return_facts_reach"  # on a running root's context: ``{"seq", "ts"}`` its view and facts reach to
-_JOURNAL = "knowledge_history.jsonl"
 _BLOCK = 1 << 20
 _LATE = "quiz_late_answer:"
 
@@ -362,13 +362,13 @@ def _keys(root: pathlib.Path) -> Dict[Tuple[Any, Any, Any], Dict[str, List[str]]
 def _page_writes(root: pathlib.Path, begin: str, end: str, own: Own, labels: RoomLabelResolver,
                  gaps: List[str]) -> Dict[Tuple[str, str], Dict[str, Any]]:
     """Page writes in the interval, one entry per page in first-write order: count, writers, last, reason, version."""
-    journals = [("global", root / "memory" / _JOURNAL)]
+    journals = [("global", root / "memory" / JOURNAL_NAME)]
     try:
-        journals += sorted((f"project:{path.parent.name}", path) for path in root.glob(f"projects/*/{_JOURNAL}"))
+        journals += sorted((f"project:{path.parent.name}", path) for path in root.glob(f"projects/*/{JOURNAL_NAME}"))
     except OSError as exc:
         gaps.append(f"project knowledge journals unreadable: {type(exc).__name__}")
     written = [(scope, row) for scope, journal in journals for row in journal_rows_between(journal, begin, end, gaps)
-               if isinstance(row, dict) and row.get("topic")
+               if is_authored_write(row) and row.get("topic")
                and not own.write(row.get("focus") if isinstance(row.get("focus"), Mapping) else {})]
     labels.warm({_chat(row["focus"]) for _scope, row in written if isinstance(row.get("focus"), Mapping)} - {None})
     pages: Dict[Tuple[str, str], Dict[str, Any]] = {}

@@ -15,8 +15,8 @@ import html
 import json
 import os
 import time
+import unicodedata
 from contextlib import contextmanager
-from itertools import chain
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Mapping
@@ -26,7 +26,9 @@ import yaml
 
 from ouroboros import knowledge_rows, knowledge_versions, text_change, utils
 # The edit compiler lives beside its one caller's module; ``compile_anchored_edits`` stays importable here.
-from ouroboros.knowledge_edits import EditRefused, compile_anchored_edits, compile_edit_items, edit_items, with_host_claim
+from ouroboros.knowledge_edits import (
+    EditRefused, HostClaimPending, compile_anchored_edits, compile_edit_items, edit_items, with_host_claim, yaml_form,
+)
 from ouroboros.knowledge_versions import body_chars as body_chars
 from ouroboros.markdown_source import MarkdownSource, parse_markdown_navigation, parse_markdown_source
 from ouroboros.platform_layer import file_lock_exclusive, file_unlock
@@ -197,6 +199,22 @@ def resolve_knowledge_address(
     return address
 
 
+def shelf_spelling(address: KnowledgeAddress) -> KnowledgeAddress:
+    """Keep the shelf's directory-entry spelling when a volume accepts an alias."""
+    parent = address.shelf
+    for part in address.path.relative_to(address.shelf).parts:
+        requested = parent / part
+        if requested.exists():
+            entries = os.listdir(parent)
+            if part not in entries:
+                folded = unicodedata.normalize("NFC", part).casefold()
+                part = next((name for name in entries if unicodedata.normalize("NFC", name).casefold() == folded
+                             and requested.samefile(parent / name)), part)
+        parent /= part
+    topic = parent.relative_to(address.shelf).as_posix()[:-3]
+    return replace(address, topic=sanitize_topic(topic)) if topic != address.topic else address
+
+
 @dataclass(frozen=True)
 class KnowledgeNote:
     address: KnowledgeAddress
@@ -297,10 +315,11 @@ def _navigation_descriptor(address: KnowledgeAddress, raw: bytes | None = None) 
     except (yaml.YAMLError, ValueError) as exc:
         return {**address.as_dict(), "claims": [], "parse_error": f"{type(exc).__name__}: {exc}"}
     error = _archive_error(address.topic, metadata)
+    claims = knowledge_versions.claim_names(metadata.get("claims"))
     return {**address.as_dict(), "title": title, "type": metadata.get("type"), "summary": metadata.get("summary"),
             "state": "archived" if "archive" in metadata and not error else "active",
             "archive": metadata.get("archive"), "archive_error": error, "keys": metadata.get("keys"),
-            "claims": knowledge_versions.claim_names(metadata.get("claims"))}
+            "claims": claims, **({"revision": hashlib.sha256(raw).hexdigest()} if claims else {})}
 
 
 # a note's address -> (what proves its bytes unchanged, its navigation row); a listing drops deleted notes
@@ -503,14 +522,11 @@ def active_claims(drive_root: Path, *, inventory: tuple[dict[str, Any], ...] | N
     shelf = resolve_knowledge_address(drive_root, OVERVIEW_TOPIC, "global")
     rows = inventory_knowledge(shelf, navigation=True) if inventory is None else inventory
     found: dict[str, list[KnowledgeAddress]] = {}
-    for row in rows:
-        if row.get("scope") != "global" or row.get("state") != "active" or not row.get("claims"):
-            continue
-        address = replace(shelf, topic=row["topic"])
-        written = set(row["claims"])
-        for name in knowledge_versions.read_claim_record_names(knowledge_versions.claim_record_path(shelf.shelf, address.topic)):
-            if name in written:
-                found.setdefault(name, []).append(address)
+    eligible = (row for row in rows if row.get("scope") == "global" and row.get("state") == "active" and row.get("claims"))
+    for topic, names in knowledge_versions.inventory_claim_names(shelf.shelf, eligible):
+        address = replace(shelf, topic=topic)
+        for name in names:
+            found.setdefault(name, []).append(address)
     return found
 
 
@@ -664,15 +680,6 @@ def knowledge_backlinks(note: KnowledgeNote, shelves: tuple[KnowledgeAddress, ..
     return tuple(rows)
 
 
-def _yaml_form(metadata: Mapping[str, Any]) -> str:
-    """Loaded frontmatter spelled exactly, for comparison without ``==``.
-
-    Legal YAML may alias a node inside itself (``custom: &loop [*loop]``); ``==``
-    walks that cycle until RecursionError, while the dump spells a shared node
-    once and aliases it. Sorted keys keep dict equality's order blindness."""
-    return yaml.safe_dump(metadata, allow_unicode=True, sort_keys=True)
-
-
 def _write_content(current: KnowledgeNote | None, content: str, mode: str,
                    old_str: str | None = None, summary: str | None = None,
                    items: list | None = None) -> tuple[bytes, bool]:
@@ -712,7 +719,7 @@ def _write_content(current: KnowledgeNote | None, content: str, mode: str,
     if current is None and (not isinstance(merged["type"], str) or not merged["type"].strip()):
         raise ValueError("A new note's type must be a non-empty string; any authored type is allowed")
     explicit_claims = "claims" in source.frontmatter
-    if _yaml_form(merged) == _yaml_form(source.frontmatter):
+    if yaml_form(merged) == yaml_form(source.frontmatter):
         return proposed, explicit_claims
     # Unknown fields survive even when an author only supplies changed fields.
     front = yaml.safe_dump(merged, allow_unicode=True, sort_keys=False).encode("utf-8")
@@ -727,26 +734,10 @@ def _lifecycle_content(current: KnowledgeNote, mode: str, reason: str) -> bytes:
         metadata["archive"] = {**metadata.get("archive", {"at": utc_now_iso()}), "reason": reason}
     else:
         metadata.pop("archive", None)
-    if _yaml_form(metadata) == _yaml_form(current.metadata):
+    if yaml_form(metadata) == yaml_form(current.metadata):
         return current.raw
     front = yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False).encode("utf-8") if metadata else b""
     return (b"---\n" + front + b"---\n" if metadata else b"") + current.raw[current.source.body_span.start_byte:]
-
-
-# One read of the journal's tail per write, the memory reader's own journal budget: the base of the
-# replaced version is looked for there. A miss only stores both texts whole, as every row did before.
-_JOURNAL_TAIL_BYTES = 8 * 1024 * 1024
-
-
-def _tail_read(journal: Path, address: KnowledgeAddress, revision: str | None) -> tuple[Any, Any]:
-    """``(newest, base)``: this note's newest row and, for a ``revision`` (``None``: no base wanted), the newest
-    row holding that version that reads back (``knowledge_rows.verified_base``), each ``(offset, row)`` or
-    ``None``, from one read of the journal's tail under the shelf lock every writer of the journal holds."""
-    rows = knowledge_versions.tail_rows(journal, address, _JOURNAL_TAIL_BYTES)
-    newest = next(rows, None)
-    if newest is None or revision is None:
-        return newest, None
-    return newest, knowledge_rows.verified_base(journal, chain([newest], rows), revision)
 
 
 @dataclass(frozen=True)
@@ -844,13 +835,16 @@ def write_knowledge_note(
     target: Any = None
     if mode == "revert":  # outside the lock: a recorded row never changes
         try:
-            target = knowledge_versions.find_version(address, version)
+            target = knowledge_versions.find_version(shelf_spelling(address), version)
         except knowledge_versions.VersionUnavailable as exc:
             target = exc
     journal = address.shelf.parent / knowledge_versions.JOURNAL_NAME
     with knowledge_write_lock(address.shelf):
         # Re-resolve inside the lock; a changed symlink cannot redirect a write.
         address.path.resolve().relative_to(address.shelf.resolve())
+        address = shelf_spelling(address)
+        if mode == "archive" and address.topic in ALWAYS_ACTIVE_TOPICS:
+            raise ValueError("the overview must stay active")
         try:
             current = read_knowledge_note(address)
         except FileNotFoundError:
@@ -867,7 +861,7 @@ def write_knowledge_note(
             return KnowledgeWriteResult(False, "revision_required", current, revision)
         if expected_revision is not None and expected_revision != revision:
             return KnowledgeWriteResult(False, "revision_conflict", current, revision, held=None if not expected_revision
-                                        else knowledge_versions.held_version(journal, address, expected_revision, _JOURNAL_TAIL_BYTES,
+                                        else knowledge_versions.held_version(journal, address, expected_revision, knowledge_versions.WRITE_TAIL_BYTES,
                                                                              current.text if current else None))
         # A refused revert says why; its caller holds the current revision (checked above), so no note is resent.
         if mode == "revert" and version != revision and isinstance(target, Exception):
@@ -888,12 +882,14 @@ def write_knowledge_note(
                 raw = with_host_claim(_note(address, raw), _host_claim)
         except EditRefused as exc:
             return KnowledgeWriteResult(False, f"edit_refused: {exc}", current, revision, show_source=False)
+        except HostClaimPending as exc:
+            return KnowledgeWriteResult(False, f"host_claim_pending: {exc}", current, revision, show_source=False)
         except (ValueError, yaml.YAMLError) as exc:
             return KnowledgeWriteResult(False, f"invalid_note: {exc}", current, revision)
         updated = _note(address, raw)
         old_archive = {"archive": current.metadata["archive"]} if current and "archive" in current.metadata else {}
         new_archive = {"archive": updated.metadata["archive"]} if "archive" in updated.metadata else {}
-        if not lifecycle and _yaml_form(old_archive) != _yaml_form(new_archive):
+        if not lifecycle and yaml_form(old_archive) != yaml_form(new_archive):
             if mode != "revert":
                 return KnowledgeWriteResult(False, "invalid_note: archive is owned by archive/restore modes", current, revision)
             states = (f"is {updated.state}, the current note is {current.state}; archive and restore change that state"
@@ -907,11 +903,11 @@ def write_knowledge_note(
         unchanged = current is not None and raw == current.raw
         if unchanged and not (claims and claims.changed):
             try:
-                if lifecycle:
+                if lifecycle or (claims and claims.needs_publication(revision)):
                     # Equal note bytes are no proof a prior index publication landed.
                     rebuild_knowledge_index(address)
                 if claims is not None:
-                    claims.publish(address, {})
+                    claims.publish(address, {}, revision)
             except (OSError, UnicodeDecodeError):
                 return KnowledgeWriteResult(False, "publication_incomplete", current, revision)
             return KnowledgeWriteResult(True, "unchanged", current, revision,
@@ -928,7 +924,7 @@ def write_knowledge_note(
                 bool(updated.source.frontmatter_span) != bool(current.source.frontmatter_span) or
                 updated.raw[:current.source.body_span.start_byte] !=
                 current.raw[:current.source.body_span.start_byte]) and (
-                summary is None or _yaml_form(updated.metadata) != _yaml_form(
+                summary is None or yaml_form(updated.metadata) != yaml_form(
                     {**current.metadata, "summary": summary, "type": current.metadata.get("type", "note")}))):
             return KnowledgeWriteResult(False, f"invalid_note: {mode} cannot change frontmatter", current, revision)
         old_text = current.text if current else ""
@@ -938,7 +934,7 @@ def write_knowledge_note(
         # verified base, else whole), before replacing source bytes. A capture
         # is not a commit receipt; a failed publication returns its actual
         # current source, never success.
-        newest, base = _tail_read(journal, address, None if lifecycle else revision) if current is not None else (None, None)
+        newest, base = knowledge_versions.write_tail(journal, address, None if lifecycle else revision) if current else (None, None)
         previous = None if current is None else {**knowledge_versions.row_facts(
             newest[1] if newest is not None and newest[1].get("new_sha256") == revision else {}), "revision": revision}
         history = {"ts": utc_now_iso(), "task_id": task_id, "topic": address.topic, "mode": mode,
@@ -972,7 +968,7 @@ def write_knowledge_note(
                 write_bytes_atomic(address.path, raw)
             rebuild_knowledge_index(address)
             if claims is not None:
-                claims.publish(address, history)
+                claims.publish(address, history, updated.revision)
         except (OSError, UnicodeDecodeError):
             try:
                 observed = read_knowledge_note(address)
