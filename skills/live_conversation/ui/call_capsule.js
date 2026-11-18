@@ -188,6 +188,7 @@ export function createTalkFacts() {
     return {
         facts,
         caption(msg, heardNow = false) {
+            if (msg.speaker === 'owner' && msg.final && !String(msg.text || '').trim()) return;  // a failed recognition: nothing said
             if (msg.speaker === 'owner') {
                 if (!msg.final && msg.text) Object.assign(facts, { ownerSpeaking: true, thinking: false, answered: false });
                 if (msg.final) Object.assign(facts, { ownerSpeaking: false,
