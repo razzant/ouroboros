@@ -1,0 +1,135 @@
+name: Main action preview
+
+on:
+  push:
+    branches: ['qa/costs-and-main-preview']
+
+permissions:
+  contents: read
+
+jobs:
+  focused-qa:
+    if: ${{ github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/qa/costs-and-main-preview' && !github.event.deleted }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 85
+    env:
+      GIT_TERMINAL_PROMPT: '0'
+      UV_NO_PROGRESS: '1'
+    steps:
+      - name: Prepare runner-local paths
+        id: paths
+        timeout-minutes: 1
+        run: |
+          evidence="$RUNNER_TEMP/costs-main-evidence"
+          mkdir -p "$RUNNER_TEMP/costs-main-raw" "$evidence"
+          printf 'QA_RAW=%s\nQA_OUTPUT=%s\nPLAYWRIGHT_BROWSERS_PATH=%s\n' \
+            "$RUNNER_TEMP/costs-main-raw" "$evidence" "$RUNNER_TEMP/costs-main-browsers" >> "$GITHUB_ENV"
+          printf 'evidence=%s\n' "$evidence" >> "$GITHUB_OUTPUT"
+      - name: Check out the exact candidate
+        id: checkout
+        timeout-minutes: 4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      # Same pins and dependency-only profile as setup-python-env, without a saved cache.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        timeout-minutes: 4
+        with:
+          python-version: '3.10'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        timeout-minutes: 5
+        with:
+          version: '0.12.1'
+          enable-cache: false
+      - name: Prepare the locked dependency environment
+        id: deps
+        timeout-minutes: 12
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          export PYTHON_STANDALONE_DEST="$RUNNER_TEMP/qa-python" PYTHON_STANDALONE_INTERPRETER_ONLY=1
+          {
+            bash scripts/download_python_standalone.sh
+            uv sync --locked --extra browser --group dev --no-install-project --python "$PYTHON_STANDALONE_DEST/bin/python3"
+          } > "$QA_RAW/dependencies.log" 2>&1
+      - name: Stage the repository-pinned Node
+        id: node
+        timeout-minutes: 5
+        run: |
+          .venv/bin/python -I -S scripts/download_node_standalone.py > "$QA_RAW/node-setup.log" 2>&1
+          echo "PLAYWRIGHT_NODEJS_PATH=$GITHUB_WORKSPACE/node-standalone/bin/node" >> "$GITHUB_ENV"
+      - name: Install Chromium and WebKit once
+        id: browsers
+        timeout-minutes: 22
+        run: >-
+          .venv/bin/python -I -S scripts/ci_browser_install.py --attempt-seconds 300 chromium webkit
+          > "$QA_RAW/browser-setup.log" 2>&1
+
+      - name: Stage the fixed Main preview checkout
+        id: main_base
+        if: ${{ !cancelled() && steps.browsers.outcome == 'success' }}
+        timeout-minutes: 4
+        run: bash qa/main_preview/run.sh stage-main > "$QA_RAW/main-setup.log" 2>&1
+      - name: Capture the Main alternatives and Evolution status from the fixed preview checkout
+        id: main
+        if: ${{ !cancelled() && steps.main_base.outcome == 'success' }}
+        timeout-minutes: 20
+        env:
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+        run: bash qa/main_preview/run.sh main
+      - name: Pack offline Main replay, even with only partial frames
+        id: pack
+        if: ${{ !cancelled() && (steps.main.outcome == 'success' || steps.main.outcome == 'failure') }}
+        timeout-minutes: 2
+        run: .venv/bin/python -I -S qa/main_preview/gallery.py "$QA_OUTPUT/main"
+      - name: Upload early Main replay and frames
+        if: ${{ !cancelled() && (steps.main.outcome == 'success' || steps.main.outcome == 'failure') }}
+        timeout-minutes: 4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: main-preview-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.paths.outputs.evidence }}/main/index.html
+            ${{ steps.paths.outputs.evidence }}/main/*/*/*/frames.json
+            ${{ steps.paths.outputs.evidence }}/main/*/*/*/0[0-4].png
+          if-no-files-found: warn
+          retention-days: 5
+          compression-level: 0
+
+      - name: Stage the fixed Find comparison checkout
+        id: find_base
+        if: ${{ !cancelled() && steps.browsers.outcome == 'success' }}
+        timeout-minutes: 4
+        run: bash qa/main_preview/run.sh stage-find > "$QA_RAW/find-setup.log" 2>&1
+      - name: Compare Find on the fixed post-change baseline with a page-only CSS overlay
+        if: ${{ !cancelled() && steps.find_base.outcome == 'success' }}
+        timeout-minutes: 8
+        env:
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+        run: bash qa/main_preview/run.sh find
+      - name: Summarize focused checks without raw test output
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.paths.outcome == 'success' }}
+        timeout-minutes: 1
+        env:
+          QA_DEPS_SETUP: ${{ steps.deps.outcome }}
+          QA_NODE_SETUP: ${{ steps.node.outcome }}
+          QA_BROWSER_SETUP: ${{ steps.browsers.outcome }}
+          QA_MAIN_BASE: ${{ steps.main_base.outcome }}
+          QA_MAIN_PACK: ${{ steps.pack.outcome }}
+          QA_FIND_BASE: ${{ steps.find_base.outcome }}
+        run: python3 -I -S qa/main_preview/receipt.py summarize "$QA_OUTPUT"
+      - name: Upload focused results and synthetic preview evidence
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.paths.outcome == 'success' }}
+        timeout-minutes: 4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: main-and-find-checks-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.paths.outputs.evidence }}/summary.json
+            ${{ steps.paths.outputs.evidence }}/find/*/*/find-*/frames.json
+            ${{ steps.paths.outputs.evidence }}/find/*/*/find-*/0[0-2].png
+          if-no-files-found: error
+          retention-days: 5
+          compression-level: 0

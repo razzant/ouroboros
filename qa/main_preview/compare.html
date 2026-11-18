@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Что открывает плашка Main</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#eef0ee;color:#27302a;font:16px/1.45 system-ui,sans-serif}main{width:min(100%,1160px);padding:24px;margin:auto}h1{font-size:clamp(24px,4vw,34px);margin:0 0 6px}p{margin:8px 0}.intro,#detail{color:#4a584f}nav,.steps,#choices{display:flex;align-items:center;gap:8px;flex-wrap:wrap}nav{margin:16px 0 8px}label{display:flex;align-items:center;gap:6px}select,button{font:inherit;color:inherit;background:#fff;border:1px solid #aab6ad;border-radius:8px;padding:5px 9px;cursor:pointer}button:disabled{opacity:.47;cursor:default}button[aria-pressed=true]{background:#27352c;color:#fff}button:focus-visible,select:focus-visible{outline:3px solid #4b85c2;outline-offset:2px}figure{position:relative;margin:10px 0;max-width:100%;line-height:0;background:#192019}img{display:block;width:100%;height:auto}#spot{position:absolute;background:transparent;border:0;padding:0}#spot:hover,#spot:focus-visible{outline:3px solid #64a5eb}#steps-label{min-width:4.2em}#detail{overflow-wrap:anywhere}#caption{min-height:1.4em}[hidden]{display:none!important}@media(max-width:600px){main{padding:12px}select{max-width:95vw}}
+</style>
+<main>
+<h1>Что открывает плашка Main</h1>
+<p class="intro">Нажми на элемент в кадре, чтобы увидеть следующий записанный шаг. Это снимки настоящего интерфейса на вымышленной переписке, не работающая установка.</p>
+<nav aria-label="Сравнение">
+<label>Ситуация <select id="scene"></select></label>
+<label>Тема <select id="theme"><option value="dark">Тёмная</option><option value="light">Светлая</option></select></label>
+<label>Движок <select id="engine"><option value="chromium">Chromium</option><option value="webkit">WebKit</option></select></label>
+</nav>
+<div id="choices"></div>
+<p id="caption" aria-live="polite"></p>
+<figure id="screen" hidden><img id="frame" alt=""><button id="spot" type="button" hidden></button></figure>
+<div class="steps"><button id="back" type="button">Назад</button><span id="steps-label"></span><button id="next" type="button">Дальше</button><button id="reset" type="button">Сначала</button></div>
+<p id="detail"></p>
+</main>
+<script type="application/json" id="data">__PREVIEW_DATA__</script>
+<script>
+const el = id => document.getElementById(id);
+const data = JSON.parse(el('data').textContent);
+const groups = [
+  ['Карточка уже загружена', [['Сейчас', 'now'], ['A · Строка System', 'a'], ['B · Исходная карточка', 'b']]],
+  ['Карточка на старой странице', [['A · Строка System', 'a-archive'], ['B · Исходная карточка', 'b-archive']]],
+  ['Родитель закончил, помощник ждёт', [['A · Строка System', 'a-helper'], ['B · Activity', 'b-helper']]],
+  ['В истории нет карточки', [['B · Нет сообщения', 'b-absent']]],
+  ['Evolution: баланс пополнен, цикл на паузе', [['Сейчас', 'evo-held'], ['Предлагаю', 'evo-held-design']]],
+  ['Evolution: обычная очередь', [['Сейчас', 'evo-queue'], ['Предлагаю', 'evo-queue-design']]],
+];
+const scene = el('scene'), theme = el('theme'), engine = el('engine'), choices = el('choices');
+const previous = el('back'), next = el('next'), reset = el('reset'), spot = el('spot');
+for (const [name] of groups) scene.add(new Option(name));
+const route = key => data[engine.value][theme.value][key];
+let choice = 0, step = 0;
+function pickAvailable() {
+  const list = groups[scene.selectedIndex][1];
+  if (route(list[choice]?.[1])) return;
+  const first = list.findIndex(([, key]) => route(key));
+  if (first >= 0) choice = first;
+}
+function paint() {
+  const list = groups[scene.selectedIndex][1];
+  const run = route(list[choice][1]);
+  const frame = run?.frames[step];
+  const more = !!frame && step + 1 < run.frames.length;
+  for (const [index, [label, key]] of list.entries()) {
+    if (choices.children.length !== list.length) choices.replaceChildren(...list.map(() => document.createElement('button')));
+    const button = choices.children[index];
+    button.type = 'button';
+    button.textContent = label + (route(key) ? '' : ' · нет кадров');
+    button.setAttribute('aria-pressed', String(index === choice));
+    button.onclick = () => { choice = index; step = 0; paint(); };
+  }
+  el('screen').hidden = !frame;
+  el('caption').textContent = frame?.description || 'Этот сценарий не записан. Выбери другой вариант, тему или движок.';
+  el('steps-label').textContent = frame ? `${step + 1} / ${run.frames.length}` : '—';
+  previous.disabled = reset.disabled = !frame || step === 0;
+  next.disabled = !more;
+  next.textContent = more && frame.action ? frame.action : 'Дальше';
+  spot.hidden = !(more && frame.box);
+  el('detail').textContent = '';
+  if (!frame) return;
+  const {width, height} = frame.viewport, image = el('frame');
+  image.width = width; image.height = height; image.src = frame.image; image.alt = frame.description;
+  el('screen').style.width = `${width}px`;
+  if (!spot.hidden) {
+    const b = frame.box;
+    spot.setAttribute('aria-label', frame.action);
+    spot.title = frame.action;
+    Object.assign(spot.style, {left: `${b.x/width*100}%`, top: `${b.y/height*100}%`,
+      width: `${b.w/width*100}%`, height: `${b.h/height*100}%`});
+  }
+  if (!run.complete) el('detail').textContent = 'Часть кадров сохранилась, но полный прогон этого движка не подтвердил все переходы.';
+  else if (!more) {
+    if (list[choice][1].startsWith('evo-')) { el('detail').textContent = 'В обоих примерах доступно $25. Здесь проверяется подпись состояния цикла на экране Evolution.'; return; }
+    const said = ['Во время перехода команда Resume не отправлялась.'];
+    if (run.anchor !== 'not_needed') said.push(`Поиск карточки: ${run.anchor}.`);
+    if (run.resume) said.push(`Явный Resume: 1 POST ${run.resume.path}, пустое тело; цель — ${run.resume.scope === 'single' ? 'один помощник' : 'корневая работа'}.`);
+    el('detail').textContent = said.join(' ');
+  }
+}
+function advance() { if (!next.disabled) { step++; paint(); if (spot.hidden) (next.disabled ? previous : next).focus(); } }
+spot.onclick = next.onclick = advance;
+previous.onclick = () => { if (step > 0) { step--; paint(); } };
+reset.onclick = () => { step = 0; paint(); };
+scene.onchange = () => { choice = 0; step = 0; pickAvailable(); paint(); };
+theme.onchange = engine.onchange = () => { step = 0; pickAvailable(); paint(); };
+// Choose a recorded route first, if stock failed before capture.
+if (!groups[0][1].some(([, key]) => route(key)) && groups[0][1].some(([, key]) => data.webkit.dark[key])) engine.value = 'webkit';
+pickAvailable();
+paint();
+</script></html>
