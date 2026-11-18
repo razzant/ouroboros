@@ -42,6 +42,29 @@ def task_facts(data: Any) -> dict:
     return {key: deepcopy(data[key]) for key in TASK_FIELDS if isinstance(data, dict) and key in data}
 
 
+def state_path(ctx: Any) -> Path:
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    return custody.custody_root(ctx) / "state" / "delegate_supervision" / f"{task_id}.json"
+
+
+def schema_1_envelope(payload: dict[str, Any]) -> dict[str, Any]:
+    """Carry a schema-1 ``pending_wake.payload`` forward without rewriting it.
+
+    Rows written before this family carried ``ok``/``host_code`` replay exactly as
+    stored; only the two classification keys are derived, and only when they are
+    ABSENT. ``refused`` was the one status the old writer used for a refused
+    observation, so it replays as the recorded tool failure it always was and
+    everything else replays as the ordinary observation it always was. No prose is
+    read, no word is matched, no terminal/success/zero-spend fact is invented, and
+    an unknown or corrupt shape keeps its whole body.
+    """
+    from ouroboros.delegate_shared import refusal_host_code
+
+    if "ok" in payload or str(payload.get("status") or "") != "refused":
+        return dict(payload)
+    return {**payload, "ok": False, "host_code": refusal_host_code(str(payload.get("reason") or ""))}
+
+
 def read(path: Path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))

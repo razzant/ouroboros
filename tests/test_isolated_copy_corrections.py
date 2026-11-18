@@ -6,7 +6,8 @@ import pytest
 from ouroboros import subagent_worktrees as trees
 from ouroboros.workspace_copies import same_directory, source_is_system_repo, copy_apply_refusal
 from ouroboros.tools.subagent_integration import _integrate_subagent_patch
-from tests.test_isolated_project_copies import case as copy_case, admit, capture, parent_context, git, repo
+from tests._isolated_copy_shared import admit, case as copy_case, parent_context
+from tests._workspace_git import git, publish_capture, seeded_repository as repo
 
 
 def late_native_case(case, *, original=False, run_id="late-run"):
@@ -237,12 +238,11 @@ def test_native_decision_binds_consumed_capture_during_orphan_apply(case, monkey
 
 def assert_current_consumers(case, task, expected_status, *, expected_path="", old_bytes=()):
     import json
-    from types import SimpleNamespace
     from ouroboros import cli, copy_capture_proof, headless, owner_stop_receipt
     from ouroboros.task_results import load_task_result
     from ouroboros.tools.control_task_results import _get_task_result
     from ouroboros.tools.subagent_integration import _compare_subagent_patches
-    from tests.test_owner_stop_retained_work import _client
+    from tests._task_file_http import task_file_client, use_cli_http
     ctx = parent_context(case)
     data = case[2]
     row = load_task_result(data, "native")
@@ -252,21 +252,18 @@ def assert_current_consumers(case, task, expected_status, *, expected_path="", o
     assert view["artifact_facts"]["status"] == expected_status, view
     comparison = _compare_subagent_patches(ctx, ["native"])
     assert f"patch status: {expected_status}" in comparison, comparison
-    with _client(data) as client:
+    with task_file_client(data) as client, pytest.MonkeyPatch.context() as monkeypatch:
+        reader, _ = use_cli_http(monkeypatch, client)
         response = client.get("/api/tasks/native")
         assert response.status_code == 200, response.text
         public = response.json()
         assert public["artifact_status"] == public["artifact_bundle"]["status"] == expected_status
         assert public["status"] == row["status"]
-        def get_bytes(path):
-            answer = client.get(path)
-            assert answer.status_code == 200, answer.text
-            return answer.content
         if expected_status == "failed":
             with pytest.raises(cli.PatchCLIError):
-                cli._patch_from_result(SimpleNamespace(get_bytes=get_bytes), "native", public, strict=False)
+                cli._patch_from_result(reader, "native", public, strict=False)
         else:
-            assert expected_path in cli._patch_from_result(SimpleNamespace(get_bytes=get_bytes), "native", public, strict=True)
+            assert expected_path in cli._patch_from_result(reader, "native", public, strict=True)
             assert expected_path in comparison
         for path, content in dict(old_bytes).items():
             relpath = Path(path).relative_to(headless.task_artifacts_dir(data, "native")).as_posix()
@@ -1079,7 +1076,7 @@ def test_clean_copies_synthesize_disjoint_hunks_on_same_file(case, commit_first)
     assert ta["workspace_copy"]["source_index_clean"]
     assert ta["workspace_copy"]["baseline_sha"] == ta["workspace_copy"]["target_head"]
     edit_line(a, "line 2", "A"); edit_line(b, "line 25", "B")
-    capture(case, a, ta); capture(case, b, tb)
+    publish_capture(case[2], ta); publish_capture(case[2], tb)
     ctx = parent_context(case)
     assert "✅ Integrated" in _integrate_subagent_patch(ctx, task_id="a")
     if commit_first:
@@ -1094,7 +1091,7 @@ def test_clean_copies_real_conflict_retains_both_results(case):
     seed_lines(case[1])
     a, ta = admit(case, "a", "parent"); b, tb = admit(case, "b", "parent")
     edit_line(a, "line 2", "A"); edit_line(b, "line 2", "B")
-    capture(case, a, ta); artifacts, _ = capture(case, b, tb)
+    publish_capture(case[2], ta); artifacts, _ = publish_capture(case[2], tb)
     ctx = parent_context(case)
     assert "✅ Integrated" in _integrate_subagent_patch(ctx, task_id="a")
     out = _integrate_subagent_patch(ctx, task_id="b")
@@ -1110,7 +1107,7 @@ def test_index_dirty_worktree_matches_head_keeps_current_tree_apply(case):
     a, ta = admit(case, "a", "parent")
     assert ta["workspace_copy"]["baseline_sha"] == ta["workspace_copy"]["target_head"]
     assert ta["workspace_copy"]["source_index_clean"] is False
-    (a / "a.txt").write_bytes(b"base\nchild\n"); capture(case, a, ta)
+    (a / "a.txt").write_bytes(b"base\nchild\n"); publish_capture(case[2], ta)
     out = _integrate_subagent_patch(parent_context(case), task_id="a")
     assert "✅ Integrated" in out, out
     assert (source / "a.txt").read_bytes() == b"base\nchild\n"
@@ -1132,7 +1129,7 @@ def test_parent_returns_named_source_under_existing_write_rights(case, monkeypat
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(runtime))
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(case[1].parent))
     child, task = admit(case, "child", "parent")
-    (child / "BIBLE.md").write_bytes(b"foreign project docs\n"); capture(case, child, task)
+    (child / "BIBLE.md").write_bytes(b"foreign project docs\n"); publish_capture(case[2], task)
     ctx = parent_context(case)
     if parent_focus in {"main", "room"}:
         ctx.workspace_root = None; ctx.workspace_mode = ""; ctx.is_direct_chat = True
@@ -1169,7 +1166,7 @@ def test_named_source_never_mints_parent_write_authority(case, monkeypatch, rest
         assert copy_apply_refusal(ctx, case[1], ["a.txt"]) == ""
         assert "VCS control directory" in copy_apply_refusal(ctx, case[1], [".git/config"])
         return
-    capture(case, child, task)
+    publish_capture(case[2], task)
     ctx = parent_context(case, source=case[0])
     if restriction in {"readonly", "acting"}:
         ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent" if restriction == "readonly" else "acting_subagent",
@@ -1186,7 +1183,7 @@ def test_named_source_never_mints_parent_write_authority(case, monkeypatch, rest
 def test_actual_body_policy_survives_false_child_label(case, monkeypatch):
     child, task = admit(case, "child", "parent", case[0])
     task["workspace_copy"]["source_is_system_repo"] = False
-    (child / "system.txt").write_bytes(b"body change\n"); capture(case, child, task)
+    (child / "system.txt").write_bytes(b"body change\n"); publish_capture(case[2], task)
     ctx = parent_context(case)  # parent is focused on the foreign project
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     out = _integrate_subagent_patch(ctx, task_id="child")
@@ -1200,7 +1197,7 @@ def test_apply_rechecks_presence_after_lock(case, monkeypatch):
     from tests.frozen_presence_authority import build_presence_capability_ceiling
     from tests.test_presence_authority import _resolution
     child, task = admit(case, "child", "parent")
-    (child / "a.txt").write_bytes(b"child\n"); capture(case, child, task)
+    (child / "a.txt").write_bytes(b"child\n"); publish_capture(case[2], task)
     ctx = parent_context(case)
     lock = git_tools._acquire_git_lock
     def acquire(*args, **kwargs):

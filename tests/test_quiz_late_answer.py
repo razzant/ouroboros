@@ -25,29 +25,11 @@ from ouroboros.owner_quiz import (
     reconcile_terminal,
     record_asked,
 )
-from tests.test_quiz_answer import _decision_app, _post
+from tests._question_answer_shared import _late_bridge, _post
+from tests.test_quiz_answer import _decision_app
 
 # TZ-2 B3: the model-facing first line of every late answer (never the owner's row).
 LATE_HEAD = "[Late answer to a question asked by task {}, which had finished]"
-
-
-def _late_bridge(tmp_path, monkeypatch):
-    """A real bridge and explicit fixture publication witnesses for named late delivery."""
-    import supervisor.message_bus as mb
-    from ouroboros.owner_quiz import record_publication
-    from ouroboros.task_store import task_facts
-
-    for task_id in task_facts(tmp_path):
-        for quiz_id, block in quiz_states(tmp_path, task_id).items():
-            if "chat_id" in block:
-                record_publication(tmp_path, task_id, quiz_id, block["chat_id"])
-
-    bridge = mb.LocalChatBridge()
-    frames = []
-    bridge._broadcast_fn = frames.append
-    monkeypatch.setattr(mb, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(mb, "_BRIDGE", bridge)
-    return bridge, frames
 
 
 def _inbox(bridge):

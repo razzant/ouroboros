@@ -883,21 +883,22 @@ class TaskModelWait:
             dialogue_store.append_quietly(pathlib.Path(self.canonical_root), "progress", event)
 
     def _drain_controls(self) -> None:
-        from ouroboros.owner_mailbox import KIND_MODEL_WAIT, _mailbox_path, drain_owner_entries
+        from ouroboros.owner_mailbox import KIND_MODEL_WAIT, _mailbox_path, receipt_gap_history, drain_owner_entries
 
         with self.lock:
             try:
                 stat = _mailbox_path(pathlib.Path(self.drive_root), self.task_id).stat()
                 stamp = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
-            except FileNotFoundError:
+            except OSError:
                 return
             if stamp == self.mailbox_stamp:
                 return
             seen = set(self.seen_controls)
             read_status = {}
             entries = drain_owner_entries(pathlib.Path(self.drive_root), self.task_id,
-                                           seen, kinds={KIND_MODEL_WAIT}, _read_status=read_status)
-            if not read_status.get("complete"):
+                                           seen, kinds={KIND_MODEL_WAIT}, _read_status=read_status,
+                                           gap_history=receipt_gap_history(self))
+            if read_status.get("unavailable"):
                 return
             stored = self.read_rows() if entries else {}
             for entry in entries:
@@ -923,7 +924,8 @@ class TaskModelWait:
             # A failed read or application cannot acknowledge the control. Keep
             # the normal strict authority error, without poisoning its next read.
             self.seen_controls.update(seen)
-            self.mailbox_stamp = stamp
+            if read_status["complete"]:
+                self.mailbox_stamp = stamp
 
     def waiting_slots(self) -> set[str]:
         with self.lock:

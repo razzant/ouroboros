@@ -4,6 +4,7 @@ Adapted from the retained startup boundary tests; lifecycle creation is stubbed
 for the entire fixture. No engine process or provider request belongs here.
 """
 import json
+import queue
 from types import SimpleNamespace
 
 import pytest
@@ -230,6 +231,7 @@ def test_fresh_start_and_retry_keep_bootstrap_once_rules(tmp_path, monkeypatch, 
 def test_shown_interactions_save_before_ack_and_survive_cold_restore(
         tmp_path, monkeypatch, save_fails, delivery):
     from ouroboros import delegate_supervision as ds, loop, working_checkpoint as wc
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
     from ouroboros.owner_mailbox import drain_owner_entries, write_owner_message
     from ouroboros.subagent_bootstrap import append_startup_receipt
     from tests.test_working_checkpoint import _registry, _saved_working_state
@@ -247,9 +249,11 @@ def test_shown_interactions_save_before_ack_and_survive_cold_restore(
                               (ctx.active_model, ctx.active_effort, False, "max", 0, ctx.context_fit_plan),
                               ctx._cost_ceiling, 100.0)
     assert write_owner_message(tmp_path, "Retained correction", task_id, msg_id="wake-mail")
+    # Schema-1 wake saved before letters moved to the mailbox drain.
     payload = {"status": "waiting_on_user", "run_id": run_id, "supervision_wake_id": "wake-q1",
                "pendingInteractions": [{"interactionId": "q1", "question": "Which path?"}],
-               "wake_events": [{"kind": "owner_text", "msg_id": "wake-mail", "text": "Retained correction"}]}
+               "wake_events": [{"type": "addressed_message", "kind": "owner_text", "provenance": "owner",
+                                "msg_id": "wake-mail", "text": "Retained correction", "ts": ""}]}
     ds._save_state(ctx, {"schema": 1, "run_id": run_id, "journal_cursor": 9, "pending_wake": {
         "wake_id": "wake-q1", "attempt_key": "2", "payload": payload, "mailbox_ids": ["wake-mail"],
         "interaction_ids": ["q1", "q-unshown"], "coordination_cursor": {"child": "v1"}}})
@@ -257,16 +261,21 @@ def test_shown_interactions_save_before_ack_and_survive_cold_restore(
         raw = json.dumps({"status": "configured_session_continuation", "wake": payload})
         append_startup_receipt(ctx, messages, raw, seen)
     else:
-        raw = json.dumps(payload)
+        replay = wake_now(ctx, run_id)  # the real wait projects the retained wake without observing the run again
         messages.append({"role": "assistant", "tool_calls": [{"id": "wait-call", "type": "function",
                          "function": {"name": "delegate_wait", "arguments": json.dumps({"run_id": run_id})}}]})
-        messages.extend(_deliver(ctx, raw, monkeypatch, tool="delegate_wait", meta={"supervision_wake_id": "wake-q1"}))
+        messages.extend(_deliver(ctx, replay.text, monkeypatch, tool="delegate_wait", meta=replay.meta))
     limit = SimpleNamespace(tools=registry, messages=messages, llm_trace=trace, accumulated_usage=usage,
                             owner_msg_seen=seen, round_idx=8, tool_schemas=[], budget_tail="tool")
     assert ctx._sleep_interaction_seen == {run_id: ["q1"]}
-    # A tool wake's shown mail is seen; a startup receipt shows its old wake's mail but leaves it to the first drain.
-    assert ("wake-mail" in seen) is (delivery == "tool")
-    assert bool(drain_owner_entries(tmp_path, task_id, set(seen), 2)) is (delivery == "startup")
+    shown_wake = messages[-1]["content"]
+    assert "Which path?" in shown_wake and "Retained correction" not in shown_wake
+    assert "wake-mail" not in seen
+    assert [entry["msg_id"] for entry in drain_owner_entries(tmp_path, task_id, set(seen), 2)] == ["wake-mail"]
+    loop._drain_incoming_messages(messages, queue.Queue(), tmp_path, task_id, None, seen,
+                                  owner_ctx=ctx, defer_content_ack=True)
+    [letter] = [row for row in messages if "Retained correction" in str(row.get("content"))]
+    assert letter.get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND and "wake-mail" in seen
     assert ds._load_state(ctx, "")["pending_wake"]
     assert drain_owner_entries(tmp_path, task_id, set(), 2)
     if save_fails:
@@ -286,7 +295,7 @@ def test_shown_interactions_save_before_ack_and_survive_cold_restore(
         return
     saved = wc.read_working(tmp_path, task_id, 2)[1]
     assert saved["sleep_interaction_seen"] == {run_id: ["q1"]}
-    assert any(raw in str(row.get("content")) for row in saved["messages"])
+    assert letter in saved["messages"] and any(row.get("content") == shown_wake for row in saved["messages"])
     assert not ds._load_state(ctx, "")["pending_wake"]
     assert not drain_owner_entries(tmp_path, task_id, set(), 2)
     next_task = {"id": task_id}
@@ -299,6 +308,7 @@ def test_shown_interactions_save_before_ack_and_survive_cold_restore(
                              (ctx.active_model, ctx.active_effort, False, "max", 0, ctx.context_fit_plan),
                              ctx._cost_ceiling, 100.0)
     assert cold._ctx._sleep_interaction_seen == {run_id: ["q1"]}
+    assert sum("Retained correction" in str(row.get("content")) for row in cold_messages) == 1
     wait_calls = []
     def observe(_ctx, rid, *_args, **_kwargs):
         assert rid == run_id

@@ -8,6 +8,7 @@ The first Continue is pinned in ``test_reply_target_carried.py``; these follow t
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +33,48 @@ def _successor_record(sources, predecessor, task_id, ctx_successor):
     return {"id": task_id, "metadata": metadata, "owner_mailbox": {"rows": [], "read_complete": True},
             "review_evidence": {"task_inputs": {"owner_requirements_and_decisions":
                                                 _accept_owner_directives(ctx_successor, None, task_id)}}}
+
+
+@pytest.mark.parametrize("from_mailbox", [True, False])
+def test_closed_card_reason_keeps_its_asker_and_meaning_through_continues(tmp_path, monkeypatch, from_mailbox):
+    from ouroboros import owner_quiz
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources, work_order_text
+    from ouroboros.review_evidence_sections import _accept_owner_directives
+
+    reason = "Use the existing outline for now.\nKeep the remaining questions open."
+    stamp, mid = "2026-11-17T10:30:00Z", "quiz_closed:q1"
+    letter = {"kind": "quiz_closed", "msg_id": mid, "text": "Host's closure frame.",
+              "quiz_delivery": {"task_id": "asker", "quiz_id": "q1", "closed_actor": "owner",
+                                "closed_at": stamp, "owner_close_words": reason}}
+    monkeypatch.setattr(owner_quiz, "quiz_states", lambda _root, asker: {
+        "q1": {"delivery": {"recipient_task_id": "reader", "msg_id": mid, "read_at": stamp}}} if asker == "asker" else {})
+    directive = {"source": "owner_question_close", "content": reason, "msg_id": mid,
+                 "source_task_id": "asker", "quiz_id": "q1", "ts": stamp}
+    record = {"id": "reader", "origin_message_text": "Check the outline.",
+              "owner_mailbox": {"rows": [json.dumps(letter)] if from_mailbox else [], "read_complete": True},
+              "review_evidence": {"task_inputs": {"owner_requirements_and_decisions": [] if from_mailbox else [directive]}}}
+    predecessor = "reader"
+    for successor in ("next", "last"):
+        sources = owner_sources(tmp_path, record, predecessor)
+        assert sources["gaps"] == []
+        [closing] = sources["later"]
+        assert (closing["source"], closing["source_task_id"], closing["quiz_id"], closing["content"]) == (
+            "owner_question_close", "asker", "q1", reason)
+        assert closing["msg_id"] == mid
+        text = work_order_text(predecessor, "owner_restart", sources)
+        heading = "Card q1 of task asker was closed without an answer"
+        assert heading in text and "No approval recorded." in text and "Owner's reason (verbatim; not an answer):" in text
+        assert text.count(reason) == 1 and text.index(heading) < text.index(reason)
+        live = SimpleNamespace(task_id=successor, task_metadata={
+            "objective_author": {"kind": "continuation", "predecessor_task_id": predecessor},
+            "owner_corpus": owner_corpus_rows(sources)})
+        _initialize_owner_directives(live, [{"role": "user", "content": text}])
+        [evidence] = [row for row in _accept_owner_directives(live, None, successor) if row.get("msg_id") == mid]
+        assert (evidence["source"], evidence["source_task_id"], evidence["quiz_id"], evidence["content"]) == (
+            "owner_question_close", "asker", "q1", reason)
+        record = _successor_record(sources, predecessor, successor, live)
+        predecessor = successor
 
 
 @pytest.mark.parametrize("source", ["initial_user", "owner_mailbox"])

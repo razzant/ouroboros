@@ -101,7 +101,7 @@ AUTHOR_STOP_CAUSE = "author_stop"  # a completed row its own author stopped as u
 # The work's own hard bounds (its deadline, its money): a new task id never
 # extends them, so a task they ended is not offered Continue.
 HARD_LIMIT_REASON_CODES = frozenset({"deadline", "deadline_local", "budget_exhausted"})
-OWNER_SOURCE_KINDS = frozenset({"owner_text", "quiz_answer", "quiz_closed", "card_input"})
+OWNER_SOURCE_KINDS = frozenset({"owner_text", "quiz_answer", "card_input"})
 # The retained owner corpus (``review_evidence.task_inputs``) labels each row by its recorder's typed
 # ``source`` (``loop_messages._record_owner_directive``): my human's later words (the one owner list less
 # the first text; the successor's seeding set), the run's first text (a projection of the original, never a
@@ -443,6 +443,38 @@ def occurrence_schedule_text(result: Dict[str, Any], task_id: str) -> List[Dict[
     return kept
 
 
+def _continuation_mail_rows(root, task_id, result, gaps, container):
+    """Combine the terminal snapshots and every still-held mailbox in source order.
+
+    Deferred child history may contain letters newer than the canonical capture;
+    after cleanup the captured owner and unread rows are the surviving sources.
+    """
+    from ouroboros.task_custody import own_child_drives
+
+    rows, drives, live = [], [root], False
+    try:
+        drives += own_child_drives(root, task_id)
+        for drive in drives:
+            entries, whole, present = _mail_rows(drive, task_id)
+            rows.extend(entries)
+            live |= present
+            if not whole:
+                gaps.append("owner_mailbox_unreadable")
+    except (OSError, ValueError):
+        gaps.append("owner_mailbox_unreadable")
+    captured = container(result, "owner_mailbox", dict, "retained_mailbox_malformed")
+    if not live and "owner_mailbox" not in result:
+        gaps.append("owner_mailbox_uncaptured")
+    elif not live and captured.get("read_complete") is not True:
+        gaps.append("owner_mailbox_capture_incomplete")
+    unread = container(result, "unread_mailbox", dict, "retained_mailbox_malformed")
+    held, whole = _exact_rows([line for block in (captured, unread)
+                               for line in container(block, "rows", list, "retained_mailbox_malformed")])
+    if not whole:
+        gaps.append("retained_mailbox_row_malformed")
+    return held + rows, drives
+
+
 def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict[str, Any]:
     """The predecessor's owner sources, authored note pointer and peer context, apart.
 
@@ -468,6 +500,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     continuation = container(metadata, "continuation", dict, "chained_owner_source_malformed")
     chained = container(continuation, "owner_sources", dict, "chained_owner_source_malformed")
     from ouroboros.consciousness_authority import wake_cause
+    from ouroboros.question_answers import closure_directive, closure_was_read, legacy_closure_directive
     from ouroboros.schedule_continuation import admission_basis, valid_basis
     schedule = chained.get("schedule") or admission_basis(result, task_id)
     if schedule is not None and not valid_basis(schedule):
@@ -556,6 +589,8 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             if sources is not None and row.get(source_key, "") not in sources:
                 gaps.append("owner_source_provenance_unknown")
                 continue
+            if target is later and legacy_closure_directive(row):
+                continue  # the old carried frame was not spoken by my human
             if named(row_identity(row), row.get("words", row[text_key]), target is later) is None:
                 target.append(dict(row))
     quizzes = result.get("owner_quiz") if isinstance(result.get("owner_quiz"), dict) else {}
@@ -578,6 +613,8 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                     and all(isinstance(row.get(key, ""), str) for key in ("source", "words", *ROW_IDS))):
                 gaps.append(malformed)
                 continue
+            if legacy_closure_directive(row):
+                continue  # only the exact letter and its receipt can recover older terms
             msg_id, source, text = str(row.get("msg_id") or ""), str(row.get("source") or ""), row["content"]
             words = row.get("words", text)  # the exact text a rendered row was delivered as; the rendering stays
             client, identity = str(row.get("client_message_id") or ""), row_identity(row)
@@ -628,37 +665,11 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     # the owner words this root began with even when no terminal corpus was captured.
     corpus_pass(container(metadata, "owner_corpus", list, "start_owner_corpus_malformed"),
                 "start_owner_corpus_row_malformed", carried=True)
-    # Deferred history leaves the child's exact mailbox in custody. A canonical
-    # terminal capture is not proof that this retained source has no later words.
-    from ouroboros.task_custody import own_child_drives, task_artifact_stores
-    rows, complete, live, drives = [], True, False, [root]
-    try:
-        drives += own_child_drives(root, task_id)
-        for drive in drives:
-            entries, whole, present = _mail_rows(drive, task_id)
-            rows.extend(entries)
-            complete = complete and whole
-            live = live or present
-    except (OSError, ValueError):
-        complete = False
-    if not complete:
-        gaps.append("owner_mailbox_unreadable")
-    # The root's terminal captured its exact owner rows, ACKed ones included
-    # (``task_custody.capture_owner_mail``): the copy that outlives the cleanup.
-    captured_owner = container(result, "owner_mailbox", dict, "retained_mailbox_malformed")
-    if not live and "owner_mailbox" not in result:
-        gaps.append("owner_mailbox_uncaptured")
-    elif not live and captured_owner.get("read_complete") is not True:
-        gaps.append("owner_mailbox_capture_incomplete")
-    unread = container(result, "unread_mailbox", dict, "retained_mailbox_malformed")
-    held_rows = [row for held in (captured_owner, unread)
-                 for row in container(held, "rows", list, "retained_mailbox_malformed")]
-    held, whole = _exact_rows(held_rows)
-    if not whole:
-        gaps.append("retained_mailbox_row_malformed")
-    rows = held + rows
+    from ouroboros.task_custody import task_artifact_stores
+    rows, drives = _continuation_mail_rows(root, task_id, result, gaps, container)
     exact_seen: set = set()
-    from ouroboros.owner_quiz import late_answer_owner_text, secret_outcome_block
+    from ouroboros.owner_quiz import late_answer_owner_text, quiz_states, secret_outcome_block
+    closure_states = {}
     for entry in rows:
         if any(not isinstance(entry.get(key, ""), str) for key in ("msg_id", "kind", "source_task_id")):
             gaps.append("owner_mailbox_row_malformed")
@@ -671,6 +682,15 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             gaps.append("owner_mailbox_row_malformed")  # the writer stores text; never str() a body
             continue
         exact_seen.add(entry["_exact_row"])
+        if kind == "quiz_closed":
+            if reason := closure_directive(entry):
+                asker = reason["source_task_id"]
+                if asker not in closure_states:
+                    closure_states[asker] = quiz_states(root, asker)
+                block = closure_states[asker].get(reason["quiz_id"]) or {}
+                if closure_was_read(root, task_id, entry, block, result) and named(msg_id, reason["content"], True) is None:
+                    later.append(reason)
+            continue  # an unread closure is owed as addressed mail, not repeated in the new work order
         if secret_outcome_block(entry) is not None:
             continue  # form outcomes remain recoverable task evidence, never fabricated owner words
         if kind == "quiz_answer" and (entry.get("quiz_delivery") or {}).get("answer_snapshot"):
@@ -799,7 +819,11 @@ def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _card_lines(row: Dict[str, Any]) -> List[str]:
-    """One answered card for the successor: the asking task's question, then the owner's answer."""
+    """One answered or closed card for the successor, with the owner's words apart."""
+    if row.get("source") == "owner_question_close":
+        return [f"- Card {row.get('quiz_id') or 'unknown'} of task {row.get('source_task_id') or 'unknown'} "
+                f"was closed without an answer ({row.get('ts') or 'time not recorded'}). No approval recorded.",
+                "  Owner's reason (verbatim; not an answer):", row.get("words", row["content"])]
     card = row.get("card") if isinstance(row.get("card"), dict) else {}
     options = card.get("options") if isinstance(card.get("options"), list) else []
     index, comment = card.get("answered_index"), str(card.get("comment") or "")
@@ -956,8 +980,10 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
     if later:
         lines += ["", "Other owner words in that task's record (verbatim, in order):"]
         for row in later:
-            lines += (_card_lines(row) if isinstance(row.get("card"), dict)
-                      else [f"- {row.get('ts') or ''} {row['content']}"])
+            if row.get("source") == "owner_question_close" or isinstance(row.get("card"), dict):
+                lines += _card_lines(row)
+            else:
+                lines.append(f"- {row.get('ts') or ''} {row['content']}")
     confirmed = [row for row in sources.get("confirmed_place") or [] if isinstance(row, dict) and row.get("content")]
     if confirmed:  # my human's words are never shortened to a count or a pointer
         lines += ["", "Words from your human's confirmed account in that place (their words there, by provenance; an order "

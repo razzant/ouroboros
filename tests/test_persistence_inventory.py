@@ -1003,7 +1003,8 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 473 -> 474: an explicit context inspection retains its ordinary-memory map,
 # ``task_results/artifacts/*/source_handles/context_checkpoints/ordinary-memory-*.json``
 # (``ouroboros/tools/compact_context.py``, ``_ordinary_memory``); its own row beside the other context checkpoints.
-EXPECTED_SCAN_PATHS = 474
+# 474 -> 475: the capture reader also names the existing task artifact workspace.patch.
+EXPECTED_SCAN_PATHS = 475
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

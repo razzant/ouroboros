@@ -422,6 +422,11 @@ def _reset_turn_state(ctx: Any) -> None:
     # A reused context cannot acknowledge a previous turn's unsaved mail.
     # Its durable mailbox will deliver those entries to the next real consumer.
     ctx._pending_content_acks = []
+    ctx._mailbox_content_ids = set()
+    ctx._restore_mailbox = True
+    ctx._mail_restore_notice = False
+    ctx._legacy_mailbox_seen = set()
+    ctx._restored_wake_mail = {}
     ctx._presence_completion, ctx._presence_completion_accepted = None, False
     ctx._presence_forced_declaration = ctx._presence_forced_pending = ctx._forced_completion = None
     ctx._completion_request = ctx._completion_selected = ctx._completion_observation = None
@@ -478,6 +483,8 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
             seed_no_send(tools._ctx, trace)  # a fresh place-carrying lineage starts having said nothing there
         if carried is not None:
             carried.reentered(tools._ctx, messages)
+        from ouroboros.mailbox_restore import restore_wake_mail
+        restore_wake_mail(tools._ctx, messages)
         from ouroboros.subagent_bootstrap import append_startup_receipt
         append_startup_receipt(tools._ctx, messages, getattr(tools._ctx, "_configured_startup_wake", ""), seen)
         from ouroboros.headless import reopen_capture_at_entry  # entered: an earlier capture becomes history

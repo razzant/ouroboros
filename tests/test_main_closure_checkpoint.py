@@ -14,6 +14,37 @@ from tests._budget_pause_exact_helpers import _loop_ctx
 from tests.test_quiz_history_evidence import _ask, runtime as runtime
 
 
+@pytest.mark.parametrize("authored", [False, True])
+def test_legacy_closure_checkpoint_reprojects_only_the_typed_owner_reason(runtime, authored):
+    from copy import deepcopy
+    from ouroboros.review_evidence_sections import _accept_owner_directives
+
+    root, tid = runtime.root, runtime.task["id"]
+    write_task_result(root, tid, "running")
+    _ask(runtime, "retired")
+    reason = "The owner withdrew the planned output" if authored else ""
+    status, _receipt = asyncio.run(answer_decision(root, {
+        "request_id": "close-legacy", "decision_id": f"quiz:{tid}:retired", "action": "close", "reason": reason,
+    }))
+    assert status == 200
+    [letter] = drain_owner_entries(root, tid)
+    ctx, limit = _loop_ctx(root, tid)
+    limit.messages[:] = [{"role": "user", "content": letter["text"]}]
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": letter["text"], "msg_id": letter["msg_id"]}]
+    wc.save_ready(limit)
+    path = wc.checkpoint_path(root, tid, 1)
+    original_bytes = path.read_bytes()
+    _, state = wc.read_working(root, tid, 1)
+    old_directives = deepcopy(state["owner_directives"])
+    resumed, restored = _loop_ctx(root, tid)
+    restore_continuation_state(restored.tools, state, restored.messages, restored.llm_trace,
+                               restored.accumulated_usage, restored.owner_msg_seen)
+    assert state["owner_directives"] == old_directives and path.read_bytes() == original_bytes
+    assert restored.messages[0]["content"] == letter["text"]
+    rows = _accept_owner_directives(resumed, root, tid)
+    assert [row["content"] for row in rows if row.get("msg_id") == letter["msg_id"]] == ([reason] if authored else [])
+
+
 @pytest.mark.parametrize("failed_save", [False, True], ids=["crash-before-save", "failed-save"])
 def test_owner_close_replays_until_its_reason_is_checkpointed(runtime, monkeypatch, failed_save):
     root, tid = runtime.root, runtime.task["id"]

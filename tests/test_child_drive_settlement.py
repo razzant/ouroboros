@@ -398,6 +398,64 @@ def test_a_timeout_retry_occupying_the_original_drive_keeps_it_until_its_own_cus
     assert _settle(data, drive)["status"] == "removed"
 
 
+def test_original_drive_keeps_a_retry_whose_only_remaining_mail_is_a_receipt(tmp_path):
+    data, drive, _ = _cancelled_with_capture(tmp_path)
+    retry = "settle1r"
+    write_task_result(data, retry, "running", child_drive_root=str(drive))
+    assert owner_mailbox.write_owner_message(drive, "Continue the report", retry, msg_id="carry")
+    assert owner_mailbox.acknowledge_task_messages(drive, retry, ["carry"], wake_id="loop_delivery")
+    owner_mailbox._mailbox_path(drive, retry).unlink()
+    receipt = owner_mailbox._ack_path(drive, retry)
+    saved = receipt.read_bytes()
+
+    assert _settle(data, drive)["reason"] == "canonical_not_settled"
+    assert receipt.read_bytes() == saved
+
+
+@pytest.mark.parametrize("suffix", [".AcKs", ".acks"], ids=["mixed-case-letter", "shared-receipt"])
+def test_original_drive_keeps_an_admitted_suffixed_recipient(tmp_path, suffix):
+    data, drive, _ = _cancelled_with_capture(tmp_path)
+    recipient = TASK + suffix
+    write_task_result(data, recipient, "running", child_drive_root=str(drive))
+    writer = recipient if suffix == ".AcKs" else TASK
+    assert owner_mailbox.write_owner_message(drive, "Keep the report", writer, msg_id="report")
+    path = owner_mailbox._mailbox_path(drive, writer)
+    if writer == TASK:
+        assert owner_mailbox.acknowledge_task_messages(drive, writer, ["report"], wake_id="loop_delivery")
+        path.unlink()
+        path = owner_mailbox._ack_path(drive, writer)
+    saved = path.read_bytes()
+
+    assert _settle(data, drive)["reason"] == "canonical_not_settled"
+    assert path.read_bytes() == saved
+
+
+@pytest.mark.parametrize("receipt_only", [False, True], ids=["letter", "receipt-only"])
+def test_drive_waits_for_the_other_mail_writer_before_retirement(tmp_path, receipt_only):
+    data = tmp_path / "data"
+    drive = _drive(data, "task_drives")
+    recipient, other = (TASK, TASK + ".acks") if receipt_only else ("retry.acks", "retry")
+    if recipient != TASK:
+        write_task_result(data, TASK, "completed", child_drive_root=str(drive))
+    write_task_result(data, recipient, "running", child_drive_root=str(drive))
+    assert owner_mailbox.write_owner_message(drive, "Keep this note", recipient, msg_id="note")
+    mailbox = owner_mailbox._mailbox_path(drive, recipient)
+    letter = mailbox.read_text(encoding="utf-8").rstrip("\n")
+    assert owner_mailbox.acknowledge_task_messages(drive, recipient, ["note"], wake_id="loop_delivery")
+    write_task_result(data, recipient, "completed", child_drive_root=str(drive))
+    if receipt_only:
+        mailbox.unlink()
+    shared = owner_mailbox._ack_path(drive, recipient) if receipt_only else mailbox
+    saved = shared.read_bytes()
+
+    with task_custody.task_mail_lock(drive, other) as locked:
+        assert locked
+        assert _settle(data, drive)["reason"] == "mailbox_busy"
+        assert shared.read_bytes() == saved
+    assert _settle(data, drive)["status"] == "removed"
+    assert load_task_result(data, recipient)["owner_mailbox"]["rows"] == [letter]
+
+
 def test_a_drive_that_is_not_the_tasks_own_is_never_touched(tmp_path):
     data, drive, _record = _cancelled_with_capture(tmp_path)
     elsewhere = tmp_path / "elsewhere"

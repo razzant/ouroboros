@@ -36,6 +36,7 @@ from ouroboros.headless_status import (
 from ouroboros.utils import atomic_write_json, utc_now_iso
 from ouroboros.workspace_patch_rules import (
     NAMED_EVIDENCE_EXCLUSION,
+    _INCIDENTAL_LOCKFILE_REASON, _LOCKFILE_METADATA_BYTES,
     _PATCH_EXCLUDE_RULES_VERSION,
     _PATCH_MAX_UNTRACKED_FILE_BYTES,
     _incidental_lockfile_excludes,
@@ -58,18 +59,12 @@ def build_workspace_patch(workspace_root: pathlib.Path) -> str:
     """Return a git patch for tracked changes plus untracked files."""
 
     with tempfile.TemporaryDirectory() as tmp:
-        artifacts, manifest = write_workspace_patch_artifacts(
-            pathlib.Path(workspace_root),
-            pathlib.Path(tmp),
-            task={},
-        )
-        if manifest.get("status") == ARTIFACT_STATUS_FAILED:
-            return ""
-        for artifact in artifacts:
-            if artifact.get("kind") == "workspace_patch":
-                path = pathlib.Path(str(artifact.get("path") or ""))
-                return path.read_text(encoding="utf-8") if path.is_file() else ""
-    return ""
+        folder = pathlib.Path(tmp)
+        _, manifest = write_workspace_patch_artifacts(pathlib.Path(workspace_root), folder, task={})
+        path = folder / manifest["patch_name"]
+        if manifest["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES and path.is_file():
+            return path.read_text(encoding="utf-8")
+        return ""
 
 
 def _held_named_evidence(root: pathlib.Path, host_evidence: str, changed: set, baseline: set,
@@ -119,6 +114,13 @@ def write_workspace_patch_artifacts(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     patch_path = artifact_dir / "workspace.patch"
     manifest_path = artifact_dir / "workspace_patch.json"
+
+    def publish_manifest(manifest):
+        # Successful and failed manifests both carry the measured identity of the bytes we publish.
+        atomic_write_json(manifest_path, manifest, trailing_newline=True)
+        return {"kind": "workspace_patch_manifest", "name": manifest_path.name, "path": str(manifest_path),
+                **stream_artifact_file(manifest_path), "workspace_root": str(root)}
+
     errors: List[Dict[str, Any]] = []
     diagnostics: List[Dict[str, Any]] = []
     excluded: List[Dict[str, str]] = []
@@ -138,10 +140,7 @@ def write_workspace_patch_artifacts(
         }])
         manifest.update(base_provenance="unknown", note=manifest["errors"][0]["message"])
         patch_path.unlink(missing_ok=True)
-        atomic_write_json(manifest_path, manifest, trailing_newline=True)
-        return [{"kind": "workspace_patch_manifest", "name": manifest_path.name,
-                 "path": str(manifest_path), **stream_artifact_file(manifest_path),
-                 "workspace_root": str(root)}], manifest
+        return [publish_manifest(manifest)], manifest
     base_ref, base_head, base_is_empty_tree = _workspace_patch_base(
         root,
         errors,
@@ -187,9 +186,8 @@ def write_workspace_patch_artifacts(
     tracked_excluded.extend({"path": rel, "reason": NAMED_EVIDENCE_EXCLUSION} for rel in held_tracked)
     untracked = [rel for rel in untracked if rel not in held]
     changed_tracked = [rel for rel in changed_tracked if rel not in held]
-    # git's binary verdict for the whole inventory in one process (two when empty
-    # files need their attribute verdict; #1241); the loop below keeps its per-file
-    # order and reads the verdict instead of spawning ``git diff --numstat`` per file.
+    # Batch git's binary verdicts, preserving per-file policy order without one process per path.
+    # Empty files may need a second batch for their attribute verdict (#1241).
     binary_verdicts = untracked_binary_verdicts(root, binary_verdict_candidates(root, untracked), warnings=diagnostics)
     for rel in untracked:
         if _is_declared_scratch(root, rel, *scratch):
@@ -197,6 +195,8 @@ def write_workspace_patch_artifacts(
             continue
         sensitive_reason = _sensitive_untracked_reason(rel)
         if sensitive_reason:
+            # A credential-shaped name is a per-file veto, never a capture failure that
+            # suppresses the entire tracked diff. Execution snapshots use the same policy (#447).
             sensitive.append({"path": rel, "reason": sensitive_reason})
             continue
         reason = _patch_exclude_reason(rel) or _wal_index_reason(root, rel)
@@ -221,16 +221,27 @@ def write_workspace_patch_artifacts(
         captured_inputs.append(rel)
         if work_domain.kind(root / rel) == "file":
             file_output_paths.append(rel)
-    incidental_lock_excludes = _incidental_lockfile_excludes([*changed_tracked, *included_untracked])
-    excluded.extend({"path": rel, "reason": "incidental lockfile without sibling manifest change"}
+    def pnpm_lock_sources(rel: str) -> Iterable[bytes]:
+        kind = work_domain.kind(root / rel)
+        if kind == "file":
+            yield work_domain.read_bytes(root / rel, limit=_LOCKFILE_METADATA_BYTES + 1)
+        elif kind != "missing" or rel not in base_sizes:
+            raise ValueError("current lockfile is unavailable")
+        if rel in base_sizes:  # An importer may have been removed in this change.
+            if base_sizes[rel] > _LOCKFILE_METADATA_BYTES:
+                raise ValueError(f"baseline lockfile exceeds the {_LOCKFILE_METADATA_BYTES}-byte metadata limit")
+            original = _git_bytes(["git", "cat-file", "blob", f"{base_ref}:{rel}"], root)
+            if len(original) != base_sizes[rel]:
+                raise ValueError("could not read the baseline lockfile")
+            yield original
+
+    captured_packages = [rel for rel in captured_inputs if pathlib.PurePosixPath(rel).name == "package.json"]
+    incidental_lock_excludes = _incidental_lockfile_excludes(
+        [*changed_tracked, *included_untracked, *captured_packages],
+        pnpm_lock_sources=pnpm_lock_sources, diagnostics=diagnostics)
+    excluded.extend({"path": rel, "reason": _INCIDENTAL_LOCKFILE_REASON}
                     for rel in included_untracked if rel in incidental_lock_excludes)
     included_untracked = [rel for rel in included_untracked if rel not in incidental_lock_excludes]
-    # A sensitive-shaped untracked file is a PER-FILE exclusion (disclosed in
-    # ``sensitive_blocked``), never a manifest error: the error path suppressed
-    # the ENTIRE patch write, so one credential-shaped NAME (public.pem,
-    # token_count.json) annihilated the whole tracked diff. The snapshot path
-    # (untracked_capture_veto_reason → provision_execution_snapshot) always
-    # treated the same hit as a per-file skip; the patch now matches it (#447).
 
     # Large generated data rides a file artifact, never a giant binary Git patch.
     large_tracked = []
@@ -277,8 +288,7 @@ def write_workspace_patch_artifacts(
             if tracked_lock_excludes or large_tracked or selected_files or wal_indexes or held_tracked:
                 tracked_pathspec += ["."] + [f":(exclude,literal){rel}" for rel in [
                     *tracked_lock_excludes, *large_tracked, *sorted(selected_files), *wal_indexes, *held_tracked]]
-            for rel in tracked_lock_excludes:
-                tracked_excluded.append({"path": rel, "reason": "incidental lockfile without sibling manifest change"})
+            tracked_excluded.extend({"path": rel, "reason": _INCIDENTAL_LOCKFILE_REASON} for rel in tracked_lock_excludes)
             diffstat = _git_stdout(
                 ["git", "diff", "--stat", "--no-ext-diff", "--no-color", base_ref, *tracked_pathspec],
                 root,
@@ -380,27 +390,10 @@ def write_workspace_patch_artifacts(
         # Where this capture retained the evidence folder, or why not; absent when a run owns it or nothing is new.
         **({"named_evidence": _evidence_summary(named_evidence)} if named_evidence is not None else {}),
     }
-    atomic_write_json(manifest_path, manifest, trailing_newline=True)
-
-    # Published with its measured identity, like the patch beside it (#1969).
-    artifacts = [
-        {
-            "kind": "workspace_patch_manifest",
-            "name": "workspace_patch.json",
-            "path": str(manifest_path),
-            **stream_artifact_file(manifest_path),
-            "workspace_root": str(root),
-        }
-    ]
-    if status == ARTIFACT_STATUS_READY_WITH_CHANGES and total_size:
-        artifacts.insert(0, {
-            "kind": "workspace_patch",
-            "name": "workspace.patch",
-            "path": str(patch_path),
-            "size": total_size,
-            "sha256": digest,
-            "workspace_root": str(root),
-        })
+    artifacts = [publish_manifest(manifest)]
+    if total_size:  # Failure and file-only results have no text patch.
+        artifacts.insert(0, {"kind": "workspace_patch", "name": patch_path.name, "path": str(patch_path),
+                             "size": total_size, "sha256": digest, "workspace_root": str(root)})
     return [*artifacts, *file_outputs], manifest
 
 

@@ -673,14 +673,10 @@ def _retry_child_task_refs_locked(parent: pathlib.Path, child: pathlib.Path, tas
 
 
 def _child_result_adopted(child: pathlib.Path, result: Dict[str, Any]) -> bool:
-    promotion = result.get("child_ref_promotion")
-    source = str(result.get("headless_child_drive_root") or "")
-    return bool(
-        "result" in result and isinstance(promotion, dict)
-        and type(promotion.get("schema_version")) is int and promotion["schema_version"] == 1
-        and promotion.get("status") in {"complete", "incomplete"}
-        and source and pathlib.Path(source).resolve(strict=False) == child.resolve(strict=False)
-    )
+    from ouroboros.task_custody import copied_child_drive
+
+    source = copied_child_drive(result)
+    return "result" in result and source is not None and source.resolve(strict=False) == child.resolve(strict=False)
 
 
 def terminal_task_files_ready(canonical_root: pathlib.Path, task: Dict[str, Any], result: Any) -> bool:

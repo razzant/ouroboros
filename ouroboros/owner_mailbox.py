@@ -1,4 +1,6 @@
 """Per-task owner-message mailboxes for running worker tasks."""
+import contextlib
+import hashlib
 import json
 import logging
 import pathlib
@@ -58,6 +60,7 @@ KIND_FINALIZE_NOW = "finalize_now"
 # restart's drain restores its attempt latch. Model mail only wakes a durable read.
 KIND_HURRY = "hurry"
 KIND_OWNER_MODEL = "owner_model"
+WAKE_CONTROL_KINDS = frozenset({KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_MODEL})
 # Owner's verbatim quiz answer (#Q-2b): a typed control whose ``text`` is the
 # chosen option label (plus an optional owner comment) — delivered inside a
 # structural frame, never as forged free-form owner dialogue.
@@ -75,12 +78,15 @@ KIND_OWNER_PAUSE = "owner_pause"
 # A model-call waiter consumes this control itself, not the conversation loop.
 # The default drain withholds it so it cannot become forged owner dialogue.
 KIND_MODEL_WAIT = "model_wait"
+_CONTROL_KINDS = WAKE_CONTROL_KINDS | {KIND_OWNER_PAUSE, KIND_MODEL_WAIT}
 # The mailbox is append-only, so a sender that changes its mind cannot delete the
 # control it already wrote — it appends this retraction naming the target msg_id.
 # Revocations are resolved by the READER over the whole mailbox, so a control that
 # was revoked before anyone drained it is never delivered at all. Its payload IS
 # the revoked msg_id (same convention as finalize_now, whose payload is a reason).
 KIND_CONTROL_REVOKED = "control_revoked"
+LETTER_KINDS = frozenset({KIND_OWNER_TEXT, KIND_TASK_MESSAGE, "relay_entry",
+                          KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_CARD_INPUT})
 
 
 def _mailbox_path(drive_root: pathlib.Path, task_id: str) -> pathlib.Path:
@@ -94,14 +100,79 @@ def mailbox_lines(content: str) -> List[str]:
     return [line for line in content.split("\n") if line.strip()]
 
 
-def _mail_text(path: pathlib.Path) -> str:
-    """A mailbox's text for the readers that skip a row they cannot parse: a torn append may have split a multibyte
-    character (rows are unescaped UTF-8), and those bytes must cost only their own row, never every row beside them."""
-    return path.read_text(encoding="utf-8", errors="replace")
+def _receipt_stamp(path):
+    try:
+        stat = path.stat()
+    except OSError:
+        return None  # the receipts themselves may still be readable
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+
+
+def _mail_rows(path: pathlib.Path, *, require_terminator: bool = False, receipt_gaps=None,
+               receipt_status=None) -> tuple[list[dict], bool, int]:
+    """Whole records, completeness, and the first row after the last gap that could hide a revocation."""
+    before = _receipt_stamp(path) if receipt_status is not None else None
+    text = path.read_text(encoding="utf-8", errors="surrogateescape")
+    terminated = not text or text.endswith("\n")
+    rows, complete, after_gap = [], terminated, 0
+    lines = text.split("\n")
+    last_bad = None
+    for index, line in enumerate(lines):
+        tail = require_terminator and not terminated and index == len(lines) - 1
+        if not line.strip() and not tail:
+            continue
+        try:
+            line.encode("utf-8")
+            row = None if tail else json.loads(line)
+        except ValueError:
+            row = None
+        if (isinstance(row, dict) and isinstance(row.get("msg_id"), (str, type(None)))
+                and isinstance(row.get("kind"), (str, type(None)))
+                and isinstance(row.get("text", ""), str)
+                and ((receipt_gaps is None and receipt_status is None) or row.get("msg_id"))):
+            rows.append(row)
+        else:
+            complete, after_gap = False, len(rows)
+            last_bad = index
+            if receipt_gaps is not None:
+                receipt_gaps.append((index, hashlib.sha256(line.encode("utf-8", "surrogateescape")).hexdigest()))
+    if last_bad is not None and before and before == _receipt_stamp(path):
+        # Exclude the separator appended to a previously torn tail. Universal-newline
+        # decoding can only shorten the intact suffix, so this bound is conservative on CRLF.
+        suffix = sum(1 + len(lines[i].encode("utf-8", "surrogateescape")) for i in range(last_bad + 1, len(lines)))
+        receipt_status["gap_end"] = [*before[:2], before[2] - suffix]
+    return rows, complete, after_gap if terminated else len(rows)
 
 
 def _ack_path(drive_root: pathlib.Path, task_id: str) -> pathlib.Path:
     return pathlib.Path(drive_root) / _MAILBOX_DIR / f"{validate_task_id(task_id)}.acks.jsonl"
+
+
+@contextlib.contextmanager
+def locked_mailbox_pair(drive_root, task_id):
+    """Lock overlapping writers from the shortest stem to the longest, through unlink."""
+    from ouroboros.task_custody import task_mail_lock
+
+    task_id = validate_task_id(task_id)
+    path = _ack_path(drive_root, task_id)
+    with contextlib.ExitStack() as locks:
+        if task_id.lower().endswith(".acks") and not locks.enter_context(task_mail_lock(drive_root, task_id[:-5])):
+            raise TimeoutError("Mailbox filename is busy")
+        if not locks.enter_context(task_mail_lock(drive_root, task_id)):
+            raise TimeoutError("Recipient mailbox is busy")
+        try:
+            path.stat()
+        except FileNotFoundError:
+            yield None  # an alias writer can still create its own mailbox; leave it alone
+            return
+        try:
+            alias = validate_task_id(path.stem)
+        except ValueError:
+            pass  # the sidecar name exceeds the task ID limit
+        else:
+            if not locks.enter_context(task_mail_lock(drive_root, alias)):
+                raise TimeoutError("Receipt filename is busy")
+        yield path
 
 
 def _append_mail(drive_root: pathlib.Path, task_id: str, path: pathlib.Path, entry: Dict[str, Any],
@@ -117,25 +188,28 @@ def _append_mail(drive_root: pathlib.Path, task_id: str, path: pathlib.Path, ent
     from ouroboros.task_custody import task_mail_lock
 
     with task_mail_lock(drive_root, task_id) as locked:
-        if locked and entry.get("provenance") == "place_event" and _holds(path, entry["msg_id"]):
+        retryable = entry.get("provenance") == "place_event" or entry.get("kind") == KIND_QUIZ_CLOSED
+        if locked and retryable and _holds(path, entry["msg_id"]):
             return True
         if locked and admit is not None and not admit():
             return False
+        if locked and entry.get("kind") in _CONTROL_KINDS:
+            # ACKs append under this same lock. Only the first whole publication of an ID
+            # can establish which receipt bytes predate the command.
+            prior = _receipt_stamp(_ack_path(drive_root, task_id))
+            if prior and prior[1] and prior[2]:
+                entry["prior_receipts"] = prior[:3]
         return bool(locked and append_jsonl(path, entry, ensure_record_boundary=True))
 
 
 def _holds(path: pathlib.Path, msg_id: str) -> bool:
     """A whole row of this id, the only form a drain can deliver. False is not proof its append wrote nothing:
     a torn row of it may lie among the rows skipped here, as the drain skips them."""
-    if not path.exists():
+    try:
+        rows, _, _ = _mail_rows(path, require_terminator=True)
+    except FileNotFoundError:
         return False
-    for line in mailbox_lines(_mail_text(path)):
-        try:
-            if json.loads(line).get("msg_id") == msg_id:
-                return True
-        except (ValueError, AttributeError):
-            continue
-    return False
+    return any(row.get("msg_id") == msg_id for row in rows)
 
 
 def place_event_retained(drive_root: pathlib.Path, task_id: str, msg_id: str) -> bool:
@@ -171,6 +245,11 @@ def acknowledged_task_message_ids(
     *,
     attempt_key: Any = None,
     _read_status: Optional[Dict[str, bool]] = None,
+    _require_terminator: bool = False,
+    _loop_receipts: Optional[set[str]] = None,
+    _require_owner: bool = False,
+    _receipt_gaps: Optional[list] = None,
+    _control_boundary: Optional[dict] = None,
 ) -> set[str]:
     """Read acknowledgements effective for one physical attempt.
 
@@ -182,63 +261,50 @@ def acknowledged_task_message_ids(
     empty set alone is not proof that every required source was readable.
     """
 
-    if _read_status is not None:
-        _read_status["complete"] = False
-    complete = True
     path = _ack_path(drive_root, task_id)
-    if not path.exists():
-        if _read_status is not None:
-            _read_status["complete"] = True
-        return set()
-    legacy_owner_ids: set[str] = set()
-    if attempt_key is not None:
-        try:
-            content = _mail_text(_mailbox_path(drive_root, task_id))
-            complete = not content or content.endswith("\n")
-            for line in mailbox_lines(content):
-                try:
-                    entry = json.loads(line)
-                except (TypeError, ValueError):
-                    complete = False
-                    continue
-                if (
-                    isinstance(entry, dict)
-                    and str(entry.get("kind") or KIND_OWNER_TEXT) in {KIND_OWNER_TEXT, "relay_entry"}
-                    and str(entry.get("msg_id") or "")
-                ):
-                    legacy_owner_ids.add(str(entry["msg_id"]))
-        except FileNotFoundError:
-            complete = False
-        except OSError:
-            complete = False
-            log.warning(
-                "Failed to classify legacy owner acknowledgements for %s",
-                task_id, exc_info=True,
-            )
-    found: set[str] = set()
+    unavailable = False
     try:
-        content = path.read_text(encoding="utf-8")
-        complete = complete and (not content or content.endswith("\n"))
-        for line in mailbox_lines(content):
-            try:
-                row = json.loads(line)
-            except (TypeError, ValueError):
-                complete = False
-                continue
-            if not isinstance(row, dict) or not str(row.get("msg_id") or ""):
-                continue
-            row_attempt = row.get("attempt_key")
-            if (
-                attempt_key is None
-                or str(row_attempt) == str(attempt_key)
-                or (row_attempt is None and str(row["msg_id"]) not in legacy_owner_ids)
-            ):
-                found.add(str(row["msg_id"]))
+        rows, complete, _ = _mail_rows(path, require_terminator=_require_terminator, receipt_gaps=_receipt_gaps,
+                                       receipt_status=_control_boundary)
+        if _require_owner and not rows:
+            complete = False  # an empty file at the overlapping name proves no owner
+    except FileNotFoundError:
+        rows, complete = [], True
     except OSError:
-        complete = False
+        rows, complete, unavailable = [], False, True
         log.warning("Failed to read task-message acknowledgements for %s", task_id, exc_info=True)
+    receipt_gap = not complete
+    legacy_owner_ids = set()
+    if attempt_key is not None and any(row.get("attempt_key") is None for row in rows):
+        try:
+            letters, whole, _ = _mail_rows(_mailbox_path(drive_root, task_id))
+            complete = complete and whole
+            legacy_owner_ids = {row["msg_id"] for row in letters if isinstance(row.get("msg_id"), str)
+                                and (row.get("kind") or KIND_OWNER_TEXT) in {KIND_OWNER_TEXT, "relay_entry"}}
+        except OSError:
+            complete, unavailable = False, True
+            log.warning("Failed to classify legacy owner acknowledgements for %s", task_id, exc_info=True)
+    found = set()
+    for row in rows:
+        mid = row.get("msg_id")
+        owned = row.get("type") == "task_message_acknowledged" and row.get("task_id") == task_id
+        if not isinstance(mid, str) or not mid or (_require_owner and (not owned or "text" in row or "kind" in row)):
+            receipt_gap, complete = True, False
+            continue
+        row_attempt = row.get("attempt_key")
+        if (attempt_key is None or str(row_attempt) == str(attempt_key)
+                or (row_attempt is None and mid not in legacy_owner_ids)):
+            found.add(mid)
+            if _loop_receipts is not None and owned and row.get("wake_id") == "loop_delivery":
+                _loop_receipts.add(mid)
     if _read_status is not None:
+        _read_status.pop("receipt_gap", None)
+        _read_status.pop("unavailable", None)
         _read_status["complete"] = complete
+        if receipt_gap:
+            _read_status["receipt_gap"] = True
+        if unavailable:
+            _read_status["unavailable"] = True
     return found
 
 
@@ -249,6 +315,9 @@ def acknowledge_task_messages(
     *,
     wake_id: str,
     attempt_key: Any = None,
+    _receipt: Optional[dict] = None,
+    _transcript_only: bool = False,
+    _known_prior_gaps: tuple = (),
 ) -> bool:
     """Acknowledge messages only after their full content entered a transcript; the rows
     land under the task's mail lock, so a custody read under it sees the mailbox and its
@@ -262,10 +331,22 @@ def acknowledge_task_messages(
     with task_mail_lock(drive_root, task_id) as locked:
         if not locked:
             return False
-        existing = acknowledged_task_message_ids(
-            drive_root, task_id, attempt_key=attempt_key,
-        )
-        for msg_id in [str(item) for item in msg_ids if str(item) and str(item) not in existing]:
+        status = {}
+        loop_receipts = set() if _transcript_only else None
+        gaps = [] if _known_prior_gaps else None
+        existing = acknowledged_task_message_ids(drive_root, task_id, attempt_key=(
+            None if _receipt is not None else attempt_key), _read_status=status,
+            _require_terminator=True, _loop_receipts=loop_receipts, _receipt_gaps=gaps)
+        if loop_receipts is not None:
+            existing = loop_receipts
+        if _receipt is not None:
+            _receipt["written"] = False
+            _receipt["uncertain_prior"] = not status["complete"] and (gaps is None or tuple(gaps) != _known_prior_gaps)
+        if status.get("unavailable"):
+            return False
+        for msg_id in map(str, msg_ids):
+            if not msg_id or msg_id in existing:
+                continue
             row = {
                 "ts": utc_now_iso(), "type": "task_message_acknowledged",
                 "task_id": str(task_id), "msg_id": msg_id, "wake_id": str(wake_id or ""),
@@ -273,8 +354,11 @@ def acknowledge_task_messages(
             if attempt_key is not None:
                 row["attempt_key"] = str(attempt_key)
                 row["settled"] = False
-            if not append_jsonl(path, row):
+            if not append_jsonl(path, row, ensure_record_boundary=True):
                 return False
+            existing.add(msg_id)
+            if _receipt is not None:
+                _receipt["written"] = True
     return True
 
 
@@ -290,14 +374,29 @@ def acknowledge_transcript_entry(
     if attempt_key is None:
         attempt_key = entry.get("_owner_attempt_key")
     msg_id = str(entry.get("msg_id") or "")
-    if msg_id and not acknowledge_task_messages(
-        drive_root, task_id, [msg_id], wake_id=wake_id, attempt_key=attempt_key,
-    ):
+    if not msg_id:
+        # Historical content can be shown, but no retry can attach a read receipt to it.
+        entry["_receipt_uncertain"] = True
+        return True
+    kind = entry.get("kind")
+    quiz_transcript = wake_id == "loop_delivery" and kind in {KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED}
+    receipt = {} if kind in LETTER_KINDS else None
+    if not acknowledge_task_messages(
+            drive_root, task_id, [msg_id], wake_id=wake_id, attempt_key=attempt_key, _receipt=receipt,
+            _transcript_only=quiz_transcript,
+            _known_prior_gaps=entry.get("_known_prior_gaps", ())):
         log.warning("Mailbox delivery acknowledgement failed for %s", msg_id)
         return False
-    if entry.get("quiz_delivery"):
+    if receipt is not None and receipt.get("written") is False:
+        entry["_receipt_exists"] = True
+        return True
+    if quiz_transcript and entry.get("quiz_delivery"):
         from ouroboros.question_answers import acknowledge_answer
         acknowledge_answer(drive_root, task_id, entry)
+    if receipt and (receipt["uncertain_prior"] or entry.get("_receipt_uncertain")):
+        # The saved transcript proves this read. An unreadable old receipt cannot authorize another notification.
+        entry["_receipt_uncertain"] = True
+        return True
     if isinstance(press := entry.get("card_delivery"), dict):
         from ouroboros.card_store import acknowledge_press
         try:  # a press left showing its wait is cosmetic; the drain goes on
@@ -645,18 +744,8 @@ def reset_attempt_controls_for_retry(
     if not path.exists():
         return 0
     try:
-        rows: List[dict] = []
-        revoked: set[str] = set()
-        for line in mailbox_lines(_mail_text(path)):
-            try:
-                row = json.loads(line)
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(row, dict):
-                continue
-            if str(row.get("kind") or KIND_OWNER_TEXT) == KIND_CONTROL_REVOKED:
-                revoked.add(str(row.get("text") or ""))
-            rows.append(row)
+        rows, _, _ = _mail_rows(path, require_terminator=True)
+        revoked = {str(row.get("text") or "") for row in rows if row.get("kind") == KIND_CONTROL_REVOKED}
         reset = 0
         for row in rows:
             kind = str(row.get("kind") or KIND_OWNER_TEXT)
@@ -672,6 +761,13 @@ def reset_attempt_controls_for_retry(
         return 0
 
 
+def receipt_gap_history(ctx):
+    """The reader's observation of damaged receipts, scoped to this live reader and mailbox."""
+    if ctx is not None and getattr(ctx, "_mailbox_receipt_history", None) is None:
+        ctx._mailbox_receipt_history = {}
+    return getattr(ctx, "_mailbox_receipt_history", None)
+
+
 def drain_owner_entries(
     drive_root: pathlib.Path,
     task_id: str,
@@ -681,6 +777,8 @@ def drain_owner_entries(
     include_acknowledged: bool = False,
     _read_status: Optional[Dict[str, bool]] = None,
     kinds: Optional[set[str]] = None,
+    transcript_ids: Optional[set[str]] = None,
+    gap_history: Optional[dict] = None,
 ) -> List[dict]:
     """Read unseen mailbox entries without mutating the append-only mailbox.
 
@@ -694,58 +792,94 @@ def drain_owner_entries(
 
     A selective reader claims only its own kinds. The ordinary conversation
     drain excludes model-wait controls, whose consumer is the still-live call.
+    At loop entry, `transcript_ids` names letters incorporated in the recovered
+    conversation. Reconcile those with the sender's receipts in mailbox order.
+    Neither a historical receipt nor a saved exposure of a wake registers a letter.
     """
     if _read_status is not None:
+        _read_status.pop("unavailable", None)
         _read_status["complete"] = False
     path = _mailbox_path(drive_root, task_id)
-    if not path.exists():
+    try:
+        mailbox_stat = path.stat()
+    except FileNotFoundError:
         if _read_status is not None:
             _read_status["complete"] = True
         return []
+    except OSError:
+        if _read_status is not None:
+            _read_status["unavailable"] = True
+        return []
     if seen_ids is None:
         seen_ids = set()
-    ack_status: Dict[str, bool] = {"complete": True}
+    ack_status = {"complete": True}
+    loop_receipts = set() if transcript_ids is not None else None
+    acknowledged = set()
+    receipt_gaps = [] if gap_history is not None else None
     if not include_acknowledged:
-        seen_ids.update(
-            acknowledged_task_message_ids(
-                drive_root, task_id, attempt_key=attempt_key,
-                **({"_read_status": ack_status} if _read_status is not None else {}),
-            )
+        acknowledged = acknowledged_task_message_ids(
+            drive_root, task_id, attempt_key=None if transcript_ids is not None else attempt_key,
+            _read_status=ack_status, _require_terminator=True, _loop_receipts=loop_receipts, _receipt_gaps=receipt_gaps,
+            _control_boundary=ack_status,
         )
+        if transcript_ids is None:
+            seen_ids.update(acknowledged)
     try:
-        content = _mail_text(path)
-        complete = ack_status.get("complete", False) and (not content or content.endswith("\n"))
-        if not content.strip():
-            if _read_status is not None:
-                _read_status["complete"] = complete
-            return []
-        parsed: List[dict] = []
-        revoked: set = set()
-        for line in mailbox_lines(content):
-            try:
-                entry = json.loads(line)
-            except Exception:
-                complete = False
-                log.debug("Malformed mailbox line for task %s", task_id, exc_info=True)
-                continue
-            if not isinstance(entry, dict):
-                complete = False
-                continue
-            if str(entry.get("kind") or KIND_OWNER_TEXT) == KIND_CONTROL_REVOKED:
-                revoked.add(str(entry.get("text") or ""))
-            parsed.append(entry)
+        recovering = transcript_ids is not None or (include_acknowledged and _read_status is not None)
+        parsed, whole, after_gap = _mail_rows(path, require_terminator=True)
+        complete = whole and ack_status["complete"]
+        revoked = {str(row.get("text") or "") for row in parsed if row.get("kind") == KIND_CONTROL_REVOKED}
+        gap_end = ack_status.get("gap_end")
+        ack_unavailable = ack_status.get("unavailable", False)
+        receipt_gap = ack_status.get("receipt_gap", False)
+        uncertain_ids = None
+        if gap_history is not None and not ack_unavailable:
+            if receipt_gaps and gap_end:
+                # A missing receipt could name a row already in this append-only mailbox.
+                # A new ID appended after we observed the same gaps cannot have that older receipt.
+                gap = (path, mailbox_stat.st_dev, mailbox_stat.st_ino, *gap_end[:2], tuple(receipt_gaps))
+                if gap_history.get("gap") != gap:
+                    gap_history.update(gap=gap, ids={row.get("msg_id") for row in parsed})
+                uncertain_ids = gap_history["ids"]
+            else:
+                gap_history.clear()
         entries = []
-        for entry in parsed:
+        visited = set()
+        for index, entry in enumerate(parsed):
             kind = str(entry.get("kind") or KIND_OWNER_TEXT)
             if (kinds is not None and kind not in kinds) or (kinds is None and kind == KIND_MODEL_WAIT):
                 continue
             mid = entry.get("msg_id", "")
-            if mid and mid in seen_ids:
-                continue
+            restoring = transcript_ids is not None and kind in LETTER_KINDS and bool(mid)
+            receipt_uncertain = not mid or ack_unavailable or (
+                receipt_gap and (uncertain_ids is None or mid in uncertain_ids))
+            if kind in _CONTROL_KINDS:
+                if not mid or mid in visited:
+                    continue
+                visited.add(mid)  # a re-publication cannot move this ID past a gap in either file
+                if index < after_gap or ack_unavailable:
+                    continue
+                if receipt_uncertain:
+                    prior = entry.get("prior_receipts")
+                    if not (gap_end and isinstance(prior, list) and len(prior) == 3 and prior[:2] == gap_end[:2]
+                            and type(prior[2]) is int and prior[2] >= gap_end[2]):
+                        continue
+            if restoring and ack_unavailable:
+                continue  # retry the failed file read before deciding whether this is a first delivery
             if mid:
+                if not restoring and mid in acknowledged:
+                    seen_ids.add(mid)
+                if mid in (visited if restoring else seen_ids):
+                    continue
+                visited.add(mid)
                 seen_ids.add(mid)
             if kind == KIND_CONTROL_REVOKED or (mid and mid in revoked):
                 continue
+            in_transcript = restoring and mid in transcript_ids
+            if in_transcript:
+                receipts = loop_receipts if kind in {KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED} else acknowledged
+                if mid in receipts:
+                    continue
             text = entry.get("text", "")
             if text or kind == "relay_entry":
                 # ``ts`` is ADDITIVE (2026-08-15 Fable pin): typed controls such
@@ -755,6 +889,18 @@ def drain_owner_entries(
                     "msg_id": mid, "text": text, "kind": kind,
                     "ts": str(entry.get("ts") or ""),
                 }
+                if kind in LETTER_KINDS and mid not in acknowledged:
+                    if receipt_uncertain:
+                        drained["_receipt_uncertain"] = True
+                    elif receipt_gap:
+                        drained["_known_prior_gaps"] = tuple(receipt_gaps)
+                if restoring:
+                    if mid in loop_receipts:
+                        drained["_loop_receipt"] = True
+                    if in_transcript:
+                        drained["_receipt_only"] = True
+                    elif mid in acknowledged:
+                        drained["_recalled"] = True
                 # Owner Surface Fact: the drain projection must carry the field
                 # explicitly or a written fact is never delivered (the exact
                 # dead-wire class this sprint closes).
@@ -778,18 +924,19 @@ def drain_owner_entries(
                         dict(item) for item in entry["attachment_manifest"]
                         if isinstance(item, dict)
                     ]
-                if entry.get("attachment_manifest_ref"):
+                if isinstance(entry.get("attachment_manifest_ref"), dict):
                     drained["attachment_manifest_ref"] = dict(entry["attachment_manifest_ref"])
                 if attempt_key is not None and kind in {KIND_OWNER_TEXT, "relay_entry"}:
                     drained["_owner_attempt_key"] = attempt_key
                 if kind == KIND_TASK_MESSAGE:
                     if isinstance(entry.get("reply_to"), dict):
                         drained["reply_to"] = dict(entry["reply_to"])
-                    drained["provenance"] = str(entry.get("provenance") or "ancestor_task")
-                    if drained["provenance"] == "system" and isinstance(entry.get("review_feedback"), dict):
-                        drained["review_feedback"] = dict(entry["review_feedback"])
-                    if drained["provenance"] == "system" and isinstance(entry.get("work_attention"), dict):
-                        drained["work_attention"] = dict(entry["work_attention"])
+                    provenance = entry.get("provenance")
+                    drained["provenance"] = provenance if recovering else str(provenance or "ancestor_task")
+                    if drained["provenance"] == "system":
+                        for key in ("review_feedback", "work_attention"):
+                            if isinstance(entry.get(key), dict):
+                                drained[key] = dict(entry[key])
                     drained["source_task_id"] = str(entry.get("source_task_id") or "")
                     drained["relayed_from_task_id"] = str(entry.get("relayed_from_task_id") or "")
                     # The peer relation is a written fact the renderer reads;
@@ -803,8 +950,12 @@ def drain_owner_entries(
                 entries.append(drained)
         if _read_status is not None:
             _read_status["complete"] = complete
+            if ack_unavailable:
+                _read_status["unavailable"] = True
         return entries
     except Exception:
+        if _read_status is not None:
+            _read_status["unavailable"] = True
         log.debug("Failed to read mailbox for task %s", task_id, exc_info=True)
         return []
 
@@ -840,7 +991,8 @@ class OwnerMailboxPeek:
         self._empty_key = None
         status: Dict[str, bool] = {}
         # Drain changes only this private set; normal loop delivery owns the real one.
-        entries = [row for row in drain_owner_entries(root, task_id, set(seen), attempt, _read_status=status)
+        entries = [row for row in drain_owner_entries(root, task_id, set(seen), attempt, _read_status=status,
+                                                     gap_history=receipt_gap_history(self))
                    if not tier_only(row) and not (self._waking_only and place_arrival_wake(row) is False)]
         if not entries and before is not None and status.get("complete"):
             try:
@@ -865,7 +1017,7 @@ def drain_owner_messages(
 
 
 def cleanup_task_mailbox(drive_root: pathlib.Path, task_id: str, *, canonical_root: Any = None,
-                         carry_inputs: bool = True, stop: Any = None) -> bool:
+                         carry_inputs: bool = True, stop: Any = None, orphan_only: bool = False) -> bool:
     """Remove a settled task's mailbox and acks once post-work and input copy are closed
     (``settled_mailbox_cleanup_allowed``) and its canonical result holds every unread row with
     a verified canonical closure of its inputs (``task_custody.settle_task_mailbox``); returns
@@ -876,7 +1028,7 @@ def cleanup_task_mailbox(drive_root: pathlib.Path, task_id: str, *, canonical_ro
     from ouroboros.task_custody import custody_anchor, settle_task_mailbox
 
     return settle_task_mailbox(canonical_root or custody_anchor(drive_root, task_id), task_id, drive_root,
-                               carry_inputs=carry_inputs, stop=stop)
+                               carry_inputs=carry_inputs, stop=stop, orphan_only=orphan_only)
 
 
 def mailbox_drain_ended(task_drive: pathlib.Path, task_id: str) -> bool:
@@ -913,26 +1065,21 @@ def mail_write_receipt(recipient_status: str, *, drain_ended: bool = False) -> D
 
 
 def mailbox_holds(drive_root: pathlib.Path, task_id: str, msg_id: str) -> bool:
-    """True while TASK_ID's mailbox still carries MSG_ID: written and not yet drained away."""
+    """True while this task's mailbox holds the identified entry."""
     try:
-        content = _mail_text(_mailbox_path(drive_root, task_id))
+        return _holds(_mailbox_path(drive_root, task_id), msg_id)
     except (OSError, ValueError):
         return False
-    for line in mailbox_lines(content):
-        try:
-            if json.loads(line).get("msg_id") == msg_id:
-                return True
-        except (ValueError, AttributeError):
-            continue
-    return False
 
 
-def mail_read_state(drive_root: pathlib.Path, task_id: str, msg_id: str) -> Optional[bool]:
+def mail_read_state(drive_root: pathlib.Path, task_id: str, msg_id: str, *, transcript_only: bool = False) -> Optional[bool]:
     """True once the recipient acknowledged MSG_ID (its words entered a transcript), False
     while unread, None when the acknowledgement ledger could not be read completely."""
     status: Dict[str, bool] = {}
-    acknowledged = acknowledged_task_message_ids(drive_root, task_id, _read_status=status)
-    if str(msg_id) in acknowledged:
+    loop_receipts = set() if transcript_only else None
+    acknowledged = acknowledged_task_message_ids(drive_root, task_id, _read_status=status,
+        _require_terminator=True, _loop_receipts=loop_receipts)
+    if str(msg_id) in (loop_receipts if transcript_only else acknowledged):
         return True
     return False if status.get("complete") else None
 
@@ -970,29 +1117,33 @@ def sweep_settled_owner_mailboxes(drive_root: pathlib.Path, *, stop: Any = None)
     report: Dict[str, Any] = {"removed": [], "kept": 0}
     mailbox_dir = pathlib.Path(drive_root) / _MAILBOX_DIR
     try:
-        entries = sorted(p for p in mailbox_dir.glob("*.jsonl") if p.is_file())
+        stems = {p.stem for p in mailbox_dir.glob("*.jsonl") if p.is_file()}
     except OSError:
         return report
-    for path in entries:
-        stem = path.name[: -len(".jsonl")]
-        if stem.endswith(".acks"):
-            continue  # swept with its mailbox
+    for stem in sorted(stems):
+        name = stem.removesuffix(".acks")
+        orphan = name != stem
+        if orphan and name in stems:
+            continue  # the mailbox already nominates this pair
         try:
-            task_id = validate_task_id(stem)
-        except Exception:
+            task_id = validate_task_id(name)
+            if task_id != name:
+                raise ValueError("Noncanonical mailbox name")
+        except ValueError:
             report["kept"] += 1
             continue  # not a task mailbox we can reason about: keep
         try:
             from ouroboros.task_results import load_task_result
             result = load_task_result(pathlib.Path(drive_root), task_id) or {}
+            if orphan and not result:
+                continue  # an unassigned filename is not a known task's mailbox
             settled = settled_mailbox_cleanup_allowed(result)
         except Exception:
             settled = False
         if not settled or (stop is not None and stop()):
             report["kept"] += 1
             continue
-        cleanup_task_mailbox(pathlib.Path(drive_root), task_id, stop=stop)
-        if path.exists():
+        if not cleanup_task_mailbox(pathlib.Path(drive_root), task_id, stop=stop, orphan_only=orphan):
             report["kept"] += 1  # unlink refused: still owned by the mailbox
         else:
             report["removed"].append(task_id)

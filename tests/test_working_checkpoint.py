@@ -17,6 +17,7 @@ import pytest
 from ouroboros import budget_pause, working_checkpoint as wc
 from ouroboros.task_results import write_task_result
 from tests._budget_pause_exact_helpers import _loop_ctx
+from tests._loop_resume_shared import _registry
 from tests._store_shared import read_result
 
 
@@ -215,34 +216,11 @@ def test_a_sourceless_pausing_seed_is_completed_from_the_same_attempts_working_s
 
 # --- the real loop continues a frozen state ----------------------------------------------
 
-def _registry(tmp_path, monkeypatch, task_id, attempt):
-    from ouroboros import context, task_pacing
-    from ouroboros.tools.registry import ToolRegistry
-    from tests.test_context_fit_v664 import _plan
-    from types import SimpleNamespace
-
-    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    ctx = registry._ctx
-    ctx.task_id, ctx.task_attempt = task_id, attempt
-    ctx.active_model, ctx.active_effort = "same-model", "high"
-    ctx.active_use_local, ctx.active_context_mode = False, "max"
-    ctx._cost_ceiling = task_pacing.CostCeiling(state="disabled")
-    ctx.owner_wait_callback = lambda *_: None
-    ctx.context_fit_plan = _plan(window=500_000, known=True)
-    monkeypatch.setattr(context, "_context_fit_route", lambda task, **_: (
-        {"model": task["model"], "provider": "openai", "use_local": False},
-        SimpleNamespace(status="confirmed", stale=False, window_tokens=500_000, route_fp="route-a"),
-    ))
-    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
-    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    return registry
-
-
 def _saved_working_state(tmp_path, monkeypatch, task_id):
     """The dead attempt 1: a batch accepted, one call answered, one not."""
     from types import SimpleNamespace
 
-    from tests.test_context_fit_v664 import _plan
+    from tests._loop_resume_shared import _plan
 
     write_task_result(tmp_path, task_id, "running")
     registry = _registry(tmp_path, monkeypatch, task_id, 1)
@@ -264,7 +242,7 @@ def _saved_working_state(tmp_path, monkeypatch, task_id):
 @pytest.mark.parametrize("new_id", [False, True])
 def test_the_real_loop_continues_the_frozen_state_and_never_reruns_the_unknown_call(tmp_path, monkeypatch, new_id):
     from ouroboros import loop
-    from tests.test_loop_transport_wait import _loop_kwargs
+    from tests._loop_resume_shared import _loop_kwargs
 
     monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
     handoff = _saved_working_state(tmp_path, monkeypatch, "t-wait")
@@ -302,7 +280,7 @@ def test_the_real_loop_continues_the_frozen_state_and_never_reruns_the_unknown_c
 
 def test_an_unusable_frozen_source_starts_over_disclosed_never_silently(tmp_path, monkeypatch):
     from ouroboros import loop
-    from tests.test_loop_transport_wait import _loop_kwargs
+    from tests._loop_resume_shared import _loop_kwargs
 
     monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
     handoff = _saved_working_state(tmp_path, monkeypatch, "t-wait")
@@ -343,8 +321,8 @@ def test_a_held_question_wait_continues_through_its_own_reader_after_quit_and_re
     from ouroboros.owner_wait import checkpoint_owner_wait, set_owner_wait
     from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
     from tests._budget_pause_exact_helpers import _install_queue
-    from tests.test_context_fit_v664 import _plan
-    from tests.test_loop_transport_wait import _loop_kwargs
+    from tests._loop_resume_shared import _plan
+    from tests._loop_resume_shared import _loop_kwargs
     from tests.test_restart_retention import _pool_events
 
     monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
@@ -409,7 +387,7 @@ def test_s3_integration_pin_working_recovery_restores_its_saved_cost_ceiling(tmp
 
     if not hasattr(task_pacing, "restore_cost_ceiling"):
         pytest.skip("S3 task_pacing.restore_cost_ceiling is not in this baseline: wire it at integration")
-    from tests.test_context_fit_v664 import _plan
+    from tests._loop_resume_shared import _plan
 
     write_task_result(tmp_path, "t-wait", "running")
     dead = _registry(tmp_path, monkeypatch, "t-wait", 1)

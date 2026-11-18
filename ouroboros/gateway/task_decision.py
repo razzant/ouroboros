@@ -424,8 +424,6 @@ async def _close_quiz_decision(root: pathlib.Path, task_id: str, quiz_id: str,
         if not outcome.get("ok"):
             error = str(outcome.get("error") or "quiz_close_refused")
             return (404 if error == "quiz_not_found" else 409), {**payload, "error": error}
-        _send_quiz_state(quiz_id, task_id, "closed", **{key: value for key, value in payload.items()
-                         if key not in {"ok", "decision_id", "state", "duplicate"}})
         return 200, payload
     except Exception as exc:
         return _refused(str(exc), 503, reason_code="quiz_close_failed")

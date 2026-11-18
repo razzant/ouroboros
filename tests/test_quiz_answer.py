@@ -21,6 +21,7 @@ from ouroboros.owner_quiz import (
     record_answered,
     record_asked,
 )
+from tests._question_answer_shared import _post
 from tests._store_shared import read_result, result_signature
 
 
@@ -223,12 +224,6 @@ def _decision_app(tmp_path, monkeypatch, live_task=None):
                             raising=False)
     return Starlette(routes=[Route("/api/decisions", endpoint=td.api_decision_answer,
                                    methods=["POST"])])
-
-
-def _post(app, body):
-    from starlette.testclient import TestClient
-
-    return TestClient(app).post("/api/decisions", json=body)
 
 
 def test_ingress_answers_a_live_quiz_end_to_end(tmp_path, monkeypatch):

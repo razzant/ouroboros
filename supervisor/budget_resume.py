@@ -61,6 +61,7 @@ def _resume_custody_refusal(result_root, task_id, row, external, owner_paused=Fa
     """Exact source and off-lock custody observation must both authorize Resume."""
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.budget_pause import EXTERNAL_STOP_CONFIRMED, set_budget_pause
+    from ouroboros.sleep_custody import RETAINED_REASONS, return_allowed
 
     try:
         read_actor_source_bytes(result_root, task_id, row["source_ref"])
@@ -76,13 +77,13 @@ def _resume_custody_refusal(result_root, task_id, row, external, owner_paused=Fa
     # An owner Pause's started critic is not the member's own writer: it finishes separately, its result collected
     # later (owner 2026-10-08, full variant), whatever saved row the Pause's closed fence overlays; an authority park
     # leaves a started panel's run to its controller. A review that cannot apply to the work is never a writer.
-    panel_owned = owner_paused or str(row.get("reason") or "") in {"owner", "authority"}
+    reason = str(row.get("reason") or "")
+    panel_owned = owner_paused or reason in {"owner", "authority"}
     unsettled = [run for run in (external.get("runs") or [])
                  if isinstance(run, dict) and str(run.get("state") or "") != EXTERNAL_STOP_CONFIRMED
                  and not (panel_owned and run.get("review_owned")) and run.get("independent_review") is not True]
-    if unsettled and row.get("reason") in {"sleep", "authority"}:
-        from ouroboros.sleep_custody import return_allowed
-        if return_allowed(task_id, row, external if row.get("reason") == "sleep" else {**external, "runs": unsettled}):
+    if unsettled and reason in RETAINED_REASONS:
+        if return_allowed(task_id, row, external if reason == "sleep" else {**external, "runs": unsettled}):
             unsettled = []  # same author's retained dependency, not a stop receipt
     if unsettled:
         try:
@@ -92,8 +93,7 @@ def _resume_custody_refusal(result_root, task_id, row, external, owner_paused=Fa
             log.debug("Fresh custody observation could not be recorded on %s", task_id, exc_info=True)
         return {"ok": False, "error": "external_runs_unsettled",
                 "runs": [{key: run.get(key) for key in ("run_id", "state", "stop_outcome")} for run in unsettled],
-                # An authority pause let them finish in their own limits: waiting is the plan.
-                "action": ("wait_for_delegated_runs_to_settle" if row.get("reason") == "authority"
+                "action": ("wait_for_delegated_runs_to_settle" if reason in RETAINED_REASONS
                            else "wait_for_delegated_runs_to_settle_or_cancel_them")}
     return None
 

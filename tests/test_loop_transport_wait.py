@@ -27,6 +27,7 @@ from ouroboros import usage_accounting as ua
 from ouroboros.loop import run_llm_loop
 from ouroboros.loop_llm_call import call_llm_with_retry, classify_llm_exception
 from ouroboros.tools.registry import ToolRegistry
+from tests._loop_resume_shared import _loop_kwargs
 
 
 def _released_capture(provider: str = "openrouter", state: str = "released") -> ua.PhysicalAttemptCapture:
@@ -153,25 +154,6 @@ def test_call_llm_with_retry_keeps_bounded_burst_for_local_released_failure(tmp_
 
 
 # ----------------------------------------------------------- round-episode loop
-
-class _FakeLoopLLM:
-    def default_model(self):
-        return "test-model"
-
-
-def _loop_kwargs(tmp_path, registry, notes, llm=None):
-    return dict(
-        messages=[{"role": "user", "content": "go"}],
-        tools=registry,
-        llm=llm or _FakeLoopLLM(),
-        drive_logs=tmp_path,
-        # emit_progress honors the ``incident=`` keyword (OuroborosAgent._emit_progress).
-        emit_progress=lambda text, *, incident=None: notes.append(text),
-        incoming_messages=queue.Queue(),
-        task_id="t-wait",
-        drive_root=tmp_path,
-    )
-
 
 class _FakeClock:
     """loop_transport-local monotonic clock that only faked sleeps advance, so

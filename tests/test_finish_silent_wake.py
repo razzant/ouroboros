@@ -431,17 +431,30 @@ def test_reply_already_sent_needs_no_ceremonial_second_final(wake):
     assert not trace.get("completion_refusals") and usage.get("wake_silent") is True
 
 
-def test_owner_quiz_closure_counts_as_owner_words(wake):
-    """A Main owner-actor quiz closure rides the owner corpus (with a reason); it is not swallowed."""
-    from ouroboros.owner_mailbox import KIND_QUIZ_CLOSED
+@pytest.mark.parametrize("reason", ["Please drop this question.", ""], ids=["owner-reason", "tap-only"])
+def test_owner_quiz_closure_counts_as_owner_words(wake, monkeypatch, reason):
+    from tests._question_answer_shared import _post, runtime
+
+    app, _, _, _ = runtime(wake.root, monkeypatch, asker=TASK_ID)
 
     def closed():
-        write_owner_message(wake.root, "[Owner question closed without answer] quiz q1", TASK_ID,
-                            msg_id="quiz_closed:q1", kind=KIND_QUIZ_CLOSED)
+        reply = _post(app, {"decision_id": f"quiz:{TASK_ID}:q", "request_id": "close",
+                            "action": "close", "reason": reason})
+        assert reply.status_code == 200, reply.text
         return call("chat_history", {})
+
     _, usage, trace, _ = wake.run([closed, finish(silent=True), finish("Noted; dropping it.")])
-    assert (trace.get("completion_refusals") or [{}])[0].get("reason", "").startswith("owner_reply_owed")
-    assert "wake_silent" not in usage
+    [closure] = [row for row in wake.calls[1] if row["role"] == "user" and
+                 "[Owner question closed without answer]" in str(row.get("content"))]
+    assert "no option was chosen and no approval was given" in str(closure["content"])
+    letters = [(r["source"], r["content"]) for r in wake.ctx._owner_directives if r["source"] != "initial_text"]
+    assert letters == ([("owner_question_close", reason)] if reason else [])
+    refusals = trace.get("completion_refusals") or []
+    if reason:
+        assert len(refusals) == 1 and refusals[0]["reason"].startswith("owner_reply_owed")
+        assert "wake_silent" not in usage
+    else:
+        assert not refusals and usage.get("wake_silent") is True
 
 
 # --- who may use the door ----------------------------------------------------------------

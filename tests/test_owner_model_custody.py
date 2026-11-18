@@ -160,7 +160,7 @@ def turn(host, monkeypatch, metadata=None):
     return tools, ctx
 
 
-def drain_and_apply(host, tools, ctx, seen=None):
+def drain_and_apply(host, tools, ctx, seen=None, *, receipt_gap=False):
     messages = []
     controls = loop._drain_incoming_messages(messages, queue.Queue(), host[0], "work", ctx.event_queue,
                                             set() if seen is None else seen, owner_ctx=ctx)
@@ -168,7 +168,13 @@ def drain_and_apply(host, tools, ctx, seen=None):
     limit = SimpleNamespace(tools=tools, messages=messages, active_model=ctx.active_model,
         active_use_local=ctx.active_use_local, active_effort=ctx.active_effort, tool_schemas=[], llm=None)
     after_mail(limit, None, "max", "max", controls)
-    assert not messages  # typed control never enters the owner's words or a dialogue row
+    if receipt_gap:
+        [notice] = messages
+        assert notice["role"] == "user" and notice["_host_context_kind"] == "mailbox_recovery"
+        assert "receipts could not be read completely" in notice["content"]
+        assert not getattr(ctx, "_owner_directives", [])
+    else:
+        assert not messages  # a typed control contributes no dialogue
     return controls
 
 
@@ -597,7 +603,9 @@ def test_a_lost_wake_is_healed_by_the_same_id_without_changing_its_decision(host
     assert json.loads((host[0] / "state/ui_preferences.json").read_text(encoding="utf-8"))["model_recents"][0]["model"] == B
 
 
-def test_owner_model_wakes_a_refused_call_wait_but_never_interrupts_a_sent_call(host, monkeypatch):
+@pytest.mark.parametrize("torn", [False, True])
+def test_owner_model_wakes_a_refused_call_wait_but_never_interrupts_a_sent_call(host, monkeypatch, torn):
+    from ouroboros import owner_mailbox as mail
     from ouroboros.model_wait import ModelWaitInterrupted, TaskModelWait
     from ouroboros.owner_model import waiting_wake
 
@@ -606,8 +614,18 @@ def test_owner_model_wakes_a_refused_call_wait_but_never_interrupts_a_sent_call(
     waiter = TaskModelWait(task=task, drive_root=host[0], event_queue=queue.Queue(),
                            worker_slot_held=True, owner_control=lambda: None)
     waiter.tool_context = ctx
+    if torn:
+        receipt = mail._ack_path(host[0], "work")
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_bytes(b'{"msg_id":')
     assert waiting_wake(waiter) is None
+    if torn:
+        assert act(host, model=C, request_id="earlier").status_code == 200
     assert act(host, model=B).status_code == 200
+    if torn:
+        with monkeypatch.context() as patch:
+            patch.setattr(ctx, "_loop_mailbox_seen_ids", {"owner_model:press"}, raising=False)
+            assert waiting_wake(waiter) is None  # only the superseded act is still unread
     assert waiter.control_reason() is None  # the physical sender's polling reader stays quiet
     with waiter.register_reprepare("main", lambda values: values, owner_model_wake=True), \
             pytest.raises(ModelWaitInterrupted) as interrupted:
@@ -615,7 +633,7 @@ def test_owner_model_wakes_a_refused_call_wait_but_never_interrupts_a_sent_call(
                     "model_poll_control": lambda: "test_wait_limit"})
     assert interrupted.value.control_reason == "owner_model"
     assert loop._handle_model_wait_control(SimpleNamespace(), interrupted.value) is None
-    drain_and_apply(host, tools, ctx)
+    drain_and_apply(host, tools, ctx, receipt_gap=torn)
     assert ctx.active_model == B and waiting_wake(waiter) is None
 
 

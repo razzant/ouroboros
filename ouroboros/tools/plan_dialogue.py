@@ -201,6 +201,18 @@ def _quiz_text(row: dict, *, provenance: bool = False) -> str:
     qid = str(quiz.get("quiz_id") or "")
     if row.get("type") == "quiz_closed":
         actor = "owner" if quiz.get("closed_actor") == "owner" else f"task {quiz.get('closed_by_task_id')}"
+        if provenance and actor == "owner":
+            from ouroboros.owner_quiz import secret_outcome_block, secret_outcome_summary
+
+            if secret_outcome_block(quiz):
+                return f"[secret request {qid}] {secret_outcome_summary(quiz)}"
+            asker = f" from {row['task_id']}" if row.get("task_id") else ""
+            head = f"[question closed without answer {qid}{asker}] by owner. No approval recorded."
+            if quiz.get("owner_wrote_reason") is True and isinstance(reason := quiz.get("closed_reason"), str):
+                return f"{head} Owner's verbatim reason: {json.dumps(reason, ensure_ascii=False)}"
+            if reason := quiz.get("closed_reason"):
+                return f"{head} Recorded reason (not attested as owner words): {reason}"
+            return head
         return f"[question closed without answer {qid}] by {actor}: {quiz.get('closed_reason') or ''}. No approval recorded."
     if row.get("type") == "quiz_answer" and quiz.get("secret_request") and isinstance(quiz.get("secret_outcome"), dict):
         from ouroboros.owner_quiz import secret_outcome_summary
@@ -225,13 +237,24 @@ def _quiz_text(row: dict, *, provenance: bool = False) -> str:
 def _line(number: int, row: dict) -> str:
     body = _quiz_text(row, provenance=True) if row.get("type") in {"quiz", "quiz_answer", "quiz_closed"} and isinstance(row.get("quiz"), dict) \
         else str(row.get("text") or "")
+    author = row.get("author") or "?"
+    if row.get("stream") == "mailbox" and (row.get("type") == "quiz_closed"
+            or str(row.get("msg_id") or "").startswith("quiz_closed:")):
+        author = "host"  # includes historical snapshots; their bytes are not rewritten
+        closure = row.get("quiz_delivery") or {}
+        if (isinstance(closure, dict) and closure.get("task_id") and closure.get("quiz_id")
+                and isinstance(reason := row.get("owner_close_words"), str)):
+            body = (f"[question {closure['quiz_id']} from {closure['task_id']} closed without answer] No approval recorded. "
+                    f"Owner's verbatim reason: {json.dumps(reason, ensure_ascii=False)}")
+    elif row.get("type") == "quiz_closed" and author == "Owner":
+        author = "host"
     reaction = row.get("reaction") if isinstance(row.get("reaction"), dict) else {}
     fact = str(reaction.get("words") or "")  # a reaction's labelled fact, beside the row's own words, never in them
     body = f"{body}\n{fact}" if body and fact else body or fact
     names = [next((str(a[k]) for k in _ATTACHMENT_NAME_KEYS if a.get(k)), "")
              for a in (row.get("attachments") or []) if isinstance(a, dict)]
     body = body.replace("\n", "\n  ") + (f" [attachments: {', '.join(n for n in names if n)}]" if any(names) else "")
-    return f"{number} · {row.get('ts') or '-'} · {row.get('author') or '?'} · {body}"
+    return f"{number} · {row.get('ts') or '-'} · {author} · {body}"
 
 
 def _gap_summary(own: dict) -> str:

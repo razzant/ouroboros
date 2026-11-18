@@ -145,7 +145,8 @@ def test_owner_close_over_http_needs_no_words_and_refuses_an_invalid_reason(tmp_
 
 
 def test_owner_closure_mailbox_failure_recovers_automatically(runtime, monkeypatch):
-    from ouroboros import owner_mailbox
+    from ouroboros import owner_mailbox, working_checkpoint
+    from tests._question_answer_shared import stage_question_mail
 
     prepare(runtime)
     real_write = owner_mailbox.write_owner_message
@@ -159,8 +160,20 @@ def test_owner_closure_mailbox_failure_recovers_automatically(runtime, monkeypat
         quizzes["q"]["delivery"]["next_retry_at"] = ""
         return True
     owner_quiz._mutate_projection(runtime.root, runtime.task["id"], advance)
-    assert asyncio.run(recover_question_deliveries(runtime.root)) == {"attempted": 1, "delivered": 1, "pending": 0}
-    assert drain_owner_entries(runtime.root, runtime.task["id"], set())[0]["kind"] == "quiz_closed"
+    assert asyncio.run(recover_question_deliveries(runtime.root)) == {"attempted": 1, "delivered": 0, "pending": 1}
+    task_id = runtime.task["id"]
+    debt = owner_quiz.quiz_states(runtime.root, task_id)["q"]["delivery"]
+    assert debt["history_at"] and debt["mailbox_at"] and not debt.get("read_at")
+    [letter] = drain_owner_entries(runtime.root, task_id)
+    assert letter["kind"] == "quiz_closed" and letter["msg_id"] == debt["msg_id"]
+    ctx, limit = stage_question_mail(runtime.root, task_id)
+    assert [row["content"] for row in ctx._owner_directives] == [receipt["closed_reason"]]
+    assert not owner_mailbox.mail_read_state(runtime.root, task_id, letter["msg_id"], transcript_only=True)
+    working_checkpoint.save_ready(limit)
+    settled = owner_quiz.quiz_states(runtime.root, task_id)["q"]["delivery"]
+    assert settled["state"] == "delivered" and settled["read_at"] and settled["history_at"] == debt["history_at"]
+    assert not drain_owner_entries(runtime.root, task_id)
+    assert asyncio.run(recover_question_deliveries(runtime.root)) == {"attempted": 0, "delivered": 0, "pending": 0}
 
 
 def test_owner_close_terminal_never_starts_a_new_turn(runtime, monkeypatch):

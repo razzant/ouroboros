@@ -144,10 +144,10 @@ def _put_settings(env, **values):
     (env.root / "settings.json").write_text(json.dumps({**_settings(env), **values}), encoding="utf-8")
 
 
-def _mail(env):
+def _mail(env, task_id=TASK):
     from ouroboros.owner_mailbox import drain_owner_entries
 
-    return drain_owner_entries(env.root, TASK, set())
+    return drain_owner_entries(env.root, task_id, set())
 
 
 def _block(env, quiz_id):
@@ -846,15 +846,15 @@ def test_the_waiting_task_wakes_with_metadata_only_secret_filled_in_its_next_mod
 
 # ------------------------------------------------------- typed host provenance
 
-def _drain(env):
+def _drain(env, task_id=TASK):
     import queue
 
     from ouroboros.loop_round_limits import _drain_incoming_messages
 
-    ctx = SimpleNamespace(task_id=TASK, task_metadata={}, drive_root=env.root, budget_drive_root=env.root,
+    ctx = SimpleNamespace(task_id=task_id, task_metadata={}, drive_root=env.root, budget_drive_root=env.root,
                           _owner_directives=[])
     messages = []
-    _drain_incoming_messages(messages, queue.Queue(), env.root, TASK, None, set(), owner_ctx=ctx)
+    _drain_incoming_messages(messages, queue.Queue(), env.root, task_id, None, set(), owner_ctx=ctx)
     return ctx, messages
 
 
@@ -879,17 +879,30 @@ def test_a_saved_secret_is_a_typed_host_row_and_adds_nothing_to_the_owner_corpus
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
-def test_a_cancelled_secret_frame_is_host_typed_and_only_the_owner_act_is_retained(env, interrupted):
+@pytest.mark.parametrize("reader", [TASK, "successor"])
+def test_a_cancelled_secret_frame_is_host_typed_and_only_the_owner_act_is_retained(env, monkeypatch, interrupted, reader):
     from ouroboros.context_budget import OWNER_WORDS_KIND
     from ouroboros.owner_quiz import SECRET_OUTCOME_ROW_KIND
 
     quiz_id = _ask(env)
     if interrupted:
         sr.claim_save(env.root, TASK, quiz_id, "dead-process")
+    if reader != TASK:
+        from ouroboros.gateway import task_decision
+        from ouroboros.task_store import patch_document
+        from tests._question_answer_shared import continue_to
+
+        patch_document(env.root, TASK, lambda row: {**row, "status": "completed"})
+        continue_to(env.root, asker=TASK)
+        monkeypatch.setattr(task_decision, "_mail_holder", lambda tid: (
+            ({"id": reader}, "") if tid == reader else (None, "task_settled")))
     assert _cancel(env, quiz_id).status_code == 200
-    [mail] = [entry for entry in _mail(env) if entry.get("kind") == "quiz_closed"]
+    [mail] = [entry for entry in _mail(env, reader) if entry.get("kind") == "quiz_closed"]
+    assert mail["msg_id"] == f"quiz_closed:{quiz_id}"
+    if reader != TASK:
+        assert not _mail(env)
     assert mail["quiz_delivery"]["answer_snapshot"]["secret_outcome"]["event"] == "secret_cancelled"
-    ctx, messages = _drain(env)
+    ctx, messages = _drain(env, reader)
     frames = [row for row in messages if "[Owner secret request cancelled]" in str(row.get("content"))]
     assert len(frames) == 1 and _kinds(frames) == [SECRET_OUTCOME_ROW_KIND]
     assert OWNER_WORDS_KIND not in _kinds(messages)

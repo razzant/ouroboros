@@ -210,6 +210,51 @@ def test_an_owner_pause_or_stop_control_is_never_filtered(tmp_path):
     assert model_sleep.wake_reason(ctx, chosen) == "control:owner_pause"
 
 
+def test_waits_observe_only_a_new_unhandled_control_after_a_receipt_gap(tmp_path):
+    import queue
+    from ouroboros import loop_transport, model_sleep, owner_mailbox as mail
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+
+    ctx = _ctx(tmp_path)
+    tid = ctx.task_id
+    _result(tmp_path, tid)
+    chosen = model_sleep.selectors(ctx)
+    receipts = mail._ack_path(tmp_path, tid)
+
+    def publish(mid):
+        _mail(tmp_path, tid, mid, msg_id=mid, kind=mail.KIND_FINALIZE_NOW)
+
+    def observed(ready):
+        before = receipts.read_bytes()
+        assert model_sleep.wake_reason(ctx, chosen) == ("control:finalize_now" if ready else "")
+        assert ctx.model_wait_context.control_reason() == ("finalize_requested" if ready else None)
+        assert loop_transport.transport_repeat_stop_requested(ctx) is ready
+        assert loop_transport._owner_signal_pending(None, tmp_path, tid, ctx._loop_mailbox_seen_ids, 1,
+                                                   owner_authority_only=True) is ready
+        assert receipts.read_bytes() == before
+
+    publish("uncertain")
+    receipts.write_bytes(b'{"msg_id":"torn-\xc3')
+    publish("uncertain")  # a sender retry is still the same command
+    observed(False)
+    publish("before-second-gap")
+    with receipts.open("ab") as stream:
+        stream.write(b'\n{"msg_id":"another-torn')
+    observed(False)
+    publish("possibly-revoked")
+    with mail._mailbox_path(tmp_path, tid).open("ab") as stream:
+        stream.write(b'{"kind":"control_revoked","text":')
+    publish("possibly-revoked")
+    observed(False)
+    publish("current")
+    assert mail.acknowledge_task_messages(tmp_path, tid, ["unrelated"], wake_id="old", attempt_key=1)
+    observed(True)
+    assert not ctx._loop_mailbox_seen_ids
+    controls = _drain_incoming_messages([], queue.Queue(), tmp_path, tid, None, ctx._loop_mailbox_seen_ids, owner_ctx=ctx)
+    assert controls["finalize_now"] == "current"
+    observed(False)
+
+
 def test_sleep_is_excluded_from_execution_once_and_the_deadline_does_not_move(tmp_path):
     from ouroboros import model_sleep
     from ouroboros.model_wait import execution_elapsed_seconds
@@ -324,6 +369,23 @@ def test_a_cold_sleep_parks_exactly_and_only_its_own_readiness_wakes_it(tmp_path
     handoff = workers.PENDING[0]["_budget_pause_resume"]
     assert handoff["selected_by"] == "sleep_wake"
     assert budget_pause_row(tmp_path, "sleeper")["sleep_ready"]["reason"] == "mail:peer-a"
+
+
+def test_cold_assignment_tick_wakes_on_control_published_after_torn_ack(tmp_path, monkeypatch):
+    from ouroboros import owner_mailbox as mail
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
+    _cold_park(tmp_path, monkeypatch, workers)
+    _mail(tmp_path, "sleeper", "earlier", msg_id="earlier", kind=mail.KIND_HURRY)
+    receipts = mail._ack_path(tmp_path, "sleeper")
+    receipts.write_bytes(b'{"msg_id":')
+    assert wake_ready_sleepers(queue) == []
+    _mail(tmp_path, "sleeper", "current", msg_id="current", kind=mail.KIND_HURRY)
+    [outcome] = wake_ready_sleepers(queue)
+    assert outcome["ok"] and outcome["ready"]["reason"] == "control:hurry"
+    assert wake_ready_sleepers(queue) == [] and receipts.read_bytes() == b'{"msg_id":'
 
 
 def test_readiness_is_recorded_but_never_overrides_an_owner_pause_or_a_restart_hold(tmp_path, monkeypatch):

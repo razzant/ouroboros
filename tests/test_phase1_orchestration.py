@@ -145,6 +145,51 @@ def test_delegation_constraint_payload_and_override(monkeypatch, tmp_path):
     )
 
 
+def test_constraint_release_addresses_the_emitter_even_when_display_label_and_id_match(monkeypatch, tmp_path):
+    from ouroboros import task_tree_ledger as ledger
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.join_ledger import _override_delegation_constraint
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+    from ouroboros.tools.task_tree import _tree_note
+
+    monkeypatch.setattr(ledger, "DATA_DIR", str(tmp_path))
+    contexts = [ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=who,
+                            task_metadata={"root_task_id": "root"}) for who in ("first", "root", "label")]
+    first, root, label = contexts
+    payload = {"constraint_id": "hold", "directive": "halt_fanout", "created_by": "label"}
+    for ctx in (first, root):
+        assert _tree_note(ctx, "delegation_constraint", "Wait", payload=payload).startswith("OK:")
+    assert [row["payload"]["created_by"] for row in ledger.open_delegation_constraints("root")] == ["label", "label"]
+    write_task_result(tmp_path, "first", "running", parent_task_id="root", root_task_id="root", delegation_role="subagent")
+    assert "only the parent" in _override_delegation_constraint(label, "hold", "display identity", "first")
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(root)
+    args = {"constraint_id": "hold", "reason": "my inspection finished"}
+
+    def release(**selector):
+        return registry.execute("override_delegation_constraint", {**args, **selector})
+
+    ambiguous = release()
+    assert all(word in ambiguous for word in ("constraint_task_id", "first", "root"))
+    assert release(constraint_task_id="root").startswith("OK:")
+    assert "not open" in release(constraint_task_id="root")
+    assert "constraint_task_id" in release()
+    assert [row["task_id"] for row in ledger.open_delegation_constraints("root")] == ["first"]
+    decision = ledger.tree_ledger_rows("root")[-1]
+    assert decision["task_id"] == decision["payload"]["constraint_task_id"] == "root"
+    assert decision["payload"]["reason"] == "my inspection finished"
+    assert release(constraint_task_id="first").startswith("OK:")
+    assert ledger.tree_ledger_rows("root")[-1]["payload"]["constraint_task_id"] == "first"
+
+    # Decisions written before emitter addressing released every earlier hold of that ID.
+    assert _tree_note(first, "delegation_constraint", "Wait again", payload=payload).startswith("OK:")
+    assert _tree_note(root, "delegation_constraint", "Wait again", payload=payload).startswith("OK:")
+    ledger.tree_ledger_append("root", "decision", "earlier parent override", task_id="root",
+                              payload={"constraint_id": "hold", "decision": "overridden", "reason": "legacy"},
+                              allow_constraint_override=True)
+    assert ledger.open_delegation_constraints("root") == []
+
+
 def test_effective_delegation_budget_honors_require_lane_and_scope():
     from ouroboros.tools.control_delegation import effective_delegation_budget
 

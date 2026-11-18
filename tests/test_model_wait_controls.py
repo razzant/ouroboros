@@ -81,6 +81,24 @@ def test_torn_mailbox_read_cannot_apply_or_consume_a_parsed_control(live_wait):
     assert owner.waits["wait-one"]["_action"]["request_id"] == "switch-one"
 
 
+@pytest.mark.parametrize("damaged_file", ["mailbox", "receipts"])
+def test_switch_after_a_permanently_torn_row_applies_once(live_wait, damaged_file):
+    if damaged_file == "receipts":
+        path = owner_mailbox._ack_path(live_wait[0], "task-one")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        damaged = b'{"msg_id":'
+        path.write_bytes(damaged)
+    root, owner, _body, _decide = _accepted_switch(live_wait)
+    if damaged_file == "mailbox":
+        path = owner_mailbox._mailbox_path(root, "task-one")
+        damaged = b'{"unfinished":"\xc3\n' + path.read_bytes()
+        path.write_bytes(damaged)
+    owner._drain_controls()
+    assert owner.waits["wait-one"].pop("_action")["request_id"] == "switch-one"
+    owner._drain_controls()
+    assert "_action" not in owner.waits["wait-one"] and path.read_bytes() == damaged
+
+
 @pytest.mark.parametrize("attempt,state,expected", [(1, "waiting", False), (2, "waiting", True), (2, "resolved", False)])
 def test_supervisor_wait_belongs_to_current_retry_attempt(attempt, state, expected):
     from supervisor.task_model_wait import model_waiting
@@ -190,11 +208,16 @@ def test_main_quota_calls_configured_api_fallback_before_any_owner_wait(main_cal
     assert any(message.get("content") == "completed review B" for message in ctx.messages)
 
 
-def test_graceful_intent_waits_for_current_control_and_never_looks_like_hard_cancel(live_wait):
+@pytest.mark.parametrize("torn", [False, True])
+def test_graceful_intent_waits_for_current_control_and_never_looks_like_hard_cancel(live_wait, torn):
     from supervisor.owner_stop import owner_stop_control_id
     from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
 
     root, _gateway, _client, owner, _events, _decide = live_wait
+    if torn:
+        receipt = owner_mailbox._ack_path(root, "task-one")
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_bytes(b'{"msg_id":')
     intent = cancel_intents.request_cancel(root, "task-one", requested_stop_policy=cancel_intents.STOP_POLICY_FINALIZE)
     assert owner.control_reason() is None
     owner_mailbox.write_owner_message(root, REASON_OWNER_REQUESTED_FINALIZATION, "task-one",

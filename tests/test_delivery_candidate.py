@@ -814,8 +814,9 @@ def test_quiz_answer_and_parent_message_reopen_a_sealed_root_for_owner_follow_up
     and another round runs; a host system frame (a settled plan wave) changes nothing."""
     import threading
 
-    from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, write_owner_message, write_task_message
+    from ouroboros.owner_mailbox import write_task_message
     from tests.test_delivery_forced_finalization import _forced_test_context
+    from tests._question_answer_shared import _post, runtime
 
     def run(write_followups):
         loop, registry, ctx, trace = _forced_test_context(tmp_path / str(len(released_runs)))
@@ -836,15 +837,20 @@ def test_quiz_answer_and_parent_message_reopen_a_sealed_root_for_owner_follow_up
         result = loop._no_tool_final_answer("Final answer.", ctx, trace, registry, queue.Queue(), set(), lambda _m: None)
         released_runs.append(released)
         # A grown corpus forces another round (None); an unchanged one delivers the answer.
-        return released, [row["source"] for row in getattr(registry._ctx, "_owner_directives", [])], result
+        directives = [(row["source"], row["content"]) for row in getattr(registry._ctx, "_owner_directives", [])]
+        return released, directives, result
+
+    def choose_database(drive):
+        app, _, _, _ = runtime(drive, monkeypatch, asker="parent1")
+        reply = _post(app, {"decision_id": "quiz:parent1:q", "request_id": "choose", "option_index": 1})
+        assert reply.status_code == 200, reply.text
 
     released_runs: list = []
-    quiz = "[Owner quiz answer] quiz q1 — asked t0, answered t1.\nThe owner chose option 2: postgres"
-    calls, sources, result = run(lambda drive: write_owner_message(drive, quiz, task_id="parent1", msg_id="qa-1", kind=KIND_QUIZ_ANSWER))
-    assert len(calls) == 1 and sources == ["owner_quiz_answer"] and result is None
+    calls, sources, result = run(choose_database)
+    assert len(calls) == 1 and sources == [("owner_quiz_answer", "2. postgres")] and result is None
     calls, sources, result = run(lambda drive: write_task_message(drive, "Use the Q3 numbers only", "parent1",
                                                                   source_task_id="root-0", msg_id="pm-1"))
-    assert len(calls) == 1 and sources == ["principal_task_message"] and result is None
+    assert len(calls) == 1 and sources == [("principal_task_message", "Use the Q3 numbers only")] and result is None
     calls, sources, result = run(lambda drive: write_task_message(
         drive, "Plan review wave abcd1234: 3 released reviewer slot(s) settled", "parent1",
         source_task_id="parent1", provenance="system", msg_id="sys-1"))

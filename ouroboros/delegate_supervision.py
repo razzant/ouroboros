@@ -44,16 +44,15 @@ from typing import Any, Iterable, Optional
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_shared import _fail, delegate_result, refusal_host_code
 from ouroboros.delegate_feed import _TICK_SEC
-from ouroboros.owner_mailbox import (
-    KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_MODEL, KIND_TASK_MESSAGE, drain_owner_entries,
-)
+from ouroboros import mailbox_restore
+from ouroboros.delegate_supervision_state import state_path as _state_path
+from ouroboros.owner_mailbox import WAKE_CONTROL_KINDS as _LOOP_CONTROL_KINDS, receipt_gap_history, drain_owner_entries
 from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import utc_now_iso
 from ouroboros import delegate_supervision_state as checkpoints
 
 log = logging.getLogger(__name__)
 _QUIET_STATUSES = {"progress", "no_progress", "observation_pending"}
-_LOOP_CONTROL_KINDS = {KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_MODEL}
 _MAX_COORDINATION_SEEN = 256
 # An in-slot wait's mark outlives one beat, then renews.
 _HOLD_MARK_SEC = 120.0
@@ -77,11 +76,6 @@ def _loop_gateway(entry: Any = None) -> Any:
 
 def _attempt_key(ctx: Any) -> str:
     return str(getattr(ctx, "task_attempt", None) or 1)
-
-
-def _state_path(ctx: Any) -> pathlib.Path:
-    task_id = str(getattr(ctx, "task_id", "") or "")
-    return custody.custody_root(ctx) / "state" / "delegate_supervision" / f"{task_id}.json"
 
 
 def _load_state(ctx: Any, run_id: str) -> dict[str, Any]:
@@ -478,7 +472,7 @@ def _addressed_wakes(ctx: Any, state: dict[str, Any]) -> list[dict[str, Any]]:
         str(getattr(ctx, "task_id", "") or ""),
         seen_ids=seen,
         attempt_key=attempt,
-        kinds=_LOOP_CONTROL_KINDS,
+        kinds=_LOOP_CONTROL_KINDS, gap_history=receipt_gap_history(ctx),
     )
     return [
         {
@@ -593,24 +587,26 @@ def _replay_fact(pending: dict[str, Any]) -> dict[str, Any]:
             "note": "The same wake, still unacknowledged; this call returned it without observing the run again."}
 
 
-def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[dict[str, Any]] = None) -> ToolResult:
+def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[dict[str, Any]] = None,
+                         *, run_id: Optional[str] = None) -> ToolResult:
     """Render valid bounded JSON, spilling an oversized exact wake to artifacts.
 
     A replay (``replay_of``: its pending record) is shown marked and without text mail this attempt
     already holds; its spilled source stays the canonical wake, the same bytes at every replay of the
     attempt, so what was delivered of it before still counts (``deliver_wake``)."""
 
-    canonical = json.dumps(payload, ensure_ascii=False, indent=2)
-    if replay_of is not None:
-        seen = getattr(ctx, "_loop_mailbox_seen_ids", None)
-        payload = {"replay_of": _replay_fact(replay_of), **unseen_wake_view(
-            payload, seen, ctx, getattr(ctx, "messages", None), replay_of.get("payload"))}
-    raw = json.dumps(payload, ensure_ascii=False, indent=2)
     from ouroboros.tool_capabilities import tool_result_limit
 
+    if replay_of is not None and mailbox_restore.has_wake_mail(replay_of):
+        payload = mailbox_restore.wake_view(ctx, payload, pending=replay_of, run_id=run_id)
+    publication = payload
+    if replay_of is not None:
+        payload = {"replay_of": _replay_fact(replay_of), **payload}
+    result = _wake_result(payload)
     budget = tool_result_limit("delegate_wait")
-    if len(raw) <= budget:
-        return _wake_result(payload)
+    if len(result.text) <= budget:
+        return result
+    canonical = result.text if publication is payload else json.dumps(publication, ensure_ascii=False, indent=2)
     wake_id = str(payload.get("supervision_wake_id") or "")
     try:
         from ouroboros.artifacts import store_actor_source_bytes, task_id_for_artifacts
@@ -631,7 +627,7 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
             "wake_id": wake_id,
             "total_chars": len(canonical),
         })
-        return _wake_result(payload)
+        return result
     events = payload.get("wake_events") if isinstance(payload.get("wake_events"), list) else []
     summaries = [_wake_event_summary(event) for event in events]
     # ``ok``/``host_code`` ride the fitted envelope: a wake that relays a REFUSED
@@ -648,6 +644,8 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
     envelope["wake_events"] = summaries
     if isinstance(payload.get("coordination_context"), dict):
         envelope["coordination_context"] = payload["coordination_context"]
+    if "restored_mailbox" in payload:
+        envelope["restored_mailbox"] = payload["restored_mailbox"]
     envelope["wake_delivery"] = {
         "complete": False,
         "total_chars": len(canonical),
@@ -692,43 +690,18 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
             "coordination_context": {"state": "available_in_full_wake_source"},
             "wake_delivery": envelope["wake_delivery"],
         }
-        rendered = json.dumps(envelope, ensure_ascii=False, indent=2)
     return _wake_result(envelope, source)
-
-
-def _schema_1_envelope(payload: dict[str, Any]) -> dict[str, Any]:
-    """Carry a schema-1 ``pending_wake.payload`` forward without rewriting it.
-
-    Rows written before this family carried ``ok``/``host_code`` replay exactly as
-    stored; only the two classification keys are derived, and only when they are
-    ABSENT. ``refused`` was the one status the old writer used for a refused
-    observation, so it replays as the recorded tool failure it always was and
-    everything else replays as the ordinary observation it always was. No prose is
-    read, no word is matched, no terminal/success/zero-spend fact is invented, and
-    an unknown or corrupt shape keeps its whole body.
-    """
-    if "ok" in payload or str(payload.get("status") or "") != "refused":
-        return dict(payload)
-    return {**payload, "ok": False, "host_code": refusal_host_code(str(payload.get("reason") or ""))}
 
 
 def _pending_payload(ctx: Any, state: dict[str, Any]) -> dict[str, Any]:
     pending = state.get("pending_wake") if isinstance(state.get("pending_wake"), dict) else {}
     payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
     if pending and not pending.get("acknowledged_at") and payload:
-        replay = _schema_1_envelope(payload)
+        replay = checkpoints.schema_1_envelope(payload)
         if str(pending.get("attempt_key") or "") != _attempt_key(ctx):
-            events = replay.get("wake_events")
-            if isinstance(events, list):
-                kept = [
-                    dict(item) for item in events if isinstance(item, dict)
-                    and str(item.get("kind") or "") not in _LOOP_CONTROL_KINDS
-                ]
-                if kept:
-                    replay["wake_events"] = kept
-                else:
-                    replay.pop("wake_events", None)
-            if str(replay.get("status") or "") in _QUIET_STATUSES and not replay.get("wake_events") and not replay.get("questions"):
+            replay = mailbox_restore.attempt_wake_view(ctx, replay, pending)
+            if (str(replay.get("status") or "") in _QUIET_STATUSES and not replay.get("wake_events")
+                    and not replay.get("questions") and not pending.get("mailbox_ids")):
                 pending["acknowledged_at"] = utc_now_iso()
                 state["last_acknowledged_wake"] = pending
                 state["pending_wake"] = {}
@@ -738,31 +711,6 @@ def _pending_payload(ctx: Any, state: dict[str, Any]) -> dict[str, Any]:
         # The canonical replay; its view omits mail this attempt already drained (``_render_wake_payload``).
         return replay
     return {}
-
-
-def unseen_wake_view(payload: dict[str, Any], seen: Any, ctx: Any = None, transcript: Any = None,
-                     canonical: Any = None) -> dict[str, Any]:
-    """The delivered wake without text mail this attempt's transcript already holds.
-
-    Only the view narrows; the pending wake keeps every mailbox id for its ACK. Given the transcript, mail a
-    still-present view showed only cut stays in it (``delegate_recovery.seen_without_cut_mail``).
-    """
-    events = payload.get("wake_events")
-    if not seen or not isinstance(events, list):
-        return payload
-    if ctx is not None:
-        from ouroboros.delegate_recovery import seen_without_cut_mail
-
-        seen = seen_without_cut_mail(ctx, seen, canonical or payload, transcript)
-    kept = [event for event in events if not any(item in seen for item in _text_mailbox_ids([event]))]
-    return payload if len(kept) == len(events) else {**payload, "wake_events": kept}
-
-
-def _text_mailbox_ids(events: Any) -> set[str]:
-    """Only text carried by the delivered view: never omitted mail, a cut summary of it or controls."""
-    return {str(item["msg_id"]) for item in events if isinstance(item, dict)
-            and item.get("msg_id") and "text" in item and not item.get("text_omitted_chars")
-            and str(item.get("kind") or "owner_text") not in _LOOP_CONTROL_KINDS}
 
 
 def _record_terminal_acknowledged(ctx: Any, state: dict[str, Any], pending: dict[str, Any],
@@ -783,38 +731,29 @@ def _record_terminal_acknowledged(ctx: Any, state: dict[str, Any], pending: dict
         })
 
 
-def stage_pending_wake_exposure(ctx: Any, delivered: Any, *, mail: bool = True) -> None:
-    """Stage shown questions and mail in this attempt before saving their transcript.
-
-    No mailbox/wake ACK or run answer occurs here. If the save fails but the
-    transcript remains, exposure remains with it; cold replay is at least once.
-    ``mail=False``: a startup receipt's old wake shows its mail but leaves it unread for the first round-top
-    drain, which delivers it as its sender's words (a wake published since carries none).
-    """
+def stage_pending_wake_exposure(ctx: Any, delivered: Any) -> None:
+    """Stage questions shown by a run before saving their transcript. The mailbox drain owns letters."""
     try:
         payload = json.loads(delivered) if isinstance(delivered, str) else delivered
     except (TypeError, ValueError):
         return
-    if not _wake_ids(payload):
+    ids = _wake_ids(payload)
+    if not ids:
         return
-    for run_id in checkpoints.read(_state_path(ctx))["runs"]:
-        state = _load_state(ctx, run_id)
+    for run_id, state in checkpoints.read(_state_path(ctx))["runs"].items():
         pending = state.get("pending_wake") or {}
-        if pending.get("wake_id") in _wake_ids(payload):
-            _record_exposure(ctx, payload, pending, run_id, mail=mail)
+        if pending.get("wake_id") in ids:
+            _record_exposure(ctx, payload, pending, run_id)
 
 
-def _record_exposure(ctx: Any, payload: Any, pending: dict[str, Any], run_id: str, *, mail: bool = True) -> None:
+def _record_exposure(ctx: Any, payload: Any, pending: dict[str, Any], run_id: str) -> None:
     from ouroboros.sleep_custody import record_question_notice
 
-    wake = payload.get("wake", payload) if isinstance(payload, dict) else {}
-    record_question_notice(ctx, (wake.get("questions") or []) if isinstance(wake, dict) else [])
-    if mail and isinstance(wake, dict) and isinstance(wake.get("wake_events"), list):
-        seen_mail = getattr(ctx, "_loop_mailbox_seen_ids", None)
-        if seen_mail is None:
-            seen_mail = ctx._loop_mailbox_seen_ids = set()
-        seen_mail.update(_text_mailbox_ids(wake["wake_events"]))
-    shown = _interaction_ids(payload) & set(pending.get("interaction_ids") or [])
+    wid = pending.get("wake_id")
+    shared_id = sum(key == wid for _, key in getattr(ctx, "_restored_wake_mail", {})) > 1
+    wake = mailbox_restore.delivered_wake(payload, run_id, wid, require_run=shared_id) or {}
+    record_question_notice(ctx, wake.get("questions") or [])
+    shown = _interaction_ids(wake) & set(pending.get("interaction_ids") or [])
     if shown and run_id:
         seen = dict(getattr(ctx, "_sleep_interaction_seen", None) or {})
         seen[run_id] = sorted(set(seen.get(run_id) or ()) | shown)
@@ -895,6 +834,13 @@ def acknowledge_pending_wake(ctx: Any, delivered: Any = None) -> bool:
     pending = [state for state in states if state.get("pending_wake")
                and not state["pending_wake"].get("acknowledged_at")]
     selected = [state for state in pending if state["pending_wake"].get("wake_id") in ids]
+    shared = {wid for wid in ids if sum(state["pending_wake"].get("wake_id") == wid for state in selected) > 1}
+    for wid in shared:
+        addressed = [state for state in selected if state["pending_wake"].get("wake_id") == wid
+                     and mailbox_restore.delivered_wake(payload, state["run_id"], wid, require_run=True) is not None]
+        if not addressed:
+            return _ack_refused(ctx, selected, "legacy_wake_binding_unavailable")
+        selected = [state for state in selected if state["pending_wake"].get("wake_id") != wid or state in addressed]
     if pending and not selected:  # e.g. an earlier wake's source read whole after that wake was acknowledged
         return _ack_refused(ctx, pending, "pending_wake_not_named", delivered_wake_ids=sorted(ids))
     for state in selected:  # each names its wake: ``payload`` is a parsed delivery that names it
@@ -923,49 +869,24 @@ def _acknowledge_run_wake(ctx: Any, payload: Any, state: dict) -> str:
     pending = state["pending_wake"]
     expected = str(pending.get("wake_id") or "")
     attempt = _attempt_key(ctx)
-    from ouroboros.owner_mailbox import acknowledge_task_messages
-
-    mailbox_ids = [str(item) for item in (pending.get("mailbox_ids") or []) if str(item)]
-    seen_mailbox_ids = [
-        str(item) for item in (pending.get("seen_mailbox_ids") or []) if str(item)
-    ] or [
-        str(item.get("msg_id") or "")
-        for item in (
-            pending.get("payload", {}).get("wake_events", [])
-            if isinstance(pending.get("payload"), dict) else []
-        )
-        if isinstance(item, dict) and str(item.get("msg_id") or "")
-    ]
-    wake_events = (
-        pending.get("payload", {}).get("wake_events", [])
-        if isinstance(pending.get("payload"), dict) else []
-    )
-    owner_ids = {
-        str(item.get("msg_id") or "")
-        for item in wake_events if isinstance(item, dict)
-        and str(item.get("kind") or "owner_text") not in {
-            *_LOOP_CONTROL_KINDS, KIND_TASK_MESSAGE,
-        }
-    }
-    global_ids = [item for item in mailbox_ids if item not in owner_ids]
-    mailbox_root = pathlib.Path(getattr(ctx, "drive_root", custody.custody_root(ctx)))
-    task_id = str(getattr(ctx, "task_id", "") or "")
-    if global_ids and not acknowledge_task_messages(
-        mailbox_root, task_id, global_ids, wake_id=expected,
-    ):
-        return "mailbox_acknowledgement_unwritten"
-    if owner_ids and not acknowledge_task_messages(
-        mailbox_root, task_id, sorted(owner_ids), wake_id=expected,
-        attempt_key=attempt,
-    ):
-        return "mailbox_acknowledgement_unwritten"
-    if mailbox_ids and not (global_ids or owner_ids) and not acknowledge_task_messages(
-        mailbox_root, task_id, mailbox_ids, wake_id=expected, attempt_key=attempt,
-    ):
-        return "mailbox_acknowledgement_unwritten"
+    legacy = mailbox_restore.has_wake_mail(pending)
+    if legacy:
+        if reason := mailbox_restore.acknowledgement_problem(ctx, payload, state["run_id"], pending):
+            return reason
+    wake_events = (pending.get("payload") or {}).get("wake_events")
+    wake_events = wake_events if isinstance(wake_events, list) else []
+    seen_mailbox_ids = pending.get("seen_mailbox_ids") or [
+        item["msg_id"] for item in wake_events if isinstance(item, dict) and item.get("msg_id")]
+    if legacy:
+        # This receipt advances the run. Only visible controls belong to its seen cursor.
+        shown = mailbox_restore.attempt_wake_view(ctx, pending["payload"], pending)
+        visible = shown.get("wake_events")
+        seen_mailbox_ids = [event["msg_id"] for event in (visible if isinstance(visible, list) else [])
+                            if isinstance(event, dict) and isinstance(event.get("msg_id"), str)
+                            and str(event.get("kind")) in _LOOP_CONTROL_KINDS]
     if not _emit(ctx, "delegate_supervision_wake_acknowledged", {
         "run_id": str(state.get("run_id") or ""), "wake_id": expected,
-        "mailbox_ids": mailbox_ids,
+        "mailbox_ids": [],
         "attempt_key": attempt,
         "interaction_ids": list(pending.get("interaction_ids") or []),
         "coordination": any(
@@ -994,6 +915,11 @@ def _acknowledge_run_wake(ctx: Any, payload: Any, state: dict) -> str:
     if isinstance(coordination_cursor, dict):
         state["coordination_cursor"] = coordination_cursor
     pending["acknowledged_at"] = utc_now_iso()
+    if legacy:
+        plan = ctx._restored_wake_mail[(state["run_id"], expected)]
+        if plan["unresolved"] or plan["unidentified"]:
+            pending["unresolved_mailbox_ids"] = plan["unresolved"]
+            pending["unidentified_mail"] = plan["unidentified"]
     state["last_acknowledged_wake"] = pending
     state["pending_wake"] = {}
     state["status"] = "awake"
@@ -1154,7 +1080,7 @@ def _replay(ctx: Any, run_ids: list[str]) -> tuple[Optional[ToolResult], dict[st
         if replay:
             _emit(ctx, "delegate_supervision_wake_replayed", {
                 "run_id": run_id, "wake_id": str(replay.get("supervision_wake_id") or "")})
-            return _render_wake_payload(ctx, replay, state["pending_wake"]), states
+            return _render_wake_payload(ctx, replay, state["pending_wake"], run_id=run_id), states
     return None, states
 
 
@@ -1246,24 +1172,24 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questio
         "wake_id": wake_id,
         "attempt_key": _attempt_key(ctx),
         "payload": payload,
-        "mailbox_ids": [  # empty now that a wake carries only loop controls; an older body's wake kept its mail ids
-            str(item.get("msg_id") or "") for item in wakes
-            if str(item.get("msg_id") or "") and str(item.get("kind") or "") not in _LOOP_CONTROL_KINDS
-        ],
+        "mailbox_ids": [],  # letter receipts belong to the round-top drain
         "seen_mailbox_ids": [str(item.get("msg_id") or "") for item in wakes if str(item.get("msg_id") or "")],
         "interaction_ids": sorted(_interaction_ids(payload)),
         "coordination_cursor": next_coordination_cursor,
         "created_at": utc_now_iso(),
     }
     _save_state(ctx, state, "wake_publication")  # another publication that landed first is the wake, rendered instead
-    payload, wake_id = state["pending_wake"]["payload"], state["pending_wake"]["wake_id"]
+    published = state["pending_wake"]
+    adopted = published["wake_id"] != wake_id
+    payload, wake_id = published["payload"], published["wake_id"]
     _emit(ctx, "delegate_supervision_wake_pending", {
         "run_id": target, "wake_id": wake_id, "payload": payload,
         "mailbox_ids": list(state["pending_wake"].get("mailbox_ids") or []),
         "interaction_ids": list(state["pending_wake"].get("interaction_ids") or []),
     })
     descriptor["wake"] = {"run_id": target, "wake_id": wake_id}
-    return _render_wake_payload(ctx, payload)
+    return _render_wake_payload(ctx, payload, published if adopted and mailbox_restore.has_wake_mail(published) else None,
+                                run_id=target)
 
 
 def owed_wake(ctx: Any, descriptor: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -1276,7 +1202,7 @@ def owed_wake(ctx: Any, descriptor: dict[str, Any]) -> tuple[str, dict[str, Any]
     if wake:
         pending = _load_state(ctx, str(wake.get("run_id") or "")).get("pending_wake") or {}
         if pending.get("wake_id") == wake.get("wake_id") and isinstance(pending.get("payload"), dict):
-            result = _render_wake_payload(ctx, pending["payload"])
+            result = _render_wake_payload(ctx, pending["payload"], pending, run_id=wake["run_id"])
             return result.text, dict(result.meta or {})
     try:
         woke_by = model_sleep.wake_reason(ctx, _choice(descriptor))
@@ -1349,15 +1275,22 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
             "(0 with an empty reason also means none).",
         )
     run_ids = list(dict.fromkeys(run_id if isinstance(run_id, list) else [str(run_id)]))
-    root, in_process = custody.custody_root(ctx), []
+    root, in_process, review_runs = custody.custody_root(ctx), [], []
     for selected in run_ids:
-        ownership, _entry = custody.lookup(root, str(ctx.task_id), selected)
+        ownership, entry = custody.lookup(root, str(ctx.task_id), selected)
         if ownership == custody.FOREIGN:
             from ouroboros.tools.delegate_terminal_evidence import retry_terminal_result
 
             return retry_terminal_result(ctx, selected)
-        if ownership == custody.OWNED and current_run(root, selected) is None:
-            in_process.append(selected)  # owned through this process's memo alone (``custody.lookup``)
+        if ownership == custody.OWNED:
+            if entry.review_owned:
+                review_runs.append(entry)
+            elif current_run(root, selected) is None:
+                in_process.append(selected)  # owned through this process's memo alone (``custody.lookup``)
+    if review_runs:
+        from ouroboros.review_waiting import review_wait_refusal
+
+        return review_wait_refusal(ctx, "delegate_wait", review_runs)
     from ouroboros.delegate_recovery import restore_bound_handoff
 
     try:
@@ -1561,6 +1494,6 @@ def delegate_wait_entry(
 
 __all__ = [
     "acknowledge_pending_wake", "stage_pending_wake_exposure", "delegate_wait_entry", "run_wait", "owed_wake",
-    "supervision_checkpoint", "coordination_live_context", "unseen_wake_view", "deliver_wake", "run_wait_reason",
+    "supervision_checkpoint", "coordination_live_context", "deliver_wake", "run_wait_reason",
     "hold_wake", "arm_hold_sleep",
 ]

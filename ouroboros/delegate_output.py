@@ -478,11 +478,13 @@ def credit_exact_source(ctx: Any, row: Dict[str, Any], view: Dict[str, Any], sou
     ``model_sleep``, a shortened or spilled wake's in ``delegate_supervision``); that consumer keeps the
     consequence and its map. ``key`` names the source a delivered view just added: a shortened ``view``'s own head
     and tail count, a summary that is no window of it counts nothing new. Otherwise ``row`` is a ``read_file``
-    whose ``read_view`` opened that very file at its exact bytes (target path and ``source_revision``), credited
-    by its actually delivered ranges, a window the delivery cut included. The same bytes under another name,
-    another file or a skipped middle credit nothing. Coverage merges in this process's reading ledger under
+    whose ``read_view`` opened that actor's exact source at an admitted placement, canonical or execution.
+    Only the actually delivered ranges at ``source_revision`` count; another task, another relative path or a
+    skipped middle credits nothing. Coverage merges in this process's reading ledger under
     ``ledger`` and rides the actor's continuation (``read_coverage``). Crediting never breaks delivery."""
-    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path, task_id_for_artifacts
+    from ouroboros.artifacts import task_id_for_artifacts
+    from ouroboros.source_retention import read_own_actor_source
+    from ouroboros.tool_access import canonical_data_root
     from ouroboros.tool_result_delivery import RESULT_VIEW_BASIS, reader_text
 
     read_view = None if key else ((row.get("result_meta") or {}).get("tool_result_meta") or {}).get("read_view")
@@ -491,19 +493,21 @@ def credit_exact_source(ctx: Any, row: Dict[str, Any], view: Dict[str, Any], sou
         and ref["sha256"] == read_view.get("source_revision"))]
     if not named or not isinstance(named[0][1], dict):
         return None
-    drive, owner = pathlib.Path(ctx.drive_root), task_id_for_artifacts(ctx)
     try:
-        key, ref = named[0]
-        if read_view is not None:
-            store = task_artifact_dir_path(drive, owner)
-            target = pathlib.Path(str(read_view.get("target") or "")).resolve(strict=False)
-            key, ref = next(((name, ref) for name, ref in named if store.joinpath(
-                *pathlib.PurePosixPath(str(ref.get("path"))).parts).resolve(strict=False) == target), (None, None))
-            if ref is None:
-                return None  # the same bytes under another name are not this source
-        content = reader_text(read_actor_source_bytes(drive, owner, ref).decode("utf-8"))
+        drive, owner = pathlib.Path(ctx.drive_root).resolve(strict=False), task_id_for_artifacts(ctx)
+        canonical = canonical_data_root(ctx)
+        target = str(read_view.get("target") or "") if read_view is not None else None
+        for key, ref in named:
+            raw = read_own_actor_source(drive, canonical, owner, ref, opened_target=target)
+            if raw is not None:
+                break
+        else:
+            return None
+        content = reader_text(raw.decode("utf-8"))
         if read_view is not None:
             ranges = _delivered_source_ranges(read_view, str(row.get("result") or ""), view, content)
+            if ranges is None:
+                return None
         elif not view.get("result_partial"):
             ranges = []  # a summary, or the same source named again: only what was delivered of it before
         else:  # the shortened view itself: its head and tail address this same text

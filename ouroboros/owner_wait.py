@@ -227,6 +227,9 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         **({"actor_loaded_tool_names": sorted(ctx._actor_loaded_tool_names)}
            if hasattr(ctx, "_actor_loaded_tool_names") else {}),
         "seen": sorted(seen), "owner_directives": getattr(ctx, "_owner_directives", []),
+        **({"mailbox_content_ids": sorted(ctx._mailbox_content_ids)} if hasattr(ctx, "_mailbox_content_ids") else {}),
+        **({"legacy_mailbox_seen": sorted(ctx._legacy_mailbox_seen)}
+           if getattr(ctx, "_restore_mailbox", False) and getattr(ctx, "_legacy_mailbox_seen", None) else {}),
         "sleep_interaction_seen": dict(getattr(ctx, "_sleep_interaction_seen", None) or {}),
         "held_dependencies_seen": dict(getattr(ctx, "_held_dependencies_seen", None) or {}),
         "held_dependencies_order": dict(getattr(ctx, "_held_dependencies_order", None) or {}),
@@ -1182,6 +1185,16 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     usage.update({key: value for key, value in state["usage"].items() if key != ROUND_REFUSALS_KEY})
     seen.update(state["seen"])
     ctx._loop_mailbox_seen_ids = seen
+    # Older checkpoints also marked letters seen when only a delegate wake showed them.
+    ctx._mailbox_content_ids = set(state.get("mailbox_content_ids") or ())
+    old_seen = set(state.get("legacy_mailbox_seen") or ())
+    if "mailbox_content_ids" not in state:
+        old_seen.update(state["seen"])
+        # A recorded directive can survive an older seen cursor. The importer verifies its author and words.
+        old_seen.update(row["msg_id"] for row in state["owner_directives"] if isinstance(row, dict)
+                        and not row.get("carried") and isinstance(row.get("msg_id"), str))
+    ctx._legacy_mailbox_seen = old_seen - ctx._mailbox_content_ids
+    ctx._restore_mailbox = True
     ctx._sleep_interaction_seen = dict(state.get("sleep_interaction_seen") or {})
     # A legacy state without this map shows each current hold once more before its wait arms.
     ctx._held_dependencies_seen = dict(state.get("held_dependencies_seen") or {})
@@ -1193,7 +1206,9 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     restore_read_coverage(str(ctx.task_id), state.get("read_coverage"))
     ctx._pending_task_wait = dict(state.get("pending_task_wait") or {}) or None  # a legacy state owes none
     ctx._wait_attention_cursors = cursors_json(state.get("wait_attention_cursors"))
-    ctx._owner_directives = state["owner_directives"]
+    from ouroboros.question_answers import restore_closure_directives
+
+    ctx._owner_directives = restore_closure_directives(getattr(ctx, "drive_root", None), ctx.task_id, state["owner_directives"])
     ctx._held_owner_messages = dict(state.get("held_owner_messages") or {})
     ctx._open_relays = dict(state.get("open_relays") or {})
     if "held_owner_messages" in state:  # the parked maps; still partial while a first build's seed is unsettled

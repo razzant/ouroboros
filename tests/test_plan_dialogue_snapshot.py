@@ -83,6 +83,72 @@ def test_inline_view_is_the_numbered_conversation(harness):
     assert gap_snapshot == ""
 
 
+@pytest.mark.parametrize("with_history", [True, False])
+def test_plan_evidence_keeps_original_card_and_only_attributes_the_owner_reason(harness, with_history):
+    from ouroboros.owner_mailbox import KIND_QUIZ_CLOSED, write_owner_message
+    from ouroboros.tools.plan_dialogue import attach_own_dialogue, render_dialogue
+
+    ctx = harness.make_ctx()
+    ctx.current_chat_id = 1
+    reason, frame = "Withdraw this option.", "Host event. No answer or approval was recorded."
+    dialogue_store.append(harness.drive, "chat", {"direction": "out", "chat_id": 1, "text": "Earlier discussion."})
+    if with_history:
+        dialogue_store.append(harness.drive, "chat", {"direction": "system", "chat_id": 1, "type": "quiz_closed",
+            "task_id": "original", "client_message_id": "quiz_closed:original:q1", "text": reason,
+            "quiz": {"quiz_id": "q1", "closed_actor": "owner", "closed_reason": reason, "owner_wrote_reason": True}})
+    assert write_owner_message(ctx.drive_root, frame, ctx.task_id, msg_id="quiz_closed:q1", kind=KIND_QUIZ_CLOSED,
+        quiz_delivery={"task_id": "original", "quiz_id": "q1", "closed_actor": "owner", "owner_close_words": reason})
+    manifest = attach_own_dialogue(ctx, harness.drive, {}, _ASK)
+    view, _ = render_dialogue(manifest)
+    assert view.count(reason) == 1 and " · host · " in view and " · Owner · " not in view
+    assert "Owner's verbatim reason:" in view and "No approval recorded." in view
+    source = [json.loads(line) for line in manifest["own_dialogue"]["text"].splitlines()][1:]
+    [closed] = [row for row in source if row.get("type") == "quiz_closed"]
+    assert closed["text"] == (reason if with_history else frame)
+    assert (closed.get("quiz_delivery") or {}).get("task_id", closed["task_id"]) == "original"
+
+
+@pytest.mark.parametrize("history", ["unique", "ambiguous", "different_asker", "different_frame", "missing"])
+def test_old_quiz_closure_letter_reconciles_only_with_its_unique_history(harness, history):
+    from ouroboros.owner_mailbox import KIND_QUIZ_CLOSED, write_owner_message
+    from ouroboros.tools.plan_dialogue import attach_own_dialogue, render_dialogue
+    from ouroboros.tools.review_result import _ask
+
+    ctx = harness.make_ctx()
+    ctx.current_chat_id = 1
+    dialogue_store.append(harness.drive, "chat", {"direction": "out", "chat_id": 1, "text": "Earlier discussion."})
+    reason, stamp = "Leave the choice open.", "2026-11-17T10:30:00Z"
+    askers = {"missing": [], "ambiguous": ["other", ctx.task_id], "different_asker": ["other"]}
+    for asker in askers.get(history, [ctx.task_id]):
+        dialogue_store.append(harness.drive, "chat", {"direction": "system", "chat_id": 1, "type": "quiz_closed",
+            "task_id": asker, "client_message_id": f"quiz_closed:{asker}:q1", "text": reason, "ts": stamp,
+            "quiz": {"quiz_id": "q1", "closed_actor": "owner", "closed_at": stamp,
+                     "closed_reason": reason, "state": "closed"}})
+    # 7de919c's non-secret supervisor writer did not send quiz_delivery.
+    old_reason = "A different recorded reason." if history == "different_frame" else reason
+    frame = (f"[Owner question closed without answer] quiz q1 — closed {stamp}. Reason: {old_reason}\n"
+             "This closes the question; no option was chosen and no approval was given.")
+    assert write_owner_message(ctx.drive_root, frame, ctx.task_id, msg_id="quiz_closed:q1", kind=KIND_QUIZ_CLOSED)
+    manifest = attach_own_dialogue(ctx, harness.drive, {}, _ASK)
+    source = [json.loads(line) for line in manifest["own_dialogue"]["text"].splitlines()[1:]]
+    closures = [row for row in source if row.get("type") == "quiz_closed"]
+    view, _ = render_dialogue(manifest)
+    if history == "unique":
+        [closed] = closures
+        assert closed["task_id"] == ctx.task_id and closed["stream"] == "chat"
+        assert f"[question closed without answer q1 from {ctx.task_id}]" in view and view.count(reason) == 1
+        assert "not attested as owner words" in view
+    else:
+        [mail] = [row for row in closures if row["stream"] == "mailbox"]
+        assert mail["text"] == frame and mail["author"] == "host"
+        assert "quiz_delivery" not in mail and "owner_close_words" not in mail
+        assert " · host · [Owner question closed without answer]" in view
+    # Ordinary result review sees owner words, not the old letter's otherwise untyped host frame.
+    result_ask = _ask(ctx)
+    assert "[Owner question closed without answer]" not in result_ask and reason not in result_ask
+    assert " · Owner · " not in view
+
+
 @pytest.mark.parametrize("native_hint", [100_000, 1_000])
 def test_mixed_delivery_keeps_full_file_and_exact_overflow_range(harness, monkeypatch, native_hint):
     from types import SimpleNamespace

@@ -450,7 +450,8 @@ class DescriptorResponse(Response):
 
 
 def serve_task_file(drive_root: Any, store: pathlib.Path, relpath: str, name: str,
-                    expected: Optional[Dict[str, Any]], *, task_id: str, mutable: bool = False) -> Response:
+                    expected: Optional[Dict[str, Any]], *, task_id: str, mutable: bool = False,
+                    head_only: bool = False) -> Response:
     """The ONE file the handler attributed to ``relpath`` of ``store``, read through the confined
     descent: the descriptor response (``x-ouroboros-artifact-identity`` verified/unmeasured), else
     409 ``artifact_identity_changed`` (a ``mutable`` row's bytes no longer match the digest it
@@ -467,16 +468,21 @@ def serve_task_file(drive_root: Any, store: pathlib.Path, relpath: str, name: st
         with _Parents() as parents:
             handle, observed = _open_member(parents, route)
         if expected is not None:
-            with handle:  # closed whatever the spool allocation or verification does
-                spool = tempfile.TemporaryFile()
-                try:
-                    measured = artifact_store.stream_artifact_file(handle, spool, expected=expected)
-                    if measured["size"] != observed.st_size:
-                        raise OSError("task file changed between its open and its verification")
-                except BaseException:
+            spool = None
+            try:
+                if not head_only:
+                    spool = tempfile.TemporaryFile()
+                measured = artifact_store.stream_artifact_file(handle, spool, expected=expected)
+                if measured["size"] != observed.st_size:
+                    raise OSError("task file changed between its open and its verification")
+            except BaseException:
+                handle.close()
+                if spool is not None:
                     spool.close()
-                    raise
-            handle = spool
+                raise
+            if spool is not None:
+                handle.close()
+                handle = spool
     except OSError as exc:
         if mutable and exc.errno is None and expected and "verification" in str(exc):
             return json_error("artifact bytes no longer match the identity the task result records for this file",
