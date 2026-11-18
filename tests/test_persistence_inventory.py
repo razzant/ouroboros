@@ -1583,3 +1583,9 @@ def test_wait_and_pause_source_prefixes_have_lifetime_rows():
         for prefix in prefixes:
             assert any("/context_checkpoints/" + prefix in line.split("|")[1] and "[record]" in line
                        for line in DOC.read_text().splitlines() if line.startswith("|"))
+
+    for term in ("park_task", "cause", "auto_resume", "resume_policy", "authority_notice_registered", "selection_door"):
+        assert f"`{term}`" in next(line for line in DOC.read_text().splitlines() if line.startswith("| task documents:"))
+    for line in DOC.read_text().splitlines():
+        if "/context_checkpoints/" in line and ("owner-wait-" in line or "budget-pause-" in line):
+            assert "indefinite" in line and "no independent remover" in line

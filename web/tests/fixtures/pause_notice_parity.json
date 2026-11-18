@@ -48,7 +48,7 @@
   },
   {
    "name": "dispatch_read",
-   "text": "The task is waiting to read its dispatch fence. Its work is saved. It resumes when its controls permit it.",
+   "text": "The task will continue automatically when it can read which tasks are stopped for spending. Its work is saved.",
    "words": null
   }
  ]

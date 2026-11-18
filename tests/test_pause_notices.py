@@ -366,7 +366,7 @@ def test_technical_repark_names_the_read_and_owes_one_notice_per_work(notices):
                  "rail": "control_authority_unreadable", "cause": "dispatch_fence_unreadable"}
         set_budget_pause(root, "task", pause)
         pause_notices.reconcile_pause_notices(root)
-    assert len(sent) == 1 and "dispatch" in sent[0][1].lower()
+    assert len(sent) == 1 and "stopped for spending" in sent[0][1] and "continue automatically" in sent[0][1]
     waits = [_pause_fact(pause, {})]
     projected = _queue_hold_facts({"id": "task", "_budget_pause": pause}, {}, waits)
     assert [fact["kind"] for fact in waits + projected] == ["authority"]

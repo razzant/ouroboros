@@ -259,6 +259,15 @@ def test_a_new_root_pause_after_its_own_resume_spends_the_childs_older_selection
     """The root's own Resume lifts F; when the root later pauses again it raises a NEW
     latch G, and a selection made before G admits neither a dispatch nor a send."""
     from ouroboros import budget_pause
+    writes = []
+    original = budget_pause.set_budget_pause
+
+    def observed(root, tid, row, **expected):
+        if (row.get("grant") or {}).get("revoke_reason") == "new_root_budget_fence":
+            writes.append(queue._queue_lock._is_owned())
+        return original(root, tid, row, **expected)
+
+    monkeypatch.setattr(budget_pause, "set_budget_pause", observed)
 
     queue, workers, sup, (child_ctx, child_limit), fence_f = _child_under_latch(tmp_path, monkeypatch)
     sent = _workers(workers)
@@ -293,6 +302,7 @@ def test_a_new_root_pause_after_its_own_resume_spends_the_childs_older_selection
         assert evidence["dispatched"] == [], evidence
         assert evidence["child_row"] == {"state": budget_pause.STATE_PAUSED,
                                          "revoke_reason": "new_root_budget_fence"}, evidence
+    assert not any(writes), "a new root fence revokes the selected child outside Q"
 
 
 @pytest.mark.parametrize("child_state", ["pending_dispatch", "running"])

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from ouroboros import i18n_memory as memory
+from tests.test_telegram_routing_notices import phone  # noqa: F401 -- shared transport fixture
 
 _ROOT = Path(__file__).resolve().parents[1] / "skills" / "telegram"
 
@@ -291,3 +292,39 @@ def test_format_falls_back_for_any_formatting_failure_of_a_translated_template(p
     monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
     _seed(tmp_path / "data", "ru", {"code:tg.menu.lang_changed": {"text": "✅ Язык: {language.foo}"}})  # an attribute field no caller supplies
     assert plugin._LOCALIZED_TEXTS["ru"].format("lang_changed", language="Русский") == "✅ Interface language changed to Русский"
+
+
+@pytest.mark.parametrize("mirror_progress", ["off", "on"])
+def test_phone_notice_uses_available_translation(phone, monkeypatch, mirror_progress):
+    from ouroboros import i18n_memory
+    from ouroboros.pause_notices import notice_text
+    import asyncio
+
+    text = notice_text({"reason": "authority", "cause": "dispatch_fence_invalid"})
+    translated = "Задача ждёт исправную запись допуска."
+    plugin = phone.plugin
+    plugin.telegram_i18n.configure(phone.data)
+    monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
+    try:
+        _seed(phone.data, "ru", {text: {"text": translated}})
+        assert i18n_memory.tr(text, "ru", drive_root=phone.data) == translated
+        settings = {
+            "TELEGRAM_CHAT_ID": "42",
+            "TELEGRAM_MIRROR_MODE": "all",
+            "TELEGRAM_MIRROR_PROGRESS": mirror_progress,
+        }
+        monkeypatch.setattr(plugin, "_load_settings", lambda _: settings)
+        event = {
+            "text": text,
+            "task_id": "root",
+            "role": "system",
+            "system_type": "task_pause_notice",
+            "narration": False,
+            "card_row": "timeline",
+            "card_row_id": "pause:root:authority",
+        }
+        asyncio.run(plugin._make_outbound(phone.api)(event))
+        delivered = [sent["text"] for sent in phone.sent()]
+        assert delivered == ([translated] if mirror_progress == "on" else [])
+    finally:
+        plugin.telegram_i18n.configure(None)

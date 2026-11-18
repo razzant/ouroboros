@@ -574,3 +574,44 @@ def test_failures_of_repeated_content_stay_failures_and_a_new_capture_refetches(
     captured = capture_directory_result(ctx.drive_root, held, engine)
     assert captured["status"] == "ready" and held.patch_captured
     assert engine.requests.count(shared) == 1 and len(engine.requests) == 4
+
+
+def test_folder_investigation_parent(tmp_path, monkeypatch):
+    from ouroboros.delegate_directory import capture_directory_result, directory_capture_block
+    from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
+
+    ctx, target = context(tmp_path, monkeypatch)
+    engine = DirectoryEngine(target, "copy")
+    engine.manifest["entries"][0]["path"] = ".review-evidence/out.bin"
+    engine.raw = json.dumps(engine.manifest).encode()
+    held = entry(ctx, target, "copy")
+    held.authority_source = INVESTIGATION_AUTHORITY
+    receipt = capture_directory_result(ctx.drive_root, held, engine)
+    result = directory_capture_block(ctx.drive_root, held, receipt)
+    assert result["retained_bytes"] == sum(
+        {f["path"]: f["size"] for f in result["file_outputs"] if f.get("side")}.values()
+    )
+
+
+def test_investigation_keeps_the_public_file_and_receipts_the_private_one(tmp_path, monkeypatch):
+    from ouroboros import config, delegate_directory as directory
+    from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
+
+    ctx, target = context(tmp_path, monkeypatch)
+    engine = DirectoryEngine(target, "copy")
+    held = entry(ctx, target, "copy")
+    held.authority_source = INVESTIGATION_AUTHORITY
+    monkeypatch.setattr(
+        config, "load_settings", lambda **kw: {"MCP_SERVERS": [{"headers": {"X-Key": "binary result"}}]}
+    )
+    manifest = directory.capture_directory_result(ctx.drive_root, held, engine)
+    assert manifest["gaps"] == [
+        {
+            "path": engine.manifest["entries"][0]["path"],
+            "side": "after",
+            "reason": "installation_settings",
+            "size": len(engine.body),
+        }
+    ]
+    assert all("side" not in f for f in manifest["file_outputs"])
+    assert directory.directory_capture_block(ctx.drive_root, held, manifest)["retained_bytes"] == 0

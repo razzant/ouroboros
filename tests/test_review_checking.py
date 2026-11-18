@@ -470,3 +470,31 @@ def test_named_evidence_stays_a_stream_because_a_clone_would_be_refused_compress
     assert artifact_storage._may_share(retained) is False
     assert artifact_storage.compression_outcome(retained) == "compressed"
     assert retained.read_bytes() == source.read_bytes()
+
+
+def test_git_checking_delta_obeys_same_settings_floor(author, tmp_path, monkeypatch):
+    from ouroboros import config
+
+    monkeypatch.setattr(
+        config,
+        "load_settings",
+        lambda **kw: {
+            "OUROBOROS_CONNECTIONS": [{"kind": "openai", "name": "sample", "api_key": "sample-fixture-value"}]
+        },
+    )
+    import json
+    from pathlib import Path
+    from ouroboros import review_checking as rc
+
+    data = tmp_path / "data"
+    (author / "former-output").write_text("sample-fixture-value")
+    _git(author, "add", "former-output")
+    source = rc.freeze_checking_source(author, data_root=data, subject=rc.SUBJECT_INDEX)
+    area = Path(rc.prepare_seat_area(data, "task", "op-1", source))
+    (area / "former-output").unlink()
+    (area / "report.txt").write_text("fixture public report")
+    (area / "renamed.json").write_text(json.dumps({"OPENROUTER_API_KEY": "sample-fixture-value"}))
+    evidence = rc.capture_seat_evidence(data, "task", "op-1")
+    patch = (Path(evidence["evidence_dir"]) / "delta.patch").read_bytes()
+    assert {g["path"] for g in evidence["gaps"] if g["size"] > 0} == {"renamed.json", "former-output"}
+    assert b"fixture public report" in patch and b"sample-fixture-value" not in patch

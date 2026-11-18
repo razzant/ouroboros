@@ -82,33 +82,48 @@ def test_a_run_that_retained_no_named_evidence_shows_none(tmp_path, monkeypatch)
     assert "named_evidence" not in capture_projection(data, custody.replay(data)[held.run_id], reader_task_id="retry-c")
 
 
-def test_only_installation_settings_with_keys_are_excluded_from_evidence(tmp_path):
+def test_only_installation_settings_with_keys_are_excluded_from_evidence(tmp_path, monkeypatch):
+    from ouroboros import config
+
+    monkeypatch.setattr(
+        config, "load_settings", lambda **kw: {"MCP_SERVERS": [{"id": "test", "auth_token": "fixture-value"}]}
+    )
     from ouroboros.delegate_named_evidence import retain_workspace_evidence
 
     copy = tmp_path / "copy"
     declared = copy / ".review-evidence"
-    private = declared / "state/settings.json"
+    private = declared / "state/copy-of-settings.txt"
     public = declared / "examples/settings.json"
     for path in (private, public):
         path.parent.mkdir(parents=True)
     private.write_text(json.dumps({"OPENROUTER_API_KEY": "fixture-value"}))
-    public.write_text(json.dumps({"theme": "dark"}))
+    public.write_text(json.dumps({"OPENAI_API_KEY": "${OPENAI_API_KEY}", "OUTPUT_FORMAT": "csv"}))
     retained = tmp_path / "saved"
     summary = retain_workspace_evidence(copy, retained)
     assert summary["status"] == "retained"
     assert [f["path"] for f in summary["files"]] == [".review-evidence/examples/settings.json"]
     assert not (retained / "files" / private.relative_to(copy)).exists()
-    assert any(gap["path"] == private.relative_to(copy).as_posix() for gap in summary["gaps"])
+    assert summary["gaps"] == [
+        {
+            "path": private.relative_to(copy).as_posix(),
+            "reason": "installation_settings",
+            "size": private.stat().st_size,
+        }
+    ]
 
 
 def test_private_settings_do_not_enter_the_fallback_workspace_patch(tmp_path, monkeypatch):
-    from ouroboros import delegate_named_evidence
+    from ouroboros import config, delegate_named_evidence
+
+    monkeypatch.setattr(config, "load_settings", lambda **kw: {"OPENROUTER_API_KEY": "fixture-private"})
     from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
     from tests.test_headless_workspace_patch import _evidence_copy
 
     copy, task, _ = _evidence_copy(tmp_path)
-    for folder, content in (("private", {"OPENROUTER_API_KEY": "fixture-private"}),
-                            ("example", {"theme": "fixture-public"})):
+    for folder, content in (
+        ("private", {"OPENROUTER_API_KEY": "fixture-private"}),
+        ("example", {"theme": "fixture-public"}),
+    ):
         settings = copy / ".review-evidence" / folder / "settings.json"
         settings.parent.mkdir()
         settings.write_text(json.dumps(content))
@@ -118,8 +133,56 @@ def test_private_settings_do_not_enter_the_fallback_workspace_patch(tmp_path, mo
 
     monkeypatch.setattr(delegate_named_evidence, "retain_named_evidence", full)
     artifacts = tmp_path / "artifacts"
-    _, manifest = write_workspace_patch_artifacts(copy, artifacts, task=task, retain_evidence_dir=tmp_path / "saved")
+    _, manifest = write_workspace_patch_artifacts(
+        copy, artifacts, task=task, retain_evidence_dir=tmp_path / "saved"
+    )
     assert manifest["named_evidence"]["status"] == "capture_failed"
     patch = (artifacts / "workspace.patch").read_text()
     assert "fixture-public" in patch
     assert "fixture-private" not in patch
+    assert manifest["named_evidence"]["gaps"] == 1
+    assert any(
+        row["reason"] == "installation_settings" and row["size"] > 0 for row in manifest["untracked_excluded"]
+    )
+
+
+def test_investigation_receipt(tmp_path, monkeypatch):
+    from ouroboros import review_checking as rc
+    from pathlib import Path
+
+    src = tmp_path / "src"
+    src.mkdir()
+    data = tmp_path / "data"
+    source = rc.freeze_checking_source(src, data_root=data)
+    created = rc.prepare_seat_area(data, "task", "review", source)
+    area = Path(created)
+    named = area / rc.EVIDENCE_DIRNAME
+    named.mkdir()
+    (named / "outline.txt").write_bytes(b"abcd")
+    result = rc.capture_seat_evidence(data, "task", "review")
+    assert result.get("retained_bytes") == 4
+
+
+def test_workspace_patch_filters_both_versions_and_arbitrary_names(tmp_path, monkeypatch):
+    from ouroboros import config
+    from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
+    from tests.test_headless_workspace_patch import _evidence_copy, _git
+
+    copy, task, _ = _evidence_copy(tmp_path)
+    key = "fixture-cross-chunk"
+    monkeypatch.setattr(config, "load_settings", lambda **kw: {"OPENAI_API_KEY": key})
+    (copy / "old.txt").write_text(key)
+    _git(copy, "add", "old.txt")
+    _git(copy, "commit", "-m", "fixture with earlier value")
+    task["base_sha"] = _git(copy, "rev-parse", "HEAD")
+    (copy / "old.txt").unlink()
+    (copy / "copy.txt").write_bytes(b"x" * ((1 << 20) - 4) + key.encode())
+    (copy / "sample.json").write_text('{"OPENAI_API_KEY": "example"}')
+    _, manifest = write_workspace_patch_artifacts(copy, tmp_path / "result", task=task)
+    patch = (tmp_path / "result/workspace.patch").read_bytes()
+    assert b"sample.json" in patch and b"copy.txt" not in patch and key.encode() not in patch
+    assert {
+        r["path"]
+        for r in manifest["tracked_excluded"] + manifest["untracked_excluded"]
+        if r["reason"] == "installation_settings" and r["size"]
+    } == {"old.txt", "copy.txt"}

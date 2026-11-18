@@ -625,3 +625,42 @@ def test_wake_grant_has_no_durable_permission_until_its_snapshot(tmp_path, monke
     assert workers.PENDING[0]["_budget_pause"]["checkpoint"]["source_ref"] == original["source_ref"]
     assert wake_ready_sleepers(q)[0]["ok"]
     assert wake_ready_sleepers(q) == []
+
+
+def test_one_publication_for_all_ready_pauses_and_none_for_unready(tmp_path, monkeypatch):
+    from ouroboros import budget_pause as bp
+    from ouroboros.utils import atomic_write_json
+    from supervisor.sleep_wake import wake_ready_sleepers
+    from tests._budget_pause_exact_helpers import _install_queue, _parked
+
+    q, state, _ = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+    for i in range(3):
+        task, row = _parked(tmp_path, monkeypatch, task_id=f"tech-{i}")
+        bp.end_dispatch_fence(task["id"])
+        row.update(
+            reason="authority", rail=bp.RAIL_CONTROL_AUTHORITY, cause="dispatch_fence_unreadable", state="paused"
+        )
+        bp.set_budget_pause(tmp_path, task["id"], row)
+        task["_budget_pause"] = bp.exact_pause_marker(row)
+    atomic_write_json(
+        tmp_path / "state/queue_dispatch.json", {"generation": "g", "budget_root_fences": [], "members": {}}
+    )
+    barriers, writes = [], []
+    publish, write = q.publish_queue_snapshot, q.atomic_write_text
+
+    def counted(reason=""):
+        barriers.append(reason)
+        return publish(reason=reason)
+
+    def counted_write(path, data):
+        writes.append((path.name, len(data)))
+        return write(path, data)
+
+    monkeypatch.setattr(q, "publish_queue_snapshot", counted)
+    monkeypatch.setattr(q, "atomic_write_text", counted_write)
+    outcomes = wake_ready_sleepers(q)
+    woken = [o for o in outcomes if o.get("ok")]
+    snapshot_writes = [w for w in writes if w[0] == "queue_snapshot.json"]
+    assert len(woken) == 3 and len(snapshot_writes) == len(barriers) == 1
+    assert not wake_ready_sleepers(q) and len(barriers) == 1

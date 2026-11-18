@@ -135,3 +135,75 @@ def test_mixed_member_selection_closes_old_before_opening_new(tmp_path, monkeypa
     monkeypatch.setattr(queue, "atomic_write_text", observe)
     assert queue.publish_queue_snapshot() and during == [(FENCED, FENCED)]
     assert _reserve(tmp_path, CHILD) == FENCED and isinstance(_reserve(tmp_path, SIBLING), str)
+
+
+def test_old_reader_export(tmp_path, monkeypatch):
+    import json
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from tests._budget_pause_exact_helpers import _install_queue
+    from ouroboros.queue_observation import SHARED_KEY
+    from supervisor import queue_publication as pub
+    from supervisor.work_stop_migration import FORMAT_KEY
+    from tests.test_queue_publication_revision import _task
+
+    q, _, _ = _install_queue(tmp_path, monkeypatch)
+    q.PENDING.extend([_task("a"), _task("b")])
+    assert q.publish_queue_snapshot("admit")
+    entered, release = threading.Event(), threading.Event()
+    original = pub._documents
+
+    def ordered(capture):
+        if capture["reason"] == "pre_restart_exit":
+            entered.set()
+            assert release.wait(12)
+        return original(capture)
+
+    monkeypatch.setattr(pub, "_documents", ordered)
+    with ThreadPoolExecutor(1) as pool:
+        forced = pool.submit(q.publish_queue_snapshot, "pre_restart_exit")
+        try:
+            assert entered.wait(12)
+            q.PENDING[0]["text"] = "newest input"
+            assert q.publish_queue_snapshot("admit")
+        finally:
+            release.set()
+        reply = forced.result()
+    doc = json.loads(q.QUEUE_SNAPSHOT_PATH.read_text())
+    assert reply is True and doc[FORMAT_KEY] == 1 and SHARED_KEY not in doc
+    assert doc["pending"][0]["task"]["text"] == "newest input"
+
+
+@pytest.mark.parametrize("bad", ["generation", "members", "valid"])
+def test_repair_order(tmp_path, monkeypatch, bad):
+    import errno
+    import json
+    from ouroboros import queue_observation as obs
+    from tests.test_budget_pause_monetary_selection import _tree, ROOT
+
+    q, _, _ = _tree(tmp_path, monkeypatch, sibling=True)
+    assert q.publish_queue_snapshot("before")
+    path = tmp_path / "state/queue_dispatch.json"
+    doc = json.loads(path.read_text())
+    if bad == "generation":
+        doc["generation"] = 7
+    if bad == "members":
+        doc["members"]["other"] = []
+    path.write_text(json.dumps(doc))
+
+    def accepted():
+        view = obs.dispatch_probe(tmp_path)
+        return view is not None and obs.valid_dispatch_facts(view)
+
+    before = accepted()
+    q.BUDGET_ROOT_FENCES[ROOT] = {"root_task_id": ROOT, "fence_id": "branch", "status": "active"}
+    write = q.atomic_write_text
+
+    def full(path, data):
+        if path == q.QUEUE_SNAPSHOT_PATH:
+            raise OSError(errno.ENOSPC, "disk full")
+        return write(path, data)
+
+    monkeypatch.setattr(q, "atomic_write_text", full)
+    reply = q.publish_queue_snapshot("tighten_one_tree")
+    assert reply is False and accepted() == before
