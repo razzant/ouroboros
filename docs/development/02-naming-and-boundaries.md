@@ -253,15 +253,12 @@ ask), because it would let a task author its own request
 (`tests/test_task_authored_messages.py`; ARCHITECTURE §6 "Owner routing verbs"). The converse holds: a host-held owner row stays my human's wherever the host carries it in a tree, by possession of its ingress row, never because a task's text says so; to a receiver it is not addressed to, it is context and precedence, never acceptance criteria or a reply debt; an addressed live task that cannot receive the exact row at its next input boundary is an incomplete implementation (`tests/test_helper_owner_words_flow.py`).
 
 A card's question, option labels and details are the asking task's text; a press without
-words is my human's act, never their words. Typed `owner_press`, it stays an owner input
-(counted, owed a reply, carried to the same foci) outside `OWNER_WORD_SOURCES`, and every
-model-facing frame names who wrote the label (`answer_facts`); words typed beside a press
-stay theirs, verbatim (`tests/test_press_is_an_act.py`). Every account (a working-view
-note, plan, brief, card label, page head) carries its author and write time, or "not
-recorded", and never reaches a reader as a person's words (notes:
+words is my human's act, never their words, while words typed beside it stay theirs
+verbatim (`tests/test_press_is_an_act.py`; ARCHITECTURE §6 "Owner routing verbs"). Every
+account (a working-view note, plan, brief, card label, page head) carries its author and
+write time, or "not recorded", and never reaches a reader as a person's words (notes:
 `context_compaction.note_written`). A host frame states who, when and by what route, never
-how to read: what a person meant is theirs to settle, and the host carries their words and
-acts as facts. The rest is review-only.
+how to read: what a person meant is theirs to settle. The rest is review-only.
 
 ### The owner corpus archives inputs; the owner door's stamp is the only authority
 
