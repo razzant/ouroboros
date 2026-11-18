@@ -496,6 +496,16 @@ class TestOwnerReplyLink:
         assert "About the Main answer." not in project and project.count("And about my own reply.") == 1
         assert {"About the Main answer.", "And about my own reply."} <= set(_texts(room.root, 1))
 
+    @pytest.mark.parametrize("old_quote", ["card", "notice"])
+    def test_a_branch_from_a_saved_web_reply_without_work_stamp_keeps_its_exact_target(self, room, old_quote):
+        quote = ({"address": "task:nova-root", "kind": "work_card", "task_id": "nova-root"}
+                 if old_quote == "card" else {"address": room.notice["row_address"], "kind": "message", "task_id": "nova-root"})
+        previous = ds.append(room.root, "chat", {"ts": "2026-11-18T22:01:00Z", "direction": "in", "source": "web",
+                             "chat_id": 1, "client_message_id": "legacy-owner", "text": "Earlier reply", "reply_to": quote}).row
+        row, _ = _owner(room.bridge, room.root, "Still about Nova", format_address(row_address(previous)),
+                        message_id="owner-legacy-branch")
+        assert row["reply_to"]["work_task_id"] == "nova-root" and row["reply_to"]["snippet"] == "Earlier reply"
+
     def test_a_reply_to_an_owner_row_written_in_the_project_is_in_that_project(self, room):
         ds.append(room.root, "chat", {"ts": "2026-10-28T06:05:00Z", "direction": "in", "chat_id": room.nova,
                                       "client_message_id": "p-own", "text": "Project note from me."})

@@ -1180,11 +1180,18 @@ def _append_routing_receipts(ctx: _RoundModelCallContext) -> bool:
         root = pathlib.Path(str(root))
         rows = _latest_annotations_by_token(root / "logs" / _ANNOTATIONS_NAME)
         acts = [routing_act_fields(root, key[0], row) for key, row in rows.items() if key[0] in ids]
+        replyable = set()
         for ref in own:  # shown once settled: its unconfirmed tool result was already read
             key = (str(ref.get("client_message_id") or ""), str(ref.get("routing_token") or ""))
-            act = routing_act_fields(root, key[0], rows.get(key) or ref) if key[0] not in ids else None
-            if act and act["status"] != "unconfirmed" and act not in acts:
+            act = routing_act_fields(root, key[0], rows.get(key) or ref)
+            if (ref.get("about_work") and act["target"] == ref["about_work"]
+                    and act["action"] == ref.get("action")
+                    and act["status"] in ({"delivered", "read"} if act["action"] == "steer_task" else {"scheduled"})):
+                replyable.add(act["target"])
+            if key[0] not in ids and act["status"] != "unconfirmed" and act not in acts:
                 acts.append(act)
+        if replyable:
+            tool_ctx._confirmed_reply_works = {*getattr(tool_ctx, "_confirmed_reply_works", ()), *replyable}
     except Exception:
         log.debug("routing receipts unreadable at the model boundary", exc_info=True)
         return False
@@ -1207,6 +1214,7 @@ def _append_routing_receipts(ctx: _RoundModelCallContext) -> bool:
         "and late outcomes of its own unconfirmed acts, oldest first — receipts from the routing rail; "
         "each row identifies the work and its recorded outcome.",
         *current,
+        *(f"To confirm your handoff to {work}, use finish_task(about_work={work!r}, …)." for work in sorted(replyable)),
         "Not listed: another turn's act under its own agent-steer id, or an act keyed only to a task id; "
         "neither links to this message."])})
     return True

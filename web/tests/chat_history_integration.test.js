@@ -1941,6 +1941,20 @@ test('a live Main work reply from the same tab appears once in the open Project 
     assert.equal(bubble.parentElement, slot);
 });
 
+test('a late older Reply is inserted before the newer Reply in a mounted work card', async t => {
+    const f = fixture(t, page([workCardHistory, workReplyHistory]));
+    await f.refresh();
+    const slot = walkCard(f.messages, workCardHistory.task_id).querySelector('[data-live-work-replies]');
+    const [newer] = slot.children;
+    const older = { ...workReplyHistory, ts: '2026-01-01T00:00:00Z', history_id: 'chat:899',
+        client_message_id: 'reply-899', row_address: 'row:1@t#reply899', text: 'An older reply' };
+    f.emit({ ...older, content: older.text, also_rooms: [2] });
+    assert.deepEqual([...slot.children].map(node => node.dataset.clientMessageId), ['reply-899', 'reply-902']);
+    assert.equal(slot.children[1], newer);
+    await f.refresh(page([older, workCardHistory, workReplyHistory]));
+    assert.deepEqual([...slot.children].map(node => node.dataset.clientMessageId), ['reply-899', 'reply-902']);
+});
+
 test('an arrival inside an unchanged work card lights New activity on replay, without moving the reader or repeating the row', async t => {
     const initial = [...presentRows(900), workCardHistory];
     const f = fixture(t, page(initial));

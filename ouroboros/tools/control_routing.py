@@ -459,7 +459,8 @@ def _start_task(
         kind_note += (" Started as your human's work on their cited words." if owner_basis else
                      " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
                      "the Off switch stops it.")
-    mode, confirmation = _emit_and_wait_for_routing(ctx, evt)
+    replyable = not private and not presence_carrier and _routing_issuer(ctx)["kind"] == ISSUER_OWNER_TURN
+    mode, confirmation = _emit_and_wait_for_routing(ctx, evt, **({"about_work": tid} if replyable else {}))
     confirmation_status = str(confirmation.get("status") or "unconfirmed")
     reason = str(confirmation.get("reason") or "")
     detail = str(confirmation.get("detail") or "")
@@ -478,7 +479,7 @@ def _start_task(
                "and it is not this turn's deferred work." if private else "")
             + (f"\n{effort_note}" if effort_note else "")
         )
-        if not private and not presence_carrier and _routing_issuer(ctx)["kind"] == ISSUER_OWNER_TURN:
+        if replyable:
             ctx._confirmed_reply_works = {*getattr(ctx, "_confirmed_reply_works", ()), tid}
             response += f"\nFor a reply confirming this handoff, use finish_task(about_work={tid!r}, …) so Replies address it."
         return _finish_swarm_handoff(ctx, evt, response, status="scheduled")

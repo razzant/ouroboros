@@ -73,14 +73,15 @@ def _tell_task(ctx, task_id: str, note: str = "", quote: list | None = None, sum
     _attach_client_surface(ctx, event)
     if (binding := presence_caller_binding(ctx)) is not None:
         event.update(presence_binding_id=binding, sender_origin=presence_sender_origin(ctx))
-    mode, receipt = _emit_and_wait_for_routing(ctx, event)
+    from ouroboros.tools.control_routing import ISSUER_OWNER_TURN
+
+    replyable = _routing_issuer(ctx)["kind"] == ISSUER_OWNER_TURN and binding is None
+    mode, receipt = _emit_and_wait_for_routing(ctx, event, **({"about_work": target} if replyable else {}))
     status = receipt.get("status")
     if status in {"delivered", "read"}:
-        from ouroboros.tools.control_routing import ISSUER_OWNER_TURN, _routing_issuer
-
         result = (f"{handed} " if handed else "") + f"Message written to {target}; relay_id={relay_id}. Read acknowledgement follows when it drains."
-        if _routing_issuer(ctx)["kind"] == ISSUER_OWNER_TURN and not getattr(ctx, "task_metadata", {}).get("presence"):
-            ctx._confirmed_reply_works = {*getattr(ctx, "_confirmed_reply_works", ()), task_id}
+        if replyable:
+            ctx._confirmed_reply_works = {*getattr(ctx, "_confirmed_reply_works", ()), target}
             result += f"\nFor a reply confirming this handoff, use finish_task(about_work={task_id!r}, …) so Replies address it."
         return result
     reason = receipt.get("reason") or ("target_not_steerable" if status in {"rejected", "needs_manual_target"}
