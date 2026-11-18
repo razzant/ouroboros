@@ -836,3 +836,45 @@ def test_a_proven_answer_does_not_attest_a_conflicting_saved_citation(tmp_path, 
     [successor] = workers.PENDING
     assert [(r["source"], r["cited"]) for r in successor["metadata"]["owner_corpus"]] == [
         ("owner_press", "Yes, start it"), ("owner_quiz_answer", "fernfall")]
+
+
+@pytest.mark.parametrize("matching_card", [True, False], ids=["saved-answer", "conflicting-card"])
+def test_continue_retypes_an_already_admitted_legacy_successor(tmp_path, monkeypatch, matching_card):
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_words import cited_owner_basis, owner_words_contain
+    from supervisor.continuation_admission import admit_continuation
+
+    comment = "  after fernfall  "
+    workers, root = _interrupted_wake_root(tmp_path, monkeypatch, scope_comment=comment)
+    first = admit_continuation(root["id"], action_nonce=NONCE)
+    assert first["ok"], first
+    predecessor = first["successor_task_id"]
+    assert not workers.WORKERS
+    assert workers.kill_workers(terminal_status="cancelled", result_reason="server shutdown", stop_source="server_shutdown")
+
+    def prior_release(result):
+        # The released Continue saved the accepted card and used this source for both sorts of answer.
+        meta = result["metadata"]
+        start = meta["continuation"]["owner_sources"]["start"]
+        act = start["answers"][0]
+        act["source"] = meta["owner_corpus"][0]["source"] = "owner_quiz_answer"
+        if not matching_card:
+            act["card"]["answered_index"] = 1
+    _edit_result(tmp_path, predecessor, prior_release)
+    # The previous Continue already read the asker. Its accepted card is now the surviving proof.
+    monkeypatch.setattr("ouroboros.owner_source.answered_quiz_block",
+                        lambda *_: pytest.fail("the chained start looked up the original card"))
+    if not matching_card:
+        _refused(tmp_path, workers, predecessor, "start_quiz_answer_unresolved")
+        return
+    second = admit_continuation(predecessor, action_nonce=NONCE)
+    assert second["ok"], second
+    [new] = workers.PENDING
+    focus = types.SimpleNamespace(task_metadata=new["metadata"])
+    _initialize_owner_directives(focus, [{"role": "user", "content": new["text"]}])
+    act, words = focus._owner_directives
+    assert (act["source"], act["content"], act["quiz_id"]) == ("owner_press", "1. Yes, start it", "q-start")
+    assert (words["source"], words["content"]) == ("owner_quiz_answer", comment)
+    assert not owner_words_contain(focus, "start it") and cited_owner_basis(focus, "start it")[0] is None
+    assert cited_owner_basis(focus, "Yes, start it")[0]["source"] == "owner_press"
+    assert owner_words_contain(focus, comment) and cited_owner_basis(focus, "fernfall")[0]["content"] == comment
