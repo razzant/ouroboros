@@ -143,8 +143,10 @@ export function bindPopoverPosition(popup, { anchor, field, point, align = 'star
         let rect = size();
         let below = true;
         if (target && !point) {
-            const spaces = () => [Math.min(height, Math.max(0, bottomEdge - protectedBox.bottom - 4)),
-                Math.min(height, Math.max(0, protectedBox.top - 4 - topEdge))];
+            // Measured from the whole pixel the popup stands on (its top is placed rounded, below), so one that fills the
+            // space ends on the viewport's edge, not a fraction short of it that moves as its anchor moves by fractions.
+            const spaces = () => [Math.min(height, Math.max(0, bottomEdge - Math.round(protectedBox.bottom + 4))),
+                Math.min(height, Math.max(0, Math.round(protectedBox.top - 4) - topEdge))];
             let [spaceBelow, spaceAbove] = spaces();
             if (scroller && rect.height > Math.max(spaceBelow, spaceAbove)) {
                 // Move only the field's scroller, toward the side needing the least movement that can fit it.

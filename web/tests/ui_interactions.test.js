@@ -489,6 +489,23 @@ test('listbox positioning follows its input without claiming keyboard, ARIA or f
     assert.equal(doc.defaultView.listenerCount(), 0);
 });
 
+test('a popup filling the space below its anchor ends on the edge whatever fraction of a pixel the anchor stands at', () => {
+    const { doc, node } = environment();
+    const input = node('input');
+    const popup = node('div', { role: 'listbox' });
+    // Its content is taller than the viewport leaves, so its height is the max-height it is given.
+    popup.rect = { width: 240, get height() { return Math.min(300, parseFloat(popup.css.get('--ui-popup-max-height')) || 300); } };
+    doc.body.append(input, popup);
+    const foot = () => parseFloat(popup.css.get('--ui-popup-top')) + popup.rect.height;
+    input.rect = { left: 28, right: 268, top: 20, bottom: 40.094, width: 240, height: 20.094 };
+    const binding = bindPopoverPosition(popup, { anchor: input });
+    assert.equal(foot(), 232, 'its foot on the bottom edge (240 less the 8 px margin), not 0.094 px above it');
+    input.rect.bottom = 40;
+    binding.reposition();
+    assert.equal(foot(), 232, 'the anchor moving by a fraction of a pixel moves nothing at its foot');
+    binding.destroy();
+});
+
 test('a chooser clears its whole field above or below and stays in its scroller', () => {
     const { doc, node } = environment();
     doc.defaultView.innerHeight = 800;
