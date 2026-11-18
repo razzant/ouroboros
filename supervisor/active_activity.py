@@ -74,14 +74,14 @@ class TurnExecution:
     stamped. Facts only move forward, so there is at most one mark per phase; the list is
     only appended to, so a reader's copy never pairs one fact with another fact's instant.
     ``owner_turn``: the owner awaits its answer (its entry's ``reply_expected``); only such a
-    turn reports its first dispatch to the after-update facts and leaves a receipt, a wake or
-    resume never does. ``call``: its latest Main call (id, start instant, whether its route
+    turn reports its first dispatch to the after-update facts and leaves a receipt (a resumed
+    one's names ``resumed``); a wake never does. ``call``: its latest Main call (id, start instant, whether its route
     observed it); ``ended_at``: the instant it left the registry. ``accepted_at``: the canonical
     acceptance of the message it answers (the inbound row's UTC stamp, its entry's
     ``origin_message_ref["ts"]``), where the owner's wait starts; ``entered_at`` is the wall-clock
     twin of the first mark, so that wait and the monotonic phases (one process only) add up.
-    ``resumed``: a resumed attempt's continuation (``owner_wait.governing_continuation``): answering no fresh
-    message, its wait starts at its own entry and its receipt names ``accepted_at`` ``origin_accepted_at``.
+    ``resumed``: a resumed attempt's continuation (``owner_wait.governing_continuation``): its wait starts at its
+    own entry, where its carrier takes it; its receipt names the message's ``accepted_at`` as ``origin_accepted_at``.
     ``dispatch``: the first dispatch's basis (``DISPATCH_BASES``) once it happened; ``meter``:
     the thread's ``store_timing.metered`` scope; ``census``: the registry's count at entry;
     ``worker_id``: the pool slot of the carrier running it (None when no carrier named one)."""
