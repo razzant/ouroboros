@@ -483,7 +483,8 @@ def test_the_living_card_drain_records_the_choice_or_supplied_values(tmp_path, d
     legacy.pop("card_press")
     assert living_card_input(legacy, tmp_path)["content"] == row["content"]
     saved = {"source": "owner_mailbox", "content": entry["text"], "msg_id": entry["msg_id"]}
-    prior = {"origin_message_text": "Open the chart", "review_evidence": {"task_inputs": {"owner_requirements_and_decisions": [saved]}}}
+    prior = {"origin_message_text": "Open the chart", "origin_message_ref": {},
+             "review_evidence": {"task_inputs": {"owner_requirements_and_decisions": [saved]}}}
     assert not owner_sources(tmp_path, prior, ctx.task_id)["gaps"]
     saved["content"] += " Different frame."
     assert "owner_message_identity_conflict" in owner_sources(tmp_path, prior, ctx.task_id)["gaps"]
