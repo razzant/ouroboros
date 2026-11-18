@@ -504,10 +504,12 @@ _PART_FACTS = """({feed, mark}) => {
     if (!node) return null;
     const box = node.getBoundingClientRect(), band = root.getBoundingClientRect();
     const pre = node.querySelector('.message pre');
-    // What the reader sees of the feed: below the page header drawn over it, above the composer.
+    // What the reader sees of the feed: below the page header drawn over it and its frosted edge (style.css "A room's
+    // edges", project_read_state.readBand), above the composer.
     const header = root.closest('.page')?.querySelector('.chat-page-header');
     const composer = document.querySelector('#chat-input-area');
-    const seen = [header?.getClientRects().length ? header.getBoundingClientRect().bottom - band.top : 0,
+    const edge = header ? parseFloat(getComputedStyle(header).getPropertyValue('--edge-reach')) || 0 : 0;
+    const seen = [header?.getClientRects().length ? header.getBoundingClientRect().bottom + edge - band.top : 0,
                   composer?.getClientRects().length ? composer.getBoundingClientRect().top - band.top : root.clientHeight];
     return {top: box.top - band.top + root.scrollTop, height: box.height, viewport: root.clientHeight, seen,
             scrollTop: root.scrollTop, clipped: pre ? pre.scrollWidth > pre.clientWidth : null,
@@ -603,7 +605,7 @@ def test_a_long_or_clipped_shared_notice_is_read_only_when_every_part_was_shown(
                     capture.checkpoint("2-bottom-only")
 
                     # Reading it by parts, top to bottom, records exactly the long notice: its first line just
-                    # below the header drawn over the feed, then half of what the reader sees per step.
+                    # below the header's frosted edge, then half of what the reader sees per step.
                     above, below = long_facts["seen"]
                     assert 0 < above < below <= long_facts["viewport"], long_facts
                     top = long_facts["top"] - above
@@ -635,11 +637,13 @@ _LANDING_FACTS = """({feed, area, first, shared}) => {
     const find = (mark) => root && [...root.querySelectorAll('.chat-bubble')].find((node) => node.innerText.includes(mark));
     const one = find(first), two = find(shared);
     if (!one || !two) return null;
-    // The band a reader sees of the room: below the panel's bar and the page header, above its composer.
+    // The band a reader sees of the room: below the panel's bar and the page header with their frosted edge (style.css
+    // "A room's edges", project_read_state.readBand), above its composer.
     const box = root.getBoundingClientRect();
     const bars = [root.closest('.project-panel')?.querySelector('.project-panel-bar'),
                   root.closest('.page, .chat-instance-panel')?.querySelector('.chat-page-header')]
-        .filter((bar) => bar?.getClientRects().length).map((bar) => bar.getBoundingClientRect().bottom);
+        .filter((bar) => bar?.getClientRects().length)
+        .map((bar) => bar.getBoundingClientRect().bottom + (parseFloat(getComputedStyle(bar).getPropertyValue('--edge-reach')) || 0));
     const composer = document.querySelector(area);
     const top = Math.max(box.top, ...bars);
     const bottom = composer?.getClientRects().length ? Math.min(box.bottom, composer.getBoundingClientRect().top) : box.bottom;
