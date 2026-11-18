@@ -189,3 +189,45 @@ def test_workspace_patch_filters_both_versions_and_arbitrary_names(tmp_path, mon
         for r in manifest["tracked_excluded"] + manifest["untracked_excluded"]
         if r["reason"] == "installation_settings" and r["size"]
     } == {"old.txt", "copy.txt"}
+
+
+@pytest.mark.parametrize("payload", ["text", "binary", "archive", "late-path", "stable"])
+def test_workspace_only_publishes_the_file_versions_checked_for_secrets(tmp_path, monkeypatch, payload):
+    import zipfile
+    from ouroboros import config, workspace_patch_capture as capture
+    from tests.test_headless_workspace_patch import _evidence_copy, _git
+
+    source, task, _ = _evidence_copy(tmp_path)
+    key = b"fixture-value-changing-during-capture"
+    monkeypatch.setattr(config, "load_settings", lambda **kw: {"OPENAI_API_KEY": key.decode()})
+    file = source / "report.txt"
+    file.write_bytes(b"before\n")
+    _git(source, "add", file.name)
+    _git(source, "commit", "-m", "known version")
+    task["metadata"]["workspace_preflight"]["git"]["head"] = _git(source, "rev-parse", "HEAD")
+    public = b"public version\n"
+    if payload != "late-path":
+        file.write_bytes(public)
+    if payload == "archive":
+        monkeypatch.setattr(capture, "_PATCH_FILE_REFERENCE_BYTES", 5)
+    classify = capture.workspace_evidence_exclusions
+
+    def other_writer(*args, **kwargs):
+        checked = classify(*args, **kwargs)
+        if payload != "stable":
+            file.write_bytes((b"\0" if payload in {"archive", "binary"} else b"") + key)
+        return checked
+
+    monkeypatch.setattr(capture, "workspace_evidence_exclusions", other_writer)
+    output = tmp_path / "out"
+    _, receipt = capture.write_workspace_patch_artifacts(source, output, task=task)
+    patch = output / "workspace.patch"
+    if payload == "stable":
+        assert public in patch.read_bytes()
+        return
+    assert not patch.exists() or file.name.encode() not in patch.read_bytes()
+    for archive in output.glob("*.zip"):
+        with zipfile.ZipFile(archive) as content:
+            assert all(key not in content.read(member) for member in content.namelist())
+    if payload != "late-path":
+        assert any(file.name in str(row) for row in receipt["errors"] + receipt["tracked_excluded"])
