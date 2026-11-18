@@ -282,3 +282,60 @@ def test_a_model_start_carries_spoken_words_only_on_the_lead_and_keeps_typed_own
     assert (LONG in owner_words_text(seeded, audience="reviewer")) is not spoken
     if not spoken:
         assert all(row["content"] == LONG for row in event["owner_corpus"])
+
+
+@pytest.mark.parametrize("cited_door", ["owner_press"], indirect=True)
+@pytest.mark.parametrize("door", ["start", "model", "schedule", "update"])
+def test_a_wake_can_cite_the_whole_pressed_choice_for_owner_work(cited_door, door):
+    from ouroboros.consciousness_wake import wake_task_metadata
+    from ouroboros.owner_words import answered_card_reply, owner_words_contain
+    from ouroboros.tools import control_routing, followup
+    from supervisor import queue as schedules
+
+    ctx, events, _ = cited_door
+    ctx.task_metadata.update(wake_task_metadata("act", "heartbeat"))
+    label = "Catalogue the blue reeds"
+    card = {"quiz_id": "marsh-card", "question": "Which work?", "options": [label], "answered_index": 0}
+    ctx._owner_directives = [{"source": "owner_press", "content": "1. " + label, "quiz_id": card["quiz_id"],
+                              "source_task_id": "marsh-keeper", "msg_id": "marsh-answer",
+                              "reply_to": answered_card_reply(card, "marsh-keeper")}]
+    when = "2040-05-01T00:00:00+00:00"
+    if door == "update":
+        assert followup._handle_schedule_followup(ctx, relation="independent", objective="Read the marsh log",
+                                                  run_at=when).startswith("FOLLOWUP_SCHEDULED")
+    before = schedules.list_scheduled_tasks(ctx.drive_root)["tasks"]
+    def choose(cite):
+        if door in ("start", "model"):
+            return control_routing._start_task(ctx, "Catalogue the reeds", title="Marsh catalogue",
+                                               model="vendor/example" if door == "model" else "", owner_words=cite)
+        if door == "schedule":
+            return followup._handle_schedule_followup(ctx, relation="independent", objective="Catalogue the reeds",
+                                                      run_at=when, owner_words=cite)
+        return followup._manage_schedules(ctx, action="update", schedule_id=before[0]["id"],
+                                          objective="Catalogue the reeds", reason="The owner chose a card", owner_words=cite)
+
+    assert "OWNER_WORDS_UNVERIFIED" in choose("blue reeds") and not events
+    assert schedules.list_scheduled_tasks(ctx.drive_root)["tasks"] == before
+    assert "OWNER_WORDS_UNVERIFIED" not in choose(label)
+    if events:
+        event = events[0]
+        kind, meta, corpus = event["work_kind"], event.get("metadata", {}), event["owner_corpus"]
+    else:
+        [saved] = schedules.list_scheduled_tasks(ctx.drive_root)["tasks"]
+        kind, meta = saved["writer_kind"], saved["task"]["metadata"]
+        corpus = meta["owner_corpus"]
+    assert any(row.get("source") == "owner_press" and row.get("cited") == label and row.get("msg_id") == "marsh-answer"
+               for row in corpus)
+    if door == "model":
+        assert meta["lead"]["source"] == "owner_press" and meta["lead"]["cited"] == label
+    assert kind == "owner"
+    assert not owner_words_contain(ctx, label)
+
+
+def test_the_model_and_work_tools_describe_both_allowed_owner_bases():
+    from ouroboros.tools import control, followup
+
+    entries = {entry.name: entry.schema for entry in [*control.get_tools(), *followup.get_tools()]}
+    for name in ("start_task", "switch_model", "schedule_followup", "manage_schedules"):
+        description = entries[name]["parameters"]["properties"]["owner_words"]["description"]
+        assert "verbatim" in description and "complete label" in description and "press" in description

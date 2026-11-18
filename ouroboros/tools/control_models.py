@@ -121,7 +121,7 @@ def start_choice(ctx, model: str, basis: dict | None, project_id: str, *, model_
     if not model:
         return {}, ""
     if not basis and not cyber_pro(ctx):
-        raise ValueError("A model requires your human's verified owner_words. Nothing was started; cite their exact words.")
+        raise ValueError("A model requires your human's verified owner_words. Cite their exact words or the complete label they pressed.")
     choice, note = resolve_model(model, model_as_typed=model_as_typed)
     if basis:
         return {"lead": {**_cited_choice(basis), "model": choice["model"], "use_local": choice["use_local"]}}, note
@@ -197,7 +197,7 @@ def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: s
     if error or not basis:
         hint = (" In Cyber Pro you may make your own room or Main change through its existing writer; this tool carries your human's words."
                 if cyber_pro(ctx) and scope in {"room", "main"} else "")
-        return refuse(ctx, "This model choice requires verified owner_words. Cite your human's exact words." + hint)
+        return refuse(ctx, "This model choice requires verified owner_words. Cite your human's exact words or the complete label they pressed." + hint)
     def finished(text):
         if effort:
             from ouroboros.tools.control_runtime import _effort_switch

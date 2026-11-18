@@ -275,7 +275,7 @@ def _start_task(
     model_basis, cite_error = cited_owner_basis(ctx, owner_words, call_speech=bool(model))
     owner_basis = model_basis if model_basis and model_basis["source"] != "live_call" else None
     if cite_error and model:
-        cite_error = "The model needs verified owner_words. Nothing was started; cite your human's exact words."
+        cite_error = "The model needs verified owner_words. Cite your human's exact words or the complete label they pressed."
     if cite_error:  # the same typed argument refusal the schedule doors publish: nothing was started
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
                                                  text=f"⚠️ OWNER_WORDS_UNVERIFIED (start_task): {cite_error}"))

@@ -570,8 +570,8 @@ def cited_owner_basis(ctx: Any, owner_words: Any, *, call_speech: bool = False) 
             return {"source": "live_call", "cited": wanted,
                     **({"msg_id": item["msg_id"]} if item.get("msg_id") else {})}, ""
     return None, ("owner_words were not found verbatim in any message of your human that reached this run (their "
-                  "confirmed account, not forwarded): nothing was started. Copy their exact words, or omit owner_words "
-                  "to start the work as your own.")
+                  "confirmed account, not forwarded). Copy their exact words or the complete label they pressed, or "
+                  "omit owner_words to start the work as your own.")
 
 
 def place_reply_target(message: Any, source: str = "") -> Dict[str, str] | None:
@@ -618,8 +618,15 @@ def merged_corpus(kept: Any, added: Any) -> List[Dict[str, Any]]:
     """Merge carried rows without collapsing same client ids from different rooms."""
     merged: List[Dict[str, Any]] = []
     for row in [*(kept if isinstance(kept, list) else []), *(added if isinstance(added, list) else [])]:
-        if isinstance(row, Mapping) and not any(_same_corpus_source(row, prior) for prior in merged):
+        if not isinstance(row, Mapping):
+            continue
+        prior = next((item for item in merged if _same_corpus_source(row, item)), None)
+        if prior is None:
             merged.append(dict(row))
+        elif (prior.get("source") == row.get("source") == OWNER_PRESS and row.get("basis") == CITED
+              and row.get("cited") and prior.get("content") == row.get("content")):
+            # A schedule edit can cite a press already held under its original id. Keep that decision on the one act.
+            prior.update(basis=CITED, cited=row["cited"])
     return merged
 
 
