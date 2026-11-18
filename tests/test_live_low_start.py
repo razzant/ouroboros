@@ -24,7 +24,7 @@ def test_adopted_call_reports_a_memory_lowered_start_once(tmp_path, sent, room, 
         root, event = sent[0]
         assert root == tmp_path and event['chat_id'] == 7 and event['task_id'] == ''
         assert event['delivery_id'] == 'low_start:call-low:2'
-        assert event['system_type'] == 'low_start_notice' and 'started in Low' in event['text']
+        assert event['system_type'] == 'low_start_notice' and 'started in Max with chapter maps' in event['text']
     # Even if later fits are crowded, renewals never invent another start notice.
     host.plan = ctx.context_fit_plan = _plan(_room())
     for n in range(3):

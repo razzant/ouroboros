@@ -9,7 +9,6 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-
 SKILL_MANIFEST_SCHEMA_VERSION = 1
 MAX_SKILL_CONFLICTS = 32
 MAX_SKILL_NAME_LENGTH = 64
@@ -154,7 +153,7 @@ class SkillManifest:
     # env_from_settings keys it writes. Structural here; which keys may be written
     # (owner-defined custom secrets only) is decided host-side, never by the request.
     secret_fields: Dict[str, str] = field(default_factory=dict)
-    # Declared MCP stdio servers the owner may connect (CREATING_SKILLS "MCP servers"):
+    # MCP stdio servers from mcp_servers followed by optional_mcp_servers:
     # normalized {id, title, runtime, entry, task_session, browser_policy} items.
     mcp_servers: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -214,7 +213,8 @@ class SkillManifest:
                 "(only extension/script skills run code)"
             )
         if self.mcp_servers and not (self.is_script() or self.is_extension()):
-            warnings.append(f"type='{self.type}' must not declare 'mcp_servers' (only script/extension skills run code)")
+            warnings.append(f"type='{self.type}' must not declare 'mcp_servers' or 'optional_mcp_servers' "
+                            "(only script/extension skills run code)")
         if self.timeout_sec <= 0:
             warnings.append("timeout_sec must be positive")
         if self.context_snapshot and "context_snapshot" not in self.permissions:
@@ -553,6 +553,7 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         "context_snapshot",
         "always_in_context",
         "mcp_servers",
+        "optional_mcp_servers",
         "schema_version",
     }
     extras: Dict[str, Any] = {
@@ -680,6 +681,7 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
             canonical_conflicts.append(canonical)
 
     env_from_settings = _string_list(data.get("env_from_settings"))
+    runtime = str(data.get("runtime") or "").strip().lower()
     return SkillManifest(
         name=str(data.get("name") or "").strip(),
         description=str(data.get("description") or "").strip(),
@@ -688,7 +690,7 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         when_to_use=str(data.get("when_to_use") or "").strip(),
         requires=_string_list(data.get("requires")),
         os=",".join(item.lower() for item in _string_list(data.get("os"))) or "any",
-        runtime=str(data.get("runtime") or "").strip().lower(),
+        runtime=runtime,
         timeout_sec=timeout_sec,
         env_from_settings=env_from_settings,
         secret_fields=_secret_fields(data.get("secret_fields"), env_from_settings),
@@ -708,7 +710,7 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         body=body,
         raw_extra=extras,
         schema_version=schema_version_int,
-        mcp_servers=_parse_mcp_servers(data.get("mcp_servers"), str(data.get("runtime") or "").strip().lower()),
+        mcp_servers=_parse_mcp_servers(data, runtime),
     )
 
 
@@ -717,46 +719,50 @@ _MCP_SERVER_ID_RE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 _MCP_SERVER_ID_MAX = 24  # mcp_client._MAX_SERVER_SLUG: an id the host keeps exactly as written
 
 
-def _parse_mcp_servers(raw: Any, manifest_runtime: str) -> List[Dict[str, Any]]:
-    """Declared stdio MCP servers: a canonical id, a reviewed relative entry and call-lifetime flags."""
-    if raw in (None, "", []):
-        return []
-    hint = "declare mcp_servers as a list of {id, entry[, title, runtime, task_session, browser_policy]}"
-    if not isinstance(raw, list):
-        raise SkillManifestError("'mcp_servers' must be a list when provided", fix_hint=hint)
+def _parse_mcp_servers(data: Dict[str, Any], manifest_runtime: str) -> List[Dict[str, Any]]:
+    """Older cores ignore optional_mcp_servers. This core validates both lists together."""
+    hint = "use a list of {id, entry[, title, runtime, task_session, browser_policy]}"
+    declarations = []
+    for section in ("mcp_servers", "optional_mcp_servers"):
+        raw = data.get(section, [])
+        if section == "mcp_servers" and raw in (None, ""):  # legacy empty declarations
+            continue
+        if not isinstance(raw, list):
+            raise SkillManifestError(f"{section!r} must be a list when provided", fix_hint=hint)
+        declarations.extend((section, item) for item in raw)
     servers: List[Dict[str, Any]] = []
-    for item in raw:
+    for section, item in declarations:
         if not isinstance(item, dict):
-            raise SkillManifestError("each 'mcp_servers' item must be a mapping", fix_hint=hint)
+            raise SkillManifestError(f"each {section!r} item must be a mapping", fix_hint=hint)
         unknown = sorted(str(key) for key in item if key not in _MCP_SERVER_KEYS)
         if unknown:
-            raise SkillManifestError(f"'mcp_servers' item has unknown keys {unknown}",
+            raise SkillManifestError(f"{section!r} item has unknown keys {unknown}",
                                      fix_hint=f"keep only {list(_MCP_SERVER_KEYS)}; the host derives command, args and cwd")
         server_id = item.get("id")
         if (not isinstance(server_id, str) or len(server_id) > _MCP_SERVER_ID_MAX
                 or not _MCP_SERVER_ID_RE.fullmatch(server_id)):
             raise SkillManifestError(
-                f"mcp_servers id {server_id!r} is not a canonical MCP server id",
+                f"{section} id {server_id!r} is not a canonical MCP server id",
                 fix_hint=f"use lowercase letters and digits joined by single '_', at most {_MCP_SERVER_ID_MAX} characters")
         if any(existing["id"] == server_id for existing in servers):
-            raise SkillManifestError(f"mcp_servers id {server_id!r} is declared twice", fix_hint="give each server its own id")
+            raise SkillManifestError(f"{section} id {server_id!r} is declared twice", fix_hint="give each server its own id")
         entry = item.get("entry")
         if (not isinstance(entry, str) or not entry or "\\" in entry or ":" in entry or entry.endswith("/")
                 or pathlib.PurePosixPath(entry).is_absolute() or ".." in pathlib.PurePosixPath(entry).parts):
-            raise SkillManifestError(f"mcp_servers {server_id!r} entry must be a relative path of a file in the skill",
+            raise SkillManifestError(f"{section} {server_id!r} entry must be a relative path of a file in the skill",
                                      fix_hint="write entry as a path inside the skill, e.g. scripts/server.mjs")
         runtime = item.get("runtime", manifest_runtime)
         runtime = runtime.strip().lower() if isinstance(runtime, str) else runtime
-        if runtime != "node":
-            raise SkillManifestError(f"mcp_servers {server_id!r} currently supports only the node runtime",
-                                     fix_hint="set runtime to node; other skill runtimes keep their existing script path")
+        if not isinstance(runtime, str) or runtime not in {"node", "agent_python"}:
+            raise SkillManifestError(f"{section} {server_id!r} supports only node or agent_python runtimes",
+                                     fix_hint="set runtime to node or agent_python; ordinary script runtimes are unchanged")
         title = item.get("title", server_id)
         flags = {key: item.get(key, False) for key in ("task_session", "browser_policy")}
         if not isinstance(title, str) or not title.strip() or any(not isinstance(v, bool) for v in flags.values()):
-            raise SkillManifestError(f"mcp_servers {server_id!r} has a malformed title or flag",
+            raise SkillManifestError(f"{section} {server_id!r} has a malformed title or flag",
                                      fix_hint="title is text; task_session and browser_policy are true or false")
         if flags["browser_policy"] and not flags["task_session"]:
-            raise SkillManifestError(f"mcp_servers {server_id!r} sets browser_policy without task_session",
+            raise SkillManifestError(f"{section} {server_id!r} sets browser_policy without task_session",
                                      fix_hint="browser_policy requires task_session: true")
         servers.append({"id": server_id, "title": title.strip(), "runtime": runtime, "entry": entry, **flags})
     return servers

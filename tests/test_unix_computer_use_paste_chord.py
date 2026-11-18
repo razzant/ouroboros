@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._unix_computer_use import CHORD_POSTED, SAFARI, inputs, load_plugin, mac, receipt
 from tests.group_run import run_in_group
-from tests.test_unix_computer_use_targeting import CHORD_POSTED, SAFARI, inputs, load_plugin, mac, receipt
 
 CHORD = Path(__file__).resolve().parents[1] / "skills" / "unix_computer_use" / "paste_chord.js"
 INERT = Path(__file__).resolve().parent / "fixtures" / "paste_chord_inert.cjs"

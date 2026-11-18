@@ -235,6 +235,9 @@ class ContextFitPlan:
         def project(projection: Optional[ContextFitProjection]) -> Optional[ContextFitProjection]:
             if projection is not None and projection.mode in contents and narrowed(projection):
                 system, facts = contents[projection.mode]  # the start's Max room outlives a narrowing, as a selection's
+                number = (projection.memory_facts.get("floor") or {}).get("no_memory_tokens")  # so does Low's miss (3A)
+                if number is not None and isinstance(facts.get("floor"), dict):
+                    facts = {**facts, "floor": {**facts["floor"], "no_memory_tokens": number}}
                 projection = replace(projection, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
                                      memory_facts={**facts, **{key: value for key, value in projection.memory_facts.items()
                                                                if key == "max_room"}}, continuation_messages_json=tail_json,
@@ -986,17 +989,18 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * (
             snapshot.spec.work_room_levels if snapshot else work_room_levels)
 
-    # Both Max decisions use the clean-start guard's minimum ordinary memory,
-    # priced in this request with its receipt, schemas, reserve and work room.
+    # Max's measure prices the clean-start guard's minimum ordinary memory, its books gate my shortest telling of the
+    # whole horizon (owner 15.11.2026, 4A: memory yields to my tellings before the books), each in this request with
+    # its receipt, schemas, reserve and work room.
     ordinary_measures = {}
-    def ordinary_need():
-        if mode in ordinary_measures:
-            return ordinary_measures[mode]
+    def ordinary_need(level_of=floor.ordinary_level):
+        if (mode, level_of) in ordinary_measures:
+            return ordinary_measures[mode, level_of]
         forms = section_views(sections[mode], receipts)
-        minimum = view(mode, sent, forms, window, boundary, level=floor.ordinary_level(snapshot)) if snapshot else floor.NO_VIEW
+        minimum = view(mode, sent, forms, window, boundary, level=level_of(snapshot)) if snapshot else floor.NO_VIEW
         price = measure(mode, sent, forms, minimum.story_chars, minimum.room_chars)
-        ordinary_measures[mode] = minimum, math.ceil(price * ratio) + reserve + work()
-        return ordinary_measures[mode]
+        ordinary_measures[mode, level_of] = minimum, math.ceil(price * ratio) + reserve + work()
+        return ordinary_measures[mode, level_of]
     minimum, need = ordinary_need() if (kept is None or start_work) and mode == "max" else (floor.NO_VIEW, 0)
     room_fact = floor.max_room_fact(snapshot, rendered_texts(core, section_views(sections[mode], receipts)),
         render_governance(governance[form[mode]], section_views(sections[mode], receipts)), story=floor.tokens_of(minimum.story_chars),
@@ -1004,6 +1008,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         window=window, reserve=reserve, work=work(), allowance=allowances["margin"]) if (kept is None or start_work) and mode == "max" else None
     if room_fact:
         room_fact.update(need=need, story=floor.tokens_of(minimum.story_chars), room=floor.tokens_of(minimum.room_chars))
+        if need > window and room_fact["zero_need"] <= window:  # only then can my shortest telling keep the books
+            room_fact["telling_need"] = ordinary_need(floor.telling_level)[1]
     if room_fact and floor.max_room_lost(room_fact):
         mode = "low"
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
@@ -1022,8 +1028,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     # is judged by its pieces' prices: a frame the fit walks away from is never drawn whole.
     while True:
         shown = floor.NO_VIEW if mode != "nano" and overflows() else render()
-        books_lost = ((kept is None or start_work) and mode == "max" and allowances["margin"] is not None
-                      and ordinary_need()[1] > window)
+        books_lost = (kept is None or start_work) and mode == "max" and bool(room_fact) and floor.max_room_lost(room_fact)
         if mode == "nano" or not (books_lost or overflows(shown)):
             break
         held = (sent, fixed, reserve, window, boundary, allowances), receipts
@@ -1323,5 +1328,5 @@ def _physical_context_for_fit(disposition: Any) -> PhysicalAttemptContext:
         window_witness_bound=getattr(measurement, "window_witness_bound", False),
         window_observation_fp=measurement.window_observation_fp,
         required_book_tokens=measurement.required_book_tokens, preferred_mode=measurement.preferred_mode,
-        mode_cause=measurement.mode_cause,
+        mode_cause=measurement.mode_cause, no_memory_tokens=measurement.no_memory_tokens,
     )

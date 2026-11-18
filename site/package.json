@@ -8,7 +8,7 @@
     "predev": "node scripts/sync-assets.mjs",
     "dev": "vite --host 127.0.0.1",
     "prebuild": "node scripts/sync-assets.mjs",
-    "build": "vite build",
+    "build": "vite build && node scripts/prune-output.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
   "devDependencies": {

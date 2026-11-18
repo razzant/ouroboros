@@ -537,6 +537,27 @@ export function updateStrategyForPlan(plan = {}) {
 /** Storage actions may have started when the answer is cut: an unreadable OK body is an error, not a reply. */
 const STORAGE_READ = { requireBody: true };
 
+function hasUpdateStatus(body) {
+    return typeof body?.available === 'boolean' || body?.managed === false || typeof body?.check_ok === 'boolean'
+        || body?.update_tx?.active === true || body?.update_progress?.active === true;
+}
+
+function readUpdateStatus(body) {
+    if (hasUpdateStatus(body)) return body;
+    throw Object.assign(new Error('No update status in the response'), { unreadable: true });
+}
+
+function descriptionReply(body, latest) {
+    const hasTask = typeof body?.task_id === 'string' && body.task_id.trim();
+    if (hasTask && (body.status === 'queued' || (latest && body.status === 'writing'))) {
+        // The task receipt stands on its own even if the accompanying status cannot refresh the page.
+        return latest && !hasUpdateStatus(body.update) ? { ...body, update: null } : body;
+    } else if (latest && ['check_failed', 'current', 'no_update'].includes(body?.status) && hasUpdateStatus(body.update)) {
+        return body;
+    }
+    throw Object.assign(new Error('No usable description outcome in the response'), { unreadable: true });
+}
+
 export const apiClient = {
     harnessMaintenanceInventory,
     startHarnessMaintenance,
@@ -642,7 +663,7 @@ export const apiClient = {
     previewOnboardingSubagents: (payload) => jsonPost('/api/onboarding/subagents/preview', payload),
     ownerRuntimeMode: (mode) => jsonPost('/api/owner/runtime-mode', { mode }),
     ownerAutoGrant: (enabled) => jsonPost('/api/owner/auto-grant', { enabled: Boolean(enabled) }),
-    ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }),
+    ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }, { headers: APP_SETTINGS_ORIGIN }),
     /** Save room primary effort and ordered helper bounds. @param {import('./client_contract_types.js').OwnerEffortRangeRequest} range */
     ownerEffortRange: (range) => jsonPost('/api/owner/effort-range', range),
     /** @param {import('./client_contract_types.js').OwnerSubagentsModeRequest} choice
@@ -778,19 +799,30 @@ export const apiClient = {
      */
     cancelStorageFree: () => jsonPost('/api/storage/free/cancel', {}, STORAGE_READ),
     /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
-    updateStatus: (init = {}) => fetchJson('/api/update/status', { cache: 'no-store', ...init }),
+    updateStatus: (init = {}) => fetchJson('/api/update/status', { cache: 'no-store', ...init }, { requireBody: true }).then(readUpdateStatus),
     /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
-    updateCheck: () => jsonPost('/api/update/check', {}),
+    updateCheck: () => jsonPost('/api/update/check', {}, { requireBody: true }).then(readUpdateStatus),
     /** @returns {Promise<import('./api_types.js').UpdatePreflightResponse>} */
     updatePreflight: () => jsonPost('/api/update/preflight', {}),
     /**
      * The owner's Write/Rewrite: one ordinary Main task describes this exact range.
+     * An answer that arrives unreadable is an unknown outcome (no HTTP status), never a reply: the server may
+     * already have admitted that writer, so the press says the outcome is unknown instead of returning in
+     * silence.
      * @param {'write'|'rewrite'} mode
      * @returns {Promise<import('./api_types.js').UpdateDescriptionResponse>}
      */
     updateDescription: (mode, key = {}) => jsonPost('/api/update/description', {
         mode, base_sha: String(key.base_sha || ''), target_sha: String(key.target_sha || ''),
-    }),
+    }, { requireBody: true }).then(body => descriptionReply(body, false)),
+    /**
+     * Check and describe: the server checks the channel, then asks for the range that check found at most once.
+     * An answer that arrives unreadable is an unknown outcome (no HTTP status), never a reply.
+     * A usable task receipt survives an unreadable update snapshot; only its update field becomes null.
+     * @returns {Promise<Omit<import('./api_types.js').UpdateDescriptionLatestResponse, 'update'> & {update: Object|null}>}
+     */
+    updateDescribeLatest: () => jsonPost('/api/update/description', { mode: 'latest' }, { requireBody: true })
+        .then(body => descriptionReply(body, true)),
     /** @returns {Promise<import('./api_types.js').UpdateApplySuccessResponse>} */
     updateApply: (strategy, plan = {}, { confirmRecovery = false } = {}) => jsonPost('/api/update/apply', {
         strategy,

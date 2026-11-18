@@ -59,7 +59,7 @@ _RESTORED: set = set()
 _RESTORING: dict = {}
 
 
-def _keeps_saved_queue(path: Any, *held: Any) -> bool:
+def _keeps_saved_queue(path: Any, *held: Any, require_readable: bool = False) -> bool:
     """Whether a publication from this process must leave the snapshot on disk as it is: another
     thread is restoring it now, or the process holds no work at all and neither restored nor
     published that snapshot, which still names pending or running rows. That is the previous
@@ -75,14 +75,23 @@ def _keeps_saved_queue(path: Any, *held: Any) -> bool:
         return False
     try:
         saved = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
     except (OSError, ValueError):
+        if require_readable:
+            raise
         return False  # nothing readable to keep
+    if require_readable and not (isinstance(saved, dict) and all(
+            isinstance(saved.get(lane), list) for lane in ("pending", "running"))):
+        raise ValueError("could not establish the saved pending and running queues")
     return isinstance(saved, dict) and bool(saved.get("pending") or saved.get("running"))
 
-def saved_queue_unowned() -> bool:
+
+def saved_queue_unowned(*, require_readable: bool = False) -> bool:
     """Whether the saved queue snapshot still names work this process has not taken into custody (no
-    finished restore of it, no publication of its own): work admitted now would be published over it."""
-    return _keeps_saved_queue(_queue().QUEUE_SNAPSHOT_PATH)
+    finished restore of it, no publication of its own). Readers proving absence require a readable
+    snapshot or an observed missing file. Publication keeps its existing best-effort policy."""
+    return _keeps_saved_queue(_queue().QUEUE_SNAPSHOT_PATH, require_readable=require_readable)
 
 
 def __getattr__(name: str):

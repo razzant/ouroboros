@@ -662,12 +662,25 @@ class BackgroundConsciousness:
             if refusal:
                 return refusal
             if self._enabled:
-                return "Background consciousness is already enabled." + note
+                return "Consciousness is already on." + note
             self._stopped, self._enabled, self._stop_source = False, True, ""
             # The clock did not advance while disabled: never announce a wake in the past.
             self._set_next_wake(max(self._next_wake_at, time.time()), appointment=True)
             at = time.strftime('%H:%M', time.localtime(self._next_wake_at))
-            return f"Background consciousness enabled; next wake-up at {at}." + note
+        from ouroboros.consciousness_view import on_sentence
+        try:  # where it may speak now: one read that never holds the start (the words 15.11, 5A)
+            from ouroboros.places import load_places
+            places = load_places(self._drive_root)
+        except Exception:
+            log.debug("consciousness: places unreadable for the start sentence", exc_info=True)
+            places = None
+        try:  # a spent or unreadable window names no wake (reviews r3, r4): read now, not the status view's cache, and
+            # with the display's short wait, never the admission's long one that would hold the owner's next command (r5)
+            from ouroboros.consciousness_allowance import allowance_window
+            allowance = str(allowance_window(self._drive_root, allow_stale=True).get("status") or "")
+        except Exception:
+            allowance = "allowance_unknown"
+        return on_sentence(at, places, get_consciousness_autonomy(), get_consciousness_daily_usd(), allowance) + note
 
     def stop(self, source: str = "") -> str:
         """Stop this process first, then save the stop with ``source`` (``OWNER_STOP`` or ``AGENT_STOP``); Panic names
@@ -702,7 +715,7 @@ class BackgroundConsciousness:
         kept += "".join(f"\nKept firing on your words (schedule {sid}): «{quote}»"
                         for sid, quote in cited_owner_schedules(self._drive_root))
         if not wakes and not was_enabled:
-            return "Background consciousness is already disabled." + saved + kept
+            return "Consciousness is already off." + saved + kept
         for task_id in wakes:
             threading.Thread(target=self._stop_live_wake, args=(task_id,), name="wake-stop", daemon=True).start()
         # What Off leaves and what it ends, in the same row (owner 09.11, variant A). The stops are already on their
@@ -733,6 +746,20 @@ class BackgroundConsciousness:
         except Exception:
             log.debug("consciousness: graceful stop of wake %s failed", task_id, exc_info=True)
 
+    def _saved_stop_source(self) -> str:
+        """Who stopped it: the confirmed saved source (a Panic stays named after a restart, and a later stop of an
+        already stopped clock does not rename it), else this process's own stop."""
+        try:
+            if panic_blocks_wake(self._drive_root):  # a Panic waiting to be saved outranks an older saved stop (review r4)
+                return PANIC_STOP
+            from supervisor.state import control_value, read_state
+            known, source = control_value(read_state(self._drive_root).projection(), STOP_SOURCE_KEY)
+            if known and source:
+                return str(source)
+        except Exception:
+            pass
+        return self._stop_source
+
     def status_snapshot(self) -> Dict[str, Any]:
         from supervisor.consciousness_carriers import queued_wakes
 
@@ -753,6 +780,8 @@ class BackgroundConsciousness:
                 # What holds it, proven from its records; the current window's own verdict stays beside it.
                 "live_wake_hold": held_wake_cause(self._drive_root, wake) if held else None,
                 "allowance_status": str(window.get("status") or ""),
+                # Who turned it off (owner, panic, agent_tool): the switch's state line names a Panic (5A).
+                **({"stop_source": source} if not self._enabled and (source := self._saved_stop_source()) else {}),
                 "allowance_open_rows": window.get("accounting_open_rows"),
                 "allowance_room_after": str(window.get("room_after") or ""),
                 "model_route": model_route(),

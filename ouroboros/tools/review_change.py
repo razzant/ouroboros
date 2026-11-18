@@ -264,13 +264,13 @@ def _admitted_workspace_root(ctx: ToolContext, value: str) -> pathlib.Path:
 
 def resolve_review_root(ctx: ToolContext, binding: Any, request: ReviewChangeRequest) -> Tuple[str, pathlib.Path]:
     """(root_kind, top level) of the repository this call reviews."""
-    from ouroboros.tools import git as git_mod
+    from ouroboros.tools import git_vcs_ops
 
     if request.workspace_root:
         start = _admitted_workspace_root(ctx, request.workspace_root)
     else:
         try:
-            start = pathlib.Path(git_mod._vcs_binding(ctx, binding, root=request.root).base_path)
+            start = pathlib.Path(git_vcs_ops._vcs_binding(ctx, binding, root=request.root).base_path)
         except (OSError, ValueError, RuntimeError) as exc:
             raise ReviewChangeArgumentError(f"root={request.root} does not resolve here: {exc}") from exc
     top = _git_line(start, "rev-parse", "--show-toplevel")

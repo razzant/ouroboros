@@ -695,46 +695,47 @@ or non-numeric one is silently dropped.
 
 ### Declaring MCP servers (Connect tools)
 
-A `script` or `extension` skill that ships an MCP stdio server declares it, and the
-owner connects it with one confirmation instead of copying settings by hand:
+A `script` or `extension` skill can ship stdio servers. Keep existing Node servers in
+`mcp_servers`. Put additions such as an `agent_python` server in `optional_mcp_servers`
+so older cores can ignore them and load the rest of the skill. Current cores append
+the second list to the first and validate every entry.
 
 ```yaml
 mcp_servers: [{"id": "chrome_browser", "title": "Chrome (shared tab)", "entry": "scripts/server.mjs", "task_session": true, "browser_policy": true}]
 ```
 
-Each item takes only these keys (anything else is a manifest error):
+Both lists use the same fields. Unknown keys or an ID repeated anywhere reject the manifest.
 
-- `id` (required): the MCP server id, lowercase letters and digits joined by single `_`,
-  at most 24 characters. Every tool is named `mcp_<id>__<tool>`, so keep it stable.
-- `entry` (required): a relative path of a file in the skill (no `..`, absolute path or
-  cache/dependency folder such as `node_modules` or `.ouroboros_env`); it is part of the
-  reviewed, hashed payload, and `skill_preflight` checks it by the rule a start applies.
-- `runtime`: currently `node` only; defaults to the manifest's `runtime`.
-- `title`: the Settings display name; defaults to `id`.
-- `task_session`, `browser_policy`: the MCP call-lifetime choices (DEVELOPMENT §12);
-  `browser_policy` needs `task_session: true`.
+- `id` (required) names every tool as `mcp_<id>__<tool>`. Use up to 24 lowercase
+  letters and digits joined by single underscores.
+- `entry` (required) is a relative file path within the reviewed, hashed payload.
+  Preflight and launch reject `..`, absolute paths and cache/dependency folders such
+  as `node_modules` or `.ouroboros_env`.
+- `runtime` is `node` or `agent_python` and defaults to the manifest runtime.
+  `agent_python` runs a usable `OUROBOROS_AGENT_PYTHON` or `sys.executable` with
+  `-I -B`. It uses that interpreter's packages, skips the skill's isolated Python
+  environment and ignores `PYTHONPATH` and user-site.
+  Managed domains refuse it. Ordinary Python scripts keep PATH-first resolution.
+- `title` names the server in Settings and defaults to `id`.
+- `task_session` and `browser_policy` control call lifetime (DEVELOPMENT §12).
+  `browser_policy` requires `task_session: true`.
 
-Once the skill is accepted for its current bytes, on, granted and its packages are
-installed, its Skills card offers **Connect tools**. The confirmation names what will run
-and, when MCP is off, every other server that turning MCP on starts. Confirming writes one
-MCP server row (`id`, `name`, `enabled`, `transport: stdio`, `skill`, the two flags) and turns
-MCP on; nothing else in settings changes, an identical state writes nothing, and a row of
-the same id that this skill did not write is never overwritten. An agent carries the same
-step with `skill_owner_action(action="connect_mcp")`: `preview: true` first, then the
+When the skill is accepted for its current bytes, enabled, granted and its packages
+ready, its card offers **Connect tools**. The owner confirms the listed servers and
+any others that turning MCP on would start. Connect sets `MCP_ENABLED` and writes
+one row per declaration (`id`, `name`, `enabled`, `transport: stdio`, `skill`, both flags).
+It preserves other settings, skips identical writes and refuses ID conflicts.
+For `skill_owner_action(action="connect_mcp")`, use `preview: true` first, then the
 owner's answer as `owner_source` with the preview's `settings_digest`.
 
-The row stores no command. Every listing, Settings Test and call
-derives the runtime binary, `<skill folder>/<entry>`, the skill folder as working directory and
-both flags from the installed skill (read-only in Settings), so a moved app or runtime
-needs no reconnect. The server gets your scripts' environment: granted settings, state
-folder, packages. Under a deployment's execution domain each start runs the verified work
-copy in its work container, on its runtime (not an extension's: its package stays on the
-service). While the skill is off, missing, edited and not re-accepted, short of grants or
-packages, or no longer declares the server, or the domain cannot start it, only that
-server is unavailable (`MCP_SKILL_UNAVAILABLE`) and nothing starts anywhere; the row
-stays. An accepted update or changed granted value is listed anew and running task
-sessions restart; a row the owner switched off stays off. Steps outside Ouroboros (a browser extension, a sign-in) belong
-in its instructions.
+The row stores no command. Listing, Settings Test and calls derive binary, entry, cwd and flags from the installed
+skill. Moving it or the runtime needs no reconnect. Servers receive scripts' granted
+settings and state folder. Managed domains stage verified Node scripts in containers
+and refuse extension servers. An off, missing or unaccepted skill, missing grants or
+packages, an absent declaration or a domain refusal leaves that row saved and inert
+(`MCP_SKILL_UNAVAILABLE`). An accepted update or changed granted value triggers a new
+listing and retires old task sessions. A disabled row stays off. Document any external
+steps such as a browser extension or sign-in in the skill.
 
 ## The `skill_preflight` tool
 
@@ -1883,19 +1884,19 @@ The frozen ABI is documented in
 This section shows the practical shape.
 
 Extensions declare the PluginAPI generation they bind against in the manifest
-(PluginAPI 2.5; a payload declaring any 2.x minimum negotiates the host's 2.5, methods included; a tool row
-with `touches` needs "2.5", which an older host refuses before import):
+(PluginAPI 2.6; a payload declaring any 2.x minimum negotiates the host's 2.6, methods included; a tool row
+with `touches` needs "2.5" and a payload relying on `get_stop_state` "2.6", which an older host refuses before import):
 
 ```yaml
-plugin_api: "2.5"            # major strict; minor = required minimum
+plugin_api: "2.6"            # major strict; minor = required minimum
 # or, with required capabilities (closed set, validated per execution mode):
 # plugin_api:
-#   version: "2.5"
+#   version: "2.6"
 #   capabilities: [register_tool, subscribe_event]
 ```
 
 A payload without the field binds the legacy "1.3" generation by
-construction (2.4's `get_settings_state` and `refresh_companion_process` refuse it): an already-reviewed payload keeps loading on its existing
+construction (`get_settings_state`, `refresh_companion_process` and `get_stop_state` refuse it): an already-reviewed payload keeps loading on its existing
 hash-bound review PASS, but a NEW review PASS (LLM review, owner attestation,
 or an install-basis acceptance) is refused until the field is declared.
 
@@ -2094,17 +2095,36 @@ objects are `ref`s whose `address` and `field` read the stored value whole; a lo
 (a title, a label) is a preview whose `derived_from` names its source. Search and inbound
 links are the skill's work over these reads, stating the coverage read.
 
+### Stop inside a multi-step tool call
+
+A Stop reaches a running call only when the call asks. `api.get_stop_state()` answers for the tool call running in this
+context, in both execution modes, with no permission or grant; the host names the call and its task. Ask it last before
+each new independent action of the call, after that action's preparation, the first one included: the next request of
+a message sent in parts, the next key chord. The answer is `{"status", "reason", "note"}`; only `continue` lets the
+action start (`reason` `no_task`: a call made for no task, which no Stop governs). `stop` names why it must not
+(`cancelled`, `task_cancelled`, `operation_already_returned`, `stop_unreadable`, each defined on the `PluginAPI`
+protocol), and `unbound` (no call of this skill is bound where it asks) permits nothing either. In process a call is
+bound to its context (its thread, its async task and contexts copied from them): a thread you start without that
+context, a route, a WebSocket handler or a companion reads `unbound`. Out of process a tool call's child binds that
+one call for all its threads until it returns.
+
+If not `continue`, start nothing more; return receipts (`observed_effect` only for actions that ran).
+Never retry or resume the rest. The first `stop` holds for the call. Host facts are `meta.control_reason` and
+`meta.refused_step`: only a non-error completion becomes `blocked` / `OWNER_OPERATION_REFUSED`. Errors and timeouts
+keep their status/code; `{"ok": false}` is an error even with `reason: stopped`. Result review
+reads your report unchanged; the host attests only its refusal. Return rather than raise: exceptions return no report
+of effects; only your state retains them. This reads immediate task Stop, not Wrap up, Pause, a deadline or the End of a live conversation.
+Stop after the read cannot reach an action already starting. Never split one action (key press/release, drag).
+The host checks between whole calls for extensions that never ask. Bundled `unix_computer_use` also checks before `key` can raise the target and before each chord.
+
 ### Async tool handlers
 
-Tool handlers can be plain functions OR `async def` coroutines —
-the registry detects coroutines and runs them on a helper thread with
-a fresh event loop under `asyncio.wait_for(timeout_sec)`. They do not
-execute on the server's main event loop, so do not rely on loop-local
-state captured at registration time, as for HTTP routes and WS handlers.
-Supervised tasks and async event subscribers share the host extension loop
-instead; do not share loop-local objects between that loop and a route or
-WebSocket handler. Blocking I/O on the extension loop still delays other
-extensions.
+Tool handlers may be plain functions or `async def`. A coroutine runs on a helper thread's own loop or in the
+per-call child's loop. Returning or raising closes the handler's Stop reader before loop cleanup. Its report is
+distinct from runner shutdown. If a child exits or times out before handing over its result, neither its report nor its refusal is confirmed.
+Do not rely on loop-local state captured at registration. Supervised tasks and async event subscribers share
+the host extension loop; do not share its loop-local objects with routes or WebSocket handlers. Blocking I/O
+on that loop delays other extensions.
 
 ```python
 async def do_search(ctx, query: str = ""):
@@ -2305,8 +2325,10 @@ HEAD/Range behavior and background actions. There is no total or pre-header
 request timer: finish, abort, disconnect or unloading that skill instance ends
 its response. Slow consumption is backpressure, not a timeout. A body failure
 breaks the stream; cleanup failure after the complete body is logged separately.
-The incoming request body retains its 512 KiB cap, and one-shot tool/catalog/WS
-results retain their existing caps and timeouts.
+The incoming request body and one-shot tool/catalog/WS results each have a
+512 KiB cap. A tool child's Stop record has a separate byte allowance. When
+the result exceeds its cap, the host receives the size error and any recorded
+refusal. One-shot timeouts still apply.
 
 The out-of-process / companion WS push (`POST /ui/ws-message`) admits
 a 60-message burst per skill and then one message per second (the excess gets a

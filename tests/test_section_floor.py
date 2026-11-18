@@ -339,9 +339,10 @@ def test_host_sections_then_memory_forms_then_a_physical_index_outline_and_peopl
 
 
 def test_an_owner_target_never_outlines_a_world_map_the_window_holds(tmp_path):
-    """WORLD.md shortens only for the window (memory audit 15.11, F7): an owner's Low target the window's own start bound
-    does not need leaves the map whole while other host forms pay the target; a window that cannot hold the request
-    outlines it, its exact source behind a reader; without a target the window's pressure still takes it before memory."""
+    """WORLD.md shortens only for the window (memory audit 15.11, F7): while the window's own start bound holds the
+    request with memory at its shortest forms, neither an owner's Low target nor a Max start's own room outlines the
+    map (other host forms still pay); a window that cannot hold it outlines it in any mode, its exact source behind a
+    reader, still before memory."""
     world = _service("world", 60_000)  # about 255,000 tokens: above Low's target even after the runtime steps
     core = _core(tmp_path, [_service(size=60_000)], [world], syn.snapshot(story=syn.pages(3, 20_000)))
     roomy = _plan(core, 1_000_000, "low")
@@ -349,11 +350,14 @@ def test_an_owner_target_never_outlines_a_world_map_the_window_holds(tmp_path):
     assert world in _text(roomy, "low")
     tight = _plan(core, 200_000, "low")  # its start bound cannot hold the map beside the rest
     assert "world" in [r["section_id"] for r in _host_facts(tight, "low")] and world.operative_view in _text(tight, "low")
-    plain = _plan(core, 200_000, "max")  # no target: the window's pressure, host forms before memory as before
+    plain = _plan(core, 200_000, "max")  # no target, a window that cannot hold the map: outlined before memory
     assert "world" in [r["section_id"] for r in _host_facts(plain, plain.initial_mode)]
     mature = _core(tmp_path, [_service(size=60_000)], [world], syn.snapshot(story=syn.pages(60, 60_000)))
     held = _plan(mature, 1_000_000, "low")  # whole memory far above the window's bound, its shortest forms below it
     assert "world" not in [r["section_id"] for r in _host_facts(held, "low")] and world in _text(held, "low")
+    started = _plan(mature, 1_000_000, "max")  # the same memory in Max: the start's own room never outlines the map
+    shown = started.initial_mode
+    assert "world" not in [r["section_id"] for r in _host_facts(started, shown)] and world in _text(started, shown)
 
 
 def test_known_window_renders_every_active_note_in_outline_unknown_steps_nothing(tmp_path):

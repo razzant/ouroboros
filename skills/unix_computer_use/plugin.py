@@ -16,9 +16,9 @@ Input receipt semantics and partial-failure limits: see SKILL.md, "Input receipt
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-import hashlib
 import os
 import pathlib
 import platform
@@ -32,10 +32,20 @@ import uuid
 from types import MappingProxyType
 from typing import Any
 
+from .capture import CaptureMixin
 from .place import PlaceMixin
 from .remote import (  # noqa: F401 - re-exported names the tests and the key/hold_key remote branches use
-    _MAX_REMOTE_SHOT_BYTES, _OSWORLD_PKGS_PREFIX, _PYAUTOGUI_BASE_ALIASES, _PYAUTOGUI_MODS, PASTE_CHORD_ARGV,
-    RemoteBackends, _osworld_result_ok, cliclick_point, cliclick_keys, command_chord_argv, PBCOPY_LOCALE,
+    _MAX_REMOTE_SHOT_BYTES,
+    _OSWORLD_PKGS_PREFIX,
+    _PYAUTOGUI_BASE_ALIASES,
+    _PYAUTOGUI_MODS,
+    PASTE_CHORD_ARGV,
+    PBCOPY_LOCALE,
+    RemoteBackends,
+    _osworld_result_ok,
+    cliclick_keys,
+    cliclick_point,
+    command_chord_argv,
 )
 
 _TIMEOUT_SEC = 10
@@ -48,6 +58,7 @@ _TRANSFORM_FILE = "coord_transform.json"
 _CONNECTIONS_FILE = "connections.json"
 _ACTIVE_CONNECTION_FILE = "active_connection.txt"
 _REMOTE_BACKENDS = {"osworld_http", "ssh_macos"}
+_DISPLAY_CAPTURE = object()  # Only an omitted window selects the display. A malformed target never widens capture.
 
 
 def _png_dimensions(path: pathlib.Path) -> tuple[int, int]:
@@ -263,7 +274,7 @@ _MAC_MODS = {
 _ALL_MODS = {**_MAC_MODS, "super": "super", "meta": "meta"}
 
 
-class _ComputerUse(PlaceMixin, RemoteBackends):
+class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
     _MAX_IMAGE_W = _MAX_IMAGE_W
     _MAX_IMAGE_H = _MAX_IMAGE_H
 
@@ -750,11 +761,14 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
         return dest, (got_w or new_w), (got_h or new_h)
 
     def screenshot(self, *, job_id: str = "manual", max_width: int = _MAX_IMAGE_W,
-                   max_height: int = _MAX_IMAGE_H, app: str = "") -> str:
+                   max_height: int = _MAX_IMAGE_H, app: str = "", window: Any = _DISPLAY_CAPTURE) -> str:
         connection = self._connection_snapshot()
         _conn_name, conn = connection
         if conn.get("disabled"):
             return self._disabled_connection_error(_conn_name, conn)
+        if window is not _DISPLAY_CAPTURE:  # before any remote or display path
+            return self._window_screenshot(connection=connection, job_id=job_id, app=app, window=window,
+                                           max_width=max_width, max_height=max_height)
         backend = str(conn.get("backend") or "local").lower()
         if backend in ("osworld_http", "ssh_macos"):
             shot = (self._osworld_screenshot if backend == "osworld_http" else self._ssh_macos_screenshot)(
@@ -901,37 +915,6 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
     # ------------------------------------------------------------------
     # pointer actions
     # ------------------------------------------------------------------
-
-    def _capture_display(self, app: str = "") -> dict[str, Any]:
-        """The display to capture: the main one, or the one holding ``app``'s front window (bounds from CoreGraphics).
-
-        The answer says how the display was chosen (``selected_by``: default, app, or fallback when the RESOLVED app's
-        window could not be located) so a main-display capture is never presented as the named app's display. With a
-        display list, an app not resolved (refused, or no answer naming its ``target``) is an ``error``, uncaptured;
-        without one the app is not looked up (``app_display_unread``): the default capture stays capture-only."""
-        res = self._native("displays", timeout=10)
-        displays = res.get("displays") if res.get("ok") else None
-        query = str(app or "").strip()
-        if not displays:
-            reason = res.get("error") or "no display list"
-            return {"display_unread": reason, **({"app_display_unread": reason} if query else {})}
-        chosen = {**next((d for d in displays if d.get("main")), displays[0]), "selected_by": "default"}
-        if query:
-            tree = self._native("observe", json.dumps({"app": query, "max_nodes": 1, "timeout_ms": 1500}), timeout=15)
-            target = tree.get("target")
-            if tree.get("stage") == "resolve" or not isinstance(target, dict):  # unresolved or unknown: never a fallback
-                return {"error": self._target_error(query, tree)}
-            node = (tree.get("nodes") or [{}])[0] if tree.get("ok") else {}
-            if "x" in node and "w" in node:
-                cx, cy = node["x"] + node["w"] // 2, node["y"] + node["h"] // 2
-                for d in displays:
-                    if d["x"] <= cx < d["x"] + d["width"] and d["y"] <= cy < d["y"] + d["height"]:
-                        return {**d, "selected_by": "app", "app": target}
-                chosen["app_window_unread"] = f"the window's centre ({cx},{cy}) lies on no active display"
-            else:
-                chosen["app_window_unread"] = str(tree.get("error") or tree.get("reason") or "the window's bounds could not be read")
-            chosen["selected_by"] = "fallback"
-        return chosen
 
     def _backend_unavailable(self, action: str) -> str:
         return _json({
@@ -1270,7 +1253,7 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
             self._validate_remote_keys(conn, remote_tokens)
         return prepared
 
-    def _send_key(self, prepared, connection, *, ctx, recheck=False, raise_policy="allow", timeout=None, keys=""):
+    def _send_key(self, prepared, connection, *, ctx, recheck=False, raise_policy="allow", timeout=None, keys="", ask_stop=False):
         timeout = timeout or (30 if connection[0] != "local" else _TIMEOUT_SEC)
         # A Command chord's receipt says so: its refusal (no key, no right to post) is a known "nothing was posted".
         method = {"method": "command_chord"} if isinstance(prepared, list) and prepared[0] == "osascript" else {}
@@ -1278,9 +1261,9 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
             import shlex
             ssh = shlex.join(prepared) if isinstance(prepared, list) else ""
             return self._remote_input(connection[1], prepared if not ssh else "", ssh_command=ssh, note=method or None,
-                                      ctx=ctx, later=recheck, raise_policy=raise_policy, timeout=timeout)
+                                      ctx=ctx, later=recheck, ask_stop=ask_stop, raise_policy=raise_policy, timeout=timeout)
         return self._exec_input_dict(prepared, ctx=ctx, recheck=recheck, extra={"keys": keys, **method},
-                                     raise_policy=raise_policy, timeout=timeout)
+                                     raise_policy=raise_policy, timeout=timeout, ask_stop=ask_stop)
 
     def key(self, *, keys: str, app: str = "", raise_policy: str = "allow") -> str:
         combo = str(keys or "").strip()
@@ -1293,18 +1276,17 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
         except ValueError as exc:
             return _json({"ok": False, "reason": "invalid_key_sequence", "error": str(exc),
                           "steps_done": 0, "steps_total": len(steps), "dispatched": False, "note": "the input was not sent"})
-        # The target is brought forward once; before every later step the front is read again and a targeted
-        # call stops, sending nothing more, when its application is no longer in front. The aggregate names
-        # every step's recipient when they differ: the 27.10 shape (cmd+tab, then an arrow) must not read as
-        # "both went to the same app".
-        refusal, ctx = self._begin(app, raise_policy=raise_policy, connection=connection)
+        # Raising the target and sending each chord are independent actions of this call.
+        refusal, ctx = self._begin(app, raise_policy=raise_policy, connection=connection, ask_stop=True)
         if refusal:
-            return _json(refusal)
+            if refusal.get("reason") == "stopped" and len(steps) > 1:
+                refusal.update(steps_done=0, steps_total=len(steps), keys=combo)
+            return self._key_result(refusal)
         if len(prepared) == 1:
-            return _json(self._send_key(prepared[0], connection, ctx=ctx, raise_policy=raise_policy, keys=combo))
+            return self._key_result(self._send_key(prepared[0], connection, ctx=ctx, raise_policy=raise_policy, keys=combo, ask_stop=True))
         results: list[dict[str, Any]] = []
         for index, command in enumerate(prepared):
-            results.append(self._send_key(command, connection, ctx=ctx, recheck=index > 0,
+            results.append(self._send_key(command, connection, ctx=ctx, recheck=index > 0, ask_stop=True,
                                            raise_policy=raise_policy, keys=steps[index]))
             if not results[-1].get("ok"):
                 break
@@ -1349,7 +1331,7 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                 payload["note"] = last["note"]
         if len({json.dumps(r, sort_keys=True) if isinstance(r, dict) else "unknown" for r in recipients}) > 1:
             payload["steps_delivered_to"] = recipients
-        return _json(payload)
+        return self._key_result(payload)
 
     def hold_key(self, *, keys: str, duration_ms: int = 500, app: str = "", raise_policy: str = "allow") -> str:
         connection = self._connection_snapshot()
@@ -1458,13 +1440,13 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                                            raise_policy=raise_policy, connection=connection))
 
     def _exec_input_dict(self, cmd: list[str], *, timeout: int = _TIMEOUT_SEC, extra: dict[str, Any] | None = None,
-                         app: str = "", ctx: dict[str, Any] | None = None, recheck: bool = False,
+                         app: str = "", ctx: dict[str, Any] | None = None, recheck: bool = False, ask_stop: bool = False,
                          before: Any = None, raise_policy: str = "allow", connection=None) -> dict[str, Any]:
         """One input process. Its successful exit is the receipt (``observed_effect``); a failed or timed-out
         process has an unknown outcome and carries none. With ``app`` the target is brought forward and verified
-        first; nothing is sent when that fails. With ``ctx`` (a later step of one call) the earlier switch is
-        reused and ``recheck`` reads the front again first. ``before`` runs after the target is verified and
-        before the input (the clipboard write of via=paste); its error message cancels the input."""
+        first; nothing is sent when that fails. With ``ctx`` (a later step of one call) the earlier switch is reused
+        and ``recheck`` reads the front again first. ``before`` runs after the target is verified and before the input
+        (the clipboard write of via=paste); its error cancels the input. ``ask_stop``: a key chord asks the Stop last."""
         if ctx is None:
             refusal, ctx = self._begin(app, raise_policy=raise_policy, connection=connection)
             if refusal:
@@ -1487,6 +1469,8 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                     payload["observed_effect"] = True  # the switch ran before the input was cancelled
                     payload["activation_done"] = True
                 return self._finish(payload, step)
+        if ask_stop and (stopped := self._stop_refusal(step, first=not recheck)):
+            return stopped  # a key chord, the first included: the host's Stop, read last before its input
         rc, stdout, stderr = self._try(cmd, timeout=timeout)
         if rc != 0:
             payload = {"ok": False, "error": stderr.strip() or stdout.strip() or f"exit {rc}", "cmd": cmd,
@@ -1570,7 +1554,7 @@ def register(api: Any) -> None:
     api.register_tool("activate_connection", impl.activate_connection, description="Select a configured connection as the active target for screenshot/input tools.", schema={"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}, timeout_sec=5)
     api.register_tool("use_local", lambda: impl.use_local(), description="Return computer-use tools to the local desktop backend.", schema={"type": "object", "properties": {}}, timeout_sec=5)
     api.register_tool("capabilities", lambda: impl.capabilities(), description="Who is in front, which OS grants this process holds (prompt-free preflights on macOS), whether app= targeting works here, and the installed backends.", schema={"type": "object", "properties": {}}, timeout_sec=45)
-    api.register_tool("screenshot", impl.screenshot, description="Capture the main display (or, with app=, the display holding that app's window on macOS; display.selected_by says which was captured), downscale to <=WXGA. mapped_input_available=true supplies an observation_id for coordinate input; otherwise capture-only, without a mapping. The image is attached automatically; an engine without vision gets its path.", schema={"type": "object", "properties": {"job_id": {"type": "string", "default": "manual"}, "max_width": {"type": "integer", "default": _MAX_IMAGE_W}, "max_height": {"type": "integer", "default": _MAX_IMAGE_H}, **_app}}, timeout_sec=90)
+    api.register_tool("screenshot", impl.screenshot, description="Capture the main display (or, with app=, the display holding that app's window on macOS; display.selected_by says which was captured), downscale to <=WXGA. mapped_input_available=true supplies an observation_id for coordinate input; otherwise capture-only, without a mapping. window= with app= (local macOS 14+) captures that one window even when covered, capture-only, never a display. The image is attached automatically; an engine without vision gets its path.", schema={"type": "object", "properties": {"job_id": {"type": "string", "default": "manual"}, "max_width": {"type": "integer", "default": _MAX_IMAGE_W}, "max_height": {"type": "integer", "default": _MAX_IMAGE_H}, **_app, "window": {"type": ["integer", "string"], "description": "Positive integer window ID or exact title string. Omit for a display capture."}}}, timeout_sec=90)
     # y is deliberately NOT in `required` for click/move: models recurringly emit the
     # whole point inside x ("663, 500") with y omitted, and a required-field rejection
     # then fires BEFORE the handler's _coerce_point can recover the pair.

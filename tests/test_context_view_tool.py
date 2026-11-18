@@ -445,8 +445,9 @@ def test_a_fold_receipt_names_the_notes_in_view_and_each_body_that_left_by_a_res
 
 
 def test_inspect_sends_its_shared_fields_on_page_one_only_and_every_unit_once(tmp_path, monkeypatch):
-    """Both directions: page one carries the fields every page shares; a later page carries only its units, the paging
-    and the view revision, within the page limit; together the pages list every unit exactly once."""
+    """Both directions: page one carries the fields every page shares; a later page carries only its units, the paging,
+    the view revision and the retained ordinary-memory map, within the page limit; together the pages list every unit
+    exactly once."""
     from ouroboros import tool_capabilities
 
     messages = [*_source()[:2], *(row for index in range(80) for row in _read(f"r{index}"))]
@@ -462,7 +463,7 @@ def test_inspect_sends_its_shared_fields_on_page_one_only_and_every_unit_once(tm
     first, later = pages[0][1], pages[1:]
     assert len(later) >= 2 and {"rule", "schema_names", "inventory", "fit_measurement", "restore_checkpoint"} <= set(first)
     for text, page in later:
-        assert set(page) <= {"view_revision", "offset", "total", "units", "next_offset"} and page["units"]
+        assert set(page) <= {"view_revision", "ordinary_memory", "offset", "total", "units", "next_offset"} and page["units"]
         assert page["view_revision"] == first["view_revision"] and len(text) <= 6000
     listed = [row["unit_id"] for _, page in pages for row in page["units"]]
     assert len(listed) == len(set(listed)) == first["total"] == first["inventory"]["units"]

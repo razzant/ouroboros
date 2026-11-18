@@ -590,6 +590,108 @@ def test_isolated_dependency_extension_oversized_child_result_is_capped(tmp_path
         dispatch_extension_tool_subprocess(tool, ctx, {})
 
 
+@pytest.mark.parametrize("success", [True, False], ids=["report", "exception"])
+@pytest.mark.parametrize("stopped", [False, True])
+@pytest.mark.parametrize("extra", [-1, 0, 1])
+def test_child_result_cap_and_stop_are_independent(tmp_path, monkeypatch, success, stopped, extra):
+    from contextlib import nullcontext
+    from io import BytesIO
+
+    from ouroboros import extension_process_runner as runner
+    from ouroboros.extension_plugin_api import STEP_STOP
+
+    latch = {"reason": "cancelled", "note": "Stop is in force for this task", "refusals": 1}
+    field = "result" if success else "error"
+    outcome = {"ok": success, field: json.dumps({STEP_STOP: latch})}
+    size = runner._RESULT_CAP + extra
+    room = size - len(json.dumps(outcome, ensure_ascii=False).encode("utf-8"))
+    outcome[field] += "é" * (room // 2) + "a" * (room % 2)
+    assert len(json.dumps(outcome, ensure_ascii=False).encode("utf-8")) == size
+
+    path = tmp_path / "result.json"
+    payload = {"mode": "tool", "result_path": str(path)}
+    runner._write_child_result(payload, outcome, step_stop=latch if stopped else None)
+    proc = SimpleNamespace(returncode=0, poll=lambda: 0, stdout=BytesIO(), stderr=BytesIO())
+    child = SimpleNamespace(proc=proc, result_path=path, started_ts=time.monotonic())
+    monkeypatch.setattr(runner, "_child_process", lambda *args, **kw: nullcontext(child))
+    monkeypatch.setattr(runner, "_publish_child_facts", lambda *args, **kw: None)
+    seen = []
+    opts = dict(skill_dir=tmp_path, drive_root=tmp_path, repo_dir=tmp_path, env={}, timeout_sec=1, on_result=seen.append)
+    expected = dict(outcome) if extra <= 0 else {"ok": False, "error": "extension child protocol result exceeded safety cap"}
+    if stopped:
+        expected[STEP_STOP] = latch
+    if expected["ok"]:
+        assert runner._run_child(payload, **opts) == expected
+    else:
+        with pytest.raises(runner.ExtensionProcessError) as exc:
+            runner._run_child(payload, **opts)
+        assert exc.value.failure_kind == "error" and str(exc.value) == expected["error"]
+    assert seen == [expected]
+
+
+def test_small_tool_result_uses_the_same_stop_allowance_on_write_and_read(tmp_path, monkeypatch):
+    from ouroboros import extension_process_runner as runner
+    from ouroboros.extension_plugin_api import STEP_STOP
+
+    path = tmp_path / "result.json"
+    payload = {"mode": "tool", "result_path": str(path)}
+    result = {"ok": True, "result": "done"}
+    latch = {"reason": "cancelled", "refusals": 1}
+    envelope = {**result, STEP_STOP: latch}
+    extra = len(runner._protocol_json(envelope)) - len(runner._protocol_json(result))
+    monkeypatch.setattr(runner, "_STEP_STOP_CAP", extra)
+    runner._write_child_result(payload, result, step_stop=latch)
+    assert runner._read_child_result(path, tool_call=True) == envelope
+    monkeypatch.setattr(runner, "_STEP_STOP_CAP", extra - 1)
+    with pytest.raises(runner.ExtensionProcessError, match="exceeded safety cap"):
+        runner._read_child_result(path, tool_call=True)
+    with pytest.raises(runner.ExtensionProcessError, match="exceeded safety cap"):
+        runner._write_child_result(payload, result, step_stop=latch)
+
+
+@pytest.mark.parametrize("mode", ["tool", "catalog", "ws"])
+def test_reader_enforces_payload_limit_independently_of_writer(tmp_path, mode):
+    from ouroboros import extension_process_runner as runner
+    from ouroboros.extension_plugin_api import STEP_STOP
+
+    path = tmp_path / "result.json"
+    ordinary = {"ok": True, "result": ""}
+    room = runner._RESULT_CAP - len(json.dumps(ordinary).encode("utf-8"))
+    ordinary["result"] = "x" * (room + 1)
+    path.write_text(json.dumps(ordinary), encoding="utf-8")
+    with pytest.raises(runner.ExtensionProcessError, match="result exceeded safety cap"):
+        runner._read_child_result(path, tool_call=mode == "tool")
+
+    latch = {"reason": "cancelled", "refusals": 1}
+    path.write_text(json.dumps({**ordinary, STEP_STOP: latch}), encoding="utf-8")
+    if mode == "tool":
+        assert runner._read_child_result(path, tool_call=True) == {
+            "ok": False, "error": "extension child protocol result exceeded safety cap", STEP_STOP: latch}
+    else:
+        with pytest.raises(runner.ExtensionProcessError, match="result exceeded safety cap"):
+            runner._read_child_result(path, tool_call=False)
+
+
+def test_child_deadline_keeps_its_timeout_before_any_result_handoff(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from io import BytesIO
+
+    from ouroboros import extension_process_runner as runner
+
+    proc = SimpleNamespace(poll=lambda: None, stdout=BytesIO(), stderr=BytesIO())
+    child = SimpleNamespace(proc=proc, result_path=tmp_path / "absent.json", started_ts=1.0)
+    monkeypatch.setattr(runner, "_child_process", lambda *args, **kw: nullcontext(child))
+    monkeypatch.setattr(runner, "_kill_process_group", lambda process: None)
+    monkeypatch.setattr(runner, "_publish_child_facts", lambda *args, **kw: None)
+    clock = iter([1.0, 2.0])
+    monkeypatch.setattr(runner, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    seen = []
+    with pytest.raises(runner.ExtensionProcessError, match="timed out") as exc:
+        runner._run_child({"mode": "tool"}, skill_dir=tmp_path, drive_root=tmp_path, repo_dir=tmp_path,
+                          env={}, timeout_sec=1, on_result=seen.append)
+    assert exc.value.failure_kind == "timeout" and seen == []
+
+
 def test_parallel_isolated_extension_children_do_not_sweep_each_other_import_tree(tmp_path):
     import concurrent.futures
     from ouroboros.tools.registry import ToolRegistry

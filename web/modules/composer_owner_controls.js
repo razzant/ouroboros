@@ -2,6 +2,7 @@
 // family. Main and Projects read their own authoritative values and save through the owner
 // endpoints (DESIGN: Composer owner controls); all four run on the capsule machine (capsule.js).
 import { fmt } from './i18n.js';
+import { APP_SETTINGS_ORIGIN } from './api_client.js';
 import {
     EFFORT_OPTIONS, EFFORT_RANGE_DEFAULT, OWNER_TIERS, effortText, normalizeEffortRange, ownerLevelIndex,
 } from './effort_levels.js';
@@ -11,7 +12,7 @@ import { haptic } from './haptics.js';
 import { createComposerFold } from './composer_fold.js';
 import { createModelControl } from './composer_model.js';
 import { createSubagentsControl } from './composer_subagents.js';
-import { CONTEXT_LABELS, CONTEXT_MODES, UNKNOWN_CONTEXT, contextShown, observeContext } from './context_observation.js';
+import { CONTEXT_LABELS, CONTEXT_MODES, UNKNOWN_CONTEXT, contextShown, lowMissedOf, observeContext } from './context_observation.js';
 
 const N = OWNER_TIERS.length - 1;
 const HANDLES = ['min', 'rec', 'max'];
@@ -433,7 +434,8 @@ function createContextModeControl({ el, row, chatId, saveContextMode, showToast,
     // with its cause when it differs from the choice.
     const say = (preview) => {
         const mode = CONTEXT_MODES.includes(preview) ? preview : current();
-        return { word: CONTEXT_LABELS[mode], text: CONTEXT_MEANINGS[mode], fact: shown.fact };
+        const missed = mode === 'low' ? lowMissedOf(observation.latest) : '';  // Low's meaning, as this room met it
+        return { word: CONTEXT_LABELS[mode], text: missed || CONTEXT_MEANINGS[mode], fact: shown.fact };
     };
     let saving = null, lastOk = true, destroyed = false;
     function choose(mode) {
@@ -557,7 +559,7 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
     };
     const saveContextMode = async mode => {
         const response = await apiFetch('/api/owner/context-mode', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(scoped({ mode })),
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...APP_SETTINGS_ORIGIN }, body: JSON.stringify(scoped({ mode })),
         });
         const reply = await response.json();
         if (!response.ok) throw new Error(reply?.error || 'Could not change context mode.');

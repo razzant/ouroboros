@@ -83,7 +83,7 @@ if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
     sys.pycache_prefix = os.environ["PYTHONPYCACHEPREFIX"]
 
 import pytest
-pytest.register_assert_rewrite("tests.ui_media_delivery_smoke")
+pytest.register_assert_rewrite("tests.ui_media_delivery_smoke", "tests._unix_computer_use")
 pytest_plugins = ["tests.browser_lane", "tests.ci_evidence", "tests.default_lane"]
 
 

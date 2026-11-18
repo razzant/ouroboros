@@ -15,10 +15,11 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
         '♻️ Ouroboros did not start its recovery turn '],
     command_reply: ['⚠️ Command ignored: ', '✅ Owner chat registered.', '♻️ Restarting.', '⚠️ Restart cancelled: ',
         '🧬 Evolution campaign: ', '🧬 Evolution stayed OFF: ', '🧬 Evolution did not turn on: ',
-        '🧠 Background consciousness ', '🧠 Background consciousness:', '🧠 Consciousness off: '],
+        '🧠 Background consciousness ', '🧠 Consciousness off: ', '🧠 Consciousness on: ', '🧠 Consciousness on, but ',
+        '🧠 Consciousness is already ', '🧠 Consciousness: '],
     restart_notice: ['♻️ Restart requested by agent: ', '⏳ Restart drain: ', '🧬 Restart cancelled: ',
         '⚠️ Restart skipped: ', '🧬 Body adoption: '],
-    consciousness_notice: ['🧠 Background consciousness ', '🧠 Consciousness off: '],
+    consciousness_notice: ['🧠 Background consciousness ', '🧠 Consciousness off: ', '🧠 Consciousness on: ', '🧠 Consciousness on, but '],
     evolution_notice: ['🧬 Evolution stayed OFF: ', '🧬 Evolution stayed off: ', '🧬 Evolution paused: ',
         '🧬 Evolution: ', '🧬 Evolution campaigns are self-modification work',
         '🛑 Stopped evolution task(s): ', '⚠️ Evolution stop INCOMPLETE — still live: '],
@@ -64,6 +65,8 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
 // display (host_notice_text.test.js pins that none of them is written again).
 export const RETIRED_HOST_NOTICE_PREFIXES = new Map(Object.entries({
     startup_notice: ['♻️ Restored pending queue from snapshot: ', '♻️ Cancelling '],
+    // The /bg status reply before the switch's words (owner 15.11, 5A) said «🧠 Background consciousness: …».
+    command_reply: ['🧠 Background consciousness:'],
     supervisor_failure: ['🛑 Supervisor loop died after repeated crashes; '],
     worker_failure: ['⚠️ Frequent worker crashes.', '❌ worker process crashed ',
         '❌ Deep self-review failed: worker process crashed '],

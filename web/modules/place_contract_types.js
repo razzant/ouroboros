@@ -123,7 +123,7 @@
  * @property {string} conversation_id
  * @property {string} label
  * @property {'active'|'silent'|'paused'} state
- * @property {boolean=} only_hears Derived per read: true while consciousness is off (or Panic) and the place is not Paused.
+ * @property {{cause: string, word: string, note: string, door: string}=} quiet Derived per read: why it is quiet now, by one cause.
  * @property {Array<Object<string,string>>} wakes
  * @property {Array<Object<string,string>>} notes
  * @property {Array<Object<string,string>>} owner_accounts
@@ -252,4 +252,18 @@
  * The host's English words for a row's typed reaction, never speech; words the row sent stay its text.
  * @typedef {Object} PlaceHistoryReaction
  * @property {string} summary
+ */
+
+/**
+ * The host's `place_origin` on a work frame or census row. `wakes` lists matched kinds in place order;
+ * `labels` gives their connector's words when known. `routed` means no kind matched and the conversation's
+ * works were read instead. An absent or empty `actor` means the author could not be identified.
+ * @typedef {Object} PlaceOrigin
+ * @property {string} place_id
+ * @property {string=} place_label
+ * @property {string=} provider
+ * @property {{id?:string,label?:string,owner?:boolean,bot?:boolean}=} actor
+ * @property {string[]} wakes
+ * @property {Object<string,string>=} labels
+ * @property {boolean=} routed
  */

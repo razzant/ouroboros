@@ -1357,12 +1357,12 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
     ctx.messages[:] = rebound.reproject_transcript(ctx.messages, mode)
     rewrite_view(ctx.tools._ctx, ctx.task_id, "memory_coarsened")
     ctx.tools._ctx.messages = ctx.messages
-    from ouroboros.loop_model_call import _adopt_view_facts
+    from ouroboros.loop_model_call import _adopt_view_facts, _shown
 
     _adopt_view_facts(ctx.tools._ctx, rebound, mode)  # the narrowed view's fact, read back as a memory shortage
     _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
         "checkpoint_kind": "context_memory_coarsened", "round": ctx.round_idx,
-        "route_fp": measurement.route_fp, "effective_mode": mode,
+        "route_fp": measurement.route_fp, **_shown(rebound, mode),
         "window_tokens": rebound.window_tokens,
         "input_tokens_estimate": measurement.estimated_input_tokens,
     })

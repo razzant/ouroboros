@@ -176,11 +176,11 @@ def _recorded_scratch(record: pathlib.Path, row: Dict[str, Any]) -> pathlib.Path
 
 
 def _legacy_identity_matches(seen: Any, recorded: List[int], *, windows: bool = os.name == "nt") -> bool:
-    """A schema-1 ``[st_dev, st_ino]``. On Windows CPython 3.12+ reports the volume's 64-bit serial; a record
-    made under 3.10 holds its low 32 bits, the serial that Python reported then."""
+    """A schema-1 ``[st_dev, st_ino]``. On Windows CPython 3.12+ reports the volume's 64-bit serial and 3.10 its
+    low 32 bits, and a record may come from either side of the move: there the low halves are compared."""
     if [seen.st_dev, seen.st_ino] == recorded:
         return True
-    return windows and [seen.st_dev & 0xFFFFFFFF, seen.st_ino] == recorded
+    return windows and [seen.st_dev & 0xFFFFFFFF, seen.st_ino] == [recorded[0] & 0xFFFFFFFF, recorded[1]]
 
 
 def recorded_scratch(record: pathlib.Path) -> pathlib.Path:

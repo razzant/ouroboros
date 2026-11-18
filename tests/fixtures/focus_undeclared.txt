@@ -11,7 +11,7 @@ Place facts (context only):
 - place: chat — active
 - notes with their authors: []
 - what woke you, with its author: [{"fact": "mention", "author": "connector"}]
-- the person (host facts): {"platform_actor_id": "person", "display_name": "", "owner_confirmed": false, "is_bot": false}
+- the person (host facts): {"platform_actor_id": "person", "display_name": "", "owner_confirmed": false, "is_bot": false, "key": {"provider": "chat", "namespace": "a", "id": "person"}}
 - work started here: Already started: task1
 - allowance (last 24 h): {"status": "available", "remaining_usd": 2}
 - working folder (address): not selected

@@ -3,7 +3,7 @@
 // JSON shape is read in one place: a field the server renames is one fix in this file. Readers are
 // tolerant (unknown extra keys are fine; a missing field stays absent, never a guessed zero); writers
 // send exactly the contract's request keys.
-import { extensionRoutePath, extensionRoutePrefix, fetchJson, jsonPost, readStateJson } from './api_client.js';
+import { extensionRoutePath, extensionRoutePrefix, fetchJson, jsonPost, readStateJson, withinRequestLifetime } from './api_client.js';
 import { tr } from './i18n.js';
 import { errorWords } from './ui_primitives.js';
 
@@ -70,8 +70,9 @@ export function normalizePlace(raw) {
         label: text(place.label),
         revision: count(place.revision),
         state: text(place.state),
-        // The host's derived fact: consciousness is off (or Panic) and the place is not Paused, so it only hears.
-        onlyHears: place.only_hears === true,
+        // Why it is quiet now, by its one cause, in the host's words (consciousness_view.place_quiet); null: it is not.
+        quiet: object(place.quiet) && text(place.quiet.word) ? { cause: text(place.quiet.cause), word: text(place.quiet.word),
+            note: text(place.quiet.note), door: text(place.quiet.door) } : null,
         destination: text(place.destination),
         icon: normalizeIcon(place.icon),
         wakes: list(place.wakes).map((item) => ({ fact: text(item?.fact), author: text(item?.author) }))
@@ -151,6 +152,8 @@ export function normalizePlacesResponse(raw) {
         places: list(data.places).map(normalizePlace).filter((place) => place.id).map((place) => ({ ...place,
             serviceLabel: connectors.find((connector) => connector.connector === place.connector)?.label || place.provider })),
         connectors,
+        // Where a new place lands, true for the switch as it stands (consciousness_view.connect_note); '' when unsaid.
+        connectNote: text(data.connect_note),
         // Each circle once, in the owner's order; null from a server without circles (not "no circle").
         circles: Array.isArray(data.circles) ? data.circles.map(normalizeCircle).filter((circle) => circle.id) : null,
         // Old connections the places migration could not move (absent on a server without the migration).
@@ -196,6 +199,9 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
         enabled: known,
         status: text(bg.status),
         detail: text(bg.detail),
+        // The switch's position by meaning and its gloss, in the host's words (consciousness_view.position_words).
+        position: text(bg.position),
+        gloss: text(bg.gloss),
         // What follows from that state, said beneath it (a held wake's allowance: what Resume keeps, what ends it).
         detailNote: text(bg.detail_note),
         coverage: bg.recent_wakes === undefined ? '' : text(bg.recent_wakes_coverage),
@@ -245,6 +251,26 @@ function announce(detail) {
 // ---- reads ---------------------------------------------------------------------------------------
 export async function readConsciousness(init = {}) {
     return normalizeConsciousness(await fetchJson('/api/consciousness', { cache: 'no-store', ...init }));
+}
+
+/** How long the switch waits for its preview (request and body): a transport bound, so a stalled read never holds the
+ *  switch; past it the dialog says what it would change could not be read and still offers the turn. */
+export const SWITCH_PREVIEW_LIFETIME_MS = 15_000;
+
+/** What turning the switch `to` ('on' | 'off') would change, read at the press (`GET /api/consciousness?switch=`):
+ *  `{lines, places: [{id, label, state, people, atLeast}]}` in the host's words; a failed, stalled or unreadable answer
+ *  throws, so the switch asks without it (never as «no place»). */
+export async function readSwitchPreview(to, { lifetimeMs = SWITCH_PREVIEW_LIFETIME_MS, ...init } = {}) {
+    const data = await withinRequestLifetime((transport) => fetchJson(`/api/consciousness?switch=${encodeURIComponent(to)}`,
+        { cache: 'no-store', ...init, signal: transport }), { signal: init.signal, lifetimeMs });
+    if (!object(data) || !Array.isArray(data.lines) || !(data.places === null || Array.isArray(data.places))) {
+        throw new Error('The switch preview could not be read.');
+    }
+    // `places: null` is the host's «could not be read»: the switch still asks, with the host's lines.
+    const places = data.places === null ? null : data.places.map((row) => ({ id: text(row?.place_id), label: text(row?.label),
+        state: text(row?.state), people: count(row?.people), atLeast: row?.people_capped === true })).filter((row) => row.id.trim() || row.label.trim());
+    if (places && places.length < data.places.length) throw new Error('The switch preview named a place it could not read.');
+    return { lines: data.lines.map(text).filter(Boolean), places };
 }
 
 /** The status the Dashboard falls back to when the full snapshot cannot be read: `/api/state`. */

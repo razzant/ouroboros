@@ -343,7 +343,8 @@ def test_placement_and_words_keep_both_origins_and_only_my_humans_save_makes_the
     # Ouroboros saving the same circle again never makes my human's placement its own (no write at all).
     assert p.edit_place(tmp_path, place.place_id, "set_circle", author=p.AUTHOR_OUROBOROS,
                         circle_id=circle["circle_id"]) == owned
-    reworded = p.edit_circle(tmp_path, circle["circle_id"], author=p.AUTHOR_OUROBOROS, text="Mind's words")
+    reworded = p.edit_circle(tmp_path, circle["circle_id"], author=p.AUTHOR_OUROBOROS, text="Mind's words",
+                             by={"owner_turn": True})  # my human's turn orders it; the words I compose are mine
     assert reworded["text_author"] == "ouroboros" and reworded["revision"] > circle["revision"]
     assert p.place_records(tmp_path).circle_context(place.place_id)["standing_delegation"] is False
     renamed = p.edit_circle(tmp_path, circle["circle_id"], author=p.AUTHOR_OWNER, name="Work room")
@@ -402,9 +403,9 @@ def test_deleting_a_circle_detaches_its_places_atomically_and_keeps_their_own_wo
             ("set_circle", {"circle_id": circle["circle_id"]}), ("set_description", {"description": "kept"})])
     before = p.place_records(tmp_path)
     with pytest.raises(p.PlaceError, match="Current revision") as stale:
-        p.delete_circle(tmp_path, circle["circle_id"], expected_revision=circle["revision"] + 99)
+        p.delete_circle(tmp_path, circle["circle_id"], author="owner", expected_revision=circle["revision"] + 99)
     assert stale.value.code == "circle_revision_conflict" and p.place_records(tmp_path) == before
-    removed = p.delete_circle(tmp_path, circle["circle_id"], expected_revision=circle["revision"])
+    removed = p.delete_circle(tmp_path, circle["circle_id"], author="owner", expected_revision=circle["revision"])
     assert removed["circle"]["text"] == "Shared words"
     assert sorted(row["place_id"] for row in removed["detached"]) == sorted([first.place_id, second.place_id])
     after = p.place_records(tmp_path)
@@ -416,7 +417,7 @@ def test_deleting_a_circle_detaches_its_places_atomically_and_keeps_their_own_wo
         assert after.description(place.place_id)["text"] == "kept"
         assert document(tmp_path)["connections"][place.place_id]["written_revision"] == new.revision
     with pytest.raises(p.PlaceError, match="circle_not_found"):
-        p.delete_circle(tmp_path, circle["circle_id"])
+        p.delete_circle(tmp_path, circle["circle_id"], author="owner")
 
 
 def test_an_adds_first_words_land_once_with_the_new_place_in_one_transaction(tmp_path):
@@ -508,3 +509,115 @@ def test_circle_model_requires_a_string_in_writers_and_stored_rows(tmp_path, mod
     with pytest.raises(p.PlaceError, match="need repair"):
         p.place_records(tmp_path)
     assert path.read_bytes() == malformed
+
+
+# ---- my human's words leave only by their act; every word that leaves is kept ---------------------------------------
+def journal(root):
+    from ouroboros.place_words_history import journal_path
+    return journal_path(root)
+
+
+def test_my_humans_place_words_leave_only_by_their_act_and_mine_stay_mine(tmp_path):
+    """14.11: a wake at Full removed my human's note of 11.11 from two places. Their note, a place's description and a
+    circle's words leave only by their own act: their app, their turn ordering words I compose, or their words waking
+    the focus of a place those words stand in. A wake, or my human speaking elsewhere, is refused and nothing changes;
+    a stale edit still meets its revision first. My own words, and a circle's name and model, stay mine to change;
+    disconnecting is an act on the place, never refused for its words."""
+    place, other = connect(tmp_path, conversation_id="one"), connect(tmp_path, conversation_id="two")
+    circle = p.create_circle(tmp_path, name="Team", text="Owner words for the team.", author="owner")
+    p.edit_place(tmp_path, place.place_id, "update", author="owner", changes=[
+        ("add_note", {"text": "Owner's standing note."}), ("set_circle", {"circle_id": circle["circle_id"]}),
+        ("set_description", {"description": "Owner's line"})])
+    owners, mine = (note.note_id for note in p.edit_place(
+        tmp_path, place.place_id, "add_note", author="ouroboros", text="My own note.").notes)
+    p.edit_place(tmp_path, other.place_id, "add_note", author="owner", text="Owner's note elsewhere.")
+    before = p.places_path(tmp_path).read_bytes()
+    for by in (None, {"owner_speaks_in": other.place_id}):  # a wake; my human speaking outside this place and circle
+        for write in (
+                lambda: p.edit_place(tmp_path, place.place_id, "remove_note", author="ouroboros", by=by, note_id=owners),
+                lambda: p.edit_place(tmp_path, place.place_id, "set_description", author="ouroboros", by=by,
+                                     description=""),
+                lambda: p.edit_circle(tmp_path, circle["circle_id"], author="ouroboros", by=by, text="Mine"),
+                lambda: p.delete_circle(tmp_path, circle["circle_id"], author="ouroboros", by=by)):
+            with pytest.raises(p.PlaceError) as refused:
+                write()
+            assert refused.value.code == "place_owner_words_owner_only"
+    with pytest.raises(p.PlaceError) as stale:
+        p.edit_circle(tmp_path, circle["circle_id"], author="ouroboros", text="Mine", expected_revision=0)
+    assert stale.value.code == "circle_revision_conflict"
+    assert p.places_path(tmp_path).read_bytes() == before and not journal(tmp_path).exists()
+    kept = p.edit_place(tmp_path, place.place_id, "remove_note", author="ouroboros", note_id=mine)
+    assert [note.text for note in kept.notes] == ["Owner's standing note."]
+    renamed = p.edit_circle(tmp_path, circle["circle_id"], author="ouroboros", name="Team room", model="circle/next")
+    assert (renamed["text"], renamed["text_author"]) == ("Owner words for the team.", "owner")
+    here = {"owner_speaks_in": place.place_id}  # my human's own words woke this place's focus now
+    assert p.edit_place(tmp_path, place.place_id, "remove_note", author="ouroboros", by=here, note_id=owners).notes == ()
+    assert p.edit_circle(tmp_path, circle["circle_id"], author="ouroboros", by=here, text="Mine")["text_author"] == (
+        "ouroboros")
+    p.edit_place(tmp_path, place.place_id, "set_description", author="ouroboros", by={"owner_turn": True},
+                 description="")
+    assert p.place_records(tmp_path).description(place.place_id) is None
+    theirs = p.create_circle(tmp_path, name="Friends", text="Owner words for friends.", author="owner")
+    assert p.delete_circle(tmp_path, theirs["circle_id"], author="owner")["circle"]["text"] == "Owner words for friends."
+    assert p.edit_place(tmp_path, other.place_id, "disconnect", author="ouroboros") is None
+
+
+def test_every_word_a_change_removes_or_replaces_is_kept_exactly_and_read_newest_first(tmp_path):
+    """Before a change lands, each note, description and circle's words it removes or replaces is appended exactly:
+    text, author and time, where it stood, the act, who made the change and the focus that wrote it. A place's earlier
+    words read newest first, its circle's included. Words that stay, and a change that removes nothing, leave no row."""
+    from ouroboros.place_words_history import earlier
+    place = connect(tmp_path)
+    circle = p.create_circle(tmp_path, name="Team", text="Circle words.", author="owner")
+    p.edit_place(tmp_path, place.place_id, "update", author="owner", changes=[
+        ("add_note", {"text": "First\n  note, verbatim. "}), ("add_note", {"text": "Second note."}),
+        ("set_circle", {"circle_id": circle["circle_id"]}), ("set_description", {"description": "Owner's line"})])
+    p.edit_place(tmp_path, place.place_id, "set_state", author="owner", state="silent")
+    p.edit_circle(tmp_path, circle["circle_id"], author="owner", text="Circle words.")  # saved again: unchanged
+    assert not journal(tmp_path).exists()
+    first, second = p.get_place(tmp_path, place.place_id).notes
+    line = p.place_records(tmp_path).description(place.place_id)
+    writer = {"kind": "mind", "focus": {"role": "main", "task_id": "task-1"}}
+    p.edit_place(tmp_path, place.place_id, "remove_note", author="owner", note_id=first.note_id)
+    p.edit_place(tmp_path, place.place_id, "set_description", author="ouroboros", description="My line",
+                 by={"owner_turn": True, "writer": writer})
+    p.edit_circle(tmp_path, circle["circle_id"], author="owner", text="Circle words, reworded.")
+    reworded = p.place_records(tmp_path).circle(circle["circle_id"])
+    p.delete_circle(tmp_path, circle["circle_id"], author="owner")
+    shown = earlier(tmp_path, place.place_id)
+    assert [(word["action"], word["kind"], word["text"], word["author"], word["changed_by"]) for word in shown] == [
+        ("delete_circle", "circle_words", "Circle words, reworded.", "owner", "owner"),
+        ("edit_circle", "circle_words", "Circle words.", "owner", "owner"),
+        ("set_description", "description", "Owner's line", "owner", "owner"),
+        ("remove_note", "note", "First\n  note, verbatim. ", "owner", "owner")]
+    assert (shown[0]["at"], shown[0]["circle_id"], shown[0]["circle_name"]) == (
+        reworded["text_at"], circle["circle_id"], "Team")
+    assert shown[1]["at"] == circle["text_at"] and shown[2]["at"] == line["at"] and shown[2]["writer"] == writer
+    assert (shown[3]["note_id"], shown[3]["at"], shown[3]["place_id"]) == (first.note_id, first.at, place.place_id)
+    rows = [json.loads(row) for row in journal(tmp_path).read_text(encoding="utf-8").splitlines()]
+    assert [row["document_revision"] for row in rows] == sorted({row["document_revision"] for row in rows})
+    assert rows[2]["words"][0]["places"] == [place.place_id] and "writer" not in rows[0]
+    p.edit_place(tmp_path, place.place_id, "disconnect", author="owner")
+    assert [(word["action"], word["kind"], word["text"]) for word in earlier(tmp_path, place.place_id)[:2]] == [
+        ("disconnect", "note", second.text), ("disconnect", "description", "My line")]
+    assert earlier(tmp_path, "another-place") == []
+
+
+def test_a_history_that_cannot_be_written_changes_nothing(tmp_path):
+    """The history row comes first: when the journal cannot take it, a change that removes words is refused
+    (``place_history_unavailable``) and the place document keeps every byte, and a journal that cannot be read is
+    an error, never "no earlier words". A change that removes nothing needs no row and still lands."""
+    from ouroboros.place_words_history import earlier
+    place = p.edit_place(tmp_path, connect(tmp_path).place_id, "add_note", author="owner", text="Keep me.")
+    journal(tmp_path).mkdir()  # something in the journal's way: no row can be appended or read
+    before = p.places_path(tmp_path).read_bytes()
+    for action, values in (("remove_note", {"note_id": place.notes[0].note_id}), ("disconnect", {})):
+        with pytest.raises(p.PlaceError) as unavailable:
+            p.edit_place(tmp_path, place.place_id, action, author="owner", **values)
+        assert unavailable.value.code == "place_history_unavailable"
+    assert p.places_path(tmp_path).read_bytes() == before
+    with pytest.raises(p.PlaceError) as unreadable:
+        earlier(tmp_path, place.place_id)
+    assert unreadable.value.code == "place_history_unreadable"
+    added = p.edit_place(tmp_path, place.place_id, "add_note", author="owner", text="And me.")
+    assert [note.text for note in added.notes] == ["Keep me.", "And me."]

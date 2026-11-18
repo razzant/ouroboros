@@ -310,7 +310,7 @@ def _lines(observation):
     return [line for kind, _offset, line in observation.events if kind != "direct_turn"]
 
 
-def test_knowledge_changes_list_every_other_focus_write_with_exact_readers(tmp_path):
+def test_knowledge_changes_list_each_page_with_all_other_foci_and_the_latest_reader(tmp_path, monkeypatch):
     from ouroboros import knowledge, knowledge_versions
     from ouroboros.tools.knowledge import _knowledge_read
     from ouroboros.tools.registry import ToolContext
@@ -321,36 +321,42 @@ def test_knowledge_changes_list_every_other_focus_write_with_exact_readers(tmp_p
     first = _observe(tmp_path)
     assert first.events == () and "knowledge" not in first.full_text()
     accepted, _task = _bind(tmp_path, first, "wake-base")
-    expected = []
+    expected = {}
     for scope in ("global", "project:fixture-shelf"):
         target = knowledge.resolve_knowledge_address(tmp_path, "notes/river", scope)
+        expected[scope] = []
         revision = None
         for index, role in enumerate(["root", "presence", "main", "child", "nanny", "consciousness", "unknown"] * 3):
             text = f"{scope}: {role} wrote revision {index}.\n"
-            focus = {"role": role, "task_id": f"writer-{index}", "room_id": "fixture-room"}
+            monkeypatch.setattr(knowledge, "utc_now_iso", lambda: _iso(T0 + index))
+            focus = {"role": role, "task_id": f"writer-{role}", "room_id": "fixture-room"}
             result = knowledge.write_knowledge_note(target, text, expected_revision=revision,
                 focus=focus if role != "unknown" else None)
             assert result.ok, result.reason
             revision = result.current.revision
             if role != "consciousness":
-                expected.append((scope, role, index, text, revision))
+                expected[scope].append((text, revision))
         # The index's own retained source is not a note version, even without a publication stamp.
         with knowledge_versions.journal_path(target).open("a", encoding="utf-8") as journal:
             journal.write(json.dumps({"type": "knowledge_index_source", "old_content": "index"}) + "\n")
     observation = _observe(tmp_path, boundary=accepted)
     assert observation.counts().get("knowledge_change") == len(expected)
-    assert f"{len(expected)} knowledge changes" in observation.full_text()
+    assert f"{len(expected)} changed knowledge pages" in observation.full_text()
     assert observation.full_text().count("Knowledge changed by other foci after the accepted journal positions:") == 1
     assert "Recorded in task results" not in observation.full_text()
     ctx = ToolContext(repo_dir=REPO, drive_root=tmp_path, task_id="reader")
-    for (kind, offset, line), (scope, role, index, text, revision) in zip(observation.events, expected):
+    for (kind, offset, line), (scope, writes) in zip(observation.events, expected.items()):
         assert kind == "knowledge_change" and offset is None
-        assert f"knowledge {scope}/notes/river: overwrite," in line and f"by {role}" in line
-        if role != "unknown":
-            assert f"task_id=writer-{index}" in line and "room_id=fixture-room" in line
+        writers = ", ".join(f"{role} task_id=writer-{role} room_id=fixture-room"
+                            for role in ("root", "presence", "main", "child", "nanny")) + ", unknown"
+        assert line.startswith(f"- knowledge {scope}/notes/river: 18 writes; by {writers}; ")
+        assert f"first {_iso(T0)}; last {_iso(T0 + 20)}; " in line
+        text, revision = writes[-1]
         tool, arguments = printed_call(line.split("; ")[-1])
         assert tool == "knowledge_read" and arguments == {"topic": "notes/river", "scope": scope, "version": revision}
-        assert _knowledge_read(ctx, **arguments).endswith(text)  # exact history, even after later edits
+        assert _knowledge_read(ctx, **arguments).endswith(text)
+        for text, revision in writes:  # every earlier version stays readable at its own address
+            assert _knowledge_read(ctx, topic="notes/river", scope=scope, version=revision).endswith(text)
     assert _observe(tmp_path, boundary=accepted).events == observation.events  # not accepted: delivered again
     committed, _task = _bind(tmp_path, observation, "wake-next")
     assert _observe(tmp_path, boundary=committed).events == ()
@@ -369,6 +375,7 @@ def test_empty_knowledge_baseline_keeps_the_wake_text_and_observes_the_first_lat
     target = knowledge.resolve_knowledge_address(tmp_path, "first-note", "global")
     note = knowledge.write_knowledge_note(target, "The first knowledge write.").current
     later = _observe(tmp_path, boundary=first.boundary)
+    assert later.counts().get("knowledge_change") == 1 and "1 changed knowledge page;" in later.full_text()
     assert f"version='{note.revision}'" in later.full_text()
     assert "then memory and knowledge changes; then outstanding cards)" in later.overview_text({})
     assert _observe(tmp_path, boundary=later.boundary).full_text() == unchanged_text
@@ -397,9 +404,11 @@ def test_a_wake_reads_both_sides_of_a_broken_knowledge_row_and_names_it_once(tmp
 
     observed = _observe(tmp_path, boundary=accepted)
     calls = [printed_call(line.split("; ")[-1])[1] for line in _lines(observed)]
-    assert calls == [{"topic": "recovery", "scope": scope, "version": note.revision} for note in (b, d)]
+    assert calls == [{"topic": "recovery", "scope": scope, "version": d.revision}]
+    assert f"- knowledge {scope}/recovery: 2 writes;" in _lines(observed)[0]
     ctx = ToolContext(repo_dir=REPO, drive_root=tmp_path, task_id="fixture-reader")
-    assert all(_knowledge_read(ctx, **args).endswith(note.text) for args, note in zip(calls, (b, d)))
+    assert _knowledge_read(ctx, **calls[0]).endswith(d.text)
+    assert _knowledge_read(ctx, topic="recovery", scope=scope, version=b.revision).endswith(b.text)
     assert len(observed.gaps) == 1
     gap = observed.gaps[0]
     assert str(journal.relative_to(tmp_path)) in gap and f"bytes {len(intact)}..{skipped_end}" in gap

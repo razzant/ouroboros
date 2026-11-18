@@ -68,6 +68,10 @@ from ouroboros.gateway.contracts import (
     UpdateApplyErrorResponse,
     UpdateApplyRequest,
     UpdateApplySuccessResponse,
+    UpdateDescriptionErrorResponse,
+    UpdateDescriptionLatestResponse,
+    UpdateDescriptionRequest,
+    UpdateDescriptionResponse,
     UpdateMergePlan,
     UpdatePreflightRequest,
     UpdatePreflightResponse,
@@ -248,8 +252,9 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         assert f"import('./evolution_types.js').{name}" in text
     text += "\n" + (modules / "evolution_types.js").read_text(encoding="utf-8")
     for name in ("UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",
-                 "UpdateApplySuccessResponse", "UpdateApplyErrorResponse", "UpdateProgressChangedOutbound",
-                 "UpdateStatusReadyOutbound"):
+                 "UpdateApplySuccessResponse", "UpdateApplyErrorResponse", "UpdateDescriptionRequest",
+                 "UpdateDescriptionResponse", "UpdateDescriptionLatestResponse", "UpdateDescriptionErrorResponse",
+                 "UpdateProgressChangedOutbound", "UpdateStatusReadyOutbound"):
         assert f"import('./update_types.js').{name}" in text
     text += "\n" + (modules / "update_types.js").read_text(encoding="utf-8")
     version = (pathlib.Path(__file__).resolve().parent.parent / "VERSION").read_text(encoding="utf-8").strip()
@@ -351,6 +356,9 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
                 StateResponse, UpdateMergePlan,
                 UpdatePreflightRequest, UpdatePreflightResponse, UpdateApplyRequest,
                 UpdateApplySuccessResponse, UpdateApplyErrorResponse,
+                # The owner's description request: Write/Rewrite name a range, Check and describe names none.
+                UpdateDescriptionRequest, UpdateDescriptionResponse, UpdateDescriptionLatestResponse,
+                UpdateDescriptionErrorResponse,
                 UpdateStatusReadyOutbound, TaskCostBreakdown, TaskCostSlice, TaskDetailResponse, QuestionRoom,
                 TaskCancelRequest, TaskPauseRequest, TaskPauseResponse,
                 TaskContinueRequest, TaskContinueResponse, ContinuationOffer,

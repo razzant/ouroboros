@@ -165,7 +165,15 @@ def _describe_bg(request: Request) -> Callable[[bool], dict[str, Any]] | None:
 
 
 async def api_consciousness(request: Request) -> JSONResponse:
-    """The Dashboard's read-only status, spend by cause, place labels and recent wakes."""
+    """The Dashboard's read-only status, spend by cause, place labels and recent wakes; with ``?switch=on|off``,
+    what that turn would change, read at the press (``consciousness_view.read_switch_preview``)."""
+    to = request.query_params.get("switch")
+    if to in ("on", "off"):
+        from ouroboros.consciousness_view import read_switch_preview
+        state_line = _state_attr(request, "describe_bg_consciousness_state")  # its live wake and own tasks, if any
+        running = await asyncio.to_thread(state_line, True) if state_line and to == "off" else None
+        preview = await asyncio.to_thread(read_switch_preview, request_drive_root(request), to, running)
+        return JSONResponse(preview, headers={"Cache-Control": "no-store"})
     describe = _state_attr(request, "describe_consciousness")
     if describe is None:
         return JSONResponse({"status": "unavailable", "recent_wakes": []}, status_code=503,

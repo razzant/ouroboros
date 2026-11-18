@@ -141,6 +141,27 @@ export function causeOf(fact, preferred) {
         ? fmt('Sent before {mode} was chosen.', { mode: said(preferred) }) : '';
 }
 
+// Low's target missed at this room's newest owner-Low start (owner 15.11.2026, 3A: where the mode is chosen, the
+// screen says it before the next start): what the rest of that start's request took, from its own receipt; '' else.
+export function lowMissedOf(fact) {
+    const n = Number(fact?.no_memory_tokens);
+    if (fact?.applied !== 'low' || fact?.profile !== 'owner_low' || !fact?.target_missed || !(n > 0)) return '';
+    return fmt('Low’s 250K target was not met at the last start here: without memory it already needed about {n}; '
+        + 'memory keeps its shortest tellings.', { n: `${Math.round(n / 1000)}K` });
+}
+
+// A start the owner holds in Max whose books went to chapter maps stays Max (`books: maps`, owner 15.11.2026, 4A):
+// why, by the start's recorded cause. The task card's start row says the same (`task_checkpoints.js`).
+export function mapsOf(cause) {
+    switch (cause) {
+    case 'memory': return fmt('Chapter maps: the history does not fit beside the whole books.', {});
+    case 'route': return fmt('Chapter maps: this model’s window cannot hold the whole books.', {});
+    case 'window': return fmt('Chapter maps: the whole books did not fit beside the rest of the start.', {});
+    case 'after_start': return fmt('The work moved to chapter maps after it started.', {});
+    default: return fmt('Chapter maps.', {});
+    }
+}
+
 // An explicitly incomplete census: what it listed is kept, but it is not the room's whole current state.
 const incomplete = () => fmt('The current read is incomplete.', {});
 
@@ -175,10 +196,15 @@ export function contextShown(observation, preferred) {
     // Agreement is today's closed capsule: its own words name it (as the overlay translated them); open, it is dated.
     const note = obs.partial ? incomplete() : '';
     if (mode === preferred) {
-        const text = [when.time, note].filter(Boolean).join(' ');
-        return { actual: mode, word, lit: [mode], differs: false, label: '', fact: text ? { word: when.word, text } : null };
+        const maps = mode === 'max' && obs.latest?.books === 'maps' ? mapsOf(obs.latest.cause) : '';
+        const text = [maps, when.time, note].filter(Boolean).join(' ');
+        return { actual: mode, word, lit: [mode], differs: false,
+            label: maps ? fmt(obs.state === 'now' ? 'Context: Max now, chapter maps' : 'Context: Max last, chapter maps', {}) : '',
+            fact: text ? { word: when.word, text } : null };
     }
-    const sentence = [causeOf(obs.latest, preferred), when.time, note].filter(Boolean).join(' ');
+    // Max whose books went to chapter maps stays Max whatever mode is chosen now: its maps sentence, never a mode move.
+    const why = mode === 'max' && obs.latest?.books === 'maps' ? mapsOf(obs.latest.cause) : causeOf(obs.latest, preferred);
+    const sentence = [why, when.time, note].filter(Boolean).join(' ');
     return { actual: mode, word, lit: [mode], differs: true,
         label: fmt(obs.state === 'now' ? 'Context: {word} now, {chosen} chosen' : 'Context: {word} last, {chosen} chosen', { word: said(mode), chosen }),
         fact: { word: when.word, text: sentence } };

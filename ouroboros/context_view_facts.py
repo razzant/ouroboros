@@ -78,8 +78,8 @@ def memory_facts(plan, mode, messages=()):
     else:
         line = "Max room in this captured build: " + floor.measure_text(room, parts=True, pages=pages) + {
             "held": "; Max held" + (f" by cuts {', '.join(room['cuts'])}" if room["cuts"] else ""),
-            "crowded": "; Low",
-            "route": "; Low, a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here",
+            "crowded": f"; {floor.MAPS}",
+            "route": f"; {floor.MAPS}, a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here",
         }[room["cause"]]
     shown = floor.addressed_text((receipt.get("floor") or {}).get("steps") or {})
     line += (f"; shown only by address: {shown}" if shown else "") + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting)
@@ -88,7 +88,8 @@ def memory_facts(plan, mode, messages=()):
 
 
 def low_start_line(plan, mode, task_id):
-    """The owner's Main line for a fresh start of an integrating focus that memory lowered to Low: its Max room (which
+    """The owner's Main line for a fresh start of an integrating focus that memory took from whole books (to chapter
+    maps, or to Nano where protected words leave the maps frame no room), named in the mode it got: its Max room (which
     exists only on the owner's Max with a known window) is ``crowded`` while the books, core, assignment, tool schemas,
     reply reserve and work room alone fit (``memory_floor.crowded_by_memory``). No numbers: the task's own facts keep
     them. "" for every other start: a route (the task's own facts disclose it), tool schemas that tip it alone, a held
@@ -97,8 +98,10 @@ def low_start_line(plan, mode, task_id):
     room = receipt.get("max_room")
     if receipt.get("role") in DELEGATED_FOCUS_ROLES or not floor.crowded_by_memory(room):
         return ""
-    maps = "Low with chapter maps" + (floor.REQUIRED_BOOK_WHOLE if room.get("book_required") else "")
-    return f"Task {task_id} started in {maps}: memory did not fit beside the full books."
+    nano = mode == "nano"  # protected words the maps frame could not hold beside its reply reserve: the start is Nano
+    maps = ("Nano" if nano else "Max with chapter maps") + (floor.REQUIRED_BOOK_WHOLE if room.get("book_required") else "")
+    return (f"Task {task_id} started in {maps}: my memory, even in its shortest tellings, did not fit beside the "
+            + ("books, even as chapter maps." if nano else "whole books."))
 
 
 def low_start_episode(root, plan, mode, task_id, send):

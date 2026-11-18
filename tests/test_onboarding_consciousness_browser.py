@@ -33,6 +33,7 @@ from tests.test_ui_smoke_playwright import (
 from tests.ui_console_errors import PageErrors
 from ouroboros.test_environment import isolated_environment, owned_process_temp
 from ouroboros.test_evidence import keep_startup_log
+from ouroboros.consciousness_view import FIRST_RUN, first_run_words
 
 pytestmark = [pytest.mark.ui_browser]
 
@@ -45,11 +46,16 @@ OFFLINE = {
 }
 MOCK_MODEL = "openai-compatible::mock-model"
 ROW = '[data-consciousness-offer] .consciousness-offer-row'
-DEFAULT_ROW = ("Consciousness Start consciousness with Ouroboros Between your requests it continues topics that interest "
-               "it and you, notices opportunities and brings you suggestions. Autonomy: Acts. Also acts on its own: starts work, "
-               "runs commands, speaks and acts in places. It does not change itself. Up to $20.00 a day in recorded "
-               "spending. Subscription quota is separate. At most 2 of its own tasks at once. Change the allowance in "
-               "Dashboard › Costs. Its other settings, and Stop and Start, are in Dashboard › Consciousness.")
+# The /bg start receipt's head (consciousness_view.on_sentence), the same on every surface.
+STARTED = "Consciousness on: Ouroboros also acts on its own"
+# The switch's first-run words are the host's (consciousness_view.FIRST_RUN, owner 15.11, 5A).
+SWITCH_WORDS = f"{FIRST_RUN['gloss']} {FIRST_RUN['choice']} {FIRST_RUN['meaning']}"
+_ADVISES = first_run_words("observe")  # Advises answers nowhere: its first-run words say so (review r3)
+ADVISES_WORDS = f"{_ADVISES['gloss']} {_ADVISES['choice']} {_ADVISES['meaning']}"
+WHERE = "Change the allowance in Dashboard › Costs. Its other settings, and its switch, are in Dashboard › Consciousness."
+DEFAULT_ROW = (f"Consciousness {SWITCH_WORDS} Autonomy: Acts. Also acts on its own: starts work, runs commands, speaks and "
+               "acts in places. It does not change itself. Up to $20.00 a day in recorded spending. Subscription quota is "
+               f"separate. At most 2 of its own tasks at once. {WHERE}")
 
 
 def _provider(llm_url: str) -> dict:
@@ -262,15 +268,15 @@ def test_first_setup_ticked_starts_once_through_the_queue_and_a_later_stop_wins(
             page.wait_for_timeout(1500)
             # The press is the owner's act, its command the host's words (#2778): Main shows the one System
             # receipt, never a "You · /bg start" bubble, on the live page and in the history a reload reads.
-            receipt = page.locator("#chat-messages .chat-bubble").filter(has_text="Background consciousness")
+            receipt = page.locator("#chat-messages .chat-bubble").filter(has_text=STARTED)
             receipt.first.wait_for(state="visible", timeout=60_000)
             page.screenshot(path=str(out / "first-setup-main-after-handoff-webkit-light.png"))
             assert page.locator("#chat-messages .chat-bubble.user").count() == 0, "a press writes no owner bubble"
             history = _get(srv.url, "/api/chat/history?limit=50")["messages"]
             assert [row["text"] for row in history if row.get("role") == "user"] == [], history
-            assert [row["system_type"] for row in history if "Background consciousness" in row.get("text", "")] == ["command_reply"]
+            assert [row["system_type"] for row in history if STARTED in row.get("text", "")] == ["command_reply"]
             page.reload(wait_until="networkidle")
-            page.locator("#chat-messages .chat-bubble").filter(has_text="Background consciousness").first.wait_for(
+            page.locator("#chat-messages .chat-bubble").filter(has_text=STARTED).first.wait_for(
                 state="visible", timeout=60_000)
             assert page.locator("#chat-messages .chat-bubble.user").count() == 0, "nor after a reload"
             page.screenshot(path=str(out / "first-setup-main-after-reload-webkit-light.png"))
@@ -320,11 +326,9 @@ def test_markerless_install_offers_its_own_limits_and_an_unticked_finish_sends_n
                 _to_summary(page, pro=False)
                 expect(page.locator(ROW)).to_be_visible()
                 assert _text(page, ROW) == (
-                    "Consciousness Start consciousness with Ouroboros Between your requests it continues topics that "
-                    "interest it and you, notices opportunities and brings you suggestions. Autonomy: Advises. On its own it "
-                    "studies, keeps its memory and tells you; it changes nothing outside. Up to $5.00 a day in recorded "
-                    "spending. Subscription quota is separate. At most 1 of its own tasks at once. Change the "
-                    "allowance in Dashboard › Costs. Its other settings, and Stop and Start, are in Dashboard › Consciousness.")
+                    f"Consciousness {ADVISES_WORDS} Autonomy: Advises. On its own it studies, keeps its memory and tells you; "
+                    "it changes nothing outside. Up to $5.00 a day in recorded spending. Subscription quota is separate. At "
+                    f"most 1 of its own tasks at once. {WHERE}")
                 page.screenshot(path=str(out / f"markerless-summary-{engine}-{theme}.png"), full_page=True)
                 page.locator(".summary-card").screenshot(path=str(out / f"markerless-summary-card-{engine}-{theme}.png"))
                 overflow = page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
@@ -396,7 +400,7 @@ def test_panic_while_the_page_waits_sends_nothing_and_says_so(setup_server, tmp_
             expect(page.locator('[data-consciousness-run="not_started"]')).to_be_visible(timeout=30_000)
             assert _text(page, '[data-consciousness-run="not_started"]') == (
                 "Consciousness was not started Ouroboros stopped answering before the Start could be sent, so nothing "
-                "was sent. Dashboard › Consciousness shows whether it is on; its Start is there. Open Ouroboros")
+                "was sent. Dashboard › Consciousness shows whether it is on; its switch is there. Open Ouroboros")
             page.screenshot(path=str(out / "panic-not-started-screen-webkit-light.png"))
             assert seen["commands"] == [], "nothing was sent"
             assert not seen["errors"], seen["errors"]
@@ -471,7 +475,7 @@ def test_a_page_left_during_the_wait_and_shown_again_from_the_cache_sends_nothin
             assert seen["commands"] == [], "no Start after the page was left"
             assert _text(page, '[data-consciousness-run="not_started"]') == (
                 "Consciousness was not started You left this page before the Start could be sent, so nothing was "
-                "sent. Dashboard › Consciousness shows whether it is on; its Start is there. Open Ouroboros")
+                "sent. Dashboard › Consciousness shows whether it is on; its switch is there. Open Ouroboros")
             page.screenshot(path=str(out / "left-and-back-not-started-chromium-light.png"))
             page.locator("#consciousness-open-btn").click()
             page.wait_for_url(srv.url + "/", timeout=120_000)

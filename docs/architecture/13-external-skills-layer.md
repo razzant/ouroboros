@@ -1,6 +1,6 @@
 # 13. External Skills Layer
 
-Discovery, review, grants, dependencies and enablement stay separate: a toggle grants no execution authority. Context snapshots: §6; protocol: `CREATING_SKILLS.md`.
+Discovery/review/grants/dependencies/enablement are separate; toggles grant no authority. Snapshots: §6; protocol: `CREATING_SKILLS.md`.
 
 ### Skill gates
 
@@ -10,7 +10,7 @@ State reads share an inventory for canonical identity and fresh peers (`skill_pe
 
 ### Skill review authority
 
-A reviewer's configured rights separately govern checks of untrusted code in its private copy: Full is not an OS sandbox, and checking grants no skill activation.
+Reviewer rights govern untrusted-code checks in private copies: Full is no OS sandbox; checking grants no activation.
 
 `skill_review.py` freezes loader-hashed bytes for the shared `tools/review_skill.py` wave. The skill ledger projects into `review.json`; seats return checklist findings. Change-focused re-review counts per root or manual content version. Install/update captures caller/scope before return; async review retains task, room, authority and budget. Skills-page calls are manual.
 
@@ -34,7 +34,7 @@ ClawHub lands atomically with file hashes; direct review attempts precede `skill
 
 ### Desktop actions and result views
 
-`skills/unix_computer_use/`: one macOS helper: quiet AX, app-local exposure, same-window reads, `until_text`. `paste_chord.js`: Command-plane V/shortcuts, local/SSH. Targeting, grants, receipts: `SKILL.md`; owned native fixtures.
+`skills/unix_computer_use/`: macOS quiet AX/exposure/same-window `until_text`; `macos_capture.py`/`macos_stream.py`: capture-only ScreenCaptureKit exact-window snapshot/task MCP stream. `paste_chord.js`: local/SSH Command-plane V/shortcuts. Targets/grants/receipts: `SKILL.md`; owned native fixtures.
 
 Composition/`PRODUCER_RESULT_SOURCE_JSON` vs `FULL_RESULT_SOURCE_JSON`: `tools/tool_result.py`, `loop_tool_execution.py`.
 
@@ -42,13 +42,13 @@ Composition/`PRODUCER_RESULT_SOURCE_JSON` vs `FULL_RESULT_SOURCE_JSON`: `tools/t
 
 `_stage_extension_import_tree` shares complete `__extension_imports/` trees by one full content/runtime/dependency digest: 65 characters shorter than two, not arbitrary depth. Kept while the payload is current or an owner lives. Review/grants stay bound to code. Local delete unloads and removes payload and the entire state directory under the lifecycle lock, without a tombstone or deferred cleanup. Same-name installs across sources preserve shared state/grants.
 
-Per-call children proxy tools/routes/WS/UI/settings/companions with loader/scrubbed env. `extension_process_runner.py` passes tool context whole outside the input cap. Persistent tasks run in-process or as companions. `extension-loop` (`EventBus.start_loop`): Host Service start, `finally` teardown; blocking off HTTP/Stop/Pause; async routes/WS on HTTP loop, sync subscribers on publisher thread, WS disclosure off-loop. Capabilities, not platforms. Server loads replace `extension_catalog.json` via a child; workers reuse by `catalog_identity` (hashed, values unstored), never failures. In-process: namespaces, permissions, per-skill tracking, atomic unload.
+Per-call children proxy tools/routes/WS/UI/settings/companions (loader, scrubbed env). `extension_process_runner.py`: 1 MiB input excluding tool context; 512 KiB result plus bounded `step_stop`. `get_stop_state` refusals annotate errors or type `OWNER_OPERATION_REFUSED`; reports stay data. Persistent tasks run in-process or as companions. `extension-loop` (`EventBus.start_loop`): Host Service start, `finally` teardown; blocking off HTTP/Stop/Pause; async routes/WS on HTTP loop, sync subscribers on publisher thread, WS disclosure off-loop. Capabilities, not platforms. Server loads replace `extension_catalog.json` via a child; workers reuse by `catalog_identity` (hashed, values unstored), never failures. In-process: namespaces, permissions, per-skill tracking, atomic unload.
 
 `skill_repair_admission.py` admits managed repair against exact bytes (§6). Bucket/name produces `skill_repair`, promoted to `normal`: payload selection, not a reduced tool profile. Installed payloads need no Git copy; review never forces unload for repair.
 
-### Live Conversation and provider packages (PluginAPI 2.3)
+### Live Conversation and provider packages
 
-Features register `LiveConfig`/call tools and optional ordinary `initial_tools`, owning media/UI; providers register route/session/catalog, owning wire/usage/route facts (registration, the Live calls frame's initial tools, `call_offer`: `CREATING_SKILLS.md`). PluginAPI 2.3 unites the memory reader with realtime registration and 2.2's initial-tool declaration; older payloads stay supported. The resident notice counts and names the actual manifest and explains discovery/enablement.
+Features register `LiveConfig`/call tools and optional ordinary `initial_tools`, owning media/UI; providers register route/session/catalog, owning wire/usage/route facts (registration, the Live calls frame's initial tools, `call_offer`: `CREATING_SKILLS.md`). The resident notice counts and names the actual manifest and explains discovery/enablement.
 
 `gateway/call_ws.py` admits an owner turn with a `call:<call_id>:open` host fact, answered once by `Respond`; that row's `Engine:` sentence is the room card's engine line, and the call instructions tell the model whether its engine sees images. A call nobody joined ends `not_connected` (cancelled, one notice row; the card folds to that line). `LiveHost` owns ordinary history/tools/mailbox/money/Stop with process-local authority. An engine whose catalog lacks vision receives every image part of the history and of tool results as a caption naming the saved file (`realtime_setup.rows_for_engine`): a screenshot never closes a call, the text model keeps the image; Grok receives each message as one text part (xAI joins parts in its echo). `realtime_setup.py` refits current history/schemas/instructions per connection through the ordinary ladder/physical guard. Supported acceptance raises only raiseable route windows through the account-scoped `context_window` record; retention and estimator limits stay declared. Preparation, connector credentials and completion evidence share one session capture (`realtime_credentials.py`); renewal polls a cached resolved window. Route reserves survive Nano's reply cap; density and typed overflow: `CREATING_SKILLS.md`.
 

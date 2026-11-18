@@ -32,6 +32,21 @@ def indented(text: Any) -> str:
     return "\n".join(INDENT + line if line else line for line in str(text or "").split("\n"))
 
 
+def retelling_status(status, refusals, part):
+    """Progress of the old retelling, including the distinct response source of each refused fold."""
+    if not status or status.get("folded", 0) >= status.get("total", 0):
+        return []
+    lines = part([f"Story status: the helper retelling is folded {status['folded']} of {status['total']} blocks; "
+                  f"{status['open_records']} retold records are still open ({status['open_rows']} rows, "
+                  f"{status['open_chars']} chars; future folds use helper route {status['helper_route']})."], "story_status")
+    for refusal in refusals:
+        answer = (f"its answer: read_file(root='runtime_data', path='{refusal['path']}')" if refusal.get("path")
+                  else "its answer was not retained")
+        lines += part([f"A helper could not fold: {refusal['label']}; {refusal['period']}; {refusal['kind']}; {answer}"],
+                      "refusal", [refusal])
+    return lines
+
+
 def _count(n: int, noun: str) -> str:
     return f"{n} {noun}{'' if n == 1 else 's'}"
 
@@ -105,7 +120,7 @@ def room_pointer(entries: List[Dict[str, Any]]) -> str:
     return "\n".join(map(_room_line, _tellings(entries)))
 
 
-def retold_lines(retold: List[Dict[str, Any]], rooms: Any) -> List[str]:
+def retold_lines(retold: List[Dict[str, Any]], rooms: Any, *, part=None) -> List[str]:
     """The retold records in story order under their headings (``HEADINGS``: a transfer's after the helper's); in a
     room the floor took, its helper retelling and its transfers are each one line where their first record stood."""
     firsts = {told[0]["id"]: told for room, entries in pointer_rooms(retold).items() if room in rooms
@@ -113,14 +128,17 @@ def retold_lines(retold: List[Dict[str, Any]], rooms: Any) -> List[str]:
     lines, heading = [], None
     for entry in retold:
         if entry.get("gap") or str(entry["room_id"]) not in rooms:
-            line = retold_record(entry)
+            line, sources = retold_record(entry), [entry]
+            form = "gap" if entry.get("gap") else "whole" if entry.get("text") else "address"
         elif entry["id"] in firsts:
-            line = _room_line(firsts[entry["id"]])
+            sources, form = firsts[entry["id"]], "count"
+            line = _room_line(sources)
         else:
             continue
         moved = bool(entry.get("transfer"))
         if moved is not heading:
-            lines += ["", HEADINGS[moved]]
+            drawn = ["", HEADINGS[moved]]
+            lines += part(drawn) if part else drawn
             heading = moved
-        lines.append(line)
+        lines += part([line], "legacy", sources, form) if part else [line]
     return lines

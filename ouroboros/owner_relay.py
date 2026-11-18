@@ -590,7 +590,7 @@ def stage_quoted(ctx, entry, row) -> list:
 
 
 def task_words_text(drive_root: Any, task: dict, *, audience: str = "child", indent: str = "",
-                    stage: bool = False, marks: Any = None) -> str:
+                    stage: bool = False, marks: Any = None, source_metadata: dict | None = None) -> str:
     """A task's set rendered from its record at its start (a helper's birth), ``owner_words``'s set in its rendering:
     the field it was scheduled with and the rows its record holds, then the live rows of its room, read once here;
     without ``drive_root`` the record alone. ``stage`` (a birth): the files the rows carry are staged on the task's
@@ -604,19 +604,31 @@ def task_words_text(drive_root: Any, task: dict, *, audience: str = "child", ind
     meta = _mapping(record.get("metadata"))
     task_id = str(record.get("id") or record.get("task_id") or "")
     root_id = str(record.get("root_task_id") or meta.get("root_task_id") or "")
-    rows, absent = task_governing_words(record)
+    addressed = source_metadata is not None
+    rows, absent = task_governing_words(record, addressed=addressed)
     gaps: list[str] = []
     if drive_root is not None:
         accounts = owner_place_accounts(drive_root)
         held = record.get("held_owner_messages") or meta.get("held_owner_messages")
-        live, gaps = _live_words(drive_root, _room_of(
-            drive_root, task_id, record.get("parent_task_id") or meta.get("parent_task_id"), root_id), accounts, marks)
+        room = _room_of(drive_root, task_id, record.get("parent_task_id") or meta.get("parent_task_id"), root_id)
+        live, gaps = _live_words(drive_root, room, accounts, marks, addressed=addressed)
         rows = _deduped([*rows, *(row for context in (False, True) for row in _held_words(
-            held, drive_root, task_id, context=context, accounts=accounts, read=True)), *live])
+            held, drive_root, task_id, context=context, accounts=accounts, read=True, addressed=addressed)), *live],
+            addressed=addressed)
         if stage and task_id:
             stage_birth_files(drive_root, record, task_id, rows)
     words = render_owner_words(rows, absent, audience=audience, root_task_id=root_id, indent=indent, gaps=gaps)
-    schedule = render_schedule_text(task_schedule_items(record), audience=audience, indent=indent)
+    items = task_schedule_items(record)
+    if source_metadata is not None:
+        # Observe the very rows being rendered, never re-read their current stores
+        # or copy their words/attachments into the diagnostic map. Only a row read
+        # from this work's own room names its showing room; a held, marked or carried
+        # address keeps where it was written, which is navigation, not a reader.
+        source_metadata.update(rows=[{key: row[key] for key in (
+            "ref", "address", "room_id", "origin_ref", "source", "carrier", "task_id", "ts", "author") if key in row} for row in rows],
+            gaps=list(gaps), absence=absent, schedules=[{key: item[key] for key in (
+                "source", "schedule_id", "field", "supplier", "supplier_task_id", "supplied_at") if key in item} for item in items])
+    schedule = render_schedule_text(items, audience=audience, indent=indent)
     return "\n\n".join(part for part in (words, schedule) if part)
 
 

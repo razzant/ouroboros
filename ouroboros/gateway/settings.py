@@ -42,7 +42,7 @@ from ouroboros.gateway.owner_settings import (
     settings_document_mutation,
     owner_write_guard,
     post_commit_failure_response,
-    record_settings_change,
+    record_context_mode_change, record_settings_change,
     settings_document_digest,
     unsaved_error,
 )
@@ -693,6 +693,7 @@ async def api_owner_context_mode(request: Request) -> JSONResponse:
 def _api_owner_context_mode_sync(request: Request, body: Any) -> JSONResponse:
     from ouroboros import config as _config
     from ouroboros.composer_cognition import main_cognition, request_project_id, update_project_cognition
+    from ouroboros.utils import utc_now_iso
 
     if not isinstance(body, dict):
         return unsaved_error("JSON body must be an object.", 400)
@@ -732,11 +733,8 @@ def _api_owner_context_mode_sync(request: Request, body: Any) -> JSONResponse:
             os.environ["OUROBOROS_CONTEXT_MODE"] = next_mode
             os.environ["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
             cognition = main_cognition()
-    _owner_audit(
-        request,
-        "context_mode",
-        {"project_id": project_id, "context_mode": next_mode, "previous_context_mode": previous_mode},
-    )
+        committed_at = utc_now_iso()  # the receipt is dated by its commit, inside the lock, not by its later send
+    record_context_mode_change(request, project_id, next_mode, previous_mode, cognition["context_mode"], at=committed_at)
     return JSONResponse({"ok": True, "project_id": project_id, "context_mode": next_mode, "cognition": cognition, **receipt})
 
 

@@ -42,7 +42,7 @@ def test_primary_endpoint_and_state_fallback_share_status(monkeypatch, tmp_path,
         return [{"task_id": "wake"}]
     monkeypatch.setattr(view, "wake_ids", lambda *args: ["wake"])
     monkeypatch.setattr(view, "recent_wakes", wakes)
-    response = asyncio.run(api_consciousness(Request({"type": "http", "app": server.app.app})))
+    response = asyncio.run(api_consciousness(Request({"type": "http", "query_string": b"", "app": server.app.app})))
     panel = json.loads(response.body)
     fallback = server.app.app.state.describe_bg_consciousness_state(True)
     assert panel["status"] == status and panel["detail"]
@@ -121,7 +121,7 @@ def test_stored_control_and_unconstructed_clock_are_visible(monkeypatch, tmp_pat
     monkeypatch.setattr(server, "_consciousness", clock if constructed else None)
     monkeypatch.setattr(server, "_supervisor_error", failed)
     monkeypatch.setattr(state, "load_state", lambda: {} if enabled is None else {"bg_consciousness_enabled": enabled})
-    response = asyncio.run(api_consciousness(Request({"type": "http", "app": server.app.app})))
+    response = asyncio.run(api_consciousness(Request({"type": "http", "query_string": b"", "app": server.app.app})))
     panel = json.loads(response.body)
     fallback = server.app.app.state.describe_bg_consciousness_state(enabled)
     assert panel["status"] == ("sleeping" if constructed and enabled else status)

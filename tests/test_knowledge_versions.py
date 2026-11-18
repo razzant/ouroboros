@@ -65,10 +65,56 @@ def test_knowledge_changes_skip_unchanged_journals_and_read_only_the_appended_wi
         spy.setattr(versions, "_parse", parsing)
         changes, accepted = versions.knowledge_changes(tmp_path, baseline, gaps)
     assert opened == [journal] and len(parsed) == len(changes) == 1 and not gaps
-    assert "edit, 2000-01-01T00:00:00Z; by main room_id=fixture-room" in changes[0][2]
+    assert "1 write; by main room_id=fixture-room; first 2000-01-01T00:00:00Z; last 2000-01-01T00:00:00Z" in changes[0][2]
     assert f"version={first.revision!r}" in changes[0][2]
     assert accepted["global"]["offset"] == journal.stat().st_size
     assert versions.knowledge_changes(tmp_path, accepted, gaps) == ([], accepted)
+
+
+def test_knowledge_changes_group_pages_in_first_write_order_and_keep_all_versions(tmp_path, monkeypatch):
+    target, other = address(tmp_path, "zeta"), address(tmp_path, "alpha")
+    first = store.write_knowledge_note(target, "Before this window.").current
+    gaps = set()
+    _, baseline = versions.knowledge_changes(tmp_path, None, gaps)
+    writers = ({"role": "root", "task_id": "fixture-z-writer"},
+               {"role": "presence", "room_id": "fixture-a-room"})
+    stamps = [f"2001-01-01T00:{index:02d}:00Z" for index in range(13)]
+    stamps[-1] = "1999-01-01T00:00:00Z"  # append order, not timestamp order, chooses the latest version
+    notes, revision = [], first.revision
+    for index, stamp in enumerate(stamps):
+        monkeypatch.setattr(store, "utc_now_iso", lambda: stamp)
+        written = store.write_knowledge_note(target, f"Write {index}.\n", expected_revision=revision,
+                                            focus=writers[index % 2])
+        assert written.ok, written.reason
+        notes.append(written.current)
+        revision = written.current.revision
+        if index == 0:
+            second_page = store.write_knowledge_note(other, "Another page.\n", focus=writers[1]).current
+    own = store.write_knowledge_note(target, "The wake's own later write.\n", expected_revision=revision,
+                                    focus={"role": "consciousness", "task_id": "fixture-own-wake"}).current
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    changes, accepted = versions.knowledge_changes(tmp_path, baseline, gaps)
+    assert len(changes) == 2 and not gaps
+    assert changes == [
+        ("knowledge_change", None,
+         f"- knowledge global/zeta: 13 writes; by root task_id=fixture-z-writer, presence room_id=fixture-a-room; "
+         f"first {stamps[0]}; last {stamps[-1]}; "
+         f"knowledge_read(topic='zeta', scope='global', version={revision!r})"),
+        ("knowledge_change", None,
+         f"- knowledge global/alpha: 1 write; by presence room_id=fixture-a-room; "
+         f"first {stamps[0]}; last {stamps[0]}; "
+         f"knowledge_read(topic='alpha', scope='global', version={second_page.revision!r})"),
+    ]
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    ctx = context(tmp_path)
+    for change, note in zip(changes, (notes[-1], second_page)):
+        tool, arguments = printed_call(change[2].split("; ")[-1])
+        assert tool == "knowledge_read" and tools._knowledge_read(ctx, **arguments).endswith(note.text)
+    for note in (first, *notes, own):
+        assert tools._knowledge_read(ctx, "zeta", version=note.revision).endswith(note.text)
+    assert versions.knowledge_changes(tmp_path, baseline, gaps)[0] == changes  # unaccepted: replay the same window
+    assert versions.knowledge_changes(tmp_path, accepted, gaps) == ([], accepted)
+    assert accepted["global"]["offset"] == versions.journal_path(target).stat().st_size
 
 
 @pytest.mark.parametrize("fault", ["ending_changed", "unfinished"])

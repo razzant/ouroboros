@@ -560,11 +560,13 @@ test('the context capsule: ring, Context and the mode; it opens into exactly thr
     m.controls.destroy();
 });
 
+const contextHeaders = { 'Content-Type': 'application/json', 'X-Ouroboros-Surface': 'app', 'X-Ouroboros-Actor': 'owner' };
+
 test('a context choice posts the owner endpoint at once, waits for the answer, shows a refusal and always re-reads /api/state', async () => {
     const m = mountPair();
     await m.press(m.contextHead);
     await m.choose('low');
-    assert.deepEqual(m.posts, [['/api/owner/context-mode', { mode: 'low' }]]);
+    assert.deepEqual(m.posts, [['/api/owner/context-mode', { mode: 'low' }, contextHeaders]]);
     assert.equal(m.contextEl.dataset.contextMode, 'low');
     assert.equal(m.contextEl.querySelector('.chat-capsule-value').textContent, '—', 'a choice never paints the observation');
     assert.equal(m.seg('low').getAttribute('aria-checked'), 'true');
@@ -1356,7 +1358,7 @@ test('Main and two projects read and save only their room, including delayed con
     assert.equal(alpha.controls.hasPendingSave(), true);
     release({ ok: true }); await saving;
     assert.equal(await alpha.controls.pendingSave(), true);
-    assert.deepEqual(alpha.posts[0], ['/api/owner/context-mode', { mode: 'nano', project_id: 'alpha' }]);
+    assert.deepEqual(alpha.posts[0], ['/api/owner/context-mode', { mode: 'nano', project_id: 'alpha' }, contextHeaders]);
     assert.equal(main.contextEl.dataset.contextMode, 'max');
     assert.equal(beta.contextEl.dataset.contextMode, 'nano');
     alpha.answer.value = { ok: true, json: async () => ({ project_id: 'beta', context_mode: 'max' }) };

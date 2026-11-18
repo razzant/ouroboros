@@ -140,13 +140,17 @@ def accounts_line(status: Mapping[str, Any]) -> str:
 
 def account_entries(store: ChronicleStore, label: Callable[..., str], units: Mapping[str, memory_inventory.LegacyUnit],
                     fixes: Mapping[str, List[Dict[str, Any]]],
-                    period_text: Callable[[memory_inventory.Period], str]) -> List[Dict[str, Any]]:
+                    period_text: Callable[[memory_inventory.Period], str],
+                    acceptances: Optional[Mapping[str, str]] = None) -> List[Dict[str, Any]]:
     """Every account shown by its acting selection, as a story entry placed like a part (``first``, sequence).
 
     ``fixes`` is the story's map of corrections and rejections by target (``memory_view._story_pages``);
     a source's later corrections are read from it by id, so the words shown are the correction's.
     ``period_text`` prints a ``Period`` the way the story prints every record's. An account no shown
     account tells carries ``told_fixes``: the fixes of what it tells (``told_records``) outside ``cited_records``.
+    ``acceptances``: each draft's operative accepting decision id (``fix_map`` collects it in the same pass); a
+    source that was a draft then and is accepted now carries it as ``acceptance_id``, for the composition map's
+    reader only -- rendering prints the acceptance without it.
     """
     entries = []
     for record in store.accounts():
@@ -158,13 +162,18 @@ def account_entries(store: ChronicleStore, label: Callable[..., str], units: Map
         for src in record.get("sources") or ():
             later = set(src.get("later_corrections") or ())
             own = fixes.get(str(src.get("id")), ())
+            rejection = next((f for f in own if f["kind"] == "rejection"), None)
+            acceptance = ((acceptances or {}).get(str(src.get("id")))
+                          if src.get("status") == "draft" and src.get("status_now") == "accepted" else None)
             sources.append({**src, "room_label": label(src.get("room_id")),
                             "later_fixes": [f["text"] for f in own if f["kind"] == "correction" and f.get("id") in later],
-                            "rejection": next((f["reason"] for f in own if f["kind"] == "rejection"), "")})
+                            "rejection": rejection["reason"] if rejection else "",
+                            **({"rejection_id": rejection["id"]} if rejection else {}),  # their readers; none adds no bytes
+                            **({"acceptance_id": acceptance} if acceptance else {})})
         entries.append({"kind": "account", "id": record["id"], "room_id": str(record["room_id"]), "label": "My account across rooms",
                         "period": period_text(period), "source_period": period.span, "period_basis": period.source,
                         "period_bases": list(period.bases or (period.source,)),
-                        "first": period.first,
+                        "first": period.first, "revision": record["revision"],
                         "text": str(record.get("current_text") or ""), "status": "",
                         "signer": draft_signer(record.get("author")), "stamp": "", "fixes": [],
                         "quotes": list(record.get("quotes") or ()),
@@ -182,8 +191,13 @@ def account_entries(store: ChronicleStore, label: Callable[..., str], units: Map
     return entries
 
 
-def fix_map(store: ChronicleStore) -> Dict[str, List[Dict[str, Any]]]:
-    """My corrections and rejections of drafts by target, oldest first: the story's ``fixes``."""
+def fix_map(store: ChronicleStore, acceptances: Optional[Dict[str, str]] = None) -> Dict[str, List[Dict[str, Any]]]:
+    """My corrections and rejections of drafts by target, oldest first: the story's ``fixes``.
+
+    ``acceptances``, when a dict is passed, collects in the same decision pass each target's operative
+    accepting decision id (``{target id: decision id}``, the latest wins). It stays out of ``fixes``,
+    which renders corrections and rejections only; the composition map reads the id (``_rendered_changes``).
+    """
     fixes: Dict[str, List[Dict[str, Any]]] = {}
     for record in store.records(kinds=("correction", "decision")):
         if record["kind"] == "correction" or record.get("accepted") is False:
@@ -191,6 +205,8 @@ def fix_map(store: ChronicleStore) -> Dict[str, List[Dict[str, Any]]]:
                 {"kind": "correction" if record["kind"] == "correction" else "rejection", "id": record["id"],
                  "text": record.get("text"), "reason": record.get("reason"), "ts": record.get("ts"),
                  "sequence": record["sequence"]})
+        elif acceptances is not None and record.get("accepted") is True:
+            acceptances[str(record.get("target_id") or "")] = record["id"]
     return fixes
 
 

@@ -482,7 +482,7 @@ def test_circle_words_changed_after_the_event_keep_the_events_words_beside_today
         if change == "reworded":
             p.edit_circle(root, circle["circle_id"], author="owner", text="NOW: keep my projects out of this chat.")
         else:
-            p.delete_circle(root, circle["circle_id"])
+            p.delete_circle(root, circle["circle_id"], author="owner")
     _ctx, bundle, prompt = _reply_bundle(root, monkeypatch, checker, before_reply=later)
     source = bundle["occasion"]["sources"][0]
     assert source["circle_at_event"]["text"] == "EARLIER: you may discuss my projects here."

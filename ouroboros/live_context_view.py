@@ -39,7 +39,7 @@ def record_live_exposure(view, response_id):
     the current observed view. Setup alone still supplies inspect, not exposure.
     """
     from ouroboros.context_compaction import exposed_context_units
-    from ouroboros.tools.compact_context import record_context_view
+    from ouroboros.tools.compact_context import publish_context_observation, record_context_view
     owner = getattr(view, '_connection_owner', view)
     session = getattr(view, '_context_session', None)
     if session is None or getattr(owner, '_connection_view', view) is not view:
@@ -50,18 +50,19 @@ def record_live_exposure(view, response_id):
     delivered_call_tool_results(owner, held)
     # Snapshot on the boundary; hashing belongs to a worker, never the media loop.
     import asyncio
-    previous = copy.deepcopy(getattr(owner.ctx, '_last_context_observation', {}) or {})
+    previous = getattr(owner.ctx, '_last_context_observation', None) or {}
+    inherited = copy.deepcopy({key: previous[key] for key in
+        ('work_room', 'physical_source_ref', 'chronicle_lead_rule', 'fit_measurement') if key in previous})
     context, rows, schemas = copy.copy(owner.ctx), copy.deepcopy(owner.messages), copy.deepcopy(owner.schemas)
+    context._last_context_observation = None
     def calculate():
-        record_context_view(context, rows, schemas, fit_measurement=previous.get('fit_measurement'))
+        record_context_view(context, rows, schemas, fit_measurement=inherited.get('fit_measurement'))
         context._last_context_observation.update(
-            exposed_units=list(exposed_context_units(rows, held)), exposure_basis='live_delivered_rows',
-            **{key: previous[key] for key in ('work_room', 'physical_source_ref', 'chronicle_lead_rule') if key in previous})
+            exposed_units=list(exposed_context_units(rows, held)), exposure_basis='live_delivered_rows', **inherited)
         return context._last_context_observation
     def publish(observation):
         if getattr(owner, '_connection_view', view) is view:
-            owner.ctx._last_context_observation = observation
-            view.ctx._last_context_observation = copy.deepcopy(observation)
+            publish_context_observation(owner.ctx, observation, view.ctx)
     try:
         asyncio.get_running_loop()
     except RuntimeError:

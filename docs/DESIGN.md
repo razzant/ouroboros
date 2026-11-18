@@ -2186,6 +2186,19 @@ owns the item.
 
 ### Dashboard › Consciousness
 
+The switch is one (owner 15.11, 5A): its name stays Consciousness, glossed “When Ouroboros acts”, and its positions
+are named by meaning, “Only when you write to it” off and “Also on its own and in places” on (“Also on its own” on an
+install with no place). The headline card says the gloss over the position, the host's state line beneath it, and the
+switch as “Turn off” / “Turn on”. Every turn in the app (this card, the chip's Shade, Activity's row) is one part
+(`consciousness_switch.js`): before turning either way (the owner chose both, 17.11), when the install has places, a
+dialog names what changes from the install's facts: the busiest places by name and how many, the people who wrote
+there in the last 7 days, what it asks to stop and what keeps working, every place behind its one disclosure. While the preview is read the
+button says “Reading…” (on a large install the first read takes seconds). With no place to name the turn goes at once;
+a preview or a place list that cannot be read, or a preview not answered within 15 seconds, does not hold the switch
+(the dialog says so and still offers the turn). Turning on says where it may answer and that at its first wake it sees what is unread there
+and decides what to read and answer. The words are the host's (`consciousness_view`): the app shows them from the
+server's answers, and the /bg replies (every surface, headless included) and the mind's own fact come from there too.
+
 The headline reports server state apart from wakes, with the host sentence as its only clock. A past next attempt says
 “Due since” the known appointment, or “Due” without one. A live/held own wake
 shows no deadline. “Its own wakes” precedes “Wakes in places”, sharing 50 ledger
@@ -2240,18 +2253,19 @@ its own, and without one they use the consciousness model; the head names it onl
 name's line cannot hold (a long model name, a long circle name) goes under the name, at the line's end, and
 wraps there; a row's facts wrap the same way, and nothing is ever wider than the head or the row.
 
-A row: mark, the place's own name, service, state word (on a place not Paused, the muted dot with
-“· consciousness off” while Off leaves it only hearing, or that no kind is checked), readiness only when
-not simply on, the last captured event (“no captured event”, never “no activity”), its model only when the place
-overrides, and the optional description, ellipsized: its own field, empty until written, never a note's
-first line; purpose, not a rule.
+A row: mark, the place's own name, service, state word (a cause that keeps the place quiet replaces it, in the host's
+words, with the muted dot: the switch off, Panic, the allowance spent, Advises; the stored choice stays the sheet's;
+on a place no cause keeps quiet and not Paused, “· no wake kinds checked” and the muted dot when no kind is checked),
+readiness only when not simply on, the last captured event beside the service (“no captured event”, never “no
+activity”), its model only when the place overrides, and the optional description,
+ellipsized: its own field, empty until written, never a note's first line; purpose, not a rule.
 
 Add asks “What is this place, and what am I here for?” (its first note) and the optional
 description, then where: each connector says its state with Connect, “Choose where” or “Enable in
 Skills”; one without instances or places connects its whole account at once. A connected place shows its
 notes and saves only the ticked changes under its revision; a repeat writes nothing twice. Add
-writes Silent atomically: “It starts Silent: it hears and thinks there and sends nothing until you
-make it Active.” Declared writes/delivery are held; the sheet retains the
+writes Silent atomically and says so in the host's words for the switch as it stands (off: it only hears there until
+consciousness is on). Declared writes/delivery are held; the sheet retains the
 scripts/browser/unintegrated-code disclosure. Paused stays connected without new foci.
 
 Connectors supply names/monochrome marks; technical ids stay in details unless two rows would read
@@ -2298,10 +2312,12 @@ Sheet/reader use status labels over manifest labels; otherwise core words stay. 
 declared labels/settings.
 Bot messages both wake and permit hearing bots. Other events are own-wake observations;
 the mind decides what to read, so the sheet must not promise exhaustive reading.
-While Off the host's `only_hears` replaces what would claim a wake: the state note and the conversation's state
-card say it only hears here, the wake note that nothing here wakes it, with the door `Consciousness ›` (Dashboard ›
-Consciousness, where Start is; no second Start). With no kind checked Active's note claims no wake; the wake note
-and state card say an ongoing conversation can still wake it (owner 16.11: the full repair). Paused keeps its words.
+A cause that keeps the place quiet (the host's `quiet`: the switch off, Panic, the allowance spent, Advises) is the
+meta line's state and one sentence under the state strip with its door (`Consciousness ›`, or `Costs ›` for the
+allowance; no second switch); the strip keeps the stored choice chosen, the wake note says nothing here wakes it
+while consciousness is off, and the conversation's state card says the same sentence. With no kind checked Active's
+note claims no wake; the wake note and state card say an ongoing conversation can still wake it (owner 16.11: the full
+repair). Paused keeps its words.
 Conflicts: “Changed elsewhere; your text is kept”. Resave uses fresh facts.
 
 Reader out rows say “as {label}”/“as you”. Heard chips accompany reasons with
@@ -3523,12 +3539,11 @@ up the bar stays in the row, in the page's flow as every keyboard room's bar is.
 The transcript runs to the room's top under the bar and to its bottom under the composer; nothing masks it. At both
 ends it is darkened and blurred under what floats over it, one material top and bottom (owner 15.11 «прозрачную шапку…
 градиент затемнения по нашей библии… и в десктопе», his choice 17.11 1A, 3A): the composer's darkening (the room's
-colour at 72 % at the edge, 36 % at 48 %, 10 % at 78 %, none at the far end), mirrored at the top over the bar's height
-and 24 px more; and under it an 18 px blur, full under the bar's capsules and a phone's clock and fading out over the
-32 px below them (on the desk 48 px of 64, so a card's own buttons just under the bar never read as its second row;
-the transcript's first row and every landing clear that reach, and a row under it is not read yet),
-and under the composer fading out over its top 32 px; at the top both are one layer of the bar, so the desktop window's
-title-band strip keeps its own. A note or the search sheet right under the bar floats over the edge as the capsules
+colour at 72 % at the edge, 36 % at 48 %, 10 % at 78 %, none at the far end), mirrored at the top. A 12 px blur
+keeps scrolling card actions distinct from the floating controls. It is full behind the capsules and phone clock,
+then tapers to clear within 32 px below the bar on every layout. The composer has the same soft transition inside
+its top 32 px. The first row and every landing clear the header's reach; a row under it is not read yet. The top
+effect uses one layer, separate from the desktop title-band strip. A note or the search sheet floats above it as the capsules
 do (a Project's status note, in its flow, stands below it). The blur belongs to the edge, not to a chip, so it applies in
 both themes. With the keyboard up the bar and the composer stand in the page's flow and nothing passes under either: the
 room draws neither edge, and a short keyboard room keeps a line of the newest message and its foot. On a dark room a room bar's capsules are the composer

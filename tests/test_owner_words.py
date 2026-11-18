@@ -325,6 +325,113 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
     assert ow._earlier_refs(before) == {"chat 1 / cm-mail": "msg mail-1"}
 
 
+def test_birth_capture_keeps_known_row_coordinates_without_changing_governing_text(tmp_path):
+    from ouroboros import memory_view as mv
+    from ouroboros.memory_form_facts import ordinary_composition
+    from ouroboros.owner_relay import task_words_text
+    from ouroboros.chat_chain import row_address, format_address
+    from ouroboros.tools.chronicle import _memory_read
+
+    row = _in_row("BODY_ONLY governing", "known-row", chat_id=1)
+    origin = build_owner_message_ref(chat_id=1, client_message_id="known-row", ts=TS, text=row["text"])
+    room = _project(tmp_path, origin={"ref": origin, "text": row["text"]})
+    _chat(tmp_path, row)
+    inherited = ow._row(row["text"], source="owner_mailbox", carrier="ctx", task_id=ROOT,
+                        ts=TS, ref="chat 1 / known-row")
+    child = {"id": "birth-child", "parent_task_id": ROOT, "root_task_id": ROOT,
+             "metadata": {"delegation_role": "subagent", ow.FIELD: [inherited]}}
+    metadata = {}
+    plain = task_words_text(tmp_path, child, indent=mv.INDENT)
+    observed = task_words_text(tmp_path, child, indent=mv.INDENT, source_metadata=metadata)
+    assert observed == plain and observed.count(row["text"]) == 1
+    source = next(s for s in metadata["rows"] if s["ref"] == inherited["ref"])
+    assert source["address"] == format_address(row_address(row))
+    assert source["source"] == "owner_mailbox" and source["carrier"] == "ctx"
+    assert "BODY_ONLY" not in json.dumps(metadata) and "text" not in source
+    spec = mv.view_spec_for_task(child, tmp_path)
+    snap = mv.capture_memory_view(tmp_path, child, spec)
+    assert snap.owner_words == plain and snap.owner_words_sources == metadata
+    restored = mv.snapshot_from_json(mv.snapshot_json(snap))
+    part = next(p for p in ordinary_composition(restored)["blocks"]["room"]["parts"] if p["kind"] == "owner_words")
+    assert "source_gap" not in part
+    exact = next(s for s in part["sources"] if s["ref"] == inherited["ref"])
+    assert exact["read"]["arguments"] == {"room_id": str(room), "rows": True,
+        "from": source["address"], "to": source["address"]}
+    assert exact["address"].startswith("row:1@") and exact["origin_ref"] == origin
+    assert row["text"] in _memory_read(_ctx(tmp_path, chat_id=room), **exact["read"]["arguments"])
+    assert "BODY_ONLY" not in json.dumps(part)
+    old = json.loads(mv.snapshot_json(snap))
+    old.pop("owner_words_sources")
+    legacy = mv.snapshot_from_json(json.dumps(old))
+    assert mv.render_room(legacy) == mv.render_room(snap)
+    legacy_part = next(p for p in ordinary_composition(legacy)["blocks"]["room"]["parts"] if p["kind"] == "owner_words")
+    assert legacy_part["source_gap"] and not legacy_part["sources"]
+    # Empty governing coordinates keep exactly the canonical bytes the view had before they were captured.
+    assert mv.snapshot_json(legacy) == json.dumps(old, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    changed = {**child, "metadata": {**child["metadata"], ow.FIELD: [{**inherited, "text": "Earlier captured words"}]}}
+    old_sources = {}
+    old_text = task_words_text(tmp_path, changed, source_metadata=old_sources)
+    assert "Earlier captured words" in old_text and "BODY_ONLY governing" not in old_text
+    old_source = next(s for s in old_sources["rows"] if s["ref"] == inherited["ref"])
+    assert "address" not in old_source  # same client id is not proof that today's row has the old words
+
+
+def test_governing_capture_keeps_a_held_replys_author_and_unresolved_memberships(tmp_path):
+    from ouroboros import dialogue_store as ds, memory_view as mv
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.memory_form_facts import ordinary_composition
+    from ouroboros.owner_relay import task_words_text
+
+    room = _project(tmp_path)
+    marked = _in_row("Remember this", "marked", ts=_at(2))
+    _chat(tmp_path, marked)
+    marked = ds.accepted_row(tmp_path, 1, "marked").row
+    assert ChronicleStore(tmp_path).mark(row_address(marked), "A reminder", MIND, room_id=str(room)).ok
+    foreign = tmp_path / "other-store"
+    reply = {**_in_row("Earlier reply", "reply"), "direction": "out"}
+    reply_ref = format_address(row_address(reply))
+    held = _in_row("Continue", "held", ts=_at(3), reply_to={"address": reply_ref})
+    _chat(foreign, reply, held)
+    held_ref = format_address(row_address(held))
+    child = {"id": "helper", "parent_task_id": ROOT, "root_task_id": ROOT,
+             "metadata": {"delegation_role": "subagent"},
+             "held_owner_messages": {held_ref: {**held, "_owner_source_root": str(foreign)}}}
+    snap = mv.capture_memory_view(tmp_path, child, mv.view_spec_for_task(child, tmp_path))
+    assert snap.owner_words == task_words_text(tmp_path, child, indent=mv.INDENT)
+    sources = next(p["sources"] for p in ordinary_composition(snap)["blocks"]["room"]["parts"]
+                   if p["kind"] == "owner_words")
+    by_ref = {s["ref"]: s for s in sources}
+    assert by_ref["chat 1 / held"]["address"] == held_ref
+    assert by_ref["chat 1 / marked"]["address"] == format_address(row_address(marked))
+    assert by_ref[reply_ref]["source"] == ow.REPLY_TARGET
+    assert by_ref[reply_ref]["author"] == ow.reply_target(foreign, {"address": reply_ref})["author"]
+    assert by_ref[reply_ref]["address"] == reply_ref
+    assert all(s.get("read_gap") and "read" not in s for s in by_ref.values())
+
+
+def test_carried_coordinates_do_not_enter_the_shared_governing_field_or_its_fallback(tmp_path):
+    from ouroboros import memory_view as mv
+    from ouroboros.owner_relay import task_words_text
+
+    plain = ow._row("Keep the first line", source="initial_user", carrier="ctx", ts=TS)
+    evidence = build_owner_message_ref(chat_id=1, client_message_id="", ts=TS, text=plain["text"])
+    carried = {**plain, "origin_ref": {**evidence, "text": "Unrelated body"}}
+    other = {**plain, "text": "Keep  the first line", "address": "row:1@elsewhere#0123456789ab"}
+    child = {"id": "helper", ow.FIELD: [carried, other]}
+    assert ow.task_governing_words(child)[0] == [plain, {**plain, "text": other["text"]}]
+    assert ow.task_owner_words(tmp_path, "helper", task=child)[0] == [plain]
+    source = {}
+    rendered = task_words_text(tmp_path, child, indent=mv.INDENT, source_metadata=source)
+    assert rendered == task_words_text(tmp_path, child, indent=mv.INDENT)
+    assert len(source["rows"]) == 1 and source["rows"][0]["origin_ref"] == evidence
+    assert "address" not in source["rows"][0]
+    original = {"origin_message_text": plain["text"], "origin_message_ref": evidence}
+    fallback, absence = ow.task_owner_words(tmp_path, "helper", task=original)
+    assert absence == "" and fallback == [ow._row(plain["text"], source="origin_message",
+        carrier="origin_message", task_id="helper", ts=TS, ref="chat 1")]
+
+
 def test_a_helper_in_the_room_shows_a_drained_message_once_and_one_message_is_one_row_under_any_carrier(tmp_path):
     """A root bound to a Project drains one room message and schedules a helper there: the field carries the row
     under its room and client id, and the helper's first request — the field, then the room read once — shows the

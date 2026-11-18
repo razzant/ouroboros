@@ -210,8 +210,9 @@ def test_stop_reaches_direct_pool_children_and_lent_focus_but_leaves_owner(clock
     # Each live item it ends is named from memory (owner 09.11, variant A): its wake-up, a reply in a place (the
     # place's label from the one store read; a lent author with no row in hand is «a place»), an autonomous task by
     # its queue title, else its id. The owner's work is neither stopped nor named.
-    assert clock.clock.stop() == ("Consciousness off: no own wakes, and 1 place only hears until Start. Stopping now: its "
-                                  "wake-up, a reply in Slack · Acme, a reply in a place, «Triage the inbox» and «kid».")
+    assert clock.clock.stop() == ("Consciousness off: Ouroboros acts only when you write to it. 1 place is heard, not "
+                                  "answered. Stopping now: its wake-up, a reply in Slack · Acme, a "
+                                  "reply in a place, «Triage the inbox» and «kid».")
     assert sorted(stopped) == ["focus", "kid", "lent", "own", "started"]
     assert clock.clock.enabled is False
 

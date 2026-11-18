@@ -117,16 +117,21 @@ function stateHtml(place, ui) {
     const options = PLACE_STATES.map(({ value, label }) => ({ value, label }));
     const group = renderSegmentedField({ target: `place-state-${place.id}`, options, modifier: 'data-place-state' });
     // What the chosen state does: a quiet note in the tray; what Silent guarantees is a host fact in the
-    // System voice, under the tray (fills never stack). While consciousness is off it only hears (the host's
-    // `only_hears`), whatever the stored choice says it would do; Active with no kind checked claims no wake (the
-    // list says that setting).
-    const note = place.onlyHears ? tr('places.only_hears.note', 'Consciousness is off: it only hears here.')
+    // System voice, under the tray (fills never stack).
+    // Why it is quiet now, by its one cause, in the host's words (owner 15.11, 5A), with the door where that cause
+    // is changed; the stored choice stays chosen in the strip above it. Active with no kind checked claims no wake
+    // (the list says that setting).
+    const quiet = place.quiet;
+    const door = quiet?.door === 'costs' ? ['open-costs', tr('places.costs.door', 'Costs ›')]
+        : quiet ? ['open-consciousness', tr('places.consciousness.door', 'Consciousness ›')] : null;
+    const note = quiet ? tr(quiet.note, quiet.note)
         : place.state === 'active' && noKindChecked(place) ? tr('places.state.active.unchecked', ACTIVE_UNCHECKED_NOTE)
             : state?.note || 'Its state could not be read.';
+    const doorHtml = door ? ` <button type="button" class="consciousness-inline-link ui-hit-area" data-place-act="${door[0]}">${escapeHtml(door[1])}</button>` : '';
     return `<div class="settings-effort-card place-state">
             <label id="place-state-label">What it does here</label>
             ${group}
-            ${silent ? '' : `<p class="place-state-note">${escapeHtml(note)}</p>`}
+            ${silent && !quiet ? '' : `<p class="place-state-note">${escapeHtml(note)}${doorHtml}</p>`}
         </div>
         ${silent ? `<p class="place-silent-card" role="note">${escapeHtml(`${state.note} ${SILENT_CARD}`)}</p>` : ''}`;
 }
@@ -149,8 +154,8 @@ function wakesHtml(place, ui) {
     return `<p class="place-sheet-note">${fmt('A checked kind calls it here at once, when {service} reports it.', { service })}</p>
         <ul class="place-wake-list">${items}</ul>
         ${vocabulary.includes('from_bot') ? `<p class="place-sheet-note">${tr('places.wake.bots', 'Bot messages need this check; once checked, they can wake it without another checked kind.')}</p>` : ''}
-        ${place.onlyHears ? `<p class="place-sheet-note">${tr('places.wake.consciousness_off', 'While consciousness is off, nothing here wakes it.')}
-            <button type="button" class="consciousness-inline-link ui-hit-area" data-place-act="open-consciousness">${tr('places.consciousness.door', 'Consciousness ›')}</button></p>`
+        ${['off', 'panic'].includes(place.quiet?.cause) ? `<p class="place-sheet-note">${tr('places.wake.consciousness_off', 'While consciousness is off, nothing here wakes it.')}</p>`
+        : place.quiet?.cause === 'allowance' ? `<p class="place-sheet-note">${tr('places.wake.allowance', 'While its allowance is spent, nothing here starts a new wake.')}</p>`
         : place.state === 'paused' ? ''
             : unchecked ? `<p class="place-sheet-note">${tr('places.wake.none', 'No kind is checked: no event starts a new conversation here at once. An ongoing conversation can still wake it.')}</p>`
                 : place.state === 'silent' ? `<p class="place-sheet-note">${tr('places.wake.silent', 'Silent: these still wake it to read and think; what it would say or change here is held.')}</p>` : ''}
@@ -320,7 +325,7 @@ export function placeSheetBodyHtml(place, ui = {}) {
 // The sheet's title is the place as its row names it (placeTitle); its meta line says what the title does not: the
 // service it is on (unless the title is the service) and the state.
 export const placeSheetMetaText = (place, title = '') => [sameWords(title, placeService(place)) ? '' : placeService(place),
-    placeStateWord(place.state)].filter(Boolean).join(' · ');
+    place.quiet?.word || placeStateWord(place.state)].filter(Boolean).join(' · ');
 
 export function sheetShell(titleHtml, metaText, modifier = '') {
     const dialog = document.createElement('dialog');
@@ -529,7 +534,8 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         const quiet = sameWords(title, service) ? '' : service;
         const meta = dialog.querySelector('[data-place-meta]');
         if (meta) meta.innerHTML = `${quiet ? `<span data-i18n-authored>${escapeHtml(quiet)}</span> · ` : ''}${escapeHtml(ui.removed
-            ? tr('places.disconnected.word', 'disconnected') : tr(`places.state.${subject.state}`, placeStateWord(subject.state)))}`;
+            ? tr('places.disconnected.word', 'disconnected') : subject.quiet ? tr(subject.quiet.word, subject.quiet.word)
+                : tr(`places.state.${subject.state}`, placeStateWord(subject.state)))}`;
         // A conversation open in the reader: its name is the title, the place (as its row names it) the meta line.
         if (selected && meta) meta.innerHTML = `<span data-i18n-authored>${escapeHtml([title, quiet].filter(Boolean).join(' · '))}</span>`;
         dialog.querySelector('[data-place-label]').textContent = selected?.label || selected?.address || title;
@@ -654,6 +660,7 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         if (act === 'open-connector') { sheet.close(); openSkillsFor({ skill: current.connector }); return; }
         // Its Start stands with the daily limit it spends under: the door goes there, it starts nothing itself.
         if (act === 'open-consciousness') { sheet.close(); openDashboard({ tab: 'consciousness' }); return; }
+        if (act === 'open-costs') { sheet.close(); openDashboard({ tab: 'costs', row: 'OUROBOROS_CONSCIOUSNESS_DAILY_USD' }); return; }
         if (act === 'edit-circle') { const id = current.circle?.id || ''; sheet.close(); openCircles({ circle: id, edit: Boolean(id) }); return; }
         if (act === 'open-latest') { const latest = recentRooms(ui.roomIndex?.rooms)[0]; if (latest) openRoom(latest); return; }
         if (act === 'all-rooms') { ui.allRooms = true; paint(); return; }

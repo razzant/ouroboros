@@ -51,9 +51,17 @@ def registered(monkeypatch):
 
 
 def delivered(tmp_path, name, **args):
-    from ouroboros.extension_process_runner import _RESULT_CAP, _call_tool, _write_child_result
+    from ouroboros.extension_process_runner import (
+        _RESULT_CAP,
+        _apply_tool_context_payload,
+        _call_tool,
+        _write_child_result,
+    )
+    from ouroboros.tools.registry import ToolContext
 
-    reply = asyncio.run(_call_tool(name, args, tmp_path, Path(__file__).resolve().parents[1]))
+    # The tool context as the child's entry builds it, here from an empty payload.
+    ctx = _apply_tool_context_payload(ToolContext(repo_dir=Path(__file__).resolve().parents[1], drive_root=tmp_path), {})
+    reply = asyncio.run(_call_tool(name, args, ctx))
     path = tmp_path / "child.json"
     _write_child_result({"result_path": str(path)}, {"ok": True, "result": reply})
     assert path.stat().st_size <= _RESULT_CAP
