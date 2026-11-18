@@ -905,11 +905,14 @@ def _capture_context_core(
     # Knowledge leads the changing block (its edits never cost the cached story) and rides whole
     # only where the view holds it; a child or nanny starts with its outline (every note by address
     # and title) and meets the whole index with its first accepted delegation (delegation_knowledge_index).
+    from ouroboros.memory_view_events import situation_names
+
     project_id = resolve_project_id(task)
     held_resume = getattr(ctx, "_held_note_capture", None)
-    global_knowledge = {"bodies": {}} if held_resume is None and view_spec.knowledge else {}
+    global_knowledge = ({"bodies": {}, "names": situation_names(task, view_spec.room_id)}
+                        if held_resume is None and view_spec.knowledge else {})
     head_parts = (build_knowledge_sections(context_env, project_id=project_id, global_capture=global_knowledge,
-                                           held_companions=(held_resume or {}).get("companions"))
+                                           held_capture=held_resume)
                   if view_spec.knowledge else
                   helper_navigation_sections(canonical_root, project_id, global_capture=global_knowledge))
     if design_nav:

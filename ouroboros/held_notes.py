@@ -1,6 +1,7 @@
 """Captured heads of the global notes that claim the acting focus's situation."""
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from dataclasses import asdict, dataclass, replace
@@ -18,6 +19,7 @@ from ouroboros.section_floor import HostSection
 log = logging.getLogger(__name__)
 _HEADING = "## Held knowledge notes"
 _HEAD_END = re.compile(rb"^## ", re.MULTILINE)
+_INDEX_FIELDS = ("topic", "title", "state", "archive_error", "read_error", "parse_error")
 CAPTURE_KEY = "held_note_capture"
 
 
@@ -31,21 +33,37 @@ class HeldNoteSection(HostSection):
     summary: str = ""
     outline_has_summary: bool = False
     index_has_summary: bool = False
+    source_chars: int = 0
+    index_row: Mapping[str, Any] | None = None
 
     def __new__(cls, section_id, full_text, *_args, **_kwargs):
         return super().__new__(cls, section_id, full_text)
 
     def __getnewargs__(self):
         return (*super().__getnewargs__(), self.topic, self.revision, self.window_label,
-                self.summary, self.outline_has_summary, self.index_has_summary)
+                self.summary, self.outline_has_summary, self.index_has_summary, self.source_chars, self.index_row)
 
     def with_index(self, row: Mapping, navigation: Mapping) -> HeldNoteSection:
         """Locate the authored summary in either captured form of the index."""
         same = row.get("summary") == self.summary and row.get("state") == "active"
         outline = navigation.get("outline", False) and same and knowledge.outline_keeps_summary(row.get("type"))
         resident = same if navigation.get("whole") else outline
+        index_row = self.index_row
+        if row:
+            index_row = {key: row[key] for key in _INDEX_FIELDS if key in row}
+            index_row["type"] = "person" if knowledge.outline_keeps_summary(row.get("type")) else None
+            index_row["summary"] = row.get("summary") if isinstance(row.get("summary"), str) else None
         return replace(self, operative_view=self._summary_view(resident), outline_has_summary=outline,
-                       index_has_summary=resident)
+                       index_has_summary=resident, index_row=index_row)
+
+    def recheck_reader(self, ctx: Any, root: Path) -> HeldNoteSection:
+        if not self.reader or not (restriction := _reader_restriction(ctx, root, self.topic, self.revision,
+                                                                     self.source_chars)):
+            return self
+        label = self.window_label or self.full_text.rsplit("\n", 1)[0]  # the overview has one reference line
+        prefix = label.removesuffix(f"Exact reader: {self.reader}")
+        return replace(self, full_text=prefix + f"Exact reader unavailable: {restriction}" + self.full_text[len(label):],
+                       reader="", window_label="", operative_view=None)
 
     def summary_is_resident(self, addressed: Mapping) -> bool:
         return self.outline_has_summary if "knowledge_index" in addressed else self.index_has_summary
@@ -71,11 +89,21 @@ class HeldNoteSection(HostSection):
                                    "topic": self.topic, "scope": "global", "version": self.revision}}}}
 
 
-def frame_key(mode: str, owner: str, window: int, record: Any, reserve: int) -> list:
-    """The mode and its physical frame, independent of the route's observation date."""
+def frame_key(mode: str, owner: str, window: int, record: Any, reserve: int, ratio: float, request_tokens: int) -> list:
+    """The mode, its physical frame and the uncut request price used to fit it."""
     if record and record.usable is not None:
         window = replace(record, reserve=reserve).total_equivalent
-    return [mode, owner, window, record.boundary if record else None, reserve]
+    return [mode, owner, window, record.boundary if record else None, reserve, ratio, request_tokens]
+
+
+def can_replay_frame(core: Any, saved: list, current: list, receipts: Mapping) -> bool:
+    if saved != current or any(not part.window_label for part in core.dynamic_sections
+                               if isinstance(part, HeldNoteSection) and part.section_id in receipts):
+        return False
+    if index_receipt := receipts.get("knowledge_index"):
+        index = next(part for part in core.dynamic_head_sections if part.section_id == "knowledge_index")
+        return index_receipt["source_ref"]["sha256"] == hashlib.sha256(index.full_text.encode("utf-8")).hexdigest()
+    return True
 
 
 def restored_capture(state: Mapping) -> dict:
@@ -92,18 +120,19 @@ def continuation_capture(plan: Any, mode: str | None) -> dict:
         return {}
     mode = mode if mode in {"max", "low", "nano"} else plan.initial_mode
     companions = {}
-    if any(part.summary for part in entries):
-        companions.update((part.section_id, asdict(part)) for part in core.dynamic_head_sections
-                          if part.section_id == "knowledge_index")
     if any(part.topic == knowledge.OVERVIEW_TOPIC for part in entries):
         companions["shared_understanding"] = asdict(core.dynamic_head_sections[0])
     _, reserve = context_mode_limits(mode, plan.preferred_mode, plan.output_reserve_tokens,
                                      working_reserve_tokens=plan.working_reserve_tokens)
-    receipts = plan.projection(mode).memory_facts.get("host_sections_addressed", ())
+    projection = plan.projection(mode)
+    facts = projection.memory_facts
+    request_tokens = facts.get("held_note_request_tokens")
     return {CAPTURE_KEY: {
         "entries": [asdict(part) for part in entries], "companions": companions,
-        "frame": frame_key(mode, plan.preferred_mode, plan.window_tokens, plan.window_record, reserve),
-        "receipts": [row for row in receipts if row.get("held_note_form") or row["section_id"] in companions],
+        "frame": frame_key(mode, plan.preferred_mode, plan.window_tokens, plan.window_record, reserve,
+                           projection.calibration_ratio, request_tokens) if request_tokens is not None else None,
+        "receipts": [row for row in facts.get("host_sections_addressed", ())
+                     if row.get("held_note_form") or row["section_id"] == "knowledge_index"],
     }}
 
 
@@ -119,13 +148,13 @@ def note_head(source: MarkdownSource) -> str:
     return source.raw[start:heading.start() if heading else end].decode("utf-8")
 
 
-def _reader_restriction(ctx: Any, note: knowledge.KnowledgeNote, revision: str) -> str:
+def _reader_restriction(ctx: Any, root: Path, topic: str, revision: str, length: int) -> str:
     from ouroboros.tool_access_paths import workspace_mode_block_reason
     from ouroboros.tools.knowledge import _address, _knowledge_read, _range
     from ouroboros.tools.registry_core import _presence_bound_args
     from ouroboros.tools.registry_guards import _capability_resource_guard_result
 
-    args = {"topic": note.address.topic, "scope": "global", "version": revision}
+    args = {"topic": topic, "scope": "global", "version": revision}
     bound, refusal = _presence_bound_args(ctx, "knowledge_read", args)
     if refusal:
         return refusal
@@ -138,9 +167,9 @@ def _reader_restriction(ctx: Any, note: knowledge.KnowledgeNote, revision: str) 
         call.apply_defaults()
         effective = call.arguments
         address = _address(ctx, effective["topic"], effective["scope"])
-        length = len(note.text)
         start, end, _ = _range(length, effective["start_char"], effective["end_char"])
-        if (address == note.address and effective["version"] == revision and effective["view"] in ("note", None, "")
+        if (address.canonical_root == root.resolve() and address.scope == "global" and address.topic == topic
+                and effective["version"] == revision and effective["view"] in ("note", None, "")
                 and effective["fingerprint"] in (None, "") and (start, end) == (0, length)):
             return ""
     except (OSError, TypeError, ValueError):
@@ -155,7 +184,8 @@ def _entry(note: knowledge.KnowledgeNote, matched: list[str], *, first: bool, ct
         f"### {note.title}\n\nGlobal note: memory/knowledge/{topic}.md\n"
         f"Matched claims: {names}\nRevision: {revision}\n")
     reader = f"knowledge_read(topic={topic!r}, scope='global', version={revision!r})"
-    restriction = _reader_restriction(ctx, note, revision)
+    length = len(note.text)
+    restriction = _reader_restriction(ctx, note.address.canonical_root, topic, revision, length)
     if not restriction:
         try:
             knowledge_versions.retain_held_version(note, revision)
@@ -176,7 +206,7 @@ def _entry(note: knowledge.KnowledgeNote, matched: list[str], *, first: bool, ct
         if reader:
             window_label = label
     return HeldNoteSection("held_note:" + topic, full, reader=reader, topic=topic, revision=revision,
-                           window_label=window_label, summary=note.summary)
+                           window_label=window_label, summary=note.summary, source_chars=length)
 
 
 def turn_sections(root: Path, task: Mapping[str, Any], spec: Any, navigation: Mapping,
@@ -186,15 +216,15 @@ def turn_sections(root: Path, task: Mapping[str, Any], spec: Any, navigation: Ma
         return []
     inventory = navigation.get("inventory", ())
     if (captured := getattr(ctx, "_held_note_capture", None)) is not None:
-        entries = [HeldNoteSection(**entry) for entry in captured["entries"]]
-        if "companions" in captured or not entries:
-            return entries
+        if not captured["entries"]:
+            return []
         rows = {row["topic"]: row for row in inventory}
-        return [entry.with_index(rows.get(entry.topic, {}), navigation) for entry in entries]
+        return [HeldNoteSection(**entry).recheck_reader(ctx, root).with_index(rows.get(entry["topic"], {}), navigation)
+                for entry in captured["entries"]]
 
     claims = knowledge.active_claims(root, inventory=inventory)
     matches: dict[knowledge.KnowledgeAddress, list[str]] = {}
-    for name in situation_names(task, spec.room_id):
+    for name in navigation["names"] if "names" in navigation else situation_names(task, spec.room_id):
         for address in claims.get(name, ()):
             matches.setdefault(address, []).append(name)
     if not matches:

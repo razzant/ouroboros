@@ -865,13 +865,14 @@ def _held_note_steps(sections, receipts, fits, *, form="summary"):
 
     addressed = section_views(sections, receipts)
     positions = {row["section_id"]: index for index, row in enumerate(receipts)}
+    entries = [part for part in sections if isinstance(part, HeldNoteSection)]
+    if form == "reader":
+        # A resident summary already kept its meaning. Spend the label's small saving last.
+        entries.sort(key=lambda part: part.section_id in positions and part.summary_is_resident(addressed))
     saved = 0
-    for part in sections:
-        if not isinstance(part, HeldNoteSection):
-            continue
+    for part in entries:
         position = positions.get(part.section_id)
-        if position is not None and (form != "reader" or receipts[position].get("held_note_form") != "summary"
-                                     or part.summary_is_resident(addressed)):
+        if position is not None and (form != "reader" or receipts[position].get("held_note_form") != "summary"):
             continue
         row = part.window_receipt(form)
         short = part.view_for_receipt(row, addressed)

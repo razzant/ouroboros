@@ -883,8 +883,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     shape; ``sized`` is the start's whole request as its density was sized, ``(rows, schemas, characters)``.
     """
     from dataclasses import replace
+    from functools import cache
     from ouroboros import memory_floor as floor
-    from ouroboros.held_notes import HeldNoteSection, frame_key
+    from ouroboros.held_notes import HeldNoteSection, can_replay_frame, frame_key
     from ouroboros.memory_view import FULL_VIEW, json_chars, room_chars, snapshot_from_json, story_chars
     from ouroboros.tool_policy import select_tool_schemas
 
@@ -897,19 +898,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     snapshot = snapshot_from_json(core.memory_view_json) if core.memory_view_json else None
     held_heads = any(isinstance(part, HeldNoteSection) for part in core.dynamic_sections)
     saved = core.held_note_resume or {}
-
-    def restores_frame(selected):
-        if kept is not None or not saved.get("frame"):
-            return False
-        _, reserve = context_budget.context_mode_limits(selected, preferred, output_reserve,
-                                                        working_reserve_tokens=working_reserve_tokens)
-        return saved["frame"] == frame_key(selected, preferred, window_tokens if known_window else 0,
-                                            window_record, reserve)
-
-    if not (select or start) and saved.get("frame"):
-        restored_mode = saved["frame"][0]
-        if restored_mode in floor.MODES and restores_frame(restored_mode):
-            mode = restored_mode
+    saved_frame = saved.get("frame")
+    saved_rows = {row["section_id"]: row for row in saved.get("receipts", ())}
     names = [schema["function"]["name"] for schema in tool_schemas or []] if resident else nano_base
     standing = resident or nano_base is None
 
@@ -924,6 +914,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     held = (kept or {}).get(start or preferred) or FULL_VIEW
     story_before, room_before = (story_chars(snapshot, held), room_chars(snapshot, held)) if snapshot else (0, 0)
+
+    @cache
+    def tools_for(selected):
+        return select_tool_schemas(tool_schemas or [], context_mode=selected, schema_names=names, standing=standing)
 
     # One serialization per request shape, its schemas inside; a host section's shorter form and a memory text then add
     # or take only their own characters (JSON escapes per character, and these texts are embedded verbatim).
@@ -946,9 +940,25 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         full = {part.section_id: part.full_text for part in sections[selected]}
         forms = sum(escaped(short) - escaped(full[name]) for name, short in addressed.items())
         return max(1, (shapes[key] + forms + story + room + 3) // 4) + envelope_overhead_tokens
+
+    def request_cost(selected, sent):
+        return measure(selected, sent, {}, story_before, room_before)
+
+    def restores_frame(selected, sent, reserve):
+        if kept is not None or not (held_heads and saved_frame and selected == saved_frame[0]):
+            return False
+        current = frame_key(selected, preferred, window_tokens if known_window else 0, window_record,
+                            reserve, ratio, request_cost(selected, sent))
+        return can_replay_frame(core, saved_frame, current, saved_rows)
+
+    if not (select or start) and saved_frame and saved_frame[0] in floor.MODES:
+        restored_mode = saved_frame[0]
+        _, reserve = context_budget.context_mode_limits(restored_mode, preferred, output_reserve,
+                                                        working_reserve_tokens=working_reserve_tokens)
+        if restores_frame(restored_mode, tools_for(restored_mode), reserve):
+            mode = restored_mode
     asked = (saving or {}).get(start or preferred, 0)  # the shown request's saving, in estimator tokens
-    original_fixed = measure(start or preferred, select_tool_schemas(tool_schemas or [], context_mode=mode,
-        schema_names=names, standing=standing), section_views(sections[start or preferred], previous))
+    original_fixed = measure(start or preferred, tools_for(mode), section_views(sections[start or preferred], previous))
     original_reserve = context_budget.context_mode_limits(mode, preferred, output_reserve, working_reserve_tokens=working_reserve_tokens)[1]
     def owed(fixed, reserve):  # what a frame still owes of it once its books, host forms and reserve paid their part
         return max(0, asked - (original_fixed - fixed) - math.floor((original_reserve - reserve) / max(ratio, 0.01)))
@@ -977,14 +987,15 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     def frame(selected):
         nonlocal receipts
         prior = host_receipts(selected, previous)
-        available, replay = sections[selected], restores_frame(selected)
-        if replay:
-            prior = saved["receipts"]
-            if "knowledge_index" in saved["companions"] and not any(row["section_id"] == "knowledge_index" for row in prior):
-                available = tuple(part for part in available if part.section_id != "knowledge_index")
-        sent = select_tool_schemas(tool_schemas or [], context_mode=selected, schema_names=names, standing=standing)
+        available = sections[selected]
+        sent = tools_for(selected)
         target, reserve = context_budget.context_mode_limits(selected, preferred, output_reserve,
                                                             working_reserve_tokens=working_reserve_tokens)
+        replay = restores_frame(selected, sent, reserve)
+        if replay:
+            prior = list(saved_rows.values())
+            if "knowledge_index" not in saved_rows:
+                available = tuple(part for part in available if part.section_id != "knowledge_index")
         record = replace(window_record, reserve=reserve) if window_record else None
         window = ((record.admitted_equivalent if admitted else record.total_equivalent)
                   if record and record.usable is not None else window_tokens)
@@ -1142,7 +1153,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         rows = host_receipts(m, receipts)
         system = _system_blocks(whole_core, whole_governance[form[m]], story, room, m,
                                 section_views(sections[m], rows), whole)
-        contents[m] = system, {**receipt, "host_sections_addressed": rows} if rows else receipt
+        facts = {**receipt, "held_note_request_tokens": request_cost(mode, sent)} if held_heads and m == mode else receipt
+        contents[m] = system, {**facts, "host_sections_addressed": rows} if rows else facts
     return contents, mode
 
 

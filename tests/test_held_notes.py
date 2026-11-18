@@ -10,12 +10,13 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from ouroboros import context, context_budget, context_fit, held_notes, knowledge, knowledge_versions, memory_view
+from ouroboros import context, context_budget, context_fit, held_notes, knowledge, knowledge_versions, memory_floor, memory_view
 from ouroboros.agent import Env, _restore_saved_clocks
 from ouroboros.memory import Memory
 from ouroboros.owner_wait import checkpoint_owner_wait, load_owner_wait, set_owner_wait
 from ouroboros.projects_registry import create_project
 from ouroboros.realtime_setup import input_from_context_plan
+from ouroboros.section_floor import section_views
 from ouroboros.tools.knowledge import _knowledge_read
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.tools.tool_context import ToolContext
@@ -301,6 +302,45 @@ def test_admitted_low_rebind_prices_emergency_nano_before_deciding_whether_it_bu
     assert no_room.projected_tokens_with_tools("low", []) + RESERVE > 18_000
 
 
+@pytest.mark.parametrize("deciding_cost", ["memory", "reserve"])
+def test_admitted_rebind_compares_both_full_prices(world, deciding_cost):
+    note = _write(world, "head", "A held head without a shorter reader. " * 1_000)
+    ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"],
+                      task_contract={"disabled_tools": ["knowledge_read"]})
+    memory = synthetic.snapshot(mark_count=1)
+    captured = replace(_core(world, ctx=ctx), section_root="", memory_view_json=memory_view.snapshot_json(memory))
+
+    def compare(low_connections, nano_connections, reserve):
+        core = replace(captured, connections=(low_connections, nano_connections))
+        initial = _plan(world, 130_000, mode="low", core=core)
+        messages = initial.messages_for("low")
+        low_input = initial.projected_tokens_with_tools("low", [])
+        window = low_input + reserve - 16
+        fit = dict(window_tokens=window, known_window=True, ratio=1.0, output_reserve=reserve, start_mode="low",
+                   tool_schemas=[], current_messages=messages, admitted=True)
+        plan = initial.reproject_for_route(**fit)
+        nano = initial.reproject_for_route(**fit, select_mode="nano")
+        assert note.revision in _held(plan) and plan.messages_for(plan.initial_mode)[1:] == messages[1:]
+        return plan, nano, low_input
+
+    if deciding_cost == "memory":
+        low, nano, _ = compare("Low connections. " * 4, "", RESERVE)
+        assert low.initial_mode == "low"
+        assert "### Physical floor" in _blocks(nano)[-1]["text"]
+        assert nano.projected_tokens_with_tools("nano", []) > low.projected_tokens_with_tools("low", [])
+        roomy_nano, _, _ = compare("Low connections. " * 40, "", RESERVE)
+        assert roomy_nano.initial_mode == "nano"
+    else:
+        low, nano, _ = compare("", "Nano connections. " * 30, RESERVE)
+        assert low.initial_mode == "low"
+        assert nano.projected_tokens_with_tools("nano", []) > low.projected_tokens_with_tools("low", [])
+        reply = context_budget.NANO_MIN_HEADROOM_TOKENS + 1_000
+        trimmed_reserve, _, low_input = compare("", "Nano connections. " * 30, reply)
+        assert trimmed_reserve.initial_mode == "nano"
+        nano_input = trimmed_reserve.projected_tokens_with_tools("nano", [])
+        assert low_input < nano_input < low_input + reply - context_budget.NANO_MIN_HEADROOM_TOKENS
+
+
 def test_physical_emergency_takes_only_the_inline_summary_past_the_bound(world):
     _write(world, "a-resident", "Person's head. " * 2_000, type="person", summary="This person stays in the index.")
     summary = "Ordinary authored telling. " * 14
@@ -329,6 +369,31 @@ def test_physical_emergency_takes_only_the_inline_summary_past_the_bound(world):
     assert outside.messages_for("nano")[1]["content"] == TASK["text"] + "x" * (padding + 4)
     assert "This person stays in the index." in _blocks(outside)[-1]["text"] and summary not in _held(outside)
     assert later_summary in _held(outside)
+    part = next(part for part in captured.dynamic_sections if part.section_id == "held_note:b-inline")
+    for plan in (inside, outside):
+        receipts = plan.nano_projection.memory_facts["host_sections_addressed"]
+        final = section_views((*captured.dynamic_head_sections, part), receipts)[part.section_id]
+        [receipt] = [row for row in receipts if row["section_id"] == part.section_id]
+        assert receipt["tokens_saved"] == memory_floor.view_tokens(part.full_text) - memory_floor.view_tokens(final)
+
+
+def test_resident_person_label_yields_for_the_whole_assignment_only_at_the_emergency_floor(world):
+    summary = "The person's authored summary stays in the index."
+    _write(world, "person", "Held person head. " * 2_000, type="person", summary=summary)
+    captured = _core(world)
+    window = 8_700
+    plain = _plan(world, window, mode="nano", core=captured)
+    assert _cuts(plain) == [("person", "summary")]
+    padding = 4 * (window - RESERVE - plain.projected_tokens_with_tools("nano", []))
+    assert padding >= 0
+
+    for extra, form in ((0, "summary"), (4, "reader")):
+        assignment = TASK["text"] + "x" * (padding + extra)
+        plan = _plan(world, window, mode="nano", core=replace(captured, user_content_json=json.dumps(assignment)))
+        assert plan.messages_for("nano")[1]["content"] == assignment
+        assert plan.projected_tokens_with_tools("nano", []) + RESERVE <= window
+        assert _cuts(plan) == [("person", form)]
+        assert _blocks(plan)[-1]["text"].count(summary) == 1 and summary not in _held(plan)
 
 
 def test_prepared_voice_prices_its_work_room_while_a_fitting_running_rebind_keeps_the_head(world, host_world, monkeypatch):
@@ -466,6 +531,36 @@ def test_only_an_admitted_call_for_the_complete_bound_revision_can_shorten_a_hea
                      {"version": earlier.revision}, {"view": "outline"}, {"start_char": 10, "end_char": 20}):
         fit(grant(**bindings), restriction="Presence argument bindings",
             result_check=lambda result: result.status == "ok" and not complete(result))
+
+
+def test_cold_restore_rechecks_the_saved_reader_against_the_current_grants(world, monkeypatch):
+    head = "These held words must stay whole when the saved reader is denied. " * 390
+    note = _write(world, "restored-reader", head, summary="An authored summary.")
+    initial = _plan(world, 16_000, mode="low")
+    assert _cuts(initial) == [(note.address.topic, "summary")]
+    checkpoint = json.loads(json.dumps(held_notes.continuation_capture(initial, "low")))
+    args = {"topic": note.address.topic, "scope": "global", "version": note.revision}
+
+    for allowed in (True, False):
+        registry = ToolRegistry(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root)
+        ctx = registry._ctx
+        ctx.task_id = TASK["id"]
+        ctx.model_wait_context = None
+        ctx.task_contract = {} if allowed else {"disabled_tools": ["knowledge_read"]}
+        _restore_saved_clocks(ctx, TASK, checkpoint)
+        fresh = _plan(world, 16_000, mode="low", ctx=ctx)
+        messages = initial.messages_for("low")
+        sent = _rebind(monkeypatch, ctx, fresh, messages, 16_000)
+        shown = messages[0]["content"][-1]["text"]
+        result = registry.execute_result("knowledge_read", args)
+        if allowed:
+            assert result.status == "ok" and result.text.endswith(note.text)
+            assert _held(sent) == _held(initial) and "Exact reader: knowledge_read(" in shown and head not in shown
+            assert _cuts(sent) == [(note.address.topic, "summary")]
+        else:
+            assert result.code == "RESOURCE_CONSTRAINT_BLOCKED"
+            assert not _cuts(sent) and head in shown and "Exact reader: knowledge_read(" not in shown
+            assert "Exact reader unavailable:" in shown and "task_contract.disabled_tools" in shown
 
 
 def test_reader_retains_an_unjournaled_revision_before_the_note_moves(world, monkeypatch):
@@ -647,7 +742,9 @@ def test_failed_copy_can_only_withhold_a_reader_without_verified_journal_bytes(w
 
 def test_navigation_hands_a_cold_or_edited_body_to_the_head_and_reopens_a_changed_file(world, monkeypatch):
     note = _write(world, "read-once", "First revision.")
+    other = _write(world, "other-room", "Another room's words. " * 1_000, claims=("room:01",))
     knowledge._NAVIGATION.pop(note.address, None)
+    knowledge._NAVIGATION.pop(other.address, None)
     monkeypatch.setattr(knowledge, "time", SimpleNamespace(time_ns=lambda: note.address.path.stat().st_ctime_ns + 10**10))
     reads, read_bytes = [], Path.read_bytes
 
@@ -657,7 +754,16 @@ def test_navigation_hands_a_cold_or_edited_body_to_the_head_and_reopens_a_change
         return read_bytes(path)
 
     monkeypatch.setattr(Path, "read_bytes", counted)
-    assert "First revision." in _held(_plan(world)) and len(reads) == 1
+    handoffs, turn_sections = [], held_notes.turn_sections
+
+    def handoff(root, task, spec, navigation, *, ctx):
+        handoffs.append(set(navigation.get("bodies", ())))
+        return turn_sections(root, task, spec, navigation, ctx=ctx)
+
+    monkeypatch.setattr(held_notes, "turn_sections", handoff)
+    cold = _plan(world)
+    assert "First revision." in _held(cold) and len(reads) == 1
+    assert handoffs == [{note.address}] and "other-room" in _blocks(cold)[-1]["text"] and "other-room" not in _held(cold)
     assert note.address in knowledge._NAVIGATION
     reads.clear()
     assert "First revision." in _held(_plan(world)) and len(reads) == 1
@@ -678,26 +784,64 @@ def test_navigation_hands_a_cold_or_edited_body_to_the_head_and_reopens_a_change
     assert "At capture." in _held(_plan(world)) and len(reads) == 2
 
 
-def test_reprojection_voice_and_cold_resume_keep_the_sent_forms_and_their_companions(world, monkeypatch):
+def test_a_saved_form_replays_only_at_the_same_density_and_request_cost(world, monkeypatch):
+    head = "The held head before the frame changed. " * 1_200
+    _write(world, "saved", head, summary="An authored summary.")
+    ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.6)
+    tight = _plan(world, 12_000, mode="low", ctx=ctx)
+    assert _cuts(tight) == [("saved", "summary")]
+    window = 48_000
+    carried = _rebind(monkeypatch, ctx, tight, tight.messages_for("low"), window)
+    assert _cuts(carried) == _cuts(tight)
+    checkpoint = json.loads(json.dumps(held_notes.continuation_capture(carried, "low")))
+    resumed = replace(tight.core, held_note_resume=checkpoint[held_notes.CAPTURE_KEY])
+
+    same = _plan(world, window, mode="low", core=resumed)
+    recomputed = _plan(world, window, mode="low", core=tight.core)
+    assert _cuts(same) == _cuts(carried) and _held(same) == _held(carried)
+    assert not _cuts(recomputed) and head in _held(recomputed)
+
+    cost_changed = replace(resumed, user_content_json=json.dumps(TASK["text"] + " More owner words." * 20))
+    repriced = _plan(world, window, mode="low", core=cost_changed)
+    assert not _cuts(repriced) and _held(repriced) == _held(recomputed)
+
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    recalibrated = _plan(world, window, mode="low", core=resumed)
+    assert not _cuts(recalibrated) and _held(recalibrated) == _held(recomputed)
+
+
+@pytest.mark.parametrize("outlined", [False, True], ids=["whole-index", "outlined-index"])
+def test_reprojection_voice_and_cold_resume_keep_held_rows_and_refresh_unrelated_addresses(world, monkeypatch, outlined):
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
 
     head = "First version of the held head. " * 1_200
-    note = _write(world, "moving", head, summary="First summary.")
+    note = _write(world, "moving", head, type="person", title="First held title", summary="First summary.")
     overview = _write(world, "overview", "Protected overview before the wait.\n\n## Still protected\nBelow the head.")
+    if outlined:
+        previous = _write(world, "earlier-entry", "Prior unclaimed note.", claims=(),
+                          summary="A long summary only present in the full navigation. " * 1_800)
     ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
     initial = ctx.context_fit_plan = _plan(world, 12_000, mode="low", ctx=ctx)
     assert _cuts(initial) == [("moving", "summary")] and "The summary is in the knowledge index." in _held(initial)
+    assert ("Outline: every active note" in _blocks(initial)[-1]["text"]) is outlined
     ctx.active_context_mode = initial.initial_mode
     ctx.task_attempt = 1
     messages = initial.messages_for(initial.initial_mode)
+    assert "current-entry" not in messages[0]["content"][-1]["text"]
     write_task_result(ctx.drive_root, ctx.task_id, STATUS_RUNNING, chat_id=TASK["chat_id"])
     checkpoint = checkpoint_owner_wait(ctx, messages, {}, {}, 1, [], set())
     set_owner_wait(ctx.drive_root, ctx.task_id, {**checkpoint, "state": "waiting"})
     voice = input_from_context_plan(initial, model="voice-fixture", selected_tools=[], output_allowance_tokens=RESERVE)
     assert HEADING + _held(initial) in json.loads(voice.messages_json)[0]["content"][-1]["text"]
 
-    changed = _write(world, "moving", "Edited version of the held head.", revision=note.revision, summary="New summary.")
+    changed = _write(world, "moving", "Edited version of the held head.", revision=note.revision,
+                     type="person", title="New held title", summary="New summary.")
     new_overview = _write(world, "overview", "Protected overview after the wait.", revision=overview.revision)
+    if outlined:
+        previous.address.path.unlink()
+    new_summary = previous.summary if outlined else "A new index entry."
+    _write(world, "current-entry", "An ordinary note created during the wait.", claims=(), summary=new_summary)
     fresh = _plan(world, 150_000, mode="low")
     assert changed.revision in _held(fresh) and "Edited version" in _held(fresh)
     assert new_overview.revision in _held(fresh) and "Protected overview after the wait." in _blocks(fresh)[-1]["text"]
@@ -713,14 +857,26 @@ def test_reprojection_voice_and_cold_resume_keep_the_sent_forms_and_their_compan
     restored = [*persisted["messages"], later]
     resumed = _rebind(monkeypatch, cold, same_frame, restored, 12_000)
     assert restored[-1] == later and _cuts(resumed) == _cuts(initial) and _held(resumed) == _held(initial)
-    original_companions = {part.section_id: part.full_text for part in initial.core.dynamic_head_sections}
-    for name in ("knowledge_index", "shared_understanding"):
-        part = next(part for part in resumed.core.dynamic_head_sections if part.section_id == name)
-        assert part.full_text == original_companions[name] and part.full_text in restored[0]["content"][-1]["text"]
     block = restored[0]["content"][-1]["text"]
     assert block.count("First summary.") == 1 and "New summary." not in block
+    assert "New held title" not in block and "current-entry" in block and "earlier-entry" not in block
+    if outlined:
+        assert "moving — First held title" in block
+        [index] = [row for row in resumed.low_projection.memory_facts["host_sections_addressed"]
+                   if row["section_id"] == "knowledge_index"]
+        assert any(part.section_id == "knowledge_index" and "current-entry" in part.full_text
+                   for part in resumed.core.dynamic_head_sections)
+        assert index["source_ref"]["sha256"] != next(
+            row["source_ref"]["sha256"] for row in initial.low_projection.memory_facts["host_sections_addressed"]
+            if row["section_id"] == "knowledge_index")
+    else:
+        assert "[First held title](<moving.md>)" in block and new_summary in block
     assert overview.revision in _held(resumed) and new_overview.revision not in block
     assert block.count("Protected overview before the wait.") == 1 and "Below the head." in block
+    [receipt] = [row for row in resumed.low_projection.memory_facts["host_sections_addressed"] if row.get("held_note_form")]
+    reader = receipt["source_ref"]["read"]
+    registry = ToolRegistry(repo_dir=cold.repo_dir, drive_root=cold.drive_root)
+    assert registry.execute(reader["tool"], reader["arguments"]).endswith(note.text)
 
     wider = _plan(world, 150_000, mode="low", ctx=cold)
     assert not _cuts(wider) and head in _held(wider) and note.revision in _held(wider)

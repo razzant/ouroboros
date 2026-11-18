@@ -67,21 +67,22 @@ def build_knowledge_sections(
     project_id: str = "",
     warn_large: bool = False,
     global_capture: Optional[dict] = None,
-    held_companions: Optional[dict] = None,
+    held_capture: Optional[dict] = None,
 ) -> List[str]:
     from ouroboros.knowledge import OVERVIEW_TOPIC, resolve_knowledge_address
 
     pid = str(project_id or "").strip()
     global_address = resolve_knowledge_address(env.drive_path("memory").parent, OVERVIEW_TOPIC, "global")
-    companions = held_companions or {}
+    captured = held_capture or {}
+    companions = captured.get("companions", {})
     if saved := companions.get("shared_understanding"):
         section, overview = HostSection(**saved), None
     else:
         section, overview = _shared_understanding(global_address)
+    held_rows = {row["topic"]: row for entry in captured.get("entries", ()) if (row := entry.get("index_row"))}
     sections = [section]
     sections.extend(knowledge_navigation_sections(global_address.canonical_root, pid, overview=overview,
-                                                  warn_large=warn_large, global_capture=global_capture,
-                                                  captured_index=companions.get("knowledge_index")))
+                                                  warn_large=warn_large, global_capture=global_capture, held_rows=held_rows))
     if pid:
         # Bounded per-project journal tail + workpad (multi-project, v6.32.0):
         # the project's durable progress memory rides along with its knowledge.
@@ -112,12 +113,18 @@ def build_knowledge_sections(
     return sections
 
 
-def _navigation_views(address, overview, *, whole: bool, global_capture: Optional[dict]):
+def _navigation_views(address, overview, *, whole: bool, global_capture: Optional[dict], held_rows=None):
     from ouroboros.knowledge import inventory_knowledge, knowledge_index_views
 
     if global_capture is None or address.scope != "global":
         return knowledge_index_views(address, overview=overview, whole=whole)
-    rows = inventory_knowledge(address, navigation=True, known_note=overview, bodies=global_capture.get("bodies"))
+    rows = inventory_knowledge(address, navigation=True, known_note=overview, bodies=global_capture.get("bodies"),
+                               body_claims=global_capture.get("names", ()))
+    if held_rows:
+        # Keep the referenced rows alongside the current addresses, in shelf order.
+        current = {row["topic"]: row for row in rows}
+        current.update(held_rows)
+        rows = tuple(current[topic] for topic in sorted(current, key=lambda topic: f"{topic}.md".split("/")))
     global_capture.update(inventory=rows, overview=overview)
     forms = knowledge_index_views(address, overview=overview, whole=whole, inventory=rows)
     global_capture.update(whole=whole, outline=True)
@@ -127,7 +134,7 @@ def _navigation_views(address, overview, *, whole: bool, global_capture: Optiona
 @timed_section("knowledge.navigation")
 def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: Any = None,
                                   warn_large: bool = False, global_capture: Optional[dict] = None,
-                                  captured_index: Optional[dict] = None) -> List[str]:
+                                  held_rows: Optional[dict] = None) -> List[str]:
     """One knowledge navigation rendering for integrating contexts and first delegations.
 
     Captured full/outline forms retain the same source addresses and canonical root.
@@ -146,14 +153,11 @@ def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: 
         knowledge_indexes.append((project_address,
                                   f"## Project knowledge ({pid})", "project knowledge index"))
     for address, header, label in knowledge_indexes:
-        if address is global_address and captured_index:
-            sections.append(HostSection(**captured_index))
-            continue
         # Every shelf and overview branch projects the current source state, even
         # when a previous writer could not publish its generated index.
         reader = f"knowledge_list(scope={address.scope!r})"
         try:
-            text, outline = _navigation_views(address, overview, whole=True, global_capture=global_capture)
+            text, outline = _navigation_views(address, overview, whole=True, global_capture=global_capture, held_rows=held_rows)
         except (OSError, UnicodeDecodeError) as exc:
             text = outline = f"Knowledge navigation unavailable: {type(exc).__name__}; {reader}."
         if warn_large and len(text) > _LARGE_CONTEXT_SECTION_CHARS:

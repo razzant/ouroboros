@@ -335,7 +335,8 @@ def _navigation_descriptor(address: KnowledgeAddress, raw: bytes | None = None) 
 _NAVIGATION: Dict[KnowledgeAddress, tuple] = {}
 
 
-def _navigation_row(address: KnowledgeAddress, bodies: dict | None = None) -> dict[str, Any]:
+def _navigation_row(address: KnowledgeAddress, bodies: dict | None = None,
+                    names: frozenset[str] = frozenset()) -> dict[str, Any]:
     """``_navigation_descriptor``, parsed again only when the note's bytes may have changed: while its
     file identity holds (``utils.file_identity``, the rule ``utils.json_snapshot`` keeps on every OS;
     Windows' ``st_ctime`` is the creation time, its in-place writes move the mtime), settled beyond a
@@ -348,7 +349,7 @@ def _navigation_row(address: KnowledgeAddress, bodies: dict | None = None) -> di
         return dict(held[1])
     raw = address.path.read_bytes()
     row = _navigation_descriptor(address, raw)
-    if bodies is not None and row.get("claims") and row.get("state") == "active":
+    if bodies is not None and row.get("state") == "active" and not names.isdisjoint(row.get("claims", ())):
         bodies[address] = (key, raw)
     if settled and not row.get("parse_error"):
         _NAVIGATION[address] = (key, row)
@@ -357,7 +358,8 @@ def _navigation_row(address: KnowledgeAddress, bodies: dict | None = None) -> di
 
 def inventory_knowledge(address: KnowledgeAddress, *, navigation: bool = False,
                         known_note: KnowledgeNote | None = None, after: str = "",
-                        limit: int | None = None, bodies: dict | None = None) -> tuple[dict[str, Any], ...]:
+                        limit: int | None = None, bodies: dict | None = None,
+                        body_claims: tuple[str, ...] = ()) -> tuple[dict[str, Any], ...]:
     """Enumerate the current shelf without writes; navigation omits source proofs.
 
     A note already read by this operation can be reused. A note's navigation is
@@ -370,6 +372,7 @@ def inventory_knowledge(address: KnowledgeAddress, *, navigation: bool = False,
     if not address.shelf.exists():
         return ()
     rows, listed, past = [], set(), tuple(f"{after}.md".split("/")) if after else ()
+    names = frozenset(body_claims)
     for path in sorted(address.shelf.rglob("*.md"), key=lambda found: found.relative_to(address.shelf).parts):
         if path == address.shelf / INDEX_FILE or path.relative_to(address.shelf).parts <= past:
             continue
@@ -384,7 +387,7 @@ def inventory_knowledge(address: KnowledgeAddress, *, navigation: bool = False,
         listed.add(item)
         try:
             rows.append(note_descriptor(known_note) if known_note is not None and item.path == known_note.address.path
-                        else _navigation_row(item, bodies) if navigation else note_descriptor(read_knowledge_note(item)))
+                        else _navigation_row(item, bodies, names) if navigation else note_descriptor(read_knowledge_note(item)))
         except (OSError, UnicodeDecodeError) as exc:
             rows.append({**item.as_dict(), "title": topic, "summary": "", "revision": None,
                          "read_error": type(exc).__name__})
