@@ -540,6 +540,11 @@ def cited_owner_basis(ctx: Any, owner_words: Any, *, call_speech: bool = False) 
         return None, ""
     for row in directive_owner_rows(ctx):  # owner-door rows that reached this run (never a reply target's words)
         if row["source"] in OWNER_WORD_SOURCES and quote_in(wanted, row["text"]):
+            if row["source"] == "owner_quiz_answer":
+                for item, _, ref, _ in _dated_directives(ctx):
+                    if (item["source"] == row["source"] and item.get("content") == row["text"]
+                            and (ref or row_ref(item)) == row["ref"]):
+                        return {**item, "cited": wanted, "basis": CITED, "carried": True}, ""
             return {"source": row["source"], "content": row["text"], "cited": wanted, "basis": CITED, "carried": True,
                     **({"msg_id": row["ref"]} if row.get("ref") else {})}, ""
     for item, _, _, _ in _dated_directives(ctx):
@@ -623,7 +628,7 @@ def merged_corpus(kept: Any, added: Any) -> List[Dict[str, Any]]:
         prior = next((item for item in merged if _same_corpus_source(row, item)), None)
         if prior is None:
             merged.append(dict(row))
-        elif (prior.get("source") == row.get("source") == OWNER_PRESS and row.get("basis") == CITED
+        elif (prior.get("source") == row.get("source") and row.get("source") in (OWNER_PRESS, "owner_quiz_answer") and row.get("basis") == CITED
               and row.get("cited") and prior.get("content") == row.get("content")):
             # A schedule edit can cite a press already held under its original id. Keep that decision on the one act.
             prior.update(basis=CITED, cited=row["cited"])

@@ -289,6 +289,7 @@ def _retained_start_quote(root: pathlib.Path, drafter: str, address: str) -> Opt
 
 def _start_answer(root: pathlib.Path, task_id: str, row: dict, drafter: str) -> Optional[dict]:
     """Read a relay by its exact chat address, or a direct answer by its asker's delivery."""
+    from ouroboros.answer_facts import answer_source
     from ouroboros.chat_chain import resolve_row
     from ouroboros.owner_relay import quotable_owner_row
     from ouroboros.owner_source import answered_quiz_block
@@ -311,7 +312,6 @@ def _start_answer(root: pathlib.Path, task_id: str, row: dict, drafter: str) -> 
         block, asker = answered_card_source(quoted)
         quiz_id = (block or {}).get("quiz_id")
         if not block and isinstance(carried := quoted.get("corpus_answer"), dict):
-            from ouroboros.answer_facts import answer_source
             asker, quiz_id = carried.get("source_task_id"), carried.get("quiz_id")
             block = answered_quiz_block(source_root, asker, quiz_id) if asker and quiz_id else {}
             if (not block or answer_source(block) != row["source"]
@@ -324,11 +324,38 @@ def _start_answer(root: pathlib.Path, task_id: str, row: dict, drafter: str) -> 
         if msg_id not in (answer_message_id(asker, quiz_id), (block.get("delivery") or {}).get("msg_id")):
             return None
     card = answered_card(block, words)
-    if not card or not asker or not quiz_id:
+    if (not card or not asker or not quiz_id or row.get("source_task_id", asker) != asker
+            or row.get("quiz_id", quiz_id) != quiz_id
+            or row.get("reply_to", answered_card_reply(block, asker)) != answered_card_reply(block, asker)):
         return None
-    return {"source": row["source"], "content": words, "msg_id": msg_id, "source_task_id": asker,
+    return {"source": answer_source(block), "content": words, "msg_id": msg_id, "source_task_id": asker,
+            **{key: row[key] for key in ("basis", "cited") if row.get(key)},
             "quiz_id": quiz_id, "card": card, **({"request_id": block["request_id"]} if block.get("request_id") else {}),
             **({"relay_source_root": row["relay_source_root"]} if row.get("relay_source_root") else {})}
+
+
+def _start_citations(rows: list) -> tuple[list, dict]:
+    """Fold an older citation's display address into the unique native quiz row it names.
+    The native row still has to prove its delivery or relay in _start_answer."""
+    from ouroboros.chronicle_quotes import quote_in
+    from ouroboros.owner_words import row_ref
+
+    rows = [dict(row) if isinstance(row, dict) else row for row in rows]
+    native = [row for row in rows if isinstance(row, dict) and row.get("source") == "owner_quiz_answer"
+              and row.get("source_task_id") and row.get("quiz_id") and isinstance(row.get("msg_id"), str)]
+    kept, aliases = [], {}
+    for row in rows:
+        if (isinstance(row, dict) and row.get("source") == "owner_quiz_answer" and row.get("basis") == "cited"
+                and row.get("carried") is True and isinstance(row.get("cited"), str) and row["cited"].strip()
+                and isinstance(row.get("content"), str) and quote_in(row["cited"], row["content"])
+                and set(row) <= {"source", "content", "msg_id", "cited", "basis", "carried"}):
+            matches = [item for item in native if row_ref(item) == row.get("msg_id") and item.get("content") == row["content"]]
+            if len(matches) == 1:
+                matches[0].update(basis="cited", cited=row["cited"])
+                aliases[row["msg_id"]] = (row["content"], True)
+                continue
+        kept.append(row)
+    return kept, aliases
 
 
 def _drafted_start(root: pathlib.Path, result: Dict[str, Any], task_id: str, metadata: Dict[str, Any],
@@ -541,6 +568,10 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     elif result.get("origin_message_ref") or result.get("origin_message_text"):
         original = _opening_message(root, result, metadata)
     absent = metadata.get("origin_message_absent") is True
+    aliases = {}
+    if absent and isinstance(metadata.get("owner_corpus"), list):
+        corpus, aliases = _start_citations(metadata["owner_corpus"])
+        metadata = {**metadata, "owner_corpus": corpus}
     if absent and (result.get("origin_message_ref") or result.get("origin_message_text")
                    or metadata.get("origin_suppressed")):
         gaps.append("opening_owner_message_conflict")  # the producer never writes both
@@ -578,6 +609,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     attached, quoted = [], []  # an owner message's staged files; the chat uploads a relay quoted
     # The start's answers keep their one identity: a corpus copy is the same message.
     seen: Dict[str, Tuple[str, bool]] = {row["msg_id"]: (row["content"], True) for row in (start or {}).get("answers") or []}
+    seen.update(aliases)
     exact: Dict[str, str] = {}  # this task's own exact rows by msg_id: the mailbox pass fills it after reading drives
 
     schedule_text = occurrence_schedule_text(result, task_id)  # then the chained corpus's: one per schedule/field/words
@@ -883,7 +915,7 @@ def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
         if isinstance(row, dict) and str(row.get("content") or "").strip():
             card = answered_card_reply(row.get("card"), row.get("source_task_id"))
             rows.append({"source": row.get("source") or "owner_mailbox", "content": row["content"],  # a card wins
-                         **{key: row[key] for key in (*ROW_IDS, "reply_to") if row.get(key)}, **({"reply_to": card} if card else {}),
+                         **{key: row[key] for key in (*ROW_IDS, "reply_to", "basis", "cited") if row.get(key)}, **({"reply_to": card} if card else {}),
                          **{key: row[key] for key in ("words",) if key in row}})  # exact, even empty
     for row in sources.get("schedule_text") or []:  # a schedule's text under its supplier, by value, never owner words
         if isinstance(row, dict) and str(row.get("content") or "").strip():
