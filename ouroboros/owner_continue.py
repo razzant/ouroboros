@@ -911,11 +911,16 @@ def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     original = sources.get("original") if isinstance(sources.get("original"), dict) else {}
     start = sources.get("start") if isinstance(sources.get("start"), dict) else {}
-    for row in [{**original, "content": original.get("words", original.get("content")), "source": original.get("input_source", "origin_message")}, *(start.get("answers") or []), *(sources.get("later") or [])]:
+    ref = original.get("origin_message_ref") or {}
+    opening = {**{key: str(ref[key]) for key in ("chat_id", "client_message_id", "ts") if ref.get(key)},
+               **original, "content": original.get("words", original.get("content")),
+               "source": original.get("input_source", "origin_message")}
+    for row in [opening, *(start.get("answers") or []), *(sources.get("later") or [])]:
         if isinstance(row, dict) and str(row.get("content") or "").strip():
             card = answered_card_reply(row.get("card"), row.get("source_task_id"))
             rows.append({"source": row.get("source") or "owner_mailbox", "content": row["content"],  # a card wins
                          **{key: row[key] for key in (*ROW_IDS, "reply_to", "basis", "cited") if row.get(key)}, **({"reply_to": card} if card else {}),
+                         **({"ts": row["ts"]} if row is opening and row.get("ts") else {}),
                          **{key: row[key] for key in ("words",) if key in row}})  # exact, even empty
     for row in sources.get("schedule_text") or []:  # a schedule's text under its supplier, by value, never owner words
         if isinstance(row, dict) and str(row.get("content") or "").strip():
