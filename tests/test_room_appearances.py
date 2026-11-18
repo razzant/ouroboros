@@ -826,6 +826,63 @@ def test_a_saved_reply_in_memory_agrees_with_history_and_evidence(tmp_path):
         assert "Owner words summary" in readers and "Owner words refusal" not in readers
 
 
+def test_memory_uses_one_reply_version_for_many_legacy_targets_and_rechecks_a_race(tmp_path, monkeypatch):
+    from ouroboros import memory_inventory as mi, room_membership as membership
+    from ouroboros.chronicle_store import ChronicleStore
+
+    nova = _project(tmp_path, "nova")
+    _born_in(tmp_path, "nova-root", nova)
+    ChronicleStore(tmp_path).ensure_activated()
+    count = 15
+    targets = []
+    for minute in range(count):
+        row = {**_SUMMARY, "ts": f"2026-10-01T05:{minute:02d}:00Z", "text": f"Nova said {minute}."}
+        targets.append(ds.append(tmp_path, "chat", row, appearances=None))
+        _legacy, reply = _legacy_reply(row, f"2026-10-01T06:{minute:02d}:00Z", str(minute))
+        ds.append(tmp_path, "chat", reply, appearances=None)
+
+    def view():
+        return [entry[0] for entry in mi.open_rows_by_room(tmp_path, gaps={})[str(nova)]
+                if entry[1].get("reply_to")]
+
+    original = membership._text_revision
+    reads = []
+    monkeypatch.setattr(membership, "_text_revision", lambda root: reads.append(root) or original(root))
+    lookup = membership._target_facts
+    progress = []
+
+    def append_after_first_lookup(rooms, ref):
+        result = lookup(rooms, ref)
+        if not progress:
+            progress.append(ds.append(tmp_path, "progress", {
+                "ts": "2026-10-01T06:59:00Z", "chat_id": 1, "text": "Unrelated progress.",
+            }))
+        return result
+
+    with monkeypatch.context() as overlap:
+        overlap.setattr(membership, "_target_facts", append_after_first_lookup)
+        both = view()
+    assert len(progress) == 1
+    assert len(both) == count and len(reads) == 2
+    with monkeypatch.context() as override:
+        override.setattr(membership, "capture_reply_targets", lambda _rooms, read: read())
+        reads.clear()
+        assert view() == both and len(reads) == 2 * count
+
+    raced = []
+
+    def edit_after_first_lookup(rooms, ref):
+        result = lookup(rooms, ref)
+        if not raced:
+            raced.append(True)
+            ds.revise_text(tmp_path, "chat", targets[0].seq, "Different target bytes.")
+        return result
+
+    monkeypatch.setattr(membership, "_target_facts", edit_after_first_lookup)
+    assert view() == both[1:]
+    assert len(raced) == 1
+
+
 def test_an_unreadable_target_is_a_gap_of_its_projects_memory_and_evidence_reads(tmp_path):
     """History, room reads, evidence and the memory view name the same gap for the Projects the Reply could
     join, and only for them; rows not derived yet are a gap of the indexed reads too."""

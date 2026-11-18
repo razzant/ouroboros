@@ -10,6 +10,7 @@ this rule decides each one.
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Any, Callable, FrozenSet, List, Mapping, Optional
 
 # ``chat_references.reference_from_row`` stamps what decides a Reply target's room, read at
@@ -53,12 +54,38 @@ def reply_target_home(target: Mapping[str, Any]) -> str:
     return TARGET_WORK if target.get("direction") != "in" and target.get("task_id") else TARGET_ROOM
 
 
-# (root, address) -> ((home, task, chat, private), (text revision, ends)): a decision this process read, kept
-# while the store it was read under stands, so a process started later decides the same. A target found
-# holds under its chat text revision (ends None: no append changes a stored row); one not found, under the
-# streams' ends too.
+# (root, address) -> (target only, dialogue identity, revision, ends). An unlocated target
+# carries no task or room of its own; each reference supplies its own fallback.
 _SAVED_TARGETS: dict = {}
 _SAVED_TARGETS_MAX = 4096
+_CAPTURED_TARGETS: ContextVar[Optional[dict]] = ContextVar("captured_reply_targets", default=None)
+
+
+def _store_identity(root: Any) -> Optional[tuple]:
+    from ouroboros import dialogue_store as ds, store
+
+    return store.file_identity(ds.path(root))
+
+
+def capture_reply_targets(rooms: Any, read: Callable[[], Any]) -> Any:
+    """Batch a pure whole-view membership pass, not a transaction around its Python work.
+
+    Take version marks lazily so a pass with no unstamped target costs nothing.
+    If a source changes during the pass, discard the projection and use ordinary
+    live resolution once. The closure returns its own facts, never writes them.
+    """
+    capture = {"rooms": rooms}
+    token = _CAPTURED_TARGETS.set(capture)
+    try:
+        result = read()
+    finally:
+        _CAPTURED_TARGETS.reset(token)
+    if "version" in capture:
+        root = rooms.root
+        if (capture["version"] != (_store_identity(root), _text_revision(root))
+                or capture.get("used_unresolved") and capture["ends"] != _stream_ends(root)):
+            return read()
+    return result
 
 
 def _text_revision(root: Any) -> int:
@@ -106,13 +133,27 @@ def _target_facts(rooms: Any, ref: Mapping[str, Any]) -> tuple:
     if not address or root is None:
         return TARGET_NONE, "", 0, False
     key = (str(root), address)
-    held = _SAVED_TARGETS.get(key)
-    revision = _text_revision(root)  # the marks are read first: a change during the read below moves them past it
-    if held is not None and held[1] == (revision, None):
+    capture = _CAPTURED_TARGETS.get()
+    if capture is not None and capture["rooms"] is rooms:
+        if "version" not in capture:
+            capture["version"] = _store_identity(root), _text_revision(root)
+        identity, revision = capture["version"]
+    else:
+        capture = None
+        identity, revision = _store_identity(root), _text_revision(root)
+    held = _SAVED_TARGETS.get(key) if identity is not None else None
+    if held is not None and held[1:] == (identity, revision, None):
         return held[0]
-    ends = _stream_ends(root)
-    if held is not None and held[1] == (revision, ends):
-        return held[0]
+    if capture is None:
+        ends = _stream_ends(root)
+    else:
+        if "ends" not in capture:
+            capture["ends"] = _stream_ends(root)
+        ends = capture["ends"]
+    if held is not None and held[1:] == (identity, revision, ends):
+        if capture is not None:
+            capture["used_unresolved"] = True
+        return held[0][0], str(ref.get("task_id") or ""), _ref_chat(ref), False
     from ouroboros import dialogue_positions as dp
     from ouroboros.chat_chain import _row_chat_id, resolve_row
     from ouroboros.presence_owner_contact import private_main_row
@@ -133,13 +174,15 @@ def _target_facts(rooms: Any, ref: Mapping[str, Any]) -> tuple:
         decision, ends = (reply_target_home(target), str(target.get("task_id") or ""), _row_chat_id(target),
                           private_main_row(dict(target))), None
     else:
+        if capture is not None:
+            capture["used_unresolved"] = True
         decision = (TARGET_UNKNOWN if statuses & {"row_unreadable", "row_ambiguous"} else TARGET_ABSENT,
-                    str(ref.get("task_id") or ""), _ref_chat(ref), False)
-    _SAVED_TARGETS.pop(key, None)
-    _SAVED_TARGETS[key] = (decision, (revision, ends))
-    while len(_SAVED_TARGETS) > _SAVED_TARGETS_MAX:
-        _SAVED_TARGETS.pop(next(iter(_SAVED_TARGETS)))
-    return decision
+                    "", 0, False)
+    if identity is not None:
+        _SAVED_TARGETS[key] = (decision, identity, revision, ends)
+        while len(_SAVED_TARGETS) > _SAVED_TARGETS_MAX:
+            _SAVED_TARGETS.pop(next(iter(_SAVED_TARGETS)), None)
+    return decision if target else (decision[0], str(ref.get("task_id") or ""), _ref_chat(ref), False)
 
 
 def reply_target(rooms: Any, ref: Mapping[str, Any]) -> tuple:
