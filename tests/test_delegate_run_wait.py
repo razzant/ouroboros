@@ -265,7 +265,7 @@ def test_an_in_slot_wait_keeps_the_call_after_what_an_earlier_call_of_the_batch_
     of the batch armed or staged comes first, before any slot is taken, as the task waits do: its unshown hold answers
     at once as ``dependency_held`` in any mode (once delivered, the same wait sleeps), and its armed wait refuses the
     next one (``armed_conflict``), which would otherwise hold that wait's wake behind this call."""
-    from ouroboros import delegate_supervision as ds, model_sleep
+    from ouroboros import delegate_custody as custody, delegate_supervision as ds, model_sleep
 
     ctx, _limit = _nanny(tmp_path)
     _run(tmp_path, "run-1")
@@ -280,8 +280,10 @@ def test_an_in_slot_wait_keeps_the_call_after_what_an_earlier_call_of_the_batch_
     model_sleep.hold_notice(ctx, [{"task_id": "held-child", "identity": "hold-1"}])
     for sleep_mode in ("in_slot", None):
         waited_on[0] = "run-2"
-        held = ds.run_wait(ctx, "run-2", sleep_mode=sleep_mode)
+        held = ds.run_wait(ctx, "run-2", sleep_mode=sleep_mode, checkpoint_after_sec=300, checkpoint_reason="look")
         assert _armed(held)["reason"] == "dependency_held" and held.meta == {model_sleep.HOLD_NOTICE: True}
+    rows = custody.event_log_path(tmp_path).read_text().splitlines()
+    assert not any(json.loads(row)["type"] == "delegate_supervision_checkpoint_scheduled" for row in rows), "held: none"
     assert beats == ["run-1"] and not getattr(ctx, "_model_sleep", None)
     assert not getattr(ctx, "_pending_task_wait", None)
     ctx._held_dependencies_pending = []  # the batch delivered the hold
