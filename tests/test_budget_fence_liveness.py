@@ -1,20 +1,10 @@
-"""The root budget fence reads the dispatch document of the last successful publication.
-
-A send needs the dispatch document's generation certified by ``queue.alive`` — never a
-fresh stamp: a stalled supervisor tick leaves the certificate in place and must not
-stop a single call. A publication in flight (the publisher unlinks the stamp first) is
-re-read briefly; a certificate that stays missing or mismatched (a failed publication)
-refuses typed, and an active fence still refuses whatever the stamp's age.
-"""
-
+"""Money admission rechecks the current dispatch file and keeps ordinary lock contention cancellable."""
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import json
 import pathlib
-import threading
-from types import SimpleNamespace
 
 import pytest
 
@@ -64,39 +54,12 @@ def test_an_active_fence_refuses_whatever_the_stamp_age(tmp_path):
 
 
 @pytest.mark.parametrize("alive_generation", [None, "g0"])
-def test_a_failed_publication_refuses_typed(tmp_path, alive_generation):
-    _publish(tmp_path, alive_generation=alive_generation)  # unlinked stamp, or one of an older publication
-    with pytest.raises(ua.UsageAccountingError, match="root budget fence authority unavailable"):
-        _reserve(tmp_path, CHILD)
-
-
-@pytest.mark.parametrize("alive_generation", [None, "g0"])
-def test_a_publication_in_flight_is_waited_out(tmp_path, monkeypatch, alive_generation):
+def test_dispatch_is_independent_of_missing_or_mismatched_stamp(tmp_path, alive_generation):
     _publish(tmp_path, alive_generation=alive_generation)
-    waits = []
-
-    def publisher_finishes(_sec):
-        waits.append(_sec)
-        _write(tmp_path, "queue.alive", {"generation": "g1", "ts": OLD_TS, "heartbeats": {}})
-
-    monkeypatch.setattr(queue_observation, "_sleep", publisher_finishes)
-    assert _reserve(tmp_path, CHILD).attempt_id and waits
+    assert _reserve(tmp_path, CHILD).attempt_id
 
 
-def test_a_publication_slower_than_the_former_window_is_waited_out(tmp_path, monkeypatch):
-    _publish(tmp_path, alive_generation=None)  # issue #1754: 20 reads failed sends on a loaded host
-    waits = []
-
-    def slow_publisher(_sec):
-        waits.append(_sec)
-        if len(waits) == 25:
-            _write(tmp_path, "queue.alive", {"generation": "g1", "ts": OLD_TS, "heartbeats": {}})
-
-    monkeypatch.setattr(queue_observation, "_sleep", slow_publisher)
-    assert _reserve(tmp_path, CHILD).attempt_id and len(waits) == 25
-
-
-@pytest.mark.parametrize("damage", ["malformed", "missing", "unreadable"])
+@pytest.mark.parametrize("damage", ["malformed", "missing", "non_object", "no_generation", "unreadable"])
 def test_an_unreadable_dispatch_document_refuses_typed(tmp_path, monkeypatch, caplog, damage):
     _publish(tmp_path)
     path = tmp_path / "state/queue_dispatch.json"
@@ -123,69 +86,21 @@ def test_an_unreadable_dispatch_document_refuses_typed(tmp_path, monkeypatch, ca
     assert len([record for record in caplog.records if record.exc_info]) == int(damage in {"malformed", "unreadable"})
 
 
-@pytest.mark.parametrize(("publication", "sliced", "operation"), [
-    ("stable", False, "reserve"),
-    ("before_lock", True, "dispatch"),
-    ("under_lock", False, "reserve"),
-])
-def test_publication_waits_only_outside_the_money_lock(tmp_path, monkeypatch, operation, sliced, publication):
-    from ouroboros import _usage_wait
-
-    _publish(tmp_path)
-    reservation = _reserve(tmp_path, CHILD) if operation == "dispatch" else None
-    stamp, held, waits, acquisitions = tmp_path / "state/queue.alive", [], [], []
-    original = ua._locked
-
-    @contextlib.contextmanager
-    def locked(*args, **kwargs):
-        with original(*args, **kwargs) as view:
-            if publication == "under_lock" and not acquisitions:
-                stamp.unlink()
-            acquisitions.append(True)
-            held.append(True)
-            try:
-                yield view
-            finally:
-                held.pop()
-
-    def finish_publication(seconds):
-        assert not held, "queue publication wait held the money lock"
-        waits.append(seconds)
-        _publish(tmp_path)
-
-    monkeypatch.setattr(ua, "_locked", locked)
-    monkeypatch.setattr(queue_observation, "_sleep", finish_publication)
-    if publication == "before_lock":
-        stamp.unlink()
-    token = _usage_wait._CANCEL.set(threading.Event() if sliced else None)
-    try:
-        def act():
-            return _reserve(tmp_path, CHILD) if operation == "reserve" else ua.mark_dispatched(reservation)
-        if operation == "reserve":
-            assert act().attempt_id
-        else:
-            act()
-    finally:
-        _usage_wait._CANCEL.reset(token)
-    assert len(waits) == int(publication != "stable")
-    if reservation:
-        with ua.usage_store.read(tmp_path) as view:
-            assert view.attempt(reservation.attempt_id)["state"] == "dispatched"
-
-
 @pytest.fixture(params=[1, 2], ids=["reserve", "dispatch"])
 def reservation_race(tmp_path, monkeypatch, request):
-    """Revoke on the chosen real acquisition, before that operation's write."""
-    _publish(tmp_path, alive_generation=None if request.param == 0 else "g1")
+    """One contended acquisition, with the transaction unwound before retry."""
+    from ouroboros.store import StoreBusy
+
+    _publish(tmp_path)
     held, acquisitions = [], []
     original = ua._locked
 
     @contextlib.contextmanager
     def locked(*args, **kwargs):
+        acquisitions.append(True)
+        if len(acquisitions) == request.param:
+            raise StoreBusy("another writer", reason="contention")
         with original(*args, **kwargs) as view:
-            acquisitions.append(True)
-            if len(acquisitions) == request.param:
-                (tmp_path / "state/queue.alive").unlink()
             held.append(True)
             try:
                 yield view
@@ -234,40 +149,6 @@ def test_reservation_race_keeps_one_physical_send(tmp_path, monkeypatch, reserva
     assert rows[0].get("cost_usd") == (None if provider_fails else 0.02)
 
 
-@pytest.mark.parametrize(("sliced", "alive_generation"), [(False, None), (True, "g0")])
-def test_reservation_race_with_persistent_absence_still_refuses(tmp_path, monkeypatch, reservation_race, alive_generation, sliced):
-    from ouroboros import _usage_wait
-
-    held, acquisitions, revoke_on = reservation_race
-    waits, sent = [], []
-    monkeypatch.setattr(queue_observation, "DISPATCH_PUBLICATION_WAIT_SEC", 0.2)
-    clock = [0.0]
-    monkeypatch.setattr(_usage_wait, "time", SimpleNamespace(monotonic=lambda: clock[0]))
-    monkeypatch.setattr(queue_observation, "_monotonic", lambda: clock[0])
-
-    def unavailable(seconds):
-        assert not held
-        waits.append(seconds)
-        clock[0] += seconds
-        _publish(tmp_path, alive_generation=alive_generation)
-
-    monkeypatch.setattr(queue_observation, "_sleep", unavailable)
-    token = _usage_wait._CANCEL.set(threading.Event() if sliced else None)
-    try:
-        with pytest.raises(ua.ControlAuthorityUnavailable, match="root budget fence authority unavailable") as refused:
-            with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id=CHILD, root_task_id=ROOT)):
-                ua.execute_physical_attempt(ua.AttemptRequest(model="m", provider="p"), lambda: sent.append(True))
-        assert refused.value.cause == "dispatch_publication_unconfirmed"
-    finally:
-        _usage_wait._CANCEL.reset(token)
-    assert sum(waits) == pytest.approx(0.2)
-    assert revoke_on <= len(acquisitions) <= revoke_on + len(waits) + 1
-    rows = ua.read_usage_records(tmp_path)
-    assert sent == [] and [row["state"] for row in rows] == (["released"] if revoke_on == 2 else [])
-    if rows:
-        assert rows[0]["reason"] == "before_dispatch_failed:ControlAuthorityUnavailable"
-
-
 def test_reservation_race_observes_a_new_fence(tmp_path, monkeypatch, reservation_race):
     held, acquisitions, revoke_on = reservation_race
     sent = []
@@ -306,76 +187,6 @@ def test_reservation_publication_wait_honors_owner_controls(tmp_path, monkeypatc
     assert error.value.control_reason == reason
     assert len(waits) == 1 and len(acquisitions) == (1 if revoke_on == 1 else 3) and sent == []
     assert [row["state"] for row in ua.read_usage_records(tmp_path)] == (["released"] if revoke_on == 2 else [])
-
-
-@pytest.mark.parametrize("reservation_race", [0, 1, 2], indirect=True, ids=["initial", "reserve", "dispatch"])
-def test_async_cancellation_joins_the_publication_wait_without_a_send(tmp_path, monkeypatch, reservation_race):
-    from ouroboros import _usage_wait
-
-    held, acquisitions, revoke_on = reservation_race
-    waiting, release = threading.Event(), threading.Event()
-    waits, cancellations = [], []
-
-    def pause(_seconds):
-        assert not held
-        waits.append(True)
-        cancellations.append(_usage_wait._CANCEL.get())
-        waiting.set()
-        assert release.wait(3)
-
-    async def send():
-        pytest.fail("cancelled publication wait sent a provider call")
-
-    async def exercise():
-        with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id=CHILD, root_task_id=ROOT)):
-            task = asyncio.create_task(ua.execute_physical_attempt_async(ua.AttemptRequest(model="m", provider="p"), send))
-            try:
-                # Preparation (first store creation, earlier locks) has no test clock:
-                # the attempt either enters its publication wait or ends on its own.
-                while not waiting.is_set() and not task.done():
-                    await asyncio.sleep(0.01)
-                assert waiting.is_set(), task
-                task.cancel()
-                assert await asyncio.to_thread(cancellations[0].wait, 3)
-                release.set()
-                with pytest.raises(asyncio.CancelledError):
-                    await task
-            finally:
-                release.set()
-                if not task.done():
-                    task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-
-    monkeypatch.setattr(queue_observation, "_sleep", pause)
-    asyncio.run(exercise())
-    assert len(waits) == 1 and len(acquisitions) == {0: 0, 1: 1, 2: 3}[revoke_on]
-    assert [row["state"] for row in ua.read_usage_records(tmp_path)] == (["released"] if revoke_on == 2 else [])
-
-
-@pytest.mark.parametrize(("recertify", "control"), [(False, "deadline"), (True, "owner_pause")])
-def test_initial_publication_gap_checks_controls_without_a_wait_owner(tmp_path, monkeypatch, control, recertify):
-    from ouroboros import model_wait, owner_pause
-    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
-
-    _publish(tmp_path, alive_generation=None)
-    remaining, waits = [60.0], []
-    monkeypatch.setattr(model_wait, "dispatch_deadline_remaining_sec", lambda: remaining[0])
-
-    def interrupt(seconds):
-        waits.append(seconds)
-        assert len(waits) == 1, "initial publication wait ignored control"
-        if control == "deadline":
-            remaining[0] = 0.0
-        else:
-            owner_pause.install_fence(tmp_path, ROOT, request_id="initial-gap-pause")
-        if recertify:  # Both a continuing gap and a returned certificate observe the control.
-            _publish(tmp_path)
-
-    monkeypatch.setattr(queue_observation, "_sleep", interrupt)
-    with pytest.raises(PhysicalDispatchInterrupted) as error:
-        _reserve(tmp_path, CHILD)
-    assert error.value.control_reason == control
-    assert len(waits) == 1 and ua.read_usage_records(tmp_path) == []
 
 
 @pytest.mark.parametrize(("stage", "operation"), [("write", "reserve"), ("commit", "dispatch"), ("exit", "reserve")])
@@ -417,108 +228,6 @@ def test_permanent_mutation_or_exit_error_is_never_retried(tmp_path, monkeypatch
     expected = (["dispatched"] if stage != "write" else ["reserved"]) if reservation else (
         ["reserved"] if stage == "commit" else [])
     assert [row["state"] for row in rows] == expected
-
-
-@pytest.mark.parametrize("operation", ["reserve", "dispatch"])
-def test_repeated_publication_races_share_one_wait_budget(tmp_path, monkeypatch, operation):
-    from ouroboros import _usage_wait
-
-    _publish(tmp_path)
-    reservation = _reserve(tmp_path, CHILD) if operation == "dispatch" else None
-    clock, held, acquisitions, waits = [0.0], [], [], []
-    original = ua._locked
-    original_read = queue_observation.load_queue_document
-    monkeypatch.setattr(queue_observation, "DISPATCH_PUBLICATION_WAIT_SEC", 0.2)
-    timer = SimpleNamespace(monotonic=lambda: clock[0])
-    monkeypatch.setattr(_usage_wait, "time", timer)
-    monkeypatch.setattr(queue_observation, "_monotonic", timer.monotonic)
-
-    @contextlib.contextmanager
-    def locked(*args, **kwargs):
-        with original(*args, **kwargs) as view:
-            acquisitions.append(True)
-            assert len(acquisitions) <= 3, "publication retries reset their deadline"
-            (tmp_path / "state/queue.alive").unlink()
-            held.append(True)
-            try:
-                yield view
-            finally:
-                held.pop()
-
-    def read_publication(*args, **kwargs):
-        if held:
-            clock[0] += 0.05  # Charge the failed publication probe, not store acquisition.
-        return original_read(*args, **kwargs)
-
-    def publish(seconds):
-        assert not held
-        waits.append(seconds)
-        clock[0] += seconds
-        _publish(tmp_path)
-
-    monkeypatch.setattr(ua, "_locked", locked)
-    monkeypatch.setattr(queue_observation, "load_queue_document", read_publication)
-    monkeypatch.setattr(queue_observation, "_sleep", publish)
-    with pytest.raises(ua.ControlAuthorityUnavailable, match="root budget fence authority unavailable") as refused:
-        ua.mark_dispatched(reservation) if reservation else _reserve(tmp_path, CHILD)
-    assert refused.value.cause == "dispatch_publication_unconfirmed"
-    assert len(acquisitions) == 3 and len(waits) == 2
-    assert [row["state"] for row in ua.read_usage_records(tmp_path)] == (["reserved"] if reservation else [])
-
-
-@pytest.mark.parametrize("operation", ["reserve", "dispatch"])
-def test_nested_precheck_near_expiry_keeps_the_outer_publication_deadline(tmp_path, monkeypatch, operation):
-    from ouroboros import _usage_wait
-
-    _publish(tmp_path)
-    reservation = _reserve(tmp_path, CHILD) if operation == "dispatch" else None
-    clock, held, acquisitions, waits, precheck_gaps = [0.0], [], [], [], []
-    original_lock, original_read = ua._locked, queue_observation.load_queue_document
-    monkeypatch.setattr(queue_observation, "DISPATCH_PUBLICATION_WAIT_SEC", 0.2)
-    monkeypatch.setattr(_usage_wait, "time", SimpleNamespace(monotonic=lambda: clock[0]))
-    monkeypatch.setattr(queue_observation, "_monotonic", lambda: clock[0])
-
-    @contextlib.contextmanager
-    def locked(*args, **kwargs):
-        with original_lock(*args, **kwargs) as view:
-            acquisitions.append(True)
-            (tmp_path / "state/queue.alive").unlink(missing_ok=True)
-            held.append(True)
-            try:
-                yield view
-            finally:
-                held.pop()
-
-    def read_publication(root, name):
-        if waits and not held:
-            # Publication returns, then is revoked at the next pre-lock check.
-            precheck_gaps.append(clock[0])
-            clock[0] += 0.001
-            (tmp_path / "state/queue.alive").unlink(missing_ok=True)
-        return original_read(root, name)
-
-    def publish(seconds):
-        assert not held
-        waits.append(seconds)
-        assert len(waits) < 8, "nested prechecks started another wait episode"
-        # The first wake is near expiry; scheduler time counts, not just sleep argv.
-        clock[0] += 0.19 if len(waits) == 1 else seconds
-        _publish(tmp_path)
-
-    monkeypatch.setattr(ua, "_locked", locked)
-    monkeypatch.setattr(queue_observation, "load_queue_document", read_publication)
-    monkeypatch.setattr(queue_observation, "_sleep", publish)
-    token = _usage_wait._CANCEL.set(threading.Event())
-    try:
-        with pytest.raises(ua.ControlAuthorityUnavailable, match="root budget fence authority unavailable") as refused:
-            ua.mark_dispatched(reservation) if reservation else _reserve(tmp_path, CHILD)
-        assert refused.value.cause == "dispatch_publication_unconfirmed"
-    finally:
-        _usage_wait._CANCEL.reset(token)
-    assert precheck_gaps and len(acquisitions) == 1
-    assert clock[0] <= 0.202, "nested precheck reset the elapsed publication budget"
-    assert waits[1] == pytest.approx(0.009)
-    assert [row["state"] for row in ua.read_usage_records(tmp_path)] == (["reserved"] if reservation else [])
 
 
 @pytest.mark.parametrize("reservation_race", [2], indirect=True)
