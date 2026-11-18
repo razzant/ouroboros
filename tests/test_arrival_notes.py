@@ -86,6 +86,49 @@ def test_two_rows_of_my_human_in_one_drain_close_once_on_the_last(tmp_path):
     assert view[-1]["content"].startswith("[Message from my human]: Second\n[Host fact: your working-view notes")
 
 
+def test_a_notes_list_already_named_in_view_is_named_again_only_once_it_changes(tmp_path):
+    """Both directions: the first arrival names the notes in view; a later arrival does not repeat the same list while
+    the row that named it is among the messages in hand; without that row the list is named again, and so is a list
+    that changed. What was named is read from the rows themselves, never stored."""
+    view = [{"role": "user", "content": "Brief"}, _note(tmp_path, "Goal: keep the reply short.", "goal")]
+    _drain(tmp_path, view, None, "First")
+    named = view[-1]["content"].rsplit("\n", 1)[-1]
+    assert named.startswith("[Host fact: your working-view notes in view now: ")
+    _drain(tmp_path, view, None, "Second")
+    assert view[-1]["content"] == "[Message from my human]: Second"  # the same list, already named in view
+    without = [*view[:2], *view[3:]]  # the messages in hand no longer hold the row that named it
+    assert _drain(tmp_path, without, None, "Third")[-1]["content"].endswith("\n" + named)
+    view.append(_written_note(tmp_path, "Decided: send on Friday.", "friday", "2026-11-17T09:00:00+00:00"))
+    _drain(tmp_path, view, None, "Fourth")
+    changed = view[-1]["content"].rsplit("\n", 1)[-1]
+    assert changed.startswith("[Host fact: your working-view notes in view now: ") and changed != named
+    assert "«Goal: keep the reply short.»" in changed and "«Decided: send on Friday.»" in changed
+
+
+def test_every_press_names_their_last_own_words_while_an_unchanged_notes_list_is_not_repeated(tmp_path):
+    """Both directions: each press without words closes with their last own words, the second too; only the notes
+    list, unchanged and already named in view, is left out of the second."""
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, write_owner_message
+
+    said = {"source": "direct_incoming", "content": "Keep it short", "client_message_id": "c0", "chat_id": "1",
+            "ts": "2026-11-13T17:13:00+00:00"}
+    ctx = SimpleNamespace(task_id="pressing", _owner_directives=[dict(said)])
+    view = [{"role": "user", "content": "Brief"}, _note(tmp_path, "Goal: keep the reply short.", "goal")]
+    for quiz in ("q1", "q2"):
+        card = {"quiz_id": quiz, "question": "Publish?", "state": "answered", "options": ["Publish it"], "answered_index": 0}
+        assert write_owner_message(tmp_path, f"[Owner quiz answer] quiz {quiz}", "pressing",
+                                   msg_id=f"quiz_answer:asker:{quiz}", kind=KIND_QUIZ_ANSWER,
+                                   quiz_delivery={"task_id": "asker", "quiz_id": quiz, "answer_snapshot": card})
+        _drain_incoming_messages(view, queue.Queue(), tmp_path, "pressing", None, set(), owner_ctx=ctx)
+    assert [row["content"].split("\n")[0] for row in view[2:]] == ["[Owner quiz answer] quiz q1",
+                                                                   "[Owner quiz answer] quiz q2"]
+    first, second = view[2]["content"], view[3]["content"]
+    words = "[Host fact: their last own words in this work: 2026-11-13T17:13:00+00:00 (chat 1 / c0)]"
+    assert words in first and second.endswith("\n" + words)  # per press, never left out
+    assert "working-view notes in view now" in first and "working-view notes in view now" not in second
+
+
 def test_a_line_the_host_cannot_compute_never_costs_the_delivery(tmp_path, monkeypatch, caplog):
     from ouroboros import arrival_notes
 

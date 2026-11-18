@@ -9,6 +9,12 @@ notes the round facts count as its own), one line naming each as a fold receipt 
 write time (``written_at`` in the capsule metadata, else "not recorded") and its first line. No earlier message
 changes; every note in view precedes the arrival, so nothing is joined by time, and nothing is judged, asked or
 instructed.
+
+The notes line names the list only when it differs from the list last named in a row of my human's still among the
+messages in hand: what the host already appended is read from those rows, where its line ends the row it closes, never
+stored. A press's last own words close every press. The ids are those of this arrival: a later fold renumbers the
+units, so the list it changes is named again. A live call's drain delivers into a fresh list of rows
+(``live_conversation.mailbox``) that holds no notes, so a call's arrivals name none.
 """
 
 from __future__ import annotations
@@ -18,25 +24,49 @@ from typing import Any, Dict, List, Sequence
 
 log = logging.getLogger(__name__)
 
+NOTES_LINE_HEAD = "[Host fact: your working-view notes in view now: "
+
 
 def notes_line(messages: List[Dict[str, Any]]) -> str:
     """The host line listing the notes the mind wrote in this view, or "" when the view holds none."""
     from ouroboros.tools.compact_context import view_notes
 
     notes = view_notes(messages, own=True)
-    return ("[Host fact: your working-view notes in view now: " + "; ".join(
+    return (NOTES_LINE_HEAD + "; ".join(
         f"{note['id']}, written {note['written']}, «{note['first_line']}»" for note in notes) + "]") if notes else ""
+
+
+def _closing_line(row: Dict[str, Any]) -> str:
+    """The last line of a row's text, where the host's lines close a row of my human's."""
+    content = row.get("content")
+    if isinstance(content, list):
+        texts = [block.get("text") for block in content if isinstance(block, dict) and block.get("type") == "text"]
+        content = texts[-1] if texts else ""
+    return content.rsplit("\n", 1)[-1] if isinstance(content, str) else ""
+
+
+def last_named(messages: List[Dict[str, Any]]) -> str:
+    """The notes line that closes the latest row of my human's among ``messages`` to carry one, else ""."""
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+
+    for row in reversed(messages):
+        if isinstance(row, dict) and row.get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND:
+            if (line := _closing_line(row)).startswith(NOTES_LINE_HEAD):
+                return line
+    return ""
 
 
 def mark_arrival(ctx: Any, messages: List[Dict[str, Any]], rows: Sequence[int], *, pressed: bool = False) -> None:
     """Append the arrival's host lines to the last row of my human's this drain delivered (``rows``: positions of the
-    rows it delivered, typed at delivery and never merged); a delivery that warrants no line changes nothing. Lines the
-    host cannot compute are left out and logged: the delivered row stands, as for the surface note beside it."""
+    rows it delivered, typed at delivery and never merged); a delivery that warrants no line changes nothing, and a
+    notes list already named in a row still in ``messages`` is not named again. Lines the host cannot compute are left
+    out and logged: the delivered row stands, as for the surface note beside it."""
     from ouroboros.answer_facts import last_own_words
 
     try:
-        lines = [line for line in ((last_own_words(ctx) if pressed and ctx is not None else ""), notes_line(messages))
-                 if line]
+        notes = notes_line(messages)
+        lines = [line for line in ((last_own_words(ctx) if pressed and ctx is not None else ""),
+                                   "" if notes == last_named(messages) else notes) if line]
     except Exception:  # noqa: BLE001 - host facts beside a delivered row of my human's, never the delivery itself
         log.warning("Arrival lines not computed; the delivered row stands without them", exc_info=True)
         return
