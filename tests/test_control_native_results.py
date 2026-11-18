@@ -36,7 +36,7 @@ from ouroboros.tools.tool_result import (
     _published_tool_result,
     _restore_tool_result_sidecar,
 )
-from tests._shared import published_result as _published  # noqa: F401 - also read by the differential suite
+from tests._published_results import published_result as _published  # noqa: F401 - also read by the differential suite
 
 
 def _ctx(tmp_path: pathlib.Path) -> ToolContext:

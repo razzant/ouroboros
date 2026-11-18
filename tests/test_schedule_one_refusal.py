@@ -8,7 +8,8 @@ import pytest
 
 from ouroboros.tools import control, control_scheduling
 from ouroboros.tools.registry import ToolContext
-from tests._shared import configure_test_subagent, published_result as _published
+from tests._published_results import published_result as _published
+from tests._shared import configure_test_subagent
 
 
 def _ctx(tmp_path):
