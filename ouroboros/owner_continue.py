@@ -323,7 +323,9 @@ def _drafted_start(root: pathlib.Path, result: Dict[str, Any], task_id: str, met
     for row in metadata.get("owner_corpus") if isinstance(metadata.get("owner_corpus"), list) else []:
         if not isinstance(row, dict) or row.get("source") not in CARD_ANSWER_SOURCES:
             continue  # the corpus pass names a malformed row; other owner words stay later sources
-        if isinstance(reply := row.get("reply_to"), dict) and reply.get("card_id"):
+        reply = row.get("reply_to") or {}
+        if (isinstance(reply, dict) and reply.get("card_id") and reply.get("pressed_label") == row.get("content")
+                and not row.get("quiz_id") and not str(row.get("msg_id") or "").startswith("quiz_answer:")):
             continue  # a living-card submission rides by value in the corpus, outside the local quiz protocol
         answer = _start_answer(root, task_id, row)
         if answer is None:
@@ -573,9 +575,11 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         if seen[identity] == (words, owner):
             return True
         twin = json.loads(exact[identity]) if corpus is not None and identity in exact else {}
-        if twin and seen[identity][1] == owner and (isinstance(twin.get("late_answer"), dict) or "words" not in corpus
-                                                   and renders_exactly(twin, corpus["content"], drives, task_id)):
-            return True
+        if twin and seen[identity][1] == owner:
+            if isinstance(twin.get("late_answer"), dict) or ("words" not in corpus
+                    and (renders_exactly(twin, corpus["content"], drives, task_id)
+                         or twin.get("kind") == "card_input" and twin.get("text") == corpus["content"])):
+                return True
         gaps.append("owner_message_identity_conflict")
         return False
 
