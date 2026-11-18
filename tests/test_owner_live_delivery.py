@@ -418,6 +418,33 @@ class TestShowRecord:
         monkeypatch.setattr(ledger, "recent_records", lambda *_args, **_kwargs: full)
         assert show_record(ctx, "live", [item]).endswith("Reviews on record naming these bytes: unknown.")
 
+    def test_a_torn_hot_index_cannot_prove_that_no_review_named_the_bytes(self, tmp_path, monkeypatch):
+        import hashlib
+
+        from ouroboros import review_ledger as ledger
+        from ouroboros.tools.owner_delivery import show_record, shown_material
+        from ouroboros.tools.review_result import subject_source
+
+        ctx = self._ctx(tmp_path, monkeypatch)
+        item = shown_material("drawing.txt", b"A bridge drawing")
+        index = ledger.index_path(ctx.drive_root)
+        index.parent.mkdir(parents=True, exist_ok=True)
+        index.write_bytes(b"")
+        assert show_record(ctx, "live", [item]).endswith(
+            "Reviews on record naming these bytes: none in this task's recent records.")
+
+        subject = f"Produced drawing.txt, sha256 {item['sha256']}"
+        subject_source(ctx, subject)
+        record_id = ledger.new_record_id()
+        ledger.write_record(ctx.drive_root, ledger.ReviewLedgerRecord(
+            record_id=record_id, state="settled", task_id=ctx.task_id, surface="result",
+            subject={"diff_sha": hashlib.sha256(subject.encode()).hexdigest()}, verdict={"aggregate": "PASS"}))
+        with index.open("ab") as tail:
+            tail.write(b'{"record_id":"unfinished-review"')
+        assert show_record(ctx, "live", [item]).endswith(f"result review {record_id} (settled, PASS).")
+        other = shown_material("bridge-notes.txt", b"The bridge notes")
+        assert show_record(ctx, "live", [other]).endswith("Reviews on record naming these bytes: unknown.")
+
     def test_no_line_without_material_or_under_review_off_and_unknown_when_records_cannot_be_read(
             self, tmp_path, monkeypatch):
         """Both directions: links carry no material and an install with task review Off records no show; an app

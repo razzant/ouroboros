@@ -375,7 +375,7 @@ def _reviews_naming(ctx: Any, digests: Dict[str, str]) -> Any:
     ledger's newest ``_REVIEW_ROWS`` hot rows, whose retained subject lists each produced file by sha256
     (``result_material.answer_text``; a helper's records are its own, and archived rows are not read), and its plan
     asks, which keep each attachment's sha256. ``None`` (unknown) when this task or any of its records could not be
-    read, and when nothing names them but the bounded read came back full, since a row past it might."""
+    read, and on a miss if the bounded read came back full or had a parse gap."""
     from ouroboros import review_ledger as ledger
     from ouroboros.plan_record import load_plan_record
     from ouroboros.tools.review_result import _retained_subject_text
@@ -388,9 +388,10 @@ def _reviews_naming(ctx: Any, digests: Dict[str, str]) -> Any:
         return label + (" for " + ", ".join(digests[digest] for digest in hashes) if len(digests) > 1 else "")
 
     found = []
+    gaps: set[str] = set()
     try:
         rows = ledger.recent_records(ledger.ledger_root(ctx), task_id, limit=_REVIEW_ROWS, hot_only=True,
-                                     surface="result")
+                                     surface="result", gap_reasons=gaps)
         for row in rows:
             if row.get("task_id") != task_id:
                 continue  # a descendant's record: its subject is retained in that task's own store
@@ -410,7 +411,7 @@ def _reviews_naming(ctx: Any, digests: Dict[str, str]) -> Any:
     except Exception:
         log.debug("records naming shown bytes unreadable for task %s", task_id, exc_info=True)
         return None
-    return found if found or len(rows) < _REVIEW_ROWS else None
+    return found if found or (not gaps and len(rows) < _REVIEW_ROWS) else None
 
 
 def _named_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) -> str:
