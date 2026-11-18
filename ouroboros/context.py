@@ -864,6 +864,10 @@ def _capture_context_core(
     # A declared request draws the role's view without the story and the parent's room;
     # the rest it withholds (identity, WORLD, health, registry, skills, review continuity)
     # is gated below and named in its receipt (``declared_receipt_section``).
+    if not is_child:  # where this view begins to be told later (``return_facts``): read before the view itself
+        from ouroboros.return_facts import reach
+
+        seen = reach(canonical_root)
     view_spec, view, view_json = _capture_memory_view(task, canonical_root, ctx, declared=declared)
 
     # Max keeps the full capability/WHY map even for external work: binding a
@@ -1031,7 +1035,7 @@ def _capture_context_core(
     if not is_child:  # the facts beside my human's word that started this turn (``return_facts``), else nothing
         from ouroboros.return_facts import turn_sections
 
-        dynamic_parts.extend(turn_sections(task, canonical_root))
+        dynamic_parts.extend(turn_sections(task, canonical_root, ctx, seen=seen))
 
     return _ContextCore(
         base_prompt=base_prompt,

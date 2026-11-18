@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
+import re
 
 import pytest
 
@@ -262,6 +264,111 @@ def test_an_interval_still_importing_is_named_not_taken_for_quiet(tmp_path, monk
     assert "Not known:\n- chat rows of this interval: 1 segments still importing" in full
 
 
+def _running_root(root, *, child=False):
+    from types import SimpleNamespace
+
+    heard = [{"source": "owner_mailbox", "content": "Evening.", "msg_id": "steer-a", "client_message_id": "a",
+              "chat_id": "1", "ts": _iso(T0)}]
+    ctx = SimpleNamespace(task_id="main-root", drive_root=root, budget_drive_root=root, current_chat_id=1,
+                          task_metadata={"delegation_role": "subagent"} if child else {}, pending_events=[],
+                          event_queue=None, drive_logs=lambda: root / "logs", _owner_directives=heard)
+    setattr(ctx, rf.REACH_KEY, {"seq": _word(root, "a").seq + 1, "ts": _iso(T0)})  # its view, captured after "a"
+    return ctx
+
+
+def _kept(root, line):
+    """The full facts a running root's one line names: the copy its reader points at, kept in the work's artifacts."""
+    name = re.search(r"path='([^']+)'", line).group(1).rsplit("/", 1)[-1]
+    return next(pathlib.Path(root).rglob(name)).read_text(encoding="utf-8")
+
+
+def test_my_humans_word_reaching_a_running_root_brings_the_facts_before_it_and_only_then(tmp_path, place):
+    import queue
+
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_mailbox import write_owner_message
+
+    _rows(tmp_path, _owner("Evening.", T0, cmid="a"), _arrival(place, "sasha", "Rollout moved to Monday.", T0 + 60),
+          {"ts": _iso(T0 + 70), "direction": "out", "chat_id": 1, "text": "My own progress.", "task_id": "main-root"},
+          _owner("From the phone at night.", T0 + 80, chat_id=144346271, cmid="t"),
+          _owner("Morning, what happened?", T0 + 36000, cmid="b"))
+    sent = [{"role": "user", "content": "the work's earlier input"}]
+    messages, ctx = list(sent), _running_root(tmp_path)
+    write_owner_message(tmp_path, "Morning, what happened?", "main-root", msg_id="steer-b", client_message_id="b")
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, "main-root", None, set(), owner_ctx=ctx)
+    kinds = [row.get(HOST_CONTEXT_KIND_KEY) for row in messages]
+    assert messages[:1] == sent and kinds[1:3] == [rf.SECTION_ID, OWNER_WORDS_KIND], "before the words, nothing rewritten"
+    line = messages[1]["content"]
+    assert "This work's view and earlier facts reach to " in line and "\nSince then, counted: 1 word of my human" in line
+    assert "«Rollout moved to Monday.»" not in line and "\nThe full facts (places, people and their newest " in line
+    facts = _kept(tmp_path, line)
+    assert "«Rollout moved to Monday.»" in facts, "the full facts stand at the line's reader"
+    assert getattr(ctx, rf.REACH_KEY)["seq"] == _word(tmp_path, "b").seq + 1, "its reach moves to the word"
+    assert "My human's words elsewhere since then:" in facts and "«From the phone at night.»" in facts
+    assert "My own progress." not in facts, "the root's own rows are its transcript's"
+    assert all(rf.HEADING not in str(row.get("content")) for row in ctx._owner_directives), "no owner corpus"
+
+    quiet = list(sent)
+    _drain_incoming_messages(quiet, queue.Queue(), tmp_path, "main-root", None, set(), owner_ctx=_running_root(tmp_path))
+    assert quiet == sent, "no word of my human in this drain: no facts"
+    child, ctx = list(sent), _running_root(tmp_path, child=True)
+    write_owner_message(tmp_path, "Morning, what happened?", "main-root", msg_id="steer-c", client_message_id="b")
+    _drain_incoming_messages(child, queue.Queue(), tmp_path, "main-root", None, set(), owner_ctx=ctx)
+    assert rf.SECTION_ID not in [row.get(HOST_CONTEXT_KIND_KEY) for row in child], "a child carries no facts"
+
+
+def test_two_words_in_one_drain_get_one_block_before_the_first_through_the_last(tmp_path, place):
+    import queue
+
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_mailbox import write_owner_message
+
+    _rows(tmp_path, _owner("Evening.", T0, cmid="a"), _arrival(place, "sasha", "Before the first word.", T0 + 60),
+          _owner("Morning.", T0 + 36000, cmid="b"), _arrival(place, "nina", "Between the two words.", T0 + 36010),
+          _owner("And another thing.", T0 + 36020, cmid="b2"))
+    messages, ctx = [{"role": "user", "content": "earlier"}], _running_root(tmp_path)
+    write_owner_message(tmp_path, "Morning.", "main-root", msg_id="steer-b", client_message_id="b")
+    write_owner_message(tmp_path, "And another thing.", "main-root", msg_id="steer-b2", client_message_id="b2")
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, "main-root", None, set(), owner_ctx=ctx)
+    kinds = [row.get(HOST_CONTEXT_KIND_KEY) for row in messages]
+    assert kinds.count(rf.SECTION_ID) == 1 and kinds.index(rf.SECTION_ID) < kinds.index(OWNER_WORDS_KIND)
+    facts = _kept(tmp_path, messages[kinds.index(rf.SECTION_ID)]["content"])
+    assert "«Before the first word.»" in facts and "«Between the two words.»" in facts, "through the last word"
+    assert "And another thing." not in facts, "a word this drain delivers is not told as said elsewhere"
+    assert getattr(ctx, rf.REACH_KEY)["seq"] == _word(tmp_path, "b2").seq + 1
+
+
+def test_a_later_drain_brings_its_own_row_and_renewal_keeps_the_whole_unanswered_run(tmp_path, place):
+    import queue
+
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+    from ouroboros.context_renewal import _cut_units
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_mailbox import write_owner_message
+
+    _rows(tmp_path, _owner("Evening.", T0, cmid="a"), _arrival(place, "sasha", "Night news.", T0 + 60),
+          _owner("Morning.", T0 + 36000, cmid="b"), _arrival(place, "nina", "Between the drains.", T0 + 36010),
+          _owner("One more.", T0 + 36020, cmid="b2"))
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "task"},
+                {"role": "assistant", "content": "working"}, {"role": "user", "content": "a tool's long output"}]
+    ctx = _running_root(tmp_path)
+    write_owner_message(tmp_path, "Morning.", "main-root", msg_id="steer-b", client_message_id="b")
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, "main-root", None, set(), owner_ctx=ctx)
+    sent = [dict(row) for row in messages]
+    write_owner_message(tmp_path, "One more.", "main-root", msg_id="steer-b2", client_message_id="b2")
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, "main-root", None, set(), owner_ctx=ctx)
+    assert messages[:len(sent)] == sent, "what the first drain placed is never rewritten"
+    kinds = [row.get(HOST_CONTEXT_KIND_KEY) for row in messages]
+    assert kinds[4:6] == [rf.SECTION_ID, OWNER_WORDS_KIND] and kinds[7:9] == [rf.SECTION_ID, OWNER_WORDS_KIND]
+    first, second = _kept(tmp_path, messages[4]["content"]), _kept(tmp_path, messages[7]["content"])
+    assert "«Night news.»" in first and "«Between the drains.»" in second
+    assert "Night news." not in second, "each row its own span: the reach moved to the first word"
+    cut = {index for group in _cut_units(messages)[0] for index in group}
+    assert not {7, 8} & cut, "renewal keeps the newest words with the facts that came with them"
+
+
 def test_a_root_captured_after_my_humans_previous_word_gets_rows_from_its_view_and_page_changes_from_the_word(
         tmp_path, place):
     _rows(tmp_path, _owner("Evening.", T0, cmid="a"), _arrival(place, "sasha", "Before the dawn capture.", T0 + 60))
@@ -282,14 +389,24 @@ def test_my_humans_own_words_in_a_place_mean_it_was_heard(tmp_path, place):
     assert "«From my phone to the team.»" in full and "Not known:" not in full, "a place my human wrote in is not quiet"
 
 
-def test_arrivals_without_a_recorded_author_are_not_called_automation(tmp_path, place):
-    unknown = _arrival(place, "x", "Who wrote this?", T0 + 5)
-    unknown["transport"]["actor"] = {}
-    unknown.pop("sender_label")
-    _rows(tmp_path, _owner("A.", T0, cmid="a"), unknown, _arrival(place, "ci", "Build green.", T0 + 6, is_bot=True),
-          _owner("B.", T0 + 9, cmid="b"))
-    full = rf.render(rf.facts(tmp_path, _word(tmp_path, "b"), rf.Own(room=1)))[0]
-    assert "unattributed arrivals ×1" in full and "automation ×1" in full
+def test_a_press_on_a_live_card_without_a_chat_row_brings_the_facts_up_to_its_time(tmp_path, place):
+    """A ``card_input`` press reaches a running author as ``owner_mailbox`` with only its time (``loop_round_limits``):
+    the facts run to that time; a row after it waits for the next facts, never skipped."""
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+
+    _rows(tmp_path, _owner("Evening.", T0, cmid="a"), _arrival(place, "sasha", "Night news.", T0 + 60))
+    after = _rows(tmp_path, _arrival(place, "nina", "Written after the press.", T0 + 36005))[0]
+    ctx = _running_root(tmp_path)
+    before = len(ctx._owner_directives)
+    ctx._owner_directives.append({"source": "owner_mailbox", "content": "[Card input] Dates: 3-5 Dec", "msg_id": "c1",
+                                  "chat_id": None, "client_message_id": None, "received": _iso(T0 + 36000)})
+    messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "asked a card"},
+                {"role": "user", HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND, "content": "[Card input] Dates: 3-5 Dec"}]
+    rf.place_before_words(ctx, messages, 2, before)
+    kept = _kept(tmp_path, messages[2]["content"])
+    assert messages[2].get(HOST_CONTEXT_KIND_KEY) == rf.SECTION_ID and "«Night news.»" in kept
+    assert "Written after the press." not in kept, "rows after the press's time wait"
+    assert getattr(ctx, rf.REACH_KEY) == {"seq": after.seq, "ts": _iso(T0 + 36000)}, "and are told next, not skipped"
 
 
 def test_the_stepped_words_count_people_not_the_lines_of_their_words(tmp_path, place):
@@ -300,11 +417,150 @@ def test_the_stepped_words_count_people_not_the_lines_of_their_words(tmp_path, p
     assert "The newest words of 1 person stand" in words.operative_view and "line two" in words.full_text
 
 
+def test_a_turns_reach_is_read_before_its_memory_view(tmp_path):
+    from types import SimpleNamespace
+
+    ctx, seen = SimpleNamespace(), {"seq": 7, "ts": _iso(T0)}
+    assert rf.turn_sections({"_is_direct_chat": False}, tmp_path, ctx, seen=seen) == []
+    assert getattr(ctx, rf.REACH_KEY) == seen, "a row arriving between the view and this hook is told next"
+
+
+def test_arrivals_without_a_recorded_author_are_not_called_automation(tmp_path, place):
+    unknown = _arrival(place, "x", "Who wrote this?", T0 + 5)
+    unknown["transport"]["actor"] = {}
+    unknown.pop("sender_label")
+    _rows(tmp_path, _owner("A.", T0, cmid="a"), unknown, _arrival(place, "ci", "Build green.", T0 + 6, is_bot=True),
+          _owner("B.", T0 + 9, cmid="b"))
+    full = rf.render(rf.facts(tmp_path, _word(tmp_path, "b"), rf.Own(room=1)))[0]
+    assert "unattributed arrivals ×1" in full and "automation ×1" in full
+
+
+def test_the_running_row_is_one_line_beside_the_reader_of_the_full_facts_whatever_the_window(tmp_path, place, monkeypatch):
+    """The owner's 3A of 18 Nov: in running work the row is the interval and its counts beside the reader of the full
+    facts, kept in the work's artifacts, however much happened and whatever the window; renewal keeps it with my
+    human's words; a copy that cannot be kept leaves the counts and names the gap, never the full form."""
+    import queue
+
+    from ouroboros import section_floor
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+    from ouroboros.context_renewal import _cut_units
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_mailbox import write_owner_message
+
+    _rows(tmp_path, _owner("Evening.", T0, cmid="a"), *(_arrival(place, f"p{n}", f"Long news {n}. " * 400, T0 + n)
+                                                        for n in range(1, 30)), _owner("Morning.", T0 + 36000, cmid="b"))
+
+    def drained(msg_id):
+        messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "task"},
+                    {"role": "assistant", "content": "working"}, {"role": "user", "content": "a tool's long output"},
+                    {"role": "user", HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND, "content": "[Card input] an earlier press"}]
+        write_owner_message(tmp_path, "Morning.", "main-root", msg_id=msg_id, client_message_id="b")
+        _drain_incoming_messages(messages, queue.Queue(), tmp_path, "main-root", None, set(),
+                                 owner_ctx=_running_root(tmp_path))
+        return messages
+
+    messages = drained("steer-b")
+    line = messages[5]["content"]
+    assert messages[5].get(HOST_CONTEXT_KIND_KEY) == rf.SECTION_ID and len(line) < 1_200, "one line, not 29 people's words"
+    assert "\nSince then, counted: 1 place: 29 people (29 messages)" in line and "Long news" not in line
+    assert "«" + "Long news 29. " * 2 in _kept(tmp_path, line)
+    cut = {index for group in _cut_units(messages)[0] for index in group}
+    assert not {4, 5, 6} & cut, "the earlier press, the facts and the word stay one run"
+
+    def unkept(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(section_floor, "retain_section", unkept)
+    line = drained("steer-b-again")[5]["content"]
+    assert "Long news" not in line and line.endswith("Not known: the full facts could not be kept for reading (OSError).")
+
 def test_a_person_who_renamed_between_posts_is_one_person_under_their_newest_name(tmp_path, place):
     _rows(tmp_path, _owner("A.", T0, cmid="a"), _arrival(place, "sasha", "Before the rename.", T0 + 1),
           _arrival(place, "sasha", "After the rename.", T0 + 2, display_name="Alexander"), _owner("B.", T0 + 9, cmid="b"))
     full = rf.render(rf.facts(tmp_path, _word(tmp_path, "b"), rf.Own(room=1)))[0]
     assert "Alexander (sasha) ×2, newest " in full and "Sasha (sasha)" not in full
+
+
+
+def test_a_press_and_a_typed_word_in_one_drain_take_the_word_before_both_as_the_previous(tmp_path, place):
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+
+    _rows(tmp_path, _owner("Evening.", T0, cmid="a"), _arrival(place, "sasha", "Night news.", T0 + 60),
+          _owner("Typed after the press.", T0 + 36060, cmid="b"))
+    ctx = _running_root(tmp_path)
+    before = len(ctx._owner_directives)
+    ctx._owner_directives += [{"source": "owner_mailbox", "content": "[Card input] Dates", "msg_id": "c1", "chat_id": None,
+                               "client_message_id": None, "received": _iso(T0 + 36000)},
+                              {"source": "owner_mailbox", "content": "Typed after the press.", "msg_id": "steer-b",
+                               "client_message_id": "b", "chat_id": "1"}]
+    messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "asked"},
+                {"role": "user", HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND, "content": "[Card input] Dates"},
+                {"role": "user", HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND, "content": "Typed after the press."}]
+    rf.place_before_words(ctx, messages, 2, before)
+    facts = messages[2]["content"]
+    assert "My human's previous word: Main, " + _iso(T0)[:16].replace("T", " ") in facts, "a word delivered now is not before"
+
+
+def test_a_card_my_human_closed_is_found_by_its_own_row(tmp_path, place):
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+
+    closed = {"ts": _iso(T0 + 36000), "direction": "system", "type": "quiz_closed", "chat_id": 1, "task_id": "main-root",
+              "client_message_id": "quiz_closed:main-root:q7", "text": "[Owner closed a card]",
+              "quiz": {"quiz_id": "q7", "state": "closed", "closed_actor": "owner"}}
+    _rows(tmp_path, _owner("Evening.", T0, cmid="a"), _arrival(place, "sasha", "Night news.", T0 + 60), closed)
+    ctx = _running_root(tmp_path)
+    before = len(ctx._owner_directives)
+    ctx._owner_directives.append({"source": "owner_mailbox", "content": "[Owner closed a card]", "msg_id": "quiz_closed:q7",
+                                  "chat_id": None, "client_message_id": None, "received": _iso(T0 + 36001)})
+    messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "asked"},
+                {"role": "user", HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND, "content": "[Owner closed a card]"}]
+    rf.place_before_words(ctx, messages, 2, before)
+    facts = messages[2]["content"]
+    assert "«Night news.»" in _kept(tmp_path, facts)
+    assert "My human's previous word: Main, " + _iso(T0)[:16].replace("T", " ") in facts
+    own = ds.probe_rows(tmp_path, "chat", [("client_message_id", "quiz_closed:main-root:q7")], limit=1)[0]
+    assert getattr(ctx, rf.REACH_KEY)["seq"] == own.seq + 1, "the closure's own row, not the stream's end"
+
+
+def test_a_reach_not_read_before_the_view_is_not_read_after_it(tmp_path):
+    from types import SimpleNamespace
+
+    ctx = SimpleNamespace()
+    assert rf.turn_sections({"_is_direct_chat": False}, tmp_path, ctx, seen=None) == []
+    assert not hasattr(ctx, rf.REACH_KEY), "no reach: a later word is told from my human's previous word"
+
+
+def test_a_press_with_nothing_before_it_still_leaves_the_rows_after_it_for_the_next_facts(tmp_path):
+    """No connected place, nothing before the press: no block, and the work that ended after the press's time, before
+    the drain, is told with the next word, never skipped (Grok, Astra R7)."""
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+
+    _rows(tmp_path, _owner("Evening.", T0, cmid="a"))
+    ended = _rows(tmp_path, _ended("other", T0 + 36060))[0]
+    ctx = _running_root(tmp_path)
+    before = len(ctx._owner_directives)
+    ctx._owner_directives.append({"source": "owner_mailbox", "content": "[Card input] Dates", "msg_id": "c1",
+                                  "chat_id": None, "client_message_id": None, "received": _iso(T0 + 36000)})
+    messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "asked"},
+                {"role": "user", HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND, "content": "[Card input] Dates"}]
+    rf.place_before_words(ctx, messages, 2, before)
+    assert len(messages) == 3, "nothing before the press: no block"
+    assert getattr(ctx, rf.REACH_KEY)["seq"] == ended.seq, "the work that ended after it waits for the next facts"
+
+
+def test_a_word_of_my_human_after_the_press_is_not_its_previous_word(tmp_path, place):
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+
+    _rows(tmp_path, _owner("Evening.", T0, cmid="a"), _arrival(place, "sasha", "Night news.", T0 + 60),
+          _owner("A DM written after the press.", T0 + 36060, chat_id=144346271, cmid="dm"))
+    ctx = _running_root(tmp_path)
+    before = len(ctx._owner_directives)
+    ctx._owner_directives.append({"source": "owner_mailbox", "content": "[Card input] Dates", "msg_id": "c1",
+                                  "chat_id": None, "client_message_id": None, "received": _iso(T0 + 36000)})
+    messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "asked"},
+                {"role": "user", HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND, "content": "[Card input] Dates"}]
+    rf.place_before_words(ctx, messages, 2, before)
+    assert "My human's previous word: Main, " + _iso(T0)[:16].replace("T", " ") in messages[2]["content"]
 
 
 def test_one_person_by_their_id_across_places_and_a_forward_is_not_their_words(tmp_path, place):
