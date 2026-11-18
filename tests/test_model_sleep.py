@@ -659,6 +659,17 @@ def test_one_publication_for_all_ready_pauses_and_none_for_unready(tmp_path, mon
 
     monkeypatch.setattr(q, "publish_queue_snapshot", counted)
     monkeypatch.setattr(q, "atomic_write_text", counted_write)
+    with monkeypatch.context() as blocked:
+        def refuse(reason):
+            barriers.append(reason)
+            return False
+        blocked.setattr(q, "publish_queue_snapshot", refuse)
+        refused = wake_ready_sleepers(q)
+    assert len(barriers) == 1 and len(refused) == 3
+    assert all(reply["error"] == "snapshot_not_persisted" for reply in refused)
+    assert all("_budget_pause_resume" not in t and bp.budget_pause_row(tmp_path, t["id"])["state"] == "paused"
+               for t in q.PENDING)
+    barriers.clear()
     outcomes = wake_ready_sleepers(q)
     woken = [o for o in outcomes if o.get("ok")]
     snapshot_writes = [w for w in writes if w[0] == "queue_snapshot.json"]

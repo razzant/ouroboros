@@ -1655,7 +1655,7 @@ def kill_workers(
     if reconcile_review_custody:
         _reconcile_review_owners(DRIVE_ROOT, dead_pids)
     try:
-        snapshot_ok = queue.publish_queue_snapshot(reason=stop_source or "kill_workers") is not False  # barrier (LB): the door names the export
+        snapshot_ok = retention.publish_pending_parks(queue, stop_source or "kill_workers", final=True) is not False
     except Exception:
         snapshot_ok = False
         log.warning("Failed to persist queue snapshot after worker shutdown", exc_info=True)

@@ -146,7 +146,8 @@ def current_stop(task: dict | None, fences: dict | None = None) -> dict:
 def _display_task(task: dict) -> dict:
     """Join the display snapshot's locator with its current durable point."""
     source = dict(task)
-    pause = source.get("budget_pause") or {}
+    from ouroboros.budget_pause import saved_budget_pause
+    pause = saved_budget_pause(source)
     if pause.get("state") in {"pausing", "paused", "resume_granted"}:
         source["_budget_pause"] = {"reason": "budget", **pause, **(source.get("_budget_pause") or {})}
     return source
@@ -216,7 +217,10 @@ def activity_stop_view(row: dict, raw: dict | None = None) -> dict:
             task["_budget_pause"] = {"reason": cause}
         elif cause == "restart" and not task.get("_budget_pause_hold"):
             task["_budget_pause_hold"] = {"reason": "owner_restart_hold"}
-    return stop_presentation(task, fences)
+    view = stop_presentation(task, fences)
+    if view["reason"]["code"] == "technical_pause" and row.get("pause_reason") and not raw.get("_budget_pause"):
+        view["reason"]["text"] = row["pause_reason"]
+    return view
 
 
 # --- One queue row's current control: the census and the mind's readers read it alike -------------
@@ -505,6 +509,8 @@ def door_can_replace(task: dict, reason: str) -> bool:
     if prior:
         return bool(record_policy(prior).get("door_replaceable")
                     and reason_policy(reason).get("replaces_door", True))
+    if reason in {"owner_restart_hold", "panic_hold"} and (pause_marker(task) or {}).get("reason") == "authority":
+        task = {k: v for k, v in task.items() if k != "_budget_pause"}
     return not current_stop(task)
 
 

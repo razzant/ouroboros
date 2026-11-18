@@ -480,12 +480,12 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
 
 
 def saved_budget_pause(result: dict) -> dict:
-    """Read the typed cause, including the exact host messages kept by older pause writers."""
+    """Recover the cause from a legacy host-issued message on its own rail."""
     pause = result.get("budget_pause")
     row = dict(pause) if isinstance(pause, dict) else {}
+    text, rail = str(row.get("reason_text") or ""), row.get("rail")
     if row.get("reason") != REASON_AUTHORITY or row.get("cause"):
         return row
-    text, rail = str(row.get("reason_text") or ""), row.get("rail")
     cause = ""
     if rail == RAIL_CONTROL_AUTHORITY:
         if text.startswith("root budget fence authority unavailable: "):
@@ -1322,8 +1322,6 @@ def _reopen_owner_fence(ctx: Any, usage: Dict[str, Any], *, fence_id: str = "", 
 def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], grant: Dict[str, Any],
                        refresh: Dict[str, Any], messages: list) -> None:
     """The resumed model's first facts: UNKNOWN host rows and how it continued, or its wake."""
-    # Prefer the grant-time re-observation over the checkpoint's pause-time copy;
-    # label its age so fresh evidence never appears stale (or vice versa).
     fresh_observation = row.get("external_runs") if isinstance(row.get("external_runs"), dict) else None
     external_observation = fresh_observation if fresh_observation is not None else (
         state.get("external_runs") or {})
@@ -1355,8 +1353,12 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
         elif not row.get("external_custody") and (passed := passed_reviews_notice(external_observation)):
             messages.append({"role": "user", "content": passed})
         return
-    kind = {REASON_OWNER: "Pause", REASON_AUTHORITY: f"technical pause ({str(row.get('rail')).replace('_', ' ')})"}.get(
-        str(row.get("reason") or ""), "budget pause")
+    kind = "Pause" if row.get("reason") == REASON_OWNER else "budget pause"
+    if row.get("reason") == REASON_AUTHORITY:
+        from ouroboros.pause_notices import authority_subject
+        subject = authority_subject(row.get("cause"))
+        detail = f"it could not read {subject}" if subject else str(row.get("reason_text") or "saved decision unreadable")
+        kind = f"technical pause ({detail})"
     held = ""
     if refresh.get("reason") == "producer_allowance_not_expanded" and refresh.get("ceiling_usd") is not None:
         # Said, not implied: Resume keeps the allowance the task was launched with.
@@ -1369,9 +1371,11 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
     from ouroboros.owner_wait import owner_pause_resume_notice
     if row.get("retained_owner_wait_id") and state.get("owner_pause"):
         messages.append(owner_pause_resume_notice(ctx, state, "owner_input", cold=True))
+    resumed_by = {"authority_readable": "the saved check succeeded", "sleep_readiness": "its wake condition was met",
+                  "explicit_resume": model_sleep.resumer_words(grant.get("by")) or "an explicit Resume"}.get(
+                      grant.get("authority"), "its saved grant")
     messages.append({"role": "user", "content": (
-        f"[SYSTEM NOTICE]\nThis task continued from its {kind} after "
-        f"{model_sleep.resumer_words(grant.get('by')) or 'an explicit Resume'} "
+        f"[SYSTEM NOTICE]\nThis task continued from its {kind} after {resumed_by} "
         f"(paused {ctx._budget_paused_sec:.0f}s; rail: {row.get('rail')}; planning threshold "
         f"{'refreshed to $%.2f' % refresh['ceiling_usd'] if refresh.get('refreshed') else 'not refreshed: ' + str(refresh.get('reason'))}"
         f"{' (' + str(refresh['ceiling_basis']) + ')' if refresh.get('ceiling_basis') else ''}{held}). "

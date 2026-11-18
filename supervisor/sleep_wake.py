@@ -11,6 +11,8 @@ import time
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
+from ouroboros.store import acquisition_budget
+
 log = logging.getLogger(__name__)
 
 SLEEP_WAKE = "sleep_wake"
@@ -24,6 +26,7 @@ def _sleepers(q: Any, only: str) -> List[Dict[str, Any]]:
                 and task["_budget_pause"].get("reason") in {"authority", "sleep"}]
 
 
+@acquisition_budget(0)
 def authority_readable(task, row, root):
     """Re-read the named fault. A row from an older writer may have no typed cause."""
     from ouroboros import owner_pause, queue_observation, usage_admission
@@ -44,7 +47,8 @@ def authority_readable(task, row, root):
                 return True
         if cause == "owner_pause_authority_unreadable":
             return not owner_pause.member_fence(SimpleNamespace(task_id=task_id, root_task_id=tree,
-                                                                budget_drive_root=root))
+                                                                budget_drive_root=root, drive_root=task.get("drive_root") or root,
+                                                                task_metadata=task.get("metadata"), task_lifecycle_bound=True))
     except Exception:
         log.debug("Technical wait of %s still lacks %s", task_id, cause, exc_info=True)
     return False
@@ -52,7 +56,6 @@ def authority_readable(task, row, root):
 
 def _readiness(q: Any, task: Dict[str, Any], row: Dict[str, Any]) -> str:
     from ouroboros.model_sleep import wake_reason
-    from ouroboros.store import acquisition_budget
 
     root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
     ctx = SimpleNamespace(
@@ -93,63 +96,79 @@ def wake_ready_sleepers(q: Any = None, *, only: str = "") -> List[Dict[str, Any]
     if not only:
         publish_pending_parks(q, "budget_pause_exact_continuation")
     outcomes: List[Dict[str, Any]] = []
+    batch = []
     sleepers = _sleepers(q, only)
     roots = {id(task): pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT) for task in sleepers}
     facts = read_ahead([(roots[id(task)], str(task.get(key) or task.get("id") or ""))
                         for task in sleepers for key in ("id", "root_task_id")]) if sleepers else {}
-    for task in sleepers:
-        task_id = str(task.get("id") or "")
-        root = roots[id(task)]
-        try:
-            with serving(facts):
-                row = budget_pause_row(root, task_id)
-            if row.get("state") != "paused":
-                continue
-            if row.get("reason") == "authority":
-                if not authority_readable(task, row, root):
+    try:
+        for task in sleepers:
+            task_id = str(task.get("id") or "")
+            root = roots[id(task)]
+            try:
+                with serving(facts):
+                    row = budget_pause_row(root, task_id)
+                if row.get("state") != "paused":
                     continue
-                ready = {"reason": row["cause"]}
-            elif row.get("reason") == "sleep" and isinstance(row.get("sleep"), dict):
-                ready = row.get("sleep_ready") or {}
-            else:
-                continue
-            if not ready:
-                reason = _readiness(q, task, row)
-                if not reason:
+                if row.get("reason") == "authority":
+                    if not authority_readable(task, row, root):
+                        continue
+                    ready = {"reason": row["cause"]}
+                elif row.get("reason") == "sleep" and isinstance(row.get("sleep"), dict):
+                    ready = row.get("sleep_ready") or {}
+                else:
                     continue
-                ready = {"reason": reason, "observed_at": time.time()}
-                # Readiness was read off-lock: a Resume, revocation or newer
-                # pause that landed meanwhile wins; the next pass re-observes.
-                set_budget_pause(root, task_id, {**row, "sleep_ready": ready},
-                                 expected_pause_id=str(row.get("pause_id") or ""),
-                                 expected_state=str(row.get("state") or ""),
-                                 expected_grant_id=str((row.get("grant") or {}).get("grant_id") or ""))
-        except BudgetPauseSuperseded:
-            log.debug("Sleep readiness of %s superseded by a newer pause row", task_id, exc_info=True)
-            continue
-        except Exception:
-            log.warning("Sleep readiness of %s unreadable; it keeps sleeping", task_id, exc_info=True)
-            continue
-        from ouroboros.budget_pause import observe_task_runs
+                if not ready:
+                    reason = _readiness(q, task, row)
+                    if not reason:
+                        continue
+                    ready = {"reason": reason, "observed_at": time.time()}
+                    # Readiness was read off-lock: a Resume, revocation or newer
+                    # pause that landed meanwhile wins; the next pass re-observes.
+                    set_budget_pause(root, task_id, {**row, "sleep_ready": ready},
+                                     expected_pause_id=str(row.get("pause_id") or ""),
+                                     expected_state=str(row.get("state") or ""),
+                                     expected_grant_id=str((row.get("grant") or {}).get("grant_id") or ""))
+            except BudgetPauseSuperseded:
+                log.debug("Sleep readiness of %s superseded by a newer pause row", task_id, exc_info=True)
+                continue
+            except Exception:
+                log.warning("Sleep readiness of %s unreadable; it keeps sleeping", task_id, exc_info=True)
+                continue
+            from ouroboros.budget_pause import observe_task_runs
 
-        external = observe_task_runs(root, task_id, reason="sleep_wake_check", request_stop=False)
-        with q._queue_lock:
-            live = next((item for item in q.PENDING if str(item.get("id") or "") == task_id), None)
-            if live is None or not isinstance(live.get("_budget_pause"), dict):
-                continue
-            with serving(facts, strict=True):  # the tree's fence as the pass read it, never a store under Q
-                veto = _vetoed(q, live)
-            if veto:
-                outcomes.append({"task_id": task_id, "ok": False, "error": "sleep_wake_vetoed", "veto": veto,
-                                 "ready": ready})
-                continue
-            pause = live["_budget_pause"]
-        granted = grant_exact_sleep_resume(live, pause, external=external)
-        outcomes.append({"task_id": task_id, "ready": ready, **granted})
+            external = observe_task_runs(root, task_id, reason="sleep_wake_check", request_stop=False)
+            with q._queue_lock:
+                live = next((item for item in q.PENDING if str(item.get("id") or "") == task_id), None)
+                if live is None or not isinstance(live.get("_budget_pause"), dict):
+                    continue
+                with serving(facts, strict=True):  # the tree's fence as the pass read it, never a store under Q
+                    veto = _vetoed(q, live)
+                if veto:
+                    outcomes.append({"task_id": task_id, "ok": False, "error": "sleep_wake_vetoed", "veto": veto,
+                                     "ready": ready})
+                    continue
+                pause = live["_budget_pause"]
+            granted = grant_exact_sleep_resume(live, pause, external=external, batch=batch)
+            granted.update(task_id=task_id, ready=ready)
+            outcomes.append(granted)
+    finally:
+        if batch:
+            _publish_batch(q, batch)
     return outcomes
 
 
-def publish_wake_grant(q, task, pause, row, handoff, record_grant):
+def _publish_batch(q, batch):
+    try:
+        saved = q.publish_queue_snapshot(reason="budget_exact_resume_granted")
+    except Exception:
+        log.warning("Could not publish the proposed wake grants", exc_info=True)
+        saved = False
+    for result, finish in batch:
+        result.update(finish(saved))
+
+
+def publish_wake_grant(q, task, pause, row, handoff, record_grant, granted, batch):
     """The snapshot carries the proposed handoff beside its blocking pause. Only the row CAS opens it."""
     from supervisor.budget_resume import _sleep_policy_allows
     from supervisor.queue_publication import mark_dirty_locked
@@ -162,28 +181,39 @@ def publish_wake_grant(q, task, pause, row, handoff, record_grant):
             return {"ok": False, "error": "sleep_wake_vetoed"}
         task["_budget_pause_resume"] = handoff
         mark_dirty_locked("budget_exact_resume_proposed")
-    try:
-        if not q.publish_queue_snapshot(reason="budget_exact_resume_granted"):
-            return {"ok": False, "error": "snapshot_not_persisted"}
-        root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
-        if not _sleep_policy_allows(task, row, root):
-            return {"ok": False, "error": "sleep_wake_vetoed"}
-        if refusal := record_grant():
-            return refusal
-        with q._queue_lock:
-            if current() and task.get("_budget_pause_resume") is handoff:
-                task.pop("_budget_pause")
-                task["budget_resumed_at"] = handoff["granted_at"]
-                mark_dirty_locked("budget_exact_resume_granted")
-                return None
-        from ouroboros.budget_pause import set_budget_pause
-        set_budget_pause(root, task["id"], row, expected_pause_id=handoff["pause_id"],
-                         expected_state="resume_granted", expected_grant_id=handoff["grant_id"])
-        return {"ok": False, "error": "selection_authority_changed"}
-    except Exception as exc:
-        return {"ok": False, "error": "grant_not_recorded", "detail": str(exc)[:200]}
-    finally:
-        with q._queue_lock:
-            if task.get("_budget_pause") is pause and task.get("_budget_pause_resume") is handoff:
-                task.pop("_budget_pause_resume", None)
-                mark_dirty_locked("budget_exact_resume_withdrawn")
+
+    def finish(saved):
+        try:
+            if not saved:
+                return {"ok": False, "error": "snapshot_not_persisted"}
+            root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
+            if not _sleep_policy_allows(task, row, root):
+                return {"ok": False, "error": "sleep_wake_vetoed"}
+            if refusal := record_grant():
+                return refusal
+            with q._queue_lock:
+                confirmed = current() and task.get("_budget_pause_resume") is handoff
+                if confirmed:
+                    task.pop("_budget_pause")
+                    task["budget_resumed_at"] = handoff["granted_at"]
+                    mark_dirty_locked("budget_exact_resume_granted")
+            if confirmed:
+                return granted()
+            from ouroboros.budget_pause import set_budget_pause
+            set_budget_pause(root, task["id"], row, expected_pause_id=handoff["pause_id"],
+                             expected_state="resume_granted", expected_grant_id=handoff["grant_id"])
+            return {"ok": False, "error": "selection_authority_changed"}
+        except Exception as exc:
+            return {"ok": False, "error": "grant_not_recorded", "detail": str(exc)[:200]}
+        finally:
+            with q._queue_lock:
+                if task.get("_budget_pause") is pause and task.get("_budget_pause_resume") is handoff:
+                    task.pop("_budget_pause_resume", None)
+                    mark_dirty_locked("budget_exact_resume_withdrawn")
+
+    result = {}
+    if batch is None:
+        _publish_batch(q, [(result, finish)])
+    else:
+        batch.append((result, finish))
+    return result

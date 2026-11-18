@@ -337,7 +337,7 @@ def test_unreadable_authority_parks_the_same_thought_and_only_a_strict_reread_re
     first = messages[0]
     assert first["role"] == "user" and "keep this thought" in str(first["content"])  # the saved stack itself
     notice = messages[-1]["content"]
-    assert "technical pause (billing authority unreadable)" in notice and "not_a_money_rail" in notice
+    assert "which spending account to use" in notice and "explicit Resume" in notice and "not_a_money_rail" in notice
     assert budget_pause.budget_pause_row(tmp_path, "tech")["state"] == budget_pause.STATE_RESUMED
 
 
@@ -696,7 +696,7 @@ def test_control_readability_wakes_only_the_saved_work_and_obeys_owner_pause(tmp
     path.write_text("{", encoding="utf-8")
     assert not any(item["ok"] for item in wake_ready_sleepers(q))
     refused = q.resume_budget_paused_task(task["id"])
-    assert not refused["ok"] and refused["cause"] == row["cause"] and "dispatch fence" in refused["message"]
+    assert not refused["ok"] and refused["cause"] == row["cause"] and "stopped for spending" in refused["message"]
     atomic_write_json(path, {"generation": "g", "budget_root_fences": [], "members": {}})
     owner_pause.install_fence(tmp_path, task["id"], request_id="owner")
     assert not any(item["ok"] for item in wake_ready_sleepers(q))

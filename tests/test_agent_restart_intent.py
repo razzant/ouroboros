@@ -749,7 +749,7 @@ def test_update_lock_open_failure_releases_only_restart_before_effects(runtime, 
     runtime.workers.RUNNING.pop(row["task"]["id"])
 
 
-@pytest.mark.parametrize("phase", ["checkout", "teardown"])
+@pytest.mark.parametrize("phase", ["checkout", "teardown", "export"])
 def test_unknown_restart_effects_keep_independent_work_held(runtime, monkeypatch, phase):
     from ouroboros.task_results import write_task_result
     from supervisor import git_ops
@@ -770,14 +770,19 @@ def test_unknown_restart_effects_keep_independent_work_held(runtime, monkeypatch
 
     def kill(**kwargs):
         effects.append("teardown")
-        raise OSError("teardown effects unknown")
+        if phase == "teardown":
+            raise OSError("teardown effects unknown")
 
+    if phase == "export":
+        publish = runtime.queue.publish_queue_snapshot
+        monkeypatch.setattr(runtime.queue, "publish_queue_snapshot",
+                            lambda reason: False if reason == "pre_restart_exit" else publish(reason))
     runtime.host.safe_restart, runtime.host.kill_workers = checkout, kill
     monkeypatch.setattr(runtime.server, "_begin_task_teardown", lambda **k: ("cancelled", "restart"))
     monkeypatch.setattr(runtime.server, "_managed_update_pending_kwargs", lambda: {})
     monkeypatch.setattr(runtime.server, "_planned_delegate_restart_transaction_id", "")
     monkeypatch.setattr(runtime.server, "_request_restart_exit", lambda: pytest.fail("no physical exit in test"))
-    with pytest.raises(OSError, match=f"{phase} effects unknown"):
+    with pytest.raises(OSError, match="rollback-readable" if phase == "export" else f"{phase} effects unknown"):
         runtime.server._handle_restart_in_supervisor({**intent, "phase": "ready"}, runtime.host)
     assert effects == (["checkout"] if phase == "checkout" else ["checkout", "teardown"])
     assert runtime.restart.agent_restart_snapshot()["request_id"] == intent["request_id"]

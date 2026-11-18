@@ -302,10 +302,10 @@ def test_an_authority_pause_says_it_is_technical_and_never_a_budget_limit(notice
     pause_notices.reconcile_pause_notices(root)
     assert len(sent) == 1
     text = sent[0][1]
-    assert "billing or control authority could not be read" in text and "says nothing about money left" in text
-    assert "budget limit" not in text and "Its work is retained." in text
+    assert "could not read a saved decision about spending or permission to work" in text
+    assert "budget limit" not in text and "Its work is saved." in text
     # Resume rereads the authority and refuses while it stays unreadable; the owner is not asked to diagnose it (#1911).
-    assert text.endswith("Use Resume on the task when available; it rechecks the conditions before continuing.")
+    assert text.endswith("Use Resume to check again.")
     assert "Fix the cause" not in text
 
 

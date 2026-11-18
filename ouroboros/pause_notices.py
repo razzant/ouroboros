@@ -82,17 +82,21 @@ def gap_words(gaps: Any, lead: str = "The Pause did not wait for") -> str:
             f"that nothing ties to this task ({named}); whether {'it belongs' if one else 'they belong'} here is unknown.")
 
 
-def authority_wait_text(cause: str) -> str:
-    """Stable source sentences for the reader's existing translation memory."""
+def authority_subject(cause: str) -> str:
+    """What the paused task could not read, in the reader's terms."""
     return {
-        "dispatch_fence_unreadable": "The task is waiting to read its dispatch fence.",
-        "dispatch_fence_invalid": "The task is waiting for a valid dispatch fence.",
-        "read_failed": "The task is waiting to read its billing record.",
-        "malformed_binding": "The task is waiting for a valid billing group record.",
-        "start_custody_unreadable": "The task is waiting to read its delegated start record.",
-        "owner_pause_authority_unreadable": "The task is waiting to read its owner's Pause.",
-        "owner_launch_authority_unavailable": "The task is waiting to read permission to launch.",
+        "dispatch_fence_unreadable": "which tasks are stopped for spending",
+        "dispatch_fence_invalid": "a valid list of tasks stopped for spending",
+        "read_failed": "its spending record", "malformed_binding": "which spending account to use",
+        "start_custody_unreadable": "whether its delegated work started",
+        "owner_pause_authority_unreadable": "whether you paused its work",
+        "owner_launch_authority_unavailable": "whether it may start the next step",
     }.get(str(cause or "").partition(":")[0], "")
+
+
+def authority_wait_text(cause: str) -> str:
+    subject = authority_subject(cause)
+    return f"The task will continue automatically when it can read {subject}." if subject else ""
 
 
 def notice_text(notice: dict) -> str:
@@ -109,12 +113,10 @@ def notice_text(notice: dict) -> str:
         return f"{head} {_RETAINED}{gap_words(notice.get('membership_gaps'))}"
     authority = notice.get("reason") == "authority"
     if authority and (words := authority_wait_text(notice.get("cause"))):
-        return f"{words} Its work is saved. It resumes when its controls permit it."
-    cause = ("a technical fault: its billing or control authority could not be read, which says nothing about "
-             "money left") if authority else "its budget limit"
-    resume = ("Use Resume on the task when available; it rechecks the conditions before continuing" if authority
-              else "Use Resume on the task when available")
-    return f"The task paused because of {cause}. Its work is retained. {resume}."
+        return f"{words} Its work is saved."
+    if authority:
+        return "The task could not read a saved decision about spending or permission to work. Its work is saved. Use Resume to check again."
+    return "The task paused because of its budget limit. Its work is retained. Use Resume on the task when available."
 
 
 def _acknowledge(root: pathlib.Path, task_id: str, identity: str, notice: dict) -> None:

@@ -29,7 +29,7 @@ from ouroboros.queue_observation import POOL_COUNT_KEYS as _POOL_COUNT_KEYS, QUE
 from ouroboros.shared_values import TOKEN_PATTERN, token
 from ouroboros.subagents import subagent_intent_fields
 from ouroboros.utils import machine_json, read_json_dict, utc_now_iso, write_text_atomic
-from supervisor.queue_snapshot import QUEUE_SNAPSHOT_SCHEMA_VERSION, _PENDING_FIELDS, _keeps_saved_queue
+from supervisor.queue_snapshot import QUEUE_SNAPSHOT_SCHEMA_VERSION, _PENDING_FIELDS, _keeps_saved_queue, retry_pausing_envelopes
 from supervisor.work_stop_migration import FORMAT_KEY, FORMAT_VERSION
 
 
@@ -242,12 +242,17 @@ def _publish_now(reason: str) -> Optional[bool]:
     if not _queue().INITIALIZED:
         log.info("Queue snapshot not published (reason=%s): no supervisor queue in this process", reason)
         return None
-    with _queue()._queue_lock:
-        _STATE["revision"] += 1
-        capture = _capture(reason)
-    if capture is None:
-        return None
-    return _publish(capture)
+    if not retry_pausing_envelopes(_queue()):
+        return False
+    while True:
+        with _queue()._queue_lock:
+            _STATE["revision"] += 1
+            capture = _capture(reason)
+        if capture is None:
+            return None
+        result = _publish(capture)
+        if result or not capture["forced"] or _STATE["published_seq"] <= capture["seq"]:
+            return result
 
 
 def publish_queue_changes() -> Optional[bool]:
@@ -256,6 +261,8 @@ def publish_queue_changes() -> Optional[bool]:
     failures every tick returns False until a write succeeds, even while a retry is on disk."""
     if not _queue().INITIALIZED:
         return None
+    if not retry_pausing_envelopes(_queue()):
+        return False
     with _queue()._queue_lock:
         if _kept_by_memo():
             return None  # the saved queue is still kept: decided once, not copied or counted again
@@ -574,7 +581,8 @@ def _dispatch_restrictions(doc):
 
 def _before_snapshot(old, new):
     """Only write early if permission actually shrinks. During a mixed change both sets of limits hold."""
-    if not old or not old.get("generation"):
+    from ouroboros.queue_observation import valid_dispatch_facts
+    if not old or not isinstance(old.get("generation"), str) or not old["generation"].strip() or not valid_dispatch_facts(old):
         return None
     try:
         before, after = _dispatch_restrictions(old), _dispatch_restrictions(new)
@@ -602,13 +610,15 @@ def _publish(capture: Dict[str, Any], *, writer: Optional[_TickWriter] = None) -
     """
     documents, encoded = _documents(capture)
     with _PUBLISH_LOCK:
+        if _queue().PRIOR_DIRECT_ROOTS.get("retry_pausing_envelopes"):
+            return False
         if writer is not None and writer is not _WRITER:
             return False  # an ended generation's capture: the next generation owns the documents now
         previous = _queue().QUEUE_PUBLICATION
         if _STATE["published_seq"] > capture["seq"]:
             # A later capture already published newer documents; while a later write failed, the bundle on
             # disk is unknown, so that publication is no durability for this caller either.
-            return not _STATE["write_failed"]
+            return not (_STATE["write_failed"] or capture["forced"])
         # After a failed write the bundle on disk is unknown: byte equality with the last cache proves nothing,
         # so every document is rewritten under a new generation and certified (R2/R3-A).
         if (previous is None or previous[0] != _queue().QUEUE_SNAPSHOT_PATH or capture["forced"]
