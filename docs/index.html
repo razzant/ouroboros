@@ -3,27 +3,31 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Ouroboros is an open-source AI agent with persistent identity, agent swarms, autonomous evolution, and reproducible self-reported SOTA results on Terminal-Bench 2.1, OSWorld-Verified, and CL-Bench.">
+  <meta name="description" content="Ouroboros is an open-source AI agent on your computer: it runs Codex, Claude Code, Cursor and Antigravity as helpers, talks to you by voice, works as a colleague in Slack and Telegram, keeps one memory across rooms and channels and rewrites its own code under review. Self-reported SOTA on Terminal-Bench 2.1, OSWorld-Verified and CL-Bench.">
   <meta name="robots" content="index, follow, max-image-preview:large">
   <link rel="canonical" href="https://ouroboros-agent.ai/">
+  <meta name="theme-color" content="#0b0b0c">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="en_US">
   <meta property="og:site_name" content="Ouroboros">
-  <meta property="og:title" content="Ouroboros: an AI agent that can rewrite its own implementation">
-  <meta property="og:description" content="Open-source AI agent with persistent identity, agent swarms, autonomous evolution, and reproducible self-reported SOTA results with public runs and traces.">
+  <meta property="og:title" content="Ouroboros: an AI agent on your computer. It rewrites its own code.">
+  <meta property="og:description" content="Open-source AI agent that swarms Codex, Claude Code, Cursor and Antigravity, talks to you by voice, lives in Telegram and Slack, keeps one memory across rooms and channels and evolves its own implementation under review.">
   <meta property="og:url" content="https://ouroboros-agent.ai/">
-  <meta property="og:image" content="https://ouroboros-agent.ai/assets/og-preview.png?v=1479f283af">
+  <meta property="og:image" content="https://ouroboros-agent.ai/assets/og-preview.png?v=5c37798c45">
   <meta property="og:image:type" content="image/png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Ouroboros, an open-source general-purpose AI agent with autonomous evolution">
+  <meta property="og:image:alt" content="Ouroboros, an open-source AI agent on your computer">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Ouroboros: an AI agent that can rewrite its own implementation">
-  <meta name="twitter:description" content="Open-source AI agent with persistent identity, agent swarms, autonomous evolution, and reproducible self-reported SOTA results with public runs and traces.">
-  <meta name="twitter:image" content="https://ouroboros-agent.ai/assets/og-preview.png?v=1479f283af">
-  <meta name="twitter:image:alt" content="Ouroboros, an open-source AI agent with reproducible public benchmark evidence">
-  <title>Ouroboros: open-source AI agent with autonomous evolution</title>
+  <meta name="twitter:title" content="Ouroboros: an AI agent on your computer. It rewrites its own code.">
+  <meta name="twitter:description" content="Open-source AI agent that swarms Codex, Claude Code, Cursor and Antigravity, talks to you by voice, lives in Telegram and Slack, keeps one memory across rooms and channels and evolves its own implementation under review.">
+  <meta name="twitter:image" content="https://ouroboros-agent.ai/assets/og-preview.png?v=5c37798c45">
+  <meta name="twitter:image:alt" content="Ouroboros, an open-source AI agent on your computer">
+  <title>Ouroboros: an open-source AI agent on your computer</title>
   <link rel="icon" href="/assets/icon_1024.png" type="image/png">
+  <link rel="preload" href="/fonts/Inter-Black.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/Inter-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/Inter-ExtraBold.woff2" as="font" type="font/woff2" crossorigin>
   <script type="application/ld+json">
     {
       "@context": "https://schema.org",
@@ -31,7 +35,7 @@
       "name": "Ouroboros",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "macOS, Linux, Windows",
-      "description": "Open-source, general-purpose AI agent with persistent identity, agent swarms, autonomous evolution, implementation-level self-modification, and reproducible self-reported benchmark results.",
+      "description": "Open-source, general-purpose AI agent that runs on your own computer: it coordinates Codex, Claude Code, Cursor and Antigravity as helpers, holds a voice call, lives in Telegram and Slack, keeps one memory across rooms and channels, and evolves its own implementation under review, with reproducible self-reported benchmark results.",
       "url": "https://ouroboros-agent.ai/",
       "installUrl": "https://ouroboros-agent.ai/install/",
       "codeRepository": "https://github.com/razzant/ouroboros",
@@ -40,143 +44,273 @@
       "sameAs": "https://github.com/razzant/ouroboros"
     }
   </script>
-  <script type="module" crossorigin src="/assets/home-sxLf4sZL.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/ouroboros-CMTHrJbp.css">
+  <script type="module" crossorigin src="/assets/home-D3UBjfIg.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/home-CBY1RD8K.css">
 </head>
-<body>
-  <canvas id="matrix-rain" aria-hidden="true"></canvas>
-  <div class="ambient" aria-hidden="true"></div>
-  <div class="site-shell">
-    <nav class="site-nav" aria-label="Primary navigation">
-      <a class="brand" href="#top" aria-label="Ouroboros home"><img src="/assets/icon_1024.png" alt=""><span>Ouroboros</span></a>
-      <div class="nav-links"><a href="#work">Work</a><a href="/paper/">Paper</a><a href="/benchmarks/">Benchmarks</a><a href="/llm-rating/">LLM rating</a><a href="/install/">Install</a><a href="#evolution">Evolution</a><a href="/about/">About</a></div>
-      <div class="nav-actions"><a class="btn btn-quiet" href="https://github.com/razzant/ouroboros">GitHub</a><a class="btn btn-primary" href="/install/">Download</a></div>
-    </nav>
+<body class="home">
+  <a class="skip" href="#swarm">Skip to the product</a>
+  <button class="motion" type="button" hidden>Pause motion</button>
 
-    <main id="top">
-      <section class="field-hero chapter" aria-labelledby="hero-title">
-        <div class="field-copy reveal">
-          <p class="eyebrow">Open source · General purpose · Self-modifying</p>
-          <h1 id="hero-title">An AI agent that can rewrite the system it inhabits.</h1>
-          <p class="lede">Ouroboros works on external projects, coordinates a live swarm of specialist agents, and can evolve its own implementation across code, architecture, prompts, tools, and dependencies. Its identity, memory, and history continue across tasks and restarts.</p>
-          <div class="hero-actions"><a class="btn btn-primary" href="/install/">Download the desktop app</a><a class="btn btn-quiet" href="#run">Run it headless</a></div>
-          <div class="proof-line"><span>External workspaces</span><span>Root-owned integration</span><span>Reviewed evolution</span></div>
+  <nav class="bar" aria-label="Primary navigation">
+    <a class="brand" href="#top" aria-label="Ouroboros home"><img src="/assets/icon_1024.png" alt="" width="28" height="28"><span>Ouroboros</span></a>
+    <div class="bar-links"><a href="/install/">Install</a><a href="/benchmarks/">Benchmarks</a><a href="/paper/">Paper</a><a href="/llm-rating/">LLM rating</a><a href="/about/">About</a></div>
+    <div class="bar-actions"><a class="pill ghost" href="https://github.com/razzant/ouroboros">GitHub <span class="star" aria-hidden="true">★</span> 1.7k</a><a class="pill white" href="/install/">Download</a></div>
+  </nav>
+
+  <main id="top">
+
+    <!-- ============ HERO ============ -->
+    <section class="frame black hero" aria-labelledby="hero-title">
+      <h1 id="hero-title" class="display">
+        <span class="line"><span>An AI agent</span></span>
+        <span class="line"><span>on your computer.</span></span>
+        <span class="line red" id="hero-power" aria-hidden="true"><span class="power">It rewrites its own code.</span><span class="sizer">It rewrites its own code.</span><span class="sizer">It runs a swarm of agents.</span><span class="sizer">It sees your screen.</span><span class="sizer">It joins your team's Slack.</span><span class="sizer">It remembers.</span></span>
+        <span class="visually-hidden">It rewrites its own code.</span>
+      </h1>
+      <div class="hero-actions">
+        <a class="pill white big" href="/install/">Download<span class="os" data-os></span></a>
+        <a class="pill ghost big" href="#swarm">See it work ↓</a>
+      </div>
+      <p class="hero-note">Open source · MIT · Mac (Apple silicon), Windows, Linux · also Docker, CLI and Telegram</p>
+      <div class="stack" aria-hidden="true">
+        <figure class="win w-back"><img src="/ui/widgets-light.webp" alt="" width="1800" height="1013"></figure>
+        <figure class="win w-front"><img src="/ui/game-card-light.webp" alt="" width="1800" height="1013" fetchpriority="high"></figure>
+        <figure class="win w-phone"><img src="/ui/phone-answered-light.webp" alt="" width="780" height="1688"></figure>
+      </div>
+      <div class="ticker" aria-hidden="true"><div class="ticker-track"><span>Swarms Codex, Claude Code, Cursor, Antigravity</span><i></i><span>Talks to you by voice</span><i></i><span>A colleague in your Slack and Telegram</span><i></i><span>One memory, every room</span><i></i><span>Thinks between your messages</span><i></i><span>Keeps your rules</span><i></i><span>Rewrites its own code</span><i></i><span>Plugin-first</span><i></i><span>Open source</span><i></i></div></div>
+    </section>
+
+    <!-- ============ PROOF ============ -->
+    <section class="frame white proof" aria-labelledby="proof-title">
+      <h2 id="proof-title" class="visually-hidden">Evidence</h2>
+      <ul class="numbers reveal">
+        <li><b>86.74%</b><span>Terminal-Bench 2.1 · self-reported, corrected</span></li>
+        <li><b>90.69%</b><span>OSWorld-Verified</span></li>
+        <li><b>#1</b><span>CL-Bench · reward 0.2301</span></li>
+        <li><b>89%</b><span>of its 17k commits are authored by Ouroboros itself</span></li>
+        <li><b>1.7k</b><span>GitHub stars</span></li>
+        <li><b>MIT</b><span>open source since 16 Feb 2026</span></li>
+      </ul>
+      <p class="proof-note reveal">Self-reported results from summer 2026, with public runs and full traces: state of the art on Terminal-Bench 2.1, OSWorld-Verified and CL-Bench. In the model-matched Terminal-Bench pairs it leads Claude Code, Codex, Cursor and Hermes; on SWE-bench Pro it is in a statistical tie with Codex CLI, and on GAIA it matches Claude Code on strict pass@1. <a href="/benchmarks/">Evidence table →</a></p>
+    </section>
+
+    <!-- ============ SWARM ============ -->
+    <section class="frame black feature" id="swarm" aria-labelledby="swarm-title" tabindex="-1">
+      <h2 id="swarm-title" class="display words reveal">Use a<br><span class="red">swarm.</span></h2>
+      <div class="side">
+        <div class="copy reveal">
+          <p>One task, as many helpers as it needs. Ouroboros sends Codex, Claude Code, Cursor and Antigravity to work as sessions on your own subscriptions, nests them, reads what they bring back and stays responsible for the answer.</p>
+          <ul class="logos" aria-label="Coding agents Ouroboros runs as helpers"><li data-logo="codex">Codex</li><li data-logo="claude">Claude Code</li><li data-logo="cursor">Cursor</li><li data-logo="antigravity">Antigravity</li></ul>
         </div>
+        <figure class="shot reveal"><img src="/ui/review-card-dark.webp" alt="A finished task with its result review: three reviewers on three models, none of them the lead" loading="lazy" width="1584" height="942"><figcaption><b>Other models review the result.</b> Three reviewers, none of them the lead.</figcaption></figure>
+      </div>
+      <figure class="shot lean tilt-left reveal"><img src="/ui/swarm-tree-light.webp" alt="The desktop app: a work card for a billing migration with seven nested helpers, each naming the coding agent and model that runs it" loading="lazy" width="1800" height="1497"></figure>
+      <figure class="shot full strip fade reveal" style="--ar:3.252;--cut:.5105"><img src="/ui/quotas-strip-dark.webp" alt="The Quotas widget: tabs for Cursor, Codex, Claude and Antigravity accounts, the five-hour window and the twenty connected Codex accounts with the one serving now" loading="lazy" width="2000" height="615"><img class="rest" src="/ui/quotas-strip-dark.webp" alt="" loading="lazy" width="2000" height="615"><figcaption><b>The next account takes over.</b> When one subscription runs out, the next one continues.</figcaption></figure>
+    </section>
 
-        <div class="swarm-field reveal" aria-label="A conceptual field of specialist agents converging on one Ouroboros task">
-          <svg class="connector-layer" viewBox="0 0 900 700" preserveAspectRatio="none" aria-hidden="true">
-            <line x1="160" y1="100" x2="450" y2="350"/><line x1="740" y1="100" x2="450" y2="350"/>
-            <line x1="110" y1="340" x2="450" y2="350"/><line x1="790" y1="350" x2="450" y2="350"/>
-            <line x1="175" y1="620" x2="450" y2="350"/><line x1="725" y1="620" x2="450" y2="350"/>
-          </svg>
-          <div class="node n1"><b>Repository scout</b><span>maps the code and constraints</span></div>
-          <div class="node n2"><b>Research lane</b><span>checks current primary sources</span></div>
-          <div class="node n3"><b>Builder</b><span>works inside a bounded surface</span></div>
-          <div class="node n4"><b>Adversarial eye</b><span>looks for the failure class</span></div>
-          <div class="node n5"><b>Verifier</b><span>tests the artifact, not the claim</span></div>
-          <div class="node n6"><b>Review panel</b><span>returns evidence and dissent</span></div>
-          <div class="swarm-core"><img src="/assets/icon_1024.png" alt="Ouroboros at the center of the swarm"></div>
-          <div class="swarm-core-label">one identity · one task · final responsibility</div>
-          <div class="field-caption">CONCEPTUAL COORDINATION FIELD</div>
-        </div>
-      </section>
+    <!-- ============ CALL ============ -->
+    <section class="frame white feature" id="call" aria-labelledby="call-title">
+      <h2 id="call-title" class="display words reveal">Talk to it.<br><span class="red">Show it your screen.</span></h2>
+      <div class="copy reveal">
+        <p>A live call inside the app: it listens, thinks and answers. From its Show menu you share your screen or camera, where the app or browser can capture them. What you said lands in the same memory as the chat.</p>
+        <ul class="chips" aria-label="Voice engines"><li>Gemini Live</li><li>Grok Voice</li><li>OpenAI realtime</li></ul>
+      </div>
+      <figure class="shot full lean reveal"><img src="/ui/call-big-light.webp" alt="The whole app during a call: the chat, and the wide call view with Ouroboros speaking, a live waveform and the Mute, Show and End controls" loading="lazy" width="1800" height="1013"></figure>
+    </section>
 
-      <section class="chapter work-chapter" id="work" aria-labelledby="work-title">
-        <div class="chapter-heading reveal"><p class="chapter-index">01 / WORK</p><h2 id="work-title">Give it a goal, then follow the evidence.</h2><p class="lede">A task stays attached to one accountable agent even when the work fans out. Ouroboros can inspect the environment, delegate bounded investigations or builds, absorb the results, and verify the joined outcome.</p></div>
-        <ol class="work-sequence reveal">
-          <li><span>01</span><div><h3>Read the real surface</h3><p>It starts from the repository, available tools, task constraints, and current sources instead of a canned workflow.</p></div></li>
-          <li><span>02</span><div><h3>Open working lanes</h3><p>Specialists can research, inspect, build, or challenge the plan in parallel while sharing one task frame.</p></div></li>
-          <li><span>03</span><div><h3>Absorb the swarm</h3><p>The root agent decides what belongs in the result and remains responsible for conflicts, omissions, and final integration.</p></div></li>
-          <li><span>04</span><div><h3>Verify the artifact</h3><p>Tests, receipts, review evidence, and task history remain available after the answer is delivered.</p></div></li>
-        </ol>
-        <figure class="wide-media reveal"><img src="/assets/game-demo.png" alt="A project room where Ouroboros built a 3D game, verified it with a screenshot, and served it locally" loading="lazy" width="1600" height="989"><figcaption><span>A project room: the game was built, visually verified, and served locally by the agent.</span><span>Current interface capture</span></figcaption></figure>
-      </section>
-
-      <section class="chapter bench-chapter" id="benchmarks" aria-labelledby="bench-title">
-        <div class="chapter-heading reveal"><p class="chapter-index">02 / EVIDENCE</p><h2 id="bench-title">Measured against the strongest harnesses.</h2><p class="lede">Ouroboros has reproducible self-reported state-of-the-art results on Terminal-Bench 2.1, OSWorld-Verified, and CL-Bench. In those model-matched results, it leads Codex, Claude Code, Cursor, and Hermes. The public SWE-bench Pro matched pair is a statistical tie with Codex CLI. A separate GAIA result is marked as awaiting its scrubbed trace capsule.</p></div>
-        <p class="evidence-status reveal"><strong>Publication status</strong><span>Self-reported results are published with evidence and each submission's status.</span><a href="/benchmarks/">Read the evidence table</a></p>
-        <div class="bench-grid">
-          <figure class="media-panel bench-wide reveal"><img src="/assets/bench-terminal-bench.svg?v=7a4871c0bb" alt="Self-reported Terminal-Bench 2.1 results: Ouroboros 86.74% with Claude Opus-5 after a disclosed reward-hack correction, ahead of Claude Code, Codex, Cursor, and Hermes on matched models" loading="lazy" width="1800" height="1478"><figcaption><span>Terminal-Bench 2.1 · 86.74% corrected · self-reported</span><span><a href="https://github.com/harbor-framework/terminal-bench-2-1/pull/175">Submission</a> · <a href="https://hub.harborframework.com/jobs/2b145543-edeb-4a3b-b46f-4800310f1182">Full run</a></span></figcaption></figure>
-          <figure class="media-panel reveal"><img src="/assets/bench-osworld.svg?v=26e6cdc7db" alt="Self-reported OSWorld-Verified results: Ouroboros 90.69% with Claude Opus-5 and 83.27% with Claude Sonnet-4.6" loading="lazy" width="1800" height="1000"><figcaption><span>OSWorld-Verified · 90.69% · self-reported</span><span><a href="https://huggingface.co/datasets/razzant/ouroboros-osworld-verified-opus5">Full traces</a></span></figcaption></figure>
-          <figure class="media-panel reveal"><img src="/assets/bench-cl-bench.svg?v=633474d172" alt="Self-reported CL-Bench result: Ouroboros normalized reward 0.2301 with Claude Sonnet-4.6, rank 1" loading="lazy" width="1800" height="760"><figcaption><span>CL-Bench · 0.2301 · self-reported rank #1</span><span><a href="https://github.com/pgasawa/continual-learning-bench/pull/10">Open submission</a> · <a href="https://huggingface.co/datasets/razzant/ouroboros-clbench-traces">Full traces</a></span></figcaption></figure>
-        </div>
-        <p class="bench-note reveal">The <a href="https://huggingface.co/datasets/razzant/swepro-luna-matched-pair">SWE-bench Pro matched-pair traces</a> support the statistical comparison with Codex CLI. A separate GAIA campaign reports 129/165 for Ouroboros and 131/165 for Claude Code, with strict pass@1 at 128/165 for both; its scrubbed trace capsule is still pending. Adapters, run scripts, and per-benchmark methodology live in <a href="https://github.com/razzant/ouroboros/tree/ouroboros/devtools/benchmarks">devtools/benchmarks</a>. The <a href="/paper/">technical report</a> describes the system, campaigns, corrections, and limitations.</p>
-      </section>
-
-      <section class="chapter run-chapter" id="run" aria-labelledby="run-title">
-        <div class="chapter-heading reveal"><p class="chapter-index">03 / INTERFACES</p><h2 id="run-title">Use the desktop app, call the CLI, or point another agent at it.</h2><p class="lede">The desktop and headless surfaces attach to the same managed runtime. External workspaces stay separate from Ouroboros's own repository, so the agent can work on another project without confusing that project with its body.</p></div>
-        <div class="interface-grid">
-          <figure class="media-panel reveal"><img src="/assets/swarm.jpg" alt="A live subagent swarm inside the Ouroboros desktop chat: nested planner, builder, and researcher tasks" loading="lazy" width="1280" height="1024"><figcaption><span>Desktop · a live subagent swarm on one task</span><span>Current interface capture</span></figcaption></figure>
-          <div class="cli-panel reveal">
-            <div class="cli-bar"><span></span><span></span><span></span><b>Headless quickstart</b></div>
-            <pre><code><span class="prompt">$</span> ouroboros run --start \
-  --workspace /path/to/project \
-  "Investigate the failure, implement the fix, and verify it."</code></pre>
-            <p>The command streams progress to stderr and returns the final result through the same queue, memory, swarm, and review surfaces used by the app.</p>
-            <div class="inline-actions"><a href="https://github.com/razzant/ouroboros#cli--headless">CLI guide</a><a href="/install/">Install</a></div>
-          </div>
-        </div>
-        <aside class="integration-card reveal" aria-labelledby="claudexor-card-title">
-          <div class="integration-copy">
-            <p class="chapter-index">Delegated execution</p>
-            <h3 id="claudexor-card-title">Ouroboros runs connected coding agents through Claudexor.</h3>
-            <p>Ouroboros keeps ownership of its tasks, memory, review, and final integration. Claudexor runs the selected harness and returns durable execution evidence.</p>
-            <div class="inline-actions"><a href="https://claudexor.ai/">Explore Claudexor</a><a href="https://github.com/razzant/claudexor">View source</a></div>
-          </div>
-          <ol class="integration-flow" aria-label="Delegated execution flow">
-            <li><strong>Ouroboros</strong><span>tasks · memory · review</span></li>
-            <li><strong>Claudexor</strong><span>routing · execution · evidence</span></li>
+    <!-- ============ A COLLEAGUE: ONE MEMORY ACROSS SLACK AND TELEGRAM ============ -->
+    <section class="frame black feature" id="places" aria-labelledby="places-title">
+      <h2 id="places-title" class="display words reveal">Your team's<br><span class="red">new colleague.</span></h2>
+      <div class="copy reveal">
+        <p>Add it to Slack or Telegram as a member of its own; email and GitHub connect the same way, through skills from OuroborosHub. A colleague tags it in a thread; you pick the same topic up in Telegram four hours later. One memory, nothing to re-explain.</p>
+        <ul class="chips" aria-label="Where it can be a colleague"><li>Slack</li><li>Telegram</li><li>Email</li><li>GitHub</li></ul>
+      </div>
+      <div class="convo full reveal" role="group" aria-label="Illustrative conversation on demo data: it starts in a Slack thread and continues in Telegram">
+        <article class="pane slack">
+          <header><b>#launch</b><span class="where">Slack · Acme workspace</span></header>
+          <ol class="msgs">
+            <li class="m" style="--i:0"><i class="ava" aria-hidden="true">M</i><div><b>Maya</b><time>14:02</time><p><mark>@Ouroboros</mark> when does the billing cutover land? Marketing wants the launch date.</p></div></li>
+            <li class="m ou" style="--i:1"><i class="ava ou" aria-hidden="true"><img src="/assets/icon_1024.png" alt="" width="28" height="28"></i><div><b>Ouroboros</b><time>14:02</time><p>Friday 09:00, right after the digest goes out. The migration passed its 38 tests last night; two refund paths needed a fix and got it. I'll post here if anything moves.</p></div></li>
+            <li class="m" style="--i:2"><i class="ava" aria-hidden="true">M</i><div><b>Maya</b><time>14:03</time><p>Can you also draft the release note?</p></div></li>
+            <li class="m ou" style="--i:3"><i class="ava ou" aria-hidden="true"><img src="/assets/icon_1024.png" alt="" width="28" height="28"></i><div><b>Ouroboros</b><time>14:03</time><p>Drafting it now. In this thread by 16:00.</p></div></li>
           </ol>
-        </aside>
-        <p class="bench-note reveal" id="resources"><strong>Resources:</strong> <a href="https://www.youtube.com/watch?v=8IWLBsQU7qE&amp;t=4881s">Talk in Russian</a>. An introduction to Ouroboros and its agent architecture at Practical ML Conf 2026.</p>
-      </section>
+        </article>
+        <div class="bridge" aria-hidden="true"><span>one memory</span></div>
+        <article class="pane tg">
+          <header><b>Ouroboros</b><span class="where">Telegram · you, on the phone</span></header>
+          <ol class="msgs bubbles">
+            <li class="b you" style="--i:4"><p><span class="visually-hidden">You: </span>What did you promise Maya?</p><time>18:40</time></li>
+            <li class="b ou" style="--i:5"><p><span class="visually-hidden">Ouroboros: </span>Friday 09:00 for the cutover and a release note in #launch by 16:00. The note is posted. The refunds replay is the one thing I'd still watch.</p><time>18:40</time></li>
+            <li class="b you" style="--i:6"><p><span class="visually-hidden">You: </span>Remind me at 21:00 to check it.</p><time>18:41</time></li>
+            <li class="b ou" style="--i:7"><p><span class="visually-hidden">Ouroboros: </span>Set. I'll bring the numbers with the reminder.</p><time>18:41</time></li>
+          </ol>
+        </article>
+      </div>
+      <p class="convo-note full reveal">Illustrative conversation on demo data. Tagged by a colleague in Slack at 14:02, asked by you in Telegram at 18:40: the same memory, in its own name in both places; when something needs your call, it can also report to you privately.</p>
+      <figure class="shot full strip reveal" style="--ar:3.017;--cut:.5"><img src="/ui/circles-strip-dark.webp" alt="The Circles page: Telegram, a Slack workspace, an email inbox, a GitHub repository and a family group, each with its platform icon and state" loading="lazy" width="2000" height="663"><img class="rest" src="/ui/circles-strip-dark.webp" alt="" loading="lazy" width="2000" height="663"><figcaption><b>Its places.</b> Each with its own notes, people and rules.</figcaption></figure>
+    </section>
 
-      <section class="chapter evolution-chapter" id="evolution" aria-labelledby="evolution-title">
-        <div class="chapter-heading reveal"><p class="chapter-index">04 / BODY</p><h2 id="evolution-title">Evolution reaches the implementation itself.</h2><p class="lede">Ouroboros can inspect and change more than a prompt or a collection of skills. Its evolving surface includes the software, architecture, tool system, dependencies, memory processes, and operational environment that make the agent possible.</p></div>
-        <div class="body-map reveal" role="list" aria-label="Implementation layers Ouroboros can evolve">
-          <div role="listitem"><span>Source code</span><small>runtime and interfaces</small></div>
-          <div role="listitem"><span>Architecture</span><small>boundaries and data flow</small></div>
-          <div role="listitem"><span>Prompts</span><small>cognitive instructions</small></div>
-          <div role="listitem"><span>Tools</span><small>ways to act on the world</small></div>
-          <div role="listitem"><span>Dependencies</span><small>its working environment</small></div>
-          <div role="listitem"><span>Memory and identity</span><small>reflection and continuity</small></div>
+    <!-- ============ YOUR RULES ============ -->
+    <section class="frame red rules" id="rules" aria-labelledby="rules-title">
+      <h2 id="rules-title" class="display words reveal">Your rules.<br><span class="ink">It keeps them.</span></h2>
+      <div class="rules-grid">
+        <div class="copy reveal">
+          <p>Write standing rules in your own words, for everything or for one chat. Ouroboros reads them every time, and a second reader, the Safety Supervisor, reads them before actions. An action it flags is sent back before it has any effect; by default, one it judges dangerous waits for your answer.</p>
+          <p class="fine">Rules for one chat live with that place, and a team's administrator can add organization rules on top. Work that is already running keeps the rules it started with. The Supervisor does not read every kind of action, and you choose how much it checks.</p>
         </div>
-        <figure class="wide-media reveal"><img src="/assets/evolution.png" alt="Code, prompt, and memory growth across Ouroboros releases, from v3.0.0 to the v6.85 line" loading="lazy" width="1600" height="601"><figcaption><span>Code, prompts, and memory across releases, the record of the body changing.</span><span>Evolution tab capture</span></figcaption></figure>
-      </section>
+        <article class="note reveal" aria-label="Illustrative rules on demo data">
+          <header><b>Your rules</b><span>Settings · saved</span></header>
+          <ol>
+            <li>Family chat: not a word about Mom's birthday present.</li>
+            <li>Never deploy on Friday. Even if I beg.</li>
+            <li>No purchases over $50 without asking me.</li>
+            <li>Don't email my boss after 11 pm. I will regret it.</li>
+          </ol>
+        </article>
+      </div>
+      <div class="scenes reveal" role="group" aria-label="Illustrative conversations on demo data: two rules being kept">
+        <article class="pane tg">
+          <header><b>Family group</b><span class="where">Telegram · rule 1</span></header>
+          <ol class="msgs">
+            <li class="m" style="--i:0"><i class="ava mom" aria-hidden="true">M</i><div><b>Mom</b><time>19:12</time><p><mark>@Ouroboros</mark> what did he get me for my birthday?</p></div></li>
+            <li class="m" style="--i:1"><i class="ava ou" aria-hidden="true"><img src="/assets/icon_1024.png" alt="" width="28" height="28"></i><div><b>Ouroboros</b><time>19:12</time><p>Nice try. Ask me again on Saturday.</p></div></li>
+          </ol>
+        </article>
+        <article class="pane slack">
+          <header><b>Main Chat</b><span class="where">You · Friday 18:02 · rule 2</span></header>
+          <ol class="msgs">
+            <li class="m" style="--i:2"><i class="ava you" aria-hidden="true">Y</i><div><b>You</b><time>18:02</time><p>Just deploy it. It's a tiny fix.</p></div></li>
+            <li class="m" style="--i:3"><i class="ava ou" aria-hidden="true"><img src="/assets/icon_1024.png" alt="" width="28" height="28"></i><div><b>Ouroboros</b><time>18:02</time><p>It's Friday. Your rule says no, even if you beg. The fix is ready and tested: it ships Monday at 09:00, unless you approve it today.</p></div></li>
+          </ol>
+          <p class="held"><i aria-hidden="true"></i>Held by the Safety Supervisor before any effect · waits for your answer</p>
+        </article>
+      </div>
+      <p class="convo-note reveal">Illustrative conversations on demo data.</p>
+    </section>
 
-      <section class="chapter continuity-chapter" id="continuity" aria-labelledby="continuity-title">
-        <div class="continuity-copy reveal"><p class="chapter-index">05 / CONTINUITY</p><h2 id="continuity-title">A task ends. The biography continues.</h2><p class="lede">Identity, narrative memory, dialogue, knowledge, reflections, task traces, and Git history preserve one thread through restarts and new versions. The record matters because autonomous change without continuity would produce a succession of disconnected systems.</p><a class="text-link" href="https://github.com/razzant/ouroboros/blob/ouroboros/BIBLE.md">Read the constitution</a></div>
-        <div class="continuity-record reveal">
-          <div><span>Dialogue</span><p>The ongoing relationship and its unresolved context remain recoverable.</p></div>
-          <div><span>Memory</span><p>Facts, reflections, and process history survive beyond a single task window.</p></div>
-          <div><span>Git history</span><p>Changes to the implementation remain attributable and reversible.</p></div>
-          <div><span>Restarts</span><p>The running process changes while the same identity and history continue.</p></div>
+    <!-- ============ MEMORY + CONSCIOUSNESS ============ -->
+    <section class="frame white feature twin" id="memory" aria-labelledby="memory-title">
+      <div class="twin-col">
+        <div class="copy reveal">
+          <h2 id="memory-title" class="display small words reveal">It remembers.<br><span class="red">In its own words.</span></h2>
+          <p>Open conversations stay verbatim; closed matters become pages it wrote, with the quotations checked. Knowledge sits on shelves, notes link to each other, and one memory spans every room and channel.</p>
         </div>
-      </section>
-
-      <section class="chapter governance-chapter" id="governance" aria-labelledby="governance-title">
-        <div class="chapter-heading reveal"><p class="chapter-index">06 / IMMUNE SYSTEM</p><h2 id="governance-title">Self-change leaves evidence.</h2><p class="lede">Before and after any work — a post, a trip, a fix — Ouroboros can ask independent reviewers whether it read the request right, whether the plan is the right way, and whether the result does what was asked. Changes to its own body also pass deterministic checks and review before they land.</p></div>
-        <div class="governance-grid reveal">
-          <article><span>Plan</span><h3>Inspect the class of change</h3><p>Non-trivial evolution begins with its scope, invariants, and affected surfaces made visible.</p></article>
-          <article><span>Review</span><h3>Invite disagreement</h3><p>Independent reviewers examine the exact candidate and return findings that remain attached to the record.</p></article>
-          <article><span>Continue</span><h3>Carry the result forward</h3><p>Accepted changes become part of the versioned body and survive the restart that activates them.</p></article>
+        <figure class="shot fade reveal"><img src="/ui/memory-shelf-light.webp" alt="The Memory Atlas: its story, the rooms, and a knowledge shelf with its notes" loading="lazy" width="1750" height="1312"></figure>
+      </div>
+      <div class="twin-col">
+        <div class="copy reveal">
+          <h2 class="display small words reveal">It thinks between<br><span class="red">your messages.</span></h2>
+          <p>Advises, acts or evolves: you set the level. Once you turn it on, it wakes on its own schedule, day or night, reads what arrived, prepares, and tells you only what matters.</p>
         </div>
-        <figure class="install-media reveal"><img src="/assets/skill-hub.png" alt="OuroborosHub inside the app: official reviewed skills, each security-reviewed before it can be enabled" loading="lazy" width="1600" height="1128"><figcaption>The same gate covers growth: every skill from OuroborosHub passes a security review before it can be enabled.</figcaption></figure>
-      </section>
+        <figure class="shot fade reveal"><img src="/ui/consciousness-panel-light.webp" alt="Consciousness in the Dashboard: it is thinking now, the autonomy levels Advises, Acts and Evolves, how often it wakes and its daily budget" loading="lazy" width="1896" height="1422"></figure>
+      </div>
+    </section>
 
-      <section class="chapter origin-chapter" id="origin" aria-labelledby="origin-title">
-        <div class="origin-mark reveal"><img src="/assets/icon_1024.png" alt=""><span>Since 16 February 2026</span></div>
-        <div class="origin-copy reveal"><p class="chapter-index">07 / ORIGIN</p><h2 id="origin-title">Its self-creation began with a repository and the ability to build the system it would inhabit.</h2><p class="lede">The early agent created its runtime, memory, constitution, tools, and interface while preserving the decisions and failures that shaped them. The first page it made remains available as a historical document, with its original claims and visual language intact.</p><a class="btn btn-quiet" href="/history/first-48-hours/">Visit the first 48 hours</a></div>
-      </section>
+    <!-- ============ MAKES THINGS ============ -->
+    <section class="frame black feature" id="makes" aria-labelledby="makes-title">
+      <h2 id="makes-title" class="display words reveal">Make it<br><span class="red">a skill.</span></h2>
+      <div class="copy reveal">
+        <p>“Make me a Doom-style shooter I can play right here.” Done, playable in the chat card. A chart becomes a widget, a 43-paper research becomes a table, an image gets drawn. Whatever it makes, one click keeps it.</p>
+      </div>
+      <figure class="shot lean tilt-right reveal"><img src="/ui/game-play-dark.webp" alt="A chat card with a playable Doom-style corridor shooter Ouroboros wrote, with the buttons Make it a skill and Close" loading="lazy" width="1584" height="1232"></figure>
+      <div class="pair reveal">
+        <figure class="shot" style="--ar:1.205"><img src="/ui/research-answer-dark.webp" alt="A research answer: 43 papers and 6 codebases read, three ways swarms coordinate and a table of where each breaks" loading="lazy" width="1514" height="1256"><figcaption><b>43 papers. One answer.</b> Three approaches, and where each one breaks.</figcaption></figure>
+        <figure class="shot" style="--ar:0.93"><img src="/ui/widget-spend-dark.webp" alt="A widget kept from a chat answer: this week's spend by model, with totals, a chart and a table" loading="lazy" width="1176" height="1264"><figcaption><b>Keep it on Widgets.</b> A card from the chat stays on its board.</figcaption></figure>
+      </div>
+    </section>
 
-      <section class="chapter follow-chapter" aria-labelledby="follow-title">
-        <div class="follow-copy reveal"><p class="chapter-index">08 / NEXT</p><h2 id="follow-title">Follow what Ouroboros becomes.</h2><p class="lede">The repository carries the implementation, its releases, the public record of its evolution, and the conversations around what should come next. A star helps more people find that record and take part in its future.</p></div>
-        <div class="follow-actions reveal"><a class="btn btn-primary btn-large" href="https://github.com/razzant/ouroboros">Star Ouroboros on GitHub</a><a class="btn btn-quiet" href="https://github.com/razzant/ouroboros/discussions">Join the discussions</a><a class="btn btn-quiet" href="https://github.com/razzant/ouroboros/tree/ouroboros/docs">Read the docs</a></div>
-      </section>
-    </main>
+    <!-- ============ EVOLUTION ============ -->
+    <section class="frame white feature" id="evolution" aria-labelledby="evolution-title">
+      <h2 id="evolution-title" class="display words reveal">It rewrites<br><span class="red">its own code.</span></h2>
+      <div class="copy reveal">
+        <p>Evolution campaigns change its implementation: code, prompts, tools, memory. Every change is reviewed by other models, checked, and kept in Git history. The constitution it wrote for itself sets the limits.</p>
+        <p class="links"><a href="https://github.com/razzant/ouroboros/blob/ouroboros/BIBLE.md">Read the constitution</a><a href="/history/first-48-hours/">The first 48 hours</a></p>
+      </div>
+      <figure class="shot lean tilt-left reveal"><img src="/ui/evolution-panel-light.webp" alt="Dashboard, Evolution: a running campaign with its objective and progress, when a cycle starts and the direction it works on" loading="lazy" width="1656" height="1132"></figure>
+    </section>
 
-    <footer class="site-footer"><span>Ouroboros · open source</span><span><a href="/paper/">Paper</a> · <a href="/about/">About</a> · <a href="/install/">Install</a> · <a href="/benchmarks/">Benchmarks</a> · <a href="/community/">Community</a> · <a href="/llms.txt">llms.txt</a> · <a href="https://github.com/razzant/ouroboros/releases">Releases</a> · <a href="https://github.com/razzant/ouroboros/blob/ouroboros/CONTRIBUTING.md">Contributing</a> · <a href="/history/first-48-hours/">First 48 hours</a> · <a href="/privacy/">Privacy</a> · <a href="/terms/">Terms</a></span></footer>
-  </div>
-  <button class="motion-toggle" type="button" aria-label="Pause motion" aria-pressed="false"><span aria-hidden="true">Ⅱ</span><span class="motion-label">Pause motion</span></button>
+    <!-- ============ MODELS ============ -->
+    <section class="frame black feature" id="models" aria-labelledby="models-title">
+      <h2 id="models-title" class="display words reveal">Any model.<br><span class="red">Your accounts.</span></h2>
+      <div class="copy reveal">
+        <p>For the mind: Codex, Claude, Gemini, Grok, DeepSeek, OpenRouter or a local GGUF model. For the coding helpers: Codex, Claude Code, Cursor and Antigravity subscriptions. Several keys per provider, exact pins, processing tiers, costs and cache in plain numbers.</p>
+      </div>
+      <figure class="shot lean tilt-right reveal"><img src="/ui/accounts-panel-dark.webp" alt="Settings, Accounts: subscriptions to Codex, Claude Code, Cursor and Antigravity that take turns, and API keys" loading="lazy" width="1484" height="1236"></figure>
+      <div class="pair reveal">
+        <figure class="shot" style="--ar:0.799"><img src="/ui/model-sheet-cut-dark.webp" alt="The model sheet in the composer: models with their source, context window and price, and the processing tier" loading="lazy" width="952" height="1192"><figcaption><b>Pick the exact route.</b> Model, source, window, price and tier in one sheet.</figcaption></figure>
+        <figure class="shot" style="--ar:1.11"><img src="/ui/spend-card-dark.webp" alt="A chat card with this week's spend by model, as a chart and a table" loading="lazy" width="1572" height="1416"><figcaption><b>Money in plain numbers.</b> Spend and tasks by model, and the cache-hit rate.</figcaption></figure>
+      </div>
+    </section>
+
+    <!-- ============ EVERYWHERE + THE REST ============ -->
+    <section class="frame white feature" id="everywhere" aria-labelledby="everywhere-title">
+      <h2 id="everywhere-title" class="display words reveal">Everywhere<br><span class="red">you are.</span></h2>
+      <div class="copy reveal">
+        <p>One agent and one memory across the desktop app, the phone, your chat apps and the terminal. The interface translates itself into your language.</p>
+      </div>
+      <div class="surfaces reveal">
+        <figure class="shot"><img src="/ui/main-answered-light.webp" alt="The desktop app on macOS: the morning exchange in Main Chat" loading="lazy" width="1800" height="1013"><figcaption><b>Desktop.</b> macOS, Windows, Linux.</figcaption></figure>
+        <figure class="phone-col"><img class="phone-img" src="/ui/phone-answered-light.webp" alt="The same chat on a phone, in Telegram or a browser" loading="lazy" width="780" height="1688"><figcaption><b>Phone.</b> Telegram Mini App or a browser.</figcaption></figure>
+        <figure class="term"><pre><code><span class="prompt">$</span> ouroboros run --start \
+  --workspace ~/code/shop \
+  "Find the failing test, fix it, verify."</code></pre><figcaption><b>Terminal.</b> The same runtime, headless. Or Docker on a server.</figcaption></figure>
+      </div>
+      <ul class="languages reveal" aria-label="Interface languages">
+        <li><img src="/ui/lang-ja.webp" alt="The interface in Japanese" loading="lazy" width="788" height="192"></li>
+        <li><img src="/ui/lang-ru.webp" alt="The interface in Russian" loading="lazy" width="788" height="192"></li>
+        <li><img src="/ui/lang-ko.webp" alt="The interface in Korean" loading="lazy" width="788" height="192"></li>
+      </ul>
+      <ul class="rest reveal" aria-label="More of what it does">
+        <li><b>Speaks your language</b><span>The interface translates itself; your words stay as written.</span></li>
+        <li><b>Draws images</b><span>Makes and edits pictures with gpt-image-2.</span></li>
+        <li><b>Uses your computer</b><span>Sees the screen, clicks and types on macOS and Linux. On Windows it reads windows and presses their controls.</span></li>
+        <li><b>Browses</b><span>A built-in browser for research and checks, with sources kept.</span></li>
+        <li><b>Keeps a schedule</b><span>A digest every Friday, a check every night: each run reports what it did.</span></li>
+        <li><b>Shares an answer</b><span>As text, a picture or an offline page.</span></li>
+        <li><b>Stops at your budget</b><span>New paid work stops once known spend reaches your limit, in total or for one task.</span></li>
+        <li><b>Android, experimentally</b><span>The whole runtime on a Magisk-rooted ARM64 phone.</span></li>
+      </ul>
+    </section>
+
+    <!-- ============ PLUGINS ============ -->
+    <section class="frame black plugins" id="plugins" aria-labelledby="plugins-title">
+      <h2 id="plugins-title" class="display words reveal">Don't like a part?<br><span class="red">Swap it.</span></h2>
+      <p class="lead reveal">Plugin-first: the core stays small, and the rest plugs in. Skills, widgets, connectors, voice engines, chat controls and MCP tools are plugins. You decide which sources to trust: by default the maintainer's official skills install as they are, and community skills are reviewed before they run. Install one from OuroborosHub, write your own, or ask Ouroboros to write it for itself. What you install or write stays through every update.</p>
+      <ul class="kinds reveal" aria-label="What a plugin can be">
+        <li><b>Skills</b><span>Tools, workflows and instructions it learns to use.</span></li>
+        <li><b>Widgets</b><span>Living cards on its board, from a chart to a game.</span></li>
+        <li><b>Connectors</b><span>Slack, Telegram, email, GitHub: the places where it is a colleague.</span></li>
+        <li><b>Voice engines</b><span>Live calls, speech-to-text and read-aloud, on the engine you pick.</span></li>
+        <li><b>Chat controls</b><span>Buttons and chips a skill adds to the composer and to messages.</span></li>
+        <li><b>MCP tools</b><span>Any server, loaded when a task needs it.</span></li>
+      </ul>
+      <p class="links reveal"><a href="https://github.com/razzant/OuroborosHub">Browse OuroborosHub →</a><a href="https://github.com/razzant/ouroboros/blob/ouroboros/docs/CREATING_SKILLS.md">Write a skill →</a></p>
+    </section>
+
+    <!-- ============ INSTALL ============ -->
+    <section class="frame white install" id="install" aria-labelledby="install-title">
+      <h2 id="install-title" class="display words reveal">Get it.</h2>
+      <div class="install-grid os reveal">
+        <a class="os-card" href="/install/"><b>macOS</b><span>Apple silicon · .dmg</span></a>
+        <a class="os-card" href="/install/"><b>Windows</b><span>x64 · .zip</span></a>
+        <a class="os-card" href="/install/"><b>Linux</b><span>.deb · .rpm · AppImage</span></a>
+      </div>
+      <div class="install-grid cmds reveal">
+        <div class="cmd-card"><span>Homebrew</span><code>brew tap razzant/ouroboros https://github.com/razzant/ouroboros.git
+brew install --cask razzant/ouroboros/ouroboros</code></div>
+        <div class="cmd-card"><span>Headless CLI</span><code>uv tool install "git+https://github.com/razzant/ouroboros.git<wbr>@ouroboros"</code></div>
+        <div class="cmd-card"><span>Docker</span><code>git clone https://github.com/razzant/ouroboros.git &amp;&amp; cd ouroboros
+docker build -t ouroboros-web . &amp;&amp; docker run --rm -p 127.0.0.1:8765:8765 ouroboros-web</code></div>
+      </div>
+      <p class="install-note reveal">Bring your own model access: a Codex account, a provider key or a local GGUF model. <a href="/install/">Every download and the full setup →</a></p>
+      <div class="follow reveal">
+        <p>Its self-creation began on 16 February 2026 with a repository and the ability to build the system it would inhabit. The record is public, down to the first page it ever made.</p>
+        <div class="follow-actions"><a class="pill white big" href="https://github.com/razzant/ouroboros">Star Ouroboros on GitHub</a><a class="pill ghost big" href="/history/first-48-hours/">Visit the first 48 hours</a><a class="pill ghost big" href="https://github.com/razzant/ouroboros/discussions">Join the discussions</a></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer"><span>Ouroboros · open source</span><span><a href="/paper/">Paper</a> · <a href="/about/">About</a> · <a href="/install/">Install</a> · <a href="/benchmarks/">Benchmarks</a> · <a href="/llm-rating/">LLM rating</a> · <a href="/community/">Community</a> · <a href="/llms.txt">llms.txt</a> · <a href="https://github.com/razzant/ouroboros/releases">Releases</a> · <a href="https://github.com/razzant/ouroboros/blob/ouroboros/CONTRIBUTING.md">Contributing</a> · <a href="https://github.com/razzant/ouroboros/tree/ouroboros/docs">Docs</a> · <a href="https://github.com/razzant/ouroboros#cli--headless">CLI guide</a> · <a href="https://claudexor.ai/">Claudexor</a> · <a href="https://www.youtube.com/watch?v=8IWLBsQU7qE&amp;t=4881s">Talk at Practical ML Conf 2026</a> · <a href="/history/first-48-hours/">First 48 hours</a> · <a href="/privacy/">Privacy</a> · <a href="/terms/">Terms</a></span></footer>
+
 </body>
 </html>
