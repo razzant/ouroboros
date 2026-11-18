@@ -29,7 +29,7 @@ def applied_host(monkeypatch, tmp_path):
     monkeypatch.setattr(server_process, "_applied_restart_settings", {})
     monkeypatch.setattr(server_process, "_applied_server_host_source", "unknown")
     monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
+    config.initialize_runtime_mode_baseline("advanced")
     monkeypatch.setattr(local_model, "_manager", local_model.LocalModelManager())
     saved = dict(config.SETTINGS_DEFAULTS)
     server_process.record_applied_restart_settings({key: saved[key] for key in (

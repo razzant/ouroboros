@@ -910,8 +910,8 @@ def _verify_and_record(
     if kind == "artifact_observation":
         paths = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
         obs_status, detail = _observe_artifacts(ctx, paths)
-        # 20 paths stored; _outcome_receipts' identity carries the omitted count and full-set hash.
-        receipt.update({"status": obs_status, "paths": paths[:20], "summary": detail})
+        # receipt_identity_projection bounds the display after canonicalizing the entire set.
+        receipt.update({"status": obs_status, "paths": paths, "summary": detail})
         if not append_verification_receipt(drive_root, task_id, redact_process_data(receipt)):
             return _receipt_custody_failure(kind, f"{obs_status}: {detail}")
         # refused_out_of_scope is a POLICY block, not a verification failure — surface it

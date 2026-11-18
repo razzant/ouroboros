@@ -1,3 +1,5 @@
+import { backrefs } from './dom_backrefs.js';
+
 // A small DOM double for row-level chat modules (chat_reply.js, chat_row_menu.js): bubbling events, focus,
 // geometry, and the selector grammar those modules use — tags, classes, attributes ([a], [a="v"], [a^="v"]),
 // :not(…), :disabled, :scope, the descendant and child combinators and selector lists. Real engines, hit
@@ -55,11 +57,11 @@ class Node extends Events {
     constructor(doc, tag = 'div', attrs = {}) {
         super();
         this.nodeType = 1;
+        backrefs(this, ['ownerDocument', 'parent']);
         this.ownerDocument = doc;
         this.tagName = tag.toUpperCase();
         this.attrs = new Map(Object.entries(attrs));
         this.children = [];
-        this.parent = null;
         this.disabled = false;
         this.hidden = false;
         this._text = '';

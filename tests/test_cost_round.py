@@ -55,6 +55,7 @@ def engine(tmp_path, monkeypatch):
     logical request, its physical candidate and its engine request through production code."""
     root = tmp_path / "data"
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+    monkeypatch.setattr(transport.config, "DATA_DIR", root)
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
     monkeypatch.setenv("TOTAL_BUDGET", "100")
     monkeypatch.delenv(MODEL_ACCOUNTS_KEY, raising=False)
