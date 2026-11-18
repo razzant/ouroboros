@@ -54,6 +54,7 @@ def test_async_timeout_result_stays_while_custody_tracks_actual_unwind(tmp_path,
     try:
         result = registry.execute_result(name, {})
         assert (result.status, result.code) == ("timeout", "EXTENSION_TIMEOUT") and cancelled.is_set()
+        assert "handler exceeded timeout" in result.text
         assert cleanup_states == ["operation_already_returned"]
         assert result.meta["timeout_sec"] == 1 and result.producer_text is None
         if refused:
