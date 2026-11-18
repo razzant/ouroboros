@@ -1,5 +1,6 @@
 """Requirements changes, targets and failed installs determine dependency sync."""
 import pathlib
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -113,12 +114,17 @@ def test_a_failed_import_test_forgets_the_fingerprint_so_the_next_sync_runs_pip(
     monkeypatch.setattr(git_ops_reset.sys, "frozen", False, raising=False)
     m.stamp(tmp_path / "data", dependencies="fingerprint")
     result = Mock(returncode=0, stdout="import_ok", stderr="")
-    monkeypatch.setattr(git_ops_reset.subprocess, "run", lambda *a, **kw: result)
+    tracked_before = shell_process._active_subprocesses.copy()
+    smoke = Mock(return_value=result)
+    # Only the import-smoke owner is doubled; real Git containment still reads ps.
+    monkeypatch.setattr(git_ops_reset, "subprocess", SimpleNamespace(run=smoke))
     assert git_ops_reset.import_test()["ok"]
     assert m.watermarks(tmp_path / "data")["dependencies"] == "fingerprint"
     result.returncode = 1
     assert not git_ops_reset.import_test()["ok"]
     assert m.watermarks(tmp_path / "data")["dependencies"] is None
+    assert smoke.call_count == 2
+    assert shell_process._active_subprocesses == tracked_before
 
 
 def test_torn_watermarks_never_fail_a_checkout_or_a_sync(tmp_path, monkeypatch):
