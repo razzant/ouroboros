@@ -78,16 +78,16 @@ def answer_source(block: Any, words_source: str = "owner_quiz_answer") -> str:
     return OWNER_PRESS if wordless_press(block) else words_source
 
 
-def living_card_input(row: Any, root: Any = None) -> dict:
-    """The submitted values or wordless action and its card. Older mail may carry only the store identity."""
+def _living_submission(row: Any, root: Any):
+    """The card id, author and frozen submission, resolving older mail by its request id."""
     from ouroboros.card_store import find_submission, late_press_ref, load_card, press_snapshot, valid_card_id
 
     if not isinstance(row, Mapping):
-        return {}
+        return None
     ref = late_press_ref(row.get("card_press")) or {}
     delivery = row.get("card_delivery") or {}
     if not ref and row.get("kind") != "card_input":
-        return {}
+        return None
     card_id = ref.get("card_id") or delivery.get("card_id")
     request = ref.get("request_id") or delivery.get("request_id")
     if not card_id:  # a live pre-snapshot mailbox id is card_input:<card_id>:<request_id>
@@ -98,18 +98,69 @@ def living_card_input(row: Any, root: Any = None) -> dict:
         stored = find_submission(load_card(drive, card_id) or {}, request)
         if stored:
             snap, asker = press_snapshot(stored), stored.get("task_id") or asker
+    return card_id, asker, snap
+
+
+def forwarded_bubble_matches(row: Mapping, content: str, root: Any) -> bool:
+    """An old owner-text capture kept the forwarded bubble, sometimes trimmed at ingress."""
+    from ouroboros.card_store import owner_press_text
+
+    if not row.get("card_press") or row.get("kind", "owner_text") != "owner_text" or row.get("text") != content:
+        return False
+    submission = _living_submission(row, root)
+    if not submission or not (snap := submission[2]):
+        return False
+    bubble = owner_press_text(snap.get("bubble_label") or snap["label"], snap["values"])
+    return content in (bubble, bubble.strip())
+
+
+def submitted_texts(values: Mapping) -> tuple[str, ...]:
+    """Each nonempty field as submitted, including interior newlines and the JSON spelling of scalars."""
+    return tuple(v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+                 for v in values.values() if v is not None and (not isinstance(v, str) or v.strip()))
+
+
+def word_spans(text: str, target: Mapping) -> tuple[str, ...]:
+    """The separate fields one quotation can come from. Older flattened forms prove only spans within a line."""
+    if isinstance(values := target.get("submitted_values"), Mapping):
+        return submitted_texts(values)
+    return tuple(text.split("\n")) if target.get("card_id") else (text,)
+
+
+def living_card_input(row: Any, root: Any = None) -> dict:
+    """The submitted values or wordless action and its card. Older mail may carry only the store identity."""
+    submission = _living_submission(row, root)
+    if submission is None:
+        return {}
+    card_id, asker, snap = submission
     if snap is None:
         return {"source": OWNER_CARD_INPUT, "content": "Card input received. Its submission is unavailable."}
     label = snap["label"]
-    values = [v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
-              for v in snap["values"].values() if v is not None and (not isinstance(v, str) or v.strip())]
+    values = submitted_texts(snap["values"])
     target = {"address": f"card {card_id} of task {asker}", "author": f"Ouroboros, task {asker}",
-              "text": f"{snap['title']}\n{label}", "pressed_label": label, "card_id": card_id}
+              "text": "\n".join(part for part in (snap["title"], snap.get("form_title"), label) if part),
+              "pressed_label": label, "card_id": card_id,
+              **({"submitted_values": snap["values"]} if snap["values"] else {})}
     return {"source": "owner_mailbox" if values else OWNER_PRESS, "content": "\n".join(values) if values else label,
             "source_task_id": asker, "reply_to": target}
 
 
-def row_source(row: Any, words_source: str) -> str:
+def card_input(row: Any, root: Any, words_source: str = "owner_mailbox") -> dict:
+    """A living submission or a late quiz input as one corpus row, resolving its own source store."""
+    from ouroboros.owner_quiz import late_answer_owner_text, late_answer_ref, resolved_late_quiz
+    from ouroboros.owner_words import answered_card_reply
+
+    if not isinstance(row, Mapping) or not (ref := late_answer_ref(row.get("late_answer"))):
+        return living_card_input(row, root)
+    block = resolved_late_quiz(root, ref)
+    content = late_answer_owner_text(block)
+    if not content:
+        return {"source": OWNER_CARD_INPUT, "content": "Quiz answer received. Its accepted answer is unavailable."}
+    return {"source": answer_source(block, words_source), "content": content, "source_task_id": ref["task_id"],
+            "quiz_id": ref["quiz_id"], "reply_to": answered_card_reply(block, ref["task_id"])}
+
+
+def row_source(row: Any, words_source: str, root: Any = None) -> str:
     """The corpus label of a row of my human's that may answer a card (a quiz answer row, a late answer's own chat
     row or mailbox entry, a relayed row): ``OWNER_PRESS`` when its card records a press without words and the row
     shows exactly that press, ``owner_quiz_answer`` for a quiz answer row's words, else ``words_source``."""
@@ -118,27 +169,29 @@ def row_source(row: Any, words_source: str) -> str:
     from ouroboros.owner_words import answered_card_source
 
     if isinstance(row, Mapping) and isinstance(answer := row.get("corpus_answer"), Mapping):
-        if answer.get("source") in (OWNER_PRESS, "owner_quiz_answer", "owner_mailbox", "initial_user", "origin_message"):
+        if answer.get("source") in (OWNER_CARD_INPUT, OWNER_PRESS, "owner_quiz_answer", "owner_mailbox", "initial_user", "origin_message"):
             return answer["source"]
-    if living := living_card_input(row):
-        return living["source"]
+    if submitted := card_input(row, root, words_source):
+        return submitted["source"]
     block = answered_card_source(row)[0]
     if wordless_press(block) and owner_text(row) == late_answer_owner_text(block):
         return OWNER_PRESS
     return "owner_quiz_answer" if isinstance(row, Mapping) and row.get("type") == "quiz_answer" else words_source
 
 
-def row_words(row: Any) -> str:
+def row_words(row: Any, root: Any = None) -> str:
     """A held row's words as a quote shows them to a model: its text, or the host's record of a press without words."""
     from ouroboros.owner_relay import owner_text
     from ouroboros.owner_words import answered_card_source
 
-    if row_source(row, "") == OWNER_PRESS:
+    if submitted := card_input(row, root):
+        return (press_record(submitted["content"], submitted["source_task_id"]) if submitted["source"] == OWNER_PRESS
+                else submitted["content"])
+    if row_source(row, "", root) == OWNER_PRESS:
         carried = row.get("corpus_answer") or {}
         if carried.get("rendered"):
             return owner_text(row)
-        return press_record(owner_text(row), carried.get("source_task_id") or living_card_input(row).get("source_task_id")
-                            or answered_card_source(row)[1])
+        return press_record(owner_text(row), carried.get("source_task_id") or answered_card_source(row, root)[1])
     return owner_text(row)
 
 

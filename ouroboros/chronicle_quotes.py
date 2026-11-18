@@ -11,7 +11,8 @@ import re
 from typing import Any, Callable, Optional, Tuple
 
 SPEAKERS = frozenset({"human", "ouroboros", "child", "host", "helper", "unattributed"})
-QuoteResolver = Callable[[Any], Optional[Tuple[str, str]]]
+QuoteSource = str | tuple[str, ...]
+QuoteResolver = Callable[[Any], Optional[Tuple[QuoteSource, str]]]
 
 # A markdown emphasis marker: a run of up to three ``*``/``_`` that opens before a word (nothing
 # word-like or ``*`` before it, a non-space after it) or closes after one. ``memory_read``,
@@ -19,13 +20,15 @@ QuoteResolver = Callable[[Any], Optional[Tuple[str, str]]]
 _EMPHASIS = re.compile(r"(?<![\w*])[*_]{1,3}(?![*_\s])|(?<=[^*_\s])[*_]{1,3}(?![\w*])")
 
 
-def quote_in(quote: str, source: str) -> bool:
+def quote_in(quote: str, source: QuoteSource) -> bool:
     """Whether ``quote`` is ``source``'s words, exact up to markdown emphasis markers on either side.
 
     Words, punctuation, spacing and order stay exact: only ``**``, ``__`` and a single
     ``*``/``_`` around words are set aside, so a helper that copied a row's words without
     its bold is not refused, while a changed word still is.
     """
+    if isinstance(source, tuple):
+        return any(quote_in(quote, field) for field in source)
     if quote in source:
         return True
     plain = _EMPHASIS.sub("", quote)
@@ -54,7 +57,7 @@ def quote_refusal(quotes: Any, resolver: Optional[QuoteResolver]) -> Optional[Tu
         if resolved is None:
             return "quote_mismatch", f"{where}: the address resolves to no chat row"
         rendered, speaker = resolved
-        if not quote_in(str(quote["text"]), str(rendered)):
+        if not quote_in(quote["text"], rendered):
             return "quote_mismatch", f"{where}: the text is not an exact substring of that row"
         if speaker != quote["speaker"]:
             return "quote_mismatch", f"{where}: that row is spoken by {speaker}, not {quote['speaker']}"

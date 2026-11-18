@@ -25,6 +25,7 @@ import math
 import pathlib
 from typing import Any, Dict, Optional, Tuple
 
+from ouroboros.card_store import owner_press_text
 from ouroboros.gateway._helpers import run_sync_to_completion
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,8 @@ def card_input_frame(record: Dict[str, Any], label: str, values: Optional[Dict[s
     card = f"the card «{record.get('title') or ''}» that task {author} showed" if author else \
         f"your card «{record.get('title') or ''}»"
     text = f"[Card input] The owner pressed «{label}» on {card} (card {record['card_id']})."
+    if record.get("form_title"):
+        text += f" Form: {record['form_title']}."
     if values:
         return text + "\nValues:\n" + json.dumps(values, ensure_ascii=False, indent=1)
     return f"{text} {card_label_fact(author)}"
@@ -69,7 +72,8 @@ def card_press_model_text(root: Any, ref: Any, owner_words: str) -> str:
     row = press.get("submission") or row
     if not row:
         return f"[Card input] On a card of task {press['task_id']} that can no longer be read, the owner pressed:\n{owner_words}"
-    return card_input_frame({**record, "card_id": press["card_id"], "title": row.get("title", record.get("title"))},
+    return card_input_frame({**record, "card_id": press["card_id"], "title": row.get("title", record.get("title")),
+                             "form_title": row.get("form_title")},
                             str(row.get("label") or row.get("action_id") or ""), row.get("values"), author=press["task_id"])
 
 
@@ -80,15 +84,6 @@ def card_press_name(root: Any, ref: Any) -> Optional[str]:
     if press is None:
         return None
     return str(row.get("title", record.get("title")) or "") if row else ""
-
-
-def owner_press_text(label: str, values: Optional[Dict[str, Any]]) -> str:
-    """What the owner's own message says for a late press: the pressed label, then each value."""
-    lines = [label]
-    for key, value in (values or {}).items():
-        shown = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        lines.append(f"{key}: {shown}")
-    return "\n".join(lines)
 
 
 def _checked_values(raw: Any, action: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
@@ -129,7 +124,7 @@ def _deliver(drive_root: pathlib.Path, record: Dict[str, Any], submission: Dict[
 
     card_id, request_id = str(record["card_id"]), str(submission["request_id"])
     label = str(submission.get("label") or submission["action_id"])
-    card = {**record, "title": submission.get("title", record.get("title"))}
+    card = {**record, "title": submission.get("title", record.get("title")), "form_title": submission.get("form_title")}
     # A press goes to the author of the card it was pressed on, also when it is retried after a replace.
     task_id = str(submission.get("task_id", record.get("task_id")) or "")
     press = {"card_id": card_id, "request_id": request_id, "task_id": task_id, "submission": press_snapshot(submission)}
@@ -164,7 +159,7 @@ def _deliver(drive_root: pathlib.Path, record: Dict[str, Any], submission: Dict[
     # No living holder: the typed press follows its author's thread in routing, the way a late answer does.
     metadata = {**({"reply_to": address} if address else {}),
                 **({"card_press": press} if task_id else {})}
-    forwarded, reason = deliver_as_owner_message(drive_root, chat_id, owner_press_text(label, submission.get("values")),
+    forwarded, reason = deliver_as_owner_message(drive_root, chat_id, owner_press_text(submission.get("bubble_label") or label, submission.get("values")),
                                                  client_id, source=source, task_metadata=metadata or None)
     return ("forwarded", "") if forwarded else ("owed", reason or "late_answer_delivery_unknown")
 
@@ -222,7 +217,8 @@ async def answer_card_decision(drive_root: pathlib.Path, body: Dict[str, Any], *
     try:
         outcome = await asyncio.to_thread(record_submission, drive_root, card_id, request_id=request_id,
                                           action_id=action_id, label=action["label"], values=values,
-                                          once=bool(action.get("once")), revision=revision)
+                                          once=bool(action.get("once")), revision=revision,
+                                          form_title=action.get("form_title", ""), bubble_label=action.get("bubble_label", ""))
     except CardStoreError as exc:
         return _refused(str(exc), 404, reason_code=exc.code)
     except (OSError, TimeoutError) as exc:

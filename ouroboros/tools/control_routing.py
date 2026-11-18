@@ -453,7 +453,11 @@ def _start_task(
         _attach_client_surface(ctx, evt)
     _attach_drafted_objective(ctx, evt)
     if owner_basis:  # the cited words ride into the new root alone, never back into this run's own corpus
-        evt["owner_corpus"] = [*evt.get("owner_corpus", []), owner_basis]
+        if owner_basis["source"] in ("owner_press", "owner_quiz_answer"):
+            from ouroboros.owner_words import merged_corpus
+            evt["owner_corpus"] = merged_corpus(evt.get("owner_corpus"), [owner_basis])
+        else:
+            evt["owner_corpus"] = [*evt.get("owner_corpus", []), owner_basis]
     kind_note = " " + model_note if model_note else ""
     if is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
         kind_note += (" Started as your human's work on their pressed choice." if owner_basis and owner_basis["source"] == "owner_press"

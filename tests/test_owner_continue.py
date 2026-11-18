@@ -432,6 +432,11 @@ def _settled_with_corpus(tmp_path, *rows, unavailable=(), late=False):
     _interrupted(tmp_path, root_phase_checkpoint={}, child_ref_promotion={})
     _owner_mail(tmp_path)
     if late:
+        from ouroboros.owner_quiz import record_answered, record_asked
+
+        record_asked(tmp_path, "asker-1", quiz_id="q-1", question="Which sheet?", options=["Sheet B"])
+        record_answered(tmp_path, "asker-1", quiz_id="q-1", option_index=0, comment="Option B, please",
+                        request_id="sheet-answer")
         write_owner_message(tmp_path, "Option B, please", "pred-1", msg_id="late-1",
                             late_answer={"task_id": "asker-1", "quiz_id": "q-1"})
     assert settle_task_mailbox(tmp_path, "pred-1", tmp_path)
@@ -1246,3 +1251,94 @@ def test_opening_answer_keeps_its_authorship_in_continue_and_start(tmp_path, mon
     chained = load_task_result(tmp_path, successor["id"])
     chained["owner_mailbox"] = {"read_complete": True, "rows": []}
     assert not owner_sources(tmp_path, chained, successor["id"])["gaps"]
+
+
+@pytest.mark.parametrize("kind", ["press", "comment", "message"])
+def test_cold_opening_keeps_its_identity_through_a_routed_start(tmp_path, monkeypatch, kind):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_words import owner_words_contain
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.tools import control_routing
+    from ouroboros.tools.registry import ToolContext
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    label, stamp = "Choose the blue tiles", "2040-01-01T00:00:00Z"
+    words = "  send a sample  " if kind == "comment" else label if kind == "message" else "1. " + label
+    ref = build_owner_message_ref(chat_id=7, client_message_id="cold-tiles", ts=stamp, text=words)
+    meta = {"origin_message_ref": ref, "origin_message_text": words}
+    if kind != "message":
+        block = {"state": "answered", "quiz_id": "tiles", "question": "Which tiles?", "options": [label],
+                 "answered_index": 0, "comment": words if kind == "comment" else "", "answered_after_terminal": True}
+        meta["late_answer"] = {"task_id": "tile-desk", "quiz_id": "tiles",
+                               "answer_snapshot": {"task_id": "tile-desk", "quiz": block}}
+    _interrupted(tmp_path, metadata=meta, origin_message_ref=ref, origin_message_text=words, owner_mailbox={"read_complete": True, "rows": []})
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    [successor] = workers.PENDING
+    ctx = ToolContext(repo_dir=Path.cwd(), drive_root=tmp_path, task_metadata=successor["metadata"])
+    ctx.current_chat_id, ctx.task_id = 7, successor["id"]
+    _initialize_owner_directives(ctx, [{"role": "user", "content": successor["text"]}])
+    events = []
+    monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing",
+                        lambda _ctx, event: (events.append(event) or "live", {"status": "scheduled"}))
+    monkeypatch.setattr(control_routing, "_promotion_pool_disabled_from_snapshot", lambda _ctx: "")
+    control_routing._start_task(ctx, "Read the building notes", title="Read notes")
+    [event] = events
+    routed = SimpleNamespace(task_metadata={"objective_author": event["objective_author"], "owner_corpus": event["owner_corpus"]})
+    _initialize_owner_directives(routed, [{"role": "user", "content": "Read the building notes"}])
+    for focus in (ctx, routed):
+        [row] = focus._owner_directives
+        assert row["content"] == words
+        assert (row["chat_id"], row["client_message_id"], row["ts"]) == ("7", "cold-tiles", stamp)
+        assert owner_words_contain(focus, words) is (kind != "press")
+        assert owner_words_contain(focus, label) is (kind == "message")
+
+
+
+@pytest.mark.parametrize("kind", ["press", "comment", "unavailable"])
+def test_a_reference_only_late_answer_keeps_its_type_on_every_opening(tmp_path, monkeypatch, kind):
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision, owner_reply_owed
+    from ouroboros.owner_quiz import late_answer_model_text, record_answered, record_asked
+    from ouroboros.owner_words import carried_owner_corpus, cited_owner_basis, owner_words_contain
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    asker, quiz, label = "fern-desk", "fern-card", "Use the fern chart"
+    comment = "  after moonrise  " if kind == "comment" else ""
+    bubble = comment or "1. " + label
+    reference = {"task_id": asker, "quiz_id": quiz}
+    if kind != "unavailable":
+        record_asked(tmp_path, asker, quiz_id=quiz, question="Which chart?", options=[label])
+        record_answered(tmp_path, asker, quiz_id=quiz, option_index=0, comment=comment, request_id="fern-choice")
+    ref = build_owner_message_ref(chat_id=7, client_message_id="fern-late", ts="2040-01-01T00:00:00Z", text=bubble)
+    meta = {"origin_message_text": bubble, "origin_message_ref": ref, "late_answer": reference}
+
+    def opened(metadata, frame):
+        ctx = SimpleNamespace(task_metadata=metadata, drive_root=tmp_path)
+        _initialize_owner_directives(ctx, [{"role": "user", "content": frame}])
+        return ctx
+
+    head = opened(meta, late_answer_model_text(tmp_path, reference, bubble))
+    assert owner_input_revision(head) == 1 and owner_reply_owed(head)
+    start = opened({"objective_author": {"kind": "task"}, "owner_corpus": carried_owner_corpus(head, bubble)}, "Read notes")
+    _interrupted(tmp_path, metadata=meta, origin_message_ref=ref, origin_message_text=bubble,
+                 owner_mailbox={"read_complete": True, "rows": []})
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    [successor] = workers.PENDING
+    for focus in (head, start, opened(successor["metadata"], successor["text"])):
+        [row] = focus._owner_directives
+        assert not owner_words_contain(focus, label)
+        if kind == "unavailable":
+            assert row["source"] == "owner_card_input" and not cited_owner_basis(focus, label)[0]
+        else:
+            assert row["content"] == bubble and "Which chart?" in row["reply_to"]["text"]
+            if comment:
+                assert owner_words_contain(focus, comment)
+            else:
+                assert cited_owner_basis(focus, label)[0]["source"] == "owner_press"
