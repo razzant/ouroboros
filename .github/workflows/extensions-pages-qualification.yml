@@ -1,0 +1,568 @@
+name: Extensions pages · Linux qualification
+
+on:
+  push:
+    branches: [qa/extensions-pages-linux-20261118]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    # One creation push, one hosted runner. No PR, dispatch, rerun or publishing job.
+    if: ${{ github.repository == 'razzant/ouroboros' && github.event.created && !github.event.deleted && github.run_attempt == 1 }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: bash
+    env:
+      PRODUCT_TREE: 4ea903a074ff2deefbc995394bffe54827688bfb
+      BASE: 8c872987ea287a6f4cf2b76a043b25516c36ffaf
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the workflow-only tip, then check out its product parent
+        id: pin
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-list --parents -n1 HEAD | wc -w)" -eq 2
+          tip=$GITHUB_SHA; product=$(git rev-parse HEAD^1)
+          test "$(git diff --name-status "$product" "$tip")" = $'A\t.github/workflows/extensions-pages-qualification.yml'
+          test "$(git rev-parse "$product^{tree}")" = "$PRODUCT_TREE"
+          test "$(git rev-parse --is-shallow-repository)" = false
+          initial=1d1e861d5ace298ee08717fa75d78bcd7581103d
+          test "$(git rev-list --parents -n1 "$product")" = "$product $initial"
+          test "$(git rev-list --parents -n1 "$initial")" = "$initial $BASE"
+          git checkout --quiet --detach "$product"
+          test -z "$(git status --porcelain)"
+          q="$RUNNER_TEMP/extensions-qa"; mkdir -p "$q"/{public/generator,public/proofs,public/screens,private,home}
+          printf 'QA=%s\nQA_PRODUCT=%s\nQA_END=%s\n' "$q" "$product" "$(( $(date +%s) + 325*60 ))" >> "$GITHUB_ENV"
+          printf 'transport_commit=%s\nproduct_commit=%s\nproduct_tree=%s\nbase=%s\n' "$tip" "$product" "$PRODUCT_TREE" "$BASE" > "$q/public/generator/source.txt"
+
+      - name: Prepare the loopback-only test transport and bounded phase runner
+        id: harness
+        run: |
+          set -euo pipefail
+          # Dependencies are acquired in explicit setup steps. Application and test processes get only lo,
+          # the runner UID, a fresh HOME and the enumerated environment. Do not fall back to live network.
+          cat > "$QA/offline" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec sudo -n /usr/bin/unshare --net -- /bin/sh -ceu '
+            /usr/sbin/ip link set lo up
+            test "$(/usr/sbin/ip -o link show | cut -d: -f2 | tr -d " ")" = lo
+            uid=$1; gid=$2; shift 2
+            exec /usr/bin/setpriv --reuid="$uid" --regid="$gid" --clear-groups --no-new-privs /usr/bin/env -i "$@"
+          ' sh "$(id -u)" "$(id -g)" HOME="$QA/home" PATH="$PATH" LANG=C.UTF-8 CI=true \
+            QA="$QA" QA_BASE="$BASE" OURO_SIZE_RATCHET_BASE_REF="$BASE" OURO_BOOK_GROWTH_MODE=block \
+            OUROBOROS_RUN_UI_SMOKE=1 OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit \
+            OUROBOROS_UI_BROWSER_ENGINE="${QA_ENGINE:-chromium}" PLAYWRIGHT_BROWSERS_PATH="$QA/browsers" \
+            PLAYWRIGHT_NODEJS_PATH="$PWD/node-standalone/bin/node" "$@"
+          SH
+          cat > "$QA/phase" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          lane=$1; limit=$2; shift 2
+          out="$QA/private/$lane"; mkdir -p "$out"
+          left=$((QA_END - $(date +%s))); ((left < limit)) && limit=$left
+          kib=$(df -Pk "$QA" | awk 'END {print $4}')
+          if ((limit < 60 || kib < 2097152)); then
+            printf '%s: NOT STARTED (remaining seconds=%s, free KiB=%s)\n' "$lane" "$left" "$kib" | tee "$QA/public/proofs/$lane.exit.txt"; exit 75
+          fi
+          opts=(); if [[ $lane == ui-* || $lane == screens ]]; then opts=(xvfb-run -a -s '-screen 0 1440x900x24 -nolisten tcp'); fi
+          rc=0
+          "$QA/offline" "${opts[@]}" "$QA_PY" -I -S scripts/safe_test.py --temp-parent /tmp --timeout "$limit" \
+            --evidence-dir "$out/supervision" -- /usr/bin/env "QA_PHASE_SECONDS=$limit" "$@" >"$out/wrapper.log" 2>&1 || rc=$?
+          printf '%s: producer exit %s (budget %ss; initial free %s KiB)\n' "$lane" "$rc" "$limit" "$kib" | tee "$QA/public/proofs/$lane.exit.txt"
+          exit "$rc"
+          SH
+          chmod 755 "$QA/offline" "$QA/phase"
+          "$QA/offline" sh -ec 'test "$(id -u)" -ne 0; test -z "${GITHUB_TOKEN:-}${ACTIONS_RUNTIME_TOKEN:-}"'
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+          enable-cache: false
+      - name: Install the shipped Python and locked test dependencies on this runner
+        id: py_setup
+        run: |
+          set -euo pipefail
+          PYTHON_STANDALONE_DEST="$RUNNER_TEMP/shipped-python" PYTHON_STANDALONE_INTERPRETER_ONLY=1 bash scripts/download_python_standalone.sh
+          export UV_PROJECT_ENVIRONMENT="$QA/venv" UV_CACHE_DIR="$QA/uv-cache"
+          uv sync --locked --extra browser --group dev --no-install-project --python "$RUNNER_TEMP/shipped-python/bin/python3"
+          echo "$UV_PROJECT_ENVIRONMENT/bin" >> "$GITHUB_PATH"
+
+      - name: Check the Python and Playwright versions
+        id: py
+        run: |
+          set -euo pipefail
+          exe=$(python -c 'import sys; print(sys.executable)')
+          "$exe" -c "import importlib.metadata as md,sys; assert sys.version_info[:3]==(3,12,15); print('Python',sys.version.split()[0],'Playwright',md.version('playwright'))"
+          echo "QA_PY=$exe" >> "$GITHUB_ENV"
+
+      - name: Verify the public historical inputs for bundled-skill comparisons
+        id: history
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' }}
+        run: |
+          for ref in 08ed0f824 1e237c1bc 6014e8896 7f71fe8d2 96816f122 cf6f95cf4 d51b09bd6 e471e380e; do git cat-file -e "${ref}:skills"; done
+
+      - name: Generate inventories and attest the tested tree (no commit)
+        id: generate
+        if: ${{ !cancelled() && steps.py.outcome == 'success' && steps.harness.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          git diff --quiet HEAD --; test -z "$(git ls-files --others --exclude-standard)"
+          "$QA/offline" "$QA_PY" -B scripts/regenerate_inventories.py
+          allow=(docs/inventories/DATA_LAYOUT_INVENTORY.md docs/inventories/UI_CONTROL_TEXT_INVENTORY.md)
+          git diff --name-only HEAD | LC_ALL=C sort > "$QA/private/generated-paths.txt"
+          printf '%s\n' "${allow[@]}" | LC_ALL=C sort | diff -u - "$QA/private/generated-paths.txt"
+          test -z "$(git ls-files --others --exclude-standard)"; git diff --check HEAD
+          "$QA/offline" "$QA_PY" -B scripts/regenerate_inventories.py --check
+          git diff --binary --full-index HEAD -- "${allow[@]}" > "$QA/public/generator/inventories.patch"
+          git add -u -- "${allow[@]}"; tested=$(git write-tree)
+          echo "tested_tree=$tested" >> "$QA/public/generator/source.txt"; echo "QA_TREE=$tested" >> "$GITHUB_ENV"
+          git diff --cached --name-status HEAD -- "${allow[@]}" > "$QA/public/generator/changed.txt"
+          sha256sum "${allow[@]}" > "$QA/public/generator/postimages.sha256"
+          (cd "$QA/public/generator"; sha256sum inventories.patch > patch.sha256)
+
+      - name: Retain the generated-only patch before lengthy checks
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: extensions-inventories-${{ github.sha }}
+          path: ${{ runner.temp }}/extensions-qa/public/generator/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Stage and verify the repository-pinned Node (also the real Playwright driver)
+        id: node
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' }}
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          python3 -I -S scripts/download_node_standalone.py
+          node="$PWD/node-standalone/bin/node"; test "$("$node" --version)" = v24.22.3
+          echo "$PWD/node-standalone/bin" >> "$GITHUB_PATH"; echo "PLAYWRIGHT_NODEJS_PATH=$node" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$QA/browsers" >> "$GITHUB_ENV"
+          "$node" --version > "$QA/public/proofs/node-pin.txt"; sha256sum "$node" | cut -d' ' -f1 >> "$QA/public/proofs/node-pin.txt"
+
+      - name: Install only locked public web dev dependencies
+        id: npm
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        timeout-minutes: 8
+        run: cd web && test "$(node --version)" = v24.22.3 && npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Whole Node test set
+        id: node_tests
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' && steps.npm.outcome == 'success' }}
+        run: |
+          rc=0
+          "$QA/phase" node-all 720 bash -ceu 'cd web; exec node --test --test-concurrency=2 --test-reporter=tap tests/*.test.js > "$1" 2>&1' sh "$QA/private/node.tap" || rc=$?
+          if [[ -f $QA/private/node.tap ]]; then
+            grep -E '^# (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) [0-9]+(\.[0-9]+)?$' "$QA/private/node.tap" | tee "$QA/public/proofs/node-totals.txt"
+            grep -Eq '^# tests [1-9][0-9]*$' "$QA/public/proofs/node-totals.txt" || exit 2
+          else exit 2; fi
+          # Each TAP primary failure has its test title and usually a location. Omit diagnostic values and stacks.
+          python3 -I - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          qa=Path(os.environ['QA']); rows=[]; current=None; root=Path.cwd().resolve()
+          with (qa/'private/node.tap').open(errors='replace') as f:
+              for line in f:
+                  m=re.match(r'^\s*not ok\s+\d+\s+-\s+(.+?)\s*$',line)
+                  if m:
+                      current={'test': ''.join(c for c in m[1] if c.isprintable())[:200]}; rows.append(current); continue
+                  if current is None: continue
+                  m=re.match(r"\s*location:\s*['\"]?(.+?\.\w+):(\d+):(\d+)",line)
+                  if m:
+                      path=(root/'web'/m[1]).resolve()
+                      if path.is_relative_to(root/'web'): current.update(file=str(path.relative_to(root)),line=int(m[2]),column=int(m[3]))
+                      current=None
+          (qa/'public/proofs/node.failures.json').write_text(json.dumps(rows,ensure_ascii=True)+'\n')
+          PY
+          exit "$rc"
+
+      - name: ESLint no-undef
+        id: lint
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' && steps.npm.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          rc=0
+          "$QA/phase" lint 300 bash -ceu 'cd web; exec npm run --silent lint:undef -- --format json --output-file "$1"' sh "$QA/private/lint-report.json" || rc=$?
+          python3 -I - <<'PY'
+          import json, os
+          from pathlib import Path
+          qa=Path(os.environ['QA']); raw=qa/'private/lint-report.json'; root=Path.cwd().resolve(); rows=[]
+          if raw.is_file():
+              for file in json.loads(raw.read_text()):
+                  path=Path(file['filePath']).resolve()
+                  if path.is_relative_to(root/'web'):
+                      for m in file.get('messages',[]):
+                          rows.append(dict(file=str(path.relative_to(root)),line=m.get('line'),column=m.get('column'),ruleId=m.get('ruleId')))
+          (qa/'public/proofs/lint.failures.json').write_text(json.dumps(dict(report_present=raw.is_file(),findings=rows))+'\n')
+          PY
+          test -s "$QA/private/lint-report.json" || exit 2
+          exit "$rc"
+
+      - name: Prepare case-level reporting outside the product tree
+        id: reporter
+        if: ${{ !cancelled() && steps.harness.outcome == 'success' && steps.py.outcome == 'success' }}
+        run: |
+          cat > "$QA/checks.py" <<'PY'
+          """Run the selected repository tests unchanged; publish IDs/phases/locations, never response bodies."""
+          import ast, hashlib, json, os, sys
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          import pytest
+          root = Path.cwd(); sys.path.insert(0, str(root))
+          base = Path(os.environ['QA']); pub = base/'public/proofs'
+          group, lane = sys.argv[1:3]; ui = lane.startswith('ui-'); priv = base/'private'/lane
+          def modules(s): return ['tests/test_' + x + '.py' for x in s.split()]
+          def browsers(s): return ['tests/test_' + x + '_browser.py' for x in s.split()]
+          def dump(name, obj): (pub/(lane+'.'+name+'.json')).write_text(json.dumps(obj, ensure_ascii=True, indent=1)+'\n')
+          floor = next(ast.literal_eval(x.value) for x in ast.parse((root/'ouroboros/test_selection.py').read_bytes()).body
+                       if isinstance(x, ast.Assign) and any(getattr(v,'id','')=='FLOOR_TESTS' for v in x.targets))
+          groups = {
+            'floor': sorted(floor),
+            'owners': modules('mcp_server_identity client_contract_bindings skill_mcp_management_contract builtin_skill_source builtin_skill_platforms platform_install_targets platform_guard extension_loader extension_loader_extraction skill_catalogue skill_lifecycle_actions mcp_client mcp_catalog mcp_api mcp_import mcp_oauth_loopback mcp_headers_loopback skill_exec skill_publish skill_publish_preflight skill_publish_destination tool_result tool_name_recovery tool_classification_differential deployment_extensions deployment_trusted_extensions extensions_api live_conversation live_conversation_config web_utils_ssot ui_control_commands'),
+            'structure': sorted(str(p.relative_to(root)) for p in (root/'tests').glob('test_*_static.py')) + modules('docs_sync reference_book_budgets reference_book_balance generated_inventories domain_manifest domain_report architecture_facts'),
+            'size': ['tests'],
+            # The first and third groups use a caller-selected engine. Other modules choose engines internally;
+            # run those once, not twice under misleading environment labels. The journal records actual launches.
+            'routes': browsers('extensions_routes settings_home settings_tools_models main_connection_choice'),
+            'listing': browsers('skills_mcp_listing skills_sources model_concurrency_setting'),
+            'neighbors': browsers('live_conversation settings_shell settings_search_selection settings_plain_pages ui_coherence'),
+            'layout': browsers('design_system_gate settings_containment repaint_keeps_place header_question_a secondary_place'),
+            'servers': browsers('mcp_headers extension_settings_unknown settings_secret_reveal settings_skill_keys provider_return'),
+            'skills': browsers('skills_fix_r1 skills_fix_r2 skills_read_state skills_card_transition skills_continue_review skill_publish deployment_extensions_ui deployment_trusted_extensions_ui') + modules('ui_skill_publication')
+                      + ['tests/test_ui_smoke_playwright.py::test_ui_smoke_phase3_declarative_widgets_and_settings'],
+          }
+          selection_gap = False
+          if group == 'owners':
+              from ouroboros.test_selection import select_tests
+              selection = select_tests(root, base=os.environ['QA_BASE'])
+              assert selection.base == os.environ['QA_BASE']
+              # Use the shipping selector for ordinary tests, plus indirect consumers. Floor/static
+              # tests have their own steps; the UI marker is exercised separately in the named browser matrix.
+              selection_gap = selection.tier != 'selected'
+              scheduled_elsewhere = set(groups['floor']) | set(groups['structure'])
+              if not selection_gap:
+                  groups['owners'] += sorted(set(selection.files) - scheduled_elsewhere)
+              dump('selector', dict(**selection.record(), full_required_not_run=selection_gap,
+                   other_ordinary_lanes=sorted(scheduled_elsewhere), authored_ordinary=groups['owners']))
+          targets = list(dict.fromkeys(groups[group]))
+          if group == 'size':
+              assert targets == ['tests'] and (root/'tests').is_dir()
+          else:
+              assert targets and all((root/p.partition('::')[0]).is_file() for p in targets)
+          mark = 'ui_browser and not ui_browser_docker and not integration and not skill_smoke' if ui else 'size_ratchet' if group=='size' else 'not integration and not browser and not ui_browser and not ui_browser_docker and not skill_smoke and not portable_detail and not size_ratchet'
+          selected, terminal, actual, in_case, skips, calls = set(), set(), set(), set(), set(), set()
+          class Observe:
+              def pytest_sessionstart(self, session):
+                  if not ui: return
+                  from playwright.sync_api import BrowserType
+                  launch = BrowserType.launch
+                  def observed(bt, *args, **kwargs):
+                      browser = launch(bt, *args, **kwargs)
+                      in_case.add(bt.name); actual.add(bt.name)
+                      return browser
+                  BrowserType.launch = observed
+              def pytest_collection_finish(self, session):
+                  selected.update(item.nodeid for item in session.items)
+                  dump('selected', sorted(selected))
+              @pytest.hookimpl(hookwrapper=True, tryfirst=True)
+              def pytest_runtest_protocol(self, item, nextitem):
+                  in_case.clear(); yield
+              @pytest.hookimpl(hookwrapper=True)
+              def pytest_runtest_makereport(self, item, call):
+                  outcome = yield; report = outcome.get_result()
+                  if report.when=='call' or not report.passed: terminal.add(item.nodeid)
+                  if report.skipped: skips.add(item.nodeid)
+                  if report.when=='call' and not report.skipped: calls.add(item.nodeid)
+                  row = dict(test=item.nodeid, phase=report.when, outcome=report.outcome,
+                             seconds=round(report.duration,3), launches=sorted(in_case))
+                  if report.failed and call.excinfo is not None:
+                      row['error_type'] = call.excinfo.typename
+                      loc = getattr(report.longrepr,'reprcrash',None)
+                      if loc:
+                          path = Path(str(loc.path)).resolve()
+                          if path.is_relative_to(root): row['at'] = f'{path.relative_to(root)}:{loc.lineno}'
+                  with (pub/(lane+'.events.jsonl')).open('a') as f: f.write(json.dumps(row)+'\n')
+          private_xml = priv/'junit.xml'
+          seconds=int(os.environ['QA_PHASE_SECONDS'])
+          args = ['-o','addopts=', '-m',mark,'-q','--tb=short','--continue-on-collection-errors',
+                  '--timeout='+str(min(300,seconds-15)), '--session-timeout='+str(max(10,seconds-120)),
+                  '--ci-evidence-dir='+str(priv/'repo-evidence'),'--junitxml='+str(private_xml), *targets]
+          rc = int(pytest.main(args,plugins=[Observe()]))
+          # A compact JUnit projection: no stack traces, captured streams, properties, XML attributes from other sources or cookies.
+          out = ET.Element('testsuites'); n=0
+          for src in ET.parse(private_xml).getroot().iter('testsuite'):
+              suite=ET.SubElement(out,'testsuite',{k:src.get(k,'') for k in ('name','tests','failures','errors','skipped','time')})
+              for old in src.findall('testcase'):
+                  n+=1; case=ET.SubElement(suite,'testcase',{k:old.get(k,'') for k in ('classname','name','time')})
+                  for disposition in ('failure','error','skipped'):
+                      if old.find(disposition) is not None: ET.SubElement(case,disposition)
+          ET.ElementTree(out).write(pub/(lane+'.xml'),encoding='utf-8',xml_declaration=True)
+          missing=selected-terminal; wanted={os.environ['OUROBOROS_UI_BROWSER_ENGINE']} if group in ('routes','neighbors') else {'chromium','webkit'}
+          selected_modules={i.partition('::')[0] for i in selected}
+          no_cases=sorted(t for t in targets if t not in (selected if '::' in t else selected_modules)) if ui else []
+          dump('result',dict(argv=args[:-len(targets)-2]+['--ci-evidence-dir=<private>','--junitxml=<private>']+targets,
+               modules_without_selected_cases=no_cases, suite=group, pytest_exit=rc, selected=len(selected), terminal=len(terminal),
+               junit_cases=n, not_run=sorted(missing), skipped=sorted(skips), actual_launches=sorted(actual), kind='selected',
+               note='A launch is observed only in its own synchronous pytest process. An unobserved engine is not inferred.'))
+          # A partial run stays red. Unit platform skips remain listed; unexpected browser skips do not become PASS.
+          gap = selection_gap or not calls or not n or bool(missing)
+          if ui: gap = gap or bool(skips) or bool(no_cases) or not wanted.issubset(actual)
+          raise SystemExit(rc or int(gap))
+          PY
+          cat > "$QA/tests" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          group=$1; lane=$2; seconds=$3; export QA_ENGINE=${4:-chromium}
+          exec "$QA/phase" "$lane" "$seconds" "$QA_PY" "$QA/checks.py" "$group" "$lane"
+          SH
+          chmod 755 "$QA/tests"
+
+      - name: Python contract floor
+        id: floor
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' && steps.reporter.outcome == 'success' }}
+        run: '"$QA/tests" floor floor 900'
+      - name: Owning Python modules, client contracts, seed history and local MCP round trips
+        id: owning
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' && steps.reporter.outcome == 'success' }}
+        run: '"$QA/tests" owners owners 1200'
+      - name: Static UI consumers, documentation, architecture and domain checks
+        id: structure
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' && steps.reporter.outcome == 'success' }}
+        run: '"$QA/tests" structure structure 900'
+      - name: All size-ratchet cases against the verified published base
+        id: size
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' && steps.reporter.outcome == 'success' }}
+        run: '"$QA/tests" size size 900'
+      - name: Preserve early numeric results and per-case evidence
+        if: ${{ !cancelled() && steps.reporter.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: extensions-core-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/extensions-qa/public/proofs/*.exit.txt
+            ${{ runner.temp }}/extensions-qa/public/proofs/node-*.txt
+            ${{ runner.temp }}/extensions-qa/public/proofs/*.failures.json
+            ${{ runner.temp }}/extensions-qa/public/proofs/*.events.jsonl
+            ${{ runner.temp }}/extensions-qa/public/proofs/*.selected.json
+            ${{ runner.temp }}/extensions-qa/public/proofs/*.selector.json
+            ${{ runner.temp }}/extensions-qa/public/proofs/*.result.json
+            ${{ runner.temp }}/extensions-qa/public/proofs/*.xml
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Install both locked browser engines and the guest display dependencies
+        id: media
+        if: ${{ !cancelled() && steps.node.outcome == 'success' && steps.py.outcome == 'success' }}
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          "$QA/offline" "$QA_PY" -c "from playwright._impl._driver import compute_driver_executable; import os, subprocess; node=compute_driver_executable()[0]; assert os.path.samefile(node, os.environ['PLAYWRIGHT_NODEJS_PATH']); assert subprocess.check_output([node,'--version'],text=True).strip()=='v24.22.3'"
+          "$QA_PY" -I -S scripts/ci_browser_install.py --python "$QA_PY" --attempt-seconds 420 chromium webkit
+          sudo -n apt-get -o Acquire::Retries=1 -y --no-install-recommends install xvfb xauth
+          command -v xvfb-run; command -v xauth
+
+      - name: Full application routes, drafts and Settings search — Chromium
+        id: primary_c
+        if: ${{ !cancelled() && steps.media.outcome == 'success' && steps.generate.outcome == 'success' && steps.reporter.outcome == 'success' }}
+        run: '"$QA/tests" routes ui-routes-chromium 2100 chromium'
+      - name: Full application routes, drafts and Settings search — WebKit
+        id: primary_w
+        if: ${{ !cancelled() && steps.media.outcome == 'success' && steps.generate.outcome == 'success' && steps.reporter.outcome == 'success' }}
+        run: '"$QA/tests" routes ui-routes-webkit 2400 webkit'
+      - name: Connect, source trust and concurrency — fixtures choosing their own engines
+        id: listing
+        if: ${{ !cancelled() && steps.media.outcome == 'success' && steps.generate.outcome == 'success' && steps.reporter.outcome == 'success' }}
+        run: '"$QA/tests" listing ui-listing 1800'
+
+      - name: Render two fixed synthetic screens and follow the Sources keyboard return doors
+        id: screens
+        if: ${{ !cancelled() && steps.media.outcome == 'success' && steps.generate.outcome == 'success' }}
+        run: |
+          cat > "$QA/views.py" <<'PY'
+          import hashlib, json, os, sys
+          from contextlib import contextmanager
+          from pathlib import Path
+          from unittest.mock import patch
+          root=Path.cwd(); sys.path.insert(0,str(root))
+          from tests import test_subscription_setup_browser as ui_fixture
+          from tests.settings_browser_helpers import open_settings, settings_page
+          from ouroboros import mcp_client as mc, mcp_catalog
+          q=Path(os.environ['QA']); fixtures=root/'web/tests/fixtures/skills_v4'
+          stamp=mc.mcp_oauth.utc_now_iso(); mgr=mc.MCPManager(); mgr._enabled=True; configs=[]
+          for key,name,on in [('docs','Docs',True),('calendar','Team calendar',True),('archive','Research archive',False)]:
+              url='https://'+key+'.example.test/mcp'
+              cfg=mc.MCPServerConfig(id=key,name=name,enabled=on,transport='streamable_http',url=url,command='',args=[],auth_header='Authorization',auth_token='',allowed_tools=[])
+              r=mc.MCPServerRuntime(config=cfg); mgr._servers[key]=r
+              configs.append(dict(id=key,name=name,enabled=on,transport=cfg.transport,url=url))
+              if key=='docs':
+                  r.tools=[mc.MCPTool(key,n,'mcp_docs__'+n,d,{'type':'object','properties':{}}) for n,d in [('list_topics','List topics.'),('read_topic','Read a topic.')]]
+                  r.last_refreshed=r.last_attempted=stamp
+                  r.catalog=mcp_catalog.attempt_envelope(cfg,None,at=stamp,items=[{'name':t.raw_name,'description':t.description} for t in r.tools],complete=True)
+          with patch.object(mc.mcp_oauth,'_load',lambda cfg: {'sign_in':{'since':stamp,'reason':'not_signed_in'}} if cfg.id=='calendar' else {}): status=mgr.status_payload()
+          assert all(r['tool_count']==len(r['tools']) for r in status['servers'])
+          skills=json.loads((fixtures/'extensions_v4.json').read_bytes()); sources=json.loads((fixtures/'skill_sources.json').read_bytes())
+          for s in sources['sources']: s['confirmed']=True
+          @contextmanager
+          def page(engine,w,h,theme):
+              os.environ['OUROBOROS_UI_BROWSER_ENGINE']=engine
+              gen=ui_fixture.subscription_ui.__wrapped__(); ui=next(gen)
+              try:
+                  ui['settings'].update(MCP_SERVERS=configs,MCP_ENABLED=True)
+                  p=ui['new_page'](viewport={'width':w,'height':h},has_touch=w<720); p.set_default_timeout(12000)
+                  def responder(value):
+                      def answer(route): route.fulfill(json=value)
+                      return answer
+                  for route,body in [('extensions',skills),('skill-sources',sources),('skills/lifecycle-queue',{'active':None,'events':[]}),('mcp/status',status)]:
+                      p.route('**/api/'+route, responder(body))
+                  p.goto(ui['url']+'/#skills'); p.wait_for_function('() => Boolean(window.ouroTheme)'); p.evaluate('t=>window.ouroTheme.set(t)',theme)
+                  assert p.context.browser.browser_type.name==engine
+                  yield p
+              finally:
+                  try: next(gen)
+                  except StopIteration: pass
+          def settle(p):
+              p.evaluate('()=>document.fonts.ready.then(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))))')
+              p.locator('#page-skills [data-settings-arrive]:visible').wait_for(state='hidden')
+          def show(p,section):
+              sel='#page-skills'; door=p.locator(f'{sel} [data-extensions-open="{section}"]')
+              door.wait_for(state='attached')
+              if not door.is_visible(): p.locator(f'{sel} > .app-page-header [data-shell-back]:visible').click()
+              door.click(); settle(p)
+          def picture(p,engine,w,theme):
+              p.wait_for_function("()=>document.querySelector('[data-extensions-open=tools]')?.textContent.includes('2 of 3 on')")
+              show(p,'tools'); p.locator('[data-entry-id=docs]').wait_for()
+              rows=p.locator('#page-skills [data-entry-id]:visible').evaluate_all('els=>els.map(e=>[e.dataset.entryId,e.innerText,e.querySelector("[data-entry-switch]")?.checked])')
+              assert {r[0]:r[2] for r in rows}=={'docs':True,'calendar':True,'archive':False}
+              assert '2 tools' in next(r[1] for r in rows if r[0]=='docs') and 'Sign in' in next(r[1] for r in rows if r[0]=='calendar')
+              assert p.locator('html').get_attribute('data-theme')==theme and p.locator('.page.active').get_attribute('id')=='page-skills'
+              f=q/'public/screens'/f'extensions-{engine}-{w}-{theme}.png'; p.screenshot(path=str(f),animations='disabled')
+              return dict(engine=engine,version=p.context.browser.version,width=w,theme=theme,sha256=hashlib.sha256(f.read_bytes()).hexdigest())
+          def source_doors(p,engine):
+              show(p,'sources'); facts=[]
+              for action,path,target in [('auto_grant','permissions',488),('skill_sources','skill-sources',733)]:
+                  opener=p.locator(f'#page-skills [data-source-action="{action}"]'); opener.wait_for(); opener.press('Enter')
+                  settings_page(p,path).wait_for(); active=p.locator('.page.active'); bounds=active.bounding_box()
+                  # Resize the window, not the CSS: the desktop sidebar is not part of the section's width.
+                  p.set_viewport_size({'width':round(p.viewport_size['width']+target-bounds['width']),'height':844})
+                  p.wait_for_function('(w)=>Math.abs(document.querySelector(".page.active").getBoundingClientRect().width-w)<=1',arg=target)
+                  settle(p); head=active.locator(':scope > .app-page-header'); back=head.locator('[data-shell-back]:visible'); back.wait_for()
+                  box=head.bounding_box(); controls=head.locator('button:visible').evaluate_all('els=>els.map(e=>{let r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}})')
+                  assert all(box['x']-1<=b['x'] and b['x']+b['width']<=box['x']+box['width']+1 for b in controls)
+                  back.press('Enter'); opener.wait_for(); settle(p)
+                  p.wait_for_function('(a)=>document.activeElement?.closest("[data-source-action]")?.dataset.sourceAction===a',arg=action)
+                  facts.append(dict(action=action,target_section_width=target,header=box,visible_controls=controls,focus_restored=True))
+              return facts
+          def circles(p,engine):
+              p.route('**/api/places', lambda r:r.fulfill(json={'circles':[], 'connectors':[], 'places':[]}))
+              p.goto(p.url.partition('#')[0]+'#settings'); level=open_settings(p,'tools'); level.get_by_text('Circles',exact=True).click()
+              p.locator('[data-circles-act="add-place"]:visible').first.click(); dialog=p.locator('dialog.place-connect:visible')
+              field=dialog.locator('[data-connect-draft="words"]'); field.fill('Local demonstration')
+              dialog.locator('[data-connect-act="next"]').click(); dialog.locator('[data-connect-act="back-words"]').click()
+              assert field.input_value()=='Local demonstration'; dialog.locator('[data-place-close]').click()
+              p.locator('#page-circles > .app-page-header').get_by_role('button',name='Back to Extensions › MCP servers',exact=True).click()
+              level.locator('[data-entry-id="docs"]').wait_for(); return dict(connect_words_restored=True,returned_to_mcp=True)
+          results={}; failed=False
+          for engine,w,h,theme in [('chromium',1440,900,'light'),('webkit',390,844,'dark')]:
+              for label in ('picture','sources-returns','circles-connect'):
+                  try:
+                      with page(engine,w if label=='picture' else 1013,h,theme) as p:
+                          if label=='picture': data=picture(p,engine,w,theme)
+                          elif label=='sources-returns': data=source_doors(p,engine)
+                          else: data=circles(p,engine)
+                      results[engine+'-'+label]=dict(passed=True,facts=data)
+                  except Exception as exc:
+                      # No page contents, HTTP data or local paths in the public report.
+                      import traceback
+                      frame=next((f for f in reversed(traceback.extract_tb(exc.__traceback__)) if f.filename==__file__),None)
+                      results[engine+'-'+label]=dict(passed=False,error_type=type(exc).__name__,witness_line=frame.lineno if frame else None); failed=True
+                  (q/'public/proofs/screen-checks.json').write_text(json.dumps(results,indent=1)+'\n')
+          raise SystemExit(int(failed))
+          PY
+          "$QA/phase" screens 420 "$QA_PY" "$QA/views.py"
+
+      - name: Preserve changed-route outcomes and the two selected renders
+        if: ${{ !cancelled() && steps.media.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: extensions-routes-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/extensions-qa/public/proofs/ui-routes-*
+            ${{ runner.temp }}/extensions-qa/public/proofs/ui-listing.*
+            ${{ runner.temp }}/extensions-qa/public/proofs/screen-checks.json
+            ${{ runner.temp }}/extensions-qa/public/proofs/screens.exit.txt
+            ${{ runner.temp }}/extensions-qa/public/screens/extensions-chromium-1440-light.png
+            ${{ runner.temp }}/extensions-qa/public/screens/extensions-webkit-390-dark.png
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Design gate, Telegram callback, reading position and repaint contracts
+        id: layout
+        if: ${{ !cancelled() && steps.media.outcome == 'success' && steps.generate.outcome == 'success' && steps.reporter.outcome == 'success' }}
+        run: '"$QA/tests" layout ui-layout 2700'
+      - name: MCP header transactions, unknown form, keys and provider return
+        id: servers
+        if: ${{ !cancelled() && steps.media.outcome == 'success' && steps.generate.outcome == 'success' && steps.reporter.outcome == 'success' }}
+        run: '"$QA/tests" servers ui-servers 2400'
+      - name: Calls, Settings shell, search and UI coherence — Chromium
+        id: neighbor_c
+        if: ${{ !cancelled() && steps.media.outcome == 'success' && steps.generate.outcome == 'success' && steps.reporter.outcome == 'success' }}
+        run: '"$QA/tests" neighbors ui-neighbors-chromium 1800 chromium'
+      - name: Calls, Settings shell, search and UI coherence — WebKit
+        id: neighbor_w
+        if: ${{ !cancelled() && steps.media.outcome == 'success' && steps.generate.outcome == 'success' && steps.reporter.outcome == 'success' }}
+        run: '"$QA/tests" neighbors ui-neighbors-webkit 2100 webkit'
+      - name: Skills cards, reads, publication and enterprise boundaries — native test matrix
+        id: skills
+        if: ${{ !cancelled() && steps.media.outcome == 'success' && steps.generate.outcome == 'success' && steps.reporter.outcome == 'success' }}
+        run: '"$QA/tests" skills ui-skills 2100'
+
+      - name: Check tested-source identity again
+        id: readback
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QA_PRODUCT"; test "$(git write-tree)" = "$QA_TREE"
+          git diff --quiet --; test -z "$(git ls-files --others --exclude-standard)"
+          "$QA/offline" "$QA_PY" -B scripts/regenerate_inventories.py --check
+          echo "tested_tree=$QA_TREE unchanged" > "$QA/public/proofs/readback.txt"
+      - name: State each outcome and boundary of this run
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' }}
+        env:
+          OUTCOMES: ${{ toJSON(steps) }}
+        run: |
+          python3 -I - <<'PY'
+          import json,os
+          from pathlib import Path
+          steps=json.loads(os.environ['OUTCOMES']); q=Path(os.environ['QA']); lines=['### Extensions: selected Linux checks','', '| Phase | Outcome |','|---|---|']
+          for name in 'pin harness py_setup py history generate node npm node_tests lint floor owning structure size media primary_c primary_w listing screens layout servers neighbor_c neighbor_w skills readback'.split():
+              lines.append(f"| {name} | {steps.get(name,{}).get('outcome','not reported')} |")
+          lines.extend(['','An interrupted or skipped phase is not a pass. Per-case files distinguish collection, setup, call, teardown and observed browser launches. The recorded producer exit remains authoritative.',
+              'This is not the full repository/UI release battery, a native Telegram/device test, Docker qualification, a real vendor login, or a Windows/macOS result. No PR or release is created.'])
+          text='\n'.join(lines)+'\n'; (q/'public/proofs/summary.md').write_text(text)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f: f.write(text)
+          PY
+      - name: Retain only the small final proof projections
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: extensions-results-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/extensions-qa/public/proofs/*.json
+            ${{ runner.temp }}/extensions-qa/public/proofs/*.jsonl
+            ${{ runner.temp }}/extensions-qa/public/proofs/*.xml
+            ${{ runner.temp }}/extensions-qa/public/proofs/*.txt
+            ${{ runner.temp }}/extensions-qa/public/proofs/summary.md
+          retention-days: 7
+          if-no-files-found: error
