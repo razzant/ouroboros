@@ -345,8 +345,7 @@ def test_a_call_whose_own_arguments_nest_past_the_decoder_is_refused_beside_a_ru
 
 
 def test_enable_tools_loads_a_whole_server_and_says_what_the_next_request_carries(registry):
-    """A binding without the gateway (a voice session) loads into the request, as does a text loop whose
-    resident list lacks it (Nano): residency of call_mcp_tool decides, never the role (#3670)."""
+    """A voice-style binding loads schemas into the request even if call_mcp_tool is resident."""
     from ouroboros import loop as loop_module
 
     _servers()
