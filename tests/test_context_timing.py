@@ -223,3 +223,29 @@ def test_a_turns_prologue_rides_on_its_first_rounds_receipt():
     assert {"prologue", "prologue.rebind.route", "prologue.restore.tools"} <= set(first)
     with round_window(slot):
         assert not any(name.startswith("prologue") for name in round_receipt()["host_steps"]["sections_ms"])
+
+
+def test_the_post_batch_evidence_read_rides_the_next_rounds_receipt_unless_a_start_prologue_waits(tmp_path, monkeypatch):
+    """After a batch, a retained answer's evidence read (``loop_budget._prepare_post_tool_budget_context``) runs before
+    the next round's window: it rides that round's receipt as ``prologue.delivery_evidence``; a turn's own start
+    prologue, not yet carried, keeps its place; with no retained answer nothing is read or carried."""
+    import ouroboros.loop as loop
+    import ouroboros.loop_delivery as delivery_mod
+    from ouroboros.llm_observability import round_receipt, round_window
+    from tests.test_acceptance_preparation_loop import _delivery_ctx
+
+    monkeypatch.setattr(delivery_mod, "delivery_evidence_fingerprint", lambda *_a, **_k: "known-1")
+    trace = {"tool_calls": [], "reasoning_notes": []}
+    registry, ctx = _delivery_ctx(tmp_path, trace)
+    slot = registry._ctx
+    loop._prepare_post_tool_budget_context(registry, ctx, trace, "test-model", False, "medium")
+    assert not getattr(slot, "_round_prologue", None), "no retained answer: nothing read, nothing carried"
+    loop._replace_delivery_candidate(registry, ctx, trace, "complete answer", control="candidate")
+    loop._prepare_post_tool_budget_context(registry, ctx, trace, "test-model", False, "medium")
+    with round_window(slot):
+        assert "prologue.delivery_evidence" in round_receipt()["host_steps"]["sections_ms"]
+    slot._round_prologue = {"sections_ms": {"total": 7, "restore.tools": 5}, "sections_cpu_ms": {}}  # a start's
+    loop._prepare_post_tool_budget_context(registry, ctx, trace, "test-model", False, "medium")
+    with round_window(slot):
+        sections = round_receipt()["host_steps"]["sections_ms"]
+    assert "prologue.restore.tools" in sections and "prologue.delivery_evidence" not in sections

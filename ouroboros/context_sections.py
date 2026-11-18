@@ -106,6 +106,7 @@ def build_knowledge_sections(
     return sections
 
 
+@timed_section("knowledge.navigation")
 def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: Any = None,
                                   warn_large: bool = False) -> List[str]:
     """One knowledge navigation rendering for integrating contexts and first delegations.
@@ -142,6 +143,7 @@ def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: 
     return sections
 
 
+@timed_section("knowledge_outline")
 def helper_navigation_sections(root: Any, project_id: str = "") -> List[str]:
     """A helper's knowledge at its start: the global shelf's outline and its room's (every active note by address and
     title, people's summaries kept: ``knowledge.render_knowledge_outline``), each under its own heading; the whole

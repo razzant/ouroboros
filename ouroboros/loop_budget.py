@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from ouroboros import budget_pause
 from ouroboros import task_pacing
+from ouroboros.context_timing import measured_sections, section_spans, timed
 from ouroboros.loop_transport import TransportWaitEpisode, end_episode_budget as _end_episode_budget
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context_fit import messages_carry_native_images
@@ -932,9 +933,10 @@ def _prepare_post_tool_budget_context(
             if candidate.finalization_control in _loop()._DELIVERY_HOLD_CONTROLS
             else ""
         )
-        evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(
-            tools, limit_ctx, llm_trace,
-        )
+        with measured_sections():  # the post-batch read rides the next round's receipt, unless a start prologue waits
+            evidence_revision, evidence_fingerprint = timed("delivery_evidence", _loop()._delivery_evidence_state,
+                                                            tools, limit_ctx, llm_trace)
+            tools._ctx._round_prologue = getattr(tools._ctx, "_round_prologue", None) or section_spans()
         if candidate.stale(evidence_revision, evidence_fingerprint) and not candidate.owes_no_selection and (
             candidate.finalization_control != evidence_notice_control(evidence_revision, evidence_fingerprint)
         ):  # fresh prose binds new evidence; an unchanged shown notice permits explicit reselection

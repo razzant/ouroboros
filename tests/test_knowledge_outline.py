@@ -59,6 +59,7 @@ def test_a_helper_start_renders_the_same_outline_and_no_whole_index(tmp_path, mo
     integrating view carries, without rendering the whole index it would discard; the integrating view still does."""
     from ouroboros import knowledge
     from ouroboros.context_sections import helper_navigation_sections, knowledge_navigation_sections
+    from ouroboros.context_timing import measured_sections, section_spans
 
     _shelf(tmp_path)
     _whole, outline = knowledge_index_views(resolve_knowledge_address(tmp_path, "overview", "global"))
@@ -69,7 +70,9 @@ def test_a_helper_start_renders_the_same_outline_and_no_whole_index(tmp_path, mo
         return real(*args, **kwargs)
 
     monkeypatch.setattr(knowledge, "render_knowledge_index", render)
-    assert helper_navigation_sections(tmp_path) == ["## Knowledge outline\n\n" + outline] and not rendered
+    with measured_sections():  # a helper's build names this span (the integrating one, ``knowledge.navigation``)
+        assert helper_navigation_sections(tmp_path) == ["## Knowledge outline\n\n" + outline] and not rendered
+        assert "knowledge_outline" in section_spans()["sections_ms"]
     [section] = knowledge_navigation_sections(tmp_path)
     assert rendered and section.operative_view.endswith(outline)
 
