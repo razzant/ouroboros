@@ -26,7 +26,7 @@ _LOCK = threading.Lock()
 
 
 def notice_fields(current: dict, root: Any, task_id: str, episode_id: str, reason: str, *,
-                  fence: dict | None = None) -> dict:
+                  fence: dict | None = None, cause: str | None = None) -> dict:
     """Called inside the result writer, only for a newly confirmed pause episode.
 
     ``fence`` is the owner Pause this episode confirms: the author it declared
@@ -38,13 +38,19 @@ def notice_fields(current: dict, root: Any, task_id: str, episode_id: str, reaso
 
     if not episode_id or reason not in {"budget", "owner", "authority"}:
         return {}
-    identity = f"pause:{task_id}:{episode_id}"
+    technical = reason == "authority"
     pending = dict(current.get("pause_notices") or {})
+    if technical:
+        if current.get("authority_notice_registered"):
+            return {}
+        if any(isinstance(owed, dict) and owed.get("reason") == reason for owed in pending.values()):
+            return {"authority_notice_registered": True}
+    identity = f"pause:{task_id}:{'authority' if technical else episode_id}"
     by = {"by": pause_author(fence)} if fence is not None else {}
     gaps = (fence or {}).get("membership_gaps")
     gaps = {"membership_gaps": dict(gaps)} if isinstance(gaps, dict) and gaps.get("count") else {}
-    pending.setdefault(identity, {"reason": reason, "confirmed_at": utc_now_iso(), **by, **gaps})
-    return {"pause_notices": pending}
+    pending.setdefault(identity, {"reason": reason, "confirmed_at": utc_now_iso(), **by, **gaps, **({"cause": cause} if cause else {})})
+    return {"pause_notices": pending, **({"authority_notice_registered": True} if technical else {})}
 
 
 _RETAINED = "Its work is retained; Resume continues it."
@@ -76,6 +82,19 @@ def gap_words(gaps: Any, lead: str = "The Pause did not wait for") -> str:
             f"that nothing ties to this task ({named}); whether {'it belongs' if one else 'they belong'} here is unknown.")
 
 
+def authority_wait_text(cause: str) -> str:
+    """Stable source sentences for the reader's existing translation memory."""
+    return {
+        "dispatch_fence_unreadable": "The task is waiting to read its dispatch fence.",
+        "dispatch_fence_invalid": "The task is waiting for a valid dispatch fence.",
+        "read_failed": "The task is waiting to read its billing record.",
+        "malformed_binding": "The task is waiting for a valid billing group record.",
+        "start_custody_unreadable": "The task is waiting to read its delegated start record.",
+        "owner_pause_authority_unreadable": "The task is waiting to read its owner's Pause.",
+        "owner_launch_authority_unavailable": "The task is waiting to read permission to launch.",
+    }.get(str(cause or "").partition(":")[0], "")
+
+
 def notice_text(notice: dict) -> str:
     """The sentence one owed notice says; an owner Pause names the author its own fence declared, and the words that
     press recorded follow its head verbatim, whoever declared it (a press without words says none)."""
@@ -89,6 +108,8 @@ def notice_text(notice: dict) -> str:
             head = f"{actor} paused this task." if actor else "This task was paused."
         return f"{head} {_RETAINED}{gap_words(notice.get('membership_gaps'))}"
     authority = notice.get("reason") == "authority"
+    if authority and (words := authority_wait_text(notice.get("cause"))):
+        return f"{words} Its work is saved. It resumes when its controls permit it."
     cause = ("a technical fault: its billing or control authority could not be read, which says nothing about "
              "money left") if authority else "its budget limit"
     resume = ("Use Resume on the task when available; it rechecks the conditions before continuing" if authority

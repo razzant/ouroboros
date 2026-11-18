@@ -580,19 +580,20 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
                          and item["_budget_pause"].get("reason") != "sleep" for item in q.PENDING):
         return {"ok": False, "error": "root_still_paused", "root_task_id": root_task_id,
                 "action": "resume_root_first"}
-    # A later Resume raises the generation; older grants cannot become live again.
+    author = resume_author()
+    direct = row.get("reason") == "authority" and not sleep_wake and not selected_by
     generation = int(row.get("resume_generation") or 0) + 1
     pause_generation = int(row.get("pause_generation") or 0)
     from ouroboros.presence_carrier import lift_allowance, lifted_record, owner_allowance_lift
     lift = {} if selected_by or sleep_wake else owner_allowance_lift(task, result_root)  # decided once (#2566)
     grant = {
-        "by": resume_author(),
+        "by": author, **({"selection_door": "direct"} if direct else {}),
         **({"owner_pause_fence_id": owner_fence_id} if owner_fence_id else {}),
         "grant_id": uuid.uuid4().hex, "granted_at": utc_now_iso(), "granted_at_ts": now,
         "single_use": True, "paused_duration_sec": prior_paused + max(0.0, now - paused_at),
         "executed_sec_before_pause": round(executed_sec, 3),
         "pause_id": pause_id, "pause_generation": pause_generation, "generation": generation,
-        "selected_by": "sleep_wake" if sleep_wake else str(selected_by or "owner"),
+        "selected_by": "sleep_wake" if sleep_wake else str((author.get("actor") or "host") if direct else selected_by or "owner"),
         "authority": "sleep_readiness" if sleep_wake else "explicit_resume",
         "sleep_id": str((row.get("sleep") or {}).get("sleep_id") or "") if sleep_wake else "",
         'root_resume_basis': root_state['basis'], "root_grant_id": str(root_grant.get("grant_id") or ""),
@@ -616,8 +617,8 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         **({"sleep_exclusion_since": now}
            if row.get("reason") == "sleep" or explicit_execution_timeout_sec(task) is not None else {}),
         **{key: grant[key] for key in (
-            'selected_by', 'by', 'authority', 'sleep_id', 'root_grant_id',
-            'root_resume_generation', 'root_fence_id', 'root_resume_basis')},
+            'selected_by', 'by', 'authority', 'sleep_id', 'root_grant_id', 'selection_door',
+            'root_resume_generation', 'root_fence_id', 'root_resume_basis') if key in grant},
     }
 
     def record_grant():

@@ -26,7 +26,7 @@ from ouroboros.utils import append_jsonl, utc_now_iso
 from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
 from ouroboros.work_stop import hold_fact as budget_hold_fact  # noqa: F401
 from ouroboros.work_stop import (
-    SELECTION_KEY, clear_refusal, continuation_refusal, declare_stop, reason_policy, record_policy,
+    SELECTION_KEY, clear_refusal, continuation_refusal, declare_stop, direct_selection, reason_policy, record_policy,
     release_refusal, resume_selection, selection_record, stop_record, writer_wait,
 )
 
@@ -869,7 +869,7 @@ def budget_resume_dispatch_allowed(q: Any, task: Dict[str, Any], *, actor_id: Op
     result_root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
     try:
         actor_id = actor_id if actor_id is not None else _validated_single_cancel_target(result_root, root_id)
-        owner_unbound = carrier.get('selected_by') == 'owner' and not carrier.get('root_grant_id')
+        owner_unbound = direct_selection(carrier) and not carrier.get('root_grant_id')
         if owner_unbound and actor_id == str(task.get('id') or ''):
             return True
         state = _root_resume_state(q, root_id, result_root, actor_id=actor_id)
@@ -1261,7 +1261,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
             handoff = member.get('_budget_pause_resume')
             if isinstance(handoff, dict):
                 if (handoff.get('authority') == 'explicit_resume'
-                        and handoff.get('selected_by') == 'owner'
+                        and direct_selection(handoff)
                         and not handoff.get('root_grant_id')
                         and not handoff.get('root_fence_id')
                         and not member.get('_budget_pause')
@@ -1285,7 +1285,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
                 continue
             prior = member.get(SELECTION_KEY)
             if isinstance(prior, dict):
-                if prior.get('selected_by') == 'owner' and not prior.get('root_grant_id') and not prior.get('fence_id'):
+                if direct_selection(prior) and not prior.get('root_grant_id') and not prior.get('fence_id'):
                     rebound.append((member, SELECTION_KEY, prior))
                 else:
                     invalidated.append((member, prior))
@@ -1474,7 +1474,7 @@ def _root_resume_grants(state: Dict[str, Any]) -> tuple:
     handoff = current.get('_budget_pause_resume') or {}
     if exact and handoff.get('grant_id') == exact['grant_id']:
         return exact, durable
-    if (selection and selection.get('selected_by') == 'owner' and not selection.get('fence_id')
+    if (selection and direct_selection(selection) and not selection.get('fence_id')
             and not handoff):
         if selection.get('grant_id'):
             if (exact and row.get('state') == STATE_RESUMED and grant.get('consumed_at')

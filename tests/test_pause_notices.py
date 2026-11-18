@@ -331,6 +331,7 @@ PARITY_CASES = (  # name, notice, the author's words as the sentence carries the
     ("nobody_declared", {"reason": "owner"}, None),
     ("budget", {"reason": "budget"}, None),
     ("authority", {"reason": "authority"}, None),
+    ("dispatch_read", {"reason": "authority", "cause": "dispatch_fence_unreadable"}, None),
 )
 
 

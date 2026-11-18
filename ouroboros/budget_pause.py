@@ -467,7 +467,7 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
         retained_wait = ({"owner_wait": {**expected_owner_wait, "state": "retained"}}
                          if expected_owner_wait is not None else {})
         from ouroboros.pause_notices import notice_fields
-        notice = (notice_fields(current, root, task_id, str(row.get("pause_id") or ""), str(row.get("reason")))
+        notice = (notice_fields(current, root, task_id, str(row.get("pause_id") or ""), str(row.get("reason")), cause=row.get("cause"))
                   if row.get("state") == STATE_PAUSED and row.get("reason") in {"budget", REASON_AUTHORITY}
                   and (old.get("state") != STATE_PAUSED or old.get("pause_id") != row.get("pause_id")) else {})
         from ouroboros.model_detach import detached_fields
@@ -729,7 +729,7 @@ def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: st
 
 
 def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
-                  root_task_id: str = "", context_view: tuple | None = None) -> None:
+                  root_task_id: str = "", context_view: tuple | None = None, cause: str = "") -> None:
     """Fence, save and unwind only after producer quiescence and a stored source.
 
     Unsettled producers/ambiguous transfer retain the worker and typed pausing hold;
@@ -796,6 +796,8 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
     carrier = getattr(getattr(ctx, "model_wait_context", None), "task", None)
     envelope = ({"park_task": parkable_direct_task(carrier)} if isinstance(carrier, dict)
                 and carrier.get("id") == task_id and (carrier.get("_is_direct_chat") or carrier.get("_presence_turn")) else {})
+    if cause:
+        envelope["cause"] = cause
     seed = {**envelope, "pause_id": pause_id, "state": STATE_PAUSING,
             "reason": _RAIL_REASONS.get(rail, "budget"), "rail": rail,
             "pause_generation": generation,
@@ -1103,11 +1105,7 @@ STATUS_PAUSED_EXACT = "paused_exact_continuation"
 
 
 def exact_pause_marker(row: Dict[str, Any], *, default_root: str = "") -> Dict[str, Any]:
-    """The queue's ``_budget_pause`` marker projected from the DURABLE pause row.
-
-    The row on the task result is the source of truth; the marker is its
-    locator inside the queue (and the worker event's ``resource_limit``).
-    """
+    """Project the queue and worker locator from the durable pause."""
     return {
         "status": STATUS_PAUSED_EXACT,
         "scope": str(row.get("scope") or "global"),
@@ -1118,8 +1116,7 @@ def exact_pause_marker(row: Dict[str, Any], *, default_root: str = "") -> Dict[s
         "auto_resume": False,
         "resume_policy": RESUME_POLICY,
         "rail": str(row.get("rail") or ""),
-        # Which pause this is (``budget`` or the owner's) and, for the owner's,
-        # whether its sent work had settled: the Resume and the UI read it.
+        **({"cause": row["cause"]} if row.get("cause") else {}),
         "reason": str(row.get("reason") or "budget"),
         **({"settlement": row["settlement"]} if row.get("settlement") else {}),
         **({"sleep": row["sleep"]} if isinstance(row.get("sleep"), dict) else {}),
@@ -1160,7 +1157,7 @@ def budget_fence_selected(task: Any, fence: Any) -> bool:
     later sends. Dispatch still rechecks the live root grant
     (``events_budget.budget_resume_dispatch_allowed``).
     """
-    from ouroboros.work_stop import continuation_refusal, hold_fact
+    from ouroboros.work_stop import continuation_refusal, direct_selection, hold_fact
 
     fence_id = str((fence or {}).get("fence_id") or "") if isinstance(fence, dict) else ""
     if (not isinstance(task, dict) or not fence_id or isinstance(task.get("_budget_pause"), dict)
@@ -1171,7 +1168,7 @@ def budget_fence_selected(task: Any, fence: Any) -> bool:
         return bool(str(handoff.get("pause_id") or "").strip() and str(handoff.get("grant_id") or "").strip()
                     and handoff.get("authority") == "explicit_resume"
                     and str(handoff.get("root_fence_id") or "") == fence_id
-                    and (handoff.get("selected_by") == "owner"
+                    and (direct_selection(handoff)
                          or str(handoff.get("root_grant_id") or "").strip()
                          and int(handoff.get("root_resume_generation") or 0) > 0))
     selection = task.get("_resume_selection")

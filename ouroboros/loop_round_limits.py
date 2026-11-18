@@ -983,7 +983,7 @@ def _handle_model_wait_control(
         # is saved on the technical rail where that capture works; otherwise this typed cause ends it.
         from ouroboros.budget_pause import RAIL_CONTROL_AUTHORITY, request_pause
 
-        request_pause(ctx, rail=RAIL_CONTROL_AUTHORITY, scope="task", reason_text=f"control authority unreadable: {reason}")
+        request_pause(ctx, rail=RAIL_CONTROL_AUTHORITY, scope="task", reason_text=f"control authority unreadable: {reason}", cause=reason)
         raise error
     if reason not in {"cancelled", "finalize_requested", "deadline", "execution_deadline", "absolute_ceiling", "accounting_wait_expired"}:
         raise error

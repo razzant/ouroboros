@@ -45,6 +45,11 @@
    "name": "authority",
    "text": "The task paused because of a technical fault: its billing or control authority could not be read, which says nothing about money left. Its work is retained. Use Resume on the task when available; it rechecks the conditions before continuing.",
    "words": null
+  },
+  {
+   "name": "dispatch_read",
+   "text": "The task is waiting to read its dispatch fence. Its work is saved. It resumes when its controls permit it.",
+   "words": null
   }
  ]
 }

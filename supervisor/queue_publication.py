@@ -460,7 +460,7 @@ def _documents(capture: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], Dict
             for key, fields in ((BUDGET_HOLD_KEY, ("reason", "release")),
                                 ("_owner_wait_resume", ("refusal",)), ("_working_recovery", ("refusal",)),
                                 ("_resume_selection", ("fence_id", "refusal")),
-                                ("_budget_pause_resume", ("pause_id", "grant_id", "authority", "root_fence_id", "selected_by", "root_grant_id", "root_resume_generation"))):
+                                ("_budget_pause_resume", ("pause_id", "grant_id", "authority", "root_fence_id", "selected_by", "selection_door", "root_grant_id", "root_resume_generation"))):
                 if task.get(key) is not None:
                     value = task[key]
                     member[key] = {k: value[k] for k in fields if k in value} if isinstance(value, dict) else value
