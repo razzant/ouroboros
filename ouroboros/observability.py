@@ -17,6 +17,7 @@ import json
 import os
 import pathlib
 import re
+import stat
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -95,7 +96,7 @@ def _chmod_private_dir(path: pathlib.Path) -> None:
 
 def _chmod_private(path: pathlib.Path) -> None:
     try:
-        if path.stat().st_mode & 0o777 != _PRIVATE_FILE_MODE:  # a private file is only looked at; another mode repaired
+        if stat.S_IMODE(path.stat().st_mode) != _PRIVATE_FILE_MODE:  # private: only looked at; any other mode repaired
             os.chmod(path, _PRIVATE_FILE_MODE)
     except OSError:
         pass
