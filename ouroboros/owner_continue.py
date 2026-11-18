@@ -268,7 +268,26 @@ def _mail_rows(drive_root: pathlib.Path, task_id: str) -> Tuple[List[Dict[str, A
     return rows, whole and (not content or content.endswith("\n")), True
 
 
-def _start_answer(root: pathlib.Path, task_id: str, row: dict) -> Optional[dict]:
+def _retained_start_quote(root: pathlib.Path, drafter: str, address: str) -> Optional[dict]:
+    """A drafter's exact addressed relay can outlive the room row, including a quote made from a carried field."""
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from ouroboros.owner_relay import KIND_RELAY, owner_row_address
+    from ouroboros.task_custody import own_child_drives
+    from ouroboros.task_store import read_document
+
+    held = ((read_document(root, drafter) or {}).get("held_owner_messages") or {}).get(address)
+    if isinstance(held, dict) and owner_row_address(held) == address:
+        return held
+    for drive in [root, *own_child_drives(root, drafter)]:
+        for entry in drain_owner_entries(drive, drafter, include_acknowledged=True, kinds={KIND_RELAY}):
+            if not entry.get("host_carried"):
+                for quoted in entry.get("owner_rows") or []:
+                    if isinstance(quoted, dict) and owner_row_address(quoted) == address:
+                        return quoted
+    return None
+
+
+def _start_answer(root: pathlib.Path, task_id: str, row: dict, drafter: str) -> Optional[dict]:
     """Read a relay by its exact chat address, or a direct answer by its asker's delivery."""
     from ouroboros.chat_chain import resolve_row
     from ouroboros.owner_relay import quotable_owner_row
@@ -284,12 +303,20 @@ def _start_answer(root: pathlib.Path, task_id: str, row: dict) -> Optional[dict]
         source_root = row.get("relay_source_root") or root
         try:
             quoted, _ = resolve_row(source_root, msg_id)
+            quoted = quoted or _retained_start_quote(root, drafter, msg_id)
         except (StoreError, OSError, ValueError, TypeError):
             return None
         if not quoted or not quotable_owner_row(quoted, source_root) or row_source(quoted, "owner_mailbox") != row["source"]:
             return None
         block, asker = answered_card_source(quoted)
         quiz_id = (block or {}).get("quiz_id")
+        if not block and isinstance(carried := quoted.get("corpus_answer"), dict):
+            from ouroboros.answer_facts import answer_source
+            asker, quiz_id = carried.get("source_task_id"), carried.get("quiz_id")
+            block = answered_quiz_block(source_root, asker, quiz_id) if asker and quiz_id else {}
+            if (not block or answer_source(block) != row["source"]
+                    or answered_card_reply(block, asker) != carried.get("reply_to")):
+                return None
     else:
         if not all(isinstance(x, str) and x.strip() for x in (asker, quiz_id, msg_id)) or asker == task_id:
             return None
@@ -327,7 +354,7 @@ def _drafted_start(root: pathlib.Path, result: Dict[str, Any], task_id: str, met
         if (isinstance(reply, dict) and reply.get("card_id") and reply.get("pressed_label") == row.get("content")
                 and not row.get("quiz_id") and not str(row.get("msg_id") or "").startswith("quiz_answer:")):
             continue  # a living-card submission rides by value in the corpus, outside the local quiz protocol
-        answer = _start_answer(root, task_id, row)
+        answer = _start_answer(root, task_id, row, author["task_id"])
         if answer is None:
             gaps.append("start_quiz_answer_unresolved")
         elif answer not in answers:

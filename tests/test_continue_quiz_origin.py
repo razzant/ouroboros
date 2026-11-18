@@ -715,3 +715,36 @@ def test_restart_continues_from_an_addressed_relay_of_an_accepted_answer(tmp_pat
         ("owner_press", "2. Green glass", "lantern-maker"), ("owner_quiz_answer", "  after sundown  ", "lantern-maker")]
     assert "Which lantern?" in successor["text"]
     assert admit_continuation(rid, action_nonce=NONCE)["successor_task_id"] == successor["id"]
+
+
+@pytest.mark.parametrize("corpus_only, comment", [(False, "  sail at dusk  "), (True, "")])
+def test_a_start_can_resolve_the_exact_quiz_quote_in_the_drafters_mail(tmp_path, corpus_only, comment):
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.owner_quiz import record_asked, record_answered
+    from ouroboros.owner_relay import owner_quote, owner_row_address, write_relay
+    from ouroboros.owner_words import answered_card_reply
+
+    asker, drafter, quiz = "sail-maker", "sail-drafter", "cloth-choice"
+    record_asked(tmp_path, asker, quiz_id=quiz, question="Which cloth?", options=["Blue linen"])
+    block = record_answered(tmp_path, asker, quiz_id=quiz, option_index=0, comment=comment, request_id="cloth-press")["block"]
+    shown = comment or "1. Blue linen"
+    source = "owner_quiz_answer" if comment else "owner_press"
+    info = {"source": source, "source_task_id": asker, "quiz_id": quiz, "reply_to": answered_card_reply(block, asker)}
+    row = {"chat_id": 1, "ts": "2040-01-01T08:00:00Z"}
+    if corpus_only:
+        row.update(direction="in", text=shown, corpus_answer=info)
+    else:
+        row.update(direction="system", type="quiz_answer", source="owner_quiz_answer", task_id=asker, quiz=block)
+    quote = owner_quote(tmp_path, row)
+    assert write_relay(tmp_path, drafter, relay_id="sail-mail", teller_task_id="sail-reader", chat_id=1,
+                       note="The submitted choice", quotes=[quote])[1]
+    carried = {**info, "msg_id": owner_row_address(row), "content": shown}
+    metadata = {"objective_author": {"kind": "task", "task_id": drafter}, "origin_message_absent": True,
+                "owner_corpus": [carried]}
+    task = {"objective": "Inspect the sail", "metadata": metadata, "owner_mailbox": {"read_complete": True, "rows": []}}
+    accepted = owner_sources(tmp_path, task, "sail-work")
+    assert not accepted["gaps"]
+    [answer] = accepted["start"]["answers"]
+    assert (answer["source"], answer["content"], answer["card"]["question"]) == (source, shown, "Which cloth?")
+    metadata["objective_author"]["task_id"] = "different-drafter"
+    assert "start_quiz_answer_unresolved" in owner_sources(tmp_path, task, "sail-work")["gaps"]
