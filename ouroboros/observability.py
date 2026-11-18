@@ -95,7 +95,8 @@ def _chmod_private_dir(path: pathlib.Path) -> None:
 
 def _chmod_private(path: pathlib.Path) -> None:
     try:
-        os.chmod(path, _PRIVATE_FILE_MODE)
+        if path.stat().st_mode & 0o777 != _PRIVATE_FILE_MODE:  # a private file is only looked at; another mode repaired
+            os.chmod(path, _PRIVATE_FILE_MODE)
     except OSError:
         pass
 

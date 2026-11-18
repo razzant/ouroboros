@@ -487,11 +487,12 @@ def knowledge_index_view(address: KnowledgeAddress, view: str = "active", *,
     return render_knowledge_index(rows, _legacy_prose(address, view, overview), view=view, scope=address.scope)
 
 
-def knowledge_index_views(address: KnowledgeAddress, *, overview: KnowledgeNote | None = None) -> tuple[str, str]:
-    """The active index whole and as its outline, from one inventory of the shelf."""
+def knowledge_index_views(address: KnowledgeAddress, *, overview: KnowledgeNote | None = None,
+                          whole: bool = True) -> tuple[str, str]:
+    """The active index whole (``""`` for a reader of the outline alone) and as its outline, from one inventory."""
     rows = inventory_knowledge(address, navigation=True, known_note=overview)
     legacy = _legacy_prose(address, "active", overview)
-    return (render_knowledge_index(rows, legacy, view="active", scope=address.scope),
+    return (render_knowledge_index(rows, legacy, view="active", scope=address.scope) if whole else "",
             render_knowledge_outline(rows, legacy, scope=address.scope))
 
 

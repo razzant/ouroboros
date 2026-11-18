@@ -124,6 +124,37 @@ def test_legacy_empty_and_captured_target_do_not_probe_again(setup, monkeypatch)
     assert "processingPreference" not in gateway.uploads[0][0]["options"]
 
 
+def test_a_found_source_list_serves_its_engine_build_and_anything_else_is_asked_again(monkeypatch):
+    """A source's declared list is a fact of the exact engine build: once a read found it, later calls on that build
+    and source get the same list without asking; a failed read, a missing list, another source, another build or an
+    unknown build asks the engine again and remembers nothing it did not find."""
+    reads, build = [], {"engine": ("6.1.2", "sha-a")}
+
+    def sources(**kwargs):
+        reads.append(kwargs)
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return {"sources": [answer]}
+
+    monkeypatch.setattr(cx, "_PROCESSING_PREFERENCES", {})
+    monkeypatch.setattr(cx, "current_engine", lambda: build["engine"])
+    monkeypatch.setattr(cx, "model_sources", sources)
+    codex, claude = ({"source": name, "processing_preference": "fast"} for name in ("codex", "claude"))
+    listed = lambda name, *values: {"id": name, "processingPreferences": list(values)}  # noqa: E731
+    answers = [cx.ClaudexorUnavailable("daemon_unreachable", "down"), {"id": "codex"}, listed("codex", "standard", "fast"),
+               listed("claude", "standard"), listed("codex", "standard"), listed("codex", "fast"), listed("codex", "fast")]
+    assert [cx.prepare_processing_target(codex)["processing_preferences"] for _ in range(4)] == [
+        [], [], ["standard", "fast"], ["standard", "fast"]]
+    assert len(reads) == 3 and reads[-1] == {"processing_view": True}, "the found list served the fourth call"
+    assert cx.prepare_processing_target(claude)["processing_preferences"] == ["standard"] and len(reads) == 4
+    build["engine"] = ("6.1.2", "sha-b")
+    assert cx.prepare_processing_target(codex)["processing_preferences"] == ["standard"] and len(reads) == 5
+    build["engine"] = None
+    assert [cx.prepare_processing_target(codex)["processing_preferences"] for _ in range(2)] == [["fast"], ["fast"]]
+    assert len(reads) == 7 and not answers
+
+
 def test_processing_retry_does_not_replace_owner_turn_before_success(setup, monkeypatch):
     _root, gateway, client = setup
     monkeypatch.setattr(cx, "owned_engine_version", lambda: "3.10.4")

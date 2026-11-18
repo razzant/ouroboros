@@ -23,7 +23,7 @@ from ouroboros.claudexor_daemon import ensure_owned_gateway, owned_engine_versio
 from ouroboros.deadline_utils import llm_transport_timeout_sec
 from ouroboros.gateways.claudexor import (ClaudexorUnavailable, engine_at_least, model_failure_evidence_supported,
                                           operation_query_supported, _READ_TIMEOUT_SEC)
-from ouroboros.gateways.claudexor_metadata import model_gateway
+from ouroboros.gateways.claudexor_metadata import current_engine, model_gateway
 from ouroboros.llm_attempt import _PhysicalSendNotStarted, _attempt_request, _candidate_before_dispatch, effort_request_facts
 from ouroboros.llm_capability_policy import model_catalog as model_catalog, catalog_admits_model as catalog_admits_model
 from ouroboros.send_clock import stamp_clock_note
@@ -43,6 +43,7 @@ from ouroboros.usage_accounting import (
 from ouroboros.utils import append_jsonl, read_json_dict, sanitize_tool_result_for_log, utc_now_iso
 
 log = logging.getLogger(__name__)
+_PROCESSING_PREFERENCES: dict = {}  # each source's processingPreferences per exact engine build and source id
 
 
 def model_sources(*, processing_view: bool = False) -> dict:
@@ -65,12 +66,16 @@ def model_sources(*, processing_view: bool = False) -> dict:
 def prepare_processing_target(target: dict) -> dict:
     """Capture the source's advertised transport preference before building bytes.
 
-    No extra polling/cache or model eligibility inference: this reads the existing
-    model-source owner once, only for explicit intent. A retained target is reused
-    by every physical preparation of this logical call.
+    No model eligibility inference: this reads the existing model-source owner, only for explicit intent. A retained
+    target is reused by every physical preparation of this logical call. The list is a static declaration of the
+    engine build (``claudexor_run_events.declared_live_input`` keeps ``liveInput`` alike): one a read found serves later
+    calls on that build (``current_engine``); a failed read, a missing list or an unknown build is asked again.
     """
     if not target.get("processing_preference") or "processing_preferences" in target:
         return target
+    known = _PROCESSING_PREFERENCES.get((current_engine(), target.get("source")))  # an unknown build is never kept
+    if known is not None:
+        return {**target, "processing_preferences": list(known)}
     prepared = {**target, "processing_preferences": []}
     try:
         sources = timed("claudexor.processing", model_sources, processing_view=True)
@@ -81,6 +86,8 @@ def prepare_processing_target(target: dict) -> dict:
     preferences = source.get("processingPreferences")
     if isinstance(preferences, list):
         prepared["processing_preferences"] = [value for value in preferences if isinstance(value, str)]
+        if engine := current_engine():  # the build whose handshake this read made
+            _PROCESSING_PREFERENCES[(engine, target.get("source"))] = tuple(prepared["processing_preferences"])
     return prepared
 
 

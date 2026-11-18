@@ -518,7 +518,8 @@ def test_a_part_with_keys_of_mixed_types_is_redacted_as_the_whole_walk(tmp_path,
 
 @pytest.mark.parametrize("count", [2, 80])
 def test_shared_publication_prepares_directories_once_per_operation(tmp_path, monkeypatch, count):
-    """Actual mkdir/chmod traffic stays constant; existing files are still checked and moded."""
+    """Actual mkdir/chmod traffic stays constant: a new file is moded, an existing private one only checked (POSIX),
+    and an existing file of any other mode repaired."""
     mkdir, chmod = pathlib.Path.mkdir, obs.os.chmod
     directories, modes = [], []
 
@@ -535,7 +536,11 @@ def test_shared_publication_prepares_directories_once_per_operation(tmp_path, mo
     monkeypatch.setattr(pathlib.Path, "mkdir", make_directory)
     monkeypatch.setattr(obs.os, "chmod", private_mode)
     payload = {"messages": [{"role": "user", "content": f"message {i} Ω"} for i in range(count)]}
-    for _ in range(2):
+    blobs, widened = tmp_path / "observability" / "blobs", ""
+    for publication in ("new", "present", "widened"):
+        if publication == "widened":
+            widened = sorted(path.name for path in blobs.glob("*.json.gz"))[0]
+            chmod(blobs / widened, 0o644)
         directories.clear()
         modes.clear()
         parts = {}
@@ -543,8 +548,13 @@ def test_shared_publication_prepares_directories_once_per_operation(tmp_path, mo
         assert len(directories) == 2, directories
         assert sum(mode == obs._PRIVATE_DIR_MODE for _path, mode in modes) == 2
         assert len(parts) == count
-        assert all(any(path.name == f"{digest}.json.gz" and mode == obs._PRIVATE_FILE_MODE
-                       for path, mode in modes) for digest in parts)
+        moded = {path.name for path, mode in modes if mode == obs._PRIVATE_FILE_MODE and path.parent == blobs}
+        if publication == "new":  # each part's temporary file, renamed into place already private
+            assert all(any(name.startswith(f".{digest}.json.gz.tmp.") for name in moded) for digest in parts)
+        elif obs.posix_private_modes_supported():
+            assert moded == ({widened} if widened else set()), "a present private file is only checked"
+        assert all((blobs / f"{digest}.json.gz").stat().st_mode & 0o777 == obs._PRIVATE_FILE_MODE or
+                   not obs.posix_private_modes_supported() for digest in parts)
         assert packs.blob_bytes(tmp_path, ref) == obs._json_bytes(payload)
 
 

@@ -125,7 +125,7 @@ def latch_final_marker(ctx: Any, msg: dict) -> None:
     reply the loop could deliver as final; a commentary or a cut latches (and withdraws) nothing, since a deadline,
     budget end or Stop would publish the latched words as the answer."""
     if not _intermediate(ctx.tools._ctx, msg) and not unfinished_finish(ctx.tools._ctx, msg):
-        _loop()._latch_final_answer_marker(ctx.llm_trace, msg.get("content"), current_tool_calls=msg.get("tool_calls") or [])
+        _loop()._latch_final_answer_marker(ctx.llm_trace, msg.get("content"))
 
 
 def intermediate_reply(ctx: Any, msg: dict, emit_progress: Any) -> bool:

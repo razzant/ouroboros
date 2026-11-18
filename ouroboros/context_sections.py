@@ -156,7 +156,7 @@ def helper_navigation_sections(root: Any, project_id: str = "") -> List[str]:
     for section_id, header, address in shelves:
         reader = f"knowledge_list(scope={address.scope!r})"
         try:
-            outline = knowledge_index_views(address)[1]
+            outline = knowledge_index_views(address, whole=False)[1]
         except (OSError, UnicodeDecodeError) as exc:
             outline = f"Knowledge navigation unavailable: {type(exc).__name__}; {reader}."
         sections.append(HostSection(section_id, f"{header}\n\n{outline}", reader=reader))
