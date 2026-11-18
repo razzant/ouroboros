@@ -1947,7 +1947,7 @@ The factory's `observe("usage", raw)` reports JSON
 `{"usage": {...}, "raw_usage": {...}}` for that physical connection; `close()` emits
 its final sample before returning. Samples and responses share one watermark. The call's
 own thread writes connection samples to the ledger, so the call loop never waits on those
-writes; a connection keeps one sample waiting, which takes in its next. A connection's close
+writes; a connection keeps one valid sample waiting, which takes in its next. A connection's close
 waits for its own samples and fails if one could not be written; the money check reads what
 is written. The host
 settles growth after Stop/budget exhaustion without admitting work or inventing responses;

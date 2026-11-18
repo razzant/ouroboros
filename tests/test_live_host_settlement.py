@@ -181,48 +181,61 @@ def test_a_slow_connected_time_write_never_holds_the_call_loop(host_world, monke
 
 def test_a_connection_close_waits_for_its_own_connected_time_only(host_world, monkeypatch):
     """#3633. One ledger writer serves every connection of a call. A connection's close waits for its own receipts and
-    raises only its own failed write: another connection's write in progress neither holds the close nor marks it
-    failed, and the call's money check still raises that other failure."""
+    raises only its own failed write: another connection's failure, already written, does not fail it, and another's
+    write in progress does not hold it. The call's money check still raises that other failure."""
     import threading
     from ouroboros import live_usage
     host = host_world.host
     host.quote = tariff(input_cost_per_second=.01)
-    entered, release, serving = threading.Event(), threading.Event(), []
+    serving, keys = [], {}
+    entered = {name: threading.Event() for name in ('failing', 'held')}
+    release = {name: threading.Event() for name in ('failing', 'held')}
     settle = live_usage.settle_connection_usage
 
-    def held_then_failed(**receipt):
+    def other_writes(**receipt):
         if receipt['connection_key'] in serving:
             return settle(**receipt)
-        entered.set()
-        assert release.wait(5), 'held by the test'
-        raise RuntimeError('ledger write failed')
-    monkeypatch.setattr(live_usage, 'settle_connection_usage', held_then_failed)
+        name = keys[receipt['connection_key']]
+        entered[name].set()
+        assert release[name].wait(5), 'held by the test'
+        if name == 'failing':
+            raise RuntimeError('ledger write failed')
+        return settle(**receipt)
+    monkeypatch.setattr(live_usage, 'settle_connection_usage', other_writes)
 
     def sample(observer, seconds):
         observer.observe('usage', json.dumps({'usage': {'connected_seconds': seconds}, 'raw_usage': {}}))
+
+    def beside(view, offset, name):  # another connection reporting beside the serving one, as views are made
+        other = copy.copy(view)
+        other.connection_number, other._meter_watermark = view.connection_number + offset, 0.0
+        keys[str(other.connection_number)] = name
+        return other
 
     async def consume(session):
         view = session.observe.__self__
         serving.append(str(view.connection_number))
         sample(session, 4)
         await asyncio.to_thread(host._connection_ledger.flush)
-        successor = copy.copy(view)  # reports beside the serving connection, as views are made
-        successor.connection_number, successor._meter_watermark = view.connection_number + 1, 0.0
-        sample(successor, 3)
-        await asyncio.to_thread(entered.wait, 2)
+        failing, held = beside(view, 1, 'failing'), beside(view, 2, 'held')
+        sample(failing, 3)
+        await asyncio.to_thread(entered['failing'].wait, 2)
+        release['failing'].set()
+        await asyncio.to_thread(host._connection_ledger.flush, str(failing.connection_number))  # its failure is written
+        sample(held, 5)
+        await asyncio.to_thread(entered['held'].wait, 2)
 
     async def run():
         with ua.usage_scope(ua.UsageScope(drive_root=host.ctx.drive_root, task_id=host.ctx.task_id)):
             await host.session(consume, LiveOptions())  # the serving connection has closed
-            assert entered.is_set() and not release.is_set(), 'its close did not wait for the other write'
-            assert 'cleanup_failure' not in host.timing['connections'][-1]
-            release.set()
+            assert not release['held'].is_set(), 'its close did not wait for the other write'
+            assert 'cleanup_failure' not in host.timing['connections'][-1], 'nor raise the other failure'
+            release['held'].set()
             await asyncio.to_thread(host._connection_ledger.flush)
             with pytest.raises(RuntimeError, match='ledger write failed'):
                 await host.check()  # the call's money check still ends it
     asyncio.run(run())
-    assert [row['cost_usd'] for row in ua.read_usage_records(host.ctx.drive_root)] == pytest.approx([.04])
-
+    assert [row['cost_usd'] for row in ua.read_usage_records(host.ctx.drive_root)] == pytest.approx([.04, .05])
 
 
 def test_a_cancelled_close_keeps_its_own_failed_write_as_evidence(host_world):
