@@ -261,7 +261,7 @@ def _inspected(ctx, kind):
 def test_keep_last_n_keeps_unnamed_notes_and_never_re_protects_a_named_one(tmp_path, monkeypatch):
     """Unchanged for unnamed notes; the count's derived keep set does not protect a note the mind
     names, not even one inside the count's recent window."""
-    from tests.test_compaction import _note
+    from tests._working_notes import _note
 
     older, note = _note(tmp_path, "Goal: keep the owner's exact wording.", "older"), _note(tmp_path, "r2 checked.")
     messages = [*_source()[:2], older, *_read("r1"), *_read("r2"), note, *_read("r3")]
@@ -309,7 +309,7 @@ def test_inspect_identifies_capsule_authorship_and_first_line_for_a_named_merge(
 
 
 def test_keeping_and_replacing_one_note_or_naming_a_non_note_is_an_argument_error(tmp_path, monkeypatch):
-    from tests.test_compaction import _note
+    from tests._working_notes import _note
 
     note = _note(tmp_path, "An earlier note.")
     messages = [*_source(), note]
@@ -334,7 +334,7 @@ def test_a_request_restored_after_a_pause_without_replace_note_ids_names_no_note
     """A pending request an earlier release saved has no replace_note_ids: it names none and folds as
     before minus the notes; a request saved with it still names its note after the JSON continuation."""
     from ouroboros.owner_wait import continuation_state, restore_continuation_state
-    from tests.test_compaction import _note
+    from tests._working_notes import _note
 
     note, other = _note(tmp_path, "Goal: keep the owner's exact wording."), _note(tmp_path, "Another note.", "other")
     messages, schemas = [*_source(), note, other], []
@@ -404,7 +404,7 @@ def test_a_fold_receipt_names_the_notes_in_view_and_each_body_that_left_by_a_res
     restore that removes nothing names no body; a receipt the window cannot hold drops the list for a count rather
     than undoing the view."""
     from ouroboros.context_compaction import context_units
-    from tests.test_compaction import _note, _undated
+    from tests._working_notes import _note, _undated
 
     older = _undated(_note(tmp_path, "Goal: keep the owner's exact wording.", "older"))
     messages = [*_source(), older]

@@ -12,7 +12,7 @@ import json
 import queue
 from types import SimpleNamespace
 
-from tests.test_compaction import _authored, _large_unit, _note, _unattributed, _undated
+from tests._working_notes import _authored, _large_unit, _note, _unattributed, _undated
 
 WORDS = "Use the March numbers"
 
