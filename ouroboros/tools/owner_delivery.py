@@ -348,9 +348,10 @@ def shown_material(name: Any, data: Any = None, *, b64: str = "") -> Dict[str, A
 
 def show_record(ctx: Any, mode: str, material: Any) -> str:
     """The host's line for a send of produced material: what was accepted or queued for delivery, and which reviews
-    on record name those exact bytes (``_reviews_naming``). A fact on the existing receipt, never a gate: nothing
-    waits or is refused, and every review mode stays as it is. No line for a frame that carries no material or did
-    not go out, nor when task review is Off (no result review runs there to name anything)."""
+    on record name those exact bytes (``_reviews_naming``), a negative stated in the scope it was read in: this task's
+    recent records, never a helper's. A fact on the existing receipt, never a gate: nothing waits or is refused, and
+    every review mode stays as it is. No line for a frame that carries no material or did not go out, nor when task
+    review is Off (no result review runs there to name anything)."""
     items = [item for item in material or () if isinstance(item, dict) and item.get("sha256")]
     if not items or mode not in ("live", "deferred"):
         return ""
@@ -360,15 +361,21 @@ def show_record(ctx: Any, mode: str, material: Any) -> str:
         return ""
     found = _reviews_naming(ctx, {str(item["sha256"]): str(item.get("name") or "") for item in items})
     shown = "; ".join(f"{item.get('name')}, sha256 {str(item['sha256'])[:12]}, {item.get('size')} B" for item in items)
-    reviews = "unknown" if found is None else "; ".join(found) or "none"
+    reviews = "unknown" if found is None else "; ".join(found) or "none in this task's recent records"
     return (f"Host fact: {'accepted' if mode == 'live' else 'queued'} for delivery: {shown}. "
             f"Reviews on record naming these bytes: {reviews}.")
 
 
+# The newest result-review rows of the review ledger's hot index one receipt reads (``recent_records``).
+_REVIEW_ROWS = 50
+
+
 def _reviews_naming(ctx: Any, digests: Dict[str, str]) -> Any:
-    """Records of this task that name any of ``digests`` (sha256 -> name), read only: its result reviews, whose
-    retained subject lists each produced file by sha256 (``result_material.answer_text``), and its plan asks, which
-    keep each attachment's sha256. ``None`` (unknown) when this task or any of its records could not be read."""
+    """Records of this task that name any of ``digests`` (sha256 -> name), read only: its result reviews among the
+    ledger's newest ``_REVIEW_ROWS`` hot rows, whose retained subject lists each produced file by sha256
+    (``result_material.answer_text``; a helper's records are its own, and archived rows are not read), and its plan
+    asks, which keep each attachment's sha256. ``None`` (unknown) when this task or any of its records could not be
+    read, and when nothing names them but the bounded read came back full, since a row past it might."""
     from ouroboros import review_ledger as ledger
     from ouroboros.plan_record import load_plan_record
     from ouroboros.tools.review_result import _retained_subject_text
@@ -382,7 +389,9 @@ def _reviews_naming(ctx: Any, digests: Dict[str, str]) -> Any:
 
     found = []
     try:
-        for row in ledger.recent_records(ledger.ledger_root(ctx), task_id, limit=50, hot_only=True, surface="result"):
+        rows = ledger.recent_records(ledger.ledger_root(ctx), task_id, limit=_REVIEW_ROWS, hot_only=True,
+                                     surface="result")
+        for row in rows:
             if row.get("task_id") != task_id:
                 continue  # a descendant's record: its subject is retained in that task's own store
             text = _retained_subject_text(ctx, str((row.get("subject") or {}).get("diff_sha") or ""))
@@ -401,7 +410,7 @@ def _reviews_naming(ctx: Any, digests: Dict[str, str]) -> Any:
     except Exception:
         log.debug("records naming shown bytes unreadable for task %s", task_id, exc_info=True)
         return None
-    return found
+    return found if found or len(rows) < _REVIEW_ROWS else None
 
 
 def _named_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) -> str:

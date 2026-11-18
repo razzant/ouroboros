@@ -372,7 +372,7 @@ class TestShowRecord:
         receipt, show = _send_file(ctx, file_path=str(doc)).split("\n")
         assert receipt == "OK: file 'mockup.html' accepted for delivery to owner chat."
         assert show == (f"Host fact: accepted for delivery: mockup.html, sha256 {digest[:12]}, 11 B. "
-                        "Reviews on record naming these bytes: none.")
+                        "Reviews on record naming these bytes: none in this task's recent records.")
 
         subject = "## What was asked\n\nA dock mockup.\n\n" + answer_text(reply="Here it is.", produced={"files": [
             {"path": str(doc), "kind": "artifact", "sha256": digest, "size": 11, "retained": "a copy"}]},
@@ -388,7 +388,35 @@ class TestShowRecord:
             f"Reviews on record naming these bytes: result review {record_id} (settled, PASS); plan ask a1.")
         other = tmp_path / "other.html"
         other.write_bytes(b"<p>other</p>")
-        assert _send_file(ctx, file_path=str(other)).endswith("Reviews on record naming these bytes: none.")
+        assert _send_file(ctx, file_path=str(other)).endswith(
+            "Reviews on record naming these bytes: none in this task's recent records.")
+
+    def test_a_negative_names_its_scope_and_a_bounded_read_that_came_back_full_is_unknown(self, tmp_path, monkeypatch):
+        """Both directions: a helper's review that names the bytes is named on the helper's own send, while its root's
+        send says none in its own recent records, never a bare none; a bounded read that came back full claims nothing
+        beyond it: unknown."""
+        import copy
+        import hashlib
+        from ouroboros import review_ledger as ledger
+        from ouroboros.tools.owner_delivery import show_record, shown_material
+        from ouroboros.tools.review_result import subject_source
+
+        ctx = self._ctx(tmp_path, monkeypatch)
+        helper = copy.copy(ctx)
+        helper.task_id = "t-helper"
+        item = shown_material("preview.html", b"<p>Done</p>")
+        subject = f"Produced preview.html, sha256 {item['sha256']}"
+        subject_source(helper, subject)
+        record_id = ledger.new_record_id()
+        ledger.write_record(ctx.drive_root, ledger.ReviewLedgerRecord(
+            record_id=record_id, state="settled", task_id=helper.task_id, root_task_id=ctx.task_id, surface="result",
+            subject={"diff_sha": hashlib.sha256(subject.encode("utf-8")).hexdigest()}, verdict={"aggregate": "PASS"}))
+        assert show_record(helper, "live", [item]).endswith(f"result review {record_id} (settled, PASS).")
+        assert show_record(ctx, "live", [item]).endswith(
+            "Reviews on record naming these bytes: none in this task's recent records.")
+        full = [{"task_id": f"t-helper-{index}", "record_id": f"r{index}"} for index in range(50)]
+        monkeypatch.setattr(ledger, "recent_records", lambda *_args, **_kwargs: full)
+        assert show_record(ctx, "live", [item]).endswith("Reviews on record naming these bytes: unknown.")
 
     def test_no_line_without_material_or_under_review_off_and_unknown_when_records_cannot_be_read(
             self, tmp_path, monkeypatch):
