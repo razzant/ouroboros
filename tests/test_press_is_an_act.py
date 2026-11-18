@@ -115,6 +115,7 @@ def test_safety_still_reads_a_press_as_my_humans_answer_to_the_card():
     answered card holds; a press without words is still such an answer, and a non-owner row carrying the same card
     is not."""
     from ouroboros import safety
+    from ouroboros.safety_evidence import with_author
     from ouroboros.owner_words import answered_card_reply
 
     card = {"quiz_id": "q9", "question": "Send to @alice:\nThanks, taking it up.", "state": "answered",
@@ -124,6 +125,9 @@ def test_safety_still_reads_a_press_as_my_humans_answer_to_the_card():
     assert safety._owner_yes(SimpleNamespace(_owner_directives=[row]), subject) == "q9"
     peer = {**row, "source": "principal_task_message"}
     assert safety._owner_yes(SimpleNamespace(_owner_directives=[peer]), subject) == ""
+    evidence = with_author(row, {})["author"]
+    assert "answer" in evidence and "press" in evidence and "no words of their own" in evidence
+    assert "press" not in with_author({**row, "source": "owner_quiz_answer"}, {})["author"]
 
 
 def test_the_wake_line_reads_a_press_as_an_act_and_words_as_words():
