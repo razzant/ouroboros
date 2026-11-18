@@ -403,6 +403,12 @@ def _drain_incoming_messages(
             from ouroboros.delegate_interactions import place_rows_into_runs
             for line in place_rows_into_runs(owner_ctx):
                 _loop()._append_or_merge_user_message(messages, line, slot=owner_ctx)
+    _show_held_quote_handles(owner_ctx, messages)
+    return controls
+
+
+def _show_held_quote_handles(owner_ctx: Any, messages: List[Dict[str, Any]]) -> None:
+    """Show this turn's available quote handles when their list changes."""
     if owner_ctx is not None and getattr(owner_ctx, "_held_owner_messages", None) and (
             getattr(owner_ctx, "task_metadata", None) or {}).get("delegation_role") != "subagent":
         handles = list(owner_ctx._held_owner_messages)  # a helper has no verb that takes a handle: no list for it
@@ -410,7 +416,6 @@ def _drain_incoming_messages(
             _loop()._append_or_merge_user_message(messages,
                 "[Host fact: owner_quote_handles held by this turn]\n" + json.dumps(handles), slot=owner_ctx)
             owner_ctx._quote_handles_shown = handles
-    return controls
 
 
 def _record_quiz_delivery(ctx, entry: dict, text: str) -> str:

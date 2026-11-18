@@ -429,6 +429,22 @@ def valid_start(start: Any) -> bool:
                             for key in ("content", "msg_id", "source_task_id", "quiz_id")) for row in answers))
 
 
+def _retained_start(start: Any, gaps: List[str]) -> Optional[Dict[str, Any]]:
+    """Read a chained start, recovering each answer's source from its saved card."""
+    if not valid_start(start):
+        gaps.append("start_source_malformed")
+        return None
+    answers = []
+    for row in start["answers"]:
+        card = row["card"]
+        source = _start_answer_source(card, row)
+        if source is None or card.get("quiz_id") != row["quiz_id"]:
+            gaps.append("start_quiz_answer_unresolved")
+        else:
+            answers.append({**row, "source": source})
+    return {**start, "answers": answers}
+
+
 def _wake_opening(metadata: Dict[str, Any], task_id: str, gaps: List[str]) -> Optional[Dict[str, Any]]:
     """The opening a consciousness wake's own row recorded, copied by value, or a named gap: own clock, its
     ``wake_task_metadata`` reason; place focus, ``focus_metadata``'s facts (sender, ``owner_confirmed`` as the place
@@ -630,18 +646,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     if (original is None or not isinstance(original.get("content"), str) or not original["content"].strip()) \
             and not schedule:
         if chained_start is not None:  # a Continue of a Continue keeps the start it was admitted on
-            if valid_start(chained_start):
-                answers = []
-                for row in chained_start["answers"]:
-                    card = row["card"]
-                    source = _start_answer_source(card, row)
-                    if source is None or card.get("quiz_id") != row["quiz_id"]:
-                        gaps.append("start_quiz_answer_unresolved")
-                    else:
-                        answers.append({**row, "source": source})
-                start = {**chained_start, "answers": answers}
-            else:
-                gaps.append("start_source_malformed")
+            start = _retained_start(chained_start, gaps)
         elif chained_wake is not None:  # ...and the wake and API openings likewise
             wake = chained_wake if valid_wake(chained_wake) else None
             if wake is None:
