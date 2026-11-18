@@ -268,7 +268,9 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
             "options": ["Publish it", "Not now"], "delivery": {"answer_row": answer}}
     write_owner_message(tmp_path, "[Owner quiz answer] quiz q7", "main0001", msg_id="qa-7", kind=KIND_QUIZ_ANSWER,
                         quiz_delivery={"task_id": "asker", "quiz_id": "q7", "answer_snapshot": card})
-    write_owner_message(tmp_path, "[Card] typed into the card", "main0001", msg_id="card-1", kind=KIND_CARD_INPUT)
+    write_owner_message(tmp_path, "[Card] a submitted form", "main0001", msg_id="card-1", kind=KIND_CARD_INPUT,
+                        card_press={"task_id": "chart-maker", "card_id": "card_7777777777777777", "request_id": "chart-form",
+                                    "submission": {"title": "Charts", "label": "Save", "values": {"caption": "typed into the card"}}})
     write_task_message(tmp_path, "[Place event]", "main0001", source_task_id="place-run", provenance="place_event",
                        msg_id="pl-1", sender_origin={"conversation_key": "tg:123"},
                        place_arrival={"owner_words": "Place words mid-turn", "source_event_id": "ev-2", "message": {}})
@@ -281,7 +283,7 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
     inject_relay(root, {"owner_rows": [quoted], "text": "note", "relay": {"relay_id": "r1"}, "source_task_id": "t"}, messages)
     received = {row["content"]: row.get("received") for row in root._owner_directives}
     assert all(received[text] for text in ("Undated payload", "Plain direct text", "Mailbox only",
-                                           "[Card] typed into the card", "Place words mid-turn"))
+                                           "typed into the card", "Place words mid-turn"))
     from ouroboros.presence_runner import presence_chat_id
     rows = [row for row in ow.work_words(root)[0] if row["source"] != ow.REPLY_TARGET]
     assert _stamps(rows) == [
@@ -292,7 +294,7 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
         ("ctx", "chat 1 / cm-mail", _at(2), "Add charts"),
         ("ctx", "msg mail-2", f"received {received['Mailbox only']}", "Mailbox only"),
         ("ctx", "chat 1 / cm-ans", _at(3), PRESSED.format("1. Publish it")),  # a press: an act, never words
-        ("ctx", "msg card-1", f"received {received['[Card] typed into the card']}", "[Card] typed into the card"),
+        ("ctx", "msg card-1", f"received {received['typed into the card']}", "typed into the card"),
         ("ctx", "chat 1 / cm-relay", _at(5), "Quoted by the teller")]
     assert ow.render_owner_words(rows, audience="child").count("[received ") == 4
     place = [item for item in root._owner_directives if item.get("content") == "Place words mid-turn"]

@@ -1062,6 +1062,8 @@ def _message_rows(drive_root: Any, task_id: str, text: Any, ref: Any, carrier: s
     from ouroboros.owner_relay import owner_row_address
     reference = _carrier_ref(row, canonical=owner_row_address(row)) if row else (_chat_ref(ref) if ref else "")
     source_root = _mapping(row).get("_owner_source_root") or drive_root
+    if row and (row.get("late_answer") or row.get("card_press") or row.get("type") == "quiz_answer"):
+        return _chat_words(row, key=reference, carrier=carrier, task_id=task_id, source="origin_message", root=source_root)
     if isinstance(text, str) and text.strip():
         target = reply_target(source_root, _mapping(row).get("reply_to"))
         return _words_rows({"source": "origin_message", "content": text, "reply_to": target}, carrier=carrier,
@@ -1124,16 +1126,27 @@ def _annotation_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any]
             acts.setdefault(client_id, str(row["action"]))
     rows = []
     for row in (_inbound_rows(drive_root, acts, accounts) if acts else []):
-        rows.extend(_words_rows({**row, "source": acts[str(row["client_message_id"])], "content": row["text"],
-                                 "reply_to": reply_target(drive_root, row.get("reply_to"))},
-                                carrier="annotation", task_id=task_id, ts=row.get("ts"), ref=_chat_ref(row)))
+        rows.extend(_chat_words(row, key=_chat_ref(row), carrier="annotation", task_id=task_id,
+                                source=acts[str(row["client_message_id"])], root=drive_root))
     return rows
 
 
+def mailbox_owner_input(drive_root: Any, entry: Mapping[str, Any]) -> dict:
+    """The owner input in an owner-text or card mailbox entry, with its card or chat reply target."""
+    from ouroboros.answer_facts import living_card_input, row_source
+
+    if living := living_card_input(entry, drive_root):
+        return living
+    block, asker = answered_card_source(entry)
+    target = answered_card_reply(block, asker) or reply_target(drive_root, entry.get("reply_reference"))
+    return {"source": row_source(entry, "owner_mailbox"), "content": entry.get("text"),
+            **({"source_task_id": asker, "quiz_id": block["quiz_id"]} if block and block.get("quiz_id") else {}),
+            **({"reply_to": target} if target else {})}
+
+
 def _mailbox_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], accounts: Any) -> List[Dict[str, str]]:
-    from ouroboros.answer_facts import row_source
-    from ouroboros.owner_mailbox import KIND_OWNER_TEXT, drain_owner_entries
-    from ouroboros.owner_relay import owner_text, quotable_owner_row
+    from ouroboros.owner_mailbox import KIND_CARD_INPUT, KIND_OWNER_TEXT, drain_owner_entries
+    from ouroboros.owner_relay import quotable_owner_row
 
     try:
         entries = drain_owner_entries(pathlib.Path(drive_root), task_id, include_acknowledged=True)
@@ -1142,11 +1155,9 @@ def _mailbox_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], a
     rows: List[Dict[str, str]] = []
     accounts_by_root = {str(drive_root): accounts}
     for entry in entries:
-        if entry.get("kind") != KIND_OWNER_TEXT:
+        if entry.get("kind") not in (KIND_OWNER_TEXT, KIND_CARD_INPUT):
             continue
-        item = {**entry, "source": row_source(entry, "owner_mailbox"), "content": entry.get("text")}
-        if target := reply_target(drive_root, entry.get("reply_reference")):
-            item["reply_to"] = target
+        item = {**entry, **mailbox_owner_input(drive_root, entry)}
         rows.extend(_words_rows(item, carrier="mailbox", task_id=task_id, ts=entry.get("ts"),
                                 ref=f"msg {entry.get('msg_id')}"))
     for entry in entries:
@@ -1166,10 +1177,8 @@ def _mailbox_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], a
             source = quote.get("source") if isinstance(quote, Mapping) else {}
             canonical = source.get("address") if isinstance(source, Mapping) else ""
             canonical = canonical or f"{entry.get('msg_id') or 'relay'}#{index}"
-            item = {**row, "source": row_source(row, "owner_mailbox"), "content": owner_text(row),
-                    "reply_to": reply_target(source_root, row.get("reply_to"))}
-            rows.extend(_words_rows(item, carrier="relay", task_id=task_id, ts=row.get("ts"),
-                                    ref=_carrier_ref(row, canonical=canonical)))
+            rows.extend(_chat_words(row, key=canonical, carrier="relay", task_id=task_id, source="owner_mailbox",
+                                    root=source_root))
     return rows
 
 

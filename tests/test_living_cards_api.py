@@ -456,6 +456,12 @@ def test_the_living_card_drain_records_the_choice_or_supplied_values(tmp_path, d
     assert response.json()["delivery"] == "delivered"
     ctx = SimpleNamespace(task_id="task-1", drive_root=tmp_path)
     messages = []
+    # A reviewer or a child can read this mailbox before the serving loop acknowledges the entry.
+    from ouroboros.review_evidence_sections import _accept_owner_directives
+    from ouroboros.owner_words import task_owner_words
+    [entry] = _mail(tmp_path, ctx.task_id)
+    [unread] = _accept_owner_directives(SimpleNamespace(), tmp_path, ctx.task_id)
+    field, _ = task_owner_words(tmp_path, ctx.task_id, task={})
     _drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
     [row] = ctx._owner_directives
     label = "Book it" if values is None else "Dates"
@@ -469,6 +475,21 @@ def test_the_living_card_drain_records_the_choice_or_supplied_values(tmp_path, d
     sources = owner_sources(tmp_path, {"origin_message_text": "Open the chart", "origin_message_ref": {}}, ctx.task_id)
     recovered = owner_corpus_rows(sources)[-1]
     assert (recovered["content"], recovered["source"]) == (row["content"], row["source"])
+
+    # A pre-snapshot mailbox can resolve the stored submission. A pre-fix capture of its exact frame
+    # is the same addressed input. Different bytes at that identity still refuse Continue.
+    from ouroboros.answer_facts import living_card_input
+    legacy = dict(entry)
+    legacy.pop("card_press")
+    assert living_card_input(legacy, tmp_path)["content"] == row["content"]
+    saved = {"source": "owner_mailbox", "content": entry["text"], "msg_id": entry["msg_id"]}
+    prior = {"origin_message_text": "Open the chart", "review_evidence": {"task_inputs": {"owner_requirements_and_decisions": [saved]}}}
+    assert not owner_sources(tmp_path, prior, ctx.task_id)["gaps"]
+    saved["content"] += " Different frame."
+    assert "owner_message_identity_conflict" in owner_sources(tmp_path, prior, ctx.task_id)["gaps"]
+    assert (unread["source"], unread["content"], unread["reply_to"]) == (row["source"], row["content"], row["reply_to"])
+    assert field[0]["source"] == row["source"] and label in field[1]["text"]
+    assert field[0]["text"] == values["from"] if values else "pressed" in field[0]["text"]
 
 
 @pytest.mark.parametrize("action, values", [("book", None), ("dates", {"from": "  after moonrise  "})])
@@ -501,3 +522,11 @@ def test_forwarded_card_keeps_its_bubble_and_opens_a_typed_head(tmp_path, decide
     [opening] = carried_owner_corpus(ctx, bubble)
     assert (opening["source"], opening["content"]) == (source, values["from"] if values else "Book it")
     assert not owner_words_contain(ctx, "Dates" if values else "Book it")
+
+    from ouroboros.owner_words import task_owner_words
+    from ouroboros.project_dialogue import build_owner_message_ref
+    reference = build_owner_message_ref(chat_id=1, client_message_id=row["client_message_id"], ts=row["ts"], text=bubble)
+    field, _ = task_owner_words(tmp_path, "observatory", task={"origin_message_ref": reference, "origin_message_text": bubble})
+    assert field[0]["source"] == source
+    assert field[0]["text"] == values["from"] if values else "pressed" in field[0]["text"]
+    assert field[1]["ref"] == opening["reply_to"]["address"]
