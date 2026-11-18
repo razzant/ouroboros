@@ -50,6 +50,8 @@ _ALL_PLACE_ROOMS = (
 # A place's newest arrival, and its newest 50 for the account candidates (``account_candidates``).
 _RECENT = f"FROM dialogue INDEXED BY dialogue_place_recent WHERE {_ARRIVAL} AND {_PLACE}=? ORDER BY ts DESC"
 _NEWEST = f"SELECT ts {_RECENT} LIMIT 1"
+_NEWEST_BEFORE = (f"SELECT ts FROM dialogue INDEXED BY dialogue_place_recent WHERE {_ARRIVAL} AND {_PLACE}=? AND ts<? "
+                  "ORDER BY ts DESC LIMIT 1")
 _CANDIDATES = ("SELECT json_extract(body,'$.sender_session_id') AS actor, "
                "json_extract(body,'$.sender_label') AS label, json_extract(body,'$.transport.actor.is_bot') AS bot, "
                "json_extract(body,'$.transport.actor.kind') AS kind, "
@@ -414,6 +416,18 @@ def place_facts(root, places, *, full=True):
         logging.getLogger(__name__).warning("Place room index unavailable for %s",
                                             ", ".join(place.place_id for place in places), exc_info=True)
     return facts
+
+
+def newest_arrivals(root, place_ids, *, before=""):
+    """``{place_id: ts}`` of each place's newest arrival stamped before ``before`` (any, when empty), one seek of
+    ``dialogue_place_recent`` each, in one read; a place with none is absent."""
+    place_ids = list(dict.fromkeys(str(place_id) for place_id in place_ids))
+    if not place_ids or not _dialogue_indexes(root):
+        return {}
+    with dialogue_store.transaction(root, write=False) as conn:
+        found = {place_id: conn.execute(_NEWEST_BEFORE, (place_id, before)).fetchone() if before
+                 else conn.execute(_NEWEST, (place_id,)).fetchone() for place_id in place_ids}
+    return {place_id: row[0] for place_id, row in found.items() if row}
 
 
 def recent_identity(root, place_id, account_id=""):
