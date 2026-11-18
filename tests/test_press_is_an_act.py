@@ -173,22 +173,3 @@ def test_a_carried_answer_reaches_a_member_as_an_act_or_as_their_words(block):
         assert words == ("(host record: my human pressed «1. Publish it» and wrote no words; the label is the text of "
                          "task asker)")
     assert "The label «Publish it» is the text of task asker" in body or "the text of task asker) and wrote" in body
-
-
-def test_continue_takes_the_press_that_opened_a_late_answer_head_as_the_original_itself(tmp_path, monkeypatch):
-    """A late answer's head records its opening press under the door's message id: Continue reads that row as the
-    original's own message (its card beside it), while a later press of the same work stays a later act."""
-    from ouroboros.owner_continue import owner_sources
-    from ouroboros.task_results import load_task_result
-    from tests._budget_pause_exact_helpers import _install_queue
-    from tests.test_owner_continue import _settled_with_corpus
-
-    card = {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker", "text": "Publish?\n1. Publish it"}
-    _install_queue(tmp_path, monkeypatch)
-    _settled_with_corpus(tmp_path, {"source": "owner_press", "content": "1. Publish it", "chat_id": "7",
-                                    "client_message_id": "m-1", "reply_to": card},  # the door's own message
-                         {"source": "owner_press", "content": "2. Not now", "chat_id": "7", "client_message_id": "m-9",
-                          "quiz_id": "q8", "source_task_id": "asker"})
-    sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
-    assert sources["gaps"] == [] and sources["original"]["reply_to"] == card
-    assert [row["content"] for row in sources["later"] if row["source"] == "owner_press"] == ["2. Not now"]

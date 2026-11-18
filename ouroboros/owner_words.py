@@ -462,7 +462,10 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
     if door is not None and client_id:  # the door's message, by its typed id and the room that id belongs to
         chat = _mapping(_ctx_metadata(ctx).get("origin_message_ref")).get("chat_id")
         door = {"client_message_id": client_id, **({"chat_id": str(chat)} if chat is not None else {}), **door}
-    if source_text and not any(row.get("source") == "origin_message" for row in rest):
+    origin = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
+    opening_press = next((row for row in rest if row.get("source") == OWNER_PRESS and client_id
+                          and _same_corpus_source(row, origin)), None)
+    if source_text and opening_press is None and not any(row.get("source") == "origin_message" for row in rest):
         ids = {key: door[key] for key in ("reply_to", "client_message_id", "chat_id") if door and key in door}
         rows = [{**ids, "source": "origin_message", "content": source_text}, *rest]
     else:

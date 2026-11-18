@@ -1194,3 +1194,55 @@ def test_an_owner_stop_after_a_size_refusal_still_refuses():
     child = continuation_eligibility({"status": "failed", "reason_code": "context_overflow",
                                       "parent_task_id": "root", "root_task_id": "root"}, "child")
     assert child["refusal"] == "not_a_root_task"
+
+
+@pytest.mark.parametrize("comment", ["", "  only the blue tiles  "])
+def test_opening_answer_keeps_its_authorship_in_continue_and_start(tmp_path, monkeypatch, comment):
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.owner_words import carried_owner_corpus, owner_words_contain
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    label, asker, qid = "Turn the tiles", "tile-setter", "tile-order"
+    shown = comment or "1. " + label
+    ref = build_owner_message_ref(chat_id=7, client_message_id="tile-answer", ts="2040-01-01T00:00:00Z", text=shown)
+    block = {"state": "answered", "quiz_id": qid, "question": "Which side?", "options": [label],
+             "answered_index": 0, "comment": comment, "answered_after_terminal": True}
+    metadata = {"origin_message_text": shown, "origin_message_ref": ref,
+                "late_answer": {"task_id": asker, "quiz_id": qid, "answer_snapshot": {"task_id": asker, "quiz": block}}}
+    def opened(task_metadata, text):
+        ctx = SimpleNamespace(task_metadata=task_metadata, drive_root=tmp_path)
+        _initialize_owner_directives(ctx, [{"role": "user", "content": text}])
+        return ctx
+    head = opened(metadata, shown)
+    _interrupted(tmp_path, origin_message_text=shown, origin_message_ref=ref, metadata=metadata,
+                 owner_mailbox={"read_complete": True, "rows": []}, review_evidence=_corpus(*head._owner_directives))
+    before_capture = load_task_result(tmp_path, "pred-1")
+    before_capture.pop("review_evidence")
+    opening = owner_sources(tmp_path, before_capture, "pred-1")["original"]
+    assert opening["reply_to"]["text"].startswith("Which side?")
+    assert (opening.get("input_source") == "owner_press") == (not comment)
+    ack = admit_continuation("pred-1", action_nonce=NONCE)
+    assert ack.get("ok"), ack
+    [successor] = workers.PENDING
+    drafted = {"objective_author": {"kind": "task"}, "owner_corpus": carried_owner_corpus(head, shown)}
+    for ctx in (head, opened(successor["metadata"], successor["text"]), opened(drafted, "Draft the work")):
+        [opening] = ctx._owner_directives
+        assert opening["reply_to"]["text"].startswith("Which side?")
+        assert owner_words_contain(ctx, label) is False
+        assert opening["content"] == shown
+        if comment:
+            assert owner_words_contain(ctx, comment)
+        else:
+            assert opening["source"] == "owner_press"
+    if not comment:
+        assert "Owner's original instruction (verbatim):" not in successor["text"]
+        assert label in successor["text"] and "pressed" in successor["text"]
+    chained = load_task_result(tmp_path, successor["id"])
+    chained["owner_mailbox"] = {"read_complete": True, "rows": []}
+    assert not owner_sources(tmp_path, chained, successor["id"])["gaps"]

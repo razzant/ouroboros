@@ -506,10 +506,16 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     original: Optional[Dict[str, Any]] = None
     if "owner_sources" in continuation and not ((schedule or any(opening is not None for opening in (
             chained_start, chained_wake, chained_api))) and chained.get("original") is None):
-        original = container(chained, "original", dict, "chained_owner_source_malformed")
+        original = dict(container(chained, "original", dict, "chained_owner_source_malformed"))
     elif result.get("origin_message_ref") or result.get("origin_message_text"):
         original = {"source": "origin_message", "content": result.get("origin_message_text"),
                     "origin_message_ref": result.get("origin_message_ref")}
+        from ouroboros.owner_words import answered_card_source
+        block, asker = answered_card_source(metadata)
+        if block and (card := answered_card(block, original["content"])):
+            original["reply_to"] = answered_card_reply(card, asker)
+            if row_source({**metadata, "text": original["content"]}, "origin_message") == OWNER_PRESS:
+                original.update(input_source=OWNER_PRESS, source_task_id=asker, quiz_id=card.get("quiz_id"))
     absent = metadata.get("origin_message_absent") is True
     if absent and (result.get("origin_message_ref") or result.get("origin_message_text")
                    or metadata.get("origin_suppressed")):
@@ -540,7 +546,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             api = _api_opening(result, metadata, task_id, gaps)
         else:
             gaps.append("original_owner_message_text")
-    if original and (original.get("source") != "origin_message" or
+    if original and (original.get("source") != "origin_message" or original.get("input_source") not in (None, OWNER_PRESS) or
                      not isinstance(original.get("origin_message_ref", {}), dict)):
         gaps.append("original_owner_source_malformed")
     later: List[Dict[str, Any]] = []
@@ -629,7 +635,9 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             opening = source == OWNER_PRESS and client_identity == origin_identity != ""  # a late answer head's press
             if source in CORPUS_INITIAL_SOURCES and not door or opening:  # its first text: the original's projection
                 if original is not None and isinstance(row.get("reply_to"), dict):
-                    original.setdefault("reply_to", row["reply_to"])  # and what it replies to (a press: its card)
+                    original.setdefault("reply_to", row["reply_to"])
+                if opening and original is not None:
+                    original.update(input_source=source, **{key: row[key] for key in ROW_IDS if row.get(key)})
                 continue
             owner = source in CORPUS_OWNER_SOURCES or door
             if named(identity, words, owner, row) is not None or not identity and words in texts[owner]:
@@ -811,7 +819,7 @@ def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     original = sources.get("original") if isinstance(sources.get("original"), dict) else {}
     start = sources.get("start") if isinstance(sources.get("start"), dict) else {}
-    for row in [{**original, "source": "origin_message"}, *(start.get("answers") or []), *(sources.get("later") or [])]:
+    for row in [{**original, "source": original.get("input_source", "origin_message")}, *(start.get("answers") or []), *(sources.get("later") or [])]:
         if isinstance(row, dict) and str(row.get("content") or "").strip():
             card = answered_card_reply(row.get("card"), row.get("source_task_id"))
             rows.append({"source": row.get("source") or "owner_mailbox", "content": row["content"],  # a card wins
@@ -944,7 +952,12 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
                   json.dumps(sources["schedule"], ensure_ascii=False)]
     original = sources.get("original") if isinstance(sources.get("original"), dict) else None
     if original and str(original.get("content") or "").strip():
-        lines += ["", "Owner's original instruction (verbatim):", str(original["content"])]
+        if original.get("input_source") == OWNER_PRESS:
+            lines += ["", press_record(original["content"], original.get("source_task_id"), who="the owner")]
+            if target := original.get("reply_to"):
+                lines.append(str(target.get("text") or target.get("address") or ""))
+        else:
+            lines += ["", "Owner's original instruction (verbatim):", str(original["content"])]
     start = sources.get("start") if isinstance(sources.get("start"), dict) else None
     if start:
         drafter = (start.get("author") or {}).get("task_id") or "unknown"
