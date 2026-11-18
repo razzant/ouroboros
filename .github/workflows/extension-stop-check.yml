@@ -1,135 +1,79 @@
-name: Extension Stop · compatibility follow-up
+name: Extension Stop — Windows verification
+
 on:
   push:
-    branches: ['qa/extension-step-stop-check']
+    branches:
+      - qa/extension-step-stop-check
+
 permissions:
   contents: read
 
 jobs:
-  regression:
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+  windows:
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: windows-latest
+    timeout-minutes: 15
     env:
-      BASE: '7de919cc0e4197c6732157046c73a983a21c1baa'
-      PRODUCT_TREE: '0f24c359132b5a65e3792cbb700ad776555ce533'
-      PREVIOUS_CHECK: '58ec98698a05744e57f62cf43302c3e09a29fb32'
-    defaults:
-      run:
-        shell: bash
+      MERGE_SHA: e0fb9542b828964dd792e202b7d5939c6c0140eb
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          fetch-depth: 0
+          ref: ${{ env.MERGE_SHA }}
           persist-credentials: false
-      - name: Bind the two source versions and detach from the workflow overlay
-        id: bind
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REPOSITORY" = razzant/ouroboros
-          test "$GITHUB_REF" = refs/heads/qa/extension-step-stop-check
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          product=$(git rev-parse HEAD^1)
-          test "$(git show -s --format=%P HEAD)" = "$product $PREVIOUS_CHECK"
-          test "$(git show -s --format=%P "$product")" = "$BASE"
-          test "$(git rev-parse "$product^{tree}")" = "$PRODUCT_TREE"
-          test "$(git diff --name-only "$product" HEAD)" = .github/workflows/extension-stop-check.yml
-          git checkout --detach "$product"
-          git worktree add --detach "$RUNNER_TEMP/stop-base" "$BASE"
-          mkdir -p "$RUNNER_TEMP/stop-results" "$RUNNER_TEMP/stop-scratch"
-          echo "product=$product base=$BASE tree=$PRODUCT_TREE"
+
       - uses: ./.github/actions/setup-python-env
-        id: deps
         with:
+          interpreter: setup-python
           install-project: 'false'
-          interpreter: shipped
-      - name: Verify the three old failures and the unused import on the base
+
+      - name: Verify both test outcomes at the merge
+        shell: python
         run: |
-          set -euo pipefail
-          py=$(python -c 'import sys; print(sys.executable)')
-          cd "$RUNNER_TEMP/stop-base"
-          out="$RUNNER_TEMP/stop-results"
-          rc=0
-          "$py" -I -S scripts/safe_test.py --timeout 420 --temp-parent "$RUNNER_TEMP/stop-scratch" --evidence-dir "$RUNNER_TEMP/base-evidence" -- "$py" -m pytest -n0 -o addopts= -vv -o verbosity_assertions=2 --tb=short --timeout=90 --junitxml="$out/base.xml" \
-            tests/test_async_invocation_lifetime.py::test_cancel_resistant_async_runner_retains_same_invocation_until_finally \
-            tests/test_connector_target_groups.py::test_an_older_host_refuses_a_2_5_connector_before_import_read_tools_included \
-            tests/test_unix_computer_use_window_session_server.py::test_the_manifest_declares_the_server_for_a_task_session || rc=$?
-          test "$rc" = 1
-          lint=0
-          "$py" -m ruff check --no-cache --select F --output-format json tests/test_extension_call_stop.py > "$out/base-lint.json" || lint=$?
-          test "$lint" = 1
-          "$py" -I - "$out" <<'PY'
-          import json, re, sys, xml.etree.ElementTree as ET
+          import os
           from pathlib import Path
-          out = Path(sys.argv[1]); cases = list(ET.parse(out/'base.xml').iter('testcase'))
-          names = ('test_cancel_resistant_async_runner_retains_same_invocation_until_finally',
-                   'test_an_older_host_refuses_a_2_5_connector_before_import_read_tools_included',
-                   'test_the_manifest_declares_the_server_for_a_task_session')
-          assert len(cases) == 3 and {c.get('name') for c in cases} == set(names), cases
-          # The diagnostic, not the source line in the traceback, must describe the old failure.
-          messages = {}
-          for c in cases:
-              failure = c.find('failure'); assert failure is not None and c.find('error') is None, c.get('name')
-              line = failure.get('message', '').splitlines()[0].removeprefix('AssertionError: ')
-              assert line.startswith('assert '), (c.get('name'), line)
-              messages[c.get('name')] = line
-          timeout, fingerprint, version = (messages[n] for n in names)
-          assert "'handler exceeded timeout' in " in timeout and "extension async handler failed: TimeoutError: '" in timeout, timeout
-          recorded = 'c472950639f4467a21f4407d9416871e8f744f27392f1a8d5f711ade39579d7c'
-          hashes = re.fullmatch(r"assert '([0-9a-f]{64})' == '([0-9a-f]{64})'", fingerprint)
-          assert hashes and hashes[2] == recorded and hashes[1] != recorded, fingerprint
-          assert version == "assert '0.8.0' == '0.7.3'", version
-          findings = json.loads((out/'base-lint.json').read_text()); assert len(findings) == 1 and findings[0]['code'] == 'F401' and 'KEYNOTE' in findings[0]['message'], findings
-          print('Original three test failures and KEYNOTE lint finding observed on the base.')
-          PY
-      - name: Run the owning suites on the product
-        if: ${{ !cancelled() && steps.bind.outcome == 'success' && steps.deps.outcome == 'success' }}
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse 'HEAD^{tree}')" = "$PRODUCT_TREE"
-          py=$(python -c 'import sys; print(sys.executable)')
-          "$py" -I -S scripts/safe_test.py --timeout 1200 --temp-parent "$RUNNER_TEMP/stop-scratch" --evidence-dir "$RUNNER_TEMP/product-evidence" -- "$py" -m pytest -n0 -o addopts= -q --tb=short -rs --timeout=120 --junitxml="$RUNNER_TEMP/stop-results/product.xml" \
-            tests/test_async_invocation_lifetime.py tests/test_batch4_extension_completion.py tests/test_extension_call_stop.py tests/test_operation_late_confirmation.py \
-            tests/test_connector_target_groups.py tests/test_live_contracts.py tests/test_extension_plugin_api_matrix.py tests/test_builtin_skill_source.py tests/test_unix_computer_use_window_session_server.py
-          "$py" -I - "$RUNNER_TEMP/stop-results/product.xml" <<'PY'
-          import sys, xml.etree.ElementTree as ET
-          cases = list(ET.parse(sys.argv[1]).iter('testcase'))
-          passed = [c.get('name') for c in cases if not any(c.find(k) is not None for k in ('failure','error','skipped'))]
-          for name in ('test_cancel_resistant_async_runner_retains_same_invocation_until_finally','test_an_older_host_refuses_a_2_5_connector_before_import_read_tools_included','test_the_manifest_declares_the_server_for_a_task_session'):
-              assert passed.count(name) == 1, name
-          assert sum(n.startswith('test_async_timeout_result_stays_while_custody_tracks_actual_unwind[') for n in passed) == 4
-          assert any(n.startswith('test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits[False-') and 'unix_computer_use' in n for n in passed), 'missing unedited native reseed'
-          print(f'{len(passed)} passed, {len(cases)-len(passed)} skipped; all named regressions passed.')
-          PY
-      - name: Lint and size on the product against the explicit base
-        if: ${{ !cancelled() && steps.bind.outcome == 'success' && steps.deps.outcome == 'success' }}
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse 'HEAD^{tree}')" = "$PRODUCT_TREE"
-          py=$(python -c 'import sys; print(sys.executable)')
-          "$py" -m ruff check --no-cache --select F .
-          "$py" -I -S scripts/safe_test.py --timeout 360 --temp-parent "$RUNNER_TEMP/stop-scratch" --evidence-dir "$RUNNER_TEMP/size-evidence" -- env -u GITHUB_EVENT_NAME OURO_SIZE_RATCHET_BASE_REF="$BASE" OURO_BOOK_GROWTH_MODE=block "$py" -m pytest -n0 -o addopts= -q -m size_ratchet --junitxml="$RUNNER_TEMP/stop-results/size.xml" tests/test_smoke.py tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py
-          "$py" -I - "$RUNNER_TEMP/stop-results/size.xml" <<'PY'
-          import sys, xml.etree.ElementTree as ET
-          cc = list(ET.parse(sys.argv[1]).iter('testcase')); assert len(cc) == 7 and all(c.find('skipped') is None and c.find('failure') is None and c.find('error') is None for c in cc)
-          PY
-          git diff --check "$BASE" HEAD && git diff --exit-code && git diff --cached --exit-code
-      - name: Check contracts, structure, documentation and the floor
-        if: ${{ !cancelled() && steps.bind.outcome == 'success' && steps.deps.outcome == 'success' }}
-        run: |
-          set -euo pipefail
-          py=$(python -c 'import sys; print(sys.executable)')
-          "$py" -I -S scripts/safe_test.py --timeout 720 --temp-parent "$RUNNER_TEMP/stop-scratch" --evidence-dir "$RUNNER_TEMP/floor-evidence" -- "$py" -m pytest -n0 -o addopts= -q --tb=short -rs --timeout=120 -m 'not size_ratchet and not integration and not browser and not ui_browser' --junitxml="$RUNNER_TEMP/stop-results/floor.xml" \
-            tests/test_architecture_facts.py tests/test_contracts.py tests/test_docs_sync.py tests/test_domain_manifest.py tests/test_domain_report.py tests/test_gateway_parity.py tests/test_generated_inventories.py tests/test_hermetic_data_root.py tests/test_packaging_sync.py tests/test_preflight_process_containment.py tests/test_process_custody.py tests/test_safety_policy.py tests/test_smoke.py
-      - name: Retain only the synthetic test reports
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: extension-stop-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/stop-results/base.xml
-            ${{ runner.temp }}/stop-results/base-lint.json
-            ${{ runner.temp }}/stop-results/product.xml
-            ${{ runner.temp }}/stop-results/size.xml
-            ${{ runner.temp }}/stop-results/floor.xml
-          retention-days: 7
-          if-no-files-found: error
+          import subprocess
+          import sys
+          import tempfile
+          import xml.etree.ElementTree as ET
+
+          sha = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True
+          ).strip()
+          print(f"Checkout: {sha}; platform: {sys.platform}", flush=True)
+          if sha != os.environ["MERGE_SHA"] or sys.platform != "win32":
+              sys.exit("Unexpected checkout or platform")
+
+          nodes = [
+              "tests/test_async_invocation_lifetime.py::test_cancel_resistant_async_runner_retains_same_invocation_until_finally",
+              "tests/test_connector_target_groups.py::test_an_older_host_refuses_a_2_5_connector_before_import_read_tools_included",
+          ]
+          expected = sorted(
+              (Path(path).with_suffix("").as_posix().replace("/", "."), name)
+              for path, name in (node.split("::") for node in nodes)
+          )
+          scratch = Path(tempfile.mkdtemp(
+              prefix="extension-stop-", dir=os.environ["RUNNER_TEMP"]
+          ))
+          report = scratch / "pytest.xml"
+          result = subprocess.run([
+              sys.executable, "-I", "-S", "scripts/safe_test.py",
+              "--temp-parent", str(scratch),
+              "--evidence-dir", str(scratch / "evidence"),
+              "--timeout", "300", "--",
+              sys.executable, "-m", "pytest",
+              "-o", "addopts=", "-o", "xfail_strict=true",
+              "-n0", "-v", "--color=no", "--tb=short", "--show-capture=no",
+              "--junitxml", str(report), *nodes,
+          ])
+          print(f"Safe test exit: {result.returncode}", flush=True)
+          if result.returncode != 0 or not report.is_file():
+              sys.exit("Test command failed or produced no JUnit report")
+
+          cases = ET.parse(report).findall(".//testcase")
+          actual = sorted((case.get("classname", ""), case.get("name", "")) for case in cases)
+          if actual != expected or any(
+              child.tag in {"skipped", "failure", "error"}
+              for case in cases for child in case
+          ):
+              sys.exit("Expected exactly the two named tests, both passed")
+          print(f"Verified: both named tests passed on Windows at {sha}", flush=True)
