@@ -621,7 +621,7 @@ def _directory_delta(area: pathlib.Path, source: Mapping[str, Any], evidence: pa
     delta = {path: {"before": before.get(path), "after": after.get(path)}
              for path in sorted(set(changed) | set(removed))}
     kept = retain_files(area, [path for path in changed
-                              if pathlib.PurePosixPath(path).parts[0] != EVIDENCE_DIRNAME], evidence / "files")
+                              if pathlib.PurePosixPath(path).parts[0] != EVIDENCE_DIRNAME], evidence / "files", gaps=gaps)
     return {"changed": changed, "removed": removed, "files": kept, "entries": delta}
 
 

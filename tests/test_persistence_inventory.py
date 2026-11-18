@@ -642,6 +642,10 @@ class _PathResolver:
                         rel, ok = self.resolve(node, consts, local)
                         if ok and _is_named(rel):
                             found.add(SUBROOT_ALIASES.get(rel, rel))
+                    elif isinstance(node, ast.Call) and _call_name(node) == "store_continuation_source" and len(node.args) >= 3:
+                        name = node.args[2]
+                        if isinstance(name, ast.BinOp) and isinstance(name.op, ast.Add) and isinstance(name.left, ast.Constant):
+                            found.add(f"task_results/artifacts/*/source_handles/context_checkpoints/{name.left.value}*-*.json")
                     elif isinstance(node, ast.Call) and _call_name(node) == "store_actor_source_bytes":
                         rel = self._source_handle_path(node, scope)
                         if rel:
@@ -1003,7 +1007,8 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 473 -> 474: an explicit context inspection retains its ordinary-memory map,
 # ``task_results/artifacts/*/source_handles/context_checkpoints/ordinary-memory-*.json``
 # (``ouroboros/tools/compact_context.py``, ``_ordinary_memory``); its own row beside the other context checkpoints.
-EXPECTED_SCAN_PATHS = 474
+# The owner-wait and exact-pause writers name their checkpoint prefix at the shared serializer.
+EXPECTED_SCAN_PATHS = 476
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

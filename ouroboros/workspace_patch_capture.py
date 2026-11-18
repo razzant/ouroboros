@@ -75,13 +75,8 @@ def build_workspace_patch(workspace_root: pathlib.Path) -> str:
 def _held_named_evidence(root: pathlib.Path, host_evidence: str, changed: set, baseline: set,
                          retain_dir: Optional[pathlib.Path], previous: Optional[Dict[str, Any]],
                          ) -> Tuple[set, Optional[Dict[str, Any]]]:
-    """The changed paths a capture holds out as the copy's named evidence, and the retention summary when
-    this capture retains them. Task retention always uses ``EVIDENCE_DIRNAME``; without ``retain_dir``,
-    ``host_evidence`` can name the delegated run's folder. Only paths NEW since the recorded
-    baseline (untracked, staged or committed in the copy) are evidence, a path the baseline holds is the
-    project's own (#2711). With ``retain_dir`` the folder is retained there once
-    (``delegate_named_evidence.retain_workspace_evidence``, ``previous`` reused while unchanged); when that
-    fails nothing is held out, so the files ride the capture as before: never zero copies."""
+    """New paths under the copy's named evidence belong to its receipt. Baseline paths stay product.
+    If retaining the folder fails, eligible files go back into the patch."""
     from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
 
     evidence = pathlib.PurePosixPath((EVIDENCE_DIRNAME if retain_dir is not None else host_evidence or EVIDENCE_DIRNAME).strip("/"))
@@ -89,16 +84,19 @@ def _held_named_evidence(root: pathlib.Path, host_evidence: str, changed: set, b
     held = {rel for rel in changed if rel not in baseline and under(rel)}
     if not held or retain_dir is None:  # a run, not this capture, retains the folder (or there is nothing new)
         return held, None
-    from ouroboros.delegate_named_evidence import retain_workspace_evidence
+    from ouroboros.delegate_named_evidence import evidence_settings, retain_workspace_evidence
 
     products = {pathlib.PurePosixPath(rel).relative_to(evidence.parent).as_posix() for rel in baseline if under(rel)}
     summary = retain_workspace_evidence(root / evidence.parent, retain_dir, product_paths=products, previous=previous)
-    return (held if summary.get("status") == "retained" else set()), summary
+    if summary.get("status") != "retained":
+        held = {rel for rel in held if (path := root / rel).name.casefold() == "settings.json"
+                and evidence_settings(path, fallback=True) is None}
+    return held, summary
 
 
 def _evidence_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
     """The manifest's compact row for a retained (or unretained) evidence folder."""
-    return {**{key: summary[key] for key in ("status", "evidence_dir", "summary_path", "error") if key in summary},
+    return {**{key: summary[key] for key in ("status", "evidence_dir", "summary_path", "error", "retained_bytes") if key in summary},
             "files": len(summary.get("files") or []), "gaps": len(summary.get("gaps") or [])}
 
 

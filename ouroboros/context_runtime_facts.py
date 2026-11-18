@@ -473,6 +473,10 @@ def storage_fact(data_root: Any, *, observed_at: Optional[str] = None) -> Option
             "previous_at": count.get("growth_since"),
             "growth_bytes": count.get("growth_bytes"),
         })
+        volume = count.get("volume")
+        if (isinstance(volume, dict) and type(volume.get("free_bytes")) is int and isinstance(volume.get("observed_at"), str)
+                and volume["observed_at"] and volume.get("total_bytes") == fact.get("volume_total_bytes")):
+            fact["previous_free"] = {"free_bytes": volume["free_bytes"], "observed_at": volume["observed_at"]}
         if count.get("growth_flag"):
             fact["growth_flag"] = count["growth_flag"]  # either count had unreadable items: the growth is qualified
     if removers:
