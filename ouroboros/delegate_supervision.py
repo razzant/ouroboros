@@ -1387,11 +1387,11 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
         return _fail("delegate_wait", "run_ownership_unknown", str(exc))
     descriptor["wake_at"] = chosen["wake_at"]
     chosen.update(_choice(descriptor))
-    if delay is not None:
-        _emit(ctx, "delegate_supervision_checkpoint_scheduled", {
-            "runs": run_ids, "wake_at": chosen["wake_at"], "reason": reason_text})
 
     def entered(**facts: Any) -> None:  # the durable trail of each wait that answers or sleeps (not a replay)
+        if delay is not None:  # a refused wait (no ``entered``) schedules no checkpoint
+            _emit(ctx, "delegate_supervision_checkpoint_scheduled", {
+                "runs": run_ids, "wake_at": chosen["wake_at"], "reason": reason_text})
         _emit(ctx, "delegate_supervision_wait_entered", {"run_id": run_ids[0], "runs": run_ids, **facts})
 
     if in_process:

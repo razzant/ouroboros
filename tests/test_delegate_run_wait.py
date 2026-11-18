@@ -235,21 +235,28 @@ def test_with_no_continuation_owner_what_is_there_answers_in_a_named_sleep_mode_
     """A result already there needs nothing to sleep under: it answers in whatever mode was named, owner or not. Only
     a call that would arm a sleep is refused when the task has no continuation owner; an unknown mode is refused
     first, even over a ready run."""
-    from ouroboros import delegate_supervision as ds
+    from ouroboros import delegate_custody as custody, delegate_supervision as ds
     from ouroboros.delegate_shared import AGENT_FAULT_CODE
 
     ctx, _limit = _nanny(tmp_path)
-    ctx.owner_wait_callback = None
+    owner, ctx.owner_wait_callback = ctx.owner_wait_callback, None
     _run(tmp_path, "run-done")
     _ended(tmp_path, "run-done")
     unknown = ds.run_wait(ctx, "run-done", sleep_mode="hot")
     assert _armed(unknown)["reason"] == "sleep_mode_refused" and unknown.code == AGENT_FAULT_CODE and not reads
     assert _armed(ds.run_wait(ctx, "run-done", sleep_mode=sleep_mode))["status"] == "terminal"
     _run(tmp_path, "run-quiet")
-    refused = ds.run_wait(ctx, "run-quiet", sleep_mode=sleep_mode)
+    refused = ds.run_wait(ctx, "run-quiet", sleep_mode=sleep_mode, checkpoint_after_sec=300, checkpoint_reason="look")
     assert _armed(refused)["reason"] == "sleep_mode_refused" and refused.code == AGENT_FAULT_CODE
     assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
     assert reads == [("run-done", 0)]
+    kinds = [json.loads(line)["type"] for line in custody.event_log_path(tmp_path).read_text().splitlines()]
+    assert "delegate_supervision_checkpoint_scheduled" not in kinds, "a refused wait schedules no checkpoint"
+    ctx.owner_wait_callback = owner  # the same call that is accepted and armed does schedule one
+    assert _armed(ds.run_wait(ctx, "run-quiet", sleep_mode=sleep_mode, checkpoint_after_sec=300,
+                              checkpoint_reason="look"))["reason"] == "sleep_armed"
+    kinds = [json.loads(line)["type"] for line in custody.event_log_path(tmp_path).read_text().splitlines()]
+    assert kinds.count("delegate_supervision_checkpoint_scheduled") == 1
 
 
 def test_an_in_slot_wait_keeps_the_call_after_what_an_earlier_call_of_the_batch_armed_or_staged(
@@ -702,8 +709,10 @@ def test_the_frozen_delegate_wait_contract_says_its_result_is_owed_to_the_next_r
     text = " ".join(wait.schema["description"].split())
     modes = "Explicit in_slot keeps the process and same-call result while yielding acting capacity; warm/cold choose"
     wire = project_function_tools_to_openai_custom([{"type": "function", "function": wait.schema}]).wire_tools()
-    assert modes in text and modes in wire[0]["custom"]["description"]
-    assert " ".join(held.split()) not in wire[0]["custom"]["description"], "the wire keeps no parameter prose"
+    lead = wire[0]["custom"]["description"]  # some providers see only this projection: it must say what each mode does
+    no_owner = "Without a continuation owner an omitted or in_slot mode waits in-process on the same sources, and warm"
+    for said in (modes, "(warm keeps your process, cold releases it)", no_owner):
+        assert said in text and said in lead, said
     assert "this wait's result is then owed to your next model request" in text
     assert "Otherwise a sleep returns sleep_armed" in text and "it returns sleep_armed" not in text
     assert "unless named live custody or a conversation turn keeps it warm" in text
