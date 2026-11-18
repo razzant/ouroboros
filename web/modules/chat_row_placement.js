@@ -14,14 +14,16 @@ export function releaseWorkReplyOrigin(node) {
 // Card lifetime is independent of saved owner rows. Restore the actual node (not a copy)
 // before the card loses its visible slot, at the reply's original position in the feed.
 export function restoreWorkReplies(root) {
-    const slot = root?.querySelector(WORK_REPLY_SLOT);
-    for (const bubble of Array.from(slot?.children || [])) {
-        const origin = replyOrigins.get(bubble);
-        if (origin?.isConnected) origin.replaceWith(bubble);
-        else root.after(bubble);
-        replyOrigins.delete(bubble);
+    if (!root) return;
+    for (const slot of root.querySelectorAll('[data-live-work-replies]')) {
+        for (const bubble of Array.from(slot.children)) {
+            const origin = replyOrigins.get(bubble);
+            if (origin?.isConnected) origin.replaceWith(bubble);
+            else root.after(bubble);
+            replyOrigins.delete(bubble);
+        }
+        slot.hidden = true;
     }
-    if (slot) slot.hidden = true;
 }
 
 // project_dialogue.ORIGIN_ADDRESSED_NOTICE_TYPES: a routing refusal names the task it
@@ -49,15 +51,30 @@ export function replayConcludesTask(row) {
         && !isNonTerminalMediaHistoryRow(row);
 }
 
-// Move the canonical bubble, with its quote and receipt, only if this room has the card.
+// A recent reply may be mounted before the old page holding its card.
+export function reconcileWorkReplies(feed, cards) {
+    let changed = false;
+    for (const bubble of feed.querySelectorAll('[data-reply-work]')) {
+        changed = moveWorkReply(cards.get(bubble.dataset.replyWork), bubble) || changed;
+    }
+    return changed;
+}
+
 export function placeWorkReply(feed, cards, row) {
     const work = row.reply_to?.work_task_id;
-    const record = work && cards.get(work);
-    const slot = record?.root?.dataset.portal !== '1' && record?.root?.querySelector(WORK_REPLY_SLOT);
-    if (!slot?.isConnected || !row.client_message_id) return false;
-    const bubble = [...feed.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
+    if (!work || !row.client_message_id) return false;
+    const bubble = Array.from(feed.querySelectorAll('.chat-bubble.user[data-client-message-id]'))
         .find(node => node.dataset.clientMessageId === row.client_message_id);
-    if (!bubble || bubble.parentElement === slot) return false;
+    if (!bubble) return false;
+    bubble.dataset.replyWork = work;
+    return moveWorkReply(cards.get(work), bubble);
+}
+
+// Move the canonical bubble, with its quote and receipt, only if this room has the card.
+function moveWorkReply(record, bubble) {
+    const root = record?.root;
+    const slot = root?.isConnected && !root.closest('[data-portal="1"]') && root.querySelector(WORK_REPLY_SLOT);
+    if (!slot || bubble.parentElement === slot) return false;
     if (!replyOrigins.has(bubble)) {
         const origin = document.createComment('work reply');
         bubble.before(origin);

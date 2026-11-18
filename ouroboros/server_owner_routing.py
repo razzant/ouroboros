@@ -17,6 +17,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from ouroboros.server_process import log
+from ouroboros.store import StoreError
 from ouroboros.server_routing_context import (
     RootSnapshot,
     _decision_turn_metadata,
@@ -772,15 +773,16 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     routed_to_task, unnamed_label = "", "Task"
     if addressed:
         target = str(reply.get("work_task_id") or "")
+        reason = "reply_work_not_reading" if target else "reply_work_unresolved"
         try:
             candidate, owner = _reply_reader(ctx, target) if target else ({}, ("", None))
             if candidate:
                 routed_to_task = _deliver_to_reader(ctx, candidate, text or image_caption, client_message_id,
                                                       task_metadata=task_metadata, image_data=image_data, owner=owner)
-        except (OSError, ValueError):
+        except (StoreError, OSError, ValueError):
+            reason = "reply_work_unresolved"
             log.debug("Exact Reply destination unavailable", exc_info=True)
         if not routed_to_task:
-            reason = "reply_work_not_reading" if target else "reply_work_unresolved"
             _record_routing_receipt(bridge, ctx, chat_id=chat_id, client_message_id=client_message_id,
                                     action="mailbox_delivery", target=target, status="rejected", reason=reason)
             return

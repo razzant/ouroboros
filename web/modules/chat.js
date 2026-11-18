@@ -7,7 +7,7 @@ import { bindScrollFade } from './scroll_fade.js';
 import { createRoomHeader, mainHeaderActionsHtml } from './chat_header.js';
 import { pageLabel } from './pages.js';
 import { showToast } from './toast.js';
-import { ORIGIN_ADDRESSED_NOTICE_TYPES, childRowPlacement, placeWorkReply, releaseWorkReplyOrigin, replayConcludesTask, restoreWorkReplies } from './chat_row_placement.js';
+import { ORIGIN_ADDRESSED_NOTICE_TYPES, childRowPlacement, placeWorkReply, reconcileWorkReplies, releaseWorkReplyOrigin, replayConcludesTask, restoreWorkReplies } from './chat_row_placement.js';
 import { appendProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold, syncSavedProjectContext } from './project_answer.js';
 import { createWorkPortals, isPortal, reconcilePortalNotes } from './work_portal.js';
 import { createTaskEpisodes } from './task_episodes.js';
@@ -1475,18 +1475,27 @@ export function createChatInstance({
         if (!record || suppressDomInsert || _syncPass1Active) return;
         const container = record.isSubagent ? ensureSubagentContainer(record.parentGroupId) : null;
         if (container) {
+            replies.syncCard(record, true);
             // The container nests a lineage-known parent (#636); the recursion
             // carries the chain up to the inserted root.
+            const wasConnected = record.root.isConnected;
             if (record.root.parentNode !== container) container.appendChild(record.root);
             const parentRecord = liveCardRecords.get(record.parentGroupId);
             ensureLiveCardVisible(parentRecord);
+            if (!wasConnected && record.root.isConnected && !_historyReplayActive) reconcileWorkReplies(messagesDiv, liveCardRecords);
             updateLiveCardCount(parentRecord);
             return;
         }
         syncBlockChrome(record);
         episodes.sync(record);
-        if (blockVisible(record)) insertMessageNode(record.root, { reorderExisting });
-        else if (record.root.parentNode === messagesDiv) record.root.remove();
+        if (blockVisible(record)) {
+            const wasConnected = record.root.isConnected;
+            insertMessageNode(record.root, { reorderExisting });
+            if (!wasConnected && record.root.isConnected && !_historyReplayActive) reconcileWorkReplies(messagesDiv, liveCardRecords);
+        } else if (record.root.parentNode === messagesDiv) {
+            restoreWorkReplies(record.root);
+            record.root.remove();
+        }
     }
 
     function setLiveCardExpanded(record, expanded) {
@@ -2444,6 +2453,7 @@ export function createChatInstance({
                     }
                 }
                 for (const row of messages) if (row.role === 'user') placeWorkReply(messagesDiv, liveCardRecords, row);
+                reconcileWorkReplies(messagesDiv, liveCardRecords);
                 for (const row of messages) {
                     const record = liveCardRecords.get(row.presentation_owner_task_id || row.task_id);
                     if (!record) continue;

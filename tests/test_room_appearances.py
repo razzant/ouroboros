@@ -385,6 +385,19 @@ class TestOwnerReplyLink:
         accept("Now something else", ordinary[0])
         assert current == ["Now something else"]
         assert _mailbox_path(room.root, target).read_text(encoding="utf-8") == mail
+        from ouroboros.store import StoreError
+
+        def room_unavailable(*_):
+            raise StoreError('room lookup unavailable')
+
+        with monkeypatch.context() as probe:
+            receipts = []
+            probe.setattr(router, '_reply_reader', room_unavailable)
+            probe.setattr(router, '_record_routing_receipt', lambda *_args, **kwargs: receipts.append(kwargs))
+            _, uncertain = _owner(room.bridge, room.root, 'Still only for the work', address, message_id='unknown')
+            accept('Still only for the work', uncertain[0])
+            assert receipts[0]['reason'] == 'reply_work_unresolved'
+            assert current == ['Now something else']
         context.RUNNING.clear()
         _, late = _owner(room.bridge, room.root, "Too late", address, message_id="closed")
         accept("Too late", late[0])
