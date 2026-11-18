@@ -128,6 +128,11 @@ def test_a_key_joins_the_pages_listing_its_exact_strings_through_revision(tmp_pa
     assert pages("mail", "", "vela@example.org", unverified=True) == {"page": reader("people/vela"),
                                                                        "matched_by": "an unverified address"}
     assert pages("chat", "T-ONE", "U-NOBODY", unverified=True) == {}  # nothing found, nothing labelled
+    odd = address(tmp_path, "people/odd").path  # a hand-written key whose id is a list equals no arrival's string
+    odd.write_text("---\ntype: person\nsummary: Odd.\nkeys: [{provider: chat, namespace: T-ONE, id: [U-VELA, x]}]\n---\n"
+                   "# Odd\n", encoding="utf-8")
+    assert pages("chat", "T-ONE", "U-VELA") == {"pages": [reader("clients/vela-desk"), reader("people/vela")]}
+    odd.unlink()
     assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == files
     # A revision keeps authored keys: a summary-only overwrite merges them; archive names the page apart, restore returns it.
     vela = store.write_knowledge_note(vela.address, "---\nsummary: Someone else.\n---\n# Someone\nNew.\n",

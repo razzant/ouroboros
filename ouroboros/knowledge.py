@@ -500,26 +500,40 @@ def _key_part(value: Any) -> Any:
     return str(value) if isinstance(value, int) and not isinstance(value, bool) else value
 
 
-def speaker_pages(canonical_root: Path | None, provider: str, namespace: str, actor_id: str, *,
-                  unverified: bool = False) -> dict[str, Any]:
-    """A place speaker's exact key and the global notes whose ``keys`` hold it, as host facts of the turn.
+def key_pages(canonical_root: Path) -> dict[tuple[Any, Any, Any], dict[str, list[str]]]:
+    """Every exact key the global notes' ``keys`` lists hold, to their readers by state (``active``, ``archived``):
+    one pass over the shelf's navigation, which writes nothing.
 
     A key is an outside name of a note's subject, ``{provider, namespace, id}`` (an account id in its account scope,
     an email, a repository), three strings only the mind writes in the note's ``keys`` frontmatter list. It joins by
     equality alone: case kept, nothing trimmed, an empty namespace meets only an empty one, a display name never.
-    Several notes holding one key are all named, never merged or ranked; archived ones are named apart; a key grants
-    no authority. One pass over the global shelf's navigation, which writes nothing. Without a data root or an
+    Several notes holding one key are all named, never merged or ranked; a key grants no authority."""
+    found: dict[tuple[Any, Any, Any], dict[str, list[str]]] = {}
+    for row in inventory_knowledge(resolve_knowledge_address(canonical_root, OVERVIEW_TOPIC, "global"), navigation=True):
+        for entry in row.get("keys") if isinstance(row.get("keys"), list) else []:
+            if isinstance(entry, Mapping):
+                key = tuple(_key_part(entry.get(name)) for name in ("provider", "namespace", "id"))
+                try:
+                    hash(key)
+                except TypeError:  # a part that is no scalar (``id: [a, b]``) equals no arrival's string: no key
+                    continue
+                readers = found.setdefault(key, {"active": [], "archived": []})[row["state"]]
+                reader = f"knowledge_read(topic={row['topic']!r}, scope='global')"
+                if reader not in readers:
+                    readers.append(reader)
+    return found
+
+
+def speaker_pages(canonical_root: Path | None, provider: str, namespace: str, actor_id: str, *,
+                  unverified: bool = False, pages: dict | None = None) -> dict[str, Any]:
+    """A place speaker's exact key and the global notes whose ``keys`` hold it (``key_pages``, or ``pages`` read
+    once for many speakers), as host facts of the turn; archived ones are named apart. Without a data root or an
     actor id there is no key and no fact."""
     if canonical_root is None or not actor_id:
         return {}
     key = {"provider": provider, "namespace": namespace, "id": actor_id}
-    found: dict[str, list[str]] = {"active": [], "archived": []}
-    shelf = resolve_knowledge_address(canonical_root, OVERVIEW_TOPIC, "global")
-    for row in inventory_knowledge(shelf, navigation=True):
-        held = row.get("keys") if isinstance(row.get("keys"), list) else []
-        if any(isinstance(entry, Mapping) and {name: _key_part(entry.get(name)) for name in key} == key for entry in held):
-            found[row["state"]].append(f"knowledge_read(topic={row['topic']!r}, scope='global')")
-    active, archived = found["active"], found["archived"]
+    found = (key_pages(canonical_root) if pages is None else pages).get((provider, namespace, actor_id)) or {}
+    active, archived = found.get("active") or [], found.get("archived") or []
     facts: dict[str, Any] = {"key": key}
     if len(active) == 1:
         facts["page"] = active[0]

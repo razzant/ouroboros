@@ -1028,6 +1028,10 @@ def _capture_context_core(
             dynamic_parts.append(presence_section)
     except Exception:
         log.debug("Failed to inject presence context", exc_info=True)
+    if not is_child:  # the facts beside my human's word that started this turn (``return_facts``), else nothing
+        from ouroboros.return_facts import turn_sections
+
+        dynamic_parts.extend(turn_sections(task, canonical_root))
 
     return _ContextCore(
         base_prompt=base_prompt,
