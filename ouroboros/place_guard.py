@@ -387,11 +387,16 @@ def with_destination_facts(ctx: Any, name: str, args: Mapping[str, Any], result:
     words beside its result, in every mode (my human's own work with Safety off included): the facts sit next to the
     act, after it, never as guidance the act had before it ran. ``result``
     is a ``ToolResult``; the note trails its text as a host annotation, the producer's text kept apart. A blocked
-    call carries its own facts (a place refusal names the place, a Safety refusal its destination). ``ext_tool`` is
+    refusal before dispatch names its own destination. A host-refused further step can finish a dispatched call;
+    its destination line describes the target, not whether an earlier part was delivered. ``ext_tool`` is
     the descriptor the call was dispatched with, so a publication that replaced it meanwhile never redescribes the
     act. Every place the send changes counts, a group's write beside the words included; a group's read does not."""
     try:
-        if (not isinstance(args, Mapping) or getattr(result, "status", "") == "blocked"
+        status = getattr(result, "status", "")
+        meta = getattr(result, "meta", None)
+        started_refusal = (status == "blocked" and isinstance(meta, Mapping)
+                           and meta.get("refused_step") is True and meta.get("physical_dispatch") is True)
+        if (not isinstance(args, Mapping) or (status == "blocked" and not started_refusal)
                 or effect_of(name, ext_tool=ext_tool, ctx=ctx, args=args).effect != EFFECT_MESSAGE):
             return result
         call = _call_destinations(ctx, name, args, ext_tool, False)
@@ -410,7 +415,7 @@ def with_destination_facts(ctx: Any, name: str, args: Mapping[str, Any], result:
         return result
     from dataclasses import replace
     return replace(result, text=f"{result.text}\n\n{note}", host_annotations=(*result.host_annotations, note),
-                   producer_text=result.text if result.producer_text is None else result.producer_text)
+                   producer_text=(result.producer_text if result.host_annotations or result.producer_text is not None else result.text))
 
 
 def _note_message_call(ctx: Any, name: str, args: Mapping[str, Any], keys: list[str], effect: ToolEffect) -> None:

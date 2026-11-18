@@ -8,7 +8,7 @@
  * and a later passing check never erases it. Every word comes from typed facts: the
  * producer's `verification` object (live frames carry it directly, the settled row
  * inside `tool_result_meta`) and the process facts beside it — never the result text.
- * `placeReplayedEvidence` is the replay side: it draws the evidence row and these rows from
+ * `placeReplayedEvidence` is the replay side: it draws the evidence row, these rows and any refused steps from
  * the host's replayed observations, under the keys the live frames used.
  */
 import { replayedEvidenceTs, updateLiveTimelineItem, upsertToolFoldRow } from './chat_render_batch.js';
@@ -101,9 +101,19 @@ export function checkFailureView(evt, callKey) {
     };
 }
 
-/** Upsert one failed-check row in place by its key; true when the timeline changed.
+/** Draw a marked settlement with the live call formatter. Its command arguments are not part of
+ *  the history projection; its recorded time, invocation key and bounded result preview are. */
+export function refusedStepView(seen, key, presentCall) {
+    if (!key || seen?.fact !== 'settled' || seen.tool_result_meta?.refused_step !== true
+        || !['held', 'error'].includes(seen.status)) return null;
+    const { phase, headline, body, fullBody } = presentCall({ type: 'tool_call', is_error: true,
+        tool: seen.tool, status: seen.recorded_status, tool_result_meta: seen.tool_result_meta, result_preview: seen.result_preview });
+    return { phase, headline, body, fullBody, visible: true, dedupeKey: key, sourceTs: String(seen.ts || '') };
+}
+
+/** Upsert one diagnostic row in place by its key; true when the timeline changed.
  *  Used for a live frame that lands after the task's terminal row as well, so the
- *  arrival order of terminal and check never decides whether the row exists. */
+ *  arrival order of terminal and diagnostic never decides whether the row exists. */
 export function placeCheckRow(record, view, ts, rawTs = view.sourceTs) {
     const { timelineUpdate } = updateLiveTimelineItem(record, view,
         { ts, rawTs, syntheticKey: view.dedupeKey, headline: view.headline, inPlaceByKey: true });
@@ -111,14 +121,14 @@ export function placeCheckRow(record, view, ts, rawTs = view.sourceTs) {
 }
 
 /** Replayed host evidence (`tool_call_log.replay_evidence`) draws the rows the live frames drew:
- *  the folded evidence row (`fold`, its view) at its first call's time, then each failed check's
- *  row under its live key. `carrierTs` is the history row that delivered the evidence and
+ *  the folded evidence row (`fold`, its view) at its first call's time, then failed checks and refused steps
+ *  under their live keys. `carrierTs` is the history row that delivered the evidence and
  *  `formatTs` the card's timestamp formatter. True when the timeline changed. */
-export function placeReplayedEvidence(record, fold, evidence, carrierTs, formatTs) {
+export function placeReplayedEvidence(record, fold, evidence, carrierTs, formatTs, presentCall) {
     const at = replayedEvidenceTs(evidence, carrierTs);
     let changed = !['none', 'duplicate-skip'].includes(upsertToolFoldRow(record, fold, formatTs(at), at).timelineUpdate);
     for (const seen of evidence?.observations || []) {
-        const view = checkFailureView(seen, seen.key);
+        const view = refusedStepView(seen, seen.key, presentCall) || checkFailureView(seen, seen.key);
         if (view) changed = placeCheckRow(record, view, formatTs(view.sourceTs)) || changed;
     }
     return changed;

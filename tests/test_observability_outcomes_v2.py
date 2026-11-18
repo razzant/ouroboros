@@ -1360,6 +1360,40 @@ def test_has_failures_true_for_failed_receipt():
     assert refreshed["summary"]["has_failures"] is True
 
 
+def test_a_plain_step_refusal_is_no_ledger_failure_while_an_independent_error_stays_one():
+    """Build and refresh preserve the recorded status and only classify the non-error refusal as a control."""
+    refused = {"tool": "ext_send_parts", "status": "blocked", "is_error": True,
+               "tool_result_code": "OWNER_OPERATION_REFUSED",
+               "tool_result_meta": {"refused_step": True, "control_reason": "cancelled",
+                                    "physical_dispatch": True}}
+    failed = {"tool": "ext_send_parts", "status": "extension_error", "is_error": True,
+              "tool_result_code": "EXTENSION_ERROR",
+              "tool_result_meta": {"refused_step": True, "control_reason": "cancelled"}}
+    plain_blocked = {"tool": "ext_send_parts", "status": "blocked", "is_error": True}
+
+    def ledger_for(*calls):
+        built = build_verification_ledger(task={}, loop_outcome={"outcome_axes": {}},
+                                          llm_trace={"tool_calls": list(calls)}, artifact_bundle={})
+        refreshed = refresh_verification_ledger_artifacts(
+            built, {"status": "ready", "artifacts": [], "errors": []})
+        assert refreshed["summary"]["has_failures"] == built["summary"]["has_failures"]
+        return built
+
+    led = ledger_for(refused)
+    entry = next(item for item in led["entries"] if item.get("kind") == "tool_call")
+    assert entry["status"] == "blocked"
+    assert entry["tool_result_meta"] == {"refused_step": True, "control_reason": "cancelled"}
+    assert led["summary"]["has_failures"] is False
+
+    failed_led = ledger_for(failed)
+    failed_entry = next(item for item in failed_led["entries"] if item.get("kind") == "tool_call")
+    assert failed_entry["status"] == "extension_error" and failed_entry["tool_result_meta"]["refused_step"] is True
+    assert failed_led["summary"]["has_failures"] is True
+    assert ledger_for(refused, plain_blocked)["summary"]["has_failures"] is True
+    assert ledger_for({**failed, "status": "timeout", "tool_result_code": "EXTENSION_TIMEOUT"})["summary"]["has_failures"] is True
+    assert ledger_for({**failed, "status": "tool_reported_failure", "tool_result_code": "TOOL_REPORTED_FAILURE"})["summary"]["has_failures"] is False
+
+
 def test_omitted_ledger_stub_keeps_the_real_summary_across_artifact_finalization(tmp_path):
     """A ledger above the inline threshold rides as a stub with no entries.
 

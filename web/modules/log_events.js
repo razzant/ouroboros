@@ -3,7 +3,7 @@ import { formatUsd } from './storage_format.js';
 import { compactTokens } from './cost_period.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
-    failedStepHeadline, heldCallPhrase, heldCallsLine, deliveredAnswerCause } from './task_reason_words.js';
+    failedStepHeadline, heldCallPhrase, heldCallsLine, deliveredAnswerCause, refusedByStop, refusedStepPhrase } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
 import { taskCheckpointLabel, taskCheckpointIdentity, checkpointHasProgressRow, waitEpisode } from './task_checkpoints.js';
 export { taskCheckpointLabel } from './task_checkpoints.js';
@@ -866,13 +866,16 @@ export function summarizeLogEvent(evt) {
         // failure facts as the live tool_call_finished frame — is_error plus the
         // signal/exit facts — so a failed call reads the same after a reload.
         const signalDeath = Boolean(evt.signal) || (typeof evt.exit_code === 'number' && evt.exit_code < 0);
-        const held = heldCallPhrase(evt.tool, evt.status);  // returned by Safety, or unread by it: no failure
+        // A refusal of further work cannot hide the current call's failure.
+        const refusal = refusedStepPhrase(evt);
+        const held = heldCallPhrase(evt.tool, evt.status) || (evt.status === 'blocked' && refusal);
         const failed = !held && (Boolean(evt.is_error) || signalDeath);
         const finished = t === 'tool_call_finished';
         const label = signalDeath ? `killed (${evt.signal || evt.exit_code})` : evt.status === 'interrupted'
             ? `interrupted (${evt.control_reason || 'control'})` : failed ? 'failed' : finished ? 'finished' : 'result';
-        return view(held ? 'warn' : evt.status === 'interrupted' ? 'info' : failed ? 'error' : finished ? 'done' : 'result', held || `${tool} ${label}`, {
-            body: shortText(toolErrorDisplayText(evt, evt.result_preview) || (finished ? '' : compactJson(evt.args, 220)), 260),
+        return view(refusedByStop(evt) ? 'info' : held ? 'warn' : evt.status === 'interrupted' ? 'info' : failed ? 'error' : finished ? 'done' : 'result', held || `${tool} ${label}`, {
+            body: shortText([!held && refusal,
+                toolErrorDisplayText(evt, evt.result_preview) || (finished ? '' : compactJson(evt.args, 220))].filter(Boolean).join(' '), 260),
             meta: [formatLogDuration(evt.duration_sec)],
         });
     }
@@ -1083,12 +1086,14 @@ function chatView({
     chip = null,
     model = '',
     receipt = false,
+    hostRefusedStep = false,
     toolCall = null,
     waitEpisode = null,
 } = {}) {
     const out = { phase, headline, body, visible, promote, terminal, human, dedupeKey };
     // Receipt rows render inside existing blocks but cannot create one.
     if (receipt) out.receipt = true;
+    if (hostRefusedStep) out.hostRefusedStep = true;
     if (toolCall) out.toolCall = toolCall;  // folded into the block's one evidence row
     if (waitEpisode) out.waitEpisode = waitEpisode;  // folded into the block's one row per wait kind
     if (fullBody) out.fullBody = fullBody;
@@ -1462,21 +1467,22 @@ function summarizeChatLiveEventView(evt) {
         });
     }
     if (['tool_call_finished', 'tool_call'].includes(t) && evt.is_error) {
-        const held = heldCallPhrase(evt.tool, evt.status);  // returned by Safety, or unread by it: no failure
+        const refusal = refusedStepPhrase(evt);
+        const held = heldCallPhrase(evt.tool, evt.status) || (evt.status === 'blocked' && refusal);
         const commandText = describeText(extractCommandText(evt.args), 120);
         const errorResult = describeText(evt.result_preview || evt.error, 220);
-        const bodyParts = [];
-        const fullBodyParts = [];
+        const bodyParts = !held && refusal ? [refusal] : [];
+        const fullBodyParts = [...bodyParts];
         if (commandText.preview) bodyParts.push(`Command: ${commandText.preview}`);
         if (errorResult.preview) bodyParts.push(errorResult.preview);
         if (commandText.full) fullBodyParts.push(`Command: ${commandText.full}`);
         if (errorResult.full) fullBodyParts.push(errorResult.full);
         return chatView({
-            phase: held || evt.status === 'non_zero_exit' ? 'warn' : evt.status === 'interrupted' ? 'info' : 'error',
+            phase: refusedByStop(evt) ? 'info' : held || evt.status === 'non_zero_exit' ? 'warn' : evt.status === 'interrupted' ? 'info' : 'error',
             headline: failedStepHeadline(evt),
             body: shortText(bodyParts.join(' '), 220),
             fullBody: fullBodyParts.join('\n\n'),
-            visible: true,
+            visible: true, hostRefusedStep: Boolean(refusal),
             dedupeKey: toolCallKey(evt, groupId),
             toolCall: toolObservation(evt, groupId, held ? 'held' : evt.status === 'interrupted' ? 'interrupted' : 'error'),
         });

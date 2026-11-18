@@ -1884,19 +1884,19 @@ The frozen ABI is documented in
 This section shows the practical shape.
 
 Extensions declare the PluginAPI generation they bind against in the manifest
-(PluginAPI 2.5; a payload declaring any 2.x minimum negotiates the host's 2.5, methods included; a tool row
-with `touches` needs "2.5", which an older host refuses before import):
+(PluginAPI 2.6; a payload declaring any 2.x minimum negotiates the host's 2.6, methods included; a tool row
+with `touches` needs "2.5" and a payload relying on `get_stop_state` "2.6", which an older host refuses before import):
 
 ```yaml
-plugin_api: "2.5"            # major strict; minor = required minimum
+plugin_api: "2.6"            # major strict; minor = required minimum
 # or, with required capabilities (closed set, validated per execution mode):
 # plugin_api:
-#   version: "2.5"
+#   version: "2.6"
 #   capabilities: [register_tool, subscribe_event]
 ```
 
 A payload without the field binds the legacy "1.3" generation by
-construction (2.4's `get_settings_state` and `refresh_companion_process` refuse it): an already-reviewed payload keeps loading on its existing
+construction (`get_settings_state`, `refresh_companion_process` and `get_stop_state` refuse it): an already-reviewed payload keeps loading on its existing
 hash-bound review PASS, but a NEW review PASS (LLM review, owner attestation,
 or an install-basis acceptance) is refused until the field is declared.
 
@@ -2099,17 +2099,36 @@ objects are `ref`s whose `address` and `field` read the stored value whole; a lo
 (a title, a label) is a preview whose `derived_from` names its source. Search and inbound
 links are the skill's work over these reads, stating the coverage read.
 
+### Stop inside a multi-step tool call
+
+A Stop reaches a running call only when the call asks. `api.get_stop_state()` answers for the tool call running in this
+context, in both execution modes, with no permission or grant; the host names the call and its task. Ask it last before
+each new independent action of the call, after that action's preparation, the first one included: the next request of
+a message sent in parts, the next key chord. The answer is `{"status", "reason", "note"}`; only `continue` lets the
+action start (`reason` `no_task`: a call made for no task, which no Stop governs). `stop` names why it must not
+(`cancelled`, `task_cancelled`, `operation_already_returned`, `stop_unreadable`, each defined on the `PluginAPI`
+protocol), and `unbound` (no call of this skill is bound where it asks) permits nothing either. In process a call is
+bound to its context (its thread, its async task and contexts copied from them): a thread you start without that
+context, a route, a WebSocket handler or a companion reads `unbound`. Out of process a tool call's child binds that
+one call for all its threads until it returns.
+
+If not `continue`, start nothing more; return receipts (`observed_effect` only for actions that ran).
+Never retry or resume the rest. The first `stop` holds for the call. Host facts are `meta.control_reason` and
+`meta.refused_step`: only a non-error completion becomes `blocked` / `OWNER_OPERATION_REFUSED`. Errors and timeouts
+keep their status/code; `{"ok": false}` is an error even with `reason: stopped`. Result review
+reads your report unchanged; the host attests only its refusal. Return rather than raise: exceptions return no report
+of effects; only your state retains them. This reads immediate task Stop, not Wrap up, Pause, a deadline or the End of a live conversation.
+Stop after the read cannot reach an action already starting. Never split one action (key press/release, drag).
+The host checks between whole calls for extensions that never ask. Bundled `unix_computer_use` also checks before `key` can raise the target and before each chord.
+
 ### Async tool handlers
 
-Tool handlers can be plain functions OR `async def` coroutines —
-the registry detects coroutines and runs them on a helper thread with
-a fresh event loop under `asyncio.wait_for(timeout_sec)`. They do not
-execute on the server's main event loop, so do not rely on loop-local
-state captured at registration time, as for HTTP routes and WS handlers.
-Supervised tasks and async event subscribers share the host extension loop
-instead; do not share loop-local objects between that loop and a route or
-WebSocket handler. Blocking I/O on the extension loop still delays other
-extensions.
+Tool handlers may be plain functions or `async def`. A coroutine runs on a helper thread's own loop or in the
+per-call child's loop. Returning or raising closes the handler's Stop reader before loop cleanup. Its report is
+distinct from runner shutdown. If a child exits or times out before handing over its result, neither its report nor its refusal is confirmed.
+Do not rely on loop-local state captured at registration. Supervised tasks and async event subscribers share
+the host extension loop; do not share its loop-local objects with routes or WebSocket handlers. Blocking I/O
+on that loop delays other extensions.
 
 ```python
 async def do_search(ctx, query: str = ""):
@@ -2310,8 +2329,10 @@ HEAD/Range behavior and background actions. There is no total or pre-header
 request timer: finish, abort, disconnect or unloading that skill instance ends
 its response. Slow consumption is backpressure, not a timeout. A body failure
 breaks the stream; cleanup failure after the complete body is logged separately.
-The incoming request body retains its 512 KiB cap, and one-shot tool/catalog/WS
-results retain their existing caps and timeouts.
+The incoming request body and one-shot tool/catalog/WS results each have a
+512 KiB cap. A tool child's Stop record has a separate byte allowance. When
+the result exceeds its cap, the host receives the size error and any recorded
+refusal. One-shot timeouts still apply.
 
 The out-of-process / companion WS push (`POST /ui/ws-message`) admits
 a 60-message burst per skill and then one message per second (the excess gets a

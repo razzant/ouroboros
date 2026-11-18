@@ -955,6 +955,7 @@ def _emit_finished(tools: ToolRegistry, live: Dict[str, Any], result: Dict[str, 
     """The live ``tool_call_finished`` frame of one call (every branch shares it)."""
     result.update(invocation_fields(live))
     result_meta = result.get("result_meta") or {}
+    published = result_meta.get("tool_result_meta") or {}  # a call the host refused a further step reads so live too
     _emit_live_log(tools, {
         **{key: value for key, value in live.items() if key not in {"ts", "timeout_sec", "terminal_wait"}},
         "type": "tool_call_finished",
@@ -964,6 +965,8 @@ def _emit_finished(tools: ToolRegistry, live: Dict[str, Any], result: Dict[str, 
         "status": result_meta.get("status"),
         **_process_fact_fields(result_meta),
         **({"verification": result_meta["verification"]} if "verification" in result_meta else {}),
+        **({"tool_result_meta": {key: published[key] for key in ("refused_step", "control_reason") if key in published}}
+           if published.get("refused_step") is True else {}),
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result.get("result", ""), 500)),
         **extra,
     })

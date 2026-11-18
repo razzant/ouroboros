@@ -143,27 +143,32 @@ def test_plugin_api_keeps_memory_voice_and_every_prior_minimum(monkeypatch):
     from ouroboros.contracts.plugin_api import (PLUGIN_API_SURFACE_FINGERPRINTS, PLUGIN_API_VERSION,
                                                 VALID_EXTENSION_PERMISSIONS, negotiate_plugin_api, plugin_api_surface_fingerprint)
 
-    # 2.3 united the memory reader and voice; 2.4 added settings state and a companion refresh beside them; 2.5 adds
-    # no method: it is the minimum a connector's target groups (``touches``) declare.
-    assert PLUGIN_API_VERSION == "2.5"
+    # 2.3 united the memory reader and voice; 2.4 added settings state and a companion refresh beside them; 2.5 added
+    # no method (the minimum a connector's target groups, ``touches``, declare); 2.6 adds the running call's Stop.
+    assert PLUGIN_API_VERSION == "2.6"
     assert PLUGIN_API_SURFACE_FINGERPRINTS == {
         "2.0": "03fabdf4334e6b2bde217b4cb83a80faaebc773ddce870546dd2108b75de17ca",
         "2.1": "7e288212fd5bcaaa5de961bde9180ca8669e45c00bbfa8d59ffbccccf9442cdb",
         "2.2": "46ee2d134ca3c3957adef9366b326b97a84abaae757e8e9d18030a7838329506",
         "2.3": "bd1062f96b99607b4651ba319e74f9620a5bae08ad1aa0d5dcb106d8ad542d12",
         "2.4": "c472950639f4467a21f4407d9416871e8f744f27392f1a8d5f711ade39579d7c",
-        "2.5": plugin_api_surface_fingerprint(),
+        "2.5": "b1539cbdb03a6b4d05111f645c94f9de32c3113b36be68d21fd6cc8d809a5a52",
+        "2.6": plugin_api_surface_fingerprint(),
     }
-    monkeypatch.setattr(papi, "PLUGIN_API_VERSION", "2.4")  # the same surface under 2.4's name: no method was added
-    assert plugin_api_surface_fingerprint() == PLUGIN_API_SURFACE_FINGERPRINTS["2.4"]
+    # 2.6's one new method is the whole difference from 2.5: without it, under 2.5's name, the live surface is 2.5's.
+    monkeypatch.setattr(papi, "PLUGIN_API_VERSION", "2.5")
+    monkeypatch.setattr(papi, "ALWAYS_AVAILABLE_CAPABILITIES", papi.ALWAYS_AVAILABLE_CAPABILITIES - {"get_stop_state"})
+    monkeypatch.delattr(papi.PluginAPI, "get_stop_state")
+    assert plugin_api_surface_fingerprint() == PLUGIN_API_SURFACE_FINGERPRINTS["2.5"]
     monkeypatch.undo()
     assert {"realtime_provider", "live_conversation", "call_peer"} <= VALID_EXTENSION_PERMISSIONS
 
     from types import SimpleNamespace
-    for minimum in ("2.0", "2.1", "2.2", "2.3", "2.4", "2.5"):
-        for capabilities in (["read_memory"], ["register_realtime_provider", "register_live_conversation"]):
+    for minimum in ("2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6"):
+        for capabilities in (["read_memory"], ["register_realtime_provider", "register_live_conversation"],
+                             ["get_stop_state"]):
             result = negotiate_plugin_api(SimpleNamespace(plugin_api={"version": minimum, "capabilities": capabilities}))
-            assert result.ok and result.generation == "2.5", result
+            assert result.ok and result.generation == "2.6", result
 
 
 def test_new_fit_ports_keep_old_host_defaults():

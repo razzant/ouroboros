@@ -1379,12 +1379,15 @@ def refresh_verification_ledger_artifacts(
 
 
 def _ledger_summary(entries: List[Any]) -> Dict[str, Any]:
-    """Entry count and failure flag; a recorded or draft task contract is no failure."""
+    """Count every entry; a plain host refusal is a control observation, including after refresh."""
+    from ouroboros.tool_call_log import is_plain_step_refusal
+
     return {
         "entry_count": len(entries),
         "has_failures": any(
             str(item.get("status") or "").lower() not in _LEDGER_NON_FAILURE_STATUSES
             and not (str(item.get("kind") or "") == "task_contract" and str(item.get("status") or "").lower() in {"draft", "recorded"})
+            and not (item.get("kind") == "tool_call" and is_plain_step_refusal(item))
             for item in entries
             if isinstance(item, dict)
         ),
@@ -1424,6 +1427,8 @@ def build_verification_ledger(
             "objective": str(contract.get("objective") or ""),
             "expected_output": str(contract.get("expected_output") or ""),
         })
+    from ouroboros.tool_call_log import has_refused_step
+
     for idx, call in enumerate(llm_trace.get("tool_calls") or [], start=1):
         if not isinstance(call, dict):
             continue
@@ -1444,6 +1449,10 @@ def build_verification_ledger(
             }
             if ignored:
                 entry["blocked_status"] = status
+            if has_refused_step(call):
+                # Keep only the host's control facts, in their recorded shape for the same reader on refresh.
+                meta = call["tool_result_meta"]
+                entry["tool_result_meta"] = {k: meta[k] for k in ("refused_step", "control_reason") if k in meta}
             entries.append(entry)
     for recovery in execution_axis.get("recoveries") or []:
         if isinstance(recovery, dict):
