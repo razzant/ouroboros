@@ -76,7 +76,7 @@ def round_window(slot: Any = None) -> Iterator[None]:
     since, prologue = getattr(slot, "_round_prep_since", None), getattr(slot, "_round_prologue", None)
     if since is not None:
         slot._round_prep_since = None
-    if prologue is not None:  # a turn's restore, route rebind and tools, measured before its first round (``loop``)
+    if prologue is not None:  # measured before this window: a start (``loop``), a post-batch read (``loop_budget``)
         slot._round_prologue = None
     now = (time.perf_counter(), time.thread_time(), threading.get_ident())
     with measured_sections():

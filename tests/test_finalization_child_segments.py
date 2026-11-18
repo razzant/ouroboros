@@ -4,7 +4,8 @@ The real final-answer gate (``loop.run_llm_loop`` -> ``loop_delivery._no_tool_fi
 over one parent with four dispositioned children. ``task_status.select_lineage`` runs once per real listing and
 ``task_custody.store_artifact_view`` once per materialized child. A child change at a boundary between segments
 (the services' stop, the result review, admission's drain) or inside one reaches the delivery decision before the
-answer leaves; a content-only change without registration keeps the child's identity and delivers.
+answer leaves; a content-only change without registration keeps the child's identity and delivers. A round that
+retains no answer reads no child result, however many children there are.
 """
 from __future__ import annotations
 
@@ -92,7 +93,7 @@ def _finish(answer):
         "name": "finish_task", "arguments": json.dumps({"action": "finish", "answer": answer})}}]}
 
 
-def run_gate(root, monkeypatch, answers, *, admission=False):
+def run_gate(root, monkeypatch, answers, *, admission=False, on_call=lambda: None):
     import ouroboros.loop as loop
     from ouroboros import finalization_timing
     from ouroboros.tools.registry import ToolRegistry
@@ -105,6 +106,7 @@ def run_gate(root, monkeypatch, answers, *, admission=False):
 
     def fake_call(_llm, request_messages, *_args, **_kwargs):
         calls.append(len(request_messages))
+        on_call()
         finalization_timing.mark_last_answer({})
         answer = next(script)
         return ({"role": "assistant", **answer} if isinstance(answer, dict)
@@ -258,6 +260,34 @@ def test_a_child_change_between_or_inside_segments_holds_the_retained_answer(tre
     assert "evidence_changed" in holds, holds
     assert gate["result"] == "Second answer." and gate["model_calls"] == 2
     assert gate["candidate"]["evidence_current"] is True
+
+
+@pytest.mark.parametrize("children", [1, 30])
+def test_an_ordinary_round_reads_no_child_result_whatever_the_number_of_children(tmp_path, monkeypatch, children):
+    """Before each model call of a round that retains no answer, no child result is read, at one child or thirty;
+    the delivery that ends the task still reads them through the same spied reader (calls are counted, since the
+    evidence read swallows a raised exception)."""
+    import ouroboros.loop as loop
+
+    root = tmp_path / "data"
+    root.mkdir()
+    for index in range(children):
+        _child(root, f"child{index}")
+        _dispose(root, f"child{index}")
+    (root / "fact.txt").write_text("one tool result", encoding="utf-8")
+    reads, at_model_call, real = [], [], loop._load_direct_child_results
+
+    def spy(*args, **kwargs):
+        reads.append(args[1:])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "_load_direct_child_results", spy)
+    read_fact = {"content": None, "tool_calls": [{"id": "read-fact", "type": "function", "function": {
+        "name": "read_file", "arguments": json.dumps({"path": "fact.txt"})}}]}
+    gate = run_gate(root, monkeypatch, [read_fact, "Final answer."], on_call=lambda: at_model_call.append(len(reads)))
+    assert gate["result"] == "Final answer." and gate["model_calls"] == 2
+    assert at_model_call == [0, 0], "an ordinary round read child results"
+    assert reads and set(reads) == {("parent1", "parent1")}, "the delivery reads the children through this reader"
 
 
 def test_a_content_only_change_keeps_the_childs_identity_and_delivers(tree, monkeypatch):

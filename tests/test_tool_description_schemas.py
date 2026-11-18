@@ -137,10 +137,12 @@ _SQL_ONLY = "db, query, max_rows, snapshot and timeout_sec are op=sql only"
 # window stays distinguishable, PR1696 native task wait); before it c806a86311a0a965.
 # schedule_subagent: + memory_view (the fields a parent may widen a child's view by), #2924; its lead pays the
 # custom-tool budget again; before it 3d5b8e7b8e317503 / 2e04edea50ceb1b6.
+# delegate_wait: + sleep_mode (optional, in_slot|warm|cold: the task waits' choice), every profile; before it
+# 60ab2c0f421da812.
 _STRUCTURE = {
     "query_data": {"full": "d7100565e686c951", "readonly": "d7100565e686c951", "acting": "d7100565e686c951"},
     "delegate_start": {"full": "a2f6fdb7a8bf6822", "readonly": "e7dcf92431326bc5", "acting": "e7dcf92431326bc5"},
-    "delegate_wait": {"full": "60ab2c0f421da812", "readonly": "60ab2c0f421da812", "acting": "60ab2c0f421da812"},
+    "delegate_wait": {"full": "a5b3b83441b79479", "readonly": "a5b3b83441b79479", "acting": "a5b3b83441b79479"},
     "wait_tasks": {"full": "50667317e4bef21f", "readonly": "50667317e4bef21f", "acting": "50667317e4bef21f"},
     # readonly prunes write_surface, write_root, protected_paths_grant and external_tool_grants.
     "schedule_subagent": {"full": "f04afa9698352e6a", "readonly": "69f811a4b8ca2ba2", "acting": "f04afa9698352e6a"},

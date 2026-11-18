@@ -13,9 +13,9 @@ Ready sources answer at once; unacknowledged wakes replay their facts
 (``replay_of``) before sleeping. Owed delivery follows mail drain; durable wakes
 coalesce. Mail wakes the sleep, but a wake carries only its loop controls: the
 round-top drain delivers the rest as its sender's words before the next request.
-Retained output precedes a run-detail read. Without a continuation
-owner the same sources are waited on in-process. There is no wait window or
-run-count cap; legacy ``wait_sec`` is inert.
+Retained output precedes a run-detail read. Without a continuation owner, or named
+``sleep_mode=in_slot``, the same sources are waited on in-process. There is no wait
+window or run-count cap; legacy ``wait_sec`` is inert.
 
 ``deliver_wake`` binds typed metadata/JSON to the saved whole view needed for
 loop/startup ACK: inline or complete exact-source reads
@@ -1289,8 +1289,8 @@ def owed_wake(ctx: Any, descriptor: dict[str, Any]) -> tuple[str, dict[str, Any]
 
 
 def _wait_in_slot(ctx: Any, descriptor: dict[str, Any]) -> ToolResult:
-    """A turn with no continuation owner to sleep under (a Presence turn) waits in its slot for the same
-    sources, read on the body's beat; its owner's Stop of the in-process turn ends the wait too."""
+    """A wait named ``in_slot``, or a turn with no continuation owner to sleep under (a Presence turn), waits in its
+    slot for the same sources, read on the body's beat; its owner's Stop of the in-process turn ends the wait too."""
     from ouroboros import model_sleep
     from supervisor.owner_stop import in_process_stop_now
 
@@ -1314,17 +1314,22 @@ def _wait_in_slot(ctx: Any, descriptor: dict[str, Any]) -> ToolResult:
     return _publish(ctx, descriptor, woke_by)
 
 
-def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = None,
+def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = None, sleep_mode: Any = None,
              checkpoint_after_sec: Optional[int] = None, checkpoint_reason: str = "") -> ToolResult:
-    """``delegate_wait`` as a sleep on runs: what is already there answers through this result; otherwise
-    the task's ordinary sleep is armed (``model_sleep.request_default_sleep``: its process is released once
-    nothing live keeps it) and this wait's result is owed to the first model request after the wake. A run
-    this task holds only in this process (``started_uncustodied``: its STARTED row never landed) is one no
-    durable source can wake a sleep on, so a wait selecting it answers now: with what is already there, else
-    with that run's one addressed read."""
+    """``delegate_wait`` as a sleep on runs: what is already there answers through this result, in any mode; otherwise
+    the sleep is armed in the mode named (``native_task_wait.sleep_choice``, as the task waits choose; omitted:
+    ``model_sleep.request_default_sleep``) and its result is owed to the first model request after the wake, or it
+    waits in this call (``in_slot``). An earlier call of the batch comes first: its armed wait refuses this one, its
+    staged hold is shown before anything waits (an in-slot wait shows it first); with no continuation owner only arming is refused. A run this task holds only in this
+    process (``started_uncustodied``: its STARTED row never landed) is one no durable source can wake a sleep on, so a
+    wait selecting it answers now: with what is already there, else with that run's one addressed read."""
     from ouroboros import model_sleep
     from ouroboros.delegate_custody_current import run as current_run
+    from ouroboros.native_task_wait import sleep_choice
 
+    mode, refusal = sleep_choice(sleep_mode, None, None, None, ctx)
+    if refusal:
+        return _fail("delegate_wait", "sleep_mode_refused", refusal)
     reason_text = str(checkpoint_reason or "").strip()
     ignored_note = ""
     if checkpoint_after_sec == 0 and not reason_text and not isinstance(checkpoint_after_sec, bool):
@@ -1369,8 +1374,8 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
         "arguments": {key: value for key, value in {
             "run_id" if len(run_ids) == 1 and not isinstance(run_id, list) else "runs":
                 run_ids[0] if len(run_ids) == 1 and not isinstance(run_id, list) else run_ids,
-            "since_seq": since_seq, "checkpoint_after_sec": delay, "checkpoint_reason": reason_text}.items()
-            if value not in (None, "")},
+            "since_seq": since_seq, "checkpoint_after_sec": delay, "checkpoint_reason": reason_text,
+            "sleep_mode": sleep_mode}.items() if value not in (None, "")},
         **({"since_seq": int(since_seq)} if since_seq is not None else {}),
         **({"checkpoint": {"reason": reason_text, "after_sec": delay}} if delay is not None else {}),
         **({"ignored_arguments": [ignored_note]} if ignored_note else {}),
@@ -1382,11 +1387,11 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
         return _fail("delegate_wait", "run_ownership_unknown", str(exc))
     descriptor["wake_at"] = chosen["wake_at"]
     chosen.update(_choice(descriptor))
-    if delay is not None:
-        _emit(ctx, "delegate_supervision_checkpoint_scheduled", {
-            "runs": run_ids, "wake_at": chosen["wake_at"], "reason": reason_text})
 
     def entered(**facts: Any) -> None:  # the durable trail of each wait that answers or sleeps (not a replay)
+        if delay is not None and facts.get("outcome") != "dependency_held":  # a refused or held wait schedules none
+            _emit(ctx, "delegate_supervision_checkpoint_scheduled", {
+                "runs": run_ids, "wake_at": chosen["wake_at"], "reason": reason_text})
         _emit(ctx, "delegate_supervision_wait_entered", {"run_id": run_ids[0], "runs": run_ids, **facts})
 
     if in_process:
@@ -1401,20 +1406,34 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
         entered(mode="answered_at_call", held_in_process=in_process)
         return _publish(ctx, {**descriptor, "runs": in_process + [rid for rid in run_ids if rid not in in_process]},
                         woke_by)
-    if not callable(getattr(ctx, "owner_wait_callback", None)):
-        entered(mode="in_slot")
-        return _wait_in_slot(ctx, descriptor)
     from ouroboros.native_task_wait import armed_conflict
 
-    if conflict := armed_conflict(ctx, native=True):
+    if conflict := armed_conflict(ctx, native=True):  # before any slot: an earlier call's wait is owed first
         return _fail("delegate_wait", "wait_already_armed", conflict)
+    if mode == "in_slot" and (held := model_sleep.unshown_holds(ctx, {})):  # an earlier call's: shown first
+        meta, withdrawn = model_sleep.hold_notice(ctx, held)
+        return delegate_result({"reason": "dependency_held", "slept": False, "mode": mode, "held": held,
+                                "runs": run_ids, "note": model_sleep.IN_SLOT_HOLD_NOTE + withdrawn}, meta=meta)
+    if mode == "in_slot":  # named, or no continuation owner to sleep under
+        entered(mode="in_slot")
+        return _wait_in_slot(ctx, descriptor)
+    if not callable(getattr(ctx, "owner_wait_callback", None)):  # named warm/cold: only what is there answers
+        if not (woke_by := model_sleep.wake_reason(ctx, chosen)):
+            return _fail("delegate_wait", "sleep_mode_refused",
+                         "this task has no continuation owner to sleep under; use sleep_mode=in_slot")
+        entered(outcome="ready", mode=mode)
+        return _publish(ctx, descriptor, woke_by)
     try:
-        outcome = model_sleep.request_default_sleep(ctx, chosen)
+        outcome = (model_sleep.request_default_sleep(ctx, chosen) if mode == "default"
+                   else model_sleep.request_sleep(ctx, chosen, mode))
     except ValueError as exc:
         return _fail("delegate_wait", "sleep_refused", str(exc))
     entered(outcome=outcome["reason"], **{key: outcome[key] for key in ("sleep_id", "mode") if outcome.get(key)})
     if outcome["reason"] == "ready":  # nothing parks: what is there answers through this result
         return _publish(ctx, descriptor, str(outcome.get("woke_by") or ""), questions=outcome.get("questions", []))
+    if outcome["reason"] == "dependency_held":  # an earlier call's unshown hold: shown first, nothing parks
+        meta, withdrawn = model_sleep.hold_notice(ctx, outcome["held"])
+        return delegate_result({**outcome, "runs": run_ids, "note": outcome["note"] + withdrawn}, meta=meta)
     descriptor.update(sleep_id=outcome["sleep_id"], mode=outcome["mode"])
     ctx._pending_task_wait = descriptor  # owed to the first request after the wake (``native_task_wait.deliver_owed``)
     return delegate_result({
@@ -1514,6 +1533,7 @@ def delegate_wait_entry(
     checkpoint_after_sec: Optional[int] = None,
     checkpoint_reason: str = "",
     runs: Optional[list[str]] = None,
+    sleep_mode: Optional[str] = None,
 ) -> ToolResult:
     """``delegate_wait``: a sleep on runs (``run_wait``); hidden ``wait_sec`` is accepted only for old
     transcripts and waits on nothing."""
@@ -1530,7 +1550,7 @@ def delegate_wait_entry(
         })
 
     try:
-        return run_wait(ctx, runs if runs is not None else run_id, since_seq=since_seq,
+        return run_wait(ctx, runs if runs is not None else run_id, since_seq=since_seq, sleep_mode=sleep_mode,
                         checkpoint_after_sec=checkpoint_after_sec, checkpoint_reason=checkpoint_reason)
     except OSError as exc:  # Only a save failure names supervision_stage; other errors keep their handling.
         if not (stage := getattr(exc, "supervision_stage", "")):

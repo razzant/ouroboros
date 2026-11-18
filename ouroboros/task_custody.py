@@ -75,6 +75,7 @@ import logging
 import os
 import pathlib
 import shutil
+import time
 import uuid
 from typing import Any, Callable, ContextManager, Dict, Iterator, List, Optional, Tuple
 
@@ -1326,14 +1327,16 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
     final census, probe and move happen inside it. ``stop()`` closes a maintenance
     generation between phases. ``admission_rollback`` additionally lets a never-started
     task's drive go without a settled row. Returns ``{"status": "removed" | "retained",
-    "reason", "published"}`` and, given a prune ``report``, records a kept drive. ``owed``: the pass's one read of the
-    kept-output debts (``owed_declarations``) for the first gate; the move rechecks with its own.
+    "reason", "published"}`` and, given a prune ``report``, records a kept drive and Phase B's step seconds
+    (``under_q_sec``, on the event of a pass that writes its ``headless_task_drive_prune`` event, never its job row). ``owed``: the pass's one
+    read of the kept-output debts (``owed_declarations``) for the first gate; the move rechecks with its own.
     """
     canonical = pathlib.Path(canonical_root).resolve(strict=False)
     tid = validate_task_id(task_id)
     drive = pathlib.Path(drive).resolve(strict=False)
     base = drive.parent if drive.parent.name == tid and drive.name == "data" else drive
     outcome: Dict[str, Any] = {"status": "retained", "reason": "", "published": 0}
+    under_q: List[float] = []  # Phase B's steps under the guard (rechecks, locks, move): the pass's ``under_q_sec``
     staging = canonical / _STAGING_DIR / f"{tid}-{uuid.uuid4().hex[:12]}"
     closed = stop or (lambda: False)
     try:
@@ -1373,7 +1376,10 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
             alive = live(item["task_id"])
             if alive is not False:
                 raise _Retained("liveness_unknown" if alive is None else "task_live")
-        with (guard() if guard is not None else contextlib.nullcontext(True)) as allowed:  # Phase B: the move
+        with contextlib.ExitStack() as phase_b:  # Phase B: the move, under the guard
+            allowed = phase_b.enter_context(guard() if guard is not None else contextlib.nullcontext(True))
+            phase_b.callback(lambda: under_q.append(time.monotonic()))  # its last step ends as the guard is left
+            under_q.append(time.monotonic())
             if not allowed:
                 raise _Retained("generation_closed")
             if _occupants(drive, tid) != occupants:
@@ -1386,6 +1392,7 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                 alive = live(item["task_id"])
                 if alive is not False:
                     raise _Retained("liveness_unknown" if alive is None else "task_live")
+            under_q.append(time.monotonic())
             with contextlib.ExitStack() as stack:
                 for item in prepared:
                     if not stack.enter_context(task_custody_lock(canonical, item["task_id"],
@@ -1398,6 +1405,7 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                     raise _Retained("generation_closed")  # closed while the locks were awaited: no move
                 for item in prepared:
                     _recheck_occupant(canonical, drive, item)
+                under_q.append(time.monotonic())
                 trash = canonical / _TRASH_DIR / f"{tid}-{uuid.uuid4().hex[:12]}"
                 trash.parent.mkdir(parents=True, exist_ok=True)
                 try:  # this pass itself read the drive's store; Windows moves no folder with an open file
@@ -1417,6 +1425,9 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
             log.warning("Child drive %s kept: custody could not be proven", drive, exc_info=True)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+    if report is not None and len(under_q) > 1:
+        report.setdefault("under_q_sec", []).append({"task_id": tid, **{step: round(b - a, 3) for step, a, b in zip(
+            ("rechecks", "locks", "move"), under_q, under_q[1:])}})
     if report is not None:
         if outcome["published"]:
             report.setdefault("custodied", []).append({"task_id": tid, "published": outcome["published"]})

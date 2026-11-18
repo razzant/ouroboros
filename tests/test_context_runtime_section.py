@@ -912,10 +912,13 @@ class TestVitalsFact:
         monkeypatch.setenv("OUROBOROS_IN_WORKER", "1")  # a deep self-review's pooled worker: no ring of its own
         _section, data = self._runtime(env)
         assert data["vitals"]["owner_turns_note"] == "none in the journal's tail" and "owner_turns" not in data["vitals"]
+        resumed = {"resumed": "exact_pause", "origin_accepted_at": "2026-10-24T14:00:00+00:00", "handler_wait_sec": 33.9}
         self._journal(tmp_path, [{"ts": f"2026-10-25T19:5{n}:00+00:00", "type": "direct_turn", "execution_id": f"turn_{n}",
-                                  "chat_id": 1, "owner_wait_sec": float(n), "dispatch": "observed_send"} for n in range(3)])
+                                  "chat_id": 1, **(resumed if n == 2 else {"owner_wait_sec": float(n)}),
+                                  "dispatch": "observed_send"} for n in range(3)])
         _section, data = self._runtime(env)
-        assert data["vitals"]["owner_turns"] == ["19:51 chat 1 waited 1.0 s", "19:52 chat 1 waited 2.0 s"]
+        assert data["vitals"]["owner_turns"] == ["19:51 chat 1 waited 1.0 s",
+                                                 "19:52 chat 1 resumed (exact_pause) 33.9 s from its own entry, its message accepted 10-24 14:00"]
         assert "owner_turns_note" not in data["vitals"]
 
     def test_the_journal_per_store_and_the_wal_gate_only_for_a_rollback_store(self, tmp_path, monkeypatch):

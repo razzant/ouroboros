@@ -66,6 +66,22 @@ def remembered_engine(gateway):
     return (str(engine.get("version") or ""), str(engine.get("sha") or "")) if isinstance(engine, dict) else None
 
 
+def current_engine():
+    """The whole ``remembered_engine`` of the descriptor ``model_gateway`` selects, else ``None`` (no handshake of that
+    generation remembered, or an identity without its build sha): the descriptor is read, no request is made."""
+    from types import SimpleNamespace
+    from ouroboros.claudexor_daemon import attach_home, attached_endpoint, owned_config_dir
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable, discover_daemon_at
+
+    try:
+        home = attach_home()
+        engine = remembered_engine(SimpleNamespace(_endpoint=attached_endpoint(home) if home is not None
+                                                   else discover_daemon_at(owned_config_dir())))
+    except ClaudexorUnavailable:
+        return None
+    return engine if engine and all(engine) else None
+
+
 def model_gateway(factory):
     """Use a proven generation, or let the existing owner ensure/probe it."""
     from ouroboros.claudexor_daemon import attach_home, attached_endpoint, get_owned_daemon, owned_config_dir

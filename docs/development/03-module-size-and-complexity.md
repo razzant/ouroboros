@@ -47,8 +47,7 @@ contract-bearing comment, docstring, message or test; a book's reason or qualifi
 defect to report, not paydown (BIBLE P7 «first simplify what exists»). When nothing honest
 fits, the record says so: a band entry with its reason, or the owner's `book-growth` label;
 the hard cap, the function gate and the byte debt take no new record, so a change or merge
-that crosses one pays as above. Enforcement: CHECKLISTS item 27 `size_cap_paydown`,
-advisory when applicable.
+that crosses one pays as above. Enforcement: CHECKLISTS item 27 `size_cap_paydown`.
 
 ### Pragmatic SOLID
 
@@ -74,7 +73,8 @@ follows. Diff size, line count and file count alone are not findings; CHECKLISTS
 ### Shared behavior and data-flow changes
 
 For shared behavior/data changes, name the authority, fact identity/scope and affected
-producers/consumers, including unchanged consumers whose inputs or assumptions change.
+producers/consumers, including unchanged consumers whose inputs or assumptions change. A change
+that removes a reader names the producers left without one.
 Preserve live/recovery semantics at comparable freshness; explain legitimate differences.
 Verify falsifiable behavior at real consumer boundaries, not helper outputs or matching
 field names; select paths from dependencies, not a fixed inventory. Enforcement:
@@ -107,8 +107,10 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
   unchanged: `tests/test_store_journal.py`).
 - **Measure growth:** history, object count, nesting, cold caches and contention, by
   receipts (`work`, L7) and real-reader spies. Telemetry adds no
-  steady-state writes/history reads. Remove repetition or reuse a validated view before
-  adding a projection/cache. Unknown is never empty; no universal time limit, benchmark or approval gate.
+  steady-state writes/history reads. A repeating step does the work its decision, audit or recovery
+  needs; finished history, its own included, grows that work only through what they read; a computation
+  with no reader left on that path is removed from it. Unknown is never empty; no universal time limit,
+  benchmark or approval gate.
 - **Passive GET:** rendering/stored display adds no steady-state writes. Already-performed
   external discovery may store typed provider facts through their existing evidence owner;
   this permits no new network or control-state writes. `usage_store.py::read` may initialize
@@ -122,12 +124,10 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
   per reader (`delegate_custody_current.held_runs`, `task_store.owing_documents`); one batch of
   stored results (`obligations.result_rows`).
 
-CHECKLISTS item 9 `perf_lifecycle` covers changed readers, startup/shutdown, batches, endpoints, pollers, subscriptions and timers. Runtime `storage` supplies the last count; `query_data(kind="storage")` its detail. The mind judges growth (P5). New growing stores name their `storage.PLACES` entry and PERSISTENCE retirer.
+CHECKLISTS item 9 `perf_lifecycle` names the surfaces it reviews. Runtime `storage` supplies the last count; `query_data(kind="storage")` its detail. The mind judges growth (P5). New growing stores name their `storage.PLACES` entry and PERSISTENCE retirer.
 
-`tests/test_store_boot.py` fixes `prepare_startup_state` (a clean boot is one read
-transaction, no history access or writes);
-`tests/test_store_legacy_reconcile.py` covers both detector outcomes, cursor resume and the
-foreground CLI; the import/switch suites keep downgrade semantics.
+`tests/test_store_boot.py` fixes `prepare_startup_state` (ARCHITECTURE §2);
+`tests/test_store_legacy_reconcile.py` the legacy reconcile; the import/switch suites keep downgrade semantics.
 
 ### Invariant: Source-complete decision pipeline
 
@@ -158,7 +158,7 @@ invalid output contracts and delivery failures may affect review authority; wind
 sizing and reading diagnostics alone may not (BIBLE P3). Neither case blanks, rewrites
 or relabels the artifact.
 
-Enforcement: CHECKLISTS item 20 `source_completeness` (critical when applicable).
+Enforcement: CHECKLISTS item 20 `source_completeness`.
 
 #### Review presentation adapters
 

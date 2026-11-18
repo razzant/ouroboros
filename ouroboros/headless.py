@@ -511,7 +511,8 @@ def prune_task_trees(
 def remove_subagent_task_drive(parent_drive_root: pathlib.Path, task_id: str, *, live: Any = None,
                                guard: Any = None, admission_rollback: bool = False) -> bool:
     """Remove TASK's own drives through ``task_custody.settle_child_drive`` (the one deletion owner):
-    ``live`` is the supervisor's probe, ``guard`` its interlock, ``admission_rollback`` frees a never-started drive."""
+    ``live`` is the supervisor's probe, ``guard`` its interlock, ``admission_rollback`` frees a never-started drive.
+    No report is passed, so the steps under the interlock are not measured here."""
     from ouroboros.task_custody import own_child_drives, settle_child_drive
 
     try:

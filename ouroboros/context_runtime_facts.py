@@ -174,7 +174,8 @@ def round_clock_fact(ctx: Any, now: Optional[float] = None) -> str:
 def _owner_wait_fact(ctx: Any) -> str:
     """This turn's own wait, from the process-local registry (``TurnExecution.receipt``): when my human's
     message was accepted and how much later this request comes, so far, with the slowest phase; once
-    the first dispatch was observed, when it went out and on which basis. Elapsed only, never a
+    the first dispatch was observed, when it went out and on which basis. A resumed attempt's wait
+    starts at its own entry, the message's acceptance named beside it. Elapsed only, never a
     dispatch that has not happened; "" for a turn nobody awaits or a process that serves none."""
     from supervisor.active_activity import turn_execution
 
@@ -186,6 +187,9 @@ def _owner_wait_fact(ctx: Any) -> str:
                if receipt.get("slowest_phase") else "")
     if receipt.get("accepted_at"):
         origin, wait = f"my human's message accepted at {receipt['accepted_at']}", receipt["owner_wait_sec"]
+    elif receipt.get("resumed"):
+        origin, wait = (f"my resumed turn ({receipt['resumed']}) began at {receipt['entered_at']}, its message accepted "
+                        f"at {receipt.get('origin_accepted_at') or 'an unknown time'}"), receipt["handler_wait_sec"]
     else:
         origin, wait = f"my turn began at {receipt['entered_at']} (acceptance stamp unknown)", receipt["handler_wait_sec"]
     if receipt["dispatch"] == "not_observed":
@@ -555,13 +559,17 @@ def _supervisor_tail(root: pathlib.Path) -> Dict[str, Any]:
 
 
 def _owner_turn(row: Dict[str, Any], ended: Dict[str, Any], today: Any) -> str:
-    """One receipt in one line: when, the chat, how long my human waited to my first request (the
-    handler's own wait when the acceptance stamp was unknown), the slowest phase, the dispatch basis
-    when it was not a seen send, the turn's transactions per store (r/w) and chronicle opens, the stall
-    episode's top frame when its end row is still in the tail, and a journal row that was not written."""
-    wait = row.get("owner_wait_sec")
-    text = f"{_clock(row.get('ts'), today)} chat {row.get('chat_id')} waited " + (
-        _sec(wait) if wait is not None else f"{_sec(row.get('handler_wait_sec'))} from entry (acceptance stamp unknown)")
+    """One receipt in one line: when, the chat, how long my human waited to my first request (the handler's own wait
+    when the acceptance stamp was unknown; a resumed attempt's from its own entry), the slowest phase, the dispatch
+    basis when it was not a seen send, the turn's transactions per store (r/w) and chronicle opens, the stall episode's
+    top frame when its end row is still in the tail, and a journal row that was not written."""
+    wait, entry = row.get("owner_wait_sec"), _sec(row.get("handler_wait_sec"))
+    waited = (f"waited {_sec(wait)}" if wait is not None
+              else f"resumed ({row['resumed']}) {entry} from its own entry, its message accepted "
+                   f"{_clock(row.get('origin_accepted_at'), today) if row.get('origin_accepted_at') else 'at an unknown time'}"
+              if row.get("resumed")
+              else f"waited {entry} from entry (acceptance stamp unknown)")
+    text = f"{_clock(row.get('ts'), today)} chat {row.get('chat_id')} {waited}"
     if row.get("slowest_phase"):
         text += f", slowest {row['slowest_phase']} {_sec(row.get('slowest_phase_sec'))}"
     if row.get("dispatch") not in (None, "observed_send"):
