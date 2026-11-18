@@ -181,13 +181,13 @@ def test_a_late_answer_keeps_its_evidence_row_and_also_enters_dialogue(runtime, 
                if row.get("client_message_id") == "quiz_late_answer:task-quiz:late"]
     assert len(inbound) == 1 and inbound[0]["direction"] == "in"
     assert inbound[0]["chat_id"] == 1 and inbound[0]["source"] == "web"
-    # The owner's row is the owner's words (the ingress strips edge whitespace
-    # of every owner row), never the host frame; the frame is for the model.
-    assert inbound[0]["text"] == "After the fact"
+    # The accepted comment keeps its edge spaces in the room, at broadcast and on replay.
+    comment = fact["quiz"]["comment"]
+    assert inbound[0]["text"] == comment
     assert "[Owner quiz answer]" not in inbound[0]["text"]
     chats = [frame for frame in runtime.frames if frame.get("type") == "chat"]
     assert [frame["role"] for frame in chats] == ["user"]
-    assert chats[0]["content"] == "After the fact"
+    assert chats[0]["content"] == comment
 
     # Reload: history replays the late answer as an ordinary user row carrying
     # the owner's words; no path re-injects the frame into the bubble.
@@ -200,7 +200,7 @@ def test_a_late_answer_keeps_its_evidence_row_and_also_enters_dialogue(runtime, 
     replayed = [row for row in messages
                 if row.get("client_message_id") == "quiz_late_answer:task-quiz:late"]
     assert len(replayed) == 1 and replayed[0]["role"] == "user"
-    assert replayed[0]["text"] == "After the fact"
+    assert replayed[0]["text"] == comment
     assert not [row for row in messages if row.get("role") == "user"
                 and "[Owner quiz answer]" in str(row.get("text") or "")]
 

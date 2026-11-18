@@ -82,7 +82,7 @@ def test_a_reply_target_rides_the_requirements_into_a_continue_successor(tmp_pat
         "owner_corpus": owner_corpus_rows(sources)})
     _initialize_owner_directives(successor, [{"role": "user", "content": "[CONTINUE] work order"}])
     assert _targets(successor) == [PROPOSAL, "Sasha's draft."]
-    assert [row.get("client_message_id") for row in successor._owner_directives] == [None, "owner-2"]
+    assert [row.get("client_message_id") for row in successor._owner_directives] == ["replying-owner", "owner-2"]
 
 
 @pytest.mark.parametrize("source", ["initial_user", "owner_mailbox"])
