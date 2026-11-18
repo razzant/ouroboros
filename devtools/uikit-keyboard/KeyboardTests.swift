@@ -1,7 +1,7 @@
 import XCTest
 
 final class KeyboardTests: XCTestCase {
-    @MainActor private func waitFor(_ phase: String, on trace: XCUIElement, seconds: TimeInterval = 10) -> Bool {
+    @MainActor private func waitFor(_ phase: String, on trace: XCUIElement, seconds: TimeInterval = 20) -> Bool {
         let condition = NSPredicate(format: "value CONTAINS %@", "|\(phase)|")
         return XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: condition, object: trace)],
                               timeout: seconds) == .completed
@@ -35,7 +35,7 @@ final class KeyboardTests: XCTestCase {
         }
 
         let initial = scenario.hasPrefix("main-") ? "latest" : scenario
-        XCTAssertTrue(waitFor(initial, on: trace, seconds: 30), "[probe:initial-position]")
+        XCTAssertTrue(waitFor(initial, on: trace, seconds: 90), "[probe:initial-position]")
         if scenario == "main-reading" {
             readOlder(above: window.frame.maxY, distance: 100)
             XCTAssertTrue(waitFor("reading", on: trace), "[probe:reading-position]")
@@ -52,7 +52,7 @@ final class KeyboardTests: XCTestCase {
         XCTAssertTrue(waitFor("field-focus", on: trace), "[probe:field-focus]")
 
         let keyboard = app.keyboards.firstMatch
-        XCTAssertTrue(keyboard.waitForExistence(timeout: 8), "[probe:no-software-keyboard]")
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 30), "[probe:no-software-keyboard]")
         XCTAssertTrue(waitFor("did-show", on: trace), "[probe:no-did-show]")
         XCTAssertGreaterThan(keyboard.frame.intersection(window.frame).height, 100, "[probe:keyboard-offscreen]")
         XCTAssertTrue(waitFor("focused-history", on: trace), "[probe:focused-history]")

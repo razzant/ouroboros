@@ -12,7 +12,7 @@ jobs:
   observe:
     if: ${{ !github.event.deleted && github.ref == 'refs/heads/probe/telegram-uikit-keyboard' }}
     runs-on: macos-26-intel
-    timeout-minutes: 35
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

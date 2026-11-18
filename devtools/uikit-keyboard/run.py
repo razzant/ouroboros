@@ -54,7 +54,7 @@ def save(path, body):
 
 
 def run():
-    test_deadline = time.monotonic() + 27 * 60  # The hosted job has 35 minutes including setup and upload.
+    test_deadline = time.monotonic() + 42 * 60  # The hosted job has 55 minutes including setup and upload.
     if (sys.platform != "darwin" or os.getenv("GITHUB_ACTIONS") != "true" or
             os.getenv("PROBE_RUNNER") != "github-hosted" or os.getenv("GITHUB_REF") != REF or
             os.getenv("GITHUB_EVENT_NAME") != "push"):
@@ -100,12 +100,14 @@ def run():
         checkpoint("fixture")
         port_file = private / "port"
         server = subprocess.Popen([sys.executable, "-B", HERE / "fixture.py", port_file])
-        for _ in range(100):
+        started = time.monotonic()
+        while not port_file.exists():
             if server.poll() is not None:
                 raise RuntimeError("The loopback fixture exited during startup")
-            if port_file.exists():
-                break
+            if time.monotonic() - started > 120:
+                raise RuntimeError("The loopback fixture reported no port within 120 s")
             time.sleep(0.1)
+        report["fixtureStartSeconds"] = round(time.monotonic() - started, 1)
         port = int(port_file.read_text())
         if not 0 < port < 65536:
             raise RuntimeError("Invalid bound fixture port")
@@ -206,7 +208,7 @@ def run():
                 for action in ("shutdown", "delete"):
                     try:
                         subprocess.run([*SIM, action, udid], check=True,
-                                       timeout=2 if report.get("interruption") == "cancelled" else 15)
+                                       timeout=2 if report.get("interruption") == "cancelled" else 60)
                     except (OSError, subprocess.SubprocessError):
                         cleanup_errors.append(action)
             report["cleanupErrors"] = cleanup_errors

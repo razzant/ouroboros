@@ -48,6 +48,12 @@ export already saved cases before deleting its simulator. A case needs its own
 XCTest result to count as passed. Even a `complete` capture cannot establish display
 smoothness, behaviour in the Telegram client or behaviour on a physical phone.
 
+A hosted Intel Mac can take ten minutes to boot the new simulator. The job
+allows 55 minutes; XCTest must finish within 42 minutes of `run.py` starting.
+A case waits up to 90 s for its first page and 30 s for the software keyboard.
+`fixtureStartSeconds` records how long the loopback fixture took to report its
+port; without a port after 120 s the run stops.
+
 The job marks the swipe-typing introduction seen on its disposable simulator.
 `tutorialPreferenceWritten` records the write outcome. Whether the tutorial
 would have appeared is unknown. See [Chromium’s simulator setup](https://chromium.googlesource.com/chromium/src/+/93b31d4424cb0fddb7cb5a901f21eb9859270658/ios/build/bots/scripts/iossim_util.py).

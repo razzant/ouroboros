@@ -10,6 +10,7 @@ import mimetypes
 from pathlib import Path
 import runpy
 import select
+import socketserver
 import threading
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -212,13 +213,21 @@ class Fixture(BaseHTTPRequestHandler):
             self.respond(405, headers=[("Connection", "close")])
 
 
+class LoopbackServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind names the bound address with socket.getfqdn, a reverse lookup this fixture never
+        # uses; on some hosts it waits on DNS. Only 127.0.0.1 is ever served.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("port_file", type=Path)
     args = parser.parse_args()
     sdk, pages, digest = inputs(ROOT)
     template = (WEB / "index.html").read_text(encoding="utf-8")
-    with ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as server:
+    with LoopbackServer(("127.0.0.1", 0), Fixture) as server:
         server.pages = {case: page_html(template, sdk, case).encode() for case in CASES}
         server.histories = pages
         server.fixture_digest = digest
