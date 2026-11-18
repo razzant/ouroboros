@@ -117,7 +117,9 @@ def test_restore_only_keeps_current_on_source_or_whole_candidate_refusal(
     after = _run(tmp_path, monkeypatch, ctx, messages, [], fit)
     assert after[:len(messages)] == messages and not _sources(after)
     if failure == "final_fit":
-        assert after is messages and len(fits) == 2 and _sources(fits[0]) and _sources(fits[-1])
+        # The whole candidate first, then once more for each optional receipt detail it holds (two here, the last
+        # being the notes list) counted instead of listed, before the view is refused.
+        assert after is messages and len(fits) == 3 and _sources(fits[0]) and _sources(fits[-1])
     assert ctx._context_view_receipt["status"] == ("source_unavailable" if failure == "source" else "fit_rejected")
 
 
