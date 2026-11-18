@@ -40,7 +40,6 @@ def resources(tmp_path, monkeypatch):
 
 def mode(monkeypatch, name):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", name)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: name)
 
 
 @pytest.mark.parametrize("utility", ["touch", "cp", "rm", "sort", "redirect"])

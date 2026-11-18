@@ -363,7 +363,7 @@ def test_a_settled_review_changes_no_cached_block(tmp_path, monkeypatch):
 def test_one_rule_sentence_per_effective_authority(monkeypatch, enforcement, mode):
     """The rule follows Access alone: the retired review-enforcement key, whatever it says, changes nothing."""
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: mode)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     block, text = _block()
 
     assert block["mode"] == mode and "enforcement" not in block and "enforcement_blocks" not in block

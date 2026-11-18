@@ -747,8 +747,8 @@ def test_schema_states_where_each_limit_and_parameter_applies():
 
 
 def test_real_registry_light_children_and_typed_errors(ctx, monkeypatch):
-    from ouroboros import config, safety
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
+    from ouroboros import safety
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     assert registry._module_load_omissions == []
     assert "query_data" in registry._FROZEN_TOOL_MODULES

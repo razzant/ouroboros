@@ -969,7 +969,7 @@ def test_evolution_restart_uses_local_commit_not_origin_and_blocks_dirty_tree(tm
 def test_toggle_evolution_tool_accepts_objective(tmp_path, monkeypatch):
     from ouroboros.tools.control import _toggle_evolution
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     pending = []
     result = _toggle_evolution(SimpleNamespace(pending_events=pending), True, objective="Improve cron")
 
@@ -980,7 +980,7 @@ def test_toggle_evolution_tool_accepts_objective(tmp_path, monkeypatch):
 def test_toggle_evolution_tool_refuses_in_light_mode(monkeypatch):
     from ouroboros.tools.control import _toggle_evolution
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     pending = []
     result = _toggle_evolution(SimpleNamespace(pending_events=pending), True)
 
@@ -1025,14 +1025,14 @@ def test_memory_provenance_records_old_and_new_content(tmp_path):
 def test_evolution_block_reason_depends_on_runtime_mode(monkeypatch):
     from supervisor import queue
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     blocked = queue.evolution_block_reason()
     assert blocked
     assert "advanced" in blocked and "pro" in blocked
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     assert queue.evolution_block_reason() == ""
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     assert queue.evolution_block_reason() == ""
 
 
@@ -1044,7 +1044,7 @@ def test_enqueue_evolution_blocked_in_light_mode(tmp_path, monkeypatch):
     supervisor_state.save_state({})  # an initialized install (#1307)
     sent = []
     monkeypatch.setattr(queue, "send_with_budget", lambda chat_id, text, *a, **k: sent.append(text))
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     queue.init(tmp_path)
     pending = []
     queue.init_queue_refs(pending, {}, {"value": 0})
@@ -1071,7 +1071,7 @@ def test_enqueue_evolution_omits_duplicate_cycle_message(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 100.0)
     sent = []
     monkeypatch.setattr(queue, "send_with_budget", lambda chat_id, text, *a, **k: sent.append(text))
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     queue.init(tmp_path)
     pending = []
     queue.init_queue_refs(pending, {}, {"value": 0})
@@ -1177,7 +1177,7 @@ def test_assign_tasks_cancels_pending_evolution_in_light_mode(tmp_path, monkeypa
 def test_toggle_evolution_tool_blocked_in_light_mode(monkeypatch):
     from supervisor import events
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     state = {"owner_chat_id": 7}
     sent = []
     ctx = SimpleNamespace(

@@ -664,19 +664,14 @@ def _forget_metrics_cursor(root: pathlib.Path) -> None:
         txn.conn.execute("DELETE FROM meta WHERE key=?", (CURSOR,))
 
 
-def heartbeats(root: pathlib.Path) -> None:
-    """The running tasks' workers' heartbeats, as a live install's would be: a stamp of now on each of their rows.
-
-    The rows keep the ``ts`` they were written with, and one older than ``task_status._ORPHAN_RUNNING_GRACE_SECONDS``
-    goes down the stale-orphan check, which parses the events tail while the queue snapshot is fresh. That is the path of
-    an orphaned row (a live worker's row is younger than the grace), and counting is not timing: which path a boot takes
-    must not follow how long the build or the boot took, which grows with k. The build stamps the rows last; the driver
-    stamps them again before the boundaries that read them."""
+def heartbeats(root: pathlib.Path) -> float:
+    """Stamp the synthetic live workers with one heartbeat and return its wall-clock instant."""
     from ouroboros.task_results import write_task_result
-    from ouroboros.utils import utc_now_iso
 
+    now = datetime.datetime.now(datetime.timezone.utc)
     for task_id in CURRENT["running"]:
-        write_task_result(root, task_id, "running", ts=utc_now_iso())
+        write_task_result(root, task_id, "running", ts=_iso(now))
+    return now.timestamp()
 
 
 def build(root: Any, k: int) -> Dict[str, Any]:

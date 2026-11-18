@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from ouroboros import config, safety
+from ouroboros import safety
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
 
@@ -17,8 +17,6 @@ def context(tmp_path, monkeypatch, mode, coverage):
         path.mkdir()
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", coverage)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: mode)
-    monkeypatch.setattr(safety, "get_runtime_mode", lambda: mode)
     monkeypatch.setattr(safety, "get_safety_mode", lambda kind="owner": coverage)
     ctx = ToolContext(repo_dir=repo, system_repo_dir=repo, drive_root=data,
                       workspace_root=work, workspace_mode="external", task_id="agency")

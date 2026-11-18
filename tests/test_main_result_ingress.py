@@ -188,7 +188,7 @@ def test_pending_effort_rebind_reaches_result_ingress(main_loop, monkeypatch, kn
     from ouroboros.context_fit import ContextCore, build_context_fit_plan
 
     f, resolved = main_loop, []
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     core = ContextCore("Core", "Bible", "Architecture", "", "Identity", "Facts", json.dumps("go"), False)
     model = "openai::fixture-model"
     original = build_context_fit_plan(None, core, {"model": model}, preferred_mode="max", reasoning_effort="none",
