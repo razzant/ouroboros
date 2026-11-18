@@ -852,6 +852,7 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
         "consciousness_autonomy": get_consciousness_autonomy(), "wake_cause": "focus",
         "consciousness_cause": "place:" + place.place_id, "work_kind": "consciousness",
         "focus": {"place_id": place.place_id, "conversation_key": event.conversation_key,
+                  "transport": {key: getattr(event, key) for key in ("provider", "account_id", "conversation_id", "thread_id")},
                   "identity": identity,
                   "identity_owner": writes_as_owner(place, identity, event.account_id, accounts[place.place_id]),
                   "room_chat_id": chat_id, "event_identity": presence_event_identity(admission.binding_id, event),

@@ -246,7 +246,7 @@ def test_exact_edit_preserves_other_knowledge_and_reports_its_delta(tmp_path):
                                 "added_headings": [], "removed_chars": 3, "added_chars": 3,  # "Old" → "New"
                                 "removed_sections": [],
                                 "body_changed": True, "summary_changed": False}
-    assert json.loads(reply.split("\n", 1)[1])["knowledge_delta"] == change["delta"]
+    assert json.loads(reply.split("\n", 2)[1])["knowledge_delta"] == change["delta"]
 
 
 def test_edit_requires_one_exact_body_anchor_and_current_revision(tmp_path):
@@ -304,7 +304,11 @@ def test_summary_revision_still_refuses_a_rerender_that_changes_a_recursive_fiel
     original = store.read_knowledge_note(target)
     write_content = store._write_content
     # A re-render that loses the alias is a changed field, not a revised summary.
-    monkeypatch.setattr(store, "_write_content", lambda *args: write_content(*args).replace(b"- *id001", b"- []"))
+    def change_alias(*args):
+        raw, claims = write_content(*args)
+        return raw.replace(b"- *id001", b"- []"), claims
+
+    monkeypatch.setattr(store, "_write_content", change_alias)
     result = store.write_knowledge_note(target, "New.", mode="edit", old_str="Old.", summary="New view.",
                                         expected_revision=original.revision)
     assert result.reason == "invalid_note: edit cannot change frontmatter"
@@ -316,7 +320,7 @@ def test_large_removed_heading_delta_keeps_tool_receipt_and_full_history(tmp_pat
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
     target = address(tmp_path, "large-headings")
     body = "".join(f"# Раздел {i:03d}\n" for i in range(240))
-    created = json.loads(tools._knowledge_write(ctx, "large-headings", body, mode="overwrite", scope="global").split("\n", 1)[1])
+    created = json.loads(tools._knowledge_write(ctx, "large-headings", body, mode="overwrite", scope="global").split("\n", 2)[1])
     assert created["knowledge_delta"]["added_headings_count"] == 240 and created["knowledge_delta"]["added_headings_omitted"]
     assert "removed_headings_omitted" not in created["knowledge_delta"]  # an empty list has nothing to give way
     assert len(history(target)[-1]["delta"]["added_headings"]) == 240
@@ -327,7 +331,7 @@ def test_large_removed_heading_delta_keeps_tool_receipt_and_full_history(tmp_pat
     result = store.read_knowledge_note(target)
     assert result.text.endswith("# Short\n")
     assert len(history(target)[-1]["delta"]["removed_headings"]) == 240
-    reported = json.loads(reply.split("\n", 1)[1])["knowledge_delta"]
+    reported = json.loads(reply.split("\n", 2)[1])["knowledge_delta"]
     assert reported["removed_headings_count"] == 240
     assert reported["removed_headings_omitted"] is True
     assert reported["removed_sections_count"] == 240 and reported["removed_sections_omitted"] is True
@@ -533,7 +537,7 @@ def test_read_shows_outgoing_link_facts_and_keeps_unlinked_notes_identical(tmp_p
     plain = address(tmp_path, "isolated")
     plain.path.write_bytes(b"# Isolated\r\nUnlinked source.\n")
     note = store.read_knowledge_note(plain)
-    assert tools._knowledge_read(ctx, "isolated") == tools._source_view(note)[0]
+    assert tools._knowledge_read(ctx, "isolated") == tools._source_view(note, situation="This situation's names: room:1 (Main)")[0]
     assert before == {path: path.read_bytes() for path in before}
     assert set(tmp_path.rglob("*")) == {target.shelf.parent, target.shelf, *before, plain.path}
 
@@ -622,7 +626,7 @@ def test_backlinks_follow_source_rename_and_deletion_without_writes(tmp_path):
             assert _link_header(reply, "backlinks (readable shelves now)") == [
                 {"scope": "global", "topic": name, "state": "active"}]
         else:
-            assert reply == tools._source_view(store.read_knowledge_note(target))[0]
+            assert reply == tools._source_view(store.read_knowledge_note(target), situation="This situation's names: room:1 (Main)")[0]
         assert before == {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in tmp_path.rglob("*") if path.is_file()}
 
 
@@ -863,7 +867,7 @@ def _files(root):
 
 def _meta(reply):
     assert reply.startswith("✅"), reply
-    return json.loads(reply.split("\n", 1)[1])
+    return json.loads(reply.split("\n", 2)[1])
 
 
 def _item(old_str=None, new_str=""):
@@ -940,8 +944,10 @@ def test_an_item_whose_text_is_only_in_the_frontmatter_says_where_it_is(tmp_path
                           ("Отсутствует.", "not found"), ("Нина — коллега из ML weekly", "not found")):
         reply = write(mode="edit", expected_revision=note.revision, edits=[_item("ранжированием", new_str="поиском"),
                                                                            _item(old_str, new_str="x")])
-        assert reply == (f"⚠️ TOOL_ERROR: Knowledge write not completed: edit_refused: item 2 (old_str): {said}. "
-                         "Nothing was written."), (old_str, reply)
+        assert reply.splitlines() == [
+            f"⚠️ TOOL_ERROR: Knowledge write not completed: edit_refused: item 2 (old_str): {said}. Nothing was written.",
+            "This situation's names: room:1 (Main)",
+        ], (old_str, reply)
     assert _files(tmp_path) == before
     _meta(write(mode="edit", expected_revision=note.revision, edits=[_item("ранжированием", new_str="поиском")]))
     _meta(write(mode="edit", expected_revision=store.read_knowledge_note(note.address).revision,
@@ -1071,7 +1077,7 @@ def test_a_write_without_an_exact_mode_writes_nothing(tmp_path):
             assert result.meta.get("operation_outcome") == "completed_no_effect", (name, result.meta)
             assert reply.startswith(f"⚠️ TOOL_ARG_ERROR: {received[name]}. knowledge_write has no default operation: "
                                     "pass mode as exactly one of overwrite"), (name, reply)
-            assert reply.endswith(" Nothing was written."), (name, reply)
+            assert reply.splitlines()[0].endswith(" Nothing was written."), (name, reply)
     assert ("revert (puts back the earlier version named by version)" in reply
             and "expected_revision is the current revision a replacing write checks" in reply), reply
     assert _files(drive / "memory") == before  # the note, its history journal and the index, byte for byte
@@ -1311,7 +1317,10 @@ def test_a_version_without_verified_text_is_a_typed_refusal(tmp_path):
         # The caller holds the current revision (it passed the check): the refusal says why, without the note.
         reply = tools._knowledge_write(ctx, "typed", mode="revert", scope="global", version=version,
                                        expected_revision=note.revision)
-        assert reply == f"⚠️ TOOL_ERROR: Knowledge write not completed: {result.reason}. Nothing was written.", reply
+        assert reply.splitlines() == [
+            f"⚠️ TOOL_ERROR: Knowledge write not completed: {result.reason}. Nothing was written.",
+            "This situation's names: room:1 (Main)",
+        ], reply
     assert _files(tmp_path) == before
 
 

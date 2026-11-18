@@ -1,4 +1,4 @@
-"""One memory text's history, read from its journal: versions, outline, listing, changes.
+"""Journal history for memory texts and the recorded claims of knowledge notes.
 
 A note's journal is ``address.shelf.parent / "knowledge_history.jsonl"``, the append-only record the
 one writer (``knowledge.write_knowledge_note``) keeps for a shelf; a row belongs to a note by its
@@ -9,8 +9,8 @@ one writer (``knowledge.write_knowledge_note``) keeps for a shelf; a row belongs
 anything is parsed and are read newest first, in blocks from the journal's end, so a large journal is
 never parsed whole; a line naming the text that is not JSON is counted as a gap, never fatal. A version is named by its revision (the sha256 of its exact bytes);
 its text is read through ``knowledge_rows`` (stored whole, or rebuilt from the changes rows carry)
-and returned only after it hashes to that revision. Nothing here writes: no index, no cache, no
-sidecar.
+and returned only after it hashes to that revision. Readers write nothing. Claim changes commit
+after the note and its index land, then project the committed names under the shelf lock.
 
 The outline is the one renderer the read, the receipt and the refusal share. It prints each heading
 line as the note spells it; its character ranges are the ``start_char``/``end_char`` of
@@ -23,11 +23,12 @@ import hashlib
 import json
 import os
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Mapping
 
-from ouroboros import knowledge_rows, text_change
+from ouroboros import knowledge_rows, text_change, utils
 from ouroboros.utils import jsonl_window
 
 JOURNAL_NAME = "knowledge_history.jsonl"
@@ -60,12 +61,12 @@ def _needle(address: Any) -> bytes:
     return json.dumps(topic, ensure_ascii=False).encode("utf-8") if isinstance(topic, str) else b"{"
 
 
-def _belongs(row: Any, address: Any) -> bool:
+def _belongs(row: Any, address: Any, publication: str = "source_capture") -> bool:
     """A version row of this text: its topic (none for a journal of one text), a version field, a capture (or an
     older unstamped row) of its scope."""
     if not isinstance(row, dict) or row.get("topic") != getattr(address, "topic", None):
         return False
-    if ("new_content" not in row and "new_sha256" not in row) or row.get("publication", "source_capture") != "source_capture":
+    if ("new_content" not in row and "new_sha256" not in row) or row.get("publication", "source_capture") != publication:
         return False
     where, scope = row.get("address"), getattr(address, "scope", None)
     return not isinstance(where, dict) or where.get("scope", scope) == scope
@@ -221,8 +222,9 @@ def tail_rows(journal: Path, address: Any, tail_bytes: int) -> Iterator[tuple[in
 class NoteHistory:
     """This text's rows over the whole journal, newest first, with the gaps met on the way."""
 
-    def __init__(self, address: Any, extra: bytes = b""):
+    def __init__(self, address: Any, extra: bytes = b"", *, publication: str = "source_capture"):
         self.address, self.extra = address, extra
+        self.publication = publication
         self.malformed, self.first_malformed, self.error = 0, None, ""
 
     def __iter__(self) -> Iterator[tuple[int, dict]]:
@@ -234,7 +236,7 @@ class NoteHistory:
                 if row is None:
                     self.malformed += 1
                     self.first_malformed = offset  # newest first: the last one met is the first in the file
-                elif _belongs(row, self.address):
+                elif _belongs(row, self.address, self.publication):
                     yield offset, row
         except FileNotFoundError:
             return
@@ -250,6 +252,99 @@ class NoteHistory:
         if self.error:
             out.append(f"the journal could not be read to its beginning ({self.error}); older rows are not shown")
         return out
+
+
+_CLAIMS_PUBLICATION = "claims_published"
+
+
+def claim_names(value: Any) -> list[str]:
+    return [name for name in value if isinstance(name, str)] if isinstance(value, list) else []
+
+
+def claim_record_path(shelf: Path, topic: str) -> Path:
+    # Topic paths may share prefixes with one another's filenames.
+    key = hashlib.sha256(topic.encode("utf-8")).hexdigest()
+    return shelf.parent / "knowledge_note_records" / f"{key}.json"
+
+
+def read_claim_record_names(path: Path) -> list[str]:
+    return claim_names((utils.json_snapshot(path) or {}).get("active_claims"))
+
+
+def _published_claim_names(address: Any) -> list[str]:
+    needle = f'"{_CLAIMS_PUBLICATION}"'.encode("ascii")
+    history = NoteHistory(address, needle, publication=_CLAIMS_PUBLICATION)
+    latest = next(iter(history), None)
+    if history.error:
+        raise OSError(f"Claims history unavailable: {history.error}")
+    return claim_names(latest[1].get("active_claims")) if latest is not None else []
+
+
+def _project_claim_record(path: Path, active: list[str]) -> None:
+    record = utils.json_snapshot(path) or {}
+    if record.get("active_claims", []) != active:
+        utils.atomic_write_json(path, {**record, "active_claims": active})
+
+
+def rebuild_claim_record(address: Any) -> None:
+    """Rebuild one note's claims from completed writes. The caller holds the shelf lock."""
+    _project_claim_record(claim_record_path(address.shelf, address.topic), _published_claim_names(address))
+
+
+@dataclass(frozen=True)
+class ClaimWrite:
+    """Proposed claim facts for a single revision-checked write under the shelf lock."""
+    path: Path | None
+    recorded: list[str]
+    active: list[str]
+    written: list[str]
+    ignored: list[str]
+    removed: bool
+    report: bool
+
+    @property
+    def changed(self) -> bool:
+        return self.active != self.recorded
+
+    def publish(self, address: Any, history: Mapping[str, Any]) -> None:
+        """Commit a change after the source and index landed, then update the projection."""
+        if self.path is None:
+            return
+        if self.changed:
+            row = {key: history[key] for key in (
+                "ts", "task_id", "topic", "mode", "address", "writer", "focus", "old_sha256", "new_sha256", "reason",
+            ) if key in history}
+            row.update(publication=_CLAIMS_PUBLICATION, active_claims=self.active)
+            if not utils.append_jsonl(journal_path(address), row,
+                                      ensure_record_boundary=True, require_lock=True):
+                raise OSError("Claims history publication failed")
+        _project_claim_record(self.path, self.active)
+
+
+def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: bool, host_claim: str | None) -> ClaimWrite | None:
+    before = current.metadata if current is not None else {}
+    after = updated.metadata
+    path = claim_record_path(address.shelf, address.topic) if address.scope == "global" else None
+    if "claims" not in before and "claims" not in after and (path is None or not path.is_file()):
+        return None
+    old, new = claim_names(before.get("claims")), claim_names(after.get("claims"))
+    # This is a writer/recovery read. Starts read only the derived record.
+    recorded = _published_claim_names(address) if path is not None else []
+    if path is None:
+        active = []
+    elif explicit:
+        active = list(dict.fromkeys(new))
+    else:
+        keep = set(old) & set(recorded)
+        if host_claim is not None:
+            keep.add(host_claim)
+        active = list(dict.fromkeys(name for name in new if name in keep))
+    value = after.get("claims")
+    ignored = ([repr(item) for item in value if not isinstance(item, str)] if isinstance(value, list)
+               else [repr(value)] if "claims" in after else [])
+    removed = bool((set(old) - set(new)) or (set(recorded) - set(active)))
+    report = explicit or host_claim is not None or old != new or recorded != active
+    return ClaimWrite(path, recorded, active, new, ignored, removed, report)
 
 
 _READ = object()  # find_version reads the live text itself
@@ -455,6 +550,35 @@ def removed_sections(old: Any, new: Any) -> list[dict[str, Any]] | None:
                     "chars": len(old.raw[span.start_byte:span.end_byte].decode("utf-8")),
                     "first_line": first[:_FIRST_LINE_CHARS]})
     return out
+
+
+def body_chars(note: Any) -> int:
+    """The same stored body the context loader carries, excluding parsed frontmatter."""
+    if note is None:
+        return 0
+    return len(note.source.text_at(note.source.body_span) if note.source else note.text)
+
+
+def note_delta(current: Any, updated: Any, change: list) -> dict[str, Any]:
+    """The text and parsed-structure differences recorded with a note's publication."""
+    old_text = current.text if current else ""
+    before = Counter((h.level, h.title) for h in current.source.headings) if current and current.source else Counter()
+    after = Counter((h.level, h.title) for h in updated.source.headings) if updated.source else Counter()
+    known = (current is None or current.source) and updated.source
+    removed_headings, added_headings = (
+        sorted("#" * level + " " + title for (level, title) in (left - right).elements()) if known else None
+        for left, right in ((before, after), (after, before)))
+    # Body bytes and the resident summary are compared as published. An unparseable side leaves both unknown.
+    old_body, old_summary = ((current.raw[current.source.body_span.start_byte:], current.summary)
+                             if current and current.source else (b"", ""))
+    removed_chars, added_chars = text_change.change_chars(change)
+    return {"old_chars": len(old_text), "new_chars": len(updated.text),
+            "old_body_chars": body_chars(current), "new_body_chars": body_chars(updated),
+            "change_chars": len(updated.text) - len(old_text), "removed_chars": removed_chars,
+            "added_chars": added_chars, "removed_headings": removed_headings, "added_headings": added_headings,
+            "removed_sections": removed_sections(current, updated),
+            "body_changed": old_body != updated.raw[updated.source.body_span.start_byte:] if known else None,
+            "summary_changed": old_summary != updated.summary if known else None}
 
 
 def _listed(row: Mapping[str, Any]) -> dict[str, Any]:

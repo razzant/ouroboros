@@ -392,7 +392,7 @@ def test_an_emptied_plain_note_keeps_its_revision_and_its_calls_work(tmp_path):
     receipt = registry.execute("knowledge_write", {"topic": "plain", "scope": "global", "mode": "overwrite",
                                                    "content": "# Again\n", "expected_revision": empty})
     assert receipt.startswith("✅"), receipt
-    meta = json.loads(receipt.split("\n", 1)[1])
+    meta = json.loads(receipt.split("\n", 2)[1])
     assert meta["knowledge_previous"]["revision"] == empty
     assert json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])["old_sha256"] == empty
     stale = registry.execute("knowledge_write", {"topic": "plain", "scope": "global", "mode": "overwrite",
@@ -418,14 +418,18 @@ def test_a_version_lookup_that_misses_names_the_torn_lines_of_this_note(tmp_path
     store.write_knowledge_note(target, "# Река\n\nOne.\n")
     missing = "0" * 64
     clean = tools._knowledge_read(ctx, TOPIC, version=missing)
-    assert clean == f"⚠️ TOOL_ERROR: version_unavailable: no version {missing} of this note in its history"
+    error = f"⚠️ TOOL_ERROR: version_unavailable: no version {missing} of this note in its history"
+    situation = "This situation's names: room:1 (Main)"
+    assert clean.splitlines() == [error, situation]
     journal = target.shelf.parent / "knowledge_history.jsonl"
     offset = journal.stat().st_size
     with journal.open("a", encoding="utf-8") as stream:  # torn before its revision fields
         stream.write(json.dumps({"topic": TOPIC, "mode": "edit"}, ensure_ascii=False)[:-1] + ', "new_sh\n')
     torn = tools._knowledge_read(ctx, TOPIC, version=missing)
-    assert torn == (f"⚠️ TOOL_ERROR: version_unavailable: no version {missing} of this note in its history (1 journal "
-                    f"line(s) naming this note are not JSON and were skipped (the first at byte offset {offset}))")
+    assert torn.splitlines() == [
+        f"{error} (1 journal line(s) naming this note are not JSON and were skipped (the first at byte offset {offset}))",
+        situation,
+    ]
 
 
 def test_the_backward_scan_finds_every_row_across_block_edges(tmp_path, monkeypatch):
@@ -703,9 +707,9 @@ def test_a_first_page_with_another_lists_fingerprint_is_told_to_read_without_one
     store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=a.revision)
     first = tools._knowledge_read(ctx, TOPIC, view="history", fingerprint="0" * 16)
     assert first.startswith("⚠️ TOOL_ERROR: position_mismatch: the fingerprint names another list of versions") and \
-        first.endswith("a first page takes none, so read it without the fingerprint") and "start_char=0" not in first, first
+        first.splitlines()[0].endswith("a first page takes none, so read it without the fingerprint") and "start_char=0" not in first, first
     later = tools._knowledge_read(ctx, TOPIC, view="history", start_char=40, fingerprint="0" * 16)
-    assert later.endswith("read it again from start_char=0"), later
+    assert later.splitlines()[0].endswith("read it again from start_char=0"), later
     assert tools._knowledge_read(ctx, TOPIC, view="history").startswith("[Knowledge history]")
 
 

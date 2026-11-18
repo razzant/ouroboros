@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+import yaml
+
 
 def mode_received(mode: Any, null: str = "missing or null") -> str:
     """A ``mode`` that is not exactly an operation, as a refusal names it: as received, never trimmed, case-folded or
@@ -225,3 +227,16 @@ def compile_edit_items(raw: bytes, body_start: int, items: list[tuple[str, str]]
         out += [body[at:start], new]
         at = end
     return b"".join(out + [body[at:]])
+
+
+def with_host_claim(note: Any, claim: str) -> bytes:
+    """Add only the one host-authored name, keeping the original body and other fields."""
+    if note.parse_error:
+        raise ValueError("a host claim requires readable frontmatter")
+    held = note.metadata.get("claims", [])
+    if not isinstance(held, list):
+        raise ValueError("a host claim requires a list or an absent claims field")
+    if claim in held:
+        return note.raw
+    front = yaml.safe_dump({**note.metadata, "claims": [*held, claim]}, allow_unicode=True, sort_keys=False)
+    return f"---\n{front}---\n".encode("utf-8") + note.raw[note.source.body_span.start_byte:]
