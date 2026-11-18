@@ -1007,6 +1007,8 @@ def quote_words(row: Mapping[str, Any], root: Any = None) -> str:
     accepted comment for an answered quiz, plain text for inbound place rows and reactions, else ``render_row_text``.
     Connector facts and delivery details shown beside those words are the host's labels, never the speaker's."""
     from ouroboros.answer_facts import living_card_input
+    if _mapping(row.get("corpus_answer")).get("source") in ("owner_press", "owner_card_input"):
+        return ""
     if living := living_card_input(row, root):
         return living["content"] if living["source"] == "owner_mailbox" else ""
     if row.get("type") == "quiz_answer" or row.get("late_answer"):

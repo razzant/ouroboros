@@ -155,7 +155,7 @@ def row_source(row: Any, words_source: str, root: Any = None) -> str:
     from ouroboros.owner_words import answered_card_source
 
     if isinstance(row, Mapping) and isinstance(answer := row.get("corpus_answer"), Mapping):
-        if answer.get("source") in (OWNER_PRESS, "owner_quiz_answer", "owner_mailbox", "initial_user", "origin_message"):
+        if answer.get("source") in (OWNER_CARD_INPUT, OWNER_PRESS, "owner_quiz_answer", "owner_mailbox", "initial_user", "origin_message"):
             return answer["source"]
     if submitted := card_input(row, root, words_source):
         return submitted["source"]

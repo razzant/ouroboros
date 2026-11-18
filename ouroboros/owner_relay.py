@@ -882,7 +882,7 @@ def _pristine_form(ctx, row: dict, targets: dict | None = None) -> tuple:
     pristine = {"direction": "in", "chat_id": chat_id, "ts": str(row.get("ts") or ""), "text": row["text"],
                 **({"client_message_id": client} if client else {}),
                 **({"attachments": copy.deepcopy(row["attachments"])} if row.get("attachments") else {})}
-    if "answer_input" in row or row["source"] == "owner_press":
+    if "answer_input" in row or row["source"] in ("owner_press", "owner_card_input"):
         fact = row.get("answer_input") or {}
         address = fact.get("reply_address")
         target = (targets or {}).get(address) or {}

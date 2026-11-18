@@ -353,7 +353,7 @@ def _words_rows(item: Mapping[str, Any], *, carrier: str, task_id: str, content:
     rows = [_row(words, source=item["source"], carrier=carrier, task_id=task_id, ts=ts or _item_time(item),
                  ref=ref or row_ref(item), attachments=attachments)]
     target = _mapping(item.get("reply_to"))
-    if item["source"] == OWNER_PRESS or is_answered_card(target) or target.get("card_id"):
+    if item["source"] in (OWNER_CARD_INPUT, OWNER_PRESS) or is_answered_card(target) or target.get("card_id"):
         rows[0]["answer_input"] = {**({"shown": shown} if item["source"] == OWNER_PRESS else {}),
                                    "reply_address": target.get("address", ""),
                                    **{k: item[k] for k in ("source_task_id", "quiz_id") if item.get(k)},
