@@ -423,7 +423,12 @@ def test_mcp_draft_after_save_and_another_list_write(subscription_ui, external):
     if external in ("same-entry", "overlapping-header", "removed"):
         expect(result).to_contain_text("could not be confirmed")
         if external == "overlapping-header":
-            expect(editor.locator('[data-mcp-header-field="value"]')).to_have_value("next-fixture")
+            field = editor.locator('[data-mcp-header-field="value"]')
+            show = editor.locator('[data-mcp-header-toggle]')
+            expect(field).to_have_value("next-fixture")
+            expect(field).to_have_attribute("type", "password")
+            expect(show).to_be_disabled()
+            expect(show).to_have_attribute("aria-expanded", "false")
         save.click()
         expect(result).to_contain_text("Discard changes")
         editor.locator("[data-editor-discard]").click()
