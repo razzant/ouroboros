@@ -198,7 +198,7 @@ def test_workspace_only_publishes_the_file_versions_checked_for_secrets(tmp_path
     from tests.test_headless_workspace_patch import _evidence_copy, _git
 
     source, task, _ = _evidence_copy(tmp_path)
-    key = b"fixture-value-changing-during-capture"
+    key = b"diff" if payload == "stable" else b"fixture-value-changing-during-capture"
     monkeypatch.setattr(config, "load_settings", lambda **kw: {"OPENAI_API_KEY": key.decode()})
     file = source / "report.txt"
     file.write_bytes(b"before\n")

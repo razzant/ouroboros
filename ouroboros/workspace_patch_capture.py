@@ -25,10 +25,10 @@ from hashlib import sha256
 from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ouroboros import work_domain
-from ouroboros.delegate_named_evidence import _held_named_evidence as _held_named_evidence, workspace_evidence_exclusions
+from ouroboros.delegate_named_evidence import _held_named_evidence as _held_named_evidence, checked_workspace_patch, workspace_evidence_exclusions
 from ouroboros.artifact_storage import compress_in_place
 from ouroboros.contracts.task_constraint import normalize_task_constraint
-from ouroboros.git_observation import numstat_paths
+from ouroboros.git_observation import _pathspec_batches, numstat_paths
 from ouroboros.headless_status import (
     ARTIFACT_STATUS_FAILED,
     ARTIFACT_STATUS_READY_NO_CHANGES,
@@ -155,7 +155,7 @@ def write_workspace_patch_artifacts(
     # v6.52.2: declared ephemeral scratch (run_command/run_script `scratch=[...]`) never leaks into the patch.
     scratch = _declared_scratch(scratch_dir or artifact_dir, root)
     base_sizes = baseline_blob_sizes(root, base_ref, errors=errors)
-    held, named_evidence = workspace_evidence_exclusions(
+    held, named_evidence, checked = workspace_evidence_exclusions(
         root, metadata.get("host_evidence"), set(untracked + changed_tracked + file_input_paths),
         base_ref, base_sizes, file_baseline, retain_evidence_dir, retained_evidence)
     excluded.extend(held[rel] for rel in untracked if rel in held)
@@ -228,6 +228,7 @@ def write_workspace_patch_artifacts(
             file_outputs = copy_directory_to_task_artifacts(
                 None, root, kind="workspace_file_outputs", artifact_dir=artifact_dir,
                 member_paths=[root / rel for rel in file_output_paths],
+                expected_members=checked or None,
             )
         except (OSError, ValueError) as exc:
             errors.append({"type": "file_capture_failed", "message": f"{type(exc).__name__}: {exc}"})
@@ -242,34 +243,23 @@ def write_workspace_patch_artifacts(
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             errors.append({"type": "file_capture_failed", "message": f"{type(exc).__name__}: {exc}"})
     total_size = 0
-    with patch_path.open("wb") as fh:
+    locks = set(changed_tracked) & incidental_lock_excludes
+    tracked_excluded.extend({"path": rel, "reason": "incidental lockfile without sibling manifest change"} for rel in sorted(locks))
+    tracked = sorted(set(changed_tracked) - locks - set(large_tracked) - selected_files)
+    with checked_workspace_patch(patch_path, root, checked, [*tracked, *included_untracked, *file_output_paths], errors) as fh:
         if not errors:
-            tracked_lock_excludes = sorted(set(changed_tracked) & incidental_lock_excludes)
-            tracked_pathspec = ["--"]
-            if tracked_lock_excludes or large_tracked or selected_files or wal_indexes or held_tracked:
-                tracked_pathspec += ["."] + [f":(exclude,literal){rel}" for rel in [
-                    *tracked_lock_excludes, *large_tracked, *sorted(selected_files), *wal_indexes, *held_tracked]]
-            for rel in tracked_lock_excludes:
-                tracked_excluded.append({"path": rel, "reason": "incidental lockfile without sibling manifest change"})
-            diffstat = _git_stdout(
-                ["git", "diff", "--stat", "--no-ext-diff", "--no-color", base_ref, *tracked_pathspec],
-                root,
-                allow_rc={0},
-                errors=errors,
-            )
-            total_size += _append_git_output(
-                ["git", "diff", "--binary", "--no-ext-diff", "--no-color", base_ref, *tracked_pathspec],
-                root,
-                fh,
-                allow_rc={0},
-                errors=errors,
-                diagnostics=diagnostics,
-            )
+            # Compare precisely the inspected names. A newly dirty neighbor belongs to the next capture.
+            flags = ["--no-ext-diff", "--no-textconv", "--no-color", base_ref, "--"]
+            patch_cmd = ["git", "diff", "--binary", *flags]
+            for specs in _pathspec_batches(patch_cmd, tracked):
+                diffstat += _git_stdout(["git", "diff", "--stat", *flags, *specs], root, allow_rc={0}, errors=errors)
+                total_size += _append_git_output([*patch_cmd, *specs], root, fh, allow_rc={0},
+                                                 errors=errors, diagnostics=diagnostics)
             for rel in included_untracked:
                 if total_size:
                     total_size += _write_patch_separator(fh)
                 total_size += _append_git_output(
-                    ["git", "diff", "--no-index", "--binary", "--no-ext-diff", "--no-color", "--", os.devnull, rel],
+                    ["git", "diff", "--no-index", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--", os.devnull, rel],
                     root,
                     fh,
                     allow_rc={0, 1},
