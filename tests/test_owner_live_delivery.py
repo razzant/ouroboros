@@ -506,6 +506,38 @@ class TestShowRecord:
                       data={"hero": uri(second)})
         assert short[first] in aimed and short[second] not in aimed
 
+    @pytest.mark.parametrize(("path", "source"), [
+        (None, "inline"),
+        ("photos.url", "inline"),
+        ("photos.0.url", "bound"),
+        ("photos.map", "unknown"),
+        ("photos.toString", "unknown"),
+    ], ids=["inline", "missing-array-property", "bound-index", "array-method", "object-method"])
+    def test_a_card_receipt_distinguishes_absent_and_inherited_array_properties(self, tmp_path, monkeypatch, path, source):
+        import base64
+        import hashlib
+        import json
+
+        from ouroboros.tools.cards import _show_card
+
+        ctx = self._ctx(tmp_path, monkeypatch)
+        images = {"inline": b"Fallback preview", "bound": b"Bound preview"}
+        urls = {name: "data:image/png;base64," + base64.b64encode(data).decode("ascii") for name, data in images.items()}
+        image = {"type": "image", "src": urls["inline"]}
+        if path is not None:
+            image["path"] = path
+        result = json.loads(_show_card(ctx, title="Preview", fallback_text="Photo", components=[image],
+                                       data={"photos": [{"url": urls["bound"]}]}))
+        [event] = ctx.event_queue.items
+        assert event["type"] == "send_card" and event["card_id"] == result["card_id"]
+        accepted, show = result["delivery"].splitlines()
+        assert accepted == "OK: card accepted for delivery to owner chat."
+        if source == "unknown":
+            assert show == "Host fact: card media bytes: unknown."
+        else:
+            digest = hashlib.sha256(images[source]).hexdigest()[:12]
+            assert show.startswith(f"Host fact: accepted for delivery: image components[0], sha256 {digest},")
+
     @pytest.mark.parametrize(("visible", "review"), [(False, "auto"), (False, "off"), (True, "auto")])
     def test_optional_media_data_cannot_break_an_accepted_card_receipt(self, tmp_path, monkeypatch, visible, review):
         import json
