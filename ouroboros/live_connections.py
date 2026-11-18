@@ -135,11 +135,14 @@ class PreparedConnection:
         await joined(asyncio.gather(self.task, return_exceptions=True))
 
     async def _close_session(self):
-        """Its connected time, closing tail included, is on the ledger once the connection has closed."""
+        """Its connected time, closing tail included, is on the ledger once the connection has closed; connected
+        time that could not be written fails the close, as a write inside the session's close did."""
         try:
             await self.session.close()
         finally:
             await asyncio.to_thread(self.host._connection_ledger.flush)
+        if self.host._connection_ledger.failure is not None:
+            raise self.host._connection_ledger.failure
 
     async def _fit(self, credentials, *, rebound=False):
         from ouroboros.observability import persist_physical_candidate

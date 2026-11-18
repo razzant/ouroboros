@@ -1,5 +1,6 @@
 """Completed, interrupted and closing live receipts use the ordinary ledger."""
 import asyncio
+import copy
 import json
 from dataclasses import replace
 
@@ -39,10 +40,18 @@ def test_response_dedup_pinned_quote_and_shared_limit(host_world):
     assert len(rows) == 2 and sum(row['cost_usd'] for row in rows) == pytest.approx(100.012)
 
 
-@pytest.mark.parametrize('ending', ['normal', 'budget', 'close_error'])
-def test_connected_samples_share_watermark_and_settle_before_close_ends(host_world, ending):
+@pytest.mark.parametrize('ending', ['normal', 'budget', 'close_error', 'stop', 'write_error'])
+def test_connected_samples_share_watermark_and_settle_before_close_ends(host_world, monkeypatch, ending):
     host = host_world.host
     host.quote = tariff(input_cost_per_second=.01)
+    if ending == 'write_error':
+        from ouroboros import live_usage
+        settle = live_usage.settle_connection_usage
+        def settle_or_fail(**receipt):
+            if receipt['usage']['connected_seconds'] == 2:  # the closing tail
+                raise RuntimeError('ledger write failed')
+            return settle(**receipt)
+        monkeypatch.setattr(live_usage, 'settle_connection_usage', settle_or_fail)
     def sample(session, seconds):
         session.observe('usage', json.dumps({'usage': {'connected_seconds': seconds},
             'raw_usage': {'billable_audio_seconds': 999}}))
@@ -71,7 +80,8 @@ def test_connected_samples_share_watermark_and_settle_before_close_ends(host_wor
                                          global_limit_usd=.06 if ending == 'budget' else None)):
             await host.session(consume, LiveOptions())
     expected = {'stop': (asyncio.CancelledError, None), 'budget': (RealtimeSetupError, 'budget_exhausted'),
-                'close_error': (RuntimeError, 'fixture close failed')}
+                'close_error': (RuntimeError, 'fixture close failed'),
+                'write_error': (RuntimeError, 'ledger write failed')}
     if ending in expected:
         error, message = expected[ending]
         with pytest.raises(error, match=message):
@@ -84,12 +94,17 @@ def test_connected_samples_share_watermark_and_settle_before_close_ends(host_wor
     # so their order in the ledger is not their arrival order; the shared watermark is in the amounts.
     entries = sorted((row['source'], row['cost_evidence']['usage']['connected_seconds'], row['cost_usd'])
                      for row in settled)
-    assert [entry[:2] for entry in entries] == [('live_connection_usage', 2), ('live_connection_usage', 4),
-                                                ('live_response', 3)]
-    assert [entry[2] for entry in entries] == pytest.approx([.02, .04, .03])
+    want = [('live_connection_usage', 2, .02), ('live_connection_usage', 4, .04), ('live_response', 3, .03)]
+    if ending == 'write_error':  # a closing tail the ledger could not write fails the connection's close, as before
+        del want[0]
+        assert host.timing['connections'][-1]['cleanup_failure'] == 'RuntimeError'
+    assert [entry[:2] for entry in entries] == [entry[:2] for entry in want]
+    assert [entry[2] for entry in entries] == pytest.approx([entry[2] for entry in want])
     assert all('response_key' not in row['cost_evidence'] for row in settled if row['source'] == 'live_connection_usage')
     assert all(row['cost_evidence']['raw_usage']['billable_audio_seconds'] == 999 for row in settled)
     assert host._connection_accounting is False and host_world.sessions[-1].closed
+    if ending == 'write_error':
+        return  # the call ends with that error: its next connection would raise it again
 
     # A new response belongs to this call, while each physical connection has
     # its own watermark. Its unknown quote stays unknown.
@@ -107,8 +122,9 @@ def test_connected_samples_share_watermark_and_settle_before_close_ends(host_wor
 def test_a_slow_connected_time_write_never_holds_the_call_loop(host_world, monkeypatch):
     """#3633. xAI reports connected seconds every idle second; on Windows CI one ledger write took up to 32 s, and on
     the call loop it froze the owner's microphone input and the page's playback receipts. The loop and the money check
-    go on while a receipt is written; a receipt still waiting takes in its connection's next one, the check reads them
-    once written, and the connection's close waits for its closing tail."""
+    go on while a receipt is written; a receipt still waiting takes in its connection's next one, even with a
+    prepared successor reporting beside it, the check reads them once written, and the connection's close waits for
+    its closing tail."""
     import threading
     from ouroboros import live_usage
     host = host_world.host
@@ -126,17 +142,24 @@ def test_a_slow_connected_time_write_never_holds_the_call_loop(host_world, monke
         session.observe('usage', json.dumps({'usage': {'connected_seconds': seconds}, 'raw_usage': {}}))
 
     async def consume(session):
+        successor = copy.copy(session.observe.__self__)  # reports beside the serving connection, as views are made
+        successor.connection_number, successor._meter_watermark = successor.connection_number + 1, 0.0
         sample(session, 4)
         await asyncio.to_thread(entered.wait, 2)
         sample(session, 6)  # waits behind the write in progress
-        sample(session, 8)  # joins the one still waiting
+        sample(successor, 3)
+        sample(session, 8)  # joins its connection's receipt still waiting, not the last one queued
+        sample(successor, 5)
         for _ in range(3):
             await asyncio.sleep(.01)  # the call loop runs while the ledger is held
         await host.check()  # and so does the money check
         assert entered.is_set() and not release.is_set() and not ua.read_usage_records(host.ctx.drive_root)
         release.set()
         await asyncio.to_thread(host._connection_ledger.flush)
-        assert [row['cost_usd'] for row in ua.read_usage_records(host.ctx.drive_root)] == pytest.approx([.04, .04])
+        written = ua.read_usage_records(host.ctx.drive_root)
+        serving, other = str(successor.connection_number - 1), str(successor.connection_number)
+        assert [row['cost_evidence']['connection_key'] for row in written] == [serving, serving, other]
+        assert [row['cost_usd'] for row in written] == pytest.approx([.04, .04, .05])
         session.close = close(session)
 
     def close(session):
@@ -150,7 +173,7 @@ def test_a_slow_connected_time_write_never_holds_the_call_loop(host_world, monke
             await host.session(consume, LiveOptions())
     asyncio.run(run())
     rows = ua.read_usage_records(host.ctx.drive_root)
-    assert [row['cost_evidence']['usage']['connected_seconds'] for row in rows] == [4, 4, 1]
+    assert [row['cost_evidence']['usage']['connected_seconds'] for row in rows] == [4, 4, 5, 1]
     assert all(row['source'] == 'live_connection_usage' and row['task_id'] == host.ctx.task_id for row in rows)
 
 

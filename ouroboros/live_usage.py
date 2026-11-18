@@ -372,11 +372,12 @@ class ConnectionLedger:
     xAI bills connected seconds and its session reports them every idle second. Each receipt is a ledger transaction:
     on Windows CI under load one took up to 32 s, and written on the call loop it froze the owner's microphone input,
     the page's played receipts and a held tool's delivery for as long. The call loop only hands a receipt over to one
-    writer thread that lives as long as the call (the store keeps a connection per thread). A receipt still waiting
-    when the same connection's next arrives takes it in (the growth adds, the newest watermark stands), so a slow
-    ledger builds no backlog. A connection's close ``flush``es, so its receipts are on the ledger once it has closed.
-    Nothing on the call's way waits for a write: the money check reads what is written (a receipt in flight is counted
-    at its next reading), and ``failure`` keeps the first write that failed for that check to end the call."""
+    writer thread that lives as long as the call (the store keeps a connection per thread). A connection keeps at most
+    one receipt waiting: its next takes that one in where it stands (the growth adds; the newest watermark and
+    evidence stand), so a slow ledger builds no backlog even while a prepared successor reports beside the serving
+    connection. A connection's close ``flush``es, so its receipts are on the ledger once it has closed. Nothing on the
+    call's way waits for a write: the money check reads what is written (a receipt in flight is counted at its next
+    reading), and ``failure`` keeps the first write that failed, for that check and a connection's close to raise."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -391,10 +392,14 @@ class ConnectionLedger:
         receipt = copy.deepcopy(receipt)  # the quote and context as they are now; the host may replace them later
         context = contextvars.copy_context()  # the call's usage scope attributes the receipt
         with self._lock:
-            if self._waiting and self._waiting[-1][1]["connection_key"] == receipt["connection_key"]:
-                earlier = self._waiting.pop()[1]["usage"]["connected_seconds"]
-                receipt["usage"] = {"connected_seconds": earlier + receipt["usage"]["connected_seconds"]}
-            self._waiting.append((context, receipt))
+            for index, (_, waiting) in enumerate(self._waiting):
+                if waiting["connection_key"] == receipt["connection_key"]:
+                    seconds = waiting["usage"]["connected_seconds"] + receipt["usage"]["connected_seconds"]
+                    receipt["usage"] = {"connected_seconds": seconds}
+                    self._waiting[index] = (context, receipt)
+                    break
+            else:
+                self._waiting.append((context, receipt))
             self._idle.clear()
             start, self._writing = not self._writing, True
         if start:
