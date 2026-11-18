@@ -2,6 +2,7 @@
 // and on replay (DESIGN "Unread"). A row's task_id names a task; by itself
 // it says neither who speaks, nor whether the row stands alone, nor whether it ends that task.
 import { isNonTerminalMediaHistoryRow, positiveTaskTerminalFact } from './chat_activity.js';
+import { insertTimelineNode } from './chat_render_batch.js';
 
 const replyOrigins = new WeakMap();
 const WORK_REPLY_SLOT = ':scope > .chat-live-details > [data-live-work-replies]';
@@ -81,6 +82,6 @@ function moveWorkReply(record, bubble) {
         replyOrigins.set(bubble, origin);
     }
     slot.hidden = false;
-    slot.append(bubble);
+    insertTimelineNode(slot, bubble);
     return true;
 }

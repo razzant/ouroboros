@@ -1989,6 +1989,10 @@ export function createChatInstance({
         }, rawTs);
         if (!summary) return false;
         // One frame is one source occurrence, live or saved; only a live note's row is a line the next note replaces.
+        if (ownLine && msg.row_address) {
+            summary.replyAddress = msg.row_address;
+            summary.replyRole = 'assistant';
+        }
         const occurrence = `${childId}:${rawTs}:${content}`;
         if (summary.reasoning) summary.dedupeKey = `reasoning:${occurrence}`;
         else if (!summary.activity) {

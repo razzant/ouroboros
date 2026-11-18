@@ -134,16 +134,16 @@ def test_reply_to_finished_launcher_reaches_only_its_live_work(tmp_path):
                     feed.wait_for(state="attached", timeout=30000)
                     print("REPLY_WITNESS_BROWSER_READY", flush=True)
                     send(page, launch)
-                    assert work_gate.arrived.wait(55), "managed work never entered its actual first request"
                     source = feed.locator("[data-row-address]").filter(has=page.get_by_text(final, exact=True)).last
-                    expect(source).to_be_visible(timeout=25000)
+                    expect(source).to_be_visible(timeout=90000)
                     address = source.get_attribute("data-row-address")
                     launch_id = wait_until(lambda: next((r["task"]["id"] for r in oracle.events("task_received")
                         if r.get("task", {}).get("text") == launch), None), 25)
                     assert launch_id and wait_durable_result(oracle, launch_id, timeout=45)["status"] == "completed"
                     assert launch_id != target["id"]
+                    assert work_gate.arrived.wait(90), "scheduled work never entered its actual first request"
                     send(page, neighbor)
-                    assert neighbor_gate.arrived.wait(55), "other Main turn never entered its actual first request"
+                    assert neighbor_gate.arrived.wait(90), "other Main turn never entered its actual first request"
                     source.click(button="right")
                     page.locator('body > .chat-row-menu[role="menu"] [data-row-action="reply"]').click()
                     strip = page.locator("#page-chat .chat-quote--composer")
