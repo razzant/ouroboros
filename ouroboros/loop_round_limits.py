@@ -133,7 +133,7 @@ def _drain_incoming_messages(
     """
     controls: Dict[str, Any] = {}
     arrivals: List[int] = []  # positions of my human's rows this drain delivered (typed, never merged)
-    pressed = False  # one of them is a press without words
+    from ouroboros.answer_facts import mark_press_arrival
 
     def ack_saved(entry: Dict[str, Any]) -> None:
         if not acknowledge_transcript_entry(drive_root, task_id, entry) or event_queue is None:
@@ -298,33 +298,30 @@ def _drain_incoming_messages(
                                                                            kind=SECRET_OUTCOME_ROW_KIND))
                     ack_content(entry)
                     continue
-            if kind in (KIND_QUIZ_CLOSED, KIND_CARD_INPUT):  # host frames around the owner's own act
-                _loop()._record_owner_directive(owner_ctx, source="owner_mailbox", origin=_arrival(received=entry.get("ts")),
-                    content=dmsg, msg_id=str(entry.get("msg_id") or ""))
+            from ouroboros.answer_facts import living_card_input
+            from ouroboros.owner_words import OWNER_PRESS
+            living = living_card_input(entry, getattr(owner_ctx, "budget_drive_root", None) or drive_root)
+            if kind in (KIND_QUIZ_CLOSED, KIND_CARD_INPUT):
+                _loop()._record_owner_directive(
+                    owner_ctx, source=living.get("source", "owner_mailbox"), content=living.get("content", dmsg),
+                    origin={**_arrival(received=entry.get("ts")), "source_task_id": living.get("source_task_id")},
+                    reply_to=living.get("reply_to"), msg_id=str(entry.get("msg_id") or ""))
                 _loop()._append_or_merge_user_message(messages, dmsg, slot=owner_ctx, kind=OWNER_WORDS_KIND)
+                if living.get("source") == OWNER_PRESS:
+                    mark_press_arrival(owner_ctx, messages[-1])
                 arrivals.append(len(messages) - 1)
                 ack_content(entry)
                 continue
             if kind == KIND_QUIZ_ANSWER:
-                from ouroboros.answer_facts import answer_source, wordless_press
-                from ouroboros.owner_quiz import late_answer_owner_text
-                from ouroboros.owner_words import answered_card_reply
-                delivery = entry.get("quiz_delivery") or {}
-                answer = delivery.get("answer_snapshot")
-                owner_words = late_answer_owner_text(answer) if isinstance(answer, dict) else dmsg
-                from ouroboros.owner_relay import retain_owner_message
-                held = retain_owner_message(owner_ctx, (answer.get("delivery") or {}).get("answer_row")) if isinstance(answer, dict) else None
-                _loop()._record_owner_directive(  # the card it answers rides beside it, the asking task's words
-                    owner_ctx, source=answer_source(answer), content=owner_words, msg_id=str(entry.get("msg_id") or ""),
-                    origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id"), **_arrival(held, entry.get("ts"))},
-                    reply_to=answered_card_reply(answer, delivery.get("task_id")))
+                source = _record_quiz_delivery(owner_ctx, entry, dmsg)
                 deliver_quiz_answer(
                     entry, task_id, event_queue,
                     lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx,
                                                                        kind=OWNER_WORDS_KIND),
                 )
                 arrivals.append(len(messages) - 1)
-                pressed = pressed or wordless_press(answer)
+                if source == OWNER_PRESS:
+                    mark_press_arrival(owner_ctx, messages[-1])
                 ack_content(entry)
                 continue
             # A LATE quiz answer: the owner's row and this entry's text are the
@@ -355,16 +352,16 @@ def _drain_incoming_messages(
                 text=dmsg,
                 ts=str(entry.get("ts") or ""),
             )
-            source = row_source(entry, "owner_mailbox")  # a late answer's press without words is an act
-            pressed = pressed or source == OWNER_PRESS
+            source = living.get("source") or row_source(entry, "owner_mailbox")  # a late answer's press without words is an act
             _loop()._record_owner_directive(
                 owner_ctx,
                 source=source,
-                content=_owner_content(entry, drive_root, task_id), words=dmsg,  # the rendering, its exact text beside
+                content=living["content"] if living else _owner_content(entry, drive_root, task_id), words=None if living else dmsg,  # the rendering, its exact text beside
                 msg_id=str(entry.get("msg_id") or ""),
                 # The same message relayed, or read from its room, is one row: its room and client id name it.
-                origin={**_arrival(held, entry.get("ts")), "client_message_id": entry.get("client_message_id")},
-                reply_to=answered_card_reply(*answered_card_source(entry))  # a late answer replies to its card
+                origin={**_arrival(held, entry.get("ts")), "client_message_id": entry.get("client_message_id"),
+                        "source_task_id": living.get("source_task_id")},
+                reply_to=living.get("reply_to") or answered_card_reply(*answered_card_source(entry))  # a late answer replies to its card
                 or reply_target(chats, entry.get("reply_reference")) or None,
             )
             from ouroboros.client_surface import noted_owner_text
@@ -379,6 +376,8 @@ def _drain_incoming_messages(
                 slot=owner_ctx, kind=OWNER_WORDS_KIND,
             )
             arrivals.append(len(messages) - 1)
+            if source == OWNER_PRESS:
+                mark_press_arrival(owner_ctx, messages[-1])
             ack_content(entry)
             if event_queue is not None:
                 try:
@@ -391,7 +390,7 @@ def _drain_incoming_messages(
                     pass
     if arrivals:  # my human's words or press reached this work: the host's facts close the last row of theirs
         from ouroboros.arrival_notes import mark_arrival
-        mark_arrival(owner_ctx, messages, arrivals, pressed=pressed)
+        mark_arrival(owner_ctx, messages, arrivals)
     if owner_ctx is not None:  # the catch-up of the host's carriage at receipt: every live member below, each row once
         from ouroboros.owner_relay import carry_to_members
         grown = len(getattr(owner_ctx, "_owner_directives", None) or []) > before_rows
@@ -408,6 +407,29 @@ def _drain_incoming_messages(
                 "[Host fact: owner_quote_handles held by this turn]\n" + json.dumps(handles), slot=owner_ctx)
             owner_ctx._quote_handles_shown = handles
     return controls
+
+
+def _record_quiz_delivery(ctx, entry: dict, text: str) -> str:
+    """Record the live answer and its card before delivery. Return its input type for the new arrival row."""
+    from ouroboros.answer_facts import answer_source
+    from ouroboros.owner_quiz import late_answer_owner_text
+    from ouroboros.owner_relay import retain_owner_message
+    from ouroboros.owner_words import answered_card_reply
+
+    delivery = entry.get("quiz_delivery") or {}
+    answer = delivery.get("answer_snapshot")
+    held = None
+    if isinstance(answer, dict):
+        text = late_answer_owner_text(answer)
+        held = retain_owner_message(ctx, (answer.get("delivery") or {}).get("answer_row"))
+    source = answer_source(answer)
+    _loop()._record_owner_directive(
+        ctx, source=source, content=text, msg_id=str(entry.get("msg_id") or ""),
+        origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id"),
+                **_arrival(held, entry.get("ts"))},
+        reply_to=answered_card_reply(answer, delivery.get("task_id")),
+    )
+    return source
 
 
 def _context_overflow_retries(tool_ctx: Any, record: str = "_context_overflow_retries") -> set:

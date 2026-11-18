@@ -132,7 +132,7 @@ def admit(task_id: str, body: dict, *, source: str = "owner") -> tuple[dict, dic
     Receipts live with the task. Even an older request repeated after a newer
     decision returns its original answer without rewriting either carrier.
     """
-    if source not in {"owner", "owner_words"}:
+    if source != "owner" and source not in route_choice.CITED_LEAD_SOURCES:
         raise ValueError("A work model act requires an owner source")
     from ouroboros.lead_fact import project_lead
     from ouroboros.task_store import patch_document
@@ -161,7 +161,7 @@ def admit(task_id: str, body: dict, *, source: str = "owner") -> tuple[dict, dic
             elif action in {"set", "keep"}:
                 chosen = body if action == "set" else fact
                 carrier = {"source": source, "model": chosen["model"], "use_local": chosen.get("use_local", False)}
-                if source == "owner_words":
+                if source in route_choice.CITED_LEAD_SOURCES:
                     carrier["cited"] = body["cited"]
             metadata = {**(row.get("metadata") or {}), **({"lead": carrier} if carrier else {})}
             if action == "follow":

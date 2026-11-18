@@ -1189,3 +1189,39 @@ def test_writer_receipts_read_no_whole_story_and_survive_a_migrating_store(tmp_p
     assert shown["ok"] and shown["shown"] is True
     assert captures == []  # no writer captured the whole story around its write
     assert all("memory_read(story=true)" in result["effect"] for result in (part, shown))
+
+
+@pytest.mark.parametrize("choice, comment", [(0, ""), (0, "  after the frost  "), (None, "  my own answer  ")])
+def test_an_answer_row_can_only_supply_the_humans_entered_words(tmp_path, choice, comment):
+    from ouroboros.dialogue_provenance import quote_words, render_row_text
+
+    label = "Open the amber gate"
+    quiz = {"quiz_id": "amber-gate", "state": "answered", "options": [label], "comment": comment,
+            "answered_index": choice}
+    [row] = chat(tmp_path, [{"chat_id": 1, "direction": "system", "type": "quiz_answer", "ts": ts(1),
+                             "source": "owner_quiz_answer", "task_id": "gate-keeper", "quiz": quiz}])
+    address = addr(row)
+    cite = {"address": address, "speaker": "human", "text": label}
+    covers = {"from": address, "to": address}
+    assert (label if choice == 0 else comment) in render_row_text(row)
+    assert quote_words(row) == comment
+    refused = write(ctx_for(tmp_path), kind="page", text="I recorded the decision.", covers=covers, quotes=[cite])
+    assert refused["reason"] == "quote_mismatch"
+    if comment:
+        assert write(ctx_for(tmp_path), kind="page", text="The answer came with words.", covers=covers,
+                     quotes=[{**cite, "text": comment}])["ok"]
+
+
+def test_a_late_answer_bubble_offers_only_the_comment_for_a_human_quote(tmp_path):
+    from ouroboros.dialogue_provenance import quote_words
+
+    for i, comment in enumerate(("", "  to the east  ")):
+        block = {"quiz_id": "late-iris", "state": "answered", "answered_after_terminal": True,
+                 "options": ["Open the iris"], "answered_index": 0, "comment": comment}
+        [row] = chat(tmp_path, [{"chat_id": 1, "direction": "in", "ts": ts(i+1), "text": comment or "1. Open the iris",
+                                 "late_answer": {"task_id": "iris-keeper", "quiz_id": "late-iris",
+                                                 "answer_snapshot": {"task_id": "iris-keeper", "quiz": block}}}])
+        assert quote_words(row) == comment
+        assert check_quotes(tmp_path, [{"address": addr(row), "speaker": "human", "text": "Open the iris"}]) == (False, 0)
+        if comment:
+            assert check_quotes(tmp_path, [{"address": addr(row), "speaker": "human", "text": comment}]) == (True, None)

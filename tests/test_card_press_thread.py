@@ -83,7 +83,9 @@ def test_presses_on_a_finished_authors_card_are_one_thread_in_main(tmp_path, mon
     bridge, app, card = _ended_author(tmp_path, monkeypatch, 1)
     assert _press(app, card, "r1")["delivery"] == "forwarded"
     [(_args, first)] = _intake_once(tmp_path, monkeypatch, bridge)
-    assert first["task_metadata"]["card_press"] == {"task_id": "task-1", "card_id": card["card_id"], "request_id": "r1"}
+    press = first["task_metadata"]["card_press"]
+    assert (press["task_id"], press["card_id"], press["request_id"]) == ("task-1", card["card_id"], "r1")
+    assert press["submission"]["label"] == "Book it" and not press["submission"]["values"]
 
     _press_head("head-1", "task-1", 1, card, "r1")
     assert _press(app, card, "r2")["delivery"] == "forwarded"

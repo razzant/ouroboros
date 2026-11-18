@@ -107,7 +107,11 @@ def test_a_live_answer_stays_an_owner_input_and_only_words_are_their_words(tmp_p
                 "«1. Publish it» and wrote no words; the label is the asking task's text)\n") in rendered
         assert not ow.owner_words_contain(ctx, "Publish it")  # the label is never cited or attested as their words
         basis, error = ow.cited_owner_basis(ctx, "Publish it")
-        assert basis is None and error.startswith("owner_words were not found verbatim")
+        assert not error and basis["source"] == "owner_press" and basis["basis"] == "cited"
+        assert basis["cited"] == "Publish it" and basis["msg_id"] == row["msg_id"] and basis["reply_to"] == row["reply_to"]
+        for other in ("Publish", "Not now", "Sends it now", "1. Publish it"):
+            assert ow.cited_owner_basis(ctx, other)[0] is None
+        assert not ow.owner_words_contain(SimpleNamespace(_owner_directives=[basis]), "Publish it")
 
 
 def test_safety_still_reads_a_press_as_my_humans_answer_to_the_card():
@@ -115,6 +119,7 @@ def test_safety_still_reads_a_press_as_my_humans_answer_to_the_card():
     answered card holds; a press without words is still such an answer, and a non-owner row carrying the same card
     is not."""
     from ouroboros import safety
+    from ouroboros.safety_evidence import with_author
     from ouroboros.owner_words import answered_card_reply
 
     card = {"quiz_id": "q9", "question": "Send to @alice:\nThanks, taking it up.", "state": "answered",
@@ -124,6 +129,9 @@ def test_safety_still_reads_a_press_as_my_humans_answer_to_the_card():
     assert safety._owner_yes(SimpleNamespace(_owner_directives=[row]), subject) == "q9"
     peer = {**row, "source": "principal_task_message"}
     assert safety._owner_yes(SimpleNamespace(_owner_directives=[peer]), subject) == ""
+    evidence = with_author(row, {})["author"]
+    assert "answer" in evidence and "press" in evidence and "no words of their own" in evidence
+    assert "press" not in with_author({**row, "source": "owner_quiz_answer"}, {})["author"]
 
 
 def test_the_wake_line_reads_a_press_as_an_act_and_words_as_words():
@@ -169,22 +177,3 @@ def test_a_carried_answer_reaches_a_member_as_an_act_or_as_their_words(block):
         assert words == ("(host record: my human pressed «1. Publish it» and wrote no words; the label is the text of "
                          "task asker)")
     assert "The label «Publish it» is the text of task asker" in body or "the text of task asker) and wrote" in body
-
-
-def test_continue_takes_the_press_that_opened_a_late_answer_head_as_the_original_itself(tmp_path, monkeypatch):
-    """A late answer's head records its opening press under the door's message id: Continue reads that row as the
-    original's own message (its card beside it), while a later press of the same work stays a later act."""
-    from ouroboros.owner_continue import owner_sources
-    from ouroboros.task_results import load_task_result
-    from tests._budget_pause_exact_helpers import _install_queue
-    from tests.test_owner_continue import _settled_with_corpus
-
-    card = {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker", "text": "Publish?\n1. Publish it"}
-    _install_queue(tmp_path, monkeypatch)
-    _settled_with_corpus(tmp_path, {"source": "owner_press", "content": "1. Publish it", "chat_id": "7",
-                                    "client_message_id": "m-1", "reply_to": card},  # the door's own message
-                         {"source": "owner_press", "content": "2. Not now", "chat_id": "7", "client_message_id": "m-9",
-                          "quiz_id": "q8", "source_task_id": "asker"})
-    sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
-    assert sources["gaps"] == [] and sources["original"]["reply_to"] == card
-    assert [row["content"] for row in sources["later"] if row["source"] == "owner_press"] == ["2. Not now"]

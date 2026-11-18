@@ -390,7 +390,7 @@ def _quote_resolver(root: Path, lineage: Dict[str, Any],
             if pos is None:
                 return None
             author = _author_of(row, pos, lineage)
-        return quote_words(row), author["kind"]
+        return quote_words(row, root), author["kind"]
     return resolve
 
 
@@ -1379,7 +1379,7 @@ def _task_final_text(root: Path, task_id: str) -> str:
     for _address, row, _pos in chat_chain.iter_rows(root):
         if (str(row.get("task_id") or "") == task_id and str(row.get("direction") or "") in ("out", "outgoing")
                 and not wordless_reaction(row)):
-            final = quote_words(row)
+            final = quote_words(row, root)
     return final
 
 
@@ -1395,7 +1395,7 @@ def _mark_target(ctx: Any, root: Path, store: ChronicleStore, a: Dict[str, Any])
         row, found = chat_chain.resolve_row(root, a["address"])
         if row is None:
             return None, None, str(found.get("status") or "row_missing")
-        if quote and quote not in quote_words(row):
+        if quote and quote not in quote_words(row, root):
             return None, None, "quote_mismatch"
         return found["address"], None, ""
     if a["task_id"]:

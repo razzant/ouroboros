@@ -275,7 +275,7 @@ def _start_task(
     model_basis, cite_error = cited_owner_basis(ctx, owner_words, call_speech=bool(model))
     owner_basis = model_basis if model_basis and model_basis["source"] != "live_call" else None
     if cite_error and model:
-        cite_error = "The model needs verified owner_words. Nothing was started; cite your human's exact words."
+        cite_error = "The model needs verified owner_words. Cite your human's exact words or the complete label they pressed."
     if cite_error:  # the same typed argument refusal the schedule doors publish: nothing was started
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
                                                  text=f"⚠️ OWNER_WORDS_UNVERIFIED (start_task): {cite_error}"))
@@ -456,7 +456,8 @@ def _start_task(
         evt["owner_corpus"] = [*evt.get("owner_corpus", []), owner_basis]
     kind_note = " " + model_note if model_note else ""
     if is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
-        kind_note += (" Started as your human's work on their cited words." if owner_basis else
+        kind_note += (" Started as your human's work on their pressed choice." if owner_basis and owner_basis["source"] == "owner_press"
+                      else " Started as your human's work on their cited words." if owner_basis else
                      " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
                      "the Off switch stops it.")
     mode, confirmation = _emit_and_wait_for_routing(ctx, evt)

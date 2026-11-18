@@ -14,9 +14,11 @@ what a press without words meant: the host states who wrote what, and when.
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any, Mapping, Optional
 
-from ouroboros.owner_words import OWNER_PRESS
+from ouroboros.owner_words import OWNER_CARD_INPUT, OWNER_PRESS
 
 
 def pressed_index(block: Any) -> Optional[int]:
@@ -76,6 +78,37 @@ def answer_source(block: Any, words_source: str = "owner_quiz_answer") -> str:
     return OWNER_PRESS if wordless_press(block) else words_source
 
 
+def living_card_input(row: Any, root: Any = None) -> dict:
+    """The submitted values or wordless action and its card. Older mail may carry only the store identity."""
+    from ouroboros.card_store import find_submission, late_press_ref, load_card, press_snapshot, valid_card_id
+
+    if not isinstance(row, Mapping):
+        return {}
+    ref = late_press_ref(row.get("card_press")) or {}
+    delivery = row.get("card_delivery") or {}
+    if not ref and row.get("kind") != "card_input":
+        return {}
+    card_id = ref.get("card_id") or delivery.get("card_id")
+    request = ref.get("request_id") or delivery.get("request_id")
+    if not card_id:  # a live pre-snapshot mailbox id is card_input:<card_id>:<request_id>
+        _, _, rest = str(row.get("msg_id") or "").partition("card_input:")
+        card_id, _, request = rest.partition(":")
+    snap, asker = ref.get("submission"), ref.get("task_id")
+    if snap is None and (drive := delivery.get("canonical_root") or root) and valid_card_id(card_id):
+        stored = find_submission(load_card(drive, card_id) or {}, request)
+        if stored:
+            snap, asker = press_snapshot(stored), stored.get("task_id") or asker
+    if snap is None:
+        return {"source": OWNER_CARD_INPUT, "content": "Card input received. Its submission is unavailable."}
+    label = snap["label"]
+    values = [v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+              for v in snap["values"].values() if v is not None and (not isinstance(v, str) or v.strip())]
+    target = {"address": f"card {card_id} of task {asker}", "author": f"Ouroboros, task {asker}",
+              "text": f"{snap['title']}\n{label}", "pressed_label": label, "card_id": card_id}
+    return {"source": "owner_mailbox" if values else OWNER_PRESS, "content": "\n".join(values) if values else label,
+            "source_task_id": asker, "reply_to": target}
+
+
 def row_source(row: Any, words_source: str) -> str:
     """The corpus label of a row of my human's that may answer a card (a quiz answer row, a late answer's own chat
     row or mailbox entry, a relayed row): ``OWNER_PRESS`` when its card records a press without words and the row
@@ -84,6 +117,11 @@ def row_source(row: Any, words_source: str) -> str:
     from ouroboros.owner_relay import owner_text
     from ouroboros.owner_words import answered_card_source
 
+    if isinstance(row, Mapping) and isinstance(answer := row.get("corpus_answer"), Mapping):
+        if answer.get("source") in (OWNER_PRESS, "owner_quiz_answer", "owner_mailbox", "initial_user", "origin_message"):
+            return answer["source"]
+    if living := living_card_input(row):
+        return living["source"]
     block = answered_card_source(row)[0]
     if wordless_press(block) and owner_text(row) == late_answer_owner_text(block):
         return OWNER_PRESS
@@ -96,7 +134,11 @@ def row_words(row: Any) -> str:
     from ouroboros.owner_words import answered_card_source
 
     if row_source(row, "") == OWNER_PRESS:
-        return press_record(owner_text(row), answered_card_source(row)[1])
+        carried = row.get("corpus_answer") or {}
+        if carried.get("rendered"):
+            return owner_text(row)
+        return press_record(owner_text(row), carried.get("source_task_id") or living_card_input(row).get("source_task_id")
+                            or answered_card_source(row)[1])
     return owner_text(row)
 
 
@@ -107,6 +149,19 @@ def last_own_words(ctx: Any) -> str:
 
     last = ("", "")
     for item, ts, reference, _door in _dated_directives(ctx):
-        if item.get("source") in OWNER_WORD_SOURCES:
+        if not item.get("carried") and item.get("source") in OWNER_WORD_SOURCES:
             last = (ts or _item_time(item), reference or row_ref(item))
     return f"[Host fact: their last own words in this work: {last[0]} ({last[1]})]" if all(last) else ""
+
+
+def mark_press_arrival(ctx: Any, message: dict) -> None:
+    """Append the last local words known when this press arrived, before its first model send."""
+    try:
+        line = last_own_words(ctx)
+    except Exception:
+        logging.getLogger(__name__).warning("Could not read the last local owner words", exc_info=True)
+        return
+    if line:
+        content = message["content"]
+        message["content"] = ([*content, {"type": "text", "text": "\n" + line}] if isinstance(content, list)
+                              else f"{content}\n{line}")

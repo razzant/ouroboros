@@ -22,7 +22,7 @@ from tests.test_place_focus import focus as _focus
 focus = _focus
 RULES = "Rule one: keep private work private.\nRule two: hold a disputed send and ask me in Main."
 OPENING = "host or Ouroboros text that opened this run; not the owner's words"
-PRESS_AUTHOR = ("the owner's act: a press of one option of the card quoted in reply_to, with no words of their own "
+PRESS_AUTHOR = ("the owner's answer by a press of an offered option on the card in reply_to, with no words of their own "
                 "(the option's label is the card's text, written by Ouroboros)")
 
 

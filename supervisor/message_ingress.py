@@ -290,6 +290,10 @@ def _chat_record(
             record["reply_to_relay"] = str(meta["reply_to_relay"])
         if isinstance(meta.get("presence_contact"), dict):
             record["presence_contact"] = dict(meta["presence_contact"])
+        if meta.get("card_press"):
+            from ouroboros.card_store import late_press_ref
+            if press := late_press_ref(meta["card_press"]):
+                record["card_press"] = press
         if meta.get("late_answer"):
             from ouroboros.owner_quiz import late_answer_ref
             accepted_answer = late_answer_ref(meta["late_answer"])
@@ -495,7 +499,11 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     chat_id = int(message["chat_id"])
     message_id = str(message["client_message_id"])
     source = str(message["source"])
-    logged = text.strip() or str(message.get("image_caption") or "").strip() or attachment_placeholder(
+    from ouroboros.card_store import late_press_ref
+    task_metadata = message.get("task_metadata") or {}
+    press = late_press_ref(task_metadata.get("card_press"))
+    late_answer = late_answer_ref(task_metadata.get("late_answer"))
+    logged = (text if press or late_answer else text.strip()) or str(message.get("image_caption") or "").strip() or attachment_placeholder(
         message.get("image_base64"), message.get("task_metadata")
     )
     if not logged:
@@ -505,7 +513,6 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     if reply:  # a replayed obligation dispatches the same reference
         message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": reply}
     refs = stored_refs((message.get("task_metadata") or {}).get("chat_attachments"))
-    late_answer = late_answer_ref((message.get("task_metadata") or {}).get("late_answer"))
     placeholder = not text.strip() and not str(message.get("image_caption") or "").strip()
     name = dispatcher_name(dispatch)
     with _INGRESS_LOCK:
@@ -519,7 +526,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
                     client_message_id=message_id, sender_label=str(message.get("sender_label") or ""),
                     transport=message.get("transport"), drive_root=root,
                     message_meta={"attachments": refs, "text_placeholder": placeholder, "reply_to": reply,
-                                  **({"late_answer": late_answer} if late_answer else {}),
+                                  **({"late_answer": late_answer} if late_answer else {}), **({"card_press": press} if press else {}),
                                   "execution_transport": (message.get("task_metadata") or {}).get("execution_transport")},
                     dispatch=obligation(name, text, message))
             finally:
@@ -534,6 +541,8 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
             # The row an earlier delivery landed (or the race lost by a hair): rejoin it, or take its owed dispatch.
             rejoin_or_refuse(row, source, logged, refs, reply,
                             execution_transport=(message.get("task_metadata") or {}).get("execution_transport"))
+            if saved_press := late_press_ref(row.get("card_press")):
+                message["task_metadata"] = {**(message.get("task_metadata") or {}), "card_press": saved_press}
             saved_answer = late_answer_ref(row.get("late_answer"))
             if saved_answer:
                 message["task_metadata"] = {**(message.get("task_metadata") or {}), "late_answer": saved_answer}

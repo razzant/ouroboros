@@ -201,12 +201,23 @@ def acknowledge_press(root: Any, card_id: str, request_id: str) -> None:
         _update(_card_path(root, card_id), mutate)
 
 
-def late_press_ref(value: Any) -> Optional[Dict[str, str]]:
+def press_snapshot(submission: Dict[str, Any]) -> Dict[str, Any]:
+    """The fields of the accepted submission that a reader needs after the card is replaced or pruned."""
+    return {"label": submission.get("label") or submission.get("action_id") or "",
+            "title": submission.get("title") or "", "values": dict(submission.get("values") or {})}
+
+
+def late_press_ref(value: Any) -> Optional[Dict[str, Any]]:
     """Typed provenance of a press whose card's author no longer holds it: ``{task_id, card_id, request_id}``."""
     if not isinstance(value, dict):
         return None
     ref = {key: str(value.get(key) or "").strip() for key in ("task_id", "card_id", "request_id")}
-    return ref if ref["task_id"] and ref["request_id"] and valid_card_id(ref["card_id"]) else None
+    if not (ref["task_id"] and ref["request_id"] and valid_card_id(ref["card_id"])):
+        return None
+    snapshot = value.get("submission")
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("label"), str) and isinstance(snapshot.get("values"), dict):
+        return {**ref, "submission": press_snapshot(snapshot)}
+    return ref
 
 
 def press_wait(row: Dict[str, Any]) -> str:
