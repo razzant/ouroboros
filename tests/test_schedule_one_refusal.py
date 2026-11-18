@@ -65,3 +65,28 @@ def test_problems_with_the_selected_row_are_named_together_after_it(tmp_path, mo
                                       target="some-route=model")
     control._schedule_task(ctx, **{**base, "subagent_id": session}, mode="plan")
     assert [event["type"] for event in ctx.pending_events] == ["schedule_subagent"]
+
+
+def test_independent_folder_field_problems_join_the_shape_refusal(tmp_path, monkeypatch):
+    """Both directions: a scope path, a directory strategy and a workspace are each checked alone, so their problems
+    come back in one refusal with the call's other shape problems; each alone reads exactly as it did; the copy rule,
+    which reads two fields, still follows once they pass."""
+    selected = configure_test_subagent(monkeypatch)
+    ctx = _ctx(tmp_path)
+    base = {"subagent_id": selected, "objective": "Read the notes", "expected_output": "Findings"}
+
+    both = control._schedule_task(ctx, **base, scope_paths=[""], deadline_at="yesterday")
+    assert both == ("⚠️ TOOL_ARG_ERROR (schedule_subagent): deadline_at must be an ISO-8601 UTC instant such as "
+                    "2026-08-02T18:30:00Z (got: 'yesterday'); scope_paths must be an array of nonempty relative paths.")
+    folder = control._schedule_task(ctx, **base, directory_strategy="old", scope_paths="../notes", workspace="other")
+    assert folder == ("⚠️ TOOL_ARG_ERROR (schedule_subagent): directory_strategy must be direct or copy; scope_paths must "
+                      "be an array of nonempty relative paths; workspace must be copy or in_place.")
+    assert control._schedule_task(ctx, **base, scope_paths=[""]) == (
+        "⚠️ TOOL_ARG_ERROR (schedule_subagent): scope_paths must be an array of nonempty relative paths.")
+    assert control._schedule_task(ctx, **base, directory_strategy="old") == (
+        "⚠️ TOOL_ARG_ERROR (schedule_subagent): directory_strategy must be direct or copy.")
+    assert control._schedule_task(ctx, **base, workspace="other") == (
+        "⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace must be copy or in_place.")
+    assert control._schedule_task(ctx, **base, directory_strategy="copy") == (
+        "⚠️ TOOL_ARG_ERROR (schedule_subagent): copy requires scope_paths; use ['.'] to select the whole folder.")
+    assert not ctx.pending_events
