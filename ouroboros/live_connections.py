@@ -112,6 +112,8 @@ class PreparedConnection:
         # Retired close may outlive its consumer. Observe its outcome even when
         # the active successor, rather than the original waiter, ends the call.
         error = None if task.cancelled() else task.exception()
+        if error is None and hasattr(self, 'view'):  # a close cancelled after its own write failed keeps that evidence
+            error = self.host._connection_ledger.failures.get(str(self.view.connection_number))
         if error is not None and hasattr(self, 'connection'):
             self.connection['cleanup_failure'] = type(error).__name__
             self.view.observe('host', canonical_json({'type': 'call.connection_cleanup_failed',
@@ -133,6 +135,17 @@ class PreparedConnection:
         if not self.task.done():
             self.task.cancel()
         await joined(asyncio.gather(self.task, return_exceptions=True))
+
+    async def _close_session(self):
+        """Its connected time, closing tail included, is on the ledger once the connection has closed; its connected
+        time that could not be written fails the close, as a write inside the session's close did."""
+        ledger, key = self.host._connection_ledger, str(self.view.connection_number)
+        try:
+            await self.session.close()
+        finally:
+            await asyncio.to_thread(ledger.flush, key)
+        if key in ledger.failures:
+            raise ledger.failures[key]
 
     async def _fit(self, credentials, *, rebound=False):
         from ouroboros.observability import persist_physical_candidate
@@ -338,7 +351,7 @@ class PreparedConnection:
                         await self.reader.stop()
                 finally:
                     if self.session is not None:
-                        await joined(self.session.close())
+                        await joined(self._close_session())
             finally:
                 if hasattr(self, 'connection'):
                     self.connection['closed_at'] = time.time()
