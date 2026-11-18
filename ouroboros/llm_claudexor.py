@@ -69,11 +69,12 @@ def prepare_processing_target(target: dict) -> dict:
     No model eligibility inference: this reads the existing model-source owner, only for explicit intent. A retained
     target is reused by every physical preparation of this logical call. The list is a static declaration of the
     engine build (``claudexor_run_events.declared_live_input`` keeps ``liveInput`` alike): one a read found serves later
-    calls on that build (``current_engine``); a failed read, a missing list or an unknown build is asked again.
+    calls on the build that answered it (``current_engine``, the same before and after the read); a failed read, a
+    missing list, an unknown build or one replaced during the read is asked again.
     """
     if not target.get("processing_preference") or "processing_preferences" in target:
         return target
-    known = _PROCESSING_PREFERENCES.get((current_engine(), target.get("source")))  # an unknown build is never kept
+    known = _PROCESSING_PREFERENCES.get((engine := current_engine(), target.get("source")))  # an unknown one: none kept
     if known is not None:
         return {**target, "processing_preferences": list(known)}
     prepared = {**target, "processing_preferences": []}
@@ -86,7 +87,7 @@ def prepare_processing_target(target: dict) -> dict:
     preferences = source.get("processingPreferences")
     if isinstance(preferences, list):
         prepared["processing_preferences"] = [value for value in preferences if isinstance(value, str)]
-        if engine := current_engine():  # the build whose handshake this read made
+        if engine and engine == current_engine():  # the build that answered: unchanged across this read
             _PROCESSING_PREFERENCES[(engine, target.get("source"))] = tuple(prepared["processing_preferences"])
     return prepared
 
