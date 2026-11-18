@@ -469,7 +469,7 @@ def test_only_an_admitted_call_for_the_complete_bound_revision_can_shorten_a_hea
 
 
 def test_reader_retains_an_unjournaled_revision_before_the_note_moves(world, monkeypatch):
-    note = _write(world, "outside-edit", "Original journaled words.")
+    note = _write(world, "Outside-Edit", "Original journaled words.")
     outside = note.raw.replace(b"Original journaled words.", b"Exact observed bytes.\r\n\r\n## History\r\nHalf the note.")
     note.address.path.write_bytes(outside)
     observed = knowledge.read_knowledge_note(note.address)
@@ -492,16 +492,61 @@ def test_reader_retains_an_unjournaled_revision_before_the_note_moves(world, mon
     retained.write_bytes(b"Damaged while the live source still exists.")
     assert _held(_plan(world)) == _held(plan) and retained.read_bytes() == outside and not history
     assert "Exact observed bytes." in _held(plan) and observed.revision in _held(plan)
+    registry = ToolRegistry(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root)
+    alias = note.address.topic.lower() if note.address.path.with_name("outside-edit.md").is_file() else note.address.topic
+    pin = registry.execute_result("knowledge_read", {"topic": alias, "scope": "global", "version": observed.revision})
+    reader = pin.meta["knowledge_source"]["read"]
+    assert pin.text.endswith(observed.text) and reader["arguments"]["topic"] == note.address.topic
     note.address.path.rename(note.address.path.with_name("moved.md"))
     ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
-    read = _knowledge_read(ctx, note.address.topic, scope="global", version=observed.revision)
-    assert read.endswith(outside.decode("utf-8"))
-    assert "Topic 'outside-edit' not found in global." in _knowledge_read(ctx, note.address.topic, scope="global")
+    assert registry.execute_result(reader["tool"], reader["arguments"]).text.endswith(observed.text)
+    assert "Topic 'Outside-Edit' not found in global." in _knowledge_read(ctx, note.address.topic, scope="global")
     wrong_address = _knowledge_read(ctx, "other", scope="global", version=observed.revision)
     assert "version_unavailable" in wrong_address
     retained.write_bytes(b"Changed retained bytes.")
     damaged = _knowledge_read(ctx, note.address.topic, scope="global", version=observed.revision)
     assert "version_unavailable" in damaged and "Changed retained bytes." not in damaged
+
+
+def test_a_remembered_journal_miss_checks_only_appended_history_until_its_topic_changes(world, monkeypatch):
+    note = _write(world, "outside", "Originally journaled.")
+    note.address.path.write_bytes(note.raw.replace(b"Originally journaled.", b"An outside edit.\n## History\nBody."))
+    observed = knowledge.read_knowledge_note(note.address)
+    journal = knowledge_versions.journal_path(note.address)
+    path = knowledge_versions._held_version_path(note.address, observed.revision)
+    real_lines = knowledge_versions._journal_lines
+    offsets = []
+
+    def lines(source, needle, *, after=0):
+        offsets.append(after)
+        return real_lines(source, needle, after=after)
+
+    monkeypatch.setattr(knowledge_versions, "_journal_lines", lines)
+    assert observed.revision in _held(_plan(world)) and offsets == [0] and path.read_bytes() == observed.raw
+    for other in ("other", "another"):
+        end = journal.stat().st_size
+        _write(world, other, "An unrelated note.", claims=())
+        offsets.clear()
+        assert observed.revision in _held(_plan(world)) and offsets == [end] and path.read_bytes() == observed.raw
+        offsets.clear()
+        assert observed.revision in _held(_plan(world)) and not offsets
+
+    # A failed source publication still captures the exact pre-image in its authored row.
+    with monkeypatch.context() as patch:
+        def no_source(*_args, **_kwargs):
+            raise OSError(errno.ENOSPC, "fixture source write failed")
+
+        patch.setattr(knowledge, "write_bytes_atomic", no_source)
+        result = knowledge.write_knowledge_note(note.address, "Next words.", mode="append")
+    assert result.reason == "publication_incomplete" and result.current.raw == observed.raw
+    offsets.clear()
+    shown = _held(_plan(world))
+    assert observed.revision in shown and offsets[0] > 0 and offsets[1:] == [0]
+    assert path.read_bytes().startswith(b"\xff") and not path.with_suffix(".checked").exists()
+    note.address.path.unlink()
+    registry = ToolRegistry(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root)
+    assert registry.execute("knowledge_read", {"topic": note.address.topic, "scope": "global",
+                                              "version": observed.revision}).endswith(observed.text)
 
 
 def test_journal_proof_keeps_readers_without_copies_and_retires_an_outside_edit(world, monkeypatch):
@@ -543,7 +588,32 @@ def test_journal_proof_keeps_readers_without_copies_and_retires_an_outside_edit(
     assert new.revision in _held(_plan(world)) and not new_copy.exists()
     journal = knowledge_versions.journal_path(new.address)
     journal.rename(journal.with_suffix(".moved"))
+    _write(world, "other-source", "A valid row in the replacement journal.", claims=())
+    assert journal.is_file()
     assert new.revision in _held(_plan(world)) and new_copy.read_bytes() == new.raw
+    new.address.path.unlink()
+    assert _knowledge_read(ctx, new.address.topic, scope="global", version=new.revision).endswith(new.text)
+
+
+def test_a_read_denied_journal_cannot_back_a_held_reader(world, monkeypatch):
+    note = _write(world, "restricted-journal", "Words retained before the reader is published.")
+    journal = knowledge_versions.journal_path(note.address)
+    path = knowledge_versions._held_version_path(note.address, note.revision)
+    healthy = _held(_plan(world))
+    assert "Exact reader: knowledge_read(" in healthy and not path.exists()
+    open_path = Path.open
+
+    def deny_read(path, mode="r", *args, **kwargs):
+        if path == journal and mode == "rb":
+            raise PermissionError(errno.EACCES, "fixture journal read denied")
+        return open_path(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", deny_read)
+    assert journal.is_file() and _held(_plan(world)) == healthy and path.read_bytes() == note.raw
+    note.address.path.rename(note.address.path.with_name("moved.md"))
+    registry = ToolRegistry(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root)
+    result = registry.execute_result("knowledge_read", {"topic": note.address.topic, "scope": "global", "version": note.revision})
+    assert result.status == "ok" and result.text.endswith(note.text)
 
 
 def test_failed_copy_can_only_withhold_a_reader_without_verified_journal_bytes(world, monkeypatch):

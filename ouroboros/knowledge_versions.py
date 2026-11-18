@@ -15,7 +15,7 @@ after the note and its index land, then project the committed names under the sh
 The held-version store grows by one full Markdown file per shown revision the journal cannot
 rebuild, plus a 25-byte journal proof for each fallback check that succeeds. Writer-published
 revisions normally use the proof in their existing claim record. A failed journal check is
-remembered beside its body until the journal changes. Capture and the journal writer replace a
+remembered beside its body and rechecked when new history names that note. Capture and the journal writer replace a
 body with a proof after hash-verified reconstruction without the live file. Only the journal can
 retire a body, so changing claims or ending a task cannot break an issued reader.
 
@@ -106,16 +106,20 @@ def _matching_lines(region: bytes, base: int, needle: bytes) -> Iterator[tuple[i
         end = start
 
 
-def _journal_lines(journal: Path, needle: bytes) -> Iterator[tuple[int, bytes]]:
-    """Every line of the journal holding ``needle``, newest first, read in blocks from its end."""
+def _journal_lines(journal: Path, needle: bytes, *, after: int = 0) -> Iterator[tuple[int, bytes]]:
+    """Lines holding ``needle`` after a record boundary, newest first in blocks."""
     with journal.open("rb") as handle:
         end, carry = os.fstat(handle.fileno()).st_size, b""
-        while end > 0:
-            start = max(0, end - _BLOCK)
+        if after:
+            handle.seek(after - 1)
+            if handle.read(1) != b"\n":
+                raise ValueError("incomplete journal boundary")
+        while end > after:
+            start = max(after, end - _BLOCK)
             handle.seek(start)
             data = handle.read(end - start) + carry
-            cut = data.find(b"\n") + 1 if start else 0
-            if start and not cut:  # one line longer than everything read so far
+            cut = data.find(b"\n") + 1 if start > after else 0
+            if start > after and not cut:  # one line longer than everything read so far
                 carry, end = data, start
                 continue
             yield from _matching_lines(data[cut:], start + cut, needle)
@@ -303,7 +307,9 @@ def _held_version_path(address: Any, revision: str) -> Path:
 
 def _journal_stamp(address: Any) -> bytes:
     try:
-        info = journal_path(address).stat()
+        with journal_path(address).open("rb", buffering=0) as journal:
+            info = os.fstat(journal.fileno())
+            journal.read(1)  # a stat alone cannot establish that a reader can open the journal
     except OSError:
         return b""
     changed = info.st_mtime_ns if os.name == "nt" else info.st_ctime_ns
@@ -318,6 +324,19 @@ def _covers_journal(stamped: bytes, observed: bytes) -> bool:
     identity, end, _ = _JOURNAL_STAMP.unpack(stamped)
     current_identity, current_end, _ = _JOURNAL_STAMP.unpack(observed)
     return stamped == observed or (identity == current_identity and end < current_end)
+
+
+def _check_still_current(address: Any, checked: bytes | None, stamp: bytes) -> bool:
+    if not checked or not _covers_journal(checked, stamp):
+        return False
+    if checked == stamp:
+        return True
+    _, offset, _ = _JOURNAL_STAMP.unpack(checked)
+    try:
+        return not any(_belongs(_parse(line), address) for _, line in
+                       _journal_lines(journal_path(address), _needle(address), after=offset))
+    except (OSError, ValueError):
+        return False
 
 
 def _held_file(path: Path) -> bytes | None:
@@ -365,13 +384,13 @@ def retain_held_version(note: Any, revision: str) -> None:
     if captured is None and _writer_proved(address, revision, stamp):
         return
     checked = path.with_suffix(".checked")
-    already_checked = _held_file(checked) == stamp
-    if not already_checked and _journal_rebuilds(address, revision):
+    previous = _held_file(checked)
+    if stamp and not _check_still_current(address, previous, stamp) and _journal_rebuilds(address, revision):
         _record_proof(path, stamp)
         return
     if captured != note.raw:
         utils.write_bytes_atomic(path, note.raw, fsync=True)
-    if not already_checked:
+    if stamp and previous != stamp:
         try:
             utils.write_bytes_atomic(checked, stamp)
         except OSError:
@@ -392,6 +411,8 @@ def _retained_held_version(address: Any, revision: str) -> str | None:
 
 def _retire_held_bodies(address: Any, history: Mapping[str, Any]) -> None:
     stamp = _journal_stamp(address)
+    if not stamp:
+        return
     for revision in dict.fromkeys((history.get("old_sha256"), history.get("new_sha256"))):
         if revision:
             path = _held_version_path(address, revision)
