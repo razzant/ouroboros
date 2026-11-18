@@ -45,6 +45,9 @@ def quotable_owner_row(row, drive_root=None, *, accounts=None) -> bool:
 
 
 def owner_text(row) -> str:
+    from ouroboros.answer_facts import living_card_input
+    if living := living_card_input(row):
+        return living["content"]
     if row.get("type") == "quiz_answer":
         from ouroboros.owner_quiz import late_answer_owner_text
         return late_answer_owner_text(row["quiz"])
@@ -243,6 +246,14 @@ def owner_quote(root, row: dict, *, address: str = "") -> dict:
              "owner_row": copy.deepcopy(row)}
     if isinstance(row.get("reply_to"), dict) and row["reply_to"]:  # what the owner was replying to, as the host resolved it
         quote["reply_to"] = copy.deepcopy(row["reply_to"])
+    from ouroboros.answer_facts import living_card_input
+    if living := living_card_input(row, root):
+        quote["input_source"] = living["source"]
+        if target := living.get("reply_to"):
+            quote["question_frame"] = f"Card of task {living['source_task_id']}: {target['text']}"
+            if living["source"] == "owner_press":
+                from ouroboros.answer_facts import press_record
+                quote["question_frame"] += "\n" + press_record(living["content"], living["source_task_id"])
     answered, asker = answered_card_source(row)
     if isinstance(answered, dict):  # a quiz row's card or a late answer's snapshot, under the asking task's name
         from ouroboros.owner_quiz import recorded_answer_frame
@@ -400,8 +411,8 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
     own voice. A ``host_carried`` entry takes the carried mode (``inject_carried``) instead. Returns the addresses
     of carried rows shown here under the fact ``reached this work`` (the drain's closing control); ``[]`` otherwise."""
     from ouroboros import loop
-    from ouroboros.answer_facts import row_source
-    from ouroboros.owner_words import answered_card_reply, answered_card_source, owner_place_accounts, reply_target
+    from ouroboros.answer_facts import mark_press_arrival, row_source
+    from ouroboros.owner_words import OWNER_PRESS, answered_card_reply, answered_card_source, owner_place_accounts, reply_target
     from ouroboros.tool_access import canonical_data_root
 
     if isinstance(entry.get("host_carried"), dict):
@@ -427,8 +438,11 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
         retain_owner_message(ctx, row, accounts=accounts, source_root=source_root)
         address = owner_row_address(row)
         # An answer replies to its card (a quiz row's own, or a late answer's snapshot), else to its chat target.
-        replied = answered_card_reply(*answered_card_source(row)) or reply_target(source_root, row.get("reply_to")) or None
-        loop._record_owner_directive(ctx, source=row_source(row, "owner_mailbox"), content=owner_text(row),
+        from ouroboros.answer_facts import living_card_input
+        living = living_card_input(row, source_root)
+        replied = living.get("reply_to") or answered_card_reply(*answered_card_source(row)) or reply_target(source_root, row.get("reply_to")) or None
+        source = living.get("source") or row_source(row, "owner_mailbox")
+        loop._record_owner_directive(ctx, source=source, content=owner_text(row),
                                      msg_id=address, carried=True,
                                      origin={"source_task_id": entry.get("source_task_id"),
                                              "client_message_id": row.get("client_message_id"),
@@ -437,6 +451,8 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
                                      reply_to=replied)
         content = quote_content(ctx, entry, row, _quote_body(row, carried_quote_line(quote, address=address)))
         loop._append_or_merge_user_message(messages, content, slot=ctx, kind=OWNER_WORDS_KIND)
+        if source == OWNER_PRESS:
+            mark_press_arrival(ctx, messages[-1])
         delivered.add(index)
     note = str(entry.get("text") or "")
     relay = entry["relay"]
@@ -544,6 +560,9 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
     from ouroboros import loop
     from ouroboros.owner_words import _chat_ref
 
+    from ouroboros.answer_facts import mark_press_arrival, row_source
+    from ouroboros.owner_words import OWNER_PRESS
+
     fact_of = entry["host_carried"]
     went = str(fact_of.get("went_to") or "")
     held = held_owner_messages(ctx) if ctx is not None else {}
@@ -565,6 +584,8 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
             body = _quote_body(row, carried_quote_line(quote, address=address, fact={"went_to": went}))
             loop._append_or_merge_user_message(messages, quote_content(ctx, entry, row, body), slot=ctx,
                                                kind=OWNER_WORDS_KIND)
+            if row_source(row, "") == OWNER_PRESS:
+                mark_press_arrival(ctx, messages[-1])
         elif row.get("attachments") and ctx is not None:
             stage_quoted(ctx, entry, row)  # its words stand in the first request; its bytes are on this drive
         if seen and (went or not any(part.startswith("room_message") for part in seen)):

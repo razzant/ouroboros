@@ -56,9 +56,10 @@ log = logging.getLogger(__name__)
 # ``place_owner``: their words from a place that a run cited for the work it started (``basis: cited``, verified by
 # ``cited_owner_basis``); older records carry the same label from the retired host verdict.
 OWNER_PRESS = "owner_press"
+OWNER_CARD_INPUT = "owner_card_input"  # retired submission: the input still reached this work, its words are unknown
 OWNER_SOURCES = frozenset({"initial_user", "owner_mailbox", "owner_quiz_answer", "origin_message",
-                           "owner_corpus", "direct_incoming", "place_owner", OWNER_PRESS})
-OWNER_WORD_SOURCES = OWNER_SOURCES - {OWNER_PRESS}
+                           "owner_corpus", "direct_incoming", "place_owner", OWNER_PRESS, OWNER_CARD_INPUT})
+OWNER_WORD_SOURCES = OWNER_SOURCES - {OWNER_PRESS, OWNER_CARD_INPUT}
 # A place event from an account its place confirms as my human's: their words, said where others can hear. Provenance
 # only (outside ``OWNER_SOURCES``): whom they are for, and whether they ask me for work, is my reading; an order exists
 # only where I cite them and the host verifies the bytes.
@@ -463,8 +464,8 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
         chat = _mapping(_ctx_metadata(ctx).get("origin_message_ref")).get("chat_id")
         door = {"client_message_id": client_id, **({"chat_id": str(chat)} if chat is not None else {}), **door}
     origin = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
-    opening_press = next((row for row in rest if row.get("source") == OWNER_PRESS and client_id
-                          and _same_corpus_source(row, origin)), None)
+    opening_press = next((row for row in rest if client_id and _same_corpus_source(row, origin)
+                          and (row.get("source") in (OWNER_PRESS, OWNER_CARD_INPUT) or _mapping(row.get("reply_to")).get("card_id"))), None)
     if source_text and opening_press is None and not any(row.get("source") == "origin_message" for row in rest):
         ids = {key: door[key] for key in ("reply_to", "client_message_id", "chat_id") if door and key in door}
         rows = [{**ids, "source": "origin_message", "content": source_text}, *rest]
@@ -749,9 +750,11 @@ def _chat_words(row: Mapping[str, Any], *, key: str, carrier: str, source: str, 
     from ouroboros.owner_relay import owner_text
 
     reference, (block, asker) = _mapping(row.get("reply_to")), answered_card_source(row)
-    replied = answered_card_reply(block, asker) or reply_target(
+    from ouroboros.answer_facts import living_card_input
+    living = living_card_input(row, root)
+    replied = living.get("reply_to") or answered_card_reply(block, asker) or reply_target(
         root, reference if root is not None else {**reference, "unresolved": True})
-    item = {"source": row_source(row, source), "content": owner_text(row), "reply_to": replied}
+    item = living or {"source": row_source(row, source), "content": owner_text(row), "reply_to": replied}
     found = _words_rows(item, carrier=carrier, task_id=task_id, ts=row.get("ts"), attachments=row.get("attachments"),
                        ref=_chat_ref(row) if row.get("client_message_id") else key)
     if addressed:

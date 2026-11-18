@@ -1004,6 +1004,9 @@ def quote_words(row: Mapping[str, Any]) -> str:
     """The words an exact quote may take from one chat row (``chronicle_quotes``, ``memory_mark``): its
     accepted comment for an answered quiz, plain text for inbound place rows and reactions, else ``render_row_text``.
     Connector facts and delivery details shown beside those words are the host's labels, never the speaker's."""
+    from ouroboros.answer_facts import living_card_input
+    if living := living_card_input(row):
+        return living["content"] if living["source"] == "owner_mailbox" else ""
     if row.get("type") == "quiz_answer":
         quiz = _mapping(row.get("quiz"))
         return "" if quiz.get("secret_request") else str(quiz.get("comment") or "")

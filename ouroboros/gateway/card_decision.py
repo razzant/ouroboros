@@ -66,9 +66,10 @@ def card_press_model_text(root: Any, ref: Any, owner_words: str) -> str:
     press, record, row = _stored_press(root, ref)
     if press is None:
         return owner_words
+    row = press.get("submission") or row
     if not row:
         return f"[Card input] On a card of task {press['task_id']} that can no longer be read, the owner pressed:\n{owner_words}"
-    return card_input_frame({**record, "title": row.get("title", record.get("title"))},
+    return card_input_frame({**record, "card_id": press["card_id"], "title": row.get("title", record.get("title"))},
                             str(row.get("label") or row.get("action_id") or ""), row.get("values"), author=press["task_id"])
 
 
@@ -118,6 +119,7 @@ def _deliver(drive_root: pathlib.Path, record: Dict[str, Any], submission: Dict[
     """``(delivery, reason)`` for one recorded press: ``delivered`` into its author's, else its admitted
     Continue successor's, mailbox (``awaiting_recipient_read`` while that one reads no mail now),
     ``forwarded`` or ``owed``; a press the owner's ingress already accepted converges there."""
+    from ouroboros.card_store import press_snapshot
     from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, is_a2a_chat_id
     from ouroboros.gateway.task_decision import _mail_holder, deliver_as_owner_message
     from ouroboros.owner_mailbox import KIND_CARD_INPUT, write_owner_message
@@ -130,6 +132,7 @@ def _deliver(drive_root: pathlib.Path, record: Dict[str, Any], submission: Dict[
     card = {**record, "title": submission.get("title", record.get("title"))}
     # A press goes to the author of the card it was pressed on, also when it is retried after a replace.
     task_id = str(submission.get("task_id", record.get("task_id")) or "")
+    press = {"card_id": card_id, "request_id": request_id, "task_id": task_id, "submission": press_snapshot(submission)}
     chat_id = record.get("publication_chat_id", record.get("chat_id"))
     client_id = f"card_input:{card_id}:{request_id}"
     # A press the owner's ingress already accepted keeps that one effect: its retry converges there.
@@ -148,7 +151,7 @@ def _deliver(drive_root: pathlib.Path, record: Dict[str, Any], submission: Dict[
                 text = card_input_frame(card, label, submission.get("values"), author="" if recipient == task_id else task_id)
                 # Paused, held or queued: the press waits for it like an answer does, and its read settles the wait.
                 waits = reason == "task_not_reading"
-                if write_owner_message(drive, text, recipient, msg_id=client_id, kind=KIND_CARD_INPUT, card_delivery={
+                if write_owner_message(drive, text, recipient, msg_id=client_id, kind=KIND_CARD_INPUT, card_press=press, card_delivery={
                         "card_id": card_id, "request_id": request_id, "canonical_root": str(drive_root)} if waits else None):
                     return "delivered", "awaiting_recipient_read" if waits else ""
                 return "owed", "mailbox_write_failed"
@@ -160,7 +163,7 @@ def _deliver(drive_root: pathlib.Path, record: Dict[str, Any], submission: Dict[
     address = str(record.get("publication_address") or "")
     # No living holder: the typed press follows its author's thread in routing, the way a late answer does.
     metadata = {**({"reply_to": address} if address else {}),
-                **({"card_press": {"task_id": task_id, "card_id": card_id, "request_id": request_id}} if task_id else {})}
+                **({"card_press": press} if task_id else {})}
     forwarded, reason = deliver_as_owner_message(drive_root, chat_id, owner_press_text(label, submission.get("values")),
                                                  client_id, source=source, task_metadata=metadata or None)
     return ("forwarded", "") if forwarded else ("owed", reason or "late_answer_delivery_unknown")

@@ -1046,3 +1046,33 @@ def test_history_of_a_relay_preserves_the_act_or_exact_words(tmp_path, comment):
     else:
         assert "pressed" in frame and "Use the tide chart" in frame and "chart-maker" in frame
         assert "Owner words quoted" not in frame
+
+
+def test_relay_puts_last_local_words_on_each_press_and_excludes_carried_words(tmp_path):
+    import queue
+    from ouroboros.answer_facts import last_own_words
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_relay import owner_quote, write_relay
+
+    ctx = context(tmp_path)
+    local = {"source": "direct_incoming", "content": "Keep the blue bowl", "client_message_id": "local-blue",
+             "chat_id": "1", "ts": "2040-01-01T01:00:00Z"}
+    other = {**local, "client_message_id": "other-blue", "carried": True, "ts": "2040-01-02T01:00:00Z"}
+    ctx._owner_directives = [other]
+    assert last_own_words(ctx) == ""
+    ctx._owner_directives = [local, other]
+    line = last_own_words(ctx)
+    assert "local-blue" in line
+    card = {"quiz_id": "bowl", "state": "answered", "question": "Which bowl?", "options": ["Blue"], "answered_index": 0}
+    quotes = []
+    for index, comment in enumerate(("", "", "  here  ")):
+        row = {"type": "quiz_answer", "direction": "system", "source": "owner_quiz_answer", "task_id": "bowl-maker",
+               "quiz": {**card, "comment": comment}, "chat_id": 1, "ts": local["ts"], "client_message_id": f"bowl-{index}"}
+        quotes.append(owner_quote(tmp_path, row))
+    assert write_relay(tmp_path, ctx.task_id, relay_id="bowl-delivery", note="Read the cards",
+                       quotes=quotes, chat_id=1, teller_task_id="bowl-runner")[1]
+    messages = []
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
+    owner_rows = [m for m in messages if m.get("_host_context_kind") == "owner_words"]
+    assert [line in m["content"] for m in owner_rows] == [True, True, False]
+    assert all(line not in m["content"] for m in messages if m not in owner_rows)

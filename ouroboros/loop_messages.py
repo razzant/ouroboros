@@ -254,7 +254,7 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
         return
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
-    from ouroboros.answer_facts import answer_source, wordless_press
+    from ouroboros.answer_facts import answer_source, living_card_input, wordless_press
     from ouroboros.dialogue_provenance import run_origin
     from ouroboros.owner_quiz import late_answer_ref, late_answer_owner_text
     from ouroboros.owner_continue import ROW_IDS
@@ -311,6 +311,12 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
             late_words = late_answer_owner_text(answered) if answered and stamped else ""
             card = answered_card_reply(answered, late["task_id"]) if late_words else {}
             press, door = bool(late_words) and wordless_press(answered), metadata.get("origin_message_ref") or {}
+            living = living_card_input(metadata, getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)) if stamped else {}
+            if living:
+                _loop()._record_owner_directive(ctx, source=living["source"], content=living["content"],
+                        reply_to=living.get("reply_to"), origin={**{key: door.get(key) for key in ("chat_id", "client_message_id", "ts")},
+                                                               "source_task_id": living.get("source_task_id")})
+                break
             _loop()._record_owner_directive(
                 ctx, source=OWNER_PRESS if press else "initial_user" if stamped else "initial_text",
                 content=late_words or message.get("content"), reply_to=card or target or None,
