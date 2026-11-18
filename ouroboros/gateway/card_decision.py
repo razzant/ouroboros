@@ -25,6 +25,7 @@ import math
 import pathlib
 from typing import Any, Dict, Optional, Tuple
 
+from ouroboros.card_store import owner_press_text
 from ouroboros.gateway._helpers import run_sync_to_completion
 
 log = logging.getLogger(__name__)
@@ -80,15 +81,6 @@ def card_press_name(root: Any, ref: Any) -> Optional[str]:
     if press is None:
         return None
     return str(row.get("title", record.get("title")) or "") if row else ""
-
-
-def owner_press_text(label: str, values: Optional[Dict[str, Any]]) -> str:
-    """What the owner's own message says for a late press: the pressed label, then each value."""
-    lines = [label]
-    for key, value in (values or {}).items():
-        shown = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        lines.append(f"{key}: {shown}")
-    return "\n".join(lines)
 
 
 def _checked_values(raw: Any, action: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:

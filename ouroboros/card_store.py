@@ -11,6 +11,7 @@ ingress and the pin endpoints from the server. Reads never write.
 from __future__ import annotations
 
 import hashlib
+import json
 import pathlib
 import re
 import uuid
@@ -199,6 +200,15 @@ def acknowledge_press(root: Any, card_id: str, request_id: str) -> None:
 
     if valid_card_id(card_id):
         _update(_card_path(root, card_id), mutate)
+
+
+def owner_press_text(label: str, values: Optional[Dict[str, Any]]) -> str:
+    """What the owner's own message says for a late press: the pressed label, then each value."""
+    lines = [label]
+    for key, value in (values or {}).items():
+        shown = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        lines.append(f"{key}: {shown}")
+    return "\n".join(lines)
 
 
 def press_snapshot(submission: Dict[str, Any]) -> Dict[str, Any]:

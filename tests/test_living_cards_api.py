@@ -551,3 +551,34 @@ def test_forwarded_card_keeps_its_bubble_and_opens_a_typed_head(tmp_path, decide
     recovered = owner_sources(tmp_path, {"origin_message_text": "Read the chart", "origin_message_ref": {}}, reader.task_id)
     later = owner_corpus_rows(recovered)[-1]
     assert (later["source"], later["content"], later["reply_to"]) == (source, opening["content"], opening["reply_to"])
+
+
+def test_continue_normalizes_only_the_exact_forwarded_form_bubble(tmp_path, decide, monkeypatch):
+    from ouroboros.owner_mailbox import write_owner_message
+    from supervisor.continuation_admission import admit_continuation
+    from tests.test_owner_continue import NONCE, _install_queue, _interrupted
+
+    card = _component_card(tmp_path)
+    decide.state["live"] = False
+    values = {"from": "  first date  ", "to": "  last date  "}
+    assert decide({"request_id": "fern-form", "revision": 1, "decision_id": f"card:{card['card_id']}:dates",
+                   "values": values}).json()["delivery"] == "forwarded"
+    queued = decide.bridge._inbox.get_nowait()
+    ref = dict(queued["task_metadata"]["card_press"])
+    ref.pop("submission")
+    bubble = queued["text"].strip()
+    assert write_owner_message(tmp_path, bubble, "fern-reader", msg_id="fern-forward", card_press=ref)
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    def interrupt(capture):
+        _interrupted(tmp_path, task_id="fern-reader", review_evidence={"task_inputs": {
+            "owner_requirements_and_decisions": [{"source": "owner_mailbox", "content": capture, "msg_id": "fern-forward"}]}})
+    interrupt(bubble + " changed")
+    refused = admit_continuation("fern-reader", action_nonce=NONCE)
+    assert refused["gaps"] == ["owner_message_identity_conflict"] and not workers.PENDING
+    interrupt(bubble)
+    accepted = admit_continuation("fern-reader", action_nonce=NONCE)
+    assert accepted.get("ok"), accepted
+    [successor] = workers.PENDING
+    [form] = [r for r in successor["metadata"]["owner_corpus"] if r.get("msg_id") == "fern-forward"]
+    assert form["source"] == "owner_mailbox" and form["content"] == "\n".join(values.values())
+    assert form["reply_to"]["card_id"] == card["card_id"]

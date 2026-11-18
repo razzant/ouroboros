@@ -46,7 +46,7 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.answer_facts import living_card_input, option_answer, press_record, row_source
+from ouroboros.answer_facts import forwarded_bubble_matches, living_card_input, option_answer, press_record, row_source
 from ouroboros.owner_words import (OWNER_CARD_INPUT, OWNER_PRESS, OWNER_SOURCES, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card,
                                    answered_card_reply, carded, reply_target, scheduled_text_items)
 from ouroboros.review_evidence_sections import renders_exactly
@@ -627,7 +627,8 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         if twin and seen[identity][1] == owner:
             if isinstance(twin.get("late_answer"), dict) or ("words" not in corpus
                     and (renders_exactly(twin, corpus["content"], drives, task_id)
-                         or twin.get("kind") == "card_input" and twin.get("text") == corpus["content"])):
+                         or twin.get("kind") == "card_input" and twin.get("text") == corpus["content"]
+                         or forwarded_bubble_matches(twin, corpus["content"], root))):
                 return True
         gaps.append("owner_message_identity_conflict")
         return False

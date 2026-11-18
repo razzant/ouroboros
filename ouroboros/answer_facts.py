@@ -78,16 +78,16 @@ def answer_source(block: Any, words_source: str = "owner_quiz_answer") -> str:
     return OWNER_PRESS if wordless_press(block) else words_source
 
 
-def living_card_input(row: Any, root: Any = None) -> dict:
-    """The submitted values or wordless action and its card. Older mail may carry only the store identity."""
+def _living_submission(row: Any, root: Any):
+    """The card id, author and frozen submission, resolving older mail by its request id."""
     from ouroboros.card_store import find_submission, late_press_ref, load_card, press_snapshot, valid_card_id
 
     if not isinstance(row, Mapping):
-        return {}
+        return None
     ref = late_press_ref(row.get("card_press")) or {}
     delivery = row.get("card_delivery") or {}
     if not ref and row.get("kind") != "card_input":
-        return {}
+        return None
     card_id = ref.get("card_id") or delivery.get("card_id")
     request = ref.get("request_id") or delivery.get("request_id")
     if not card_id:  # a live pre-snapshot mailbox id is card_input:<card_id>:<request_id>
@@ -98,6 +98,28 @@ def living_card_input(row: Any, root: Any = None) -> dict:
         stored = find_submission(load_card(drive, card_id) or {}, request)
         if stored:
             snap, asker = press_snapshot(stored), stored.get("task_id") or asker
+    return card_id, asker, snap
+
+
+def forwarded_bubble_matches(row: Mapping, content: str, root: Any) -> bool:
+    """An old owner-text capture kept the forwarded bubble, sometimes trimmed at ingress."""
+    from ouroboros.card_store import owner_press_text
+
+    if not row.get("card_press") or row.get("kind", "owner_text") != "owner_text" or row.get("text") != content:
+        return False
+    submission = _living_submission(row, root)
+    if not submission or not (snap := submission[2]):
+        return False
+    bubble = owner_press_text(snap["label"], snap["values"])
+    return content in (bubble, bubble.strip())
+
+
+def living_card_input(row: Any, root: Any = None) -> dict:
+    """The submitted values or wordless action and its card. Older mail may carry only the store identity."""
+    submission = _living_submission(row, root)
+    if submission is None:
+        return {}
+    card_id, asker, snap = submission
     if snap is None:
         return {"source": OWNER_CARD_INPUT, "content": "Card input received. Its submission is unavailable."}
     label = snap["label"]
