@@ -251,7 +251,7 @@ ask), because it would let a task author its own request
 A card's question, option labels and details are the asking task's text; a press without
 words is my human's act, never their words, while words typed beside it stay theirs
 verbatim (`tests/test_press_is_an_act.py`; ARCHITECTURE §6 "Owner routing verbs"). Every
-account (a working-view note, plan, brief, card label, page head) carries its author and
+account (a working-view note, plan, brief, card label) carries its author and
 write time, or "not recorded", and never reaches a reader as a person's words (notes:
 `context_compaction.note_written`). A host frame states who, when and by what route, never
 how to read: what a person meant is theirs to settle. The rest is review-only.
@@ -260,9 +260,7 @@ how to read: what a person meant is theirs to settle. The rest is review-only.
 
 A task-authored objective copies only its retained owner corpus, never the draft. Other
 runs record their first user turn for the corpus and Safety, labelled by what the host
-knows: `initial_user` when owner routing stamped the run (`metadata.origin_message_ref`
-or `origin_suppressed`, by value in a promoted root) and no control (`ui_control`) wrote
-it, else `initial_text`; schedule text is `schedule_text`. `dialogue_provenance.run_origin`
+knows (`loop_messages._initialize_owner_directives` names each label). `dialogue_provenance.run_origin`
 mints the stamp once from typed fields (`owner_ingress`): a turn the door stamped, never
 a lane, a client id or an inherited stamp; it is reserved on `/api/tasks` and schedule
 templates. No label decides what work was accepted; the contract and the owner's answers do.
