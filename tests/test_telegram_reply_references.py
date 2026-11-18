@@ -299,6 +299,11 @@ def test_confirmed_lifecycle_card_survives_child_index_eviction(bridge):
         "chat_id": 7, "task_id": "parent", "subagent_task_id": "child",
         "subagent_event": "scheduled", "accepted": True, "is_progress": True,
     }))
+    asyncio.run(b.plugin._make_outbound(b.api)({
+        "chat_id": 7, "task_id": "parent", "subagent_task_id": "child",
+        "subagent_event": "started", "accepted": True, "is_progress": True,
+    }))
+    assert b.calls[-1][0] == "editMessageText"
     state._save_subagent_state(b.api, {})  # only the separate child index has lost the card
     fields = state._owner_ingress_fields(b.api, "", 42, _owner(50, "About the child", reply=101), 50)
     assert fields["reply_to"] == "task:child"

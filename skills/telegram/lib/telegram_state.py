@@ -597,17 +597,22 @@ async def _render_subagent_card(api, client, chat_id: int, event: Dict[str, Any]
     child = str(event.get("subagent_task_id") or event.get("task_id") or "").strip()
     if not child:
         return
+    def remember_card(mid: int) -> None:
+        record = _message_ref(api, client.bot_id, chat_id, mid)
+        _remember_message(api, client.bot_id, chat_id, mid, {
+            **record, "chat_id": event.get("chat_id"), "kind": "work_card", "task_id": child,
+            "child_card": True, "confirmed_lifecycle_card": True,
+        })
+
     text = _subagent_card_text(event, sub_event, lang)
     msg_id = _get_subagent_msg(api, client.bot_id, chat_id, child)
     if msg_id:
         # Edit the subagent's existing bubble (plain text — no HTML parse risk).
         if await client.edit_message_text(chat_id, msg_id, text, parse_mode=""):
+            remember_card(msg_id)
             return
         # Edit failed (message too old / deleted) → post a fresh bubble below.
     new_id = await client.send_message(chat_id, text, parse_mode="", **({"disable_notification": True} if quiet else {}))
     if new_id:
         _set_subagent_msg(api, client.bot_id, chat_id, child, new_id)
-        _remember_message(api, client.bot_id, chat_id, new_id, {
-            "chat_id": event.get("chat_id"), "kind": "work_card", "task_id": child,
-            "child_card": True, "confirmed_lifecycle_card": True,
-        })
+        remember_card(new_id)
