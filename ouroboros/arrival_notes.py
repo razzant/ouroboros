@@ -1,10 +1,9 @@
 """At my human's arrival, the host names the working-view notes in view: append only, facts only.
 
 A drain that delivers a row of theirs into a work's transcript (their words, a card answer or press, a closure of
-theirs, their words relayed or carried to this work) closes the last such row with host lines, as part of that
-delivered message: for a press without words, their last own words in this work (``answer_facts.last_own_words``);
-and, while the view holds notes the mind wrote through ``compact_context`` folds (capsules of actor authorship, the
-notes the round facts count as its own), one line naming each as a fold receipt names it
+theirs, their words relayed or carried to this work) closes the last such row with a host line, as part of that
+delivered message, while the view holds notes the mind wrote through ``compact_context`` folds (capsules of actor
+authorship, the notes the round facts count as its own): one line naming each as a fold receipt names it
 (``compact_context.view_notes``): by the unit id ``compact_context`` inspects and ``replace_note_ids`` takes, its
 write time (``written_at`` in the capsule metadata, else "not recorded") and its first line. No earlier message
 changes; every note in view precedes the arrival, so nothing is joined by time, and nothing is judged, asked or
@@ -12,7 +11,8 @@ instructed.
 
 The notes line names the list only when it differs from the list last named in a row of my human's still among the
 messages in hand: what the host already appended is read from those rows, where its line ends the row it closes, never
-stored. A press's last own words close every press. The ids are those of this arrival: a later fold renumbers the
+stored. A press without words gets its own line, their last own words in this work, on its own row as it is
+delivered (``answer_facts.mark_press_arrival``). The ids are those of this arrival: a later fold renumbers the
 units, so the list it changes is named again. A live call's drain delivers into a fresh list of rows
 (``live_conversation.mailbox``) that holds no notes, so a call's arrivals name none.
 """
@@ -56,23 +56,20 @@ def last_named(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
-def mark_arrival(ctx: Any, messages: List[Dict[str, Any]], rows: Sequence[int], *, pressed: bool = False) -> None:
-    """Append the arrival's host lines to the last row of my human's this drain delivered (``rows``: positions of the
-    rows it delivered, typed at delivery and never merged); a delivery that warrants no line changes nothing, and a
-    notes list already named in a row still in ``messages`` is not named again. Lines the host cannot compute are left
-    out and logged: the delivered row stands, as for the surface note beside it."""
-    from ouroboros.answer_facts import last_own_words
-
+def mark_arrival(ctx: Any, messages: List[Dict[str, Any]], rows: Sequence[int]) -> None:
+    """Append the notes line to the last row of my human's this drain delivered (``rows``: positions of the rows it
+    delivered, typed at delivery and never merged); a view without notes changes nothing, and a notes list already
+    named in a row still in ``messages`` is not named again. A line the host cannot compute is left out and logged: the
+    delivered row stands, as for the surface note beside it. ``ctx`` is the delivering focus, kept for its callers."""
     try:
         notes = notes_line(messages)
-        lines = [line for line in ((last_own_words(ctx) if pressed and ctx is not None else ""),
-                                   "" if notes == last_named(messages) else notes) if line]
-    except Exception:  # noqa: BLE001 - host facts beside a delivered row of my human's, never the delivery itself
+        text = "" if notes == last_named(messages) else notes
+    except Exception:  # noqa: BLE001 - a host fact beside a delivered row of my human's, never the delivery itself
         log.warning("Arrival lines not computed; the delivered row stands without them", exc_info=True)
         return
-    if not lines or not rows:
+    if not text or not rows:
         return
-    row, text = messages[rows[-1]], "\n".join(lines)
+    row = messages[rows[-1]]
     content = row.get("content")
     row["content"] = ([*content, {"type": "text", "text": "\n" + text}] if isinstance(content, list)
                       else f"{content}\n{text}")
