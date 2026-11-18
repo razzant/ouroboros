@@ -13,9 +13,9 @@ Ready sources answer at once; unacknowledged wakes replay their facts
 (``replay_of``) before sleeping. Owed delivery follows mail drain; durable wakes
 coalesce. Mail wakes the sleep, but a wake carries only its loop controls: the
 round-top drain delivers the rest as its sender's words before the next request.
-Retained output precedes a run-detail read. Without a continuation
-owner the same sources are waited on in-process. There is no wait window or
-run-count cap; legacy ``wait_sec`` is inert.
+Retained output precedes a run-detail read. Without a continuation owner, or named
+``sleep_mode=in_slot``, the same sources are waited on in-process. There is no wait
+window or run-count cap; legacy ``wait_sec`` is inert.
 
 ``deliver_wake`` binds typed metadata/JSON to the saved whole view needed for
 loop/startup ACK: inline or complete exact-source reads
@@ -1314,17 +1314,22 @@ def _wait_in_slot(ctx: Any, descriptor: dict[str, Any]) -> ToolResult:
     return _publish(ctx, descriptor, woke_by)
 
 
-def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = None,
+def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = None, sleep_mode: Any = None,
              checkpoint_after_sec: Optional[int] = None, checkpoint_reason: str = "") -> ToolResult:
-    """``delegate_wait`` as a sleep on runs: what is already there answers through this result; otherwise
-    the task's ordinary sleep is armed (``model_sleep.request_default_sleep``: its process is released once
-    nothing live keeps it) and this wait's result is owed to the first model request after the wake. A run
-    this task holds only in this process (``started_uncustodied``: its STARTED row never landed) is one no
-    durable source can wake a sleep on, so a wait selecting it answers now: with what is already there, else
-    with that run's one addressed read."""
+    """``delegate_wait`` as a sleep on runs: what is already there answers through this result; otherwise the task's
+    sleep is armed in the mode the wait names (``native_task_wait.sleep_choice``, as the task waits choose; omitted:
+    ``model_sleep.request_default_sleep``, its process released once nothing live keeps it) and this wait's result is
+    owed to the first model request after the wake; ``in_slot`` waits in this call. A run this task holds only in this
+    process (``started_uncustodied``: its STARTED row never landed) is one no durable source can wake a sleep on, so a
+    wait selecting it answers now: with what is already there, else with that run's one addressed read."""
     from ouroboros import model_sleep
     from ouroboros.delegate_custody_current import run as current_run
+    from ouroboros.native_task_wait import sleep_choice
 
+    mode, refusal = sleep_choice(sleep_mode, None, None, None, ctx)
+    if refusal or (mode in ("warm", "cold") and not callable(getattr(ctx, "owner_wait_callback", None))):
+        return _fail("delegate_wait", "sleep_mode_refused",
+                     refusal or "this task has no continuation owner to sleep under; use sleep_mode=in_slot")
     reason_text = str(checkpoint_reason or "").strip()
     ignored_note = ""
     if checkpoint_after_sec == 0 and not reason_text and not isinstance(checkpoint_after_sec, bool):
@@ -1369,8 +1374,8 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
         "arguments": {key: value for key, value in {
             "run_id" if len(run_ids) == 1 and not isinstance(run_id, list) else "runs":
                 run_ids[0] if len(run_ids) == 1 and not isinstance(run_id, list) else run_ids,
-            "since_seq": since_seq, "checkpoint_after_sec": delay, "checkpoint_reason": reason_text}.items()
-            if value not in (None, "")},
+            "since_seq": since_seq, "checkpoint_after_sec": delay, "checkpoint_reason": reason_text,
+            "sleep_mode": sleep_mode}.items() if value not in (None, "")},
         **({"since_seq": int(since_seq)} if since_seq is not None else {}),
         **({"checkpoint": {"reason": reason_text, "after_sec": delay}} if delay is not None else {}),
         **({"ignored_arguments": [ignored_note]} if ignored_note else {}),
@@ -1401,7 +1406,7 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
         entered(mode="answered_at_call", held_in_process=in_process)
         return _publish(ctx, {**descriptor, "runs": in_process + [rid for rid in run_ids if rid not in in_process]},
                         woke_by)
-    if not callable(getattr(ctx, "owner_wait_callback", None)):
+    if mode == "in_slot":  # named, or no continuation owner to sleep under
         entered(mode="in_slot")
         return _wait_in_slot(ctx, descriptor)
     from ouroboros.native_task_wait import armed_conflict
@@ -1409,12 +1414,16 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
     if conflict := armed_conflict(ctx, native=True):
         return _fail("delegate_wait", "wait_already_armed", conflict)
     try:
-        outcome = model_sleep.request_default_sleep(ctx, chosen)
+        outcome = (model_sleep.request_default_sleep(ctx, chosen) if mode == "default"
+                   else model_sleep.request_sleep(ctx, chosen, mode))
     except ValueError as exc:
         return _fail("delegate_wait", "sleep_refused", str(exc))
     entered(outcome=outcome["reason"], **{key: outcome[key] for key in ("sleep_id", "mode") if outcome.get(key)})
     if outcome["reason"] == "ready":  # nothing parks: what is there answers through this result
         return _publish(ctx, descriptor, str(outcome.get("woke_by") or ""), questions=outcome.get("questions", []))
+    if outcome["reason"] == "dependency_held":  # an earlier call's unshown hold: shown first, nothing parks
+        meta, withdrawn = model_sleep.hold_notice(ctx, outcome["held"])
+        return delegate_result({**outcome, "runs": run_ids, "note": outcome["note"] + withdrawn}, meta=meta)
     descriptor.update(sleep_id=outcome["sleep_id"], mode=outcome["mode"])
     ctx._pending_task_wait = descriptor  # owed to the first request after the wake (``native_task_wait.deliver_owed``)
     return delegate_result({
@@ -1514,6 +1523,7 @@ def delegate_wait_entry(
     checkpoint_after_sec: Optional[int] = None,
     checkpoint_reason: str = "",
     runs: Optional[list[str]] = None,
+    sleep_mode: Optional[str] = None,
 ) -> ToolResult:
     """``delegate_wait``: a sleep on runs (``run_wait``); hidden ``wait_sec`` is accepted only for old
     transcripts and waits on nothing."""
@@ -1530,7 +1540,7 @@ def delegate_wait_entry(
         })
 
     try:
-        return run_wait(ctx, runs if runs is not None else run_id, since_seq=since_seq,
+        return run_wait(ctx, runs if runs is not None else run_id, since_seq=since_seq, sleep_mode=sleep_mode,
                         checkpoint_after_sec=checkpoint_after_sec, checkpoint_reason=checkpoint_reason)
     except OSError as exc:  # Only a save failure names supervision_stage; other errors keep their handling.
         if not (stage := getattr(exc, "supervision_stage", "")):

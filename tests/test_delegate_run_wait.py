@@ -155,7 +155,8 @@ def test_unselected_question_exposure_waits_for_the_exact_wake_source(tmp_path, 
     assert json.loads(next_wait["result"])["reason"] == "sleep_armed"
 
 
-def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request(tmp_path, reads):
+@pytest.mark.parametrize("sleep_mode,mode", [(None, "cold"), ("warm", "warm")])
+def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request(tmp_path, reads, sleep_mode, mode):
     """Nothing there yet: the call arms the task's ordinary sleep on its runs (no slot, no tick, no read) and owes its
     result; the run's terminal wakes the sleep, and the first request after it carries one wake, published then and
     acknowledged only after the next saved state, never before."""
@@ -165,8 +166,8 @@ def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request
 
     ctx, limit = _nanny(tmp_path)
     _run(tmp_path, "run-1")
-    armed = _armed(ds.run_wait(ctx, "run-1"))
-    assert armed["reason"] == "sleep_armed" and armed["mode"] == "cold", "the body takes the run: nothing keeps it"
+    armed = _armed(ds.run_wait(ctx, "run-1", sleep_mode=sleep_mode))
+    assert armed["reason"] == "sleep_armed" and armed["mode"] == mode, "omitted: the body takes the run, nothing keeps it"
     assert ctx._model_sleep["runs"] == ["run-1"] and ctx._model_sleep["any_mail"] and ctx._model_sleep["run_wait"]
     assert ctx._pending_task_wait["tool"] == "delegate_wait" and ctx._pending_task_wait["runs"] == ["run-1"]
     assert reads == [] and _pending(ctx, "run-1") == ("", ""), "arming reads no run and publishes no wake"
@@ -174,7 +175,7 @@ def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request
 
     trail = [row for row in map(json.loads, custody.event_log_path(tmp_path).read_text(encoding="utf-8").splitlines())
              if row["type"] == "delegate_supervision_wait_entered"]
-    assert [(row["run_id"], row["outcome"], row["mode"]) for row in trail] == [("run-1", "sleep_armed", "cold")]
+    assert [(row["run_id"], row["outcome"], row["mode"]) for row in trail] == [("run-1", "sleep_armed", mode)]
     chosen = dict(ctx._model_sleep)
     assert model_sleep.wake_reason(ctx, chosen) == "", "a quiet run does not wake its sleep"
     _ended(tmp_path, "run-1")
@@ -207,6 +208,57 @@ def test_what_is_already_there_answers_at_once_and_nothing_parks(tmp_path, reads
     asked = _armed(ds.run_wait(ctx, "run-asks"))
     assert asked["status"] == "waiting_on_user" and asked["sleep"]["woke_by"] == "run_question:run-asks"
     assert [iid for row in asked["pending_interactions"] for iid in [row["interaction_id"]]] == ["q1"]
+
+
+@pytest.mark.parametrize("sleep_mode,mode", [(None, "cold"), ("cold", "cold"), ("warm", "warm")])
+def test_a_named_sleep_mode_arms_that_sleep_omitted_keeps_the_default_and_ready_answers_at_once(
+        tmp_path, reads, sleep_mode, mode):
+    """``delegate_wait`` chooses its sleep as the task waits do (``native_task_wait.sleep_choice``): warm keeps the
+    process, cold releases it, and an omitted mode keeps the owner's default (here cold: nothing keeps the process).
+    A run that already ended answers through the result in that mode, and nothing parks."""
+    from ouroboros import delegate_supervision as ds
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-done")
+    _ended(tmp_path, "run-done")
+    assert _armed(ds.run_wait(ctx, "run-done", sleep_mode=sleep_mode))["status"] == "terminal"
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+    _run(tmp_path, "run-quiet")
+    armed = _armed(ds.run_wait(ctx, "run-quiet", sleep_mode=sleep_mode))
+    assert armed["reason"] == "sleep_armed" and armed["mode"] == mode == ctx._model_sleep["mode"]
+    assert ctx._pending_task_wait["arguments"].get("sleep_mode") == sleep_mode and reads == [("run-done", 0)]
+
+
+def test_an_in_slot_wait_keeps_the_call_and_an_unshown_hold_answers_before_any_sleep(tmp_path, monkeypatch, reads):
+    """``in_slot`` waits in this call on the sleep's own sources although the task could sleep; a hold an earlier call
+    of the batch returned answers at once as ``dependency_held`` with no sleep armed, and the same wait then sleeps.
+    A mode the wait cannot take is the caller's refusal: an unknown one, or warm/cold with no continuation owner."""
+    from ouroboros import delegate_supervision as ds, model_sleep
+    from ouroboros.delegate_shared import AGENT_FAULT_CODE
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-1")
+    with monkeypatch.context() as slot:
+        beats = []
+        slot.setattr(model_sleep, "declare_in_slot_wait", lambda *_a, **_k: None)
+        slot.setattr(model_sleep, "end_in_slot_wait", lambda *_a, **_k: None)
+        slot.setattr("supervisor.owner_stop.in_process_stop_now", lambda _ctx: False)
+        slot.setattr(ds.time, "sleep", lambda _sec: beats.append(1) or _ended(tmp_path, "run-1"))
+        assert _armed(ds.run_wait(ctx, "run-1", sleep_mode="in_slot"))["status"] == "terminal" and beats == [1]
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+    _run(tmp_path, "run-2")
+    model_sleep.hold_notice(ctx, [{"task_id": "held-child", "identity": "hold-1"}])
+    held = ds.run_wait(ctx, "run-2")
+    assert _armed(held)["reason"] == "dependency_held" and held.meta == {model_sleep.HOLD_NOTICE: True}
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+    ctx._held_dependencies_pending = []  # the batch delivered the hold
+    assert _armed(ds.run_wait(ctx, "run-2"))["reason"] == "sleep_armed"
+    for sleep_mode, owner in (("hot", True), ("warm", False), ("cold", False)):
+        ctx._model_sleep = ctx._pending_task_wait = None
+        ctx._owner_wait_requested = ""
+        ctx.owner_wait_callback = (lambda *_a, **_k: "unknown") if owner else None
+        refused = ds.run_wait(ctx, "run-2", sleep_mode=sleep_mode)
+        assert _armed(refused)["reason"] == "sleep_mode_refused" and refused.code == AGENT_FAULT_CODE
 
 
 @pytest.mark.parametrize("local_first", [False, True])
@@ -607,9 +659,16 @@ def test_the_frozen_delegate_wait_contract_says_its_result_is_owed_to_the_next_r
 
     entries = {entry.name: entry for entry in delegate.get_tools()}
     assert set(entries) == {"delegate_start", "delegate_wait", "delegate_cancel", "delegate_answer", "delegate_message"}
+    from ouroboros.native_task_wait import SLEEP_MODES
+
     wait = entries["delegate_wait"]
-    assert set(wait.schema["parameters"]["properties"]) == {
-        "run_id", "runs", "since_seq", "checkpoint_after_sec", "checkpoint_reason"}
+    properties = wait.schema["parameters"]["properties"]
+    assert set(properties) == {"run_id", "runs", "since_seq", "checkpoint_after_sec", "checkpoint_reason", "sleep_mode"}
+    assert set(properties["sleep_mode"]["enum"]) == set(SLEEP_MODES), "the task waits' modes, no other"
+    held = properties["sleep_mode"]["description"]
+    assert all(words in held for words in ("Omitted: your process is released", "warm: your process and all it holds stay",
+                                           "cold: your saved continuation stays", "in_slot: your process and this call stay"))
+    assert not any(character.isdigit() for character in held), "what stays held, in words and no numbers"
     assert list(inspect.signature(wait.handler).parameters) == list(inspect.signature(delegate_wait_entry).parameters)
     assert wait.handler.__wrapped__ is delegate_wait_entry, "the one ToolResult->str publisher wraps the entry"
     text = " ".join(wait.schema["description"].split())

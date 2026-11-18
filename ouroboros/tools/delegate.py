@@ -1317,15 +1317,15 @@ def get_tools() -> List[ToolEntry]:
                 "Sleep on delegated runs until one ends, asks a question or needs you. What is already there (its "
                 "terminal, a new question, an unacknowledged earlier wake) answers in this result at once; mail ends "
                 "it at once too and reaches your next request as its sender's own row, not inside this result. "
-                "Otherwise it returns sleep_armed: the sleep starts after this tool batch and yields acting capacity; your "
-                "process is released after state/obligations save unless named live custody keeps it warm. The body "
+                "Otherwise it returns sleep_armed: the sleep starts after this tool batch and yields acting capacity; with "
+                "no sleep_mode your process is released after state/obligations save unless named live custody keeps it warm. The body "
                 "observes the runs; their progress streams to the human without waking you, and an unreachable "
                 "daemon is told to the owner once per outage. A selected run's terminal, a new question from any "
                 "run you own, addressed owner/task mail, a direct child's attention/terminal, a cancel, your "
                 "deadline or the one-shot checkpoint wakes you, and this wait's result is then owed to your next "
                 "model request: it arrives there as a host notice, with no further call. Each wake is delivered "
                 "once and counts as shown only when shown whole. There is no wait window: a wait_sec an old "
-                "transcript passes is accepted and sizes nothing. Without a continuation owner it waits in-process on the same sources. To keep your process on a wait you expect to be short, call await_messages(mode=\"warm\", runs=[...]) first. Context-only place arrivals stay unread until a genuine wake. "
+                "transcript passes is accepted and sizes nothing. Without a continuation owner it waits in-process on the same sources. Context-only place arrivals stay unread until a genuine wake. "
                 "A host-confirmed retry successor may retrieve a predecessor's proven terminal result; live control stays with its starter. "
                 "Usable terminal output returns before pending host capture/accounting; "
                 "rereading it is immediate, not a wait for that preparation. A wake's leaf_live_input is the "
@@ -1358,6 +1358,12 @@ def get_tools() -> List[ToolEntry]:
                     "a real earlier wake consumes it. Omit both for no checkpoint (0 with an empty reason also means none)."},
                 "checkpoint_reason": {"type": "string", "description":
                     "Why one proactive inspection is worth a model call. No repeating cadence."},
+                "sleep_mode": {"type": "string", "enum": ["in_slot", "warm", "cold"], "description": (
+                    "How to wait, as wait_task chooses. Omitted: your process is released once your state is saved, unless "
+                    "live custody keeps it (named in the result). warm: your process and all it holds stay until the wake. "
+                    "cold: your saved continuation stays and the process is released; work that cannot be handed over "
+                    "refuses it. in_slot: your process and this call stay, and the result arrives in this call. Every "
+                    "mode yields acting capacity; what is already there answers at once.")},
             }},
         }, _published_entry(_delegate_wait_entry),  # no lifetime: no outer bound; the wait wakes on controls
            timeout_sec=None if (lifetime := get_task_abs_ceiling_sec()) is None else lifetime + 120),

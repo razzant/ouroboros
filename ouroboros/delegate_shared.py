@@ -82,6 +82,7 @@ _AGENT_FAULT_REASONS = frozenset({
     "retry_selector_conflict",
     "run_selector_conflict",
     "selector_on_retry",
+    "sleep_mode_refused",
     "source_response_invalid",
     "source_response_not_required",
     "subagent_selection_required",
