@@ -240,14 +240,15 @@ def _current_feedback_positions(messages):
 def _cut_units(messages):
     """Oldest eligible atomic units; protection is independent of dialogue kind."""
     from ouroboros import context_compaction as cc
-    from ouroboros.context_budget import OWNER_WORDS_KIND, host_row_intact
+    from ouroboros.context_budget import OWNER_WORDS_KIND, RETURN_FACTS_KIND, host_row_intact
     from ouroboros.context_source_view import chosen_read_units
     from ouroboros.main_context_authority import LATE_ANSWER_NOTES_NAME, PREDECESSOR_NOTES_NAME
     from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY, obsolete_review_index_positions
     first = next((i for i, row in enumerate(messages) if row.get('role') == 'user'), -1)
     latest = max((i for i, row in enumerate(messages) if i > first
                   and row.get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND), default=len(messages) - 1)
-    while latest > first + 1 and messages[latest - 1].get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND:
+    while latest > first + 1 and messages[latest - 1].get(HOST_CONTEXT_KIND_KEY) in {
+            OWNER_WORDS_KIND, RETURN_FACTS_KIND}:  # the facts beside the words are of the run
         latest -= 1
     obsolete = set(obsolete_review_index_positions(messages))
     feedback = _current_feedback_positions(messages)

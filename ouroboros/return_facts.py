@@ -14,7 +14,7 @@ is stored. The lower bound is my human's previous word to me (``previous_word``:
 ``owner_speech`` confirms, card answers included; a late click's two rows are one word); a caller whose view reaches
 further back or later (``since``) starts the rows where that view ends and page changes at the earlier of the two, no
 view holding an edit as a change. ``Own`` is what the receiver already holds: at a turn start its room
-(``## This room``). With no connected place and nothing in the interval, no block; quiet connected places alone make
+(``## This room``), in a running root its own rows and page writes. With no connected place and nothing in the interval, no block; quiet connected places alone make
 one line.
 
 Three forms (``render``): full, the structure and then each person's newest words whole (a count alone updates
@@ -25,11 +25,18 @@ Low asks, and only where the window would otherwise lose the books or a telling 
 then the structure to its last form (``memory_floor.TELLING_SPARED``; owner 18.11.2026, 1A: a count alone updated
 nothing in the audit, the words did). Reads are bounded by the interval: one reverse read to the previous word, one
 forward read, journal tails back to its start (an untouched journal is not opened), one indexed seek per quiet place.
+
+A running root hears my human's later words through its drains (``place_before_words``): its facts start at what it
+last saw (``REACH_KEY``: its view's capture, then the upper bound of the last facts it received; relayed or carried
+words move nothing) and stand in one typed row before those words: one line, the interval and its counts, beside the
+reader of the full facts retained in that work's artifacts (``_line``; owner 18.11.2026, 3A: a full row cost up to 2.4
+million tokens a day on the owner's data, the line about 18 thousand; whether to read the rest is the mind's).
 """
 from __future__ import annotations
 
 import datetime as _dt
 import json
+import logging
 import pathlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -43,6 +50,7 @@ from ouroboros.text_sentences import first_sentence
 
 SECTION_ID = "return_facts"  # = ``context_budget.RETURN_FACTS_KIND``, the running row's kind
 HEADING = "## Since my human's previous word"
+REACH_KEY = "_return_facts_reach"  # on a running root's context: ``{"seq", "ts"}`` its view and facts reach to
 _JOURNAL = "knowledge_history.jsonl"
 _BLOCK = 1 << 20
 _LATE = "quiz_late_answer:"
@@ -112,6 +120,11 @@ def _reader(first: ds.Row, last: ds.Row) -> str:
             f"to='{format_address(row_address(last.row))}')")
 
 
+def _answers(row: Mapping[str, Any], cards: Any) -> bool:
+    """Whether a row is my human's answer to one of these cards (its answer row or its late delivery)."""
+    return bool(cards) and (_late(row) or str(row.get("type") or "") == "quiz_answer") and _quiz_id(row) in cards
+
+
 def _late(row: Mapping[str, Any]) -> bool:
     return str(row.get("client_message_id") or "").startswith(_LATE)
 
@@ -131,14 +144,16 @@ def word_to_me(row: Mapping[str, Any], accounts: Any = None) -> bool:
             and owner_speech(row, row_author(row, owner_accounts=accounts)))
 
 
-def previous_word(root: Any, word: ds.Row, accounts: Any = None) -> Optional[ds.Row]:
-    """My human's newest word to me before ``word``; the other row of the same late click is the same word."""
+def previous_word(root: Any, word: ds.Row, accounts: Any = None, skip: Any = ()) -> Optional[ds.Row]:
+    """My human's newest word to me before ``word``; the other row of the same late click is the same word, and the
+    words delivered with it (``skip``) are not before it."""
     before, card = word.seq, _quiz_id(word.row) if str(word.row.get("client_message_id") or "").startswith(_LATE) else ""
     while True:
         candidates = ds.newest_owner_candidates(root, before=before, limit=32)
         for entry in candidates:
-            if word_to_me(entry.row, accounts) and not (card and _quiz_id(entry.row) == card):
-                return entry
+            if (word_to_me(entry.row, accounts) and not (card and _quiz_id(entry.row) == card) and entry.seq not in skip
+                    and (word.length or str(entry.row.get("ts") or "") < str(word.row.get("ts") or ""))):
+                return entry  # a word with no row stands at the stream's end: one after its time is not before it
         if len(candidates) < 32:
             return None
         before = candidates[-1].seq
@@ -190,11 +205,23 @@ def journal_rows_between(journal: pathlib.Path, lower: str, upper: str, gaps: Li
     return found[::-1]
 
 
+def reach(root: Any) -> Optional[Dict[str, Any]]:
+    """Where a view captured now reaches: the chat stream's next position and this instant (read before the view, so
+    no row falls between it and the facts a later word brings); ``None`` when the store cannot say."""
+    try:
+        return {"seq": ds.stream_end(root, "chat"), "ts": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+    except Exception:  # no reach: a later word is told from my human's previous word, more rather than less
+        logging.getLogger(__name__).debug("return facts: no reach recorded", exc_info=True)
+        return None
+
+
 def facts(root: Any, word: ds.Row, own: Own, *, upper: Optional[ds.Row] = None,
-          since: Optional[Mapping[str, Any]] = None, delivered: Any = ()) -> Optional[Dict[str, Any]]:
+          since: Optional[Mapping[str, Any]] = None, delivered: Any = (), cards: Any = (),
+          told: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """What happened elsewhere from the receiver's lower bound to ``upper`` (default ``word``, the first of the words
     it now receives); ``since`` is a running root's reach; ``delivered`` the positions of the words it receives with
-    the block, which it holds already. ``None`` when there is nothing to say."""
+    the block, which it holds already, and ``cards`` the cards those words answer: a card answer's other row (a late
+    click writes two) is the same word, never one elsewhere. ``None`` when there is nothing to say."""
     from ouroboros.places import place_owner_accounts, place_rows
 
     root = pathlib.Path(root)
@@ -203,7 +230,9 @@ def facts(root: Any, word: ds.Row, own: Own, *, upper: Optional[ds.Row] = None,
     except Exception:  # an unreadable registry confirms no place account: place rows stay other people's
         accounts = None
     end = upper or word
-    previous = previous_word(root, word, accounts)
+    held = {word.seq, *delivered}
+    answered = {card for card in (_quiz_id(word.row), _quiz_id(end.row), *cards) if card}
+    previous = previous_word(root, word, accounts, skip=held)
     starts = ([(int(since["seq"]), str(since.get("ts") or ""))] if since else []) + (
         [(previous.seq + 1, str(previous.row.get("ts") or ""))] if previous is not None else [])
     if not starts:
@@ -217,13 +246,19 @@ def facts(root: Any, word: ds.Row, own: Own, *, upper: Optional[ds.Row] = None,
     if not coverage.get("imported") or coverage.get("gaps"):
         gaps.append(f"chat rows of this interval: {coverage.get('pending', 0)} segments still importing, "
                     f"{coverage.get('mismatch', 0)} not importable, {coverage.get('gaps', 0)} lines unreadable")
-    held = {word.seq, *delivered}
     rows = [entry for entry in ds.iter_rows(root, "chat", lower=lower, upper=end.seq)
-            if not own.row(entry.row) and entry.seq not in held]
+            if not own.row(entry.row) and entry.seq not in held and not _answers(entry.row, answered)]
+    later = None  # an act without a row stands at the stream's end: rows after its time wait for the next facts
+    if not end.length:
+        cut = str(end.row.get("ts") or "")
+        later = min((entry.seq for entry in rows if str(entry.row.get("ts") or "") > cut), default=None)
+        rows = [entry for entry in rows if later is None or entry.seq < later]
+    if told is not None:  # where the next facts begin, though these may say nothing
+        told["later"] = later
     chats = {chat for chat in (_chat(entry.row) for entry in [previous, *rows] if entry is not None) if chat}
     transports = ds.latest_inbound_transport(root, chats)
     labels.warm(chats)  # rooms no registry names: their latest inbound transport, in one read
-    found: Dict[str, Any] = {"previous": previous, "since": since, "begin": begin, "word": word, "end": end,
+    found: Dict[str, Any] = {"previous": previous, "since": since, "begin": begin, "word": word, "end": end, "later": later,
                              "labels": labels, "mine": [], "places": {}, "ended": [], "started": [], "cards": [],
                              "heard": set(), "gaps": gaps}
     for entry in rows:
@@ -498,11 +533,15 @@ def _totals(found: Mapping[str, Any]) -> str:
     return "\n".join([*_head(found), "Since then, counted: " + "; ".join(part for part in parts if part) + "."])
 
 
-def turn_sections(task: Mapping[str, Any], root: Any) -> List[Any]:
-    """The sections of a turn my human's word starts (the facts, then the people's newest words), or none. A read that
-    fails is named in the section; the turn goes on."""
+def turn_sections(task: Mapping[str, Any], root: Any, ctx: Any = None, seen: Optional[Mapping[str, Any]] = None) -> List[Any]:
+    """The sections of a turn my human's word starts (the facts, then the people's newest words), or none. On ``ctx``
+    it records where this root's view and facts reach (``REACH_KEY``): the bound of the facts a later word of my
+    human brings it while it runs; for a turn my human's word starts, that word (what follows it is told later, never
+    lost between). A read that fails is named in the section; the turn goes on."""
     from ouroboros.section_floor import HostSection
 
+    if ctx is not None and seen:  # the reach read before this turn's memory view; none read, none recorded (no
+        setattr(ctx, REACH_KEY, dict(seen))  # second read after the view: a later word is told from the previous word)
     metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
     ref = next((value for value in (task.get("origin_message_ref"), metadata.get("origin_message_ref"))
                 if isinstance(value, Mapping) and value.get("client_message_id")), {})
@@ -513,6 +552,8 @@ def turn_sections(task: Mapping[str, Any], root: Any) -> List[Any]:
         word = ds.accepted_row(root, chat, str(ref["client_message_id"]))
         if word is None or not word_to_me(word.row):
             return []
+        if ctx is not None:
+            setattr(ctx, REACH_KEY, {"seq": word.seq + 1, "ts": str(word.row.get("ts") or "")})
         found = facts(root, word, Own(room=chat))
         if found is None:
             return []
@@ -523,3 +564,84 @@ def turn_sections(task: Mapping[str, Any], root: Any) -> List[Any]:
     return [HostSection(SECTION_ID, structure, totals), *([HostSection(WORDS_ID, words, (
         f"{WORDS_HEADING}\nThe newest words of {people} {'person' if people == 1 else 'people'} stand at the readers "
         "on their place lines above."))] if words else [])]
+
+
+def _line(root: pathlib.Path, task_id: str, found: Mapping[str, Any]) -> str:
+    """A running root's row: the interval and its counts, beside the reader of the full facts retained now in this
+    work's artifacts (``section_floor.retain_section``; written once, digest-named, kept with the work's sources). A
+    copy that cannot be kept leaves the counts and names the gap; the full form never stands here."""
+    from ouroboros.section_floor import HostSection, retain_section
+
+    full, _middle, totals = render(found)
+    try:
+        held = retain_section(HostSection(SECTION_ID, full, totals), root=str(root), task_id=task_id)
+    except (OSError, ValueError) as exc:
+        return f"{totals}\nNot known: the full facts could not be kept for reading ({type(exc).__name__})."
+    return f"{totals}\nThe full facts (places, people and their newest words, works, pages, readers): {held['reader']}."
+
+
+_HEARD = frozenset({"direct_incoming", "owner_mailbox", "owner_quiz_answer"})  # my human's words this drain carried
+
+
+def _word_row(root: pathlib.Path, origin: Mapping[str, Any], chat: Optional[int], task_id: str = "") -> Optional[ds.Row]:
+    """The dialogue row of one delivered word, by the room and client id its delivery recorded; a card's answer or
+    closure delivered as ``<kind>:<quiz>`` by its canonical row ``<kind>:<task>:<quiz>`` (``dialogue_evidence``)."""
+    client = str(origin.get("client_message_id") or "")
+    room = _chat(origin) if origin.get("chat_id") not in (None, "") else chat
+    msg = str(origin.get("msg_id") or "")
+    kind = next((kind for kind in ("quiz_closed", "quiz_answer") if msg.startswith(kind + ":")), "")
+    if not client and kind and task_id:
+        client, room = f"{kind}:{task_id}:{msg[len(kind) + 1:]}", None
+    if not client:
+        return None
+    found = [entry for entry in ds.probe_rows(root, "chat", [("client_message_id", client)], limit=8)
+             if room is None or _chat(entry.row) == room]
+    return found[0] if found else None
+
+
+def _pressed(root: pathlib.Path, origin: Mapping[str, Any]) -> Optional[ds.Row]:
+    """My human's act that wrote no chat row (a press on a live card, a card closed: ``card_input``, ``quiz_closed``
+    and late answers deliver only the act): their word at the chat stream's end, at the time its delivery recorded,
+    length 0; the facts then count rows up to that time (``facts``)."""
+    at = str(origin.get("ts") or origin.get("received") or "")
+    if origin.get("client_message_id") or not at:
+        return None
+    return ds.Row("chat", ds.stream_end(root, "chat"), {"ts": at, "type": "quiz_answer", "direction": "system",
+                                                        "quiz": {"quiz_id": str(origin.get("quiz_id") or "")}}, None, 0)
+
+
+def place_before_words(ctx: Any, messages: List[Dict[str, Any]], start: int, heard_before: int) -> None:
+    """One row of facts before the first of my human's words this drain appended to a running root: from what the
+    root last saw (``REACH_KEY``) or my human's previous word, the earlier, to the last of those words, as one line
+    beside the reader of the full facts (``_line``); then its reach moves there. Nothing sent is rewritten: a later
+    drain brings its own row before its own words, and renewal keeps the newest run of words with these rows whole
+    (``context_renewal._cut_units``). A child or a delivery without its word's row gets none; a failed read is named."""
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND, RETURN_FACTS_KIND
+
+    if ctx is None or (getattr(ctx, "task_metadata", None) or {}).get("delegation_role") == "subagent":
+        return
+    first = next((index for index in range(start, len(messages))
+                  if messages[index].get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND), None)
+    directives = [row for row in list(getattr(ctx, "_owner_directives", None) or []) if isinstance(row, dict)]
+    fresh = [row for row in directives[heard_before:] if row.get("source") in _HEARD and not row.get("carried")]
+    if first is None or not fresh:
+        return
+    root = pathlib.Path(getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", ""))
+    chat = getattr(ctx, "current_chat_id", None)
+    try:
+        task_id = str(getattr(ctx, "task_id", "") or "")
+        words = [row for row in (_word_row(root, origin, chat, task_id) or _pressed(root, origin) for origin in fresh)
+                 if row is not None and word_to_me(row.row)]
+        if not words:
+            return
+        told: Dict[str, Any] = {}
+        found = facts(root, words[0], Own(root_task_id=task_id), upper=words[-1], since=getattr(ctx, REACH_KEY, None),
+                      delivered=[row.seq for row in words], cards=[_quiz_id(row.row) for row in words], told=told)
+        text = _line(root, task_id, found) if found is not None else ""
+        later = told.get("later")
+        setattr(ctx, REACH_KEY, {"seq": later if later is not None else words[-1].seq + (1 if words[-1].length else 0),
+                                 "ts": str(words[-1].row.get("ts") or "")})
+    except Exception as exc:  # unknown is never "nothing happened": named, and the words still reach the work
+        text = f"{HEADING}\nNot known: these facts could not be read ({type(exc).__name__})."
+    if text:  # renewal keeps the row with my human's words (``context_renewal._cut_units``)
+        messages.insert(first, {"role": "user", HOST_CONTEXT_KIND_KEY: RETURN_FACTS_KIND, "content": text})

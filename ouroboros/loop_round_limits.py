@@ -131,6 +131,7 @@ def _drain_incoming_messages(
     left are placed into the sessions it holds open (``place_rows_into_runs``), each once.
     """
     controls: Dict[str, Any] = {}
+    start = len(messages)  # this drain's rows follow: the facts row stands before the first of my human's words
 
     def ack_saved(entry: Dict[str, Any]) -> None:
         if not acknowledge_transcript_entry(drive_root, task_id, entry) or event_queue is None:
@@ -371,6 +372,9 @@ def _drain_incoming_messages(
                     })
                 except Exception:
                     pass
+    if owner_ctx is not None and drive_root is not None:  # what happened since this work last heard my human
+        from ouroboros.return_facts import place_before_words
+        place_before_words(owner_ctx, messages, start, before_rows)
     if owner_ctx is not None:  # the catch-up of the host's carriage at receipt: every live member below, each row once
         from ouroboros.owner_relay import carry_to_members
         grown = len(getattr(owner_ctx, "_owner_directives", None) or []) > before_rows
