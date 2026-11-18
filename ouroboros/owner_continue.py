@@ -786,10 +786,15 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                     continue
                 address = owner_row_address(row)
                 if address not in seen:
-                    target = reply_target(source_root, row.get("reply_to")) if isinstance(row.get("reply_to"), dict) else {}
-                    later.append(carded({"source": row_source(row, "owner_mailbox"), "content": owner_text(row),
-                                         "msg_id": address, **({"reply_to": target} if target else {})}, row))
-                    seen[address] = (owner_text(row), True)
+                    item = living_card_input(row, source_root)
+                    if not item:
+                        carried = row.get("corpus_answer") or {}
+                        target = carried.get("reply_to") or reply_target(source_root, row.get("reply_to"))
+                        item = {"source": row_source(row, "owner_mailbox"), "content": owner_text(row),
+                                **{k: carried[k] for k in ("source_task_id", "quiz_id") if carried.get(k)},
+                                **({"reply_to": target} if target else {})}
+                    later.append(carded({**item, "msg_id": address}, row))
+                    seen[address] = (item["content"], True)
                     quoted += [{**ref, "_owner_source_root": str(source_root)}
                                for ref in row.get("attachments") or [] if isinstance(ref, dict)]
         if kind in {"relay_entry", "task_message"} and not entry.get("host_carried"):  # a note and a task's words: peers

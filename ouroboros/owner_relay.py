@@ -252,7 +252,7 @@ def owner_quote(root, row: dict, *, address: str = "") -> dict:
         quote["reply_to"] = copy.deepcopy(row["reply_to"])
     from ouroboros.answer_facts import living_card_input
     if living := living_card_input(row, root):
-        quote["input_source"] = living["source"]
+        quote.update(input_source=living["source"], text=living["content"])
         if target := living.get("reply_to"):
             quote["question_frame"] = f"Card of task {living['source_task_id']}: {target['text']}"
             if living["source"] == "owner_press":
@@ -343,7 +343,7 @@ def write_relay(root, task_id: str, *, relay_id: str, note: str, quotes: list, c
     return entry, True
 
 
-def carried_quote_line(quote: dict, *, address: str, fact=None, row=None) -> str:
+def carried_quote_line(quote: dict, *, address: str, fact=None, input_source="") -> str:
     """The one line over an owner row's quoted words, for a relay's quote and a carried row alike: the pinned
     prefix, the time and the room the quote names (a part the host does not have is left out, never invented),
     the carriage fact of a carried row (``reached this work`` | ``went to <task>`` | ``in the project room; routed by
@@ -352,7 +352,7 @@ def carried_quote_line(quote: dict, *, address: str, fact=None, row=None) -> str
     from ouroboros.answer_facts import row_source
     from ouroboros.owner_words import OWNER_CARD_INPUT, OWNER_PRESS
 
-    kind = quote.get("input_source") or row_source(row or quote.get("owner_row") or {}, "")
+    kind = input_source or quote.get("input_source") or row_source(quote.get("owner_row") or {}, "")
     heading = {OWNER_PRESS: "Owner card press", OWNER_CARD_INPUT: "Owner card input"}.get(kind, "Owner words quoted verbatim")
     parts = [heading, str(source.get("ts") or ""), str(source.get("label") or "")]
     if isinstance(fact, dict):
@@ -363,18 +363,25 @@ def carried_quote_line(quote: dict, *, address: str, fact=None, row=None) -> str
     return "[" + "; ".join(part for part in [*parts, f"handle {address}"] if part) + "]"
 
 
-def _quote_body(row: dict, line: str) -> str:
+def _quote_body(row: dict, line: str, living: dict | None = None) -> str:
     """The quoted row under its line: its words whole (a press without words: the host's record of the act), then
     the message it replies to, the card it answers and the files it carries, each as a host frame beside my human's
     words."""
-    from ouroboros.answer_facts import row_words
-    from ouroboros.owner_words import answered_card_source
+    from ouroboros.answer_facts import living_card_input, press_record, row_words
+    from ouroboros.owner_words import OWNER_PRESS, answered_card_source
 
-    body = f"{line}\n{row_words(row)}"
+    if living is None:
+        living = living_card_input(row, row.get("_owner_source_root"))
+    if living:
+        text = (press_record(living["content"], living["source_task_id"]) if living["source"] == OWNER_PRESS
+                else living["content"])
+    else:
+        text = row_words(row)
+    body = f"{line}\n{text}"
     if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
         body += ("\n[Host reference: the message these owner words reply to; context, not the owner's words]\n"
                  + json.dumps(row["reply_to"], ensure_ascii=False))
-    if target := (row.get("corpus_answer") or {}).get("reply_to"):
+    if target := (living or row.get("corpus_answer") or {}).get("reply_to"):
         body += f"\n[Host question frame]\n{target.get('author')}: {target.get('text')}"
     answered, asker = answered_card_source(row)
     if isinstance(answered, dict):  # the question it answers, for the model too, under the asking task's name
@@ -466,7 +473,8 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
                                              "chat_id": row.get("chat_id"), "ts": row.get("ts"),
                                              "relay_source_root": str(source_root) if source_root and str(source_root) != str(root) else ""},
                                      reply_to=replied)
-        content = quote_content(ctx, entry, row, _quote_body(row, carried_quote_line(quote, address=address, row=row)))
+        line = carried_quote_line(quote, address=address, input_source=source)
+        content = quote_content(ctx, entry, row, _quote_body(row, line, living))
         loop._append_or_merge_user_message(messages, content, slot=ctx, kind=OWNER_WORDS_KIND)
         if source == OWNER_PRESS:
             mark_press_arrival(ctx, messages[-1])
@@ -575,10 +583,8 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
     this work that stood there under its room, the one host fact line. Attachments are staged either way (by saved
     hash, idempotent). Returns the addresses shown under ``reached this work``."""
     from ouroboros import loop
-    from ouroboros.owner_words import _chat_ref
-
-    from ouroboros.answer_facts import mark_press_arrival, row_source
-    from ouroboros.owner_words import OWNER_PRESS
+    from ouroboros.answer_facts import living_card_input, mark_press_arrival, row_source
+    from ouroboros.owner_words import OWNER_PRESS, _chat_ref
 
     fact_of = entry["host_carried"]
     went = str(fact_of.get("went_to") or "")
@@ -598,10 +604,12 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
         refs = {address, _chat_ref(row) if row.get("client_message_id") else "", str(fact_of.get("earlier_ref") or "")}
         seen = [stamps[ref] for ref in refs - {""} if ref in stamps]
         if not seen:
-            body = _quote_body(row, carried_quote_line(quote, address=address, fact={"went_to": went}, row=row))
-            loop._append_or_merge_user_message(messages, quote_content(ctx, entry, row, body), slot=ctx,
-                                               kind=OWNER_WORDS_KIND)
-            if row_source(row, "") == OWNER_PRESS:
+            living = living_card_input(row, row.get("_owner_source_root") or entry.get("relay_canonical_root"))
+            kind = living.get("source") or row_source(row, "")
+            line = carried_quote_line(quote, address=address, fact={"went_to": went}, input_source=kind)
+            loop._append_or_merge_user_message(messages, quote_content(ctx, entry, row, _quote_body(row, line, living)),
+                                               slot=ctx, kind=OWNER_WORDS_KIND)
+            if kind == OWNER_PRESS:
                 mark_press_arrival(ctx, messages[-1])
         elif row.get("attachments") and ctx is not None:
             stage_quoted(ctx, entry, row)  # its words stand in the first request; its bytes are on this drive

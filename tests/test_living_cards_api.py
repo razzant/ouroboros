@@ -531,3 +531,23 @@ def test_forwarded_card_keeps_its_bubble_and_opens_a_typed_head(tmp_path, decide
     assert field[0]["source"] == source
     assert field[0]["text"] == values["from"] if values else "pressed" in field[0]["text"]
     assert field[1]["ref"] == opening["reply_to"]["address"]
+
+    # The original card reference on older rows has no submitted values by value. The source store still has them.
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources
+    from ouroboros.owner_relay import inject_relay, owner_quote, write_relay
+    old = {**row, "card_press": {k: v for k, v in row["card_press"].items() if k != "submission"}}
+    quote = owner_quote(tmp_path, old)
+    assert (quote["input_source"], quote["text"]) == (source, opening["content"])
+    frames = []
+    reader = SimpleNamespace(task_id="lunar-reader", drive_root=tmp_path)
+    relay, created = write_relay(tmp_path, reader.task_id, relay_id="lunar-mail", chat_id=1, quotes=[quote],
+                                 teller_task_id="lunar-courier", note="The submission")
+    assert created
+    inject_relay(reader, relay, frames)
+    assert reader._owner_directives[0]["content"] == opening["content"]
+    assert opening["reply_to"]["text"] in frames[0]["content"] and opening["content"] in frames[0]["content"]
+    if not values:
+        assert "Owner card press" in frames[0]["content"]
+    recovered = owner_sources(tmp_path, {"origin_message_text": "Read the chart", "origin_message_ref": {}}, reader.task_id)
+    later = owner_corpus_rows(recovered)[-1]
+    assert (later["source"], later["content"], later["reply_to"]) == (source, opening["content"], opening["reply_to"])
