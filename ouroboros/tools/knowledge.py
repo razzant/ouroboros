@@ -372,14 +372,19 @@ def _claim_lines(result: knowledge_store.KnowledgeWriteResult, situation: Situat
     lines = []
     if claims.ignored:
         lines.append("Ignored claims entries (expected a list of strings): " + ", ".join(claims.ignored))
-    matching = situation.matching(claims.written)
-    if unmatched := list(dict.fromkeys(repr(name) for name in claims.written if name not in matching)):
+    matching, unverified = situation.matching(claims.written)
+    names = dict.fromkeys(claims.written)
+    if unmatched := [repr(name) for name in names if name not in matching and name not in unverified]:
         lines.append("Claims with no matching situation found: " + ", ".join(unmatched))
+    if unverified:
+        lines.append("Claims with unverified situations: " + ", ".join(repr(name) for name in names if name in unverified))
     if result.current.address.scope != "global":
         lines.append("Claims on a project-shelf note hold nowhere.")
     else:
-        held = [name for name in claims.active if name in matching and result.current.state == "active"]
-        lines.append("Present situations holding this note: " + (", ".join(held) or "none"))
+        active = claims.active if result.current.state == "active" else []
+        held = [name for name in active if name in matching]
+        lines.append("Present situations holding this note: " + (", ".join(held) or
+                     ("unverified" if unverified.intersection(active) else "none")))
     if claims.removed:
         lines.append("Removing a claim clears no arrival, releases no mark, and withdraws no doubt.")
     return lines

@@ -8,11 +8,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import quote
 
 from ouroboros import chat_chain, dialogue_store
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
-from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+from ouroboros.consciousness_authority import FOCUS_ROUTE_FIELDS, FOCUS_TRANSPORT_KEY
+from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID
 from ouroboros.dialogue_provenance import RoomLabelResolver, _derives, recorded_person, recorded_speaker
 from ouroboros.store import StoreError
 
@@ -148,9 +148,6 @@ def locate_catalogue(groups):
         offset += sum(len(line) + 1 for line in catalogue_lines(group))
 
 
-_ROUTE_FIELDS = ("provider", "account_id", "conversation_id", "thread_id")
-
-
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -160,30 +157,37 @@ def _place_facts(task: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]]:
     focus = _mapping(metadata.get("focus") or task.get("focus"))
     presence = _mapping(metadata.get("presence"))
     place_id = focus.get("place_id") or presence.get("place_id")
-    route = _mapping(presence.get("event")) or _mapping(focus.get("transport"))
+    route = (_mapping(presence.get("event")) or _mapping(metadata.get(FOCUS_TRANSPORT_KEY))
+             or _mapping(focus.get("transport")))
     if not route and place_id:
         # Older carried focuses kept just the concurrency key. It yields exact
         # components only where its separators are unambiguous.
         parts = str(focus.get("conversation_key") or "").split(":")
-        if len(parts) == len(_ROUTE_FIELDS):
-            route = dict(zip(_ROUTE_FIELDS, parts))
+        if len(parts) == len(FOCUS_ROUTE_FIELDS):
+            if parts[-1] == "0":
+                parts[-1] = ""
+            route = dict(zip(FOCUS_ROUTE_FIELDS, parts))
     return place_id if isinstance(place_id, str) else "", route
 
 
+def _encode_component(value: str) -> str:
+    return value.replace("%", "%25").replace("/", "%2F")
+
+
 def _route_names(route: Mapping[str, Any]) -> tuple[str, ...]:
-    provider, account, conversation, thread = (route.get(key) for key in _ROUTE_FIELDS)
+    provider, account, conversation, thread = (route.get(key) for key in FOCUS_ROUTE_FIELDS)
     if not (isinstance(provider, str) and provider and isinstance(account, str)
-            and isinstance(conversation, str) and conversation):
+            and isinstance(conversation, str) and conversation and isinstance(thread, (str, type(None)))):
         return ()
-    path = "/".join(quote(part, safe="") for part in (provider, account, conversation))
+    path = "/".join(map(_encode_component, (provider, account, conversation)))
     name = f"conversation:{path}"
-    if isinstance(thread, str) and thread not in {"", "0"}:
-        return name, f"thread:{path}/{quote(thread, safe='')}"
+    if thread:
+        return name, f"thread:{path}/{_encode_component(thread)}"
     return (name,)
 
 
 def _place_name(place_id: str) -> str:
-    return f"place:{quote(place_id, safe='')}"
+    return f"place:{_encode_component(place_id)}"
 
 
 def situation_names(task: Mapping[str, Any], room_id: str) -> tuple[str, ...]:
@@ -199,31 +203,32 @@ def situation_names(task: Mapping[str, Any], room_id: str) -> tuple[str, ...]:
 class SituationReceipt:
     root: Path
     room_labels: RoomLabelResolver
-    places: Mapping[str, Any]
-    names: tuple[str, ...]
+    places: Mapping[str, Any] | None
+    witnessed: tuple[str, ...]
     line: str
 
-    def matching(self, names: list[str]) -> set[str]:
-        """Which written names have witnesses in the current focus or the install's registries and rooms."""
-        wanted = set(names)
+    def matching(self, names: list[str]) -> tuple[set[str], set[str]]:
+        """The proved matches and the names whose evidence could not be read."""
+        wanted, unverified = set(names), set()
         known = {f"room:{WEB_UI_CHAT_ID}", *(f"room:{chat}" for chat in self.room_labels.project_chat_ids)}
-        known.update(name for name in self.names if not name.startswith("place:"))
-        for place in self.places.values():
-            known.add(_place_name(place.place_id))
-            if place.account_id not in {"", "*"} and place.conversation_id not in {"", "*"}:
-                known.update(_route_names({key: getattr(place, key) for key in _ROUTE_FIELDS}))
-        unresolved = any(name.startswith(("room:", "conversation:", "thread:")) for name in wanted - known)
-        if unresolved and dialogue_store.present(self.root):
+        known.update(self.witnessed)
+        if self.places is None:
+            unverified.update(name for name in wanted if name.startswith("place:"))
+        else:
+            known.update(_place_name(place.place_id) for place in self.places.values())
+        unresolved = {name for name in wanted - known if name.startswith(("room:", "conversation:", "thread:"))}
+        if unresolved:
             try:
-                chats = {row["chat_id"] for row in dialogue_store.rooms(self.root)} - self.room_labels.project_chat_ids
-                transports = dialogue_store.latest_inbound_transport(self.root, chats) if chats else {}
-                for chat, route in transports.items():
-                    if _derives(route, chat):
+                skip = self.room_labels.project_chat_ids | {WEB_UI_CHAT_ID, HIDDEN_CHAT_ID}
+                transports = dialogue_store.transport_witnesses(self.root, skip_chat_ids=skip) if dialogue_store.present(self.root) else ()
+                for chat, route in transports:
+                    route_names = _route_names(route)
+                    if route_names and _derives(route, chat):
                         known.add(f"room:{chat}")
-                        known.update(_route_names(route))
+                        known.update(route_names)
             except (OSError, StoreError):
-                pass  # The receipt can report only the matches it found.
-        return wanted & known
+                unverified.update(unresolved - known)
+        return wanted & known, unverified
 
 
 def receipt_situation(ctx: Any, root: Path, *, claims_written: bool = False) -> SituationReceipt | None:
@@ -241,23 +246,26 @@ def receipt_situation(ctx: Any, root: Path, *, claims_written: bool = False) -> 
 
     try:
         places = place_rows(root)
-    except PlaceError:
-        places = {}
-    labels = RoomLabelResolver(root, places=places)
+    except (PlaceError, OSError):
+        places = None
+    labels = RoomLabelResolver(root, places=places or {})
     room = view_room_id(task, ctx, root, project_chat_ids=labels.project_chat_ids, presence=role == "presence")
-    names = situation_names(task, room)
-    if not integrating:
-        return SituationReceipt(root, labels, places, names, "")
-
     place_id, route = _place_facts(task)
+    focus = _mapping(metadata.get("focus"))
+    source_room, _ = labels._chat_id({"chat_id": focus.get("room_chat_id", room if role == "presence" else None)})
+    route_names = _route_names(route)
+    witnessed = (f"room:{source_room}", *route_names) if source_room is not None and route_names and _derives(route, source_room) else ()
+    if not integrating:
+        return SituationReceipt(root, labels, places, witnessed, "")
+
+    names = situation_names(task, room)
     room_label = labels.label({"chat_id": room, "transport": route}).removesuffix(f" [chat_id={room}]")
     descriptions = {names[0]: room_label}
-    place = places.get(place_id)
+    place = (places or {}).get(place_id)
     carried_place = _mapping(_mapping(metadata.get("presence")).get("place"))
     if place_id:
         descriptions[_place_name(place_id)] = place.label if place else carried_place.get("label", "")
     conversation = _mapping(route.get("conversation"))
-    route_names = _route_names(route)
     if route_names:
         descriptions[route_names[0]] = next((conversation[key] for key in ("title", "name", "full_name", "username")
                                              if conversation.get(key)), "")
@@ -265,4 +273,4 @@ def receipt_situation(ctx: Any, root: Path, *, claims_written: bool = False) -> 
     for name in names:
         label = " ".join(str(descriptions.get(name) or "").split())
         rendered.append(f"{name} ({label})" if label else name)
-    return SituationReceipt(root, labels, places, names, "This situation's names: " + ", ".join(rendered))
+    return SituationReceipt(root, labels, places, witnessed, "This situation's names: " + ", ".join(rendered))

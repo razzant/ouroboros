@@ -324,7 +324,7 @@ def _wake_opening(metadata: Dict[str, Any], task_id: str, gaps: List[str]) -> Op
     connector reported about that message (``reported``, its labelled block; a cut names this task's record). None is
     owner text here: an addressed event from my human's confirmed account is its own ``place_owner`` corpus row."""
     from ouroboros.consciousness_authority import (
-        WAKE_CAUSE_FOCUS, WORK_KIND_CONSCIOUSNESS, is_consciousness_origin, wake_cause, work_kind,
+        WAKE_CAUSE_FOCUS, WORK_KIND_CONSCIOUSNESS, focus_evidence, is_consciousness_origin, wake_cause, work_kind,
     )
     from ouroboros.presence_message_facts import connector_facts, event_reader
 
@@ -332,7 +332,7 @@ def _wake_opening(metadata: Dict[str, Any], task_id: str, gaps: List[str]) -> Op
     presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
     opening = {"source": WAKE_OPENING, "task_id": task_id, "wake_cause": cause}
     if cause == WAKE_CAUSE_FOCUS:
-        opening.update(focus=copy.deepcopy(metadata.get("focus")), observed_text=presence.get("observed_text"))
+        opening.update(focus=copy.deepcopy(focus_evidence(metadata.get("focus"))), observed_text=presence.get("observed_text"))
         focus = opening["focus"] if isinstance(opening["focus"], dict) else {}
         actor = focus.get("actor") if isinstance(focus.get("actor"), dict) else {}
         event = presence.get("event") if isinstance(presence.get("event"), dict) else {}
@@ -929,10 +929,12 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
     wake = sources.get("wake") if isinstance(sources.get("wake"), dict) else None
     later = [row for row in sources.get("later") or [] if isinstance(row, dict) and row.get("content")]
     if wake:
+        from ouroboros.consciousness_authority import focus_evidence
+
         lines += ["", "That task was a wake of your consciousness; no owner message opened it. Its recorded "
                       "opening (host facts, not owner words):",
-                  json.dumps({key: value for key, value in wake.items() if key not in ("observed_text", "reported")},
-                             ensure_ascii=False)]
+                  json.dumps({key: focus_evidence(value) if key == "focus" else value
+                              for key, value in wake.items() if key not in ("observed_text", "reported")}, ensure_ascii=False)]
         if isinstance(wake.get("reported"), str) and wake["reported"]:
             lines.append(wake["reported"])  # the connector's facts about that message, labelled, beside its words
         # Once, below, only when my human's confirmed account opened the wake and a ``place_owner`` row (cited, or an
