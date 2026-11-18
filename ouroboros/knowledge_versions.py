@@ -12,6 +12,13 @@ its text is read through ``knowledge_rows`` (stored whole, or rebuilt from the c
 and returned only after it hashes to that revision. Readers write nothing. Claim changes commit
 after the note and its index land, then project the committed names under the shelf lock.
 
+The held-version store grows by one full Markdown file per shown revision the journal cannot
+rebuild, plus a 25-byte journal proof for each fallback check that succeeds. Writer-published
+revisions normally use the proof in their existing claim record. A failed journal check is
+remembered beside its body until the journal changes. Capture and the journal writer replace a
+body with a proof after hash-verified reconstruction without the live file. Only the journal can
+retire a body, so changing claims or ending a task cannot break an issued reader.
+
 The outline is the one renderer the read, the receipt and the refusal share. It prints each heading
 line as the note spells it; its character ranges are the ``start_char``/``end_char`` of
 ``knowledge_read``; a section is the parser's (``MarkdownHeading.section``), nested sections
@@ -22,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import struct
 from collections import Counter
 from dataclasses import dataclass
 from itertools import chain
@@ -271,6 +279,8 @@ class NoteHistory:
 
 
 _CLAIMS_PUBLICATION = "claims_published"
+_JOURNAL_STAMP = struct.Struct(">QQQ")
+_HELD_PROOF = b"\xff"  # a flag outside the UTF-8 a Markdown body can contain here
 
 
 def claim_names(value: Any) -> list[str]:
@@ -288,21 +298,103 @@ def _held_version_path(address: Any, revision: str) -> Path:
     return address.shelf.parent / "knowledge_held_versions" / topic_key / f"{revision}.md"
 
 
+def _journal_stamp(address: Any) -> bytes:
+    try:
+        info = journal_path(address).stat()
+    except OSError:
+        return b""
+    changed = info.st_mtime_ns if os.name == "nt" else info.st_ctime_ns
+    identity = hashlib.blake2b(f"{info.st_dev}:{info.st_ino}".encode(), digest_size=8).digest()
+    return _JOURNAL_STAMP.pack(int.from_bytes(identity, "big"), info.st_size, changed)
+
+
+def _covers_journal(stamped: bytes, observed: bytes) -> bool:
+    """Witness the journal at the recorded byte boundary across ordinary appends."""
+    if len(stamped) != _JOURNAL_STAMP.size or not observed:
+        return False
+    identity, end, _ = _JOURNAL_STAMP.unpack(stamped)
+    current_identity, current_end, _ = _JOURNAL_STAMP.unpack(observed)
+    return stamped == observed or (identity == current_identity and end < current_end)
+
+
+def _held_file(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _record_proof(path: Path, stamp: bytes) -> None:
+    if stamp:
+        try:
+            utils.write_bytes_atomic(path, _HELD_PROOF + stamp, fsync=True)
+            path.with_suffix(".checked").unlink(missing_ok=True)
+        except OSError:
+            pass  # the journal backs the reader even when its derived proof cannot land
+
+
+def _journal_rebuilds(address: Any, revision: str) -> bool:
+    try:
+        find_version(address, revision, live=None, journal_only=True)
+    except VersionUnavailable:
+        return False
+    return True
+
+
+def _writer_proved(address: Any, revision: str, stamp: bytes) -> bool:
+    record = utils.json_snapshot(claim_record_path(address.shelf, address.topic)) or {}
+    if record.get("topic") != address.topic or record.get("revision") != revision:
+        return False
+    try:
+        proof = bytes.fromhex(record.get("journal_proof", ""))
+    except (ValueError, TypeError):
+        return False
+    return _covers_journal(proof, stamp)
+
+
 def retain_held_version(note: Any, revision: str) -> None:
-    """Keep the observed bytes for an exact reader without consulting the shelf journal at a start."""
-    path = _held_version_path(note.address, revision)
-    if not path.is_file():
+    """Prove the reader from history or put the exact source in custody before publishing it."""
+    address = note.address
+    path = _held_version_path(address, revision)
+    stamp, captured = _journal_stamp(address), _held_file(path)
+    if captured and captured.startswith(_HELD_PROOF) and _covers_journal(captured[1:], stamp):
+        return
+    if captured is None and _writer_proved(address, revision, stamp):
+        return
+    checked = path.with_suffix(".checked")
+    already_checked = _held_file(checked) == stamp
+    if not already_checked and _journal_rebuilds(address, revision):
+        _record_proof(path, stamp)
+        return
+    if captured != note.raw:
         utils.write_bytes_atomic(path, note.raw, fsync=True)
+    if not already_checked:
+        try:
+            utils.write_bytes_atomic(checked, stamp)
+        except OSError:
+            pass  # the exact body is already in custody
 
 
 def _retained_held_version(address: Any, revision: str) -> str | None:
     if getattr(address, "scope", None) != "global":
         return None
-    try:
-        raw = _held_version_path(address, revision).read_bytes()
-        return raw.decode("utf-8") if hashlib.sha256(raw).hexdigest() == revision else None
-    except (OSError, UnicodeDecodeError):
-        return None
+    raw = _held_file(_held_version_path(address, revision))
+    if raw is not None and hashlib.sha256(raw).hexdigest() == revision:
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+    return None
+
+
+def _retire_held_bodies(address: Any, history: Mapping[str, Any]) -> None:
+    stamp = _journal_stamp(address)
+    for revision in dict.fromkeys((history.get("old_sha256"), history.get("new_sha256"))):
+        if revision:
+            path = _held_version_path(address, revision)
+            raw = _held_file(path)
+            if raw is not None and not raw.startswith(_HELD_PROOF) and _journal_rebuilds(address, revision):
+                _record_proof(path, stamp)
 
 
 def claim_records_by_revision(shelf: Path) -> dict[str, dict]:
@@ -374,6 +466,10 @@ def _project_claim_record(path: Path, publication: dict | None) -> None:
     updated = {**(record or {}), "active_claims": claim_names((publication or {}).get("active_claims"))}
     if publication:
         updated.update(topic=publication["topic"], revision=publication["new_sha256"])
+        if proof := publication.get("journal_proof"):
+            updated["journal_proof"] = proof
+        else:
+            updated.pop("journal_proof", None)
     if updated != record:
         utils.atomic_write_json(path, updated)
 
@@ -421,6 +517,8 @@ class ClaimWrite:
             ) if key in history}
             row.update(ts=history.get("ts") or utils.utc_now_iso(), topic=address.topic, address=address.as_dict(),
                        new_sha256=revision, publication=_CLAIMS_PUBLICATION, active_claims=self.active)
+            if self.active and history.get("new_sha256") == revision and (stamp := _journal_stamp(address)):
+                row["journal_proof"] = stamp.hex()
             if self.moved_from:
                 row["moved_from"] = self.moved_from
             if not utils.append_jsonl(journal_path(address), row,
@@ -429,6 +527,8 @@ class ClaimWrite:
             _retire_claim_record(address.shelf, row)
             publication = row
         _project_claim_record(self.path, publication)
+        if history:
+            _retire_held_bodies(address, history)
 
 
 def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: bool, host_claim: str | None) -> ClaimWrite | None:
@@ -472,7 +572,7 @@ def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: b
 _READ = object()  # find_version reads the live text itself
 
 
-def find_version(address: Any, version: Any, live: Any = _READ) -> tuple[str, dict]:
+def find_version(address: Any, version: Any, live: Any = _READ, *, journal_only: bool = False) -> tuple[str, dict]:
     """The exact text of one version of this text and the row that wrote it, newest rows first.
 
     Every row that names the version, as the text it published (``new_sha256``) or replaced
@@ -483,7 +583,8 @@ def find_version(address: Any, version: Any, live: Any = _READ) -> tuple[str, di
     outside edit, or a write before history). ``VersionUnavailable`` says why there is no text and
     names the gaps among the lines that name this note. ``live`` is the current text a writer already
     captured under its lock (the journal and the text it reads are then one state); by default the file
-    is read here."""
+    is read here. A custody check passes ``live=None, journal_only=True`` to require independent
+    reconstruction from the journal and skip the second pass for diagnostics on a miss."""
     if not isinstance(version, str) or len(version) != 64 or version.strip("0123456789abcdef"):
         raise VersionUnavailable("a version is a revision: the 64 lowercase hex characters of its sha256")
     if live is _READ:
@@ -508,6 +609,8 @@ def find_version(address: Any, version: Any, live: Any = _READ) -> tuple[str, di
             held = text  # a later row's old side: keep looking for the row that wrote it
     if held is not None:
         return held, {}
+    if journal_only:
+        raise VersionUnavailable(why or f"no version {version} of this {noun(address)} in its history")
     if (captured := _retained_held_version(address, version)) is not None:
         return captured, {}
     # A torn line may have lost the very version asked for: on a miss, count every line naming this note.
