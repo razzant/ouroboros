@@ -284,7 +284,7 @@ def test_context_mode_receipt_names_the_change_and_declared_actor_in_its_room(cl
     assert rows == [
         ((1, f"{reach} (Max → Low)."), typed),
         ((77, f"{reach} (Low → Max, changed by Ouroboros)."), typed),
-        ((room["chat_id"], f"{reach} (Max → Nano, changed by you)."), typed),
+        ((room["chat_id"], f"{reach} (Max → Nano, changed by the owner)."), typed),
     ]
     audits = [json.loads(line) for line in (install.parent / "logs" / "events.jsonl").read_text().splitlines()]
     assert [row["previous_context_mode"] for row in audits if row.get("action") == "context_mode"] == [

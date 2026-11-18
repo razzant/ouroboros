@@ -417,7 +417,10 @@ def record_context_mode_change(request: Request, project_id: str, requested: str
             chat = owner_chat_id(request_drive_root(request))
         if not chat:
             return
-        actor = _ROW_ACTORS.get(declared_settings_origin(request)["actor"])
+        # The owner chose "changed by the owner" here (17.11): the room's readers (the mind, colleagues) are not
+        # all "you"; the settings rows keep their own bylines.
+        declared = declared_settings_origin(request)["actor"]
+        actor = "by the owner" if declared == "owner" else _ROW_ACTORS.get(declared)
         attribution = f", changed {actor}" if actor else ""
         transition = f"{_CONTEXT_MODE_NAMES.get(old, old)} → {_CONTEXT_MODE_NAMES.get(new, new)}"
         text = f"New work in this room uses the updated context mode ({transition}{attribution})."
