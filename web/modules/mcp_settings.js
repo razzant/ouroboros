@@ -619,7 +619,7 @@ function paintEditorActions(view) {
     if (!remove.hasAttribute('aria-busy')) remove.disabled = busy || (isLive(server) && heldEditor(server));
     if (!heldEditor(server)) return;
     if (isLive(server)) card.querySelector('[data-editor-discard]')?.removeAttribute('hidden');
-    if (card.querySelector('[data-mcp-header-toggle][aria-expanded="true"]')) resetSecretReveals(card);
+    resetSecretReveals(card);
     card.querySelectorAll('[data-entry-switch], [data-mcp-test], [data-mcp-refresh], [data-mcp-header-toggle], [data-mcp-sign-in-action]')
         .forEach(control => { control.disabled = true; });
     card.querySelector('[data-mcp-sign-in-link]')?.setAttribute('hidden', '');
