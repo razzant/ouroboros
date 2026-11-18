@@ -108,4 +108,4 @@ Bridge intake keeps identity, transport and durable acceptance; failed handlers 
 
 The bridge recognizes `/panic`, `/restart`, `/review`, `/evolve [on|off]`, `/bg [start|stop|status]` and `/status`; other text is ordinary routing. External transports invoke them only with positive owner identity and a current transport-specific owner-chat binding; unknown refuses and registers nobody; Panic keeps its observed immutable binding until owner Reset closes it (`PanicIngress`). Commands reuse runtime-mode, queue, cancellation and typed-result authority.
 
-Confirmed budget/owner pauses register `pause_notices` with the confirming result update: a saved System chat row is the receipt, a failed append stays owed (`pause_notices.py`). Consciousness reports paused/pausing or unknown, never guessing settlement.
+Confirmed money and owner pauses owe a System notice per episode. Technical waits owe one per task, naming the cause in the reader’s language. Recording the chat row settles delivery debt (`pause_notices.py`).

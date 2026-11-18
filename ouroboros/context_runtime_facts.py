@@ -435,7 +435,7 @@ def disk_view(path: Any, *, observed_at: Optional[str] = None) -> Dict[str, Any]
 def storage_fact(data_root: Any, *, observed_at: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """What the mind knows about its disk, as one compact fact, every turn: free and total space of the
     data folder's disk, read fresh with or without a count, in bytes and the Storage page's decimal GB with
-    when it was read (``disk_view``); what every retirer holds and why
+    when it was read (``disk_view``) and the preceding dated reading (``previous_free``); what every retirer holds and why
     (``holds``: by remover, each class with its count, one example and since when, from the job rows the
     server's five retirer passes and the custody sweep's engine record keep; never an engine call while a
     turn is prepared) and what the last pass of each released; the last finished storage count when there
