@@ -7,7 +7,8 @@ automatic retry or an application stop costs at most the work since the last
 boundary instead of the whole line of thought:
 
 - ``ready`` — incorporated owner/peer mail and context changes, before the
-  model call (skipped when nothing changed since the last save);
+  model call (skipped only when its signature, the round number included,
+  equals the last save's: a repeat within one round);
 - ``pre_effect`` — the accepted assistant message and its tool batch, before
   the first tool: a write failure HOLDS the batch visibly (typed, interruptible
   by the task's own Stop/Panic/deadline); no unrecorded effect starts;
