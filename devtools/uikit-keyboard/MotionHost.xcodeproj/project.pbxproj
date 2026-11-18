@@ -1,0 +1,97 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {};
+    objectVersion = 56;
+    objects = {
+        A10000000000000000000001 /* Project */ = {
+            isa = PBXProject;
+            buildConfigurationList = A10000000000000000000020;
+            compatibilityVersion = "Xcode 14.0";
+            developmentRegion = en;
+            hasScannedForEncodings = 0;
+            knownRegions = (en, Base);
+            mainGroup = A10000000000000000000002;
+            productRefGroup = A10000000000000000000003;
+            projectDirPath = "";
+            projectRoot = "";
+            targets = (A10000000000000000000010, A10000000000000000000011);
+        };
+        A10000000000000000000002 /* Sources */ = {
+            isa = PBXGroup;
+            children = (A10000000000000000000004, A10000000000000000000005, A10000000000000000000006,
+                        A10000000000000000000007, A10000000000000000000003);
+            sourceTree = "<group>";
+        };
+        A10000000000000000000003 /* Products */ = {
+            isa = PBXGroup; name = Products; sourceTree = "<group>";
+            children = (A10000000000000000000008, A10000000000000000000009);
+        };
+        A10000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionHost.swift; sourceTree = "<group>";};
+        A10000000000000000000005 = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Reading.js; sourceTree = "<group>";};
+        A10000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardTests.swift; sourceTree = "<group>";};
+        A10000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>";};
+        A10000000000000000000008 = {isa = PBXFileReference; explicitFileType = wrapper.application; path = MotionHost.app; sourceTree = BUILT_PRODUCTS_DIR;};
+        A10000000000000000000009 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = MotionUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR;};
+
+        A10000000000000000000010 /* App */ = {
+            isa = PBXNativeTarget;
+            name = MotionHost; productName = MotionHost;
+            productReference = A10000000000000000000008;
+            productType = "com.apple.product-type.application";
+            buildConfigurationList = A10000000000000000000021;
+            buildPhases = (A10000000000000000000012, A10000000000000000000013, A10000000000000000000014);
+            buildRules = (); dependencies = ();
+        };
+        A10000000000000000000011 /* UI test */ = {
+            isa = PBXNativeTarget;
+            name = MotionUITests; productName = MotionUITests;
+            productReference = A10000000000000000000009;
+            productType = "com.apple.product-type.bundle.ui-testing";
+            buildConfigurationList = A10000000000000000000022;
+            buildPhases = (A10000000000000000000015, A10000000000000000000016);
+            buildRules = (); dependencies = (A10000000000000000000017);
+        };
+        A10000000000000000000012 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000030); runOnlyForDeploymentPostprocessing = 0;};
+        A10000000000000000000013 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+        A10000000000000000000014 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000031); runOnlyForDeploymentPostprocessing = 0;};
+        A10000000000000000000015 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000032); runOnlyForDeploymentPostprocessing = 0;};
+        A10000000000000000000016 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+        A10000000000000000000017 = {isa = PBXTargetDependency; target = A10000000000000000000010; targetProxy = A10000000000000000000018;};
+        A10000000000000000000018 = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000001; proxyType = 1; remoteGlobalIDString = A10000000000000000000010; remoteInfo = MotionHost;};
+        A10000000000000000000030 = {isa = PBXBuildFile; fileRef = A10000000000000000000004;};
+        A10000000000000000000031 = {isa = PBXBuildFile; fileRef = A10000000000000000000005;};
+        A10000000000000000000032 = {isa = PBXBuildFile; fileRef = A10000000000000000000006;};
+
+        A10000000000000000000020 = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000023); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
+        A10000000000000000000021 = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000024); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
+        A10000000000000000000022 = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000025); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
+        A10000000000000000000023 /* Project Debug */ = {
+            isa = XCBuildConfiguration; name = Debug;
+            buildSettings = {
+                SDKROOT = iphonesimulator;
+                SUPPORTED_PLATFORMS = iphonesimulator;
+                TARGETED_DEVICE_FAMILY = 1;
+                IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+                CLANG_ENABLE_MODULES = YES;
+                SWIFT_VERSION = 5.0;
+                SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+                PRODUCT_NAME = "$(TARGET_NAME)";
+            };
+        };
+        A10000000000000000000024 /* App Debug */ = {
+            isa = XCBuildConfiguration; name = Debug;
+            buildSettings = {INFOPLIST_FILE = Info.plist; PRODUCT_BUNDLE_IDENTIFIER = org.ouroboros.MotionProbeR1;};
+        };
+        A10000000000000000000025 /* UI test Debug */ = {
+            isa = XCBuildConfiguration; name = Debug;
+            buildSettings = {
+                GENERATE_INFOPLIST_FILE = YES;
+                PRODUCT_BUNDLE_IDENTIFIER = org.ouroboros.MotionProbeR1.UITests;
+                TEST_TARGET_NAME = MotionHost;
+                SKIP_INSTALL = YES;
+            };
+        };
+    };
+    rootObject = A10000000000000000000001;
+}

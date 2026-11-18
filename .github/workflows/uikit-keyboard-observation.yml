@@ -1,0 +1,35 @@
+name: UIKit keyboard observation
+run-name: Keyboard trace at ${{ github.sha }}
+
+on:
+  push:
+    branches: [probe/telegram-uikit-keyboard]
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    if: ${{ !github.event.deleted && github.ref == 'refs/heads/probe/telegram-uikit-keyboard' }}
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Observe the software keyboard on a fresh iPhone
+        env:
+          PROBE_RUNNER: ${{ runner.environment }}
+          PYTHONNOUSERSITE: '1'
+        run: exec python3 -B devtools/uikit-keyboard/run.py
+      - name: Keep keyboard geometry and capture checks
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: uikit-observation-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/uikit-observation/summary.json
+            ${{ runner.temp }}/uikit-observation/trace.json
+          if-no-files-found: error
+          retention-days: 3
