@@ -224,6 +224,60 @@ def test_a_connection_close_waits_for_its_own_connected_time_only(host_world, mo
     assert [row['cost_usd'] for row in ua.read_usage_records(host.ctx.drive_root)] == pytest.approx([.04])
 
 
+
+def test_a_cancelled_close_keeps_its_own_failed_write_as_evidence(host_world):
+    """#3633. When the call's end cancels a connection's close after its own connected-time write failed, the
+    connection still records that cleanup failure; one whose writes succeeded records nothing."""
+    from types import SimpleNamespace
+    from ouroboros.live_connections import PreparedConnection
+    host, wire = host_world.host, []
+    host._connection_ledger.failures['7'] = RuntimeError('ledger write failed')
+
+    async def cancelled():
+        future = asyncio.get_running_loop().create_future()
+        future.cancel()
+        return future
+    ended = asyncio.run(cancelled())
+
+    def lease(number):
+        made = PreparedConnection.__new__(PreparedConnection)
+        made.host, made.connection = host, {'number': number}
+        made.view = SimpleNamespace(connection_number=number,
+                                    observe=lambda direction, raw: wire.append((number, json.loads(raw))))
+        made._cleanup_result(ended)
+        return made
+    failed, healthy = lease(7), lease(8)
+    assert failed.connection['cleanup_failure'] == 'RuntimeError' and 'cleanup_failure' not in healthy.connection
+    assert wire == [(7, {'type': 'call.connection_cleanup_failed', 'error_class': 'RuntimeError'})]
+
+
+def test_a_malformed_connected_count_waits_alone_and_never_breaks_the_loop(monkeypatch):
+    """#3633. Only valid growths merge. A malformed count, which no adapter sends, stays a receipt of its own (priced
+    unknown, as before) instead of raising on the call loop or folding into valid seconds."""
+    import threading
+    from ouroboros import live_usage
+    entered, release, written = threading.Event(), threading.Event(), []
+
+    def held(**receipt):
+        if not written:
+            entered.set()
+            assert release.wait(5), 'held by the test'
+        written.append(receipt['usage']['connected_seconds'])
+    monkeypatch.setattr(live_usage, 'settle_connection_usage', held)
+    ledger = live_usage.ConnectionLedger()
+    try:
+        ledger.add(connection_key='1', usage={'connected_seconds': 1})
+        assert entered.wait(2)
+        for seconds in (2, None, 3):
+            ledger.add(connection_key='1', usage={'connected_seconds': seconds})
+        release.set()
+        ledger.flush()
+        assert written == [1, 5, None]
+    finally:
+        release.set()
+        ledger.close()
+
+
 def test_cancel_joins_started_tool_before_connection_closes(host_world):
     host = host_world.host
     checkpoints = []

@@ -112,6 +112,8 @@ class PreparedConnection:
         # Retired close may outlive its consumer. Observe its outcome even when
         # the active successor, rather than the original waiter, ends the call.
         error = None if task.cancelled() else task.exception()
+        if error is None and hasattr(self, 'view'):  # a close cancelled after its own write failed keeps that evidence
+            error = self.host._connection_ledger.failures.get(str(self.view.connection_number))
         if error is not None and hasattr(self, 'connection'):
             self.connection['cleanup_failure'] = type(error).__name__
             self.view.observe('host', canonical_json({'type': 'call.connection_cleanup_failed',

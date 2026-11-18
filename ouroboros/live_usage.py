@@ -366,15 +366,20 @@ def settle_connection_usage(*, engine: str, model: str, call_id: str, connection
         physical_context=physical_context, cost_evidence=evidence), normalized, cost_usd=cost)
 
 
+def _mergeable_seconds(value) -> bool:
+    """A connected-seconds growth that merges: a malformed one stays a receipt of its own, priced unknown."""
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
 class ConnectionLedger:
     """A call's connected-time receipts, written to the ledger by their own thread (#3633).
 
     xAI bills connected seconds and its session reports them every idle second. Each receipt is a ledger transaction:
     on Windows CI under load one took up to 32 s, and written on the call loop it froze the owner's microphone input,
     the page's played receipts and a held tool's delivery for as long. The call loop only hands a receipt over to one
-    writer thread that lives as long as the call (the store keeps a connection per thread). A connection keeps at most
-    one receipt waiting: its next takes that one in where it stands (the growth adds; the newest watermark and
-    evidence stand), so a slow ledger builds no backlog even while a prepared successor reports beside the serving
+    writer thread that lives as long as the call (the store keeps a connection per thread). A connection keeps one
+    receipt waiting: its next takes that one in where it stands (the growth adds; the newest watermark and evidence
+    stand), so a slow ledger builds no backlog even while a prepared successor reports beside the serving
     connection. A connection's close ``flush``es its own receipts, so they are on the ledger once it has closed, and
     raises its own write that failed (``failures``); another connection's writes neither hold nor fail it. Nothing on
     the call's way waits for a write: the money check reads what is written (a receipt in flight is counted at its
@@ -394,7 +399,8 @@ class ConnectionLedger:
         context = contextvars.copy_context()  # the call's usage scope attributes the receipt
         with self._changed:
             for index, (_, waiting) in enumerate(self._waiting):
-                if waiting["connection_key"] == receipt["connection_key"]:
+                if waiting["connection_key"] == receipt["connection_key"] and all(
+                        _mergeable_seconds(item["usage"]["connected_seconds"]) for item in (waiting, receipt)):
                     seconds = waiting["usage"]["connected_seconds"] + receipt["usage"]["connected_seconds"]
                     receipt["usage"] = {"connected_seconds": seconds}
                     self._waiting[index] = (context, receipt)
