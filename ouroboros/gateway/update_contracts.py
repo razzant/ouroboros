@@ -87,10 +87,11 @@ class UpdateApplyErrorResponse(TypedDict):
 
 
 class UpdateDescriptionRequest(TypedDict):
-    """The owner's Write/Rewrite of the update description for one exact range."""
-    mode: Literal["write", "rewrite"]
-    base_sha: str
-    target_sha: str
+    """The owner's Write/Rewrite of one exact range, or Check and describe (``latest``, no range: the
+    server checks first and asks for the range that check finds)."""
+    mode: Literal["write", "rewrite", "latest"]
+    base_sha: NotRequired[str]  # write/rewrite only
+    target_sha: NotRequired[str]  # write/rewrite only
 
 
 class UpdateDescriptionResponse(TypedDict):
@@ -100,9 +101,24 @@ class UpdateDescriptionResponse(TypedDict):
     key: Dict[str, Any]  # {base_sha, target_sha, update_channel, target_ref}
 
 
+class UpdateDescriptionLatestResponse(TypedDict):
+    """``latest``: ``queued`` admitted one task (``task_id``, ``key``); ``writing`` found a requested task that can
+    still save (``task_id`` and its own ``key``, which may be older than ``checked_key``); ``current`` found a saved
+    text of exactly ``checked_key``; ``no_update`` found none on offer; ``check_failed`` did not complete."""
+    status: Literal["queued", "writing", "current", "no_update", "check_failed"]
+    update: Dict[str, Any]  # that check's UpdateStatusResponse; a request it admitted shows in the next status read
+    checked_key: Optional[Dict[str, Any]]  # the range this check found on offer
+    task_id: NotRequired[str]
+    key: NotRequired[Dict[str, Any]]
+
+
 class UpdateDescriptionErrorResponse(TypedDict):
-    """400 malformed; 409 a request still running (``task_id``, ``task_status``) or a range nobody
-    offered (``legal_ranges``); 503 record busy or the task not admitted (``reason``)."""
+    """400 malformed; 409 a request still running (``task_id``, ``task_status``), a range nobody
+    offered (``legal_ranges``) or, for ``latest``, an update whose exact range is unknown
+    (``reason: range_unavailable``); 503 record busy (``reason: record_busy``) or the task not
+    admitted (``reason``), including ``task_status_unknown`` with the existing ``task_id`` and
+    ``task_status: unknown``. Each establishes that nothing new was admitted; any other failure
+    (a 500, a gateway's answer, none at all) leaves the outcome unknown."""
     error: str
     task_id: NotRequired[str]
     task_status: NotRequired[str]
@@ -124,5 +140,6 @@ class UpdateStatusReadyOutbound(TypedDict):
 __all__ = [
     "UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",
     "UpdateApplySuccessResponse", "UpdateApplyErrorResponse", "UpdateDescriptionRequest", "UpdateDescriptionResponse",
-    "UpdateDescriptionErrorResponse", "UpdateProgressChangedOutbound", "UpdateStatusReadyOutbound",
+    "UpdateDescriptionLatestResponse", "UpdateDescriptionErrorResponse", "UpdateProgressChangedOutbound",
+    "UpdateStatusReadyOutbound",
 ]

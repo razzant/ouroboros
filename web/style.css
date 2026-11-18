@@ -10470,8 +10470,8 @@ html[data-layout="stack"] .project-panel {
 /* The update description: Ouroboros's own account of the update this panel
    offers, kept after it lands as "What changed in this version". A fact block,
    so it is separated from the headline the way Recovery is — a rule, not a
-   card, with two small actions: Check (facts only) and Write/Rewrite (an
-   ordinary task that authors it). */
+   card, with one small action (Check and describe, Write for the update just
+   applied, or Check while a description is written); Rewrite waits in Details. */
 .updates-letter {
     display: flex;
     flex-direction: column;
@@ -10502,8 +10502,7 @@ html[data-layout="stack"] .project-panel {
     gap: var(--space-1);
     margin-left: auto;
 }
-.updates-letter-refresh,
-.updates-letter-write {
+.updates-letter-action {
     white-space: nowrap;
 }
 .updates-letter-label {
@@ -10540,7 +10539,8 @@ html[data-layout="stack"] .project-panel {
     color: var(--text-meta);
     overflow-wrap: anywhere;
 }
-.updates-letter-details p {
+.updates-letter-details p,
+.updates-letter-rewrite {
     margin: var(--space-2) 0 0;
 }
 /* The panel's letter opens at its first part (about eight lines); "Read all" opens the rest in place. The Apply
