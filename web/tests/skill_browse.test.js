@@ -1,4 +1,4 @@
-// Skills → Browse: sort, filter, category counts, the recommended shelf and the
+// Extensions → Browse: sort, filter, category counts, the recommended shelf and the
 // consequence row each card shows before its one action is pressed.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

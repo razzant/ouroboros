@@ -716,7 +716,7 @@ Both lists use the same fields. Unknown keys or an ID repeated anywhere reject t
   `-I -B`. It uses that interpreter's packages, skips the skill's isolated Python
   environment and ignores `PYTHONPATH` and user-site.
   Managed domains refuse it. Ordinary Python scripts keep PATH-first resolution.
-- `title` names the server in Settings and defaults to `id`.
+- `title` names the server in Extensions (default `id`).
 - `task_session` and `browser_policy` control call lifetime (DEVELOPMENT §12).
   `browser_policy` requires `task_session: true`.
 
@@ -728,7 +728,7 @@ It preserves other settings, skips identical writes and refuses ID conflicts.
 For `skill_owner_action(action="connect_mcp")`, use `preview: true` first, then the
 owner's answer as `owner_source` with the preview's `settings_digest`.
 
-The row stores no command. Listing, Settings Test and calls derive binary, entry, cwd and flags from the installed
+The row stores no command. Listing, Test and calls derive binary, entry, cwd and flags from the installed
 skill. Moving it or the runtime needs no reconnect. Servers receive scripts' granted
 settings and state folder. Managed domains stage verified Node scripts in containers
 and refuse extension servers. An off, missing or unaccepted skill, missing grants or
@@ -2807,7 +2807,7 @@ You can read their full source under
 
 ### Where installed skills come from
 
-An install reads skills from its **sources** (Skills → Sources; the settings key
+An install reads skills from its **sources** (Extensions › Sources; the settings key
 `OUROBOROS_SKILL_SOURCES`): the skills built into the app, the public hub
 `razzant/OuroborosHub` as two rows (**Ouroboros**, the maintainer's Official
 skills, installed without review by default; **Ouroboros Community**, every
@@ -3032,7 +3032,7 @@ scanner output.
 
 ClawHub is the broader OpenClaw registry. Publishing requires an
 OpenClaw publisher account; once your skill is on the registry, a search in
-Skills → Browse finds it and installs it via the `adapt_openclaw_skill`
+Browse finds it and installs it via the `adapt_openclaw_skill`
 translation pipeline. Note that the adapter
 preserves the original `SKILL.openclaw.md` next to the translated
 `SKILL.md` so reviewers can cross-check both manifests.

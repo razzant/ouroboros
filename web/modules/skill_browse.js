@@ -1,4 +1,4 @@
-// Skills → Browse (UX §2, boards B2, B2c, B5, B5b, B14): every connected
+// Extensions › Browse (UX §2, boards B2, B2c, B5, B5b, B14): every connected
 // source's catalog as one board of cards in sort order. Search filters the
 // loaded catalogs while typing; Enter also asks the registry (ClawHub), whose
 // hits join the board. A registry chosen alone with nothing typed shows its own

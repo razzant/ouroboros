@@ -1,4 +1,4 @@
-// Dialogs of the Skills page. Plain confirmations go through the shared
+// Dialogs of the skill views of Extensions. Plain confirmations go through the shared
 // openConfirmDialog; a choice between consequences is drawn as offered-answer
 // cards (the question card's recipe), one chosen, the confirm button's words and
 // tone following the chosen card. Cancel, Close, the backdrop, Escape and a newer
@@ -190,7 +190,7 @@ export async function connectSkillTools(skill, { dialog = openConfirmDialog, api
         // The host's blockers are readiness tokens and launch diagnostics: the body says the outcome, Details keep them.
         const blockers = preview.blockers || [];
         await dialog({ title: `${skillTitle(skill)} can’t connect its tools yet`, alert: true,
-            body: conflict ? `${conflict.conflict}. Remove or rename that server in Settings → Tools → MCP servers.`
+            body: conflict ? `${conflict.conflict}. Remove or rename that server in Extensions → MCP servers.`
                 : 'It can’t run them now, so nothing was changed.',
             details: conflict ? null : { summary: 'What stops it', rows: [
                 ...(blockers.length ? [{ label: blockers.length > 1 ? 'Reasons' : 'Reason', value: blockers.join('; ') }] : []),
@@ -510,7 +510,7 @@ export function firstStartTrustHtml(rows = []) {
     return `<p>Ouroboros comes connected to its public hub. Confirm how its skills install — you do this once.</p>
         <div class="skills-first-rows">${rows.map(choice).join('')}</div>
         <p class="skills-dialog-note">Suggested choices apply until you choose. Official doesn’t skip the review by itself: if you choose “Review each skill” for Ouroboros, its Official skills are reviewed too. A review sends the skill’s files to your review models.</p>
-        <p class="skills-dialog-note">You choose once. You can change it later in Skills → Sources.</p>`;
+        <p class="skills-dialog-note">You choose once. You can change it later in Extensions → Sources.</p>`;
 }
 
 /** First start of the public hub (B3). Resolves {id: trust} or null (Later). */

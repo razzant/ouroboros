@@ -108,7 +108,7 @@ class _Run:
         assert result.startswith('Saved'), result
 
     def unrelated_save(self, page, value):
-        open_settings(page, 'tools', 'OUROBOROS_TOOL_TIMEOUT_SEC')
+        open_settings(page, 'computer/advanced', 'OUROBOROS_TOOL_TIMEOUT_SEC')
         assert commit_row(page, 'OUROBOROS_TOOL_TIMEOUT_SEC', value).startswith('Saved')
         self.load_settings(page, DESKTOP)
 

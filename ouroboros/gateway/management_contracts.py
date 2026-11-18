@@ -1031,12 +1031,12 @@ class McpSignIn(TypedDict, total=False):
 
 
 class McpServerStatus(TypedDict, total=False):
-    """One configured MCP server. A configuration error row has only ``id``, ``enabled``,
-    ``tool_count``, ``last_error`` and ``code`` (MCP_CONFIG_ERROR or MCP_ID_AMBIGUOUS)."""
+    """One server identity. A rejected row reports its config error and zero tools."""
 
     id: Required[str]
     name: str
     enabled: Required[bool]
+    configured_count: int  # MCP_ID_AMBIGUOUS groups all configured entries claiming this identity
     transport: str
     url: str  # credentials redacted
     auth_header: Any

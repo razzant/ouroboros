@@ -1,4 +1,4 @@
-"""The tool servers of Settings › Tools without a browser (web/modules/mcp_settings.js).
+"""The tool servers of Extensions › MCP servers without a browser (web/modules/mcp_settings.js).
 
 Each test runs the real module in Node over the repo's DOM stand-in (web/tests/dashboard_dom_fixture.js): the page
 is mounted the way the shell mounts it (``settingsPageFor(path).mount``), a server's form is edited through its own

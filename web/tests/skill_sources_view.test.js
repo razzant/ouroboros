@@ -1,4 +1,4 @@
-// Skills → Sources rows and the dialogs' shared trust cards: the trust value is a
+// Extensions → Sources rows and the dialogs' shared trust cards: the trust value is a
 // setting, health is live evidence, and the first-start rows show their suggestion.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

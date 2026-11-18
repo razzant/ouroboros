@@ -16,11 +16,15 @@ import { createClaudexorStatusStore } from '../modules/claudexor_status_store.js
 import { getContributions } from '../modules/contributions.js';
 import { createHostStart } from '../modules/host_starting_status.js';
 import { initSettings } from '../modules/settings.js';
-import { readSettings, writeEntry } from '../modules/settings_controls.js';
+import { bindSettingRows, readSettings, settingsRow, writeEntry } from '../modules/settings_controls.js';
 import { askOuroboros, beingState, homeAnswers, mountSettingsHome, needRows } from '../modules/settings_home.js';
 import { registerSettingsPage, settingsPageFor } from '../modules/settings_pages.js';
+import { rowById } from '../modules/settings_rows.js';
 import { createStateSnapshotSequencer, readStateSnapshot } from '../modules/state_snapshots.js';
 import { ANSWERS, STARTS, Stub, settle, world } from './helpers/settings_dom.js';
+// The MCP servers page registers its family when it is imported (in the app, extensions.js imports it):
+// the home's Extensions door and its status writer are tested here without the section itself.
+import '../modules/mcp_settings.js';
 
 const account = (harness, id, verification, enabled = true) => ({
     harness, profile_id: id, display_name: `${id}@example.com`, enabled, identity: {}, status: { verification, verification_source: 'vendor' },
@@ -52,21 +56,25 @@ test('accounts that need sign-in again are one row per harness, only over an acc
     assert.deepEqual(needRows({}), [], 'nothing read yet says nothing');
 });
 
-test('a tool server that needs sign-in is a row; a status that could not be read is no row, and its MCP servers row says Not checked', () => {
+test('a tool server that needs sign-in is a row; a status that could not be read is no row, and the Extensions row says Not checked', () => {
     const servers = [
-        { id: 'slack', name: 'Slack', enabled: true, sign_in: { state: 'needed', reason: 'expired' } },
-        { id: 'docs', name: 'Docs', enabled: true, sign_in: { state: 'signed_in', reason: 'insufficient_scope', required_scope: 'write' } },
-        { id: 'git', name: 'GitHub', enabled: true, sign_in: { state: 'signed_in' } },
-        { id: 'off', name: 'Off', enabled: false, sign_in: { state: 'needed' } },
-        { id: 'local', name: 'Local', enabled: true },
+        { id: 'slack', name: 'Slack', enabled: true, tool_count: 0, sign_in: { state: 'needed', reason: 'expired' } },
+        { id: 'docs', name: 'Docs', enabled: true, tool_count: 0, sign_in: { state: 'signed_in', reason: 'insufficient_scope', required_scope: 'write' } },
+        { id: 'git', name: 'GitHub', enabled: true, tool_count: 3, sign_in: { state: 'signed_in' } },
+        { id: 'off', name: 'Off', enabled: false, tool_count: 0, sign_in: { state: 'needed' } },
+        { id: 'local', enabled: true, tool_count: 0, code: 'MCP_CONFIG_ERROR' },
     ];
     const rows = needRows({ tools: { enabled: true, servers } });
     assert.deepEqual(kinds(rows), ['tool-sign-in:slack', 'tool-sign-in:docs']);
+    // Its old address: Settings opens it in Extensions › MCP servers, with Back to Settings (settings.js).
     assert.deepEqual([rows[0].text, rows[0].open, rows[0].owner], ['MCP server Slack needs sign-in', 'tools/slack', true]);
     assert.deepEqual(needRows({ tools: { enabled: true, servers: servers.slice(2) } }), []);
-    // A status that could not be read is no line of the card: the MCP servers row says it was not checked.
+    // A status that could not be read is no line of the card: the Extensions row says it was not checked.
     assert.deepEqual(needRows({ tools: null }), []);
-    assert.deepEqual(homeAnswers({ tools: null }).tools, { text: 'Not checked', owner: false });
+    assert.deepEqual(homeAnswers({ tools: null })['page:skills'], { text: 'Not checked', owner: false });
+    assert.equal(homeAnswers({ tools: null }).tools, undefined, 'Settings has no Tools row now');
+    // A server waiting for its sign-in is the owner's move on Extensions' one door.
+    assert.deepEqual(homeAnswers({ tools: { enabled: true, servers } })['page:skills'], { text: '3 of 5 MCP servers on', owner: true });
     assert.deepEqual(needRows({ tools: undefined }), []);
 });
 
@@ -105,8 +113,9 @@ test('a row answers its fact, says when it was not read, and marks the owner\'s 
     assert.equal(text('rules'), 'Written');
     assert.equal(text('permissions'), 'Pro now, Cyber Pro after restart');
     assert.equal(text('accounts'), '1 account, 2 API keys');
-    assert.equal(text('tools'), '1 of 3 servers on');
-    assert.equal(text('page:skills'), '2 installed');
+    // Extensions' one door says both kinds it holds, each by its own name.
+    assert.equal(text('page:skills'), '2 skills · 1 of 3 MCP servers on');
+    assert.equal(text('tools'), undefined);
     assert.equal(text('page:circles'), '1 place');
     assert.equal(text('dashboard:storage'), 'Not measured');
     assert.equal(text('dashboard:evolution'), 'State unknown');
@@ -133,7 +142,7 @@ test('a row answers its fact, says when it was not read, and marks the owner\'s 
     // Not read yet: no answer is claimed. A read that failed says so, and an unread accounts facet never prints a count.
     assert.deepEqual(homeAnswers({}), {});
     const failed = homeAnswers({ settings: null, state: null, tools: null, storage: null, update: null, skills: null, places: null });
-    for (const to of ['models', 'agents', 'rules', 'permissions', 'tools', 'page:skills', 'dashboard:storage', 'dashboard:costs', 'dashboard:updates']) {
+    for (const to of ['models', 'agents', 'rules', 'permissions', 'page:skills', 'dashboard:storage', 'dashboard:costs', 'dashboard:updates']) {
         assert.equal(failed[to].text, 'Not checked', to);
     }
     assert.equal(homeAnswers({ settings, accounts: accounts([account('codex', 'a', 'passed')], 'not_read') }).accounts.text, '2 API keys');
@@ -141,7 +150,7 @@ test('a row answers its fact, says when it was not read, and marks the owner\'s 
     const signIn = (read) => homeAnswers({ settings, accounts: accounts([account('codex', 'a', 'failed')], read) }).accounts.owner;
     assert.deepEqual([signIn('ok'), signIn('not_read'), answers.accounts.owner], [true, false, false]);
     const needy = { enabled: true, servers: [{ enabled: true, tool_count: 1, sign_in: { state: 'needed' } }] };
-    assert.deepEqual([homeAnswers({ tools: needy }).tools.owner, answers.tools.owner], [true, false]);
+    assert.deepEqual([homeAnswers({ tools: needy })['page:skills'].owner, answers['page:skills'].owner], [true, false]);
     assert.equal(homeAnswers({ settings: { _meta: {} } }).permissions.text, 'Not reported');
 });
 
@@ -332,8 +341,8 @@ test('showing the home reads only what is passive: no catalogue, no review pool,
     assert.doesNotMatch(card.textContent, /nothing/i);
     const answer = (to) => content.querySelector(`[data-settings-open="${to}"]`).querySelector('[data-settings-answer]').textContent;
     // The Accounts row says nothing it did not read: no count of accounts, and no keys from a document that lists none.
-    assert.deepEqual(['models', 'rules', 'page:skills', 'dashboard:storage', 'tools', 'accounts'].map(answer),
-        ['glm-5.3', 'Empty', '1 installed', 'Not measured', 'No MCP servers', '']);
+    assert.deepEqual(['models', 'rules', 'page:skills', 'dashboard:storage', 'accounts'].map(answer),
+        ['glm-5.3', 'Empty', '1 skill · No MCP servers', 'Not measured', '']);
     await settle();
     assert.deepEqual(statusReads, [], 'still no read of the status and no wake');
 });
@@ -468,18 +477,19 @@ test('a page reads when it is shown, not when Settings is', async (t) => {
     const atHome = reads.length;
     assert.ok(atHome >= 1 && !env.calls.some((call) => STARTS.some((url) => String(call).startsWith(url) && !Object.hasOwn(ANSWERS, String(call)))));
     assert.equal(content.querySelectorAll('.settings-page').length, 0);
-    // The skill sources page (settings_extension_forms.js): its own read fires for its own path only.
-    assert.ok(settingsPageFor('skill-sources'));
-    await controls.open('skill-sources');
+    // The rules page (settings_safety.js): its own read fires for its own path only. (The skill sources
+    // page moved to Extensions; a page reading there is extensions_section.test.js's subject.)
+    assert.ok(settingsPageFor('rules'));
+    await controls.open('rules');
     await settle();
     assert.ok(reads.length > atHome, 'opening the page read its settings');
     const before = reads.length;
-    env.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'models' } }));
+    env.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { place: 'skills', path: 'tools' } }));
     await settle();
-    assert.equal(reads.length, before, 'another page being shown is not this page\'s read');
+    assert.equal(reads.length, before, 'showing MCP servers in Extensions does not reread rules or the Settings list');
     const level = content.querySelector('.settings-page');
-    assert.equal(level.dataset.settingsPage, 'skill-sources');
-    assert.ok(level.querySelector('[data-setting-row="OUROBOROS_SKILLS_REPO_PATH"]'));
+    assert.equal(level.dataset.settingsPage, 'rules');
+    assert.ok(level.querySelector('[data-setting-row="OUROBOROS_SAFETY_OWNER_RULES"]'));
 });
 
 test('the Context door shows Main and nothing else: with a project room open it posts no context mode', async (t) => {
@@ -499,11 +509,14 @@ test('the Context door shows Main and nothing else: with a project room open it 
     assert.deepEqual(dashboard, [['costs', { row: 'TOTAL_BUDGET' }]]);
 });
 
-test('all seven Settings doors use ordinary navigation; a Tools door retains its level for the shell return', async (t) => {
+test('all seven Settings doors use ordinary navigation; a page\'s door retains its level for the shell return', async (t) => {
     const { env, content, state, shown, showPage, layers } = world(t);
     const dashboard = [];
     const controls = initSettings({ state, ws: env.ws, showPage, layers,
-        openDashboardTab: (...args) => dashboard.push(args), setBeforePageLeave() {} });
+        openDashboardTab: (...args) => dashboard.push(args), setBeforePageLeave() {},
+        // app.js' openExtensions: the section opens through the shell's ordinary showPage, keyed to the
+        // section (extensions.js openFromOutside), never a private callback.
+        openExtensions: (path = '', options = {}) => showPage('skills', { ...options, key: `skills:${path}` }) });
     await controls.open('');
     await settle();
     const home = content.querySelector('[data-settings-home]');
@@ -518,19 +531,30 @@ test('all seven Settings doors use ordinary navigation; a Tools door retains its
         await home.fire('click', { target: row });
         await settle();
         const [kind, name] = destination.split(':');
-        if (kind === 'page') assert.deepEqual(shown.at(-1), [name, {}]);
+        if (destination === 'page:skills') assert.deepEqual(shown.at(-1), ['skills', { row: '', key: 'skills:' }]);
+        else if (kind === 'page') assert.deepEqual(shown.at(-1), [name, {}]);
         else assert.deepEqual(dashboard.at(-1), [name, { row: '' }]);
     }
-    await controls.open('tools');
+    // The page that moved to Extensions (MCP servers) opens there now. A Settings page with a door to
+    // Main, drawn and bound by the real row machinery (settings_controls.js), keeps the level contract:
+    // an ordinary jump, and the shell's return restores the same node.
+    const doorRow = structuredClone(rowById('voice:dictation'));
+    registerSettingsPage('test-door-main', { title: 'Door page', mount(container, { ctx }) {
+        container.innerHTML = settingsRow(doorRow);
+        const bound = bindSettingRows(container, { rows: [doorRow],
+            openDoor: (door, opener) => ctx.openSettings?.(door.control.to, { opener }) });
+        return { unmount: () => bound.dispose() };
+    } });
+    await controls.open('test-door-main');
     await settle();
     const origin = controls.capture();
     const level = content.querySelector('.settings-page');
-    assert.equal(level.dataset.settingsPage, 'tools');
-    await level.querySelector('.settings-page-body').fire('click', { target: level.querySelector('[data-setting-row="tools:door:skills"]') });
-    assert.deepEqual(shown.at(-1), ['skills', {}], 'a level door needs no private Back callback');
+    assert.equal(level.dataset.settingsPage, 'test-door-main');
+    await level.querySelector('.settings-page-body').fire('click', { target: level.querySelector('[data-setting-row="voice:dictation"]') });
+    assert.deepEqual(shown.at(-1), ['chat', {}], 'a level door needs no private Back callback');
     origin.restore();
     assert.equal(content.querySelector('.settings-page'), level, 'the retained level is restored');
-    assert.equal(origin.title, 'Settings › Tools');
+    assert.equal(origin.title, 'Settings › Door page');
 });
 
 test('Ask Ouroboros puts the words into Main as an unsent draft and replaces no draft that is there', async () => {
@@ -662,7 +686,8 @@ test('a Settings door keeps one history entry from the list or a page, and a ref
             const showPage = (name, options = {}) => nav.go(options.key || name,
                 () => { shown(name); options.enter?.(); }, options);
             controls = initSettings({ state, ws: env.ws, layers, showPage,
-                openDashboardTab: name => showPage('dashboard', { key: `dashboard:${name}` }) });
+                openDashboardTab: name => showPage('dashboard', { key: `dashboard:${name}` }),
+                openExtensions: (path = '', options = {}) => showPage('skills', { ...options, key: `skills:${path}` }) });
             const home = content.querySelector('[data-settings-home]');
             home.getClientRects = () => origin === 'one-column' ? [] : [{}];
             await controls.open(origin === 'list' ? '' : 'test-door-history', { map: true });
@@ -881,14 +906,15 @@ test('one read of a source at a time: asked again in flight it starts no second 
     assert.equal(answer('page:circles'), '2 places');
 });
 
-test('the Tools status writer updates the list beside another page without reading; off screen it paints and reads nothing', async (t) => {
+test('the MCP servers status writer updates Extensions\' door beside another page without reading; off screen it paints and reads nothing', async (t) => {
     const { env, content } = world(t);
     const status = (enabled) => ({ sdk_available: true, enabled: true, servers: [{ id: 'docs', enabled, tool_count: 3 }] });
     env.routes.set('/api/mcp/status', () => reply(status(false)));
     const { home, answer } = listHome(t, content);
     await home.refresh();
     home.mark('rules');
-    assert.equal(answer('tools'), '0 of 1 server on');
+    // Extensions' one door says both kinds it holds: the listing's one skill, then the servers.
+    assert.equal(answer('page:skills'), '1 skill · 0 of 1 MCP server on');
     const pending = deferred();
     env.routes.set('/api/mcp/status', () => pending.promise);
     const tools = await settingsPageFor('tools').mount(new Stub(), { path: 'tools', ctx: { readSettings } });
@@ -897,7 +923,7 @@ test('the Tools status writer updates the list beside another page without readi
     const before = [...env.calls];
     pending.resolve(reply(status(true)));  // the page's completed status is stored by refreshStatus
     await settle();
-    assert.equal(answer('tools'), '1 of 1 server on');
+    assert.equal(answer('page:skills'), '1 skill · 1 of 1 MCP server on');
     assert.deepEqual(env.calls, before, 'adopting the completed status starts no request');
     const late = deferred();
     env.routes.set('/api/mcp/status', () => late.promise);
@@ -911,7 +937,7 @@ test('the Tools status writer updates the list beside another page without readi
     assert.equal(content.textContent, hiddenText, 'a completed status paints nothing off screen');
     assert.deepEqual(env.calls, hiddenReads, 'a completed status reads nothing off screen');
     await home.refresh(['tools']);
-    assert.equal(answer('tools'), '0 of 1 server on', 'showing the list reads its current answer');
+    assert.equal(answer('page:skills'), '1 skill · 0 of 1 MCP server on', 'showing the list reads its current answer');
 });
 
 test('an answer is painted though another source was read meanwhile: a slow source, and the state snapshot by its sequencer', async (t) => {
@@ -955,15 +981,19 @@ test('the row of a page that is left reads its sources again, a setting\'s row a
     await go('ouro:settings-page-shown', { path: 'rules' });
     assert.equal(count('/api/settings'), beforeAgents + 1, 'Agents left: its settings source is read once');
     // A door leaves Settings before its destination is shown, so the home does not own that page's read.
-    // A server switched on the Tools page is one entry of MCP_SERVERS written; its event names the row, not the page.
-    // The document and the servers' status are read again: the row's two sources.
+    // A server switched on Extensions' MCP servers page is one entry of MCP_SERVERS written; its event names the row,
+    // not the page. That page is no page of this home (Extensions' door stands for it), so the document alone is read
+    // again; the servers' status is the door's answer when the home reads it on coming on screen.
     env.routes.set('/api/settings', async (_url, init = {}) => (init.method === 'POST'
         ? reply({ status: 'saved', changes: { MCP_SERVERS: { withheld: 'structure', token: 'servers@2' } } })
         : reply({ ...ANSWERS['/api/settings'], MCP_SERVERS: [{ id: 'docs', enabled: false }], _meta: { tokens: { MCP_SERVERS: 'servers@1' } } })));
     now.servers = [{ id: 'docs', enabled: true, tool_count: 2 }];
+    const statusReads = count('/api/mcp/status');
     assert.equal((await writeEntry('MCP_SERVERS', 'docs', (before) => ({ ...before, enabled: true }))).state, 'saved');
     await settle();
-    assert.equal(answer('tools'), '1 of 1 server on');
+    assert.equal(count('/api/mcp/status'), statusReads, 'a row of Extensions is not this home\'s read');
+    await home.refresh(['tools']);
+    assert.equal(answer('page:skills'), '1 skill · 1 of 1 MCP server on');
     // A width change covers the list and brings it back beside the same page, without announcing a new path.
     home.hide();
     await home.refresh();

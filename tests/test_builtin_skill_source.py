@@ -435,6 +435,8 @@ def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, o
 ] + [('live_conversation', '96816f122', '0.1.1'),
      # The Calls UI changed after 0.1.33 shipped: an install that took that payload is reseeded too.
      ('live_conversation', 'cf6f95cf4', '0.1.33'),
+     # Retained Extensions forms need the new per-root Calls UI bindings after an app update.
+     ('live_conversation', '085f41abafcee74a61c60e79824025e7e5d3a4e1', '0.1.34'),
      ('unix_computer_use', 'e471e380e6de1e7f728e0fffbb4457667422ebf4', '0.6.0')])
 @pytest.mark.parametrize("edited", [False, True])
 def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, monkeypatch, name, previous_release,
@@ -467,7 +469,7 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         assert compute_content_hash(installed) == previous_hash
         assert read_install_record(drive, name) == previous_record
     else:
-        version = {'live_conversation': '0.1.34', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.21', 'openai_realtime': '0.1.10',
+        version = {'live_conversation': '0.1.35', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.21', 'openai_realtime': '0.1.10',
                    'unix_computer_use': '0.8.0'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)
@@ -475,7 +477,7 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         # Pin the files that stayed stale on the stand, not just the manifest.
         paths = ["plugin.py"]
         if name == "live_conversation":
-            paths += ["driver.py", "ui/call_settings.js"]
+            paths += ["driver.py", "ui/call_settings.js", "ui/index.js"]
         elif name == "openai_realtime":
             paths += ["live.py"]
         elif name == "unix_computer_use":

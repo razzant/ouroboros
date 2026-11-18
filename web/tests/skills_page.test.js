@@ -12,7 +12,8 @@ import { Stub } from './helpers/settings_dom.js';
 
 import {
     buildHealPrompt, destinationFromChoice, inFlightCount, installedFilterCounts, lifecycleEventsFromQueue,
-    matchesInstalledFilter, mergeLifecycleEvents, publishDestinations, updateAllCandidates, skillsPageTemplate,
+    matchesInstalledFilter, mergeLifecycleEvents, publishDestinations, updateAllCandidates, skillsViewsTemplate,
+    SKILLS_ACTIONS,
 } from '../modules/skills.js';
 
 const LISTING = JSON.parse(readFileSync(new URL('./fixtures/skills_v4/extensions_v4.json', import.meta.url), 'utf8'));
@@ -20,19 +21,27 @@ const SOURCES = JSON.parse(readFileSync(new URL('./fixtures/skills_v4/skill_sour
 const rows = () => structuredClone(LISTING.skills);
 const byName = (name) => rows().find((skill) => skill.name === name);
 
-test('search and chips belong to the scrolling list; tabs and actions stay above it', () => {
+test('search and chips stay above the one scroller; the views\' actions belong to the band', () => {
     const page = new Stub('div');
-    page.innerHTML = skillsPageTemplate();
+    page.innerHTML = skillsViewsTemplate();
     const scroll = page.querySelector('.skills-scroll');
-    for (const selector of ['#skills-installed-search', '#skills-installed-filters', '#skills-browse-chrome', '#skills-pane-sources']) {
+    for (const selector of ['#skills-pane-installed', '#skills-pane-browse', '#skills-pane-sources']) {
         assert.ok(scroll.contains(page.querySelector(selector)), selector);
     }
-    for (const selector of ['.skills-tabs', '#skills-refresh', '#skills-update-all']) {
-        assert.equal(scroll.contains(page.querySelector(selector)), false, selector);
+    // Each view's search row stands over the scroller, never inside it (skills.js: "each view's search
+    // row, then their one scroller").
+    for (const selector of ['#skills-installed-search', '#skills-installed-filters', '#skills-browse-chrome']) {
+        const chrome = page.querySelector(selector);
+        assert.ok(chrome, selector);
+        assert.equal(scroll.contains(chrome), false, `${selector} stays above the scroller`);
     }
-    const band = page.querySelector('.app-page-tabs');
-    assert.ok(band.contains(page.querySelector('#skills-update-all')), 'phones keep Update beside the tabs');
-    assert.equal(band.contains(page.querySelector('#skills-refresh')), false, 'Refresh stays beside the title');
+    // Update all and Refresh are the band's end (extensions.js draws them there from SKILLS_ACTIONS);
+    // the views block keeps no action of its own, and no tab strip of the retired page survives.
+    assert.match(SKILLS_ACTIONS, /id="skills-update-all"/);
+    assert.match(SKILLS_ACTIONS, /id="skills-refresh"/);
+    for (const selector of ['#skills-update-all', '#skills-refresh', '.skills-tabs']) {
+        assert.equal(page.querySelector(selector), null, `${selector} is not part of the views`);
+    }
 });
 
 test('the chip rails start at the column edge, and on a phone run to the page\'s edges as Logs\' rail does', () => {
@@ -49,7 +58,8 @@ test('Update counts trusted candidates briefly in the band and keeps the full sc
     const button = { setAttribute(key, value) { this[key] = value; } };
     const context = vm.createContext({ snapshot: { rawSkills: true }, projected: () => [], paintFilters() {},
         updateAllCandidates: () => Array.from({ length: context.count }), cache: {}, activeTab: 'installed',
-        updateAllBtn: button, document: { getElementById: () => null }, lifecycleEventsFromQueue: () => [], inFlightCount: () => 0 });
+        updateAllBtn: button, document: { getElementById: () => null }, lifecycleEventsFromQueue: () => [], inFlightCount: () => 0,
+        section: { paintAnswers() {} } });
     vm.runInContext(source.match(/    function paintChrome\(\) \{[\s\S]+?\n    \}/)[0], context);
     for (const count of [4, 0]) {
         context.count = count; context.paintChrome();
@@ -59,19 +69,19 @@ test('Update counts trusted candidates briefly in the band and keeps the full sc
     }
 });
 
-test('a skill opens Widgets as a jump; a nested visit cannot replace the tab saved by an earlier return', async () => {
+test('a skill opens Widgets as a jump; another view is the section\'s page, never a private tab', async () => {
     const source = readFileSync(new URL('../modules/skills.js', import.meta.url), 'utf8');
-    const shown = [], selected = [];
+    const shown = [], gone = [];
     const context = vm.createContext({ ctx: { showPage: (...args) => shown.push(args) }, activeTab: 'installed',
-        selectTab: (tab) => { context.activeTab = tab; selected.push(tab); } });
+        section: { go: (...args) => gone.push(args) }, browse: { searchFor: (name) => gone.push(['search', name]) } });
     vm.runInContext(source.match(/    async function runInstalledAction\([\s\S]+?\n    \}/)[0], context);
     await context.runInstalledAction('example', 'open_widgets');
     assert.deepEqual(shown, [['widgets']], 'the action does not press a primary map row');
-    const capture = vm.runInContext('({' + source.match(/capture\(\) \{\n        const tab[\s\S]+?\n    \}/)[0] + '})', context).capture;
-    const restore = capture();
-    restore(); assert.deepEqual(selected, [], 'an unchanged retained view is left alone');
-    context.activeTab = 'sources';
-    restore(); assert.deepEqual(selected, ['installed']);
+    // A view change goes through the section's levels; retaining a view across a jump is the section's
+    // capture (extensions_section.test.js), never a tab saved privately by skills.js.
+    vm.runInContext(source.match(/    function selectTab\(view\) \{\n        section\.go\(view\);\n    \}/)[0], context);
+    await context.runInstalledAction('example', 'find_in_browse');
+    assert.deepEqual(gone, [['browse'], ['search', 'example']], 'find-in-browse asks the section for the view and searches');
 });
 
 test('the active lifecycle job joins the event stream once', () => {

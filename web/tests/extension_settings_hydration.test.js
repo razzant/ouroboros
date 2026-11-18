@@ -230,12 +230,12 @@ test('Edit anyway is the owner\'s explicit choice: it unlocks the form, and only
 
 test('a form of read-only fields is a status: its check refreshes those fields in place and saves nothing', async () => {
     const component = {
-        type: 'form', id: 'connection', route: 'connection', method: 'POST', submit_label: 'Refresh status', busy_label: 'Checking…',
+        type: 'form', id: 'connection', route: 'connection', method: 'POST', submit_label: 'Refresh status',
         fields: ['token_status', 'bridge_status', 'miniapp_status'].map((name) => ({ name, label: name, type: 'text', disabled: true })),
     };
     const reads = [
         { token_status: 'Not set (Settings → Secrets)', bridge_status: 'Waiting for a bot token', miniapp_status: 'Waiting for a bot token' },
-        { token_status: 'Saved', bridge_status: 'Connected', miniapp_status: 'Ready', message: 'Status checked.' },
+        { token_status: 'Saved', bridge_status: 'Connected', miniapp_status: 'Ready' },
         { token_status: "Can't read saved settings now; the current token stays in use", bridge_status: 'Connected', miniapp_status: 'Ready', message: 'Status checked.' },
     ];
     const { html } = await render(() => jsonResponse(reads[0]), { component });
