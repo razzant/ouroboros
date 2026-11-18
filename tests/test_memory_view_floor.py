@@ -552,7 +552,7 @@ def test_lows_target_never_counts_the_windows_cut_of_my_humans_words():
     assert (edge["steps"]["F7"], edge["steps"]["F7a"], edge["by_budget"]) == (4, 1, 0)
 
 
-def test_a_max_view_keeps_my_humans_words_while_its_books_are_whole():
+def test_a_max_start_keeps_my_humans_words_while_its_books_are_whole():
     """The one order at a start (owner 15.11.2026, 4A; consilium 17.11): a Max start floored at my tellings never turns
     my human's words into addresses beside whole books; when the window cannot hold it the books go to chapter maps
     first, and only that frame lets the window take them."""
