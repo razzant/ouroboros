@@ -78,9 +78,7 @@ def _live_liveness(phase: str = "maintenance") -> list:
     from ouroboros import server_liveness
 
     liveness = [time.monotonic(), {}, time.thread_time(), None]
-    server_liveness.observe_worker_event_lag(liveness, {
-        "type": "task_heartbeat", "task_id": "t-1", "ts": _iso_ago(4.0),
-    })
+    server_liveness.observe_worker_event_lag(liveness, 4.0)  # an event that waited 4 s in the bus
     liveness[1] = server_liveness.loop_phase_facts(liveness, phase)
     return liveness
 
@@ -169,19 +167,25 @@ def test_a_healthy_loop_journals_neither_row(monkeypatch, journal):
     assert journal == []
 
 
-def test_an_event_without_a_worker_stamp_never_produces_a_lag(monkeypatch):
-    """Events carry the worker's own ``ts``; an unstamped one is skipped, not invented."""
-    from ouroboros import server_liveness
+def test_the_lag_is_the_buss_own_wait_never_a_producers_stamp(monkeypatch):
+    """An event a worker stamped long ago but the bus took in just now waited only that long: the lag is the bus's
+    own put-to-take wait (``drain``) plus the pass's batch wait; a bus without put stamps measures none."""
+    import queue
 
+    from ouroboros import server_liveness
+    from supervisor.event_observation import ObservedEventQueue
+
+    monkeypatch.setattr("supervisor.events.dispatch_event", lambda _evt, _ctx: None)
     liveness = [time.monotonic(), {}, time.thread_time(), None]
-    for unstamped in ({"type": "task_message_injected"}, {"type": "x", "ts": ""},
-                      {"type": "x", "ts": "not-a-timestamp"}, {"type": "x", "ts": None}):
-        server_liveness.observe_worker_event_lag(liveness, unstamped)
+    plain = queue.Queue()
+    plain.put({"type": "task_heartbeat", "task_id": "t-1", "ts": _iso_ago(600.0)})
+    server_liveness.drain_worker_events(plain, None, liveness, on_restart=lambda *_a: None)
     assert "max_event_lag_sec" not in server_liveness.loop_phase_facts(liveness, "maintenance")
-    # The other direction: a worker-stamped event IS measured.
-    server_liveness.observe_worker_event_lag(liveness, {"type": "task_heartbeat", "ts": _iso_ago(7.0)})
-    facts = server_liveness.loop_phase_facts(liveness, "maintenance")
-    assert facts["max_event_lag_sec"] == pytest.approx(7.0, abs=2.0)
+    bus = ObservedEventQueue()
+    bus.put({"type": "task_heartbeat", "task_id": "t-1", "ts": _iso_ago(600.0)})
+    time.sleep(0.2)  # its real wait in the bus
+    server_liveness.drain_worker_events(bus, None, liveness, on_restart=lambda *_a: None)
+    assert 0.2 <= server_liveness.loop_phase_facts(liveness, "maintenance")["max_event_lag_sec"] < 60
 
 
 def test_the_drain_maximum_is_scoped_to_one_tick(monkeypatch):
@@ -189,7 +193,7 @@ def test_the_drain_maximum_is_scoped_to_one_tick(monkeypatch):
     from ouroboros import server_liveness
 
     liveness = [time.monotonic(), {}, time.thread_time(), None]
-    server_liveness.observe_worker_event_lag(liveness, {"type": "task_heartbeat", "ts": _iso_ago(5.0)})
+    server_liveness.observe_worker_event_lag(liveness, 5.0)
     opening = server_liveness.loop_phase_facts(liveness, "events", new_tick=True)
     assert opening["max_event_lag_sec"] == pytest.approx(5.0, abs=2.0)
     assert "max_event_lag_sec" not in server_liveness.loop_phase_facts(liveness, "maintenance")
@@ -238,7 +242,8 @@ def test_the_loop_publishes_one_monotonic_stamp_per_tick_phase():
     # The bounded drain receives the loop's own liveness list and observes the lag itself.
 
     assert re.search(r"drain_worker_events\(\s*get_event_q\(\), _event_ctx, _loop_liveness,", source), source
-    assert "observe_worker_event_lag(liveness, evt)" in inspect.getsource(server_liveness.drain_worker_events)
+    assert "observe_worker_event_lag(liveness, None if waited is None else waited + taken - drained_at)" in (
+        inspect.getsource(server_liveness.drain_worker_events))
 
 
 def _run_custody_tick(monkeypatch, *, failing_step=None):

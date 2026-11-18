@@ -80,6 +80,8 @@ class TurnExecution:
     acceptance of the message it answers (the inbound row's UTC stamp, its entry's
     ``origin_message_ref["ts"]``), where the owner's wait starts; ``entered_at`` is the wall-clock
     twin of the first mark, so that wait and the monotonic phases (one process only) add up.
+    ``resumed``: a resumed attempt's continuation (``owner_wait.governing_continuation``): answering no fresh
+    message, its wait starts at its own entry and its receipt names ``accepted_at`` ``origin_accepted_at``.
     ``dispatch``: the first dispatch's basis (``DISPATCH_BASES``) once it happened; ``meter``:
     the thread's ``store_timing.metered`` scope; ``census``: the registry's count at entry;
     ``worker_id``: the pool slot of the carrier running it (None when no carrier named one)."""
@@ -94,6 +96,7 @@ class TurnExecution:
     call: Optional[Tuple[str, float, bool]] = None
     ended_at: Optional[float] = None
     accepted_at: str = ""
+    resumed: str = ""
     entered_at: float = field(default_factory=time.time)
     dispatch: str = ""
     meter: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
@@ -188,10 +191,11 @@ class TurnExecution:
             "entered_at": _iso(self.entered_at),
             "handler_wait_sec": round(handler_wait, 3), "phases": phases,
             "dispatch": self.dispatch or "not_observed",
-            "meter": store_timing.snapshot(self.meter), "census": dict(self.census)}
+            "meter": store_timing.snapshot(self.meter), "census": dict(self.census),
+            **({"resumed": self.resumed, "origin_accepted_at": self.accepted_at} if self.resumed else {})}
         if phases:
             row["slowest_phase"], row["slowest_phase_sec"] = max(phases.items(), key=lambda item: item[1])
-        accepted = _epoch(self.accepted_at)
+        accepted = None if self.resumed else _epoch(self.accepted_at)
         if accepted is not None:
             before = self.entered_at - accepted
             row.update(accepted_at=self.accepted_at, wait_before_entry_sec=round(before, 3),
