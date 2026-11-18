@@ -9,13 +9,7 @@ import { META_PART_SEPARATOR } from './harness_presentation.js';
 import { placeLabelOnce } from './chat_media.js';
 import { capitalized, heardFactWord, listWords, sameWords, wakeFactWord } from './consciousness_words.js';
 
-/**
- * The host's `place_origin` (`subagent_messages.initiator_meta`, also on a census row): what the admitted focus
- * recorded, pure over its stored metadata. `wakes` are the checked kinds that matched, in the place's order, and
- * `labels` the words their connector declared for some of them; `routed` says none did and the conversation's works
- * were read instead. An absent or empty `actor` is an author nobody identified.
- * @typedef {{place_id:string,place_label?:string,provider?:string,actor?:{id?:string,label?:string,owner?:boolean,bot?:boolean},wakes:string[],labels?:Object<string,string>,routed?:boolean}} PlaceOrigin
- */
+/** @typedef {import('./place_contract_types.js').PlaceOrigin} PlaceOrigin */
 
 const text = (value) => (typeof value === 'string' ? value.trim() : '');
 // The card's meta separator as a part's own tail: the dot holds on to the part's last word, so a wrapped line may

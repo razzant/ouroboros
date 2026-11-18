@@ -1247,6 +1247,7 @@ class UpdateStatusResponse(TypedDict, total=False):
     update_tx: Required[UpdateTransactionState]
     update_progress: Required[UpdateProgress]
     letter: Optional[UpdateLetter]
+    letter_unavailable: bool  # projection failed; a null letter alone is an observed absence
     after_update: Optional[Dict[str, Any]]
     managed: bool
     remote: str

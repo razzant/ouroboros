@@ -48,7 +48,7 @@ from ouroboros.gateway.card_contracts import CardOutbound, CardStateOutbound  # 
 from ouroboros.gateway.cost_breakdown import TaskCostBreakdown, TaskCostSlice  # noqa: F401 -- public re-exports
 from ouroboros.gateway.update_contracts import (  # noqa: F401 -- public re-exports
     UpdateApplyErrorResponse, UpdateApplyRequest, UpdateApplySuccessResponse, UpdateDescriptionErrorResponse,
-    UpdateDescriptionRequest, UpdateDescriptionResponse, UpdateMergePlan,
+    UpdateDescriptionLatestResponse, UpdateDescriptionRequest, UpdateDescriptionResponse, UpdateMergePlan,
     UpdatePreflightRequest, UpdatePreflightResponse, UpdateProgressChangedOutbound, UpdateStatusReadyOutbound,
 )
 from ouroboros.gateway.management_contracts import (  # noqa: F401 -- public re-exports
@@ -1517,7 +1517,8 @@ __all__ = [
     "ProjectsChangedOutbound", "UiPreferencesChangedOutbound", "MessageAnnotationOutbound",
     "UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",
     "UpdateApplySuccessResponse", "UpdateApplyErrorResponse",
-    "UpdateDescriptionRequest", "UpdateDescriptionResponse", "UpdateDescriptionErrorResponse",
+    "UpdateDescriptionRequest", "UpdateDescriptionResponse", "UpdateDescriptionLatestResponse",
+    "UpdateDescriptionErrorResponse",
     "UpdateStatusReadyOutbound", "UpdateProgressChangedOutbound",
     "ProjectCreateRequest", "ProjectEntry", "ProjectClosure", "ProjectDeleteResponse", "ProjectCognition",
     "FsDirsEntry", "FsDirsResponse",

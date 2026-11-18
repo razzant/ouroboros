@@ -949,6 +949,7 @@
  * @property {UpdateTransactionState} update_tx
  * @property {UpdateProgress} update_progress
  * @property {?import('./api_types.js').UpdateLetter=} letter
+ * @property {boolean=} letter_unavailable - Letter projection failed. Other update facts remain usable.
  * @property {?Object=} after_update - Retained before/after process samples; missing observations stay null.
  * @property {boolean=} managed
  * @property {string=} remote
