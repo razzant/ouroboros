@@ -555,9 +555,14 @@ def test_forwarded_card_keeps_its_bubble_and_opens_a_typed_head(tmp_path, decide
 
 
 def test_continue_normalizes_only_the_exact_forwarded_form_bubble(tmp_path, decide, monkeypatch):
+    import sys
+
+    # This API witness runs on its own, with the Continue suite unavailable.
+    monkeypatch.setitem(sys.modules, "tests.test_owner_continue", None)
     from ouroboros.owner_mailbox import write_owner_message
     from supervisor.continuation_admission import admit_continuation
-    from tests.test_owner_continue import NONCE, _install_queue, _interrupted
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests._owner_continue_helpers import NONCE, _interrupted
 
     card = _component_card(tmp_path)
     decide.state["live"] = False
