@@ -261,8 +261,8 @@ def _sources():
     return paths
 
 
-def _calls(source: str, target: str):
-    """Every call to ``target`` with the enclosing lexical qualname."""
+def _calls(source: str, target: str, *, include_partials: bool = False):
+    """Lexical calls; writer inventory may include partial bindings, which do not prove execution order."""
     stack: list[str] = []
     aliases: list[set[str]] = [set()]
     found: list[tuple[str, ast.Call]] = []
@@ -298,6 +298,10 @@ def _calls(source: str, target: str):
             self.generic_visit(node)
 
         def visit_Call(self, node):
+            if (include_partials and isinstance(node.func, ast.Attribute) and node.func.attr == "partial"
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "functools" and node.args):
+                node = ast.copy_location(ast.Call(func=node.args[0], args=node.args[1:],
+                                                 keywords=node.keywords), node)
             func = node.func
             name = (
                 func.id if isinstance(func, ast.Name)
@@ -311,12 +315,12 @@ def _calls(source: str, target: str):
     return found
 
 
-def _call_sites(target: str):
+def _call_sites(target: str, *, include_partials: bool = False):
     for path in _sources():
         source = path.read_text(encoding="utf-8")
         if target not in source:
             continue
-        for qualname, node in _calls(source, target):
+        for qualname, node in _calls(source, target, include_partials=include_partials):
             yield path, source, f"{path.relative_to(REPO).as_posix()}::{qualname}", node
 
 
@@ -370,7 +374,7 @@ def test_c7_the_set_of_terminal_status_writers_equals_the_manifest():
     this is that assertion.
     """
     live: dict[tuple[str, str], str] = {}
-    for _path, source, identity, node in _call_sites("write_task_result"):
+    for _path, source, identity, node in _call_sites("write_task_result", include_partials=True):
         expression = _expression(source, node, 2, "status")
         if expression in _NON_TERMINAL_STATUS_EXPRESSIONS:
             continue
@@ -548,15 +552,25 @@ def test_terminal_inventory_sees_conditional_writers_without_leaking_aliases():
 def refusal():
     writer = receipt_first if never_admitted else write_task_result
     writer(root, tid, **({} if never_admitted else {"status": STATUS_FAILED}))
+    pending = functools.partial(writer, root, tid, **({} if never_admitted else {"status": status}))
+    gate(pending)
+    functools.partial(write_task_result, root, tid, STATUS_CANCELLED)
     def nested(writer):
         writer(root, tid, "not-a-result-writer")
     writer = unrelated
     writer(root, tid, "not-a-result-writer")
+    functools.partial(writer, root, tid, "not-a-result-writer")
 def sibling():
     writer(root, tid, "not-a-result-writer")
     write_task_result(root, tid, status=status)
 '''
-    found = _calls(source, "write_task_result")
-    assert [(qualname, _expression(source, node, 2, "status")) for qualname, node in found] == [
+    direct = _calls(source, "write_task_result")
+    assert [(qual, _expression(source, node, 2, "status")) for qual, node in direct] == [
         ("refusal", "STATUS_FAILED"), ("sibling", "status"),
+    ]  # Binding a callback alone must not count as executing it for C8/C9.
+    found = _calls(source, "write_task_result", include_partials=True)
+    assert [(qualname, _expression(source, node, 2, "status")) for qualname, node in found] == [
+        ("refusal", "STATUS_FAILED"), ("refusal", "status"),
+        ("refusal", "STATUS_CANCELLED"), ("sibling", "status"),
     ]
+    assert [node.lineno for _, node in found] == [4, 5, 7, 15]
