@@ -1434,6 +1434,55 @@ def test_an_answer_held_for_newer_words_never_holds_an_older_answer(monkeypatch)
     asyncio.run(scenario())
 
 
+
+def test_a_final_for_an_item_never_matched_closes_no_later_words(monkeypatch):
+    """#3633. A final whose item matched no open words (a stray failure while only named words were open) closes
+    nothing, and neither does its repeat once newer, unnamed words have begun: they still release their answer only
+    with their own caption."""
+    from skills.live_conversation import driver
+    calls = []
+
+    class Observed(driver._Call):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            calls.append(self)
+    monkeypatch.setattr(driver, '_Call', Observed)
+
+    def caption(speaker, item, text, final=True):
+        return LiveEvent('caption', {'speaker': speaker, 'item_id': item, 'text': text, 'final': final})
+
+    def texts(host):
+        return [row['text'] for row in host.captions]
+
+    async def scenario():
+        host = Host()
+        task, session = await started(host)
+        try:
+            session.emit('ready', input_rate=24000, output_rate=24000)
+            session.input_pending = True
+            session.events.put_nowait([LiveEvent('input_started', {'item_id': 'asked'}), LiveEvent('input_done'),
+                                       caption('owner', 'stray', '')])  # matches no words that no item names
+            session.events.put_nowait([caption('owner', 'asked', 'What time is it?'),
+                                       LiveEvent('input_started'), LiveEvent('input_done'),
+                                       LiveEvent('response_started', {'response_id': 'r2'}),
+                                       LiveEvent('audio', {'item_id': 'two', 'rate': 24000, 'pcm': b'\0' * 960}),
+                                       caption('ouroboros', 'two', 'Two.')])
+            await until(lambda: 'two' in calls[0].audio_ms)
+            host.hub.events.append(cp.PeerControl('peer', cp.PEER_OWNER, {'type': 'played', 'item_id': 'two', 'played_ms': 20}))
+            await until(lambda: calls[0].spoken_rows)
+            session.events.put_nowait([caption('owner', 'stray', '')])  # the stray final again
+            await asyncio.sleep(.05)
+            assert texts(host) == ['What time is it?'], 'a repeat of an unmatched final closes no later words'
+            session.input_pending = False
+            session.events.put_nowait([caption('owner', 'more', 'One more thing.')])
+            await until(lambda: len(host.captions) == 3)
+            assert texts(host) == ['What time is it?', 'One more thing.', 'Two.']
+        finally:
+            host.hub.ended_by_owner = True
+            await asyncio.wait_for(task, 2)
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('recognition', ['newer-first', 'newer-unnamed', 'older-failed'])
 def test_a_newer_transcript_landing_first_never_releases_an_older_answer(monkeypatch, recognition):
     """#3633, OpenAI and xAI: transcripts of different utterances land in any order, so the adapter names each

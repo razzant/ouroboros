@@ -267,11 +267,12 @@ class _Call:
         # words begun before its response and never waits for words begun after it; owner rows never wait. Recognition can
         # close words after their answer was heard (ordinary Gemini closes both captions at one turn completion paced to
         # the end of playback; OpenAI and xAI transcribe beside the response). Utterances are counted as they begin. A
-        # final owner caption closes the words it names (OpenAI and xAI name each utterance's item as it begins, and a
-        # failed recognition closes its item with no words: their transcripts of different utterances land in any order),
-        # else the oldest still open; once a converted batch leaves nothing said or awaiting recognition, all have
-        # closed. ``answer_words`` is how many had begun when each response did (a response the adapter names for
-        # lagging words counts them too); ``spoken_rows`` holds heard or interrupted answers until those have all closed.
+        # final owner caption closes the words of the item it names (OpenAI and xAI name each utterance's item as it
+        # begins, and their transcripts of different utterances land in any order; a failed recognition is an empty
+        # final); a caption whose item was never named closes the oldest open words no item names. Once a converted
+        # batch leaves nothing said or awaiting recognition, all have closed. ``answer_words`` is how many had begun when
+        # each response did (a response the adapter names for lagging words counts them too); ``spoken_rows`` holds
+        # heard or interrupted answers until those have all closed.
         self.words_begun = self.words_closed = 0
         self.word_items, self.words_shut = {}, set()  # item -> its utterance; utterances closed ahead of an older one
         self.answer_words, self.item_answer, self.spoken_rows, self.answering = {}, {}, [], ""
@@ -767,12 +768,12 @@ class _Call:
                     await self.rows.put(dict(speaker=speaker, text=text, item_id=item, heard=heard,
                         **({"speaker_label": ", ".join(sorted(self.meeting_speakers))} if heard and self.meeting_speakers else {})))
                 words = self.word_items.get(item)
-                if words is None:  # an item never named: the oldest words still open that no item names
+                if words is None:  # an item never named: the oldest words still open that no item names, if any
                     named = set(self.word_items.values())
                     words = next((number for number in range(self.words_closed + 1, self.words_begun + 1)
                                   if number not in self.words_shut and number not in named), 0)
-                    if words and item:
-                        self.word_items[item] = words  # its repeat closes nothing more
+                    if item:
+                        self.word_items[item] = words  # its repeat closes nothing more, nor later words
                 if words > self.words_closed:
                     self.words_shut.add(words)
                 await self.write_spoken(self.words_closed)

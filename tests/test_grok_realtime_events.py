@@ -117,9 +117,9 @@ def test_grok_renewal_waits_for_vad_answer_and_late_transcripts(providers):
     asyncio.run(run())
 
 
-def test_grok_failed_recognition_closes_its_words_once_with_what_was_received(providers):
-    """#3633: a failed transcript closes its item once: with the words received so far, marked incomplete, or with no
-    text. Teardown then has nothing more of it, so it can never land after an answer it released."""
+def test_grok_failed_recognition_closes_its_words_with_an_empty_final(providers):
+    """#3633: a failed transcript closes its item with an empty final caption, wherever newer words stand; its
+    provisional words, if any, stay for teardown's salvage, as before."""
     async def run():
         adapter, _ = make(providers, 'grok')
         try:
@@ -132,10 +132,10 @@ def test_grok_failed_recognition_closes_its_words_once_with_what_was_received(pr
             closed = [adapter.convert({'type': 'conversation.item.input_audio_transcription.failed', 'item_id': item})
                       for item in ('partial', 'silent')]
             assert [[(event.kind, event.data) for event in events] for events in closed] == [
-                [('caption', {'speaker': 'owner', 'item_id': 'partial', 'text': 'What time', 'final': True,
-                              'replace': True, 'incomplete': True})],
-                [('caption', {'speaker': 'owner', 'item_id': 'silent', 'text': '', 'final': True})]]
-            assert adapter.final_captions() == []
+                [('caption', {'speaker': 'owner', 'item_id': item, 'text': '', 'final': True})]
+                for item in ('partial', 'silent')]
+            assert [(event.data['item_id'], event.data['text'], event.data.get('incomplete'))
+                    for event in adapter.final_captions()] == [('partial', 'What time', True)]
         finally:
             await adapter.close()
     asyncio.run(run())
