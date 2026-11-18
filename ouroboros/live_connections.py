@@ -134,6 +134,13 @@ class PreparedConnection:
             self.task.cancel()
         await joined(asyncio.gather(self.task, return_exceptions=True))
 
+    async def _close_session(self):
+        """Its connected time, closing tail included, is on the ledger once the connection has closed."""
+        try:
+            await self.session.close()
+        finally:
+            await asyncio.to_thread(self.host._connection_ledger.flush)
+
     async def _fit(self, credentials, *, rebound=False):
         from ouroboros.observability import persist_physical_candidate
         from ouroboros.realtime_setup import session_candidate
@@ -338,7 +345,7 @@ class PreparedConnection:
                         await self.reader.stop()
                 finally:
                     if self.session is not None:
-                        await joined(self.session.close())
+                        await joined(self._close_session())
             finally:
                 if hasattr(self, 'connection'):
                     self.connection['closed_at'] = time.time()

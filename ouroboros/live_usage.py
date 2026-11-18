@@ -14,8 +14,10 @@ on the audio path.
 
 from __future__ import annotations
 
+import contextvars
 import copy
 import math
+import threading
 from dataclasses import dataclass, replace
 from typing import Mapping
 
@@ -361,6 +363,57 @@ def settle_connection_usage(*, engine: str, model: str, call_id: str, connection
     accounting.record_received_attempt(accounting.AttemptRequest(
         model=model, provider=engine, task_id=task_id, drive_root=drive_root, source="live_connection_usage",
         physical_context=physical_context, cost_evidence=evidence), normalized, cost_usd=cost)
+
+
+class ConnectionLedger:
+    """A call's connected-time receipts, written to the ledger by their own thread in arrival order (#3633).
+
+    xAI bills connected seconds and its session reports them every idle second. Each receipt is a ledger transaction:
+    on Windows CI under load one took up to 32 s, and written on the call loop it froze the owner's microphone input,
+    the page's played receipts and a held tool's delivery for as long. The call loop only hands a receipt over. One
+    still waiting when the same connection's next arrives takes it in (the growth adds, the newest watermark stands),
+    so a slow ledger builds no backlog. A connection's close ``flush``es, so its receipts are on the ledger once it has
+    closed. Nothing on the call's way waits for a write: the money check reads what is written (a receipt in flight is
+    counted at its next reading), and ``failure`` keeps the first write that failed for that check to end the call."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._waiting = []
+        self._idle = threading.Event()
+        self._idle.set()
+        self._thread = None
+        self.failure = None
+
+    def add(self, **receipt):
+        receipt = copy.deepcopy(receipt)  # the quote and context as they are now; the host may replace them later
+        context = contextvars.copy_context()  # the call's usage scope attributes the receipt
+        with self._lock:
+            if self._waiting and self._waiting[-1][1]["connection_key"] == receipt["connection_key"]:
+                earlier = self._waiting.pop()[1]["usage"]["connected_seconds"]
+                receipt["usage"] = {"connected_seconds": earlier + receipt["usage"]["connected_seconds"]}
+            self._waiting.append((context, receipt))
+            self._idle.clear()
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._write, name="call-connection-ledger", daemon=True)
+                self._thread.start()
+
+    def _write(self):
+        while True:
+            with self._lock:
+                if not self._waiting:
+                    self._thread = None
+                    self._idle.set()
+                    return
+                context, receipt = self._waiting.pop(0)
+            try:
+                context.run(settle_connection_usage, **receipt)
+            except Exception as exc:  # noqa: BLE001 - kept for the call's money check, which raises it
+                with self._lock:
+                    self.failure = self.failure or exc
+
+    def flush(self) -> None:
+        """Wait until every receipt handed over is written or has failed (each write is bounded by the ledger lock)."""
+        self._idle.wait()
 
 
 def abandon_live_response(attempt: LiveAttempt, *, reason: str) -> None:

@@ -393,6 +393,8 @@ class ConversationHost:
         self.executed, self.captioned, self.requested = {}, {}, {}
         self.wire_path = task_artifact_dir_path(ctx.drive_root, ctx.task_id, create=True) / "conversation-wire.jsonl"
         self.wire = WireJournal(self.wire_path)
+        from ouroboros.live_usage import ConnectionLedger
+        self._connection_ledger = ConnectionLedger()  # shared with every connection view (``copy.copy``)
         self.connection_number = 0
         self._connection_sequence = 0
         self._connection_tasks = []
@@ -518,12 +520,11 @@ class ConversationHost:
         return counts
 
     def _settle_connection_sample(self, counts, raw_usage):
-        from ouroboros.live_usage import settle_connection_usage
         if counts.get("connected_seconds") == 0:
             return
         args = self._response_args("")
         args.pop("response_key")
-        settle_connection_usage(**args, connection_key=str(self.connection_number),
+        self._connection_ledger.add(**args, connection_key=str(self.connection_number),
             usage={"connected_seconds": counts["connected_seconds"]}, raw_usage=raw_usage,
             watermark=self._meter_watermark)
 
@@ -557,6 +558,8 @@ class ConversationHost:
         while True:
             if self._end_reason is not None:
                 raise RealtimeSetupError(*self._end_reason)
+            if self._connection_ledger.failure is not None:  # connected time that could not be recorded ends the call
+                raise self._connection_ledger.failure
             reading = asyncio.create_task(asyncio.to_thread(probe))
             try:
                 await asyncio.shield(reading)
@@ -954,6 +957,10 @@ class ConversationHost:
                     self._response_text_estimates.clear()
                     self._density_input = 0
                     await joined(asyncio.to_thread(self.executor.shutdown, wait=True))
+                    await joined(asyncio.to_thread(self._connection_ledger.flush))  # every closing tail is written
+                    if self._connection_ledger.failure is not None:
+                        log.warning("call %s: connected time not recorded", self.turn.spec.call_id,
+                                    exc_info=self._connection_ledger.failure)
         finally:
             # Evidence last, after every custody step above has run (a cancellation at any of their
             # awaits included): a failed wire-log write never skips custody and never replaces the

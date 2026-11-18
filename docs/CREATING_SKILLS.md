@@ -1945,7 +1945,10 @@ start, finish, status and usage axes, including interrupted/tool-only responses.
 time. For optional delivery evidence, shared `JsonSession.hold_context` and `hold_tool_call` record rows only after delivery, and `capture_response_context(response_id)` snapshots what that response held before queued updates are released. They also bound answers: an ordinary result or typed room request is answered only by a response begun after its rows are held (after a fresh switch, the pointer asking for its answer) that ends without `continues` and, where captured, held them at its end (without hooks, after the send returns). Older/external providers without these hooks keep exposure unknown; setup or queued results never prove exposure.
 The factory's `observe("usage", raw)` reports JSON
 `{"usage": {...}, "raw_usage": {...}}` for that physical connection; `close()` emits
-its final sample before returning. Samples and responses share one watermark. The host
+its final sample before returning. Samples and responses share one watermark. The call's
+own thread writes connection samples to the ledger in arrival order, so the call loop never
+waits on it; a connection's close waits for its samples, the money check reads what is
+written, and one still waiting takes in its connection's next. The host
 settles growth after Stop/budget exhaustion without admitting work or inventing responses;
 response IDs dedupe across the call, including resumed connections. Reservations
 survive reconnects; final call teardown abandons responses without a receipt.
