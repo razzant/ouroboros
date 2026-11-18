@@ -14,6 +14,8 @@ From a **separate matching source checkout** without an adoption pointer, run `p
 
 If the selected body exceeds the 16 MiB default, the reader reports its recorded size and redacted reference without printing a partial body. `--attempt ID --max-bytes N` explicitly raises the bound for that object; integrity verification still comes before output. A recorded candidate can have been released without dispatch. The reader never replaces a missing selection with a subsequent attempt and never reads the raw blob. A file trace names the captured `prompts/SYSTEM.md` SHA-256 when the leading system message still carries its exact normalized text. Native top-level `system`/other serializers and older attempts without that witness report no trace. The digest describes the file at capture, not its present contents, and no offset in the redacted body or provider receipt is asserted.
 
+An attempt without a ledger-bound capture reference reports `not_linked`, even if failed preparation left a manifest on disk. Inspection declines an export-marked usage store without completing its handoff. SQLite may use its ordinary sidecars and locks, and looking up a packed body can refresh the derived evidence index. Neither changes the recorded request or accounting rows. Diagnostics and the redacted body may still contain private text or paths.
+
 ## 1. Scope of the claim
 
 The invariant binds exactly one object: **`model_send` — the physical

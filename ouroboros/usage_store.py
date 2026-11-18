@@ -871,14 +871,19 @@ def _sha256_file(path: pathlib.Path) -> Optional[str]:
 
 @contextlib.contextmanager
 def hold(root: pathlib.Path | str, *, timeout_sec: float = USAGE_LOCK_TIMEOUT_SEC,
-         write: bool = True, migrate: bool = True, exporting: bool = False, remaining_sec=None) -> Iterator[Txn]:
+         write: bool = True, migrate: bool = True, exporting: bool = False, remaining_sec=None,
+         inspect_only: bool = False) -> Iterator[Txn]:
     """Bounded money acquisition (``_usage_wait``); timeout raises UsageLockUnavailable.
     Writes use BEGIN IMMEDIATE and wait for readers at COMMIT. An export mark
     refuses writes with UsageExportInProgress; only export/abandonment use exporting=True.
     Receipt callbacks run after the transaction and name lock have closed.
     ``remaining_sec`` optionally narrows each acquisition to a caller's one deadline
     (query_data SQL); it never enlarges a wait or changes other callers' defaults.
+    An offline inspection uses the normal lock tier but declines an export-marked
+    store without participating in its handoff.
     """
+    if inspect_only and (write or migrate or exporting):
+        raise ValueError("usage inspection cannot write, migrate or export")
     root = pathlib.Path(root)
     tier = store_tier(root, wait_sec=timeout_sec, migrate=migrate, remaining_sec=remaining_sec)
     with contextlib.ExitStack() as stack:
@@ -894,7 +899,10 @@ def hold(root: pathlib.Path | str, *, timeout_sec: float = USAGE_LOCK_TIMEOUT_SE
         try:  # the enforced tier's COMMIT waits for readers to drain
             with _core.transaction(conn, write=write, finish=txn.commit,
                                    commit_wait_sec=USAGE_LOCK_TIMEOUT_SEC if tier == TIER_ENFORCED else None):
-                handoff = txn.meta("export") is not None
+                marked = txn.meta("export") is not None
+                if marked and inspect_only:
+                    raise UsageExportInProgress("usage inspection unavailable while the store is being exported")
+                handoff = marked
                 if write and not exporting and handoff:
                     raise UsageExportInProgress(f"usage store is being exported for a switch; money writes are "
                                                 f"refused until it completes or is abandoned: {root / STORE_REL}")

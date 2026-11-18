@@ -16,7 +16,7 @@ _BODY_LIMIT = 16 * 1024 * 1024
 
 def list_attempts(root: Path, task_id: str, *, after: str = "") -> dict:
     """A bounded task-local selection; a cursor from another task never advances it."""
-    with usage_store.hold(root, write=False, migrate=False, timeout_sec=1) as txn:
+    with usage_store.hold(root, write=False, migrate=False, timeout_sec=1, inspect_only=True) as txn:
         page = txn.task_attempt_page(task_id, None, after=after, limit=_PAGE_SIZE + 1)
     if page is None:
         raise ValueError("Attempt cursor does not belong to this task")
@@ -26,7 +26,7 @@ def list_attempts(root: Path, task_id: str, *, after: str = "") -> dict:
 
 def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int = _BODY_LIMIT) -> tuple[dict, bytes | None]:
     """Read the exact attempt's redacted host projection, not raw bytes or provider receipt."""
-    with usage_store.hold(root, write=False, migrate=False, timeout_sec=1) as txn:
+    with usage_store.hold(root, write=False, migrate=False, timeout_sec=1, inspect_only=True) as txn:
         row = txn.attempt(attempt_id)
     if not row or row.get("task_id") != task_id:
         raise ValueError("Attempt does not belong to this task")
@@ -34,7 +34,9 @@ def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int = 
     facts = {"task_id": task_id, "attempt_id": attempt_id, "ledger_state": state,
              "provider_body": "not_observed", "file_trace": "not_recorded"}
     ref = row.get("candidate_manifest_ref")
-    if not isinstance(ref, dict) or ref.get("model_send_seal_version") != SEAL_VERSION:
+    if not isinstance(ref, dict) or not ref:
+        return {**facts, "body": "not_linked"}, None  # a producer may fail after sealing but before linking
+    if ref.get("model_send_seal_version") != SEAL_VERSION:
         return {**facts, "body": "not_recorded"}, None
     if ref.get("call_id") != attempt_id:
         raise ValueError("Attempt and manifest identifiers differ")

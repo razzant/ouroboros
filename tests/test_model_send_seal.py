@@ -141,6 +141,25 @@ def test_local_request_reader_selects_one_sealed_attempt(data_root, capsys):
     assert not failed.out and 'unavailable' in failed.err
 
 
+def test_local_request_reader_declines_export_without_store_handoff(data_root, capsys, monkeypatch):
+    from ouroboros import store, usage_store
+    from ouroboros.context_attempt_reader import main
+
+    attempt = _dispatch(data_root, 'export-reader-test')
+    with usage_store.hold(data_root) as txn:
+        txn.set_meta('export', {'test': 'a switch is preparing this store'})
+
+    def unexpected_handoff(*args, **kwargs):
+        pytest.fail('request inspection must not take part in exporting the usage store')
+
+    monkeypatch.setattr(store, 'prepare_handoff', unexpected_handoff)
+    args = ['--data-root', str(data_root), 'export-reader-test']
+    for tail in ([], ['--attempt', attempt['attempt_id']]):
+        assert main([*args, *tail]) == 2
+        failed = capsys.readouterr()
+        assert not failed.out and 'UsageExportInProgress' in failed.err
+
+
 def test_local_request_reader_logical_bound_is_not_shared_skeleton_bound(data_root, capsys):
     from ouroboros.context_attempt_reader import main
     from ouroboros.evidence_packs import shared_placement_path
