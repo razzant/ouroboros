@@ -12400,8 +12400,9 @@ body.keyboard-open :is(#page-chat.active, .project-panel) {
 }
 /* The transcript's first row and a Project's status note stand below the bar and its edge, and below Main's note, which
    floats over that edge: the room's measured reserve (the bar and the note, chat.js) or the bar and its edge, whichever
-   ends lower. Before chat.js first measures the bar a 56 px bar stands in, so a room's first row already clears the
-   edge; a room mounted without a bar has no edge (room_work.js), and its measured reserve stands alone. */
+   ends lower. Before chat.js first measures the bar a 56 px bar stands in, so a room's first row clears the edge of a
+   bar that tall from the first frame (Telegram's taller row is reserved once measured); a room mounted without a bar has
+   no edge (room_work.js), and its measured reserve stands alone. */
 :is(#page-chat, .chat-instance-panel) {
     --chat-top-reserve: max(var(--chat-header-reserve, 56px), var(--chat-header-bar, 56px) + var(--edge-reach, 0px));
 }
