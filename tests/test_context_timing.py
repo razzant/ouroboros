@@ -225,10 +225,11 @@ def test_a_turns_prologue_rides_on_its_first_rounds_receipt():
         assert not any(name.startswith("prologue") for name in round_receipt()["host_steps"]["sections_ms"])
 
 
-def test_the_post_batch_evidence_read_rides_the_next_rounds_receipt_unless_a_start_prologue_waits(tmp_path, monkeypatch):
+def test_the_post_batch_evidence_read_rides_the_next_rounds_receipt_beside_a_waiting_start_prologue(tmp_path, monkeypatch):
     """After a batch, a retained answer's evidence read (``loop_budget._prepare_post_tool_budget_context``) runs before
     the next round's window: it rides that round's receipt as ``prologue.delivery_evidence``; a turn's own start
-    prologue, not yet carried, keeps its place; with no retained answer nothing is read or carried."""
+    prologue, not yet carried, keeps its sections and takes the read's beside them, wall and CPU, carried once; with no
+    retained answer nothing is read or carried."""
     import ouroboros.loop as loop
     import ouroboros.loop_delivery as delivery_mod
     from ouroboros.llm_observability import round_receipt, round_window
@@ -244,8 +245,14 @@ def test_the_post_batch_evidence_read_rides_the_next_rounds_receipt_unless_a_sta
     loop._prepare_post_tool_budget_context(registry, ctx, trace, "test-model", False, "medium")
     with round_window(slot):
         assert "prologue.delivery_evidence" in round_receipt()["host_steps"]["sections_ms"]
-    slot._round_prologue = {"sections_ms": {"total": 7, "restore.tools": 5}, "sections_cpu_ms": {}}  # a start's
+    start = {"total": 7000, "restore.tools": 5000}
+    slot._round_prologue = {"sections_ms": dict(start), "sections_cpu_ms": dict(start), "work": {}}  # a start's
     loop._prepare_post_tool_budget_context(registry, ctx, trace, "test-model", False, "medium")
+    for kind in ("sections_ms", "sections_cpu_ms"):  # one receipt: the start's sections and the read's, totals summed
+        merged = slot._round_prologue[kind]
+        assert merged["restore.tools"] == 5000 and "delivery_evidence" in merged and merged["total"] >= 7000, merged
     with round_window(slot):
         sections = round_receipt()["host_steps"]["sections_ms"]
-    assert "prologue.restore.tools" in sections and "prologue.delivery_evidence" not in sections
+    assert {"prologue.restore.tools", "prologue.delivery_evidence"} <= set(sections) and sections["prologue"] >= 7000
+    with round_window(slot):
+        assert not any(name.startswith("prologue") for name in round_receipt()["host_steps"]["sections_ms"])

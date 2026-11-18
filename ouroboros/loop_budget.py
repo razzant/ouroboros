@@ -933,10 +933,13 @@ def _prepare_post_tool_budget_context(
             if candidate.finalization_control in _loop()._DELIVERY_HOLD_CONTROLS
             else ""
         )
-        with measured_sections():  # the post-batch read rides the next round's receipt, unless a start prologue waits
+        with measured_sections():  # the post-batch read rides the next round's receipt, beside a waiting start's
             evidence_revision, evidence_fingerprint = timed("delivery_evidence", _loop()._delivery_evidence_state,
                                                             tools, limit_ctx, llm_trace)
-            tools._ctx._round_prologue = getattr(tools._ctx, "_round_prologue", None) or section_spans()
+            read, start = section_spans(), getattr(tools._ctx, "_round_prologue", None) or {}
+        tools._ctx._round_prologue = {kind: {**start.get(kind, {}), **{  # one receipt: each section's ms summed by name
+            name: ms + start.get(kind, {}).get(name, 0) for name, ms in read[kind].items()}}
+            for kind in ("sections_ms", "sections_cpu_ms")}
         if candidate.stale(evidence_revision, evidence_fingerprint) and not candidate.owes_no_selection and (
             candidate.finalization_control != evidence_notice_control(evidence_revision, evidence_fingerprint)
         ):  # fresh prose binds new evidence; an unchanged shown notice permits explicit reselection

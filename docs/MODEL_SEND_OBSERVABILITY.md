@@ -244,7 +244,10 @@ only; nothing decides by them.
   (CPU null: it ends on the model sender's thread).
 - `host_steps.sections_ms`: wall ms of each record's `redact`, `blobs`,
   `lock_wait` and `manifest_write`; `context_facts`;
-  `daemon.gateway|operations|upload|create`; `event_put`; `total` (the window).
+  `daemon.gateway|operations|upload|create`; `event_put`; `total` (the window);
+  `prologue` and `prologue.*`: host work measured before the window opened and
+  carried once, a start's restore, route rebind and tools and a retained
+  answer's post-batch `delivery_evidence` read, in one receipt.
 - `host_steps.rusage`: the process's voluntary and involuntary context
   switches, major faults and block writes since the batch's end; absent on
   Windows.
