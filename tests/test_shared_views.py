@@ -553,9 +553,11 @@ def test_shared_publication_prepares_directories_once_per_operation(tmp_path, mo
             assert sum(mode == obs._PRIVATE_DIR_MODE for _path, mode in modes) == 2
             assert len(parts) == count
             moded = [path.name for path, mode in modes if mode == obs._PRIVATE_FILE_MODE and path.parent == blobs]
-            if publication == "new":  # at most each new file's temporary (parts, envelope), once, before its rename
+            if not obs.posix_private_modes_supported():
+                pass  # Windows reports a writable file as 0666 whatever chmod set: the counts below are POSIX facts
+            elif publication == "new":  # at most each new file's temporary (parts, envelope), once, before its rename
                 assert len(set(moded)) == len(moded) <= count + 1 and all(".gz.tmp." in name for name in moded), moded
-            elif obs.posix_private_modes_supported():
+            else:
                 assert moded == ([widened] if widened else []), "a present private file is only checked"
             assert all(stat.S_IMODE((blobs / f"{digest}.json.gz").stat().st_mode) == obs._PRIVATE_FILE_MODE or
                        not obs.posix_private_modes_supported() for digest in parts)
