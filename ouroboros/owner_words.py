@@ -564,7 +564,7 @@ def cited_owner_basis(ctx: Any, owner_words: Any, *, call_speech: bool = False) 
         else:
             label = _mapping(item.get("reply_to")).get("pressed_label")
         if isinstance(label, str) and wanted == label.strip():
-            return {**item, "cited": wanted, "basis": CITED, "carried": True}, ""
+            return {**item, "cited": label, "basis": CITED, "carried": True}, ""
     for item in getattr(ctx, "_owner_directives", None) or []:  # confirmed place events, with what they replied to
         if (isinstance(item, dict) and item.get("source") == PLACE_CONFIRMED
                 and quote_in(wanted, str(item.get("content") or "")) and not _my_post(ctx, item)):
