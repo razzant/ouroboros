@@ -623,6 +623,27 @@ def _same_corpus_source(left: Mapping[str, Any], right: Mapping[str, Any]) -> bo
     return bool(_corpus_keys(left) & _corpus_keys(right))
 
 
+def _same_form_citation(prior: Mapping, row: Mapping) -> bool:
+    """Attach a field citation only to its own identified submission, with the same recorded field boundaries."""
+    from ouroboros.answer_facts import word_spans
+    from ouroboros.chronicle_quotes import quote_in
+
+    target = _mapping(prior.get("reply_to"))
+    cited_target = _mapping(row.get("reply_to"))
+    if (row.get("source") != "owner_mailbox" or not target.get("card_id")
+            or target["card_id"] != cited_target.get("card_id")
+            or prior.get("source_task_id") != row.get("source_task_id")
+            or target.get("submitted_values") != cited_target.get("submitted_values")):
+        return False
+    if not (prior.get("msg_id") or prior.get("client_message_id")):
+        return False  # equal words without a delivery identity do not establish a submission
+    if any(prior.get(key) and row.get(key) and str(prior[key]) != str(row[key])
+           for key in ("msg_id", "client_message_id", "chat_id")):
+        return False
+    return isinstance(row["cited"], str) and isinstance(prior.get("content"), str) and quote_in(
+        row["cited"], word_spans(prior["content"], target))
+
+
 def merged_corpus(kept: Any, added: Any) -> List[Dict[str, Any]]:
     """Merge carried rows without collapsing same client ids from different rooms."""
     merged: List[Dict[str, Any]] = []
@@ -632,9 +653,9 @@ def merged_corpus(kept: Any, added: Any) -> List[Dict[str, Any]]:
         prior = next((item for item in merged if _same_corpus_source(row, item)), None)
         if prior is None:
             merged.append(dict(row))
-        elif (prior.get("source") == row.get("source") and row.get("source") in (OWNER_PRESS, "owner_quiz_answer") and row.get("basis") == CITED
-              and row.get("cited") and prior.get("content") == row.get("content")):
-            # A schedule edit can cite a press already held under its original id. Keep that decision on the one act.
+        elif (row.get("basis") == CITED and row.get("cited") and prior.get("source") == row.get("source")
+              and prior.get("content") == row.get("content")
+              and (row.get("source") in (OWNER_PRESS, "owner_quiz_answer") or _same_form_citation(prior, row))):
             prior.update(basis=CITED, cited=row["cited"])
     return merged
 
