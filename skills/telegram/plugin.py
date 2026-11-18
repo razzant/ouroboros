@@ -36,7 +36,7 @@ from .lib.telegram_state import (
     _get_silent_msg, _set_silent_msg, _clear_silent_msg, _subagent_cards_enabled,
     _mirror_progress_enabled, _render_subagent_card, _data_dir,
     _load_runtime_state, _child_row_held_for_root, _child_final_report,
-    _mirror_options, _old_reference_unlinked, _owner_message_seen, _owner_ingress_fields, _replaceable_progress,
+    _mirror_options, _owner_message_seen, _owner_ingress_fields, _replaceable_progress,
     _quiet_progress,
 )
 from .lib import telegram_i18n, telegram_inbound, telegram_quiz
@@ -980,6 +980,13 @@ async def _handle_owner_message(
                 request_key=update_key(update), lang=lang, post=_host_post,
             )
             return
+    ingress = _owner_ingress_fields(api, client.bot_id, chat_id, message, update_id)
+    if (isinstance(reply_to, dict) and reply_to.get("message_id") and not ingress.get("reply_to")
+            and not _SLASH_COMMAND_RE.match(text)):
+        await client.call("sendMessage", data={"chat_id": str(chat_id), "text": _LOCALIZED_TEXTS[lang]["reply_not_linked"],
+                                               "reply_to_message_id": message["message_id"],
+                                               "allow_sending_without_reply": False})
+        return
     photos = message.get("photo") or []
     image_base64 = ""
     image_mime = ""
@@ -1007,15 +1014,14 @@ async def _handle_owner_message(
         parked = await telegram_inbound.park_inbound_file(api, client, inbound)
     try:
         await _inject(api, {
-            **_owner_ingress_fields(api, client.bot_id, chat_id, message, update_id),
+            **ingress,
             "text": safe_text,
             "chat_id": chat_id,
             "user_id": int(sender.get("id") or chat_id or 1),
             "source": "telegram",
             "sender_label": sender_label,
             "transport": {
-                "kind": "telegram",
-                "conversation_id": str(chat_id),
+                **ingress["transport"],
                 "sender_label": sender_label,
             },
             "image_base64": image_base64,
@@ -1026,11 +1032,6 @@ async def _handle_owner_message(
     finally:
         if parked is not None:
             parked.cleanup()
-    if _old_reference_unlinked(api, client.bot_id, chat_id, message):
-        try:
-            await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["reply_not_linked"])
-        except Exception:
-            api.log("warning", "Telegram note about an unlinked reply could not be delivered.")
 
 
 def _make_poller(api):

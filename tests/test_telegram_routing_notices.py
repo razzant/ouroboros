@@ -180,9 +180,9 @@ def test_a_refused_steer_of_an_owner_message_is_one_line_replying_to_that_messag
     [ack] = phone.acks()
     assert ack["reply_to"] == reference_from_row(row) and ack["routing_notice_carrier"] == "routing_ack"
     assert phone.rows() == []
-    # Control: an ordinary answer to the same latest message stays an unquoted neighbour.
+    # A separate ordinary answer to the same input keeps that exact anchor too.
     asyncio.run(phone.plugin._make_outbound(phone.api)({"text": "On it.", "reply_to": ack["reply_to"]}))
-    assert "reply_to_message_id" not in phone.sent()[-1]
+    assert phone.sent()[-1]["reply_to_message_id"] == 50
 
 
 @pytest.mark.parametrize("reason", _EVERY_REFUSAL)

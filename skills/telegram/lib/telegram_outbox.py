@@ -90,7 +90,7 @@ _ID = re.compile(r"\d{12}-[0-9a-f]{8}")  # the only record id this journal write
 TOKEN_WAIT_SEC = 5.0
 _NOT_MODIFIED = "Telegram API editMessageText: message is not modified."
 _ACTIVE = frozenset({"pending", "sending", "retry_wait"})
-# Delivery manners, not content: Silent mode's sound and the reply anchor may differ between attempts.
+# Delivery manners are not part content; the native reply anchor is stored on the operation.
 _VOLATILE = frozenset({"disable_notification", "reply_to_message_id", "allow_sending_without_reply"})
 _SOURCE_KEYS = ("task_id", "subagent_task_id", "row_address", "quiz_id", "card_id", "system_type", "annotation_type")
 
@@ -255,6 +255,13 @@ class _Operation:
 
     async def _send(self, client, part: dict, method: str, data, files, timeout) -> Dict[str, Any]:
         record = self.record
+        # Later chunks and retries use the first dispatch's exact target, even if
+        # the derived message cache lost it or the subagent card was replaced.
+        anchor = record.setdefault("native_reply_id", getattr(client, "reply_to_message_id", 0))
+        if anchor and record.get("bot") and client.bot_id != record["bot"]:
+            await self._token_changed(part)
+        if hasattr(client, "reply_to_message_id"):
+            client.reply_to_message_id = anchor
         before = part["state"]
         part.update(state="sending", attempts=int(part.get("attempts") or 0) + 1)
         # The bot of its first delivered part owns the operation; until then, the one in force sends it.

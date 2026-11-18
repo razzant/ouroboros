@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.16
+version: 1.4.17
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -15,7 +15,7 @@ subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.docu
 conflicts: [telegram-bridge, telegram-miniapp-poc]
 when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.
 model_experience:
-  what_model_sees: No new tools; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants, enables or resumes nothing; the enabled bridge applies a saved or cleared token by itself. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never routing instructions. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
+  what_model_sees: No new tools; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants, enables or resumes nothing; the enabled bridge applies a saved or cleared token by itself. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages open a turn in the host-resolved room; the reference does not select a worker. Quiz answers use the web card's decision ingress.
   token_effect: Near-zero while idle — no per-round schema cost; incoming Telegram media arrive as ordinary attachments and cost what any chat attachment costs.
 timeout_sec: 60
 companion_processes:
@@ -59,9 +59,12 @@ Quizzes keep the label through answers and edits.
 
 The bridge remembers every mirrored part, including media and completion
 notices, in a bounded durable message map. Replying passes its host row or work
-reference through normal chat; Ouroboros decides what it means. Unknown or
-evicted ids add nothing. Answers to an earlier owner message from this Telegram
-chat use a native reply; answers to its latest owner message stay unquoted.
+reference through normal chat and opens a turn in the target's Main or Project room.
+The same bot in the same Telegram chat answers the exact owner message, even the
+latest. A reply about a subagent's card uses that child's Telegram card when known.
+Unknown or expired reply targets are reported rather than routed elsewhere;
+Telegram must accept the native anchor when one is specified. A resumed delivery
+keeps its original anchor for all remaining parts.
 Relay success stays silent; a host-reported failure arrives as one line. A relayed row quotes the owner's words verbatim as
 plain text, under where he wrote them and with the file names, above the note; a
 note between works that quotes none of his words stays in its room.
@@ -180,7 +183,7 @@ edits to the bot that polled or sent: a newly chosen server or another bot's tok
 read from its oldest pending update, and a batch already handled is not handled again.
 Records saved before 1.4.3 name no bot and anchor nothing: a reply at an old card's
 number (one of the last 50) stays here, pointing to the card, even if another
-message was meant; another reply to an old message arrives unlinked, with a note. A
+message was meant; another reply to an old message stays here, with a note. A
 batch unconfirmed at the upgrade may repeat a turn.
 
 Version 1.4.1 declares `secret_fields` (`botToken` → `TELEGRAM_BOT_TOKEN`), so setup can

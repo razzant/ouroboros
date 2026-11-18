@@ -154,7 +154,6 @@ def _receive(b, message, *, update_id=70):
 @pytest.mark.parametrize("kind,address,expected", [
     ("message", "row:1@time#123456789abc", "row:1@time#123456789abc"),
     ("work_card", "row:1@time#123456789abc", "task:work-1"),
-    ("message", "", "task:work-1"),
 ])
 def test_reply_to_mirrored_work_goes_through_normal_ingress_as_reference(bridge, monkeypatch, kind, address, expected):
     b = bridge
@@ -174,14 +173,15 @@ def test_reply_to_mirrored_work_goes_through_normal_ingress_as_reference(bridge,
     assert b.api.logs == []
 
 
-def test_unmapped_or_other_chat_reply_has_no_reference_and_no_notice(bridge, monkeypatch):
+def test_unmapped_or_other_chat_reply_is_not_routed_elsewhere(bridge, monkeypatch):
     b = bridge
     _state(b.plugin)._remember_message(b.api, "", 43, 101, {"row_address": "other-chat"})
     posts = _host_posts(b, monkeypatch)
     _receive(b, _owner(reply=101))
     _receive(b, _owner(51, reply=999))
-    assert all("reply_to" not in payload for _, payload in posts)
-    assert b.calls == [] and b.api.logs == []
+    assert not posts
+    assert len(b.calls) == 2
+    assert all("not routed" in data["text"] for _, data in b.calls)
 
 
 def _accept_owner(b, mid, *, text="Same owner words", chat=42):
@@ -199,8 +199,8 @@ def _accept_owner(b, mid, *, text="Same owner words", chat=42):
             "author_label": "You", "kind": "message", "snippet": text, "ts": row["ts"], "task_id": ""}
 
 
-@pytest.mark.parametrize("target", ["earlier", "other_chat", "unresolved"])
-def test_native_reply_only_for_nonlatest_owner_from_same_telegram_chat(bridge, target):
+@pytest.mark.parametrize("target, expected", [("earlier", 10), ("latest", 11), ("other_chat", None), ("unresolved", None)])
+def test_native_reply_anchors_exact_owner_from_same_telegram_chat(bridge, target, expected):
     b = bridge
     earlier = _accept_owner(b, 10)
     latest = _accept_owner(b, 11)  # deliberately identical text; identity decides
@@ -215,13 +215,15 @@ def test_native_reply_only_for_nonlatest_owner_from_same_telegram_chat(bridge, t
                 "row_address": "answer-row", "reply_to": reference}))
     assert len(b.calls) > 1
     for _, data in b.calls:
-        assert data.get("reply_to_message_id") == (10 if target == "earlier" else None)
+        assert data.get("reply_to_message_id") == expected
+        if expected is not None:
+            assert data.get("allow_sending_without_reply") is False
     assert b.api.logs == []
     if target == "earlier":
         assert _state(b.plugin)._message_ref(b.api, "", 42, 10)["row_address"] == earlier["address"]
 
 
-def test_local_owner_command_breaks_native_reply_adjacency(bridge, monkeypatch):
+def test_local_owner_command_does_not_change_a_replies_anchor(bridge):
     b = bridge
     ref = _accept_owner(b, 10)
     _receive(b, _owner(11, "/help"))
@@ -230,18 +232,163 @@ def test_local_owner_command_breaks_native_reply_adjacency(bridge, monkeypatch):
     assert b.calls[0][1]["reply_to_message_id"] == 10
 
 
-def test_latest_owner_identity_survives_reference_eviction(bridge, monkeypatch):
+def test_only_exact_retained_owner_reference_can_anchor_after_eviction(bridge, monkeypatch):
     b = bridge
     state = _state(b.plugin)
+    from ouroboros.chat_references import origin_reply
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from supervisor.message_bus import accept_local_message
+
     monkeypatch.setattr(state, "_MAX_MESSAGE_REFS", 2)
-    ref = _accept_owner(b, 10)
-    _accept_owner(b, 11)
-    # A late binding refreshes an old record; it must not make it the latest input.
-    record = {**state._message_ref(b.api, "", 42, 10), "row_address": ref["address"]}
-    state._remember_message(b.api, "", 42, 10, record)
-    state._remember_message(b.api, "", 42, 100, {"row_address": "bot-row"})
-    assert state._message_ref(b.api, "", 42, 11) == {}
-    assert state._native_reply_id(b.api, "", 42, {"reply_to": ref}) == 10
+    root = b.api.state_dir / "data"
+    receiver = SimpleNamespace(enqueue_local_message=lambda *a, **k: None)
+    bot = "123"
+    refs = []
+    for mid in (10, 11, 12):
+        fields = state._owner_ingress_fields(b.api, bot, 42, _owner(mid), mid)
+        row, _ = accept_local_message(receiver, root, "same words", chat_id=42, user_id=42,
+                                      source="skill:telegram", **fields)
+        refs.append(build_owner_message_ref(chat_id=42, client_message_id=fields["client_message_id"],
+                                            ts=row["ts"], text=row["text"]))
+    assert state._message_ref(b.api, bot, 42, 10) == {}
+    transport = {}
+    reply = origin_reply(root, "", {"origin_message_ref": refs[0]}, transport=transport)
+    assert state._native_reply_id(b.api, bot, 42, {"reply_to": reply, "transport": transport}) == 10
+    assert state._native_reply_id(b.api, "999", 42, {"reply_to": reply, "transport": transport}) == 0
+    newer = {}
+    origin_reply(root, "", {"origin_message_ref": refs[-1]}, transport=newer)
+    assert state._native_reply_id(b.api, bot, 42, {"reply_to": reply, "transport": newer}) == 0
+
+
+def test_reply_to_owner_bubble_resolves_before_any_outbound_answer(bridge, monkeypatch):
+    earlier = _accept_owner(bridge, 10)
+    posts = _host_posts(bridge, monkeypatch)
+    _receive(bridge, _owner(reply=10))
+    assert posts[0][1]["reply_to"] == earlier["address"]
+
+
+def test_child_notice_replies_use_the_exact_child_card_not_the_notice_or_parent(bridge, monkeypatch):
+    b = bridge
+    state = _state(b.plugin)
+    outbound = b.plugin._make_outbound(b.api)
+    asyncio.run(outbound({"chat_id": 7, "task_id": "parent", "subagent_task_id": "child",
+                          "subagent_event": "scheduled", "is_progress": True, "text": "A helper started"}))
+    # A separately mirrored incident is about that same child; Telegram rendered a different bubble.
+    asyncio.run(outbound({"chat_id": 7, "task_id": "child", "delegation_role": "subagent", "role": "system",
+                          "system_type": "terminal_incident", "row_address": "incident-row", "text": "Helper stopped"}))
+    assert state._reply_reference(b.api, "", 42, 102) == "task:child"
+    posts = _host_posts(b, monkeypatch)
+    _receive(b, _owner(reply=102))
+    [(path, payload)] = posts
+    assert path == "/chat/inject" and payload["reply_to"] == "task:child"
+    from supervisor.message_bus import accept_local_message
+    from ouroboros.chat_references import reference_from_row
+
+    row, _ = accept_local_message(SimpleNamespace(enqueue_local_message=lambda *a, **k: None),
+                                  b.api.state_dir / "data", payload["text"], chat_id=42, user_id=42,
+                                  source="skill:telegram", client_message_id=payload["client_message_id"],
+                                  task_metadata={"reply_to": payload["reply_to"]})
+    asyncio.run(outbound({"chat_id": 7, "text": "The exact child answer", "reply_to": reference_from_row(row)}))
+    assert b.calls[-1][1]["reply_to_message_id"] == 101
+
+
+@pytest.mark.parametrize("target_kind", ["main_row", "main_converted", "project_row", "project_card", "project_chain", "project_retired", "unavailable"])
+def test_telegram_reply_turn_uses_target_room_but_keeps_ingress_identity(bridge, monkeypatch, target_kind):
+    from ouroboros import server_owner_routing as routing
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.projects_registry import create_project
+    from ouroboros.task_results import write_task_result
+    from supervisor import message_bus as bus
+    from tests.test_chat_attachments import _web_bridge
+
+    b = bridge
+    root = b.api.state_dir / "data"
+    _web_bridge(root, monkeypatch)
+    project = create_project(root, "target-room")
+    expected_room = project["chat_id"] if target_kind.startswith("project") else 1
+    if target_kind in {"project_card", "main_converted"}:
+        write_task_result(root, "target-work", "completed", chat_id=expected_room)
+        address = "task:target-work"
+    else:
+        target = bus.log_chat("out", expected_room, 1, "The target message")
+        address = format_address(row_address(target)) if target_kind != "unavailable" else "task:missing-work"
+
+    queued = []
+    receiver = SimpleNamespace(enqueue_local_message=lambda text, **payload: queued.append(payload))
+    telegram = {"kind": "telegram", "conversation_id": "42"}
+    if target_kind == "project_chain":
+        first, _ = bus.accept_local_message(receiver, root, "First Project Reply", chat_id=42, user_id=42,
+                                            source="skill:telegram", client_message_id="tg:42:49", transport=telegram,
+                                            task_metadata={"reply_to": address})
+        address = format_address(row_address(first))
+        queued.clear()
+    accepted, _ = bus.accept_local_message(receiver, root, "Answer exactly here", chat_id=42, user_id=42,
+                                             source="skill:telegram", client_message_id="tg:42:50", transport=telegram,
+                                             task_metadata={"reply_to": address})
+    [incoming] = queued
+    if target_kind == "main_converted":
+        from ouroboros.chat_references import reference_from_row
+        from ouroboros.projects_registry import bind_task_to_project
+
+        bind_task_to_project(root, "target-work", project["id"], origin={"absent": "system"})
+        assert reference_from_row(accepted)["telegram_room_chat_id"] == 1
+    if target_kind == "project_retired":
+        from ouroboros.projects_registry import begin_project_deletion, complete_project_deletion
+
+        begin_project_deletion(root, project["id"])
+        complete_project_deletion(root, project["id"])
+    from ouroboros.project_dialogue import build_owner_message_ref
+    source_ref = build_owner_message_ref(chat_id=42, client_message_id="tg:42:50", ts=accepted["ts"], text=accepted["text"])
+    started, notices = [], []
+    def unrelated(*args, **kwargs):
+        pytest.fail("An explicit Telegram Reply must not enter an unrelated turn's mailbox")
+
+    monkeypatch.setattr(routing, "_route_project_chat_to_running_task", unrelated)
+    monkeypatch.setattr(routing, "_route_main_followup", unrelated)
+    monkeypatch.setattr(routing, "addressable_roots", lambda _ctx: SimpleNamespace(rows=lambda *a: [], gap=None))
+    monkeypatch.setattr(routing, "_decision_turn_metadata", lambda _ctx, _room, _id, meta, _roots: meta)
+    ctx = SimpleNamespace(DRIVE_ROOT=root, handle_chat_direct=lambda *args, **kwargs: started.append((args, kwargs)),
+                          send_with_budget=lambda *args, **kwargs: notices.append((args, kwargs)))
+    routing._route_owner_message(receiver, ctx, {
+        **incoming, "text": accepted["text"], "log_text": accepted["text"], "origin_message_ref": source_ref,
+        "task_metadata": {**incoming["task_metadata"], "_host_operation": True},
+    })
+    assert bus.accepted_chat_message(root, 42, "tg:42:50")["reply_to"]["address"] == address
+    if target_kind in {"unavailable", "project_retired"}:
+        assert not started and notices[0][0][0] == 42
+        assert notices[0][1]["progress_meta"]["origin_message_ref"] == source_ref
+        return
+    [(args, kwargs)] = started
+    assert args[0] == expected_room and not notices
+    assert kwargs["task_metadata"]["origin_message_ref"] == source_ref
+    assert kwargs["task_metadata"]["reply_reference"]["address"] == address
+    assert kwargs["task_metadata"].get("project_id", "") == (project["id"] if expected_room != 1 else "")
+    if target_kind == "project_chain":
+        from ouroboros.projects_registry import RoomResolver
+        from ouroboros.room_membership import appearance_keys, row_rooms
+
+        rooms = RoomResolver(root, strict=True)
+        assert expected_room in row_rooms(42, accepted, {expected_room}, rooms)
+        assert f"room:{expected_room}" in appearance_keys(accepted, {expected_room}, rooms)
+
+    # Real bus publication in the targeted room must still reach a Telegram-only bridge.
+    b.plugin.merge_settings(b.api.state_dir, {"TELEGRAM_MIRROR_MODE": "telegram_only"})
+    _state(b.plugin)._owner_ingress_fields(b.api, "", 42, _owner(), 50)
+    live = bus.LocalChatBridge({})
+    monkeypatch.setattr(bus, "get_bridge", lambda: live)
+    monkeypatch.setattr(bus, "publish_event", lambda _topic, event: asyncio.run(b.plugin._make_outbound(b.api)(event)))
+    bus.send_with_budget(expected_room, "Here is the answer", task_id="new-turn",
+                         progress_meta={"origin_message_ref": source_ref})
+    [(method, form)] = b.calls
+    assert method == "sendMessage" and form["reply_to_message_id"] == 50
+    bus.send_with_budget(expected_room, "Another turn's web reply", task_id="unrelated-turn")
+    assert len(b.calls) == 1
+    from supervisor import queue
+
+    monkeypatch.setattr(queue, "RUNNING", {"new-turn": {"task": {"origin_message_ref": source_ref}}})
+    monkeypatch.setattr(bus, "publish_event", lambda _topic, event: asyncio.run(b.plugin._make_photo(b.api)(event)))
+    live.send_photo(expected_room, b"picture", "Here is a photo", task_id="new-turn")
+    assert b.calls[-1][0] == "sendPhoto" and b.calls[-1][1]["reply_to_message_id"] == 50
 
 
 @pytest.mark.parametrize("surface,extra", [
@@ -322,7 +469,7 @@ def test_silent_mode_replaces_progress_only_within_its_episode_and_reply_origin(
     assert _state(b.plugin)._reply_reference(b.api, "", 42, 104) == "row-origin"
 
 
-def test_silent_mode_starts_new_message_when_native_reply_anchor_changes(bridge):
+def test_silent_mode_keeps_exact_reply_anchor_when_a_new_owner_message_arrives(bridge):
     b = bridge
     handle = _quiet(b, TELEGRAM_MIRROR_PROGRESS="on")
     ref = _accept_owner(b, 10)
@@ -330,8 +477,8 @@ def test_silent_mode_starts_new_message_when_native_reply_anchor_changes(bridge)
     asyncio.run(handle(event))
     _state(b.plugin)._owner_message_seen(b.api, "", 42, 11)
     asyncio.run(handle({**event, "text": "More about the earlier request"}))
-    assert [method for method, _ in b.calls] == ["sendMessage", "sendMessage"]
-    assert "reply_to_message_id" not in b.calls[0][1] and b.calls[1][1]["reply_to_message_id"] == 10
+    assert [method for method, _ in b.calls] == ["sendMessage", "editMessageText"]
+    assert b.calls[0][1]["reply_to_message_id"] == 10
 
 
 _REPLIES = ["Starting: the page template first, then the three longest notes.",

@@ -285,15 +285,25 @@ def test_a_long_reply_resumes_at_its_first_unsent_part(tmp_path):
     async def scenario():
         async with _Origin(close_after=1) as first, _Origin() as second:
             bridge = _Bridge(tmp_path / "state", first.base)
-            await bridge.publish("chat.outbound", {"text": _LONG, "transport": {}})
+            address = "row:42@2026-11-17T12:00:00+00:00#0123456789ab"
+            from sys import modules
+
+            state = modules[bridge.plugin._mirror_options.__module__]
+            source = {"direction": "in", "row_address": address, "chat_id": 42}
+            state._remember_message(bridge.api, _BOT, 42, 10, source)
+            await bridge.publish("chat.outbound", {"text": _LONG, "transport": {},
+                                                    "reply_to": {"address": address, "chat_id": 42, "role": "user"}})
             [record] = bridge.records()
             assert [part["state"] for part in record["parts"]] == ["confirmed", "retry_wait"]
+            state._remember_message(bridge.api, _BOT, 42, 10, {"direction": "in"})
+            state._remember_message(bridge.api, _BOT, 42, 20, source)
             bridge.serve(second.base)
             await bridge.drain()
         chunks = bridge.telegram_api.message_chunks(_LONG, "HTML")
         assert len(chunks) == 3
         assert [form["text"] for form in first.sent()] == chunks[:1]  # the delivered part is never resent
         assert [form["text"] for form in second.sent()] == chunks[1:]
+        assert [form["reply_to_message_id"] for form in first.sent() + second.sent()] == ["10"] * 3
         await bridge.stop()
     _run(scenario)
 

@@ -18,7 +18,7 @@ Preflight failure persists as PENDING, never overridable BLOCKERS. Records bind 
 
 ### Telegram built-in
 
-The notifier reads bounded `state/dialog.sqlite` windows; failed reads keep seen IDs. Untyped child finals stay unsent. `supervisor/message_origin.py` labels events by Project or Main work title (direct replies, unknown: none); `lib/telegram_origin.py` renders it literally per part.
+The notifier tails `state/dialog.sqlite`; failed reads keep seen IDs. Untyped child finals stay unsent. `message_origin.py` labels mirrored work. `telegram_reply_room` selects a Reply's room, not its transport; native anchors follow SKILL.md.
 
 `skills/telegram/` owns the bridge, companion (sidecar/429-paced tunnel/menu rollback/heartbeat/singleton). `skill_builtin.py` requires grants; Colab enables after executable install (auto-grants eligible items if allowed). `data/state/skills/telegram/` keeps binding, companion, rollback, cursors, tunnel cache, bounded bot-qualified refs, `outbox/` (journal, kept copies: `lib/telegram_outbox.py`), `quiz_state.json` (cards). Confined files enter `/chat/inject` then `data/uploads`, quiz answers `/chat/decision`; oversized ones point in-app or to a live Mini App, no new tunnel/URL. `lib/telegram_i18n.py` follows `OUROBOROS_UI_LANGUAGE` (§7; `/language`: `/ui/language`) except host lines. `lib/telegram_token.py` applies token saves/clears to all clients and the companion (a missing one waits); `lib/telegram_connection.py` shows status. Events wake one `TypingCue` (`gateway/reply_preparation.py`, DESIGN §9). `TELEGRAM_PROXY`: locked `httpx[socks]`. `SKILL.md`: replies, notices, completion toggle, native quotes, Silent Mode, limits, proxy forms, self-hosted Bot API (`TELEGRAM_API_BASE`, `TELEGRAM_API_FILES_DIR`).
 

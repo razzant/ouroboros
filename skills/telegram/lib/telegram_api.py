@@ -726,7 +726,7 @@ class TelegramClient:
             data[field] = prefix.rstrip() if not body else prefix + body
         if self.reply_to_message_id and method_text in {"sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendAudio"}:
             data = {**(data or {}), "reply_to_message_id": self.reply_to_message_id,
-                    "allow_sending_without_reply": True}
+                    "allow_sending_without_reply": False}
         try:
             # trust_env trades ambient-proxy/SSL_CERT isolation for a proxy-routed install's
             # only egress; decided once by the caller via net_transport.env_proxies_configured.
@@ -1094,7 +1094,7 @@ _MENU_TEXTS_EN = {
     "unknown_command": "Unknown command",
     "use_miniapp": "Use the Mini App.",
     "update_failed": "Could not deliver that Telegram update to Ouroboros.",
-    "reply_not_linked": "Sent, but not linked to the earlier work: a message from before this bridge update can't be matched safely.",
+    "reply_not_linked": "I couldn't identify the message or card you replied to. Your reply was not routed. Try replying to a newer copy, or send it as a new message.",
     "metrics_budget_status": "• **Budget Status:**\n  Spent: `${spent_usd}`\n  Limit: `${total_budget}`\n  Remaining: `${rem}`\n\n• **System Environment:**\n  Branch: `{branch}`\n  BG Thoughts: `{bg_status}`",
     "file_too_large_notice": "{filename} is saved in Ouroboros. This file exceeds the Telegram upload limit and cannot be mirrored here.",
     "file_open_app_hint": "Open the app to download it.",

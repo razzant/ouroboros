@@ -676,7 +676,7 @@ class LocalChatBridge:
             "task_id": str(task_id or ""),
             **(projection_fields(stored) if stored else {}),
             "chat_id": int(chat_id or 0),
-            "transport": self.chat_transport(chat_id),
+            "transport": (stored or {}).get("transport") or self.chat_transport(chat_id),
             "caption": str(caption or ""),
             "image_base64": b64_str,
             "mime": str(mime or ""),
@@ -742,7 +742,7 @@ class LocalChatBridge:
             "task_id": str(task_id or ""),
             **(projection_fields(stored) if stored else {}),
             "chat_id": int(chat_id or 0),
-            "transport": self.chat_transport(chat_id),
+            "transport": (stored or {}).get("transport") or self.chat_transport(chat_id),
             "caption": str(caption or ""),
             "video_base64": b64_str,
             "mime": str(mime or ""),
@@ -825,7 +825,7 @@ class LocalChatBridge:
             "task_id": str(task_id or ""),
             **(projection_fields(stored) if stored else {}),
             "chat_id": int(chat_id or 0),
-            "transport": self.chat_transport(chat_id),
+            "transport": (stored or {}).get("transport") or self.chat_transport(chat_id),
             "caption": str(caption or ""),
             "file_base64": b64_str,
             "mime": str(mime or ""),
@@ -884,7 +884,7 @@ class LocalChatBridge:
             "task_id": str(task_id or ""),
             **(projection_fields(stored) if stored else {}),
             "chat_id": int(chat_id or 0),
-            "transport": self.chat_transport(chat_id),
+            "transport": (stored or {}).get("transport") or self.chat_transport(chat_id),
             "title": safe_title,
             "actions": validated,
             "ts": ts,
@@ -1019,7 +1019,8 @@ class LocalChatBridge:
                 msg["question_delivery"] = delivery
         if self._broadcast_fn:
             self._broadcast_fn(msg)
-        quiz_transport = self.chat_transport(chat_id)
+        quiz_transport = (stored or {}).get("transport") or self.chat_transport(chat_id)
+        from ouroboros.chat_references import projection_fields
         from ouroboros.secret_requests import transport_hint
 
         publish_event(CHAT_QUIZ, {
@@ -1036,6 +1037,7 @@ class LocalChatBridge:
             "assumption": payload["assumption"],
             "state": str(state or "open"),
             "ts": ts,
+            **(projection_fields(stored) if stored else {}),
             **lifecycle,
             **({"materials": materials} if materials else {}),
             **({"host_facts": str(host_facts)} if host_facts else {}),
@@ -1138,7 +1140,9 @@ class LocalChatBridge:
                 log.debug("quiz_state broadcast failed", exc_info=True)
         # The WebSocket reaches only the SPA. Transport skills need the same
         # lifecycle fact to edit an already delivered card without a reload.
-        quiz_transport = self.chat_transport(chat_id)
+        from ouroboros.chat_references import telegram_origin_transport
+
+        quiz_transport = telegram_origin_transport(DATA_DIR, task_id) or self.chat_transport(chat_id)
         publish_event(CHAT_QUIZ_STATE, {**msg, "transport": quiz_transport})
 
     def push_log(self, event: dict):
@@ -1244,8 +1248,14 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             meta["narration"] = bool(narration)
         meta.setdefault("narration", False)
         from ouroboros.chat_references import origin_reply, projection_fields
-        if not is_progress and (reply := origin_reply(DATA_DIR, task_id, meta if meta.get("origin_message_ref") else None)):
-            meta.setdefault("reply_to", reply)
+        if not is_progress:
+            source_transport: Dict[str, Any] = {}
+            reply = origin_reply(DATA_DIR, task_id, meta if meta.get("origin_message_ref") else None,
+                                 transport=source_transport)
+            if reply:
+                meta.setdefault("reply_to", reply)
+            if source_transport:
+                meta.setdefault("transport", source_transport)
         progress_meta = meta
         if task_id and DATA_DIR and system_type not in ROOM_FIXED_ROW_TYPES and meta.get("_is_direct_chat") is not True:
             # The one room rule (A4) at the one send seam: a task-addressed host row

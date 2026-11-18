@@ -332,10 +332,11 @@ def test_a_reply_never_takes_a_reference_from_another_bots_message(world):
     world.run(steps)
     by_text = {row["text"]: row for row in world.rows()}
     assert by_text["a reply to the first bot"]["reply_to"]["address"] == world.address(0)
-    assert not by_text["a reply to the new bot's message 100"].get("reply_to")
+    assert "a reply to the new bot's message 100" not in by_text
+    assert "not routed" in world.bots.bot(B).methods("sendMessage")[-1]["text"]
 
 
-def test_native_reply_and_latest_owner_belong_to_the_sending_bot(world):
+def test_native_replies_belong_to_the_sending_bot_including_latest(world):
     async def steps():
         await world.deliver(A, _owner(900, "A early"), _owner(901, "A latest"))
         await world.deliver(B, _owner(5, "B early"), _owner(6, "B latest"))
@@ -353,7 +354,7 @@ def test_native_reply_and_latest_owner_belong_to_the_sending_bot(world):
     assert [form.get("reply_to_message_id") for form in sent_a] == ["900"]
     assert "reply_to_message_id" not in sent_b["A's row, B sends"]
     assert sent_b["to B's early"]["reply_to_message_id"] == "5"
-    assert "reply_to_message_id" not in sent_b["to B's latest"], "B's own latest, below A's old numbers"
+    assert sent_b["to B's latest"]["reply_to_message_id"] == "6"
 
 
 def test_subagent_card_and_silent_progress_edit_only_their_own_bots_bubble(world):
@@ -418,7 +419,7 @@ def test_a_reply_answers_only_the_polling_bots_card_and_settles_that_card(quiz_w
         # B's own message 100 is no card, even if A's card has that number here.
         world.bots.bot(B).sent.add(100)
         await world.deliver(B, _owner(30, "just a remark", reply=100))
-        assert world.texts() == ["just a remark"] and _quiz_block(world)["state"] == "open"
+        assert world.texts() == [] and _quiz_block(world)["state"] == "open"
         await world.deliver(B, _owner(31, "postgres, in my words", reply=200))
 
     world.run(steps)
@@ -560,7 +561,7 @@ def test_a_token_saved_while_polling_moves_polling_to_its_bot_and_keeps_each_bot
     refs = world.refs()["bots"]
     assert refs["messages"][f"{B_ID}:42:50"]["client_message_id"] == f"tg:{B_ID}:42:50"
     assert refs["messages"][f"{B_ID}:42:200"]["row_address"] == "row-b"
-    assert refs["latest_owner"] == {f"{B_ID}:42": 50}
+    assert "latest_owner" not in refs  # Telegram message order is no longer a routing input
 
 
 def test_a_token_saved_during_a_long_send_stops_it_and_never_moves_its_parts(world):
@@ -637,18 +638,17 @@ def test_stored_rows_and_references_stay_as_they_were_and_no_bot_inherits_them(w
         await world.deliver(B, _owner(7, "stored before the upgrade"))
 
     world.run(steps)
-    assert world.ids() == ["tg:42:7", f"tg:{A_ID}:42:7", f"tg:{A_ID}:42:9", f"tg:{B_ID}:42:7"]
+    assert world.ids() == ["tg:42:7", f"tg:{A_ID}:42:7", f"tg:{B_ID}:42:7"]
     stored = accepted_chat_message(world.data, 42, "tg:42:7")
     assert stored["text"] == "stored before the upgrade"
     assert resolve_reply(world.data, world.address(0))["snippet"] == "stored before the upgrade"
     refs = world.refs()
     assert refs["messages"] == _LEGACY_REFS["messages"] and refs["latest_owner"] == _LEGACY_REFS["latest_owner"]
-    assert not world.rows()[2].get("reply_to"), "a matching number proves no ownership: no reference"
     (note,) = world.bots.bot(A).methods("sendMessage")
-    assert note["text"].startswith("Sent, but not linked to the earlier work")
+    assert "not routed" in note["text"]
 
 
-def test_a_reply_with_nothing_old_at_its_number_or_known_as_its_own_gets_no_note(world):
+def test_only_a_reply_with_a_known_message_gets_routed(world):
     async def steps():
         _seed_legacy_refs(world)
         world.use(A)
@@ -657,8 +657,9 @@ def test_a_reply_with_nothing_old_at_its_number_or_known_as_its_own_gets_no_note
         await world.deliver(A, _owner(20, "a reply to A's own", reply=8), _owner(21, "a reply to nothing known", reply=1234))
 
     world.run(steps)
-    assert world.texts() == ["a reply to A's own", "a reply to nothing known"]
-    assert [form["text"] for form in world.bots.bot(A).methods("sendMessage")] == ["A's own message"]
+    assert world.texts() == ["a reply to A's own"]
+    first, note = world.bots.bot(A).methods("sendMessage")
+    assert first["text"] == "A's own message" and "not routed" in note["text"]
 
 
 def test_a_replayed_batch_across_the_upgrade_repeats_its_turn_once_and_only_once(world):
@@ -698,14 +699,15 @@ def test_botless_bubbles_are_not_edited_by_a_named_bot(world):
 _CANARY = "fixture-secret-canary-value"
 
 
-def test_a_secret_request_no_longer_remembered_has_no_protection_left(world):
-    """The disclosed limit: the local hold exists only while a record says a card was there. The
-    file keeps its last 50 cards; past that, nothing distinguishes the reply."""
+def test_a_reply_to_an_evicted_secret_card_does_not_enter_main(world):
+    """Once the receipt ages out, an unrecognized explicit reply must not become ordinary input."""
     async def steps():
         await world.deliver(A, _owner(90, "a reply to an evicted card", reply=77))
 
     world.run(steps)
-    assert world.texts() == ["a reply to an evicted card"]
+    assert world.texts() == []
+    refused = world.bots.bot(A).methods("sendMessage")[-1]
+    assert "not routed" in refused["text"] and int(refused["reply_to_message_id"]) == 90
 
 
 def _seed_legacy_card(world: _World, token: str, *, secret: bool, message_id: int = 77) -> None:
@@ -968,7 +970,6 @@ def test_references_of_all_bots_share_the_newest_thousand_in_one_order(maps):
     assert state._message_ref(maps.api, bots[1], 42, 2)["row_address"] == f"{bots[1]}-2"
     assert state._message_ref(maps.api, bots[2], 42, 1)["row_address"] == "updated"
     assert list(state._message_refs(maps.api, bots[1]))[:2] == ["42:2", "42:3"]
-    assert stored["bots"]["latest_owner"] == {f"{bot}:42": 334 for bot in bots}
     assert json.dumps(stored["messages"]) == json.dumps(legacy["messages"]), "the old map keeps its bytes"
     assert stored["latest_owner"] == legacy["latest_owner"]
     assert list(state._message_refs(maps.api, "")) == ["42:1"], "a token naming no bot still reads only the old map"

@@ -282,7 +282,22 @@ def _chat_record(
             record["execution_transport"] = dict(meta["execution_transport"])
         if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
             from ouroboros.chat_references import origin_reply
-            meta["reply_to"] = origin_reply(root, task_id)
+            origin_transport: dict = {}
+            # Live turns can emit a file or question before their result exists.
+            from supervisor.active_activity import get_direct_activity_registry
+            from supervisor import queue
+
+            activity = get_direct_activity_registry().get(task_id)
+            if activity:
+                ref = activity.origin_message_ref
+            else:
+                with queue._queue_lock:
+                    task = (queue.RUNNING.get(task_id) or {}).get("task") or {}
+                    ref = task.get("origin_message_ref")
+            meta["reply_to"] = origin_reply(root, task_id, {"origin_message_ref": ref} if ref else None,
+                                            transport=origin_transport)
+            if origin_transport and record_type in {"photo", "video", "document", "links", "quiz", "card"} and not transport:
+                record["transport"] = origin_transport
         for key in ("reply_to", "relay"):
             if isinstance(meta.get(key), dict) and meta[key]:
                 record[key] = dict(meta[key])
@@ -500,8 +515,16 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     )
     if not logged:
         raise ValueError("message is empty")
-    from ouroboros.chat_references import ingress_reply
+    from ouroboros.chat_references import ingress_reply, telegram_reply_room
     reply = ingress_reply(drive_root, message.get("task_metadata") or {})
+    if reply and source == "skill:telegram":
+        from ouroboros.store import StoreError
+
+        try:
+            room = telegram_reply_room(drive_root, reply, chat_id)
+        except (OSError, ValueError, StoreError):
+            room = None  # the accepted row keeps this unresolved decision for dispatch
+        reply["telegram_room_chat_id"] = room
     if reply:  # a replayed obligation dispatches the same reference
         message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": reply}
     refs = stored_refs((message.get("task_metadata") or {}).get("chat_attachments"))

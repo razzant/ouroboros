@@ -83,7 +83,7 @@ _META_FIELDS = ("chat_id", "ts", "type", "direction", "task_id", "parent_task_id
                 "wake_summary",  # a finished root's closing sentence: how my other conversations know that turn
                 "fold_read")  # and that its sentence stands for what it read there (``finish_task(fold_read=true)``)
 _MEMBERSHIP_FIELDS = ("chat_id", "ts", "type", "task_id", "parent_task_id", "root_task_id", "source_keys")
-_REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unresolved")
+_REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "telegram_room_chat_id", "unresolved")
 # What a row's ``transport`` keeps: its scalars, which ``dialogue_provenance.place_row_facts`` spreads as the row's
 # place facts (``place_activity`` reads the event, place and conversation keys) and which name its provider, account,
 # conversation and thread (``dialogue_provenance``, ``RoomLabelResolver.label``), so a row that came over a transport
