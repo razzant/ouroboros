@@ -219,11 +219,33 @@ def _js_text(value: Any) -> str:
     return "" if value is None else "[object Object]"
 
 
+def _drawn_source(node: Dict[str, Any], data: Dict[str, Any]) -> str:
+    """The source the card renderer draws for a media component (``safeMediaSrc``), else "": a ``path`` reads the
+    card's one state, its own ``data`` (``web/modules/card_components.js``), and the component's ``src`` stands where it
+    reads nothing; a ``target`` other than ``result`` names no state a card holds, so its ``src`` is drawn."""
+    path = node.get("path") if isinstance(node.get("path"), str) else ""
+    state = data if (node.get("target") or "result") == "result" else None
+    value = _data_value(state, path) if path and state is not None else None
+    text = _js_text((node.get("src") or "") if value is None else value).strip(_JS_SPACE)
+    return text if _DRAWABLE_MEDIA.fullmatch(text) else ""
+
+
 def _draws(node: Dict[str, Any], data: Dict[str, Any]) -> bool:
     """Whether the card renderer finds a source for this media component (``safeMediaSrc``)."""
-    path = node.get("path") if isinstance(node.get("path"), str) else ""
-    value = _data_value(data, path) if path else None
-    return _DRAWABLE_MEDIA.fullmatch(_js_text((node.get("src") or "") if value is None else value).strip(_JS_SPACE)) is not None
+    return bool(_drawn_source(node, data))
+
+
+def _data_gallery_items(components: Any, data: Dict[str, Any]) -> Iterator[Tuple[str, int, str, Any, bool]]:
+    """``(gallery place, index, key, item, plain)`` for each item a gallery without listed items draws, as a component:
+    the list its ``path`` (else ``items_key``) reads from the card's ``data``; aimed at another target, it reads none."""
+    for where, node, kind, plain in _nodes(components):
+        if kind != "gallery" or node.get("items") or isinstance(node.get("items"), list):
+            continue
+        key = next((node[k] for k in ("path", "items_key") if isinstance(node.get(k), str) and node[k]), "")
+        state = data if (node.get("target") or "result") == "result" else None
+        read = (_data_value(state, key) if key else state) if state is not None else None
+        for idx, item in enumerate(read if isinstance(read, list) else []):
+            yield where, idx, key, item, plain
 
 
 def _undrawable_media(components: Any, data: Any) -> str:
@@ -237,18 +259,12 @@ def _undrawable_media(components: Any, data: Any) -> str:
             else "src: an inline data: URI (audio mpeg, wav or ogg; video mp4, webm or ogg)"
         note = f"; path {path!r} reads a value of data, not a file" if path else ""
         return f"{where}: this {kind} has no source a card can draw{note}. Give it {way}"
-    for where, node, kind, plain in _nodes(components):
-        # A gallery without listed items draws the list its path reads from data, each item as a component.
-        if kind != "gallery" or not plain or node.get("items") or isinstance(node.get("items"), list):
-            continue
-        key = next((node[k] for k in ("path", "items_key") if isinstance(node.get(k), str) and node[k]), "")
-        read = _data_value(data, key) if key else data
-        for idx, item in enumerate(read if isinstance(read, list) else []):
-            kind = str(item.get("type") or "image") if isinstance(item, dict) else "image"
-            if kind in ("image", "audio", "video") and not (
-                    isinstance(item, dict) and (item.get("target") or item.get("condition_key") or _draws(item, data))):
-                return (f"{where}: item {idx} of data {key!r} has no source a card can draw. Give each item src: an "
-                        f"inline data: URI, or list the images in the gallery's items, where an image takes file")
+    for where, idx, key, item, plain in _data_gallery_items(components, data):
+        kind = str(item.get("type") or "image") if isinstance(item, dict) else "image"
+        if plain and kind in ("image", "audio", "video") and not (
+                isinstance(item, dict) and (item.get("target") or item.get("condition_key") or _draws(item, data))):
+            return (f"{where}: item {idx} of data {key!r} has no source a card can draw. Give each item src: an "
+                    f"inline data: URI, or list the images in the gallery's items, where an image takes file")
     return ""
 
 
@@ -294,18 +310,20 @@ def _card_body(ctx: ToolContext, components: Any, data: Any, widget: Any, app: A
 
 def _shown_media(kind: str, body: Dict[str, Any], app: Any) -> list:
     """The produced material a card puts up, for its receipt's show line (``owner_delivery.show_record``): an app's
-    page, or each image, audio and video a components card carries inline (``_media_nodes``), by its place."""
+    page, or each image, audio and video a components card draws, by its place and by the bytes the renderer draws
+    (``_drawn_source``: a path's value from the card's data where it reads one), a gallery's items from data too."""
     from ouroboros.tools.owner_delivery import shown_material
 
     if kind == "app":
         path = app.get("path") if isinstance(app, dict) else None
         return [{"name": pathlib.Path(path).name if path else "app page", **body["app"]}]
-    shown = []
-    for where, node, media, _plain in _media_nodes(body.get("components")):
-        src = node.get("src").strip(_JS_SPACE) if isinstance(node.get("src"), str) else ""
-        if _DRAWABLE_MEDIA.fullmatch(src):
-            shown.append(shown_material(f"{media} {where}", b64=src.split(",", 1)[1]))
-    return shown
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+    drawn = [(f"{media} {where}", node) for where, node, media, _plain in _media_nodes(body.get("components"))]
+    drawn += [(f"{str(item.get('type') or 'image')} {where} item {idx}", item)
+              for where, idx, _key, item, _plain in _data_gallery_items(body.get("components"), data)
+              if isinstance(item, dict) and str(item.get("type") or "image") in ("image", "audio", "video")]
+    return [shown_material(name, b64=source.split(",", 1)[1]) for name, node in drawn
+            if (source := _drawn_source(node, data))]
 
 
 def _show_card(ctx: ToolContext, title: str = "", fallback_text: str = "", components: Any = None,

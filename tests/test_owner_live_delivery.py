@@ -417,3 +417,36 @@ class TestShowRecord:
         assert _send_photo(ctx, file_path=str(image)).endswith("Reviews on record naming these bytes: unknown.")
         off = self._ctx(tmp_path / "off", monkeypatch, review="off")
         assert _send_photo(off, file_path=str(image)) == "OK: photo accepted for delivery to owner chat."
+
+    def test_a_card_names_the_bytes_its_renderer_draws(self, tmp_path, monkeypatch):
+        """Both directions: an image whose path reads the card's data is named by those bytes, never by the src the
+        renderer passes over, and so is a gallery drawn from data; a literal src, a path that reads nothing and a src
+        aimed at another target (a card holds no other state) are named by their src."""
+        import base64
+        import hashlib
+        import json
+        from ouroboros.tools.cards import _show_card
+
+        ctx = self._ctx(tmp_path, monkeypatch)
+        first, second = (b"\x89PNG\r\n\x1a\n" + fill * 200 for fill in (b"A", b"B"))
+        short = {data: hashlib.sha256(data).hexdigest()[:12] for data in (first, second)}
+
+        def uri(data):
+            return "data:image/png;base64," + base64.b64encode(data).decode()
+
+        def shown(*components, data=None):
+            delivery = json.loads(_show_card(ctx, title="Preview", fallback_text="Image", components=list(components),
+                                             data=data))["delivery"]
+            return delivery.partition("\n")[2]
+
+        bound = shown({"type": "image", "src": uri(first), "path": "hero"}, data={"hero": uri(second)})
+        assert short[second] in bound and short[first] not in bound
+        assert short[second] in shown({"type": "image", "path": "hero"}, data={"hero": uri(second)})
+        gallery = shown({"type": "gallery", "path": "shots"}, data={"shots": [{"src": uri(first)}, {"src": uri(second)}]})
+        assert short[first] in gallery and short[second] in gallery
+        assert short[first] in shown({"type": "image", "src": uri(first)})
+        unread = shown({"type": "image", "src": uri(first), "path": "missing"}, data={"hero": uri(second)})
+        assert short[first] in unread and short[second] not in unread
+        aimed = shown({"type": "image", "src": uri(first), "path": "hero", "target": "elsewhere"},
+                      data={"hero": uri(second)})
+        assert short[first] in aimed and short[second] not in aimed
