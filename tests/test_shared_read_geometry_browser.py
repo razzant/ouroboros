@@ -53,8 +53,8 @@ def _serve(page, html):
     page.goto("http://shared.test/")
 
 
-# The row stands where a reader sees it: below the header (56 px) and its 64 px frosted edge on the desk (style.css
-# "A room's edges"; project_read_state.readBand), so the work list alone decides whether its words were read.
+# The row stands where a reader sees it: below the header (56 px) and its frosted edge (style.css "A room's edges";
+# project_read_state.readBand), so the work list alone decides whether its words were read.
 _WORK = '''<!doctype html><html data-theme="light" data-layout="docked"><head>
 <link rel="stylesheet" href="/ui.css"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/room_work.css">
 <style>html,body{margin:0;width:100%;height:100%}#page-chat{display:block;position:relative;width:900px;height:680px;margin:0}
