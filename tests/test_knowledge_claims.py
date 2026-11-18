@@ -111,44 +111,52 @@ def test_claim_records_use_the_shelf_spelling_and_advertise_that_versions_addres
     assert exact.status == "ok" and exact.text.endswith("Revised case note.\n")
 
 
-def test_a_byte_identical_move_keeps_claims_and_rekeys_only_on_write(tmp_path, monkeypatch):
+def test_a_moved_note_holds_nothing_until_an_explicit_write_at_its_new_address(tmp_path):
     registry = _registry(tmp_path)
     old = knowledge.resolve_knowledge_address(tmp_path, "nova", "global")
     moved = knowledge.resolve_knowledge_address(tmp_path, "renamed", "global")
-    unrelated = knowledge.resolve_knowledge_address(tmp_path, "unrelated", "global")
-    raw = _markdown(["room:1", "place:handwritten"])
     assert _write(registry, old, _markdown(["room:1"])).startswith("✅")
-    old.path.write_bytes(raw.encode())
-    assert _write(registry, old, "Latest authored body.\n", mode="append").startswith("✅")
-    old.path.rename(moved.path)
-    unrelated.path.write_bytes(raw.encode())
+    assert knowledge.active_claims(tmp_path) == {"room:1": [old]}
+    original = knowledge.read_knowledge_note(old)
     old_record = knowledge_versions.claim_record_path(old.shelf, old.topic)
     new_record = knowledge_versions.claim_record_path(moved.shelf, moved.topic)
     before = old_record.read_bytes()
-    rows = knowledge.inventory_knowledge(moved, navigation=True)
+    old.path.rename(moved.path)
+    assert knowledge.active_claims(tmp_path) == {}
+    assert "unchanged" in _write(registry, moved, "", mode="append")
+    assert not new_record.exists() and knowledge.active_claims(tmp_path) == {}
+    assert _write(registry, moved, "Later body line.\n", mode="append").startswith("✅")
+    assert not new_record.exists() and knowledge.active_claims(tmp_path) == {}
 
-    def forbidden(*_args, **_kwargs):
-        pytest.fail("claim lookup must use the supplied inventory and projections")
-
-    with monkeypatch.context() as spy:
-        spy.setattr(knowledge, "inventory_knowledge", forbidden)
-        spy.setattr(knowledge_versions, "_journal_lines", forbidden)
-        assert knowledge.active_claims(tmp_path, inventory=rows) == {"room:1": [moved]}
-    assert old_record.read_bytes() == before and not new_record.exists()
-
-    # A different source at the old topic uses only the record names still in its YAML.
-    old.path.write_bytes(raw.encode())
-    assert knowledge.active_claims(tmp_path) == {"room:1": [old, moved]}
-    original = knowledge.read_knowledge_note(moved)
-    same_bytes = _write(registry, moved, "", mode="append")
-    assert "unchanged" in same_bytes and not old_record.exists()
-    assert json.loads(new_record.read_bytes())["revision"] == original.revision
+    current = knowledge.read_knowledge_note(moved)
+    adoption = _write(registry, moved, current.text, expected_revision=current.revision)
+    assert "Present situations holding this note: room:1" in adoption
+    assert moved.path.read_bytes() == current.raw and new_record.is_file()
     assert knowledge.active_claims(tmp_path) == {"room:1": [moved]}
-    new_record.unlink()
-    with knowledge.knowledge_write_lock(moved.shelf):
-        knowledge_versions.rebuild_claim_record(moved)
-        knowledge_versions.rebuild_claim_record(old)
-    assert not old_record.exists() and knowledge.active_claims(tmp_path) == {"room:1": [moved]}
+    assert old_record.read_bytes() == before
+    pin = registry.execute_result("knowledge_read", {"topic": old.topic, "scope": "global", "version": original.revision})
+    assert pin.status == "ok" and pin.text.endswith(original.text)
+
+
+def test_a_claimless_append_can_use_a_known_file_when_its_directory_cannot_be_listed(tmp_path, monkeypatch):
+    target = knowledge.resolve_knowledge_address(tmp_path, "restricted/known", "global")
+    first = knowledge.write_knowledge_note(target, "Known text.\n").current
+    journal = knowledge_versions.journal_path(target)
+    before = journal.read_bytes()
+    listdir = knowledge.os.listdir
+
+    def restricted(path):
+        if path == target.path.parent:
+            raise PermissionError("directory has write and search permission only")
+        return listdir(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(knowledge.os, "listdir", restricted)
+        without_listing = knowledge.write_knowledge_note(target, "", mode="append")
+    with_listing = knowledge.write_knowledge_note(target, "", mode="append")
+    assert with_listing == without_listing
+    assert without_listing.ok and without_listing.reason == "unchanged" and without_listing.current.raw == first.raw
+    assert journal.read_bytes() == before
 
 
 def test_body_only_append_keeps_recorded_names_without_adopting_names_from_yaml(tmp_path):

@@ -108,6 +108,95 @@ def test_a_pinned_read_recovers_when_the_live_path_is_unreadable(tmp_path, occup
     assert body(registry.execute("knowledge_read", outline.meta["knowledge_view"]["read"]["arguments"])) == saved.text
 
 
+@pytest.mark.parametrize("legacy", [False, True], ids=["on-disk-spelling", "legacy-case-alias"])
+def test_case_aliases_use_the_journal_address_for_pins_history_and_revert(tmp_path, monkeypatch, legacy):
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(context(tmp_path))
+    target, alias = address(tmp_path, "Field/CaseNote"), address(tmp_path, "field/casenote")
+    if legacy:
+        target.path.parent.mkdir(parents=True)
+        target.path.write_bytes(b"Handwritten seed.\n")
+        if not alias.path.exists():
+            pytest.skip("legacy alias writes require a case-insensitive volume")
+        seed = store.read_knowledge_note(target)
+        with monkeypatch.context() as patch:
+            # Older writers journaled the requested address even when the shelf spelled it differently.
+            patch.setattr(store, "shelf_spelling", lambda requested: requested)
+            first = store.write_knowledge_note(alias, RIVER, expected_revision=seed.revision).current
+            second = store.write_knowledge_note(alias, RIVER.replace("Мост", "Пристань"), expected_revision=first.revision).current
+    else:
+        first = store.write_knowledge_note(target, RIVER).current
+        second = store.write_knowledge_note(target, RIVER.replace("Мост", "Пристань"), expected_revision=first.revision).current
+
+    args = {"topic": alias.topic, "scope": alias.scope}
+    if not alias.path.exists():
+        separate = store.write_knowledge_note(alias, "Independent note.\n").current
+        listing = registry.execute("knowledge_read", {**args, "view": "history"})
+        assert "1 recorded version(s)" in listing and separate.revision in listing and first.revision not in listing
+        assert "version_unavailable" in registry.execute("knowledge_read", {**args, "version": first.revision})
+        return
+
+    history = registry.execute_result("knowledge_read", {**args, "view": "history"})
+    listing = body(history.text)
+    assert "2 recorded version(s)" in listing and all(note.revision in listing for note in (first, second))
+    cursor = history.meta["knowledge_view"]
+    page = registry.execute("knowledge_read", {**args, "topic": cursor["topic"], "view": "history",
+                                              "fingerprint": cursor["fingerprint"], "start_char": 40})
+    assert body(page) == listing[40:]
+    journal_topic = alias.topic if legacy else target.topic
+    assert body(registry.execute("knowledge_read", {**args, "topic": journal_topic, "version": first.revision})) == first.text
+    readers = []
+    for note in (first, second):
+        pin = {**args, "version": note.revision}
+        exact = registry.execute_result("knowledge_read", pin)
+        page = registry.execute_result("knowledge_read", {**pin, "start_char": 1, "end_char": 10})
+        outline = registry.execute_result("knowledge_read", {**pin, "view": "outline"})
+        assert body(exact.text) == note.text and body(page.text) == note.text[1:10]
+        assert f"version={note.revision}" in body(outline.text)
+        expected_reader = {"tool": "knowledge_read", "arguments": {**pin, "topic": journal_topic}}
+        assert exact.meta["knowledge_source"]["read"] == page.meta["knowledge_source"]["read"] == expected_reader
+        assert outline.meta["knowledge_view"]["read"] == expected_reader
+        readers.append((expected_reader, note.text))
+
+    target.path.write_bytes(b"\xff")
+    unreadable = registry.execute("knowledge_read", {**args, "version": first.revision})
+    assert "The live note is unreadable at this address." in unreadable and body(unreadable) == first.text
+    target.path.write_bytes(second.raw)
+    current = second
+    if legacy:
+        current = store.write_knowledge_note(alias, "Newly journaled under the on-disk spelling.\n", mode="append").current
+        listing = registry.execute("knowledge_read", {**args, "view": "history"})
+        assert "3 recorded version(s)" in listing
+        assert listing.index("current") > listing.index(current.revision)
+        assert all(note.revision in listing for note in (first, second))
+    reverted = registry.execute_result("knowledge_write", {**args, "mode": "revert", "version": first.revision,
+                                                           "expected_revision": current.revision})
+    assert reverted.status == "ok" and target.path.read_bytes() == first.raw
+
+    target.path.rename(target.path.with_name("Moved.md"))
+    for reader, expected in readers:
+        assert body(registry.execute(reader["tool"], reader["arguments"])) == expected
+
+
+def test_a_malformed_outline_names_the_pin_that_reads_its_complete_source(tmp_path):
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(context(tmp_path))
+    target = address(tmp_path)
+    target.path.parent.mkdir(parents=True)
+    target.path.write_bytes(b"---\nsummary: [\n---\n## Earlier body\n")
+    malformed = store.read_knowledge_note(target)
+    assert malformed.parse_error
+    revised = store.write_knowledge_note(target, RIVER, expected_revision=malformed.revision).current
+    args = {"topic": target.topic, "scope": target.scope, "view": "outline"}
+    assert "Headings: unknown" not in registry.execute("knowledge_read", args)
+    assert f"version={revised.revision}" not in registry.execute("knowledge_read", args)
+
+    old = registry.execute_result("knowledge_read", {**args, "version": malformed.revision})
+    assert f"the complete note is the default read with version={malformed.revision}" in body(old.text)
+    reader = old.meta["knowledge_view"]["read"]
+    assert body(registry.execute(reader["tool"], reader["arguments"])) == malformed.text
+
+
 def test_knowledge_changes_skip_unchanged_journals_and_read_only_the_appended_window(tmp_path, monkeypatch):
     target = address(tmp_path)
     first = store.write_knowledge_note(target, "# Earlier\n" + "old body\n" * 2000).current

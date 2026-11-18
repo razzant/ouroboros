@@ -24,6 +24,7 @@ import json
 import os
 from collections import Counter
 from dataclasses import dataclass
+from heapq import merge
 from itertools import chain
 from pathlib import Path
 from types import SimpleNamespace
@@ -283,65 +284,31 @@ def claim_record_path(shelf: Path, topic: str) -> Path:
     return shelf.parent / "knowledge_note_records" / f"{key}.json"
 
 
-def claim_records_by_revision(shelf: Path) -> dict[str, dict]:
-    """Existing claim projections by their last committed revision, for notes missing a direct record."""
-    records = {}
-    for path in sorted(claim_record_path(shelf, "").parent.glob("*.json")):
-        row = utils.json_snapshot(path) or {}
-        topic, revision = row.get("topic"), row.get("revision")
-        if (isinstance(topic, str) and isinstance(revision, str) and isinstance(row.get("active_claims"), list)
-                and claim_record_path(shelf, topic) == path):
-            records.setdefault(revision, row)
-    return records
-
-
 def inventory_claim_names(shelf: Path, rows: Iterator[dict[str, Any]]) -> Iterator[tuple[str, list[str]]]:
-    """Intersect each inventory row with its record. Try the revision only when the topic has no record."""
-    by_revision = None
+    """Intersect each inventory row with the record at its shelf address."""
     for row in rows:
         topic = row["topic"]
-        record = utils.json_snapshot(claim_record_path(shelf, topic))
-        if record is None and row.get("revision"):
-            if by_revision is None:
-                by_revision = claim_records_by_revision(shelf)
-            record = by_revision.get(row["revision"])
+        record = utils.json_snapshot(claim_record_path(shelf, topic)) or {}
         written = set(row["claims"])
-        yield topic, [name for name in claim_names((record or {}).get("active_claims")) if name in written]
+        yield topic, [name for name in claim_names(record.get("active_claims")) if name in written]
 
 
-def _claim_publication(address: Any, topic: str) -> dict | None:
-    """The latest committed publication or transfer out of a topic, including before the projection landed."""
-    needle = _needle(SimpleNamespace(topic=topic))
+def _claim_publication(address: Any) -> dict | None:
+    """The latest committed publication at this address, including before the projection landed."""
     try:
-        for _offset, line in _journal_lines(journal_path(address), needle):
+        for _offset, line in _journal_lines(journal_path(address), _needle(address)):
             if b'"claims_published"' not in line:
                 continue
             row = _parse(line)
             if (not isinstance(row, dict) or row.get("publication") != _CLAIMS_PUBLICATION
-                    or not isinstance(row.get("topic"), str) or not isinstance(row.get("new_sha256"), str)):
+                    or row.get("topic") != address.topic or not isinstance(row.get("new_sha256"), str)):
                 continue
             where = row.get("address")
             if isinstance(where, dict) and where.get("scope", address.scope) != address.scope:
                 continue
-            if row["topic"] == topic or (_move_origin(row) or {}).get("topic") == topic:
-                return row
+            return row
     except FileNotFoundError:
         pass
-    return None
-
-
-def _retire_claim_record(shelf: Path, publication: dict | None) -> None:
-    moved = _move_origin(publication)
-    if moved:
-        path = claim_record_path(shelf, moved["topic"])
-        if (utils.json_snapshot(path) or {}).get("revision") == moved["revision"]:
-            path.unlink(missing_ok=True)
-
-
-def _move_origin(publication: dict | None) -> dict | None:
-    moved = (publication or {}).get("moved_from")
-    if isinstance(moved, dict) and all(isinstance(moved.get(key), str) for key in ("topic", "revision")):
-        return moved
     return None
 
 
@@ -358,11 +325,7 @@ def _project_claim_record(path: Path, publication: dict | None) -> None:
 
 def rebuild_claim_record(address: Any) -> None:
     """Rebuild one note's claims from completed writes. The caller holds the shelf lock."""
-    publication = _claim_publication(address, address.topic)
-    _retire_claim_record(address.shelf, publication)
-    if publication and publication["topic"] != address.topic:
-        return
-    _project_claim_record(claim_record_path(address.shelf, address.topic), publication)
+    _project_claim_record(claim_record_path(address.shelf, address.topic), _claim_publication(address))
 
 
 @dataclass(frozen=True)
@@ -376,35 +339,28 @@ class ClaimWrite:
     removed: bool
     report: bool
     publication: dict | None
-    moved_from: dict | None
 
     @property
     def changed(self) -> bool:
         return self.active != self.recorded
 
     def needs_publication(self, revision: str) -> bool:
-        return bool(self.moved_from or self.changed or
-                    (self.active and revision != (self.publication or {}).get("new_sha256")))
+        return self.changed or bool(self.active and revision != (self.publication or {}).get("new_sha256"))
 
     def publish(self, address: Any, history: Mapping[str, Any], revision: str) -> None:
         """Commit the names and their latest published revision after the source and index landed."""
         if self.path is None:
             return
-        _retire_claim_record(address.shelf, self.publication)
-        previous = self.publication or {}
-        publication = previous if previous.get("topic") == address.topic else None
+        publication = self.publication
         if self.needs_publication(revision):
             row = {key: history[key] for key in (
                 "task_id", "mode", "writer", "focus", "old_sha256", "reason",
             ) if key in history}
             row.update(ts=history.get("ts") or utils.utc_now_iso(), topic=address.topic, address=address.as_dict(),
                        new_sha256=revision, publication=_CLAIMS_PUBLICATION, active_claims=self.active)
-            if self.moved_from:
-                row["moved_from"] = self.moved_from
             if not utils.append_jsonl(journal_path(address), row,
                                       ensure_record_boundary=True, require_lock=True):
                 raise OSError("Claims history publication failed")
-            _retire_claim_record(address.shelf, row)
             publication = row
         _project_claim_record(self.path, publication)
 
@@ -417,17 +373,8 @@ def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: b
         return None
     old, new = claim_names(before.get("claims")), claim_names(after.get("claims"))
     # This is a writer/recovery read. Starts read only the derived record.
-    publication = _claim_publication(address, address.topic) if path is not None else None
-    recorded, moved_from = [], None
-    if publication and publication["topic"] == address.topic:
-        recorded = claim_names(publication.get("active_claims"))
-    elif path is not None and "claims" in before and (publication or not path.is_file()):
-        candidate = claim_records_by_revision(address.shelf).get(current.revision)
-        if candidate and candidate["topic"] != address.topic:
-            origin = _claim_publication(address, candidate["topic"])
-            if origin and origin["topic"] == candidate["topic"] and origin["new_sha256"] == current.revision:
-                recorded = claim_names(origin.get("active_claims"))
-                moved_from = {"topic": candidate["topic"], "revision": current.revision}
+    publication = _claim_publication(address) if path is not None else None
+    recorded = claim_names((publication or {}).get("active_claims"))
     if path is None:
         active = []
     elif explicit:
@@ -444,7 +391,7 @@ def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: b
     fields = ({"claims": data["claims"]} if "claims" in data else {} for data in (before, after))
     before_claims, after_claims = map(yaml_form, fields)
     report = explicit or host_claim is not None or before_claims != after_claims or recorded != active
-    return ClaimWrite(path, recorded, active, new, ignored, removed, report, publication, moved_from)
+    return ClaimWrite(path, recorded, active, new, ignored, removed, report, publication)
 
 
 _READ = object()  # find_version reads the live text itself
@@ -493,6 +440,18 @@ def find_version(address: Any, version: Any, live: Any = _READ) -> tuple[str, di
     gaps = "; ".join(unfiltered.gaps())
     raise VersionUnavailable((why or f"no version {version} of this {noun(address)} in its history")
                              + (f" ({gaps})" if gaps else ""))
+
+
+def find_note_version(address: Any, requested: Any, version: Any, live: Any = _READ) -> tuple[Any, str, dict]:
+    """Return the journal address that verifies the revision, including legacy writes under a case alias."""
+    try:
+        text, row = find_version(address, version, live)
+    except VersionUnavailable:
+        if requested == address:
+            raise
+        address = requested
+        text, row = find_version(address, version, live)
+    return address, text, row
 
 
 def row_facts(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -597,7 +556,8 @@ def render_outline(note: Any, label: str = "", *, version: str | None = None) ->
              "Summary: " + ("\n  ".join(summary.splitlines()) if summary else "no summary"),
              f"Revision: {note.revision}", f"State: {note.state}", f"Total: {len(note.text)} characters"]
     if note.source is None:
-        lines.append("Headings: unknown (the metadata does not parse; the complete note is the default read)")
+        pin = f" with version={version}" if version is not None else ""
+        lines.append(f"Headings: unknown (the metadata does not parse; the complete note is the default read{pin})")
         return "\n".join(lines) + "\n"
     headings = note.source.headings
     if not headings:
@@ -766,7 +726,8 @@ def _row_line(row: Mapping[str, Any], marks: list[str], replaced: list[str]) -> 
 
 
 def render_listing(source: Any, current: str, title: str, read: str, revert: Callable[[str], str] | None,
-                   blocked: tuple[str, str] | None = None, lifecycle: Callable[[str], str] | None = None) -> str:
+                   blocked: tuple[str, str] | None = None, lifecycle: Callable[[str], str] | None = None,
+                   *, alias: Any = None) -> str:
     """A text's versions, newest first, one line each: who wrote it, when, in which mode, why, the version it replaced
     (its actual undo target, also where no line above wrote it: a first write, an outside change, a write that did not
     land) and the call that puts that version back, what it changed, with the current one marked; then the calls that
@@ -776,11 +737,13 @@ def render_listing(source: Any, current: str, title: str, read: str, revert: Cal
     line offers a call the writer refuses; ``lifecycle(mode)`` renders a note's archive or restore call, the undo of the
     opposite lifecycle row."""
     history = NoteHistory(source)
-    rows = [_listed(row) for _offset, row in history]
+    legacy = NoteHistory(alias) if alias is not None else None
+    entries = history if legacy is None else merge(history, legacy, key=lambda entry: entry[0], reverse=True)
+    rows = [_listed(row) for _offset, row in entries]
     what = noun(source)
     blocked = blocked or (f"the {what} does not exist now", "mode=overwrite")
     lines = [f"{title}: {len(rows)} recorded version(s), newest first. Current revision: {current}."]
-    lines += [f"Gap: {gap}." for gap in history.gaps()]
+    lines += [f"Gap: {gap}." for gap in dict.fromkeys(history.gaps() + (legacy.gaps() if legacy else []))]
     current_seen = False
     for index, row in enumerate(rows):
         marks = []
@@ -806,17 +769,22 @@ def render_listing(source: Any, current: str, title: str, read: str, revert: Cal
     return "\n".join(lines) + "\n"
 
 
-def render_history(note: Any) -> str:
+def render_history(note: Any, requested: Any = None) -> str:
     """This note's versions, newest first, one line each, with the current one marked (``render_listing``)."""
     address = note.address
+    alias = requested if requested != address else None
     arguments = f"topic={address.topic!r}, scope={address.scope!r}"
+    read = f"knowledge_read({arguments}, version=<revision>)"
+    if alias is not None:
+        arguments = f"topic={alias.topic!r}, scope={alias.scope!r}"
+        read += f" or knowledge_read({arguments}, version=<revision>)"
     return render_listing(address, note.revision, f"History of {address.topic!r} ({address.scope})",
-                          f"knowledge_read({arguments}, version=<revision>)",
+                          read,
                           lambda version: f"knowledge_write({arguments}, mode='revert', version={version!r}, "
                                           f"expected_revision={note.revision!r})",
                           lifecycle=lambda mode: f"knowledge_write({arguments}, mode={mode!r}, "
                                                  + ("reason=<why>, " if mode == "archive" else "")
-                                                 + f"expected_revision={note.revision!r})")
+                                                 + f"expected_revision={note.revision!r})", alias=alias)
 
 
 def _lines(raw: bytes, start: int, end: int, sign: str) -> tuple[int, list[str]]:
