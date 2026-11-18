@@ -1301,3 +1301,134 @@ def test_a_fully_played_item_is_heard_though_its_report_floors_a_millisecond_sho
     assert not call.heard('said') and call.unheard()  # control: a real remainder is still unheard
     call.interrupted.add('said')
     assert not call.unheard()  # an interrupted item is never waited for
+
+
+
+@pytest.mark.parametrize('engine', ['gemini-one-batch', 'transcript-after-the-answer', 'response-named-for-the-words',
+                                    'never-recognised'])
+def test_history_keeps_speaking_order_between_the_owners_words_and_the_answer(monkeypatch, engine):
+    """#3633. An answer's row follows the owner's words begun before its response, even when recognition closes them
+    after the answer was heard: ordinary Gemini closes both captions at one turn completion paced to the end of
+    playback (28.10), its answer's first; OpenAI and xAI transcribe beside the response. Words begun after an answer
+    (a barge-in, or the owner speaking right after hearing it) never hold its row, and owner rows are never held."""
+    from skills.live_conversation import driver
+    calls = []
+
+    class Observed(driver._Call):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            calls.append(self)
+    monkeypatch.setattr(driver, '_Call', Observed)
+
+    def caption(speaker, item, text, final=True):
+        return LiveEvent('caption', {'speaker': speaker, 'item_id': item, 'text': text, 'final': final})
+
+    def done(response):
+        return LiveEvent('response_done', {'response_id': response, 'usage': {}, 'raw_usage': {}, 'status': 'completed',
+                                           'continues': False})
+
+    async def heard(host, session, response, item, text, *, before=()):
+        session.events.put_nowait([*before, LiveEvent('response_started', {'response_id': response}),
+                                   LiveEvent('audio', {'item_id': item, 'rate': 24000, 'pcm': b'\0' * 960}),
+                                   caption('ouroboros', item, text, final=False)])
+        await until(lambda: item in calls[0].audio_ms)
+        host.hub.events.append(cp.PeerControl('peer', cp.PEER_OWNER, {'type': 'played', 'item_id': item, 'played_ms': 20}))
+        await until(lambda: calls[0].heard(item))
+
+    def texts(host):
+        return [row['text'] for row in host.captions]
+
+    async def scenario():
+        host = Host()
+        task, session = await started(host)
+        try:
+            session.emit('ready', input_rate=24000, output_rate=24000)
+            session.input_pending = True  # the adapter's fact: words said or awaiting their transcript
+            if engine == 'response-named-for-the-words':  # no VAD start: the transcript names the answer under way
+                await heard(host, session, 'r1', 'noon', 'Noon.')
+                session.events.put_nowait([LiveEvent('input_started', {'response_id': 'r1'}),
+                                           caption('owner', 'asked', 'What time is it?', final=False)])
+            else:
+                start = [LiveEvent('input_started'), caption('owner', 'asked', 'What time is it?', final=False)]
+                if engine != 'gemini-one-batch':
+                    start.append(LiveEvent('input_done'))  # speech stopped; its transcript is still to come
+                await heard(host, session, 'r1', 'noon', 'Noon.', before=start)
+            if engine in ('gemini-one-batch', 'response-named-for-the-words'):
+                session.input_pending = False
+                session.events.put_nowait([caption('ouroboros', 'noon', 'Noon.'), caption('owner', 'asked', 'What time is it?'),
+                                           LiveEvent('input_done'), done('r1')])
+            else:
+                session.events.put_nowait([caption('ouroboros', 'noon', 'Noon.'), done('r1')])
+                await until(lambda: 'noon' not in calls[0].pending_spoken)
+                await asyncio.sleep(.05)
+                assert not host.captions, 'a heard answer waits for the words begun before it'
+                assert 'pending_spoken' in calls[0].quiet_blockers(), 'a held answer keeps the call from switching'
+                session.input_pending = False
+                # A failed transcript converts to no event: the words close once nothing is said or awaited.
+                session.events.put_nowait([] if engine == 'never-recognised' else [caption('owner', 'asked', 'What time is it?')])
+            expected = ['Noon.'] if engine == 'never-recognised' else ['What time is it?', 'Noon.']
+            await until(lambda: len(host.captions) == len(expected))
+            assert texts(host) == expected, 'the answer is written after the words it answers'
+            await heard(host, session, 'r2', 'more', 'Anything else?')
+            session.input_pending = True
+            session.events.put_nowait([LiveEvent('input_started'), caption('owner', 'after', 'No, thanks.', final=False),
+                                       caption('ouroboros', 'more', 'Anything else?')])
+            await until(lambda: len(host.captions) == len(expected) + 1)
+            assert texts(host)[-1] == 'Anything else?', 'words begun after an answer never hold it'
+            assert 'pending_spoken' not in calls[0].quiet_blockers()
+            session.input_pending = False
+            session.events.put_nowait([caption('owner', 'after', 'No, thanks.'), LiveEvent('input_done'), done('r2')])
+            await until(lambda: len(host.captions) == len(expected) + 2)
+            assert texts(host) == [*expected, 'Anything else?', 'No, thanks.']
+        finally:
+            host.hub.ended_by_owner = True
+            await asyncio.wait_for(task, 2)
+    asyncio.run(scenario())
+
+
+def test_an_answer_held_for_newer_words_never_holds_an_older_answer(monkeypatch):
+    """#3633, both answers held: R1 answers A, R2 began after B began. R2's final caption came first and R1's late.
+    A's words release R1 at once though R2 still waits for B's; B's words then release R2."""
+    from skills.live_conversation import driver
+    calls = []
+
+    class Observed(driver._Call):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            calls.append(self)
+    monkeypatch.setattr(driver, '_Call', Observed)
+
+    def caption(speaker, item, text, final=True):
+        return LiveEvent('caption', {'speaker': speaker, 'item_id': item, 'text': text, 'final': final})
+
+    async def heard(host, session, before, response, item, text):
+        session.events.put_nowait([*before, LiveEvent('response_started', {'response_id': response}),
+                                   LiveEvent('audio', {'item_id': item, 'rate': 24000, 'pcm': b'\0' * 960}),
+                                   caption('ouroboros', item, text, final=False)])
+        await until(lambda: item in calls[0].audio_ms)
+        host.hub.events.append(cp.PeerControl('peer', cp.PEER_OWNER, {'type': 'played', 'item_id': item, 'played_ms': 20}))
+        await until(lambda: calls[0].heard(item))
+
+    async def scenario():
+        host = Host()
+        task, session = await started(host)
+        try:
+            session.emit('ready', input_rate=24000, output_rate=24000)
+            session.input_pending = True  # both utterances await their transcripts
+            await heard(host, session, [LiveEvent('input_started'), LiveEvent('input_done')], 'r1', 'one', 'First answer.')
+            await heard(host, session, [LiveEvent('input_started'), LiveEvent('input_done')], 'r2', 'two', 'Second answer.')
+            session.events.put_nowait([caption('ouroboros', 'two', 'Second answer.'), caption('ouroboros', 'one', 'First answer.')])
+            await until(lambda: len(calls[0].spoken_rows) == 2)
+            session.events.put_nowait([caption('owner', 'a', 'First words.')])
+            await until(lambda: len(host.captions) == 2)
+            assert [row['text'] for row in host.captions] == ['First words.', 'First answer.'], 'R2 holds no older answer'
+            assert [row['text'] for _, row in calls[0].spoken_rows] == ['Second answer.'], 'R2 still waits for B'
+            session.input_pending = False
+            session.events.put_nowait([caption('owner', 'b', 'Second words.')])
+            await until(lambda: len(host.captions) == 4)
+            assert [row['text'] for row in host.captions] == ['First words.', 'First answer.', 'Second words.',
+                                                             'Second answer.']
+        finally:
+            host.hub.ended_by_owner = True
+            await asyncio.wait_for(task, 2)
+    asyncio.run(scenario())

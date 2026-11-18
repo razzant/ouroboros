@@ -1973,7 +1973,9 @@ native input/transcription work and open calls; the feature also waits for playb
 never for a running tool. Optional `input_pending` reports words said or awaiting recognition, apart from open calls:
 a forced switch waits for it, and a loss with it set gives a fresh session the hearing-gap fact (absent, VAD events decide).
 `input_started` may name a `response_id` already begun for its words when no VAD start preceded them, so that response
-answers them. A native resume needs a handle published after the open calls and last native result; one history outran
+answers them. History keeps speaking order: a spoken row follows the owner's words begun before its response (counted
+by `input_started`, closed in order by their final caption or by a converted batch that leaves nothing said or awaiting
+recognition), never words begun after it, and owner rows are never held. A native resume needs a handle published after the open calls and last native result; one history outran
 while opening continues fresh. OpenAI withholds `response.create` while its own call awaits output: speech on the issuing
 connection, or after a further call behind a running effect, is answered once that output is written.
 `final_captions()` returns received unfinished words at teardown without new wire work.

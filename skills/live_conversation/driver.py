@@ -263,6 +263,15 @@ class _Call:
         # request that crossed new speech stay owed, and a transcript landing after the answer finds nothing to owe.
         # A fresh fit holds recognised words, so a fresh switch owes them as room words; other words stay the gap fact's.
         self.spoken_answers, self.spoken_known = None, False
+        # Speaking order. History is append-only, so an answer's row is placed before it is queued: it follows the owner's
+        # words begun before its response and never waits for words begun after it; owner rows never wait. Recognition can
+        # close words after their answer was heard (ordinary Gemini closes both captions at one turn completion paced to
+        # the end of playback; OpenAI and xAI transcribe beside the response). Utterances are counted as they begin and
+        # close in order: with a final owner caption, or once a converted batch leaves nothing said or awaiting
+        # recognition. ``answer_words`` is how many had begun when each response did (a response the adapter names for
+        # lagging words counts them too); ``spoken_rows`` holds heard or interrupted answers whose words are still open.
+        self.words_begun = self.words_closed = 0
+        self.answer_words, self.item_answer, self.spoken_rows, self.answering = {}, {}, [], ""
 
     async def run(self):
         writer = self.writer = asyncio.create_task(self.save_rows())
@@ -675,7 +684,7 @@ class _Call:
     def refit_ready(self):
         return (self.preparation_ready() and not self.input_unsettled()
                 and not (self.active_responses - self.tool_responses)
-                and not self.pending_spoken and not self.unheard() and not self.delivering)
+                and not self.pending_spoken and not self.spoken_rows and not self.unheard() and not self.delivering)
 
     def input_unsettled(self):
         """Words being said or awaiting recognition, by the adapter's own fact where it has one: a VAD edge or an older
@@ -699,7 +708,7 @@ class _Call:
     def quiet_blockers(self):
         blocked = [name for name, active in (
             ("response_open", self.response_open), ("input_open", self.input_open), ("delivering", self.delivering),
-            ("pending_spoken", bool(self.pending_spoken)), ("unheard", self.unheard())) if active]
+            ("pending_spoken", bool(self.pending_spoken or self.spoken_rows)), ("unheard", self.unheard())) if active]
         if self.session is None:
             blocked.append("connection")
         elif not self.session.renewal_ready:
@@ -716,8 +725,20 @@ class _Call:
     async def finish_spoken(self, item, *, interrupted=False, completed=False):
         caption = self.pending_spoken.pop(item, None)
         if caption is not None:
-            await self.rows.put(dict(speaker="ouroboros", item_id=item, heard=False,
-                played_ms=self.played.get(item, 0), interrupted=interrupted, completed=completed, **caption))
+            self.spoken_rows.append((self.answer_words.get(self.item_answer.get(item), 0), dict(
+                speaker="ouroboros", item_id=item, heard=False, played_ms=self.played.get(item, 0),
+                interrupted=interrupted, completed=completed, **caption)))
+            await self.write_spoken(self.words_closed)
+
+    async def write_spoken(self, closed):
+        """Queue every held answer whose words have closed, in the order they finished, once ``closed`` utterances have
+        closed; one still waiting holds back no other. Only an owner caption, the end of a converted batch and the
+        connection's end close words; a played receipt never decides it."""
+        self.words_closed = max(self.words_closed, closed)
+        ready = [row for need, row in self.spoken_rows if need <= self.words_closed]
+        self.spoken_rows = [(need, row) for need, row in self.spoken_rows if need > self.words_closed]
+        for row in ready:
+            await self.rows.put(row)
 
     async def caption(self, data):
         speaker, item = data["speaker"], data["item_id"]
@@ -738,6 +759,7 @@ class _Call:
             else:
                 await self.rows.put(dict(speaker=speaker, text=text, item_id=item, heard=heard,
                     **({"speaker_label": ", ".join(sorted(self.meeting_speakers))} if heard and self.meeting_speakers else {})))
+                await self.write_spoken(min(self.words_closed + 1, self.words_begun))  # the oldest words still open
             if speaker == "owner":
                 self.meeting_audio = False
                 self.meeting_speakers.clear()
@@ -762,6 +784,7 @@ class _Call:
                 await self.caption(event.data)
         for item in tuple(self.pending_spoken):
             await self.finish_spoken(item, interrupted=item in self.interrupted)
+        await self.write_spoken(self.words_begun)  # an ending connection waits for no words
         drain = asyncio.create_task(self.rows.join())
         try:
             done, _ = await asyncio.wait((drain, self.writer), return_when=asyncio.FIRST_COMPLETED)
@@ -922,6 +945,7 @@ class _Call:
                 if event.kind == 'audio' or event.kind == 'caption' and data['speaker'] == 'ouroboros':
                     # Refit must wait for speech to finish; continuation custody is unchanged.
                     self.tool_responses.difference_update(self.active_responses)
+                    self.item_answer.setdefault(data['item_id'], self.answering)
                 if event.kind == "ready":
                     if self.tool_refit.is_set():
                         continue  # a late ready cannot release work to the retiring connection
@@ -963,6 +987,9 @@ class _Call:
                 elif event.kind == "input_started":
                     self.input_open = True
                     self.spoken_answers = {data["response_id"]} if data.get("response_id") else set()
+                    self.words_begun += 1
+                    if data.get("response_id"):  # begun already for these words: its spoken rows follow them
+                        self.answer_words[data["response_id"]] = self.words_begun
                     await self.reader_wrote(self.input_frames())
                 elif event.kind == "input_done":
                     self.input_open = False
@@ -978,11 +1005,13 @@ class _Call:
                             refusal = exc
                             continue
                         self.started_responses.add(response)
+                        self.answer_words[response] = self.words_begun
                         for due in settles:
                             if due is self.answer_due or due is self.room_due:
                                 due.answering.add(response)
                         if self.spoken_answers is not None:
                             self.spoken_answers.add(response)
+                    self.answering = response
                     if response not in self.receipts:
                         self.active_responses.add(response)
                     self.response_open = bool(self.active_responses) or self.response_open
@@ -1022,6 +1051,9 @@ class _Call:
                         raise RealtimeSetupError("provider_closed", data.get("detail") or "provider ended the live connection")
                     self.lost_connection(resuming=resumable and self.resume_allowed())
                     return
+            # Every input fact this batch moved is applied: words no longer said or awaited have closed, a failed
+            # recognition included, which converts to no event of its own.
+            await self.write_spoken(self.words_closed if self.input_unsettled() else self.words_begun)
             if refusal is not None:
                 raise refusal
 
