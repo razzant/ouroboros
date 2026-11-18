@@ -1,0 +1,133 @@
+name: Extension Stop · one-off Linux check
+'on':
+  push:
+    branches: ['qa/extension-step-stop-check']
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      # Bind both values to the reviewed product before creating the check branch.
+      STOP_BASE_SHA: '4f95ba757a70fc76429aee73b23ff5160ce4a275'
+      STOP_EXPECTED_TREE: '783548b92d5a231a0a3b96469fa661a81fe83384'
+      OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: '1'
+      OUROBOROS_PREFLIGHT_REQUIRE_NODE: '1'
+      PYTHONNOUSERSITE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # repository CI pin, v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Extract just the check driver, then detach on the reviewed product
+        id: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'razzant/ouroboros'
+          test "$GITHUB_REF" = 'refs/heads/qa/extension-step-stop-check'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse --is-shallow-repository)" = false
+          [[ $STOP_BASE_SHA =~ ^[0-9a-f]{40}$ && $STOP_EXPECTED_TREE =~ ^[0-9a-f]{40}$ ]]
+          read -r -a lineage <<< "$(git rev-list --parents -n 1 HEAD)"
+          test "${#lineage[@]}" -eq 2
+          product_sha="${lineage[1]}"
+          test "$(git rev-parse "$product_sha^{tree}")" = "$STOP_EXPECTED_TREE"
+          git merge-base --is-ancestor "$STOP_BASE_SHA" "$product_sha"
+          expected=$'.github/qa/stop_lane.py\n.github/workflows/extension-stop-check.yml'
+          test "$(git diff --no-renames --name-only "$product_sha" HEAD | LC_ALL=C sort)" = "$expected"
+          git show HEAD:.github/qa/stop_lane.py > "$RUNNER_TEMP/stop_lane.py"
+          git checkout --detach "$product_sha"
+          test "$(git rev-parse HEAD)" = "$product_sha"
+          test "$(git write-tree)" = "$STOP_EXPECTED_TREE"
+          git diff --quiet && git diff --cached --quiet
+          mkdir -p "$RUNNER_TEMP/stop-qa/public"
+          printf '{"product":"%s","tree":"%s","base":"%s","tooling":"%s"}\n' "$product_sha" "$STOP_EXPECTED_TREE" "$STOP_BASE_SHA" "$GITHUB_SHA" > "$RUNNER_TEMP/stop-qa/public/binding.json"
+          printf 'STOP_PRODUCT_SHA=%s\nSTOP_PY=%s\nPLAYWRIGHT_BROWSERS_PATH=%s\n' "$product_sha" "$RUNNER_TEMP/stop-venv/bin/python" "$RUNNER_TEMP/stop-chromium" >> "$GITHUB_ENV"
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # repository CI pin, v9.0.0
+        id: uv
+        with:
+          version: '0.12.1'
+          enable-cache: false
+      - name: Project-pinned Python and locked test/browser dependencies
+        id: deps
+        if: ${{ !cancelled() && steps.product.outcome == 'success' && steps.uv.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e _python_tmp && test ! -e "$RUNNER_TEMP/stop-python"
+          PYTHON_STANDALONE_DEST="$RUNNER_TEMP/stop-python" PYTHON_STANDALONE_INTERPRETER_ONLY=1 bash scripts/download_python_standalone.sh
+          UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/stop-venv" uv sync --locked --no-install-project --extra browser --group dev --python "$RUNNER_TEMP/stop-python/bin/python3"
+          "$STOP_PY" -I -c 'import sys, pytest, xdist, pytest_timeout, playwright.sync_api; print(sys.executable, sys.version)'
+          git diff --exit-code
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # repository CI pin, v4
+        id: node_bin
+        if: ${{ !cancelled() && steps.product.outcome == 'success' }}
+        with:
+          node-version: '24.22.3'
+      - name: Pin Playwright's browser and driver in the test environment
+        id: browser_bin
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' && steps.node_bin.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PLAYWRIGHT_NODEJS_PATH="$(command -v node)"
+          test "$("$PLAYWRIGHT_NODEJS_PATH" --version)" = v24.22.3
+          echo "PLAYWRIGHT_NODEJS_PATH=$PLAYWRIGHT_NODEJS_PATH" >> "$GITHUB_ENV"
+          "$STOP_PY" -m playwright install --with-deps chromium
+
+      - name: Owning tests, including Stop, receipts, place notes and simulated input
+        id: owning
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        run: '"$STOP_PY" -I "$RUNNER_TEMP/stop_lane.py" owning "$RUNNER_TEMP/stop-qa"'
+      - name: Structure, frozen interfaces, inventory, docs and floor
+        id: structure
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        run: '"$STOP_PY" -I "$RUNNER_TEMP/stop_lane.py" structure "$RUNNER_TEMP/stop-qa"'
+      - name: Size against the explicit public base
+        id: size
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        run: '"$STOP_PY" -I "$RUNNER_TEMP/stop_lane.py" size "$RUNNER_TEMP/stop-qa"'
+      - name: Node UI contracts
+        id: node_tests
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' && steps.node_bin.outcome == 'success' }}
+        run: '"$STOP_PY" -I "$RUNNER_TEMP/stop_lane.py" node "$RUNNER_TEMP/stop-qa"'
+      - name: Real Chromium, synthetic late rows and replay by the real gateway
+        id: browser
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' && steps.browser_bin.outcome == 'success' }}
+        run: '"$STOP_PY" -I "$RUNNER_TEMP/stop_lane.py" browser "$RUNNER_TEMP/stop-qa"'
+      - name: Check the final source identity and patch whitespace
+        id: source
+        if: ${{ !cancelled() && steps.product.outcome == 'success' }}
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$STOP_PRODUCT_SHA"
+          test "$(git write-tree)" = "$STOP_EXPECTED_TREE"
+          git diff --exit-code
+          git diff --check "$STOP_BASE_SHA" "$STOP_PRODUCT_SHA"
+      - name: Package only allowlisted synthetic diagnostics (partial evidence survives failures)
+        id: evidence
+        if: ${{ !cancelled() && steps.product.outcome == 'success' }}
+        run: python3 -I "$RUNNER_TEMP/stop_lane.py" bundle "$RUNNER_TEMP/stop-qa"
+      - name: Preserve the synthetic card and check reports
+        id: upload
+        if: ${{ !cancelled() && steps.product.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # repository CI pin, v4
+        with:
+          name: extension-stop-synthetic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stop-qa/stop-check.zip
+          if-no-files-found: error
+          retention-days: 7
+      - name: Require all expected outcomes
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -eu
+          states='${{ steps.product.outcome }} ${{ steps.uv.outcome }} ${{ steps.deps.outcome }} ${{ steps.node_bin.outcome }} ${{ steps.browser_bin.outcome }} ${{ steps.owning.outcome }} ${{ steps.structure.outcome }} ${{ steps.size.outcome }} ${{ steps.node_tests.outcome }} ${{ steps.browser.outcome }} ${{ steps.source.outcome }} ${{ steps.evidence.outcome }} ${{ steps.upload.outcome }}'
+          read -r -a actual <<< "$states"
+          test "${#actual[@]}" -eq 13
+          for outcome in "${actual[@]}"; do test "$outcome" = success; done
