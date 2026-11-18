@@ -1909,3 +1909,55 @@ test('a repeated physical down returns again after passive focus scrolling witho
     assert.equal(returned, true, 'every physical press moves immediately');
     assert.equal(f.calls.length, before, 'both presses share the one pending fetch');
 });
+
+
+const workCardHistory = row('progress:901', 'Working in this Project', { task_id: 'reply-work', is_progress: true, narration: true });
+const workReplyHistory = row('chat:902', 'A reply from the Main portal', {
+    role: 'user', chat_id: 1, client_message_id: 'reply-902', row_address: 'row:1@t#reply902',
+    sender_session_id: 'same-tab', ingress_accepted: true,
+    reply_to: { address: 'task:reply-work', role: 'assistant', kind: 'work_card', snippet: 'Working', work_task_id: 'reply-work' },
+});
+
+test('a live Main work reply from the same tab appears once in the open Project before history, and replay keeps its node', async t => {
+    const f = fixture(t, page([workCardHistory]), null, { seed: () => sessionStorage.setItem('ouro_chat_session_id', 'same-tab') });
+    await f.refresh();
+    const card = walkCard(f.messages, workCardHistory.task_id);
+    const slot = card.querySelector('[data-live-work-replies]');
+    const echo = { ...workReplyHistory, content: workReplyHistory.text, also_rooms: [2] };
+    const reads = f.calls.length;
+    f.emit(echo);
+    assert.equal(f.calls.length, reads, 'the live transport paints without a history read');
+    assert.equal(slot.hidden, false);
+    const shown = f.messages.querySelectorAll('.chat-bubble.user[data-client-message-id]');
+    assert.equal(shown.length, 1);
+    const [bubble] = shown;
+    assert.equal(bubble.parentElement, slot, 'only the actual Project work owns this appearance');
+    assert.equal(bubble.dataset.rowAddress, workReplyHistory.row_address);
+    f.emit(echo);
+    await f.refresh(page([workCardHistory, workReplyHistory]));
+    f.emit(echo);
+    assert.deepEqual(f.messages.querySelectorAll('.chat-bubble.user[data-client-message-id]'), [bubble]);
+    assert.equal(bubble.dataset.historyId, workReplyHistory.history_id);
+    assert.equal(bubble.parentElement, slot);
+});
+
+test('an arrival inside an unchanged work card lights New activity on replay, without moving the reader or repeating the row', async t => {
+    const initial = [...presentRows(900), workCardHistory];
+    const f = fixture(t, page(initial));
+    await f.refresh();
+    const card = walkCard(f.messages, workCardHistory.task_id);
+    readUp(f);
+    // Independent scroll geometry: reparenting one row does not change this reader's distance from the live edge.
+    Object.defineProperty(f.messages, 'scrollHeight', { configurable: true, get: () => 1500, set() {} });
+    f.messages.scrollTop = 400;
+    assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message');
+    await f.refresh(page([...initial, workReplyHistory]));
+    assert.equal(latestButton().getAttribute('aria-label'), 'New activity — scroll to latest message');
+    assert.equal(f.messages.scrollTop, 400);
+    const slot = card.querySelector('[data-live-work-replies]');
+    assert.equal(slot.children.length, 1);
+    const [bubble] = slot.children;
+    await f.refresh(page([...initial, workReplyHistory]));
+    assert.deepEqual(slot.children, [bubble]);
+    assert.equal(f.messages.scrollTop, 400);
+});

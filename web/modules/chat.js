@@ -2241,7 +2241,8 @@ export function createChatInstance({
         // A returning room reads arrivals instead of receiving socket frames. Only newly drawn content marks ↓:
         // the first page, older pages and adopting a stored identity for already seen live words stay quiet.
         const reportActivity = historyLoaded && !archived;
-        const knownRows = reportActivity ? new Set(messagesDiv.children) : null;
+        const replyPlacements = () => messagesDiv.querySelectorAll('[data-reply-work]');
+        const knownRows = reportActivity ? new Set([...messagesDiv.children, ...replyPlacements()]) : null;
         const knownCards = new Map([...liveCardRecords].map(([id, record]) => [id, reportActivity
             ? { projection: captureLiveCardProjection(record), items: record.items.length, source: record.latestSourceTs } : null]));
         _historyReplayActive = true;
@@ -2467,7 +2468,8 @@ export function createChatInstance({
                 const dirty = [...liveCardRecords.values()].filter(record => record._timelineDirty);
                 measure(() => { const kept = keepSelection(document); return dirty.map(record => ({ scroll: timelineScroll(record), kept })); },
                     (before) => dirty.forEach((record, index) => renderLiveCardTimeline(record, before[index])));
-                return reportActivity && ([...messagesDiv.children].some(node => node.classList.contains('chat-bubble') && !knownRows.has(node))
+                return reportActivity && ([...messagesDiv.children, ...replyPlacements()]
+                    .some(node => node.classList.contains('chat-bubble') && !knownRows.has(node))
                     || [...liveCardRecords].some(([id, record]) => {
                         const before = knownCards.get(id);
                         // Reconciliation can change liveness or placement of words already seen; that is no arrival.
@@ -3255,7 +3257,8 @@ export function createChatInstance({
             const senderSessionId = msg.sender_session_id || '';
             // 2A: the user echo is receipt of the user ROW, not turn start: it settles the bubble but must NOT retire the
             // `Sending...` submission (a linked typing frame, snapshot turn, routing receipt or the turn's conclusion does).
-            const own = senderSessionId === chatSessionId && clientMessageId;
+            // Several rooms in one tab share the sender session; only this room's sends are local echoes here.
+            const own = senderSessionId === chatSessionId && localEchoJournal.has(clientMessageId);
             if (own) markPendingDelivered(clientMessageId);
             // The custody listener can settle this room's send while away; another client's echo waits for history.
             if (leaving) {
@@ -3263,19 +3266,15 @@ export function createChatInstance({
                 unconfirmed.settle(msg);
                 return;
             }
-            if (!own) withRemoteActivity(() => addMessage(
-                msg.content, 'user', false, msg.ts || null, false, {
-                source: msg.source || '',
-                senderLabel: msg.sender_label || '',
-                senderSessionId,
-                clientMessageId,
-                taskId: msg.task_id || '',
-                attachments: msg.attachments,
-                textPlaceholder: msg.text_placeholder === true, reply: msg,
-                },
-            ));
-            withStableViewport(() => markIngressSaved(messagesDiv, msg) | replies.adopt(msg)
-                | markSwarmLabel(messagesDiv, msg) | placeWorkReply(messagesDiv, liveCardRecords, msg));
+            (own ? withStableViewport : withRemoteActivity)(() => {
+                const added = !own && addMessage(msg.content, 'user', false, msg.ts || null, false, {
+                    source: msg.source || '', senderLabel: msg.sender_label || '', senderSessionId,
+                    clientMessageId, taskId: msg.task_id || '', attachments: msg.attachments,
+                    textPlaceholder: msg.text_placeholder === true, reply: msg,
+                });
+                return Boolean(markIngressSaved(messagesDiv, msg) | replies.adopt(msg)
+                    | markSwarmLabel(messagesDiv, msg) | placeWorkReply(messagesDiv, liveCardRecords, msg)) || Boolean(added);
+            });
             unconfirmed.settle(msg);
             syncChatStatus();
             return;

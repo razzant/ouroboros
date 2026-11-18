@@ -30,6 +30,7 @@ function fixture({ stack = true, coarse = true, blocked = false, selection = '' 
     globalThis.window.getSelection = () => ({ toString: () => state.selection });
     const dispose = createRowSwipe({
         feed, icon: '<svg></svg>', reply: (ref) => replied.push(ref.address),
+        rowOf: (target) => target.closest('.chat-bubble'),
         replyRef: (row) => (row.dataset.rowAddress ? { address: row.dataset.rowAddress } : null),
         isStack: () => state.stack, isCoarse: () => state.coarse, isBlocked: () => state.blocked,
         onLayout: (sync) => { layoutHandlers.push(sync); return () => layoutHandlers.splice(layoutHandlers.indexOf(sync), 1); },

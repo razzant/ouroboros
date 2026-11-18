@@ -542,9 +542,8 @@ const CARD_HEADER = [
     '.chat-live-project-card-btn',
 ];
 
-// The feed's bounded, separately scrolling boxes: a card timeline, a fetched
-// full output, a Reviews group's Record facts. Each clips what it holds.
-const BOUNDED_BOX = '[data-live-timeline], .chat-live-line-body-full, [data-review-attempt-detail]';
+// A card's own timeline, Details (bounded alongside children), full output and Record facts.
+const BOUNDED_BOX = '[data-live-timeline], .chat-live-details, .chat-live-line-body-full, [data-review-attempt-detail]';
 
 /** An explicit exact-line landing scrolls every clipping owner before the feed. */
 export function revealTimelineNode(node, feed, clearance) {
