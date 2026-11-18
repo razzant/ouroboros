@@ -128,7 +128,9 @@ def _reject_schedule_task(
     loop); otherwise nothing is overwritten and the copy is freed only once
     another owner provably holds the row. A workspace child that never ran has
     no artifacts to finalize, so its artifact status is terminal (as the API
-    refusal records it). Returns whether the refusal was durably confirmed.
+    refusal records it). Receipt persistence alone resumes through the claim's
+    store gate: contention retains the chosen detail, before cleanup or notice.
+    Returns whether the refusal was durably confirmed.
     """
     log.warning("Rejecting scheduled task %s: %s", tid, detail)
     write_fields = {**result_fields, **(extra_fields or {})}
@@ -147,7 +149,7 @@ def _reject_schedule_task(
             from supervisor.task_admission import persist_never_admitted_refusal
 
             write_refusal = persist_never_admitted_refusal if never_admitted else write_task_result
-            write_refusal(
+            persist = functools.partial(write_refusal,
                 ctx.DRIVE_ROOT,
                 tid,
                 **({"admission_token": preparation.token} if preparation is not None
@@ -158,6 +160,10 @@ def _reject_schedule_task(
                 # under the honest name (the retired alias is read-only).
                 accounted_upper_bound_usd=0.0,
             )
+            if preparation is None:
+                persist()
+            else:
+                preparation.store_gate(persist, controls=False)
             refusal_confirmed = True
         except Exception as exc:
             from supervisor.workspace_preparation import store_contention
