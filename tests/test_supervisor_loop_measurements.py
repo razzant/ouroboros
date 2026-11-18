@@ -239,11 +239,8 @@ def test_the_loop_publishes_one_monotonic_stamp_per_tick_phase():
     helper = inspect.getsource(server_liveness.run_startup_phase)
     assert re.findall(r'loop_phase_facts\(liveness, (\w+|"\w+")\), time\.(\w+)\(\)', helper) == [
         ("phase", "monotonic"), ('"startup"', "monotonic")], helper
-    # The bounded drain receives the loop's own liveness list and observes the lag itself.
-
+    # The bounded drain receives the loop's own liveness list; what it observes there is the lag test's.
     assert re.search(r"drain_worker_events\(\s*get_event_q\(\), _event_ctx, _loop_liveness,", source), source
-    assert "observe_worker_event_lag(liveness, None if waited is None else waited + taken - drained_at)" in (
-        inspect.getsource(server_liveness.drain_worker_events))
 
 
 def _run_custody_tick(monkeypatch, *, failing_step=None):
