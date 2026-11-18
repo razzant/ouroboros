@@ -120,6 +120,11 @@ def _reader(first: ds.Row, last: ds.Row) -> str:
             f"to='{format_address(row_address(last.row))}')")
 
 
+def _answers(row: Mapping[str, Any], cards: Any) -> bool:
+    """Whether a row is my human's answer to one of these cards (its answer row or its late delivery)."""
+    return bool(cards) and (_late(row) or str(row.get("type") or "") == "quiz_answer") and _quiz_id(row) in cards
+
+
 def _late(row: Mapping[str, Any]) -> bool:
     return str(row.get("client_message_id") or "").startswith(_LATE)
 
@@ -211,11 +216,12 @@ def reach(root: Any) -> Optional[Dict[str, Any]]:
 
 
 def facts(root: Any, word: ds.Row, own: Own, *, upper: Optional[ds.Row] = None,
-          since: Optional[Mapping[str, Any]] = None, delivered: Any = (),
+          since: Optional[Mapping[str, Any]] = None, delivered: Any = (), cards: Any = (),
           told: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """What happened elsewhere from the receiver's lower bound to ``upper`` (default ``word``, the first of the words
     it now receives); ``since`` is a running root's reach; ``delivered`` the positions of the words it receives with
-    the block, which it holds already. ``None`` when there is nothing to say."""
+    the block, which it holds already, and ``cards`` the cards those words answer: a card answer's other row (a late
+    click writes two) is the same word, never one elsewhere. ``None`` when there is nothing to say."""
     from ouroboros.places import place_owner_accounts, place_rows
 
     root = pathlib.Path(root)
@@ -225,6 +231,7 @@ def facts(root: Any, word: ds.Row, own: Own, *, upper: Optional[ds.Row] = None,
         accounts = None
     end = upper or word
     held = {word.seq, *delivered}
+    answered = {card for card in (_quiz_id(word.row), _quiz_id(end.row), *cards) if card}
     previous = previous_word(root, word, accounts, skip=held)
     starts = ([(int(since["seq"]), str(since.get("ts") or ""))] if since else []) + (
         [(previous.seq + 1, str(previous.row.get("ts") or ""))] if previous is not None else [])
@@ -240,7 +247,7 @@ def facts(root: Any, word: ds.Row, own: Own, *, upper: Optional[ds.Row] = None,
         gaps.append(f"chat rows of this interval: {coverage.get('pending', 0)} segments still importing, "
                     f"{coverage.get('mismatch', 0)} not importable, {coverage.get('gaps', 0)} lines unreadable")
     rows = [entry for entry in ds.iter_rows(root, "chat", lower=lower, upper=end.seq)
-            if not own.row(entry.row) and entry.seq not in held]
+            if not own.row(entry.row) and entry.seq not in held and not _answers(entry.row, answered)]
     later = None  # an act without a row stands at the stream's end: rows after its time wait for the next facts
     if not end.length:
         cut = str(end.row.get("ts") or "")
@@ -629,7 +636,7 @@ def place_before_words(ctx: Any, messages: List[Dict[str, Any]], start: int, hea
             return
         told: Dict[str, Any] = {}
         found = facts(root, words[0], Own(root_task_id=task_id), upper=words[-1], since=getattr(ctx, REACH_KEY, None),
-                      delivered=[row.seq for row in words], told=told)
+                      delivered=[row.seq for row in words], cards=[_quiz_id(row.row) for row in words], told=told)
         text = _line(root, task_id, found) if found is not None else ""
         later = told.get("later")
         setattr(ctx, REACH_KEY, {"seq": later if later is not None else words[-1].seq + (1 if words[-1].length else 0),

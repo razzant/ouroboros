@@ -501,6 +501,27 @@ def test_a_press_and_a_typed_word_in_one_drain_take_the_word_before_both_as_the_
     assert "My human's previous word: Main, " + _iso(T0)[:16].replace("T", " ") in facts, "a word delivered now is not before"
 
 
+
+def test_a_late_click_reaching_running_work_is_not_also_a_word_elsewhere(tmp_path, place):
+    """A click on a card whose work had ended writes the answer and its late delivery; when that delivery reaches a
+    running root, the answer's other row is the same word, never one said elsewhere (Astra r10)."""
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+
+    _rows(tmp_path, _owner("Evening.", T0, cmid="a"), _arrival(place, "sasha", "Night news.", T0 + 60),
+          _card_answer(T0 + 36000),
+          _owner("[Owner quiz answer] quiz q1", T0 + 36001, chat_id=PROJECT_ROOM, cmid="quiz_late_answer:asker:q1"))
+    ctx = _running_root(tmp_path)
+    before = len(ctx._owner_directives)
+    ctx._owner_directives.append({"source": "owner_mailbox", "content": "[Owner quiz answer] quiz q1", "msg_id": "late-q1",
+                                  "client_message_id": "quiz_late_answer:asker:q1", "chat_id": str(PROJECT_ROOM)})
+    messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "asked"},
+                {"role": "user", HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND, "content": "[Owner quiz answer] quiz q1"}]
+    rf.place_before_words(ctx, messages, 2, before)
+    line = messages[2]["content"]
+    assert "\nSince then, counted: 1 place" in line and "word of my human" not in line, "no word of theirs elsewhere"
+    assert "My human's words elsewhere" not in _kept(tmp_path, line) and "«Night news.»" in _kept(tmp_path, line)
+
+
 def test_a_card_my_human_closed_is_found_by_its_own_row(tmp_path, place):
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
 
