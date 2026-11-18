@@ -188,7 +188,7 @@ def test_reply_to_finished_launcher_reaches_only_its_live_work(tmp_path):
                         expect(line).to_have_count(1)
                         if not line.is_visible():
                             card.locator(":scope > [data-live-summary-button] [data-live-disclosure]").click()
-                        expect(line.locator(".chat-quote")).to_have_attribute("data-address", address)
+                        expect(line.get_by_role("button", name=re.compile("Reply to.*" + final))).to_be_visible()
                         expect(line).to_be_visible()
                         page.screenshot(path=str(evidence / ("replay.png" if replay else "live.png")), animations="disabled")
                 finally:

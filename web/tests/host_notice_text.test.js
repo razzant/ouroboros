@@ -9,7 +9,7 @@ import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { HOST_NOTICE_PREFIXES, RETIRED_HOST_NOTICE_PREFIXES, hostNoticeDisplayText, hostRowDisplayText, toolErrorDisplayText } from '../modules/host_notice_text.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
-import { cardRowSummary } from '../modules/chat_activity.js';
+import { cardRowSummary } from '../modules/chat_row_placement.js';
 import { loadSkillReviewDetail, renderSkillReviewDisclosure, summarizeSkillReviewMessage } from '../modules/skill_review_card.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 

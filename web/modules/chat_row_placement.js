@@ -1,28 +1,52 @@
 // Where a task-keyed chat row belongs, read from its declared facts the same way live
 // and on replay (DESIGN "Unread"). A row's task_id names a task; by itself
 // it says neither who speaks, nor whether the row stands alone, nor whether it ends that task.
-import { isNonTerminalMediaHistoryRow, positiveTaskTerminalFact } from './chat_activity.js';
-import { insertTimelineNode } from './chat_render_batch.js';
+import { cardRowEvidenceRef, isNonTerminalMediaHistoryRow, positiveTaskTerminalFact } from './chat_activity.js';
+import { normalizeLogTs } from './log_events.js';
+import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
+import { mergeHistoricalTimelineItem } from './chat_history_replay.js';
+import { insertTimelineNode, updateLiveTimelineItem } from './chat_render_batch.js';
 
-const replyOrigins = new WeakMap();
 const WORK_REPLY_SLOT = ':scope > .chat-live-details > [data-live-work-replies]';
+const taskKey = value => String(value || '').trim();
+const CARD_ROW_PHASES = new Map([['timeline', 'warn'], ['reviews', 'result']]);
 
-export function releaseWorkReplyOrigin(node) {
-    replyOrigins.get(node)?.remove();
-    replyOrigins.delete(node);
+export function placedCardRow(msg) {
+    const placement = taskKey(msg?.card_row);
+    const phase = CARD_ROW_PHASES.get(placement);
+    const taskId = taskKey(msg?.task_id);
+    return phase && taskId ? { placement, phase, taskId } : null;
 }
 
-// Card lifetime is independent of saved owner rows. Restore the actual node (not a copy)
-// before the card loses its visible slot, at the reply's original position in the feed.
-export function restoreWorkReplies(root) {
-    if (!root) return;
+export function cardRowSummary(msg, phase, rawTs = '') {
+    const text = String(msg.text ?? msg.content ?? '');
+    const lines = hostRowDisplayText(msg, msg.role === 'system' && msg.system_type === 'task_pause_notice' ? hostSentenceText(text) : text).split('\n');
+    const rowId = String(msg.card_row_id || '').trim() || `${String(msg.system_type || '').trim()}|${rawTs}`;
+    return {
+        phase, headline: lines[0].trim(), body: lines.slice(1).join('\n').trim(), dedupeKey: `cardrow|${rowId}`,
+        cardRowRevision: msg.card_row_revision, evidenceRef: cardRowEvidenceRef(msg),
+        replyAddress: msg.role === 'system' ? msg.row_address || '' : '',
+        cardReview: msg?.late_evidence?.kind === 'merge_review' ? msg.late_evidence : null,
+    };
+}
+
+export function mergePlacedCardRow(record, msg, { phase }, rawTs) {
+    const summary = cardRowSummary(msg, phase, rawTs);
+    const ts = normalizeLogTs(rawTs);
+    // Replay keeps source/order/page identity.
+    if (msg.history_id) return mergeHistoricalTimelineItem(record, summary, msg, ts);
+    const { timelineUpdate } = updateLiveTimelineItem(record, summary, {
+        ts, rawTs, syntheticKey: summary.dedupeKey, headline: summary.headline, inPlaceByKey: true,
+    });
+    return !['none', 'duplicate-skip'].includes(timelineUpdate);
+}
+
+// The card may move, but its reply is the feed's same chronological node, never a copy.
+export function restoreWorkReplies(root, feed = root.parentElement) {
+    if (!feed) return;
+    const typing = feed.lastElementChild?.classList?.contains('typing-bubble') ? feed.lastElementChild : null;
     for (const slot of root.querySelectorAll('[data-live-work-replies]')) {
-        for (const bubble of Array.from(slot.children)) {
-            const origin = replyOrigins.get(bubble);
-            if (origin?.isConnected) origin.replaceWith(bubble);
-            else root.after(bubble);
-            replyOrigins.delete(bubble);
-        }
+        for (const bubble of Array.from(slot.children)) insertTimelineNode(feed, bubble, typing);
         slot.hidden = true;
     }
 }
@@ -52,6 +76,8 @@ export function replayConcludesTask(row) {
         && !isNonTerminalMediaHistoryRow(row);
 }
 
+export const replyAwareRows = feed => [...feed.children, ...feed.querySelectorAll('[data-reply-work]')];
+
 // A recent reply may be mounted before the old page holding its card.
 export function reconcileWorkReplies(feed, cards) {
     let changed = false;
@@ -76,11 +102,6 @@ function moveWorkReply(record, bubble) {
     const root = record?.root;
     const slot = root?.isConnected && !root.closest('[data-portal="1"]') && root.querySelector(WORK_REPLY_SLOT);
     if (!slot || bubble.parentElement === slot) return false;
-    if (!replyOrigins.has(bubble)) {
-        const origin = document.createComment('work reply');
-        bubble.before(origin);
-        replyOrigins.set(bubble, origin);
-    }
     slot.hidden = false;
     insertTimelineNode(slot, bubble);
     return true;

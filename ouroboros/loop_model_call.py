@@ -1175,7 +1175,7 @@ def _append_routing_receipts(ctx: _RoundModelCallContext) -> bool:
         return False
     try:
         from ouroboros.project_dialogue import _ANNOTATIONS_NAME, _latest_annotations_by_token
-        from ouroboros.routing_wait import routing_act_fields, routing_act_lines as lines
+        from ouroboros.routing_wait import confirmed_reply_work, routing_act_fields, routing_act_lines as lines
 
         root = pathlib.Path(str(root))
         rows = _latest_annotations_by_token(root / "logs" / _ANNOTATIONS_NAME)
@@ -1184,10 +1184,8 @@ def _append_routing_receipts(ctx: _RoundModelCallContext) -> bool:
         for ref in own:  # shown once settled: its unconfirmed tool result was already read
             key = (str(ref.get("client_message_id") or ""), str(ref.get("routing_token") or ""))
             act = routing_act_fields(root, key[0], rows.get(key) or ref)
-            if (ref.get("about_work") and act["target"] == ref["about_work"]
-                    and act["action"] == ref.get("action")
-                    and act["status"] in ({"delivered", "read"} if act["action"] == "steer_task" else {"scheduled"})):
-                replyable.add(act["target"])
+            if (work := confirmed_reply_work(ref, act)):
+                replyable.add(work)
             if key[0] not in ids and act["status"] != "unconfirmed" and act not in acts:
                 acts.append(act)
         if replyable:

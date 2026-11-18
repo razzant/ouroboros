@@ -179,6 +179,15 @@ def routing_act_fields(root: Path, client_message_id: str, row: Dict[str, Any]) 
     }
 
 
+def confirmed_reply_work(own_ref: dict, act: dict) -> str:
+    """A positive late receipt qualifies only an explicitly replyable act of this turn."""
+    work, action = own_ref.get("about_work"), own_ref.get("action")
+    if not work or act["target"] != work or act["action"] != action:
+        return ""
+    statuses = {"delivered", "read"} if action == "steer_task" else {"scheduled"}
+    return work if act["status"] in statuses else ""
+
+
 def routing_act_lines(acts: Any) -> list:
     """One line per act (``routing_act_fields``), oldest first: the observer's row and the
     facts it compares against render the same way."""
