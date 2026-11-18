@@ -90,7 +90,9 @@ def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = N
     header += "".join(f"[Range note] {item}\n" for item in range_notes) + _argument_notes(notes)
     if earlier is not None:
         written = knowledge_versions.written_text(earlier)
-        header += f"[Earlier version, not the current note: {written}. The current revision is {earlier['current_revision']}.]\n"
+        current = earlier["current_revision"]
+        where = f"The current revision is {current}." if current else "The live note is absent at this address."
+        header += f"[Earlier version, not the current note: {written}. {where}]\n"
     if note.parse_error:
         header += "[Metadata unavailable; the complete original Markdown follows.]\n"
     if note.archive_error:
@@ -137,7 +139,7 @@ class ListChanged(Exception):
     """A history page's continuation named another list than the one rendered now (a write landed since)."""
 
 
-def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | None,
+def _note_view(address: knowledge_store.KnowledgeAddress, view: str, version: str | None,
                start_char: int | None, end_char: int | None, notes=(), fingerprint: str = "", shelves=()) -> tuple[str, dict]:
     if view not in ("note", "outline", "history"):
         raise ValueError(f"view={view!r}: use note (default), outline or history")
@@ -145,15 +147,22 @@ def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | No
         raise ValueError("fingerprint continues a list of versions (view='history'), as its first page names it")
     if version is not None and view == "history":
         raise ValueError("version selects one version for view=note or view=outline; view=history lists them all")
+    try:
+        note = knowledge_store.read_knowledge_note(address)
+    except FileNotFoundError:
+        if version is None:
+            raise
+        note = None
+    current_revision = note.revision if note is not None else None
     shown, earlier = note, None
-    if version is not None and version != note.revision:
-        text, row = knowledge_versions.find_version(note.address, version)
-        shown = knowledge_store._note(note.address, text.encode("utf-8"))
-        earlier = {**knowledge_versions.row_facts(row), "revision": version, "current_revision": note.revision}
+    if version is not None and version != current_revision:
+        text, row = knowledge_versions.find_version(address, version, live=note.text if note is not None else None)
+        shown = knowledge_store._note(address, text.encode("utf-8"))
+        earlier = {**knowledge_versions.row_facts(row), "revision": version, "current_revision": current_revision}
     if view == "note":
         return _source_view(shown, start_char, end_char, earlier, notes, shelves)
-    facts = {"topic": note.address.topic, "scope": note.address.scope, "revision": shown.revision,
-             **({"current_revision": note.revision, "earlier_version": earlier} if earlier else {})}
+    facts = {"topic": address.topic, "scope": address.scope, "revision": shown.revision,
+             **({"current_revision": current_revision, "earlier_version": earlier} if earlier else {})}
     if view == "history":  # newest first: a later page continues the list its first page read, by its fingerprint
         for name, bound in (("start_char", start_char), ("end_char", end_char)):  # an argument error, not a list's
             if bound is not None and (type(bound) is not int or bound < 0):
@@ -166,7 +175,10 @@ def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | No
                               "the fingerprint names another list of versions (a write landed since): a first page "
                               "takes none, so read it without the fingerprint")
         return _rendered_view(view, listing, {**facts, "fingerprint": digest}, start_char, end_char, notes)
-    label = f" — an earlier version, not the current note (current revision {note.revision})" if earlier else ""
+    label = ""
+    if earlier is not None:
+        current = f"current revision {current_revision}" if current_revision else "live note absent at this address"
+        label = f" — an earlier version, not the current note ({current})"
     return _rendered_view(view, knowledge_versions.render_outline(shown, label), facts, start_char, end_char, notes)
 
 
@@ -183,14 +195,13 @@ def _knowledge_read(ctx: ToolContext, topic: str, scope: str = "",
     try:
         sanitized = _sanitize_topic(topic)
         address = _address(ctx, sanitized, scope)
-        note = knowledge_store.read_knowledge_note(address)
         if fingerprint is not None and not isinstance(fingerprint, str):
             raise ValueError("fingerprint is the text a history page's header names")
         shelves = (address,
                    knowledge_store.resolve_knowledge_address(address.canonical_root, sanitized, "global"),
                    knowledge_store.resolve_knowledge_address(address.canonical_root, sanitized,
                                                              project_id=str(placed_project_id(ctx) or ""))) if view == "note" else ()
-        text, meta = _note_view(note, view, version, start_char, end_char, notes, fingerprint or "", shelves)
+        text, meta = _note_view(address, view, version, start_char, end_char, notes, fingerprint or "", shelves)
     except ListChanged as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_REPORTED_FAILURE", text=f"⚠️ TOOL_ERROR: position_mismatch: {exc}",

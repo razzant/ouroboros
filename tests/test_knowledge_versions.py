@@ -32,6 +32,30 @@ def body(reply):
     return reply.split("\n\n", 1)[1]
 
 
+@pytest.mark.parametrize("scope", ["global", "project:river"])
+def test_exact_version_survives_rename_and_the_unversioned_address_reports_the_missing_note(tmp_path, scope):
+    target = store.resolve_knowledge_address(tmp_path, TOPIC, scope)
+    first = store.write_knowledge_note(target, RIVER.replace("\n", "\r\n")).current
+    second = store.write_knowledge_note(target, RIVER + "New current facts.\n", expected_revision=first.revision).current
+    ctx = context(tmp_path)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ctx)
+    args = {"topic": target.topic, "scope": scope}
+    assert body(registry.execute("knowledge_read", args)) == second.text
+    target.path.rename(target.path.with_name("new-name.md"))
+
+    exact = registry.execute_result("knowledge_read", {**args, "version": first.revision})
+    assert exact.status == "ok" and "The live note is absent at this address." in exact.text
+    assert exact.text[exact.meta["knowledge_body_start"]:].encode("utf-8") == first.raw
+    assert exact.meta["knowledge_source"]["read"]["arguments"] == {**args, "version": first.revision}
+    outline = registry.execute("knowledge_read", {**args, "version": second.revision, "view": "outline"})
+    assert "Earlier" not in body(outline) and "## Мост" in body(outline)
+    missing = registry.execute_result("knowledge_read", args)
+    assert missing.meta["knowledge_missing"] is True and "Topic" in missing.text and "not found" in missing.text
+    unknown = registry.execute_result("knowledge_read", {**args, "version": "0" * 64})
+    assert unknown.status == "error" and "version_unavailable" in unknown.text
+
+
 def test_knowledge_changes_skip_unchanged_journals_and_read_only_the_appended_window(tmp_path, monkeypatch):
     target = address(tmp_path)
     first = store.write_knowledge_note(target, "# Earlier\n" + "old body\n" * 2000).current
