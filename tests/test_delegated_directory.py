@@ -14,11 +14,11 @@ from tests._delegated_transport_shared import _HealthStub, _owned_gateway_uses_e
 
 
 class DirectoryEngine(_HealthStub):
-    def __init__(self, target, strategy="copy", *, lost_apply=False):
+    def __init__(self, target, strategy="copy", *, lost_apply=False, body=b"\x00complete binary result\xff" * 1000):
         super().__init__(engine_version="99.0.0")
         self.target, self.strategy, self.lost_apply = target, strategy, lost_apply
         self.posts, self.applies, self.decisions = [], [], []
-        self.body = b"\x00complete binary result\xff" * 1000
+        self.body = body
         state = {"kind": "file", "sha256": "sha256:" + sha256(self.body).hexdigest(),
                  "sizeBytes": len(self.body), "mode": 420, "artifactPath": "final/files/output.bin"}
         self.manifest = {"version": 1, "sourceRoot": str(target),
@@ -593,18 +593,24 @@ def test_folder_investigation_parent(tmp_path, monkeypatch):
     )
 
 
-def test_investigation_keeps_the_public_file_and_receipts_the_private_one(tmp_path, monkeypatch):
+@pytest.mark.parametrize("copied", [True, False], ids=["settings-copy", "mention"])
+def test_investigation_keeps_the_public_file_and_receipts_the_private_one(tmp_path, monkeypatch, copied):
     from ouroboros import config, delegate_directory as directory
     from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
 
+    settings = {"MCP_SERVERS": [{"headers": {"X-Api-Key": "binary result"}}]}
     ctx, target = context(tmp_path, monkeypatch)
-    engine = DirectoryEngine(target, "copy")
+    # A copy of the settings file is private; a file that only mentions the header's value is the child's result.
+    body = json.dumps(settings, indent=2).encode() if copied else b"\x00complete binary result\xff" * 1000
+    engine = DirectoryEngine(target, "copy", body=body)
     held = entry(ctx, target, "copy")
     held.authority_source = INVESTIGATION_AUTHORITY
-    monkeypatch.setattr(
-        config, "load_settings", lambda **kw: {"MCP_SERVERS": [{"headers": {"X-Api-Key": "binary result"}}]}
-    )
+    monkeypatch.setattr(config, "load_settings", lambda **kw: settings)
     manifest = directory.capture_directory_result(ctx.drive_root, held, engine)
+    if not copied:
+        assert manifest.get("gaps", []) == [] and directory.directory_capture_block(
+            ctx.drive_root, held, manifest)["retained_bytes"] == len(body)
+        return
     assert manifest["gaps"] == [
         {
             "path": engine.manifest["entries"][0]["path"],

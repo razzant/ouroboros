@@ -87,8 +87,11 @@ def test_a_run_that_retained_no_named_evidence_shows_none(tmp_path, monkeypatch)
     {"MCP_SERVERS": [{"headers": {"Authorization": "Bearer fixture-value", "Accept": "application/json"}}]},
     {"MCP_SERVERS": [{"url": "https://fixture-value@example.invalid/"}]},
     {"OUROBOROS_CONNECTIONS": [{"kind": "openai", "name": "test", "api_key": "fixture-value"}]},
+    {"OPENAI_COMPATIBLE_API_KEY": "fixture-value"},  # a local server's key is often one short word
 ])
 def test_only_installation_settings_with_keys_are_excluded_from_evidence(tmp_path, monkeypatch, settings):
+    """A copy of the settings file (a secret beside its own name) stays out; a report that only mentions the
+    same value, as a note about a local `ollama` server would, is ordinary evidence and is kept."""
     from ouroboros import config
 
     monkeypatch.setattr(config, "load_settings", lambda **kw: settings)
@@ -98,14 +101,17 @@ def test_only_installation_settings_with_keys_are_excluded_from_evidence(tmp_pat
     declared = copy / ".review-evidence"
     private = declared / "state/copy-of-settings.txt"
     public = declared / "examples/settings.json"
-    for path in (private, public):
+    report = declared / "notes/report.md"
+    for path in (private, public, report):
         path.parent.mkdir(parents=True)
-    private.write_text(json.dumps({"OPENROUTER_API_KEY": "fixture-value"}))
-    public.write_text(json.dumps({"OPENAI_API_KEY": "${OPENAI_API_KEY}", "Accept": "application/json"}))
+    private.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+    public.write_text(json.dumps({"OPENAI_API_KEY": "${OPENAI_API_KEY}", "Accept": "application/json"}), encoding="utf-8")
+    report.write_text("The server answered fixture-value and application/json.\n", encoding="utf-8")
     retained = tmp_path / "saved"
     summary = retain_workspace_evidence(copy, retained)
     assert summary["status"] == "retained"
-    assert [f["path"] for f in summary["files"]] == [".review-evidence/examples/settings.json"]
+    assert sorted(f["path"] for f in summary["files"]) == [".review-evidence/examples/settings.json",
+                                                            ".review-evidence/notes/report.md"]
     assert not (retained / "files" / private.relative_to(copy)).exists()
     assert summary["gaps"] == [
         {

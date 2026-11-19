@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Collection, Dict, Tuple
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 # Credentials the Settings API answers a GET with a PLACEHOLDER instead of the
 # stored value. The same set gates the read-side repair in
@@ -60,39 +60,33 @@ def is_custom_secret_setting_key(key: Any, *, known_setting_keys: Collection[str
 
 
 def installation_secret_bytes():
-    """Exact configured values that Settings masks, including connection and MCP credentials."""
+    """Each configured secret beside its own setting name, as the settings file writes it (``"NAME": "value"``,
+    also compact and ASCII-escaped): a copy of that file, or of its connection or MCP section, carries these bytes,
+    while a report that only mentions a value (a local server's key may be ``ollama``) does not."""
     from ouroboros.config import SETTINGS_DEFAULTS, load_settings
-    from ouroboros.gateway.secret_rows import typed_connection_secrets
+    from ouroboros.gateway.secret_rows import typed_connection_secret_fields
     from ouroboros.utils import is_credential_header_name
 
     settings = load_settings(strict=True)
-    values = {v for k, v in settings.items() if isinstance(v, str) and v and (
+    pairs = {(k, v) for k, v in settings.items() if isinstance(v, str) and (
         k in MASKED_SECRET_SETTING_KEYS or is_custom_secret_setting_key(k, known_setting_keys=SETTINGS_DEFAULTS))}
-    values.update(typed_connection_secrets(settings.get("OUROBOROS_CONNECTIONS")))
+    pairs.update(typed_connection_secret_fields(settings.get("OUROBOROS_CONNECTIONS")))
     for server in settings.get("MCP_SERVERS") or ():
         if not isinstance(server, dict):
             continue
         if isinstance(token := server.get("auth_token"), str):
-            values.add(token)
+            pairs.add(("auth_token", token))
         headers = server.get("headers")
         if isinstance(headers, dict):
             auth_header = str(server.get("auth_header") or "").casefold() if server.get("auth_token") else ""
-            values.update(v for k, v in headers.items() if isinstance(v, str)
-                          and (is_credential_header_name(k) or str(k).casefold() == auth_header))
-            values.update(value.split(" ", 1)[1] for name, value in headers.items() if isinstance(value, str)
-                          and str(name).lower() == "authorization" and value.lower().startswith("bearer "))
+            pairs.update((k, v) for k, v in headers.items() if isinstance(v, str)
+                         and (is_credential_header_name(k) or str(k).casefold() == auth_header))
         url = str(server.get("url") or "")
         if url != mask_mcp_url(url):
-            values.add(url)
-            try:
-                parsed = urlsplit(url)
-                credential = parsed.password or parsed.username
-                if credential:
-                    values.update((credential, unquote(credential)))
-            except ValueError:
-                pass
-    return {form.encode() for value in values if value and value != CONFIGURED_SECRET_PLACEHOLDER
-            for form in (value, json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1])}
+            pairs.add(("url", url))
+    return {(json.dumps(k, ensure_ascii=ascii_only) + separator + json.dumps(v, ensure_ascii=ascii_only)).encode()
+            for k, v in pairs if v.strip() and v != CONFIGURED_SECRET_PLACEHOLDER
+            for ascii_only in (False, True) for separator in (": ", ":")}
 
 
 class SecretScan:
