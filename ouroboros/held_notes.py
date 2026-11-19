@@ -95,9 +95,10 @@ class HeldNoteSection(HostSection):
         return f"{label}\n\n{self.summary}\n\n{marker}"
 
     def view_for_receipt(self, row: Mapping, addressed: Mapping) -> str | None:
-        if row.get("held_note_form") == "reader":
-            return (label + "\n\n[Head omitted at the physical window's emergency floor.]"
-                    if (label := self.available_window_label) else None)
+        if row.get("held_note_form") == "reader":  # a carried head with no summary takes it first (_held_note_steps)
+            why = ("for the physical window: this note has no authored summary" if self.carried_by
+                   and not self.summary.strip() else "at the physical window's emergency floor")
+            return f"{label}\n\n[Head omitted {why}.]" if (label := self.available_window_label) else None
         return self._summary_view(self.outline_has_summary) if "knowledge_index" in addressed else self.operative_view
 
     def window_receipt(self, form: str) -> dict:

@@ -561,6 +561,29 @@ def test_a_linked_head_yields_to_the_window_before_any_claimed_head(world):
     assert emergency["z"] == "reader", emergency
 
 
+def test_a_linked_head_without_a_summary_still_yields_before_the_claimed_head(world):
+    """A head only a link holds yields first even without an authored summary: it keeps only its exact reader, marked
+    as such, while the claimed heads stand; then the claimed head with a summary steps to it. A claimed head without
+    one (`c`) still stays whole until the emergency floor, whose marker is its own."""
+    _write(world, "a", "Head a. " * 5_000 + "\n\nIt links [z](z.md).\n", summary="Authored telling of a.")
+    _write(world, "c", "Head c. " * 5_000)
+    _write(world, "z", "Head z. " * 5_000, claims=())  # carried, no authored summary
+    _write(world, "ordinary", "An unclaimed note.", claims=(), summary="Whole index only. " * 8_000)
+    captured, seen = _core(world), {}
+    for window in range(196_000, 8_000, -4_000):
+        plan = _plan(world, window, core=captured)
+        seen.setdefault(tuple(_cuts(plan)), plan)
+    order = list(seen)
+    assert order[1:3] == [(("z", "reader"),), (("z", "reader"), ("a", "summary"))], order  # not `a` first
+    first = _held(seen[order[1]])
+    assert "Head z. Head z." not in first and "Head a. " * 5_000 in first and "Head c. " * 5_000 in first
+    assert "\n\n[Head omitted for the physical window: this note has no authored summary.]" in first
+    claimed_first = next(cuts for cuts in order if "c" in dict(cuts))
+    assert dict(claimed_first)["a"] == "reader", order  # c yields only at the emergency floor, after a's summary
+    floor = _held(seen[claimed_first])
+    assert floor.count("[Head omitted at the physical window's emergency floor.]") == len(claimed_first) - 1
+
+
 def _index(plan, mode=None):
     """The form of the global knowledge index in this request: ``whole``, or the ``outline`` the window chose."""
     text = _blocks(plan, mode)[-1]["text"]

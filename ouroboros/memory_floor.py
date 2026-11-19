@@ -858,12 +858,14 @@ TELLING_SPARED = ("return_facts", "return_facts_words")
 
 
 def _held_note_steps(sections, receipts, fits, *, form="summary"):
-    """The last host forms to yield: the captured heads in address order, one at a time until ``fits``.
+    """The last host forms to yield: the captured heads in address order, one at a time until ``fits``, a head only a
+    link holds (``carried_by``) before every claimed one.
 
     In a map frame each steps to its authored summary beside its exact reader, once the physical window has left no
     index or registry it could still outline and the request with memory at its shortest forms still exceeds the
-    heads' bound (``_host_steps``); a head without a summary stays whole. A head only a link holds (``carried_by``)
-    yields before every claimed one. At the emergency floor only the exact reader remains.
+    heads' bound (``_host_steps``); there a claimed head without a summary stays whole, while a carried one keeps only
+    its exact reader, so it still yields first. At the emergency floor only the exact reader remains. A head whose
+    reader the actor cannot open has no shorter form at either step: it stays whole.
     """
     from ouroboros.held_notes import HeldNoteSection
 
@@ -880,6 +882,9 @@ def _held_note_steps(sections, receipts, fits, *, form="summary"):
             continue
         row = part.window_receipt(form)
         short = part.view_for_receipt(row, addressed)
+        if short is None and form == "summary" and part.carried_by:  # no summary to step to: its reader yields first
+            row = part.window_receipt("reader")
+            short = part.view_for_receipt(row, addressed)
         current = addressed.get(part.section_id, part.full_text)
         if short is None or (delta := view_tokens(current) - view_tokens(short)) <= 0:
             continue
