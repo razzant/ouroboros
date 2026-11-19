@@ -576,6 +576,41 @@ def test_a_handle_miss_and_an_ordering_hint_never_wait_for_the_index_lock(tmp_pa
     assert packs.blob_bytes(tmp_path, foreign) == packs.blob_bytes(tmp_path, foreign, task_id="b")  # free: both answer
 
 
+def test_a_task_s_own_sidecars_are_parsed_once_per_file_and_only_a_few_are_kept(tmp_path, monkeypatch):
+    """Reassembling one view reads hundreds of its parts from one owner, whose sidecar can hold tens of
+    thousands of members: each sidecar is parsed once per file, never once per lookup; a new generation is
+    read when it appears, a replaced file is read again (never answered from the old one), and only a few
+    parsed sidecars are kept per process."""
+    from ouroboros import evidence_packer, evidence_packs as packs
+    from tests.test_evidence_packs import _blob, _result, _task
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    refs = {task: _task(tmp_path, task, blobs=3)[0] for task in ("a", "b", "c", "d", "e")}
+    assert evidence_packer.run_pass(tmp_path)["faults"] == 0
+    decoded = _spy_sidecars(monkeypatch)
+    first = [packs.blob_bytes(tmp_path, ref, task_id="a") for ref in refs["a"]]
+    for _ in range(20):
+        assert [packs.blob_bytes(tmp_path, ref, task_id="a") for ref in refs["a"]] == first
+    assert decoded == ["a.members.json"]
+    raw = json.dumps({"message": {"content": "late answer"}}).encode()
+    late = _blob(tmp_path, raw)
+    (tmp_path / "observability" / "calls" / "a" / "llm_9_response.json").write_text(
+        json.dumps({"call_id": "llm_9", "full_payload_ref": late}), encoding="utf-8")
+    _result(tmp_path, "a", "completed")  # written terminal again: its next generation
+    assert evidence_packer.run_pass(tmp_path)["packed"] == 1
+    decoded.clear()
+    assert packs.blob_bytes(tmp_path, late, task_id="a") == raw and packs.blob_bytes(tmp_path, refs["a"][0], task_id="a") == first[0]
+    assert decoded == ["a.2.members.json"]
+    (packs.packs_dir(tmp_path) / packs.INDEX_NAME).unlink()  # no cache could vouch for the replaced file
+    (packs.packs_dir(tmp_path) / "a.members.json").write_text("{", encoding="utf-8")
+    with pytest.raises(packs.SidecarCorrupt):
+        packs.blob_bytes(tmp_path, refs["a"][0], task_id="a")
+    for task in ("b", "c", "d", "e"):
+        assert packs.blob_bytes(tmp_path, refs[task][0], task_id=task)
+    kept = packs._brief.cache_info()
+    assert kept.currsize <= kept.maxsize < 5  # a few parsed sidecars, never one per task read
+
+
 # ---- the Host Service operation read: one accepted message over k-scaled room, routing and task history
 
 OP_ROWS_PER_K, OP_NOTES_PER_K, OP_TASKS_PER_K = 20, 20, 10

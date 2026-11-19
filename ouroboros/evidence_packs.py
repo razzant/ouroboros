@@ -4,6 +4,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import contextvars
+import functools
 import gzip
 import hashlib
 import json
@@ -404,13 +405,46 @@ def index_upsert(root: Any, pack_path: pathlib.Path, sidecar: Dict[str, Any]) ->
         _index_rows(conn, pack_path, sidecar)
 
 
-def _own_placements(root: pathlib.Path, task_id: str, wanted: Callable[[Dict[str, Any]], bool]) -> Tuple[list, list]:
-    """``(placements, errors)``: the members ``wanted`` picks in this task's own sidecars, found by their
-    names (``_task_sidecar_names``: no listing, lock or index), and the task's sidecars that are unreadable."""
-    errors: list = []
-    found = [(path.with_name(pack_name(task_id, sidecar["generation"])), member)
-             for path, sidecar in list_sidecars(root, errors=errors, names=_task_sidecar_names(root, task_id))
-             if sidecar["task_id"] == task_id for member in sidecar["members"] if wanted(member)]
+def _own_members(path: pathlib.Path) -> tuple:
+    """One sidecar in brief, parsed once per file state (size, mtime, inode): a published sidecar never
+    changes, so another state is another file (``_brief``). ``SidecarCorrupt`` as ``read_sidecar``."""
+    try:
+        info = path.stat()
+    except OSError:
+        return _brief.__wrapped__(str(path), None)  # never kept: ``read_sidecar`` names the fault
+    return _brief(str(path), (info.st_size, info.st_mtime_ns, info.st_ino))
+
+
+@functools.lru_cache(maxsize=3)  # the parsed sidecars a process keeps: the memory a giant owner's view lends its reads
+def _brief(path: str, _state: Optional[tuple]) -> tuple:
+    """``(task_id, generation, blobs, handles)``: ``(sha256, kind) -> (offset, size)`` and, for its checkpoint
+    handles, ``path -> (sha256, offset, size)``, without the rest of the sidecar's JSON."""
+    sidecar = read_sidecar(pathlib.Path(path))
+    members = sidecar["members"]
+    return (sidecar["task_id"], sidecar["generation"], {(m["sha256"], m["kind"]): (m["offset"], m["size"]) for m in members},
+            {m["path"]: (m["sha256"], m["offset"], m["size"]) for m in members if m["kind"] == CHECKPOINT and m.get("path")})
+
+
+def _own_placements(root: pathlib.Path, task_id: str, *, key: Optional[tuple] = None,
+                    rel_path: str = "") -> Tuple[list, list]:
+    """``(placements, errors)``: in this task's own sidecars, found by their names (``_task_sidecar_names``: no
+    listing, lock or index), the blob ``key`` (``(sha256, kind)``) or else its handles (``rel_path``: that one);
+    and the task's sidecars that are unreadable."""
+    directory, found, errors = packs_dir(root), [], []
+    for name in sorted(_task_sidecar_names(root, task_id)):
+        try:
+            owner, generation, blobs, handles = _own_members(directory / name)
+        except SidecarCorrupt as exc:
+            errors.append(exc)
+            continue
+        if owner != task_id:
+            continue  # a homonym's sidecar (``a.2`` generation 1 beside ``a``) is not this task's
+        pack = directory / pack_name(task_id, generation)
+        if key is not None and key in blobs:
+            found.append((pack, {"sha256": key[0], "kind": key[1], "offset": blobs[key][0], "size": blobs[key][1]}))
+        elif key is None:
+            found += [(pack, {"sha256": sha, "kind": CHECKPOINT, "offset": offset, "size": size, "path": path})
+                      for path, (sha, offset, size) in handles.items() if rel_path in ("", path)]
     return found, errors
 
 
@@ -451,9 +485,8 @@ def _placements(root: pathlib.Path, *, sha256: str = "", kind: str = "", task_id
     if not packs_dir(root).is_dir():
         return []  # a root without packs is left untouched (no cache, no lock file)
     handles = handles or bool(rel_path)
-    wanted = ((lambda m: m["kind"] == CHECKPOINT and bool(m.get("path")) and rel_path in ("", m["path"])) if handles
-              else (lambda m: (m["sha256"], m["kind"]) == (sha256, kind)))
-    found, errors = _own_placements(root, task_id, wanted) if task_id else ([], [])
+    found, errors = _own_placements(root, task_id, key=None if handles else (sha256, kind),
+                                    rel_path=rel_path) if task_id else ([], [])
     if found or (handles and not errors):
         return found
     query, params = (_MEMBER_SQL, (sha256, kind)) if not handles else (
@@ -670,8 +703,7 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
                 if indexed:
                     placements = _placements(candidate, sha256=sha256, kind=kind)
                 else:
-                    placements, unreadable = _own_placements(
-                        candidate, task_id, lambda member: (member["sha256"], member["kind"]) == (sha256, kind))
+                    placements, unreadable = _own_placements(candidate, task_id, key=(sha256, kind))
                     failure = unreadable[0] if unreadable else failure  # the task's own damage is never an absence
             except EvidenceUnavailable as exc:
                 if failure is None or isinstance(failure, FileNotFoundError):
