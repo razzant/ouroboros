@@ -973,14 +973,9 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
     return { timelineUpdate, patchIndex };
 }
 
-/** The block's folded tool evidence row. Live frames and the host's metrics
- * reach it through the same keyed in-place upsert, so neither route can mint a
- * second row, and the row keeps the position and timestamp of its first frame.
- */
+/** Live frames and host metrics upsert one folded tool row, keeping its first position and time through a burst. */
 export function upsertToolFoldRow(record, view, ts, rawTs) {
     const syntheticKey = `tools|${record.groupId}`;
-    // Stationary: the row keeps the place and the time of the first frame it
-    // counted, so a burst of calls never walks it down the timeline.
     const first = !record.items.some((item) => item.dedupeKey === syntheticKey);
     return updateLiveTimelineItem(record, view, {
         ts: first ? ts : '', rawTs, syntheticKey, headline: view.headline, inPlaceByKey: true,
