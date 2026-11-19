@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Collection, Dict, Tuple
+from urllib.parse import urlsplit
 
 # Credentials the Settings API answers a GET with a PLACEHOLDER instead of the
 # stored value. The same set gates the read-side repair in
@@ -56,6 +57,70 @@ def is_custom_secret_setting_key(key: Any, *, known_setting_keys: Collection[str
         and text not in known_setting_keys
         and not text.startswith("OUROBOROS_")
     )
+
+
+def installation_secret_bytes():
+    """Each configured secret beside its own setting name, as the settings file writes it (``"NAME": "value"``,
+    also compact, ASCII-escaped, or quoted inside a JSON string): a copy of that file, or of its connection or MCP
+    section, carries these bytes, while a report that only mentions a value (a local server's key may be
+    ``ollama``) does not. Other forms (an env line, a printed bare value) are not a copy of the file."""
+    from ouroboros.config import SETTINGS_DEFAULTS, load_settings
+    from ouroboros.gateway.secret_rows import typed_connection_secret_fields
+    from ouroboros.utils import is_credential_header_name
+
+    settings = load_settings(strict=True)
+    pairs = {(k, v) for k, v in settings.items() if isinstance(v, str) and (
+        k in MASKED_SECRET_SETTING_KEYS or is_custom_secret_setting_key(k, known_setting_keys=SETTINGS_DEFAULTS))}
+    pairs.update(typed_connection_secret_fields(settings.get("OUROBOROS_CONNECTIONS")))
+    for server in settings.get("MCP_SERVERS") or ():
+        if not isinstance(server, dict):
+            continue
+        if isinstance(token := server.get("auth_token"), str):
+            pairs.add(("auth_token", token))
+        headers = server.get("headers")
+        if isinstance(headers, dict):
+            auth_header = str(server.get("auth_header") or "").casefold() if server.get("auth_token") else ""
+            pairs.update((k, v) for k, v in headers.items() if isinstance(v, str)
+                         and (is_credential_header_name(k) or str(k).casefold() == auth_header))
+        url = str(server.get("url") or "")
+        if url != mask_mcp_url(url):
+            pairs.add(("url", url))
+    written = {json.dumps(k, ensure_ascii=ascii_only) + separator + json.dumps(v, ensure_ascii=ascii_only)
+               for k, v in pairs if v.strip() and v != CONFIGURED_SECRET_PLACEHOLDER
+               for ascii_only in (False, True) for separator in (": ", ":")}
+    # A copy quoted inside a JSON string (a JSONL log or a tool result that read the file) is escaped once more.
+    return {form.encode() for pair in written for form in (pair, json.dumps(pair)[1:-1])}
+
+
+class SecretScan:
+    """A binary stream sink matching configured values even across copy chunks."""
+    def __init__(self, values, sink=None):
+        self.sink = sink
+        self.values = values
+        self.overlap = max(map(len, values), default=1) - 1
+        self.tail = b""
+        self.found = False
+        self.size = 0
+
+    @property
+    def name(self):
+        """The wrapped destination's name: code that reads the copy's target sees the real file."""
+        return getattr(self.sink, "name", "")
+
+    def write(self, data):
+        self.size += len(data)
+        if self.values and not self.found:
+            chunk = self.tail + data
+            self.found = any(value in chunk for value in self.values)
+            self.tail = chunk[-self.overlap:] if self.overlap else b""
+        if self.sink is not None and not self.found:
+            self.sink.write(data)
+        return len(data)
+
+    def read_from(self, handle):
+        while data := handle.read(1 << 20):
+            self.write(data)
+        return self.found
 
 
 def mask_prefixed_secret(value: Any, *, visible_chars: int) -> str:
@@ -133,8 +198,6 @@ def looks_masked_mcp_secret(value: Any) -> bool:
 
 def mask_mcp_url(value: Any) -> str:
     """Mask URL userinfo for the editable Settings surface, preserving its address."""
-    from urllib.parse import urlsplit
-
     text = str(value or "")
     try:
         authority = urlsplit(text).netloc
@@ -152,8 +215,6 @@ def rehydrate_mcp_url(value: Any, current_value: Any) -> str:
     remove the placeholder, never carry the old userinfo to a different target.
     A real new userinfo or an explicit URL without it is kept as supplied.
     """
-    from urllib.parse import urlsplit
-
     text, current = str(value or ""), str(current_value or "")
     if text == CONFIGURED_SECRET_PLACEHOLDER:
         return current if current and mask_mcp_url(current) == text else ""
@@ -174,7 +235,7 @@ def looks_masked_secret(value: Any) -> bool:
     return text == CONFIGURED_SECRET_PLACEHOLDER or looks_masked_mcp_secret(text)
 
 
-# JSON Schema words that redaction and schema presentation share (``observability._redact_any``,
+# JSON Schema words that redaction and schema presentation share (``redaction._redact_any``,
 # ``mcp_schema.wrap_schema_text``): a name map's keys name parameters or definitions, never credentials;
 # a subschema says what it accepts by at least one kind keyword; notes describe it and hold no instance data.
 SCHEMA_MAPS = frozenset({"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"})
@@ -183,7 +244,7 @@ SCHEMA_KINDS = frozenset({"type", "$ref", "enum", "const"}) | SCHEMA_ARRAYS
 SCHEMA_NOTES = frozenset({"type", "$ref", "title", "description", "format"})
 
 
-# Well-known entropy token formats (SSOT; ``observability`` reuses this list
+# Well-known entropy token formats (SSOT; ``redaction`` reuses this list
 # for forensic redaction). File-tool results do not apply these patterns.
 SECRET_TOKEN_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     ("bearer_token", re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_\-./+=]{16,}")),

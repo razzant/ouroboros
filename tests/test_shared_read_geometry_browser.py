@@ -53,12 +53,14 @@ def _serve(page, html):
     page.goto("http://shared.test/")
 
 
+# The row stands where a reader sees it: below the header (56 px) and its frosted edge (style.css "A room's edges";
+# project_read_state.readBand), so the work list alone decides whether its words were read.
 _WORK = '''<!doctype html><html data-theme="light" data-layout="docked"><head>
 <link rel="stylesheet" href="/ui.css"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/room_work.css">
 <style>html,body{margin:0;width:100%;height:100%}#page-chat{display:block;position:relative;width:900px;height:680px;margin:0}
 .chat-page-header{height:56px;padding:0 24px;box-sizing:border-box}.app-page-title-row{display:flex}
 #chat-messages{position:absolute;top:0;left:0;right:0;height:600px;overflow:auto;padding:0 24px;box-sizing:border-box}
-#subject{position:absolute;top:78px;left:36px;width:740px;min-height:110px;margin:0;box-sizing:border-box}
+#subject{position:absolute;top:128px;left:36px;width:740px;min-height:110px;margin:0;box-sizing:border-box}
 #chat-input-area{position:absolute;top:610px;left:24px;right:24px;height:60px}
 </style></head><body><div id="page-chat" class="page active">
 <div id="chat-messages" class="chat-messages"><div id="subject" class="chat-bubble assistant"

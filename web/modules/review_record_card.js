@@ -119,8 +119,9 @@ export function panelFactsText(facts) {
 }
 
 // The owner's words for the pool facts (IMPL_SPEC §5: the Reviewer tick means whose agreement
-// counts); a word outside these prints as recorded, never guessed.
-const STRICTNESS_WORDS = { blocking: 'Blocking', advisory: 'Advisory', cyber_pro: 'Cyber Pro' };
+// counts); a word outside these prints as recorded, never guessed. Every panel outside Cyber Pro
+// records `advisory` and prints no mode word; an older Blocking record still says so.
+const STRICTNESS_WORDS = { blocking: 'Blocking', advisory: '', cyber_pro: 'Cyber Pro' };
 const CHOOSER_WORDS = { ouroboros: 'Ouroboros', host: 'the host', owner: 'you' };
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const usdText = (value) => `$${value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`;
@@ -159,7 +160,7 @@ export function panelPoolLines(panel) {
     const [counted, advisers] = [count(facts.seats), count(facts.additional_seats)];
     const [strictness, chooser, reason] = [text(facts.strictness), text(facts.chosen_by), text(facts.reason)];
     const lines = [`Panel: ${[
-        STRICTNESS_WORDS[strictness] || strictness,
+        Object.hasOwn(STRICTNESS_WORDS, strictness) ? STRICTNESS_WORDS[strictness] : strictness,
         chooser ? `chosen by ${CHOOSER_WORDS[chooser] || chooser}` : '',
         ticked ? `${counted} of ${plural(ticked, 'ticked reviewer')}`
             : `${ticked === 0 ? 'no reviewer ticked · ' : ''}${plural(counted, 'counted seat')}`,

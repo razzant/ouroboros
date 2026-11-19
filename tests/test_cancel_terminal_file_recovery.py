@@ -163,3 +163,37 @@ def test_reconciled_terminal_without_checkpoint_still_needs_real_file_adoption(s
     assert adopted["child_ref_promotion"]["pending_refs"]
     retained = headless.retry_child_task_refs(s.drive, s.child, s.task["id"])
     assert not retained["child_ref_promotion"]["pending_refs"] and (s.drive / "observability").is_dir()
+
+
+def test_settled_failed_native_capture_is_not_reprepared(split, monkeypatch):
+    """A settled failed capture stays failed during later dead-worker recovery."""
+    task = {
+        "id": "failed-native",
+        "type": "task",
+        "chat_id": 5,
+        "workspace_root": str(split.drive / "workspace"),
+    }
+    write_task_result(
+        split.drive,
+        task["id"],
+        "failed",
+        result="The worker failed before capture completed",
+        artifact_status="failed",
+        artifact_error="native capture failed",
+        native_capture_pending=True,
+    )
+    finalizer_calls = []
+    monkeypatch.setattr(
+        headless,
+        "finalize_task_artifacts",
+        lambda *_args, **_kwargs: finalizer_calls.append(True),
+    )
+
+    report = headless.prepare_terminal_task_files(split.drive, task)
+    stored = load_task_result(split.drive, task["id"])
+
+    assert report["error"] == ""
+    assert finalizer_calls == []
+    assert stored["status"] == "failed"
+    assert stored["artifact_status"] == "failed"
+    assert stored["native_capture_pending"] is True

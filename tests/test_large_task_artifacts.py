@@ -217,6 +217,32 @@ def test_missing_directory_member_is_not_silently_omitted(tmp_path):
     assert not list(root.iterdir())
 
 
+def test_directory_capture_keeps_every_source_when_a_zip_name_cannot_be_written(tmp_path):
+    directory = tmp_path / "output"
+    directory.mkdir()
+    source = directory / "summary.txt"
+    source.write_bytes(b"original report")
+    store = tmp_path / "artifacts"
+    saved = artifacts.copy_directory_to_task_artifacts(None, directory, artifact_dir=store)
+    ledger, archive = (Path(row["path"]) for row in saved)
+    before = {path: path.read_bytes() for path in store.iterdir()}
+
+    other = directory / "notes.txt"
+    other.write_bytes(b"keep these notes")
+    # A policy-checked member may have a different logical name from its host source (bind view).
+    logical = b"notes-\xff.txt".decode("utf-8", "surrogateescape")
+    with pytest.raises(OSError, match="member name cannot be stored in a ZIP"):
+        artifacts.copy_directory_to_task_artifacts(
+            None, directory, member_sources=[(source.name, source), (logical, other)], artifact_dir=store)
+
+    assert source.read_bytes() == b"original report" and other.read_bytes() == b"keep these notes"
+    assert set(store.iterdir()) == set(before)
+    assert all(path.read_bytes() == content for path, content in before.items())
+    assert json.loads(ledger.read_text(encoding="utf-8"))["file_count"] == 1
+    with zipfile.ZipFile(archive) as bundle:
+        assert bundle.namelist() == [source.name] and bundle.read(source.name) == b"original report"
+
+
 def test_copyback_failure_retains_child_until_existing_retry_finishes(tmp_path, monkeypatch):
     from ouroboros.headless import copy_child_task_result, prepare_task_drive, remove_subagent_task_drive
     from ouroboros.observability import retry_pending_child_ref_promotions

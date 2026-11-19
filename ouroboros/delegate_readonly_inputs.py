@@ -1,9 +1,12 @@
-"""Materialize native lineage read authority for a folderless session request.
+"""Materialize selected or automatic native inputs for a folderless session request.
 
 The engine accepts one readonly project scope, not additional read roots. Give
-each invocation its own scratch with verified input copies; never pass parent
-scratch or external runtime data as the engine's project. These copies confer
-no workspace/write authority. Native and session inputs use one access owner.
+each invocation its own scratch with verified input copies (``_lineage_copies``:
+bytes only, cloned where the volume can, streamed where compression may later
+want the source); never pass parent scratch or external runtime data as the
+engine's project. A plan-thread turn stages nothing: its thread keeps its first
+folder. These copies confer no workspace/write authority. Native and session
+inputs use one access owner.
 
 ``input_files`` (#2593) is the caller's explicit selection of ordinary files it
 may already read, each a ``{root, path}`` pair resolved and checked as ``read_file``
@@ -12,7 +15,8 @@ exact bytes are retained in the selecting task's canonical artifact store
 (``source_handles/delegated_readonly_inputs/<invocation|scheduled-<child>>/``, named by
 content, ``inputs/selected/<sha256[:16]>/<name>``): the existing snapshot home that is no
 deliverable, outlives the task drive, and whose name the lineage walker prunes.
-A folderless start restages them once into its scope; a start in a repository or folder
+A nonempty selection replaces the automatic lineage copies; a folderless start restages
+it once into its scope; a start in a repository or folder
 keeps it as scope and cwd and names the retained copies by absolute path:
 the engine has no readable-root field, so reaching them is the harness's native read
 reach, not a host guarantee. A scheduled API child's first input names its copies for
@@ -23,8 +27,6 @@ engine-document import. Preparation is not a read.
 from __future__ import annotations
 
 import copy
-import hashlib
-import io
 import json
 import os
 import pathlib
@@ -43,9 +45,12 @@ INPUT_FILES_CONTRACT = (
     "else active_workspace. Every entry is mandatory: each is checked as read_file checks it and its exact bytes are "
     "retained in your task's artifact store before the run starts, and one that cannot be prepared refuses the whole "
     "start typed, unrun. The receipt covers exactly these entries (not the automatic inputs); prepared is not read. A "
+    "nonempty selection replaces automatic folderless task/artifact lineage copies; omitted, null or [] keeps them. A "
     "folderless run also finds the copies inside its folder; a run in a repository or folder keeps it and gets the "
-    "retained copies' absolute paths outside it, reached by its harness's own native read reach. A path named only "
-    "in the prompt is never copied. Omit (or []) for today's inputs. Not engine documents: those are attachment_paths.")
+    "retained copies' absolute paths outside it, reached by its harness's own native read reach. A plan-thread "
+    "turn keeps its original folder and names new copies outside it. A path named only "
+    "in the prompt is never copied. Omit (or use null or []) for the existing automatic inputs. "
+    "Not engine documents: those are attachment_paths.")
 
 
 class InputSelectionError(ValueError):
@@ -196,7 +201,18 @@ def copy_selection(rows: List[Dict[str, Any]], root: Optional[pathlib.Path]) -> 
                 measured, local = stream_artifact_file(row["local"], expected=expected), pathlib.Path(row["local"])
             else:
                 staging = temporary_sibling(root / SELECTED_DIR / name)
-                measured = copy_artifact_file(row.get("local") or row["source"], staging, expected=expected)
+                origin = row.get("local") or row["source"]
+                from ouroboros import work_domain
+
+                if work_domain.is_work(origin):  # a work file's bytes: the streamed confined intake, never a service open
+                    staging.parent.mkdir(parents=True, exist_ok=True)
+                    with staging.open("xb") as sink:
+                        measured = work_domain.measure(origin, sink)
+                    if expected and any(expected[key] != measured[key] for key in ("sha256", "size")):
+                        staging.unlink(missing_ok=True)
+                        raise ArtifactIdentityError(f"selected input changed: {origin}")
+                else:
+                    measured = copy_artifact_file(origin, staging, expected=expected)
                 local = root / SELECTED_DIR / measured["sha256"][:ADDRESS_HEX] / name  # hash-stable, never positional
                 local.parent.mkdir(parents=True, exist_ok=True)
                 if local.exists() or local.is_symlink():  # a repeated selection's same bytes stay; others refuse
@@ -237,12 +253,12 @@ def schedule_selected_inputs(ctx: Any, entries: List[Dict[str, str]], child_task
 
 
 def start_inputs(ctx: Any, authority: Any, invocation_id: str, input_files: Any, prepared: Any,
-                 thread_turn: bool = False):
-    """``(inputs, refusal)`` for one new start: lineage staging plus the explicit selection.
+                 thread_folder: Optional[str] = None):
+    """``(inputs, refusal)`` for one new start: the explicit selection, else the default lineage staging.
 
     Only a read-only run (readonly access or an evidence-only investigation) stages inputs; a
     nonempty selection for a writable run refuses typed, while omission and [] never gate it.
-    ``thread_turn``: a plan-thread turn, whose engine thread keeps its original folder.
+    ``thread_folder``: a plan-thread turn's, the folder its engine thread keeps (``prepare_readonly_inputs``).
     Every refusal precedes the request row."""
     from ouroboros.delegate_shared import _fail
 
@@ -255,7 +271,7 @@ def start_inputs(ctx: Any, authority: Any, invocation_id: str, input_files: Any,
                                         "read-only run; this start can write. Omit input_files, or start it read-only.",
                                         definitely_unrun=True)
             return NO_INPUTS._replace(selected=[] if asked else None), None
-        inputs = prepare_readonly_inputs(ctx, invocation_id, entries, prepared, thread_turn=thread_turn)
+        inputs = prepare_readonly_inputs(ctx, invocation_id, entries, prepared, thread_folder=thread_folder)
     except InputSelectionError as exc:
         return NO_INPUTS, _fail("delegate_start", exc.code, exc.detail, input_files=exc.results, definitely_unrun=True)
     except (OSError, ValueError) as exc:
@@ -265,13 +281,18 @@ def start_inputs(ctx: Any, authority: Any, invocation_id: str, input_files: Any,
 
 def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List[Dict[str, str]]] = None,
                             prepared: Optional[List[Dict[str, Any]]] = None, *,
-                            thread_turn: bool = False) -> ReadonlyInputs:
-    """This invocation's inputs: folderless lineage copies and the explicit selection.
+                            thread_folder: Optional[str] = None) -> ReadonlyInputs:
+    """This invocation's inputs: the explicit selection, which replaces folderless lineage copies, else those copies.
 
     ``entries`` are this call's ``input_files``; ``prepared`` a scheduled child's
-    schedule-time receipt for its first start. Without either the result equals the
-    pre-selection behavior exactly. A ``thread_turn`` keeps its thread's original folder
-    (the engine drops a new scope), so its selection is named by retained path, outside it."""
+    schedule-time receipt for its first start; either one, nonempty, is the whole set (no lineage
+    file is enumerated or copied). Without either the result equals the pre-selection behavior
+    exactly. A plan-thread turn (``thread_folder`` given) runs in the folder
+    its thread was created on, whose copies that start staged: the engine drops a turn's scope and
+    no other field reaches a new folder, so the turn stages nothing, keeps that folder (as the
+    engine's thread record names it) as its scope and registration identity, and names its
+    selection by retained path, outside it. A folderless turn whose record names no folder ("")
+    is refused before anything is retained, staged or registered: no other root stands in for it."""
     from ouroboros.tool_access import folderless_scratch_dir
 
     rows = resolve_selection(ctx, entries) if entries else list(prepared or [])
@@ -281,29 +302,96 @@ def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List
     if not invocation_id or pathlib.Path(invocation_id).name != invocation_id:
         raise ValueError("invalid readonly invocation identity")
     container = None if scratch is None else _owned_container(scratch)
+    if container is not None and thread_folder == "":
+        raise ValueError("The engine's record of this plan thread names no folder (repoRoot), so this read-only "
+                         "turn's scope is unknown; nothing was retained, staged, registered or sent. Start a "
+                         "fresh plan, or continue once the engine names the thread's folder.")
     if entries:
         retained_root = _retained_root(ctx, invocation_id)
         retained_root.mkdir(parents=True, exist_ok=False)
         rows = copy_selection(rows, retained_root)
         _write_manifest(retained_root, [], rows)
+    turn = thread_folder is not None
     outside = [{**row, "carrier": "outside_scope_path"} for row in (rows if entries else copy_selection(rows, None))
-               ] if container is None or thread_turn else []  # the run keeps its folder and names the retained copies
-    note = _selection_note(pathlib.Path(outside[0]["retained"]).parents[3] / "inputs.json", outside,
-                           inside_scope=False) if outside else ""
+               ] if container is None or turn else []  # the run keeps its folder and names the retained copies
+    manifest = pathlib.Path(outside[0]["retained"]).parents[3] / "inputs.json" if outside else None
+    beside = thread_folder or getattr(ctx, "workspace_root", "") or (manifest.parent if manifest else "")
+    if outside and (delivered := _work_delivery(ctx, invocation_id, None, outside, beside)) is not None:
+        outside = [{**row, "local": str(delivered / _selected_rel(row))} for row in outside]  # what the work reads
+        manifest = delivered / "inputs.json"
+    note = _selection_note(manifest, outside, inside_scope=False) if outside else ""
     if container is None:
         return ReadonlyInputs("", "\n" + note, outside, note)
+    if turn:
+        return ReadonlyInputs(thread_folder, "\n" + note if note else "", outside, note)
     root = container / invocation_id
     root.mkdir(parents=True, exist_ok=False)
-    lineage = _lineage_copies(ctx, root)
-    receipt = outside if thread_turn else [{**row, "carrier": "scope"} for row in copy_selection(rows, root)]
-    _write_manifest(root, lineage, [] if thread_turn else receipt)
+    lineage = [] if rows else _lineage_copies(ctx, root)  # a nonempty selection is the whole set
+    receipt = [{**row, "carrier": "scope"} for row in copy_selection(rows, root)]
+    _write_manifest(root, lineage, receipt)
+    if (delivered := _work_delivery(ctx, invocation_id, root, receipt, root)) is not None:  # the scope the engine reads
+        receipt = [{**row, "local": str(delivered / pathlib.Path(row["local"]).relative_to(root))} for row in receipt]
+        root = delivered
     note = note or (_selection_note(root / "inputs.json", receipt, inside_scope=True, scope=root) if receipt else "")
     return ReadonlyInputs(str(root), (
         "\nREADONLY INPUTS: This invocation has its own scratch scope, not a workspace grant. "
-        "inputs.json maps permitted native lineage sources to byte-identical verified local copies. "
+        "inputs.json maps the selected files, or default native lineage sources, to verified local copies. "
         "Read those local paths when the work order names the original sources. "
         "The manifest describes staged copies, not an additional filesystem-read boundary.\n"
     ) + note, receipt, note)
+
+
+def _selected_rel(row: Dict[str, Any]) -> str:
+    return f"{SELECTED_DIR}/{row['sha256'][:ADDRESS_HEX]}/{pathlib.Path(row['local']).name}"
+
+
+def _work_delivery(ctx: Any, invocation_id: str, root: Optional[pathlib.Path], rows: List[Dict[str, Any]],
+                   execution: Any) -> Optional[pathlib.Path]:
+    """Managed (``work_domain``): this invocation's inputs materialized in the work domain, so the work engine reads
+    their bytes there and nothing of the service. The folder is a session scratch its task's drive owns
+    (``session_scratch_owners/inputs-<invocation>``, made by ``workspace_preflight._session_scratch`` apart from
+    ``execution``): the custody pass retires it once that task is over or its drive settles, a producer's retention
+    marker or an unlistable subtree holding it as any scratch's, and a plan-thread turn keeps naming it meanwhile.
+    ``root``: the folderless scope the service staged, mirrored whole (``inputs.json`` included); else the selected
+    rows' verified copies under ``inputs/selected`` with their own ``inputs.json``. One tar stream the container
+    unpacks as the work domain. None unmanaged: the service's own copies stay what the run reads."""
+    from ouroboros import work_domain
+
+    if not work_domain.managed():
+        return None
+    from ouroboros.task_results import validate_task_id
+    from ouroboros.tool_access_paths import canonical_data_root
+    from ouroboros.workspace_preflight import (
+        SESSION_SCRATCH_DIRNAME,
+        _note_open_scratch,
+        _owned_directory,
+        _session_scratch,
+    )
+
+    task_id, key, execution = validate_task_id(str(getattr(ctx, "task_id", "") or "")), f"inputs-{invocation_id}", \
+        work_domain.settle(execution)
+    owner = _owned_directory(getattr(ctx, "drive_root", ""), ("task_drives", task_id, SESSION_SCRATCH_DIRNAME, key), execution)
+    target = _session_scratch(owner, execution)
+    _note_open_scratch(canonical_data_root(ctx), task_id, key, owner)
+    members = []
+    if root is not None:
+        for folder, _dirs, files in os.walk(root, followlinks=False):
+            for name in sorted(files):
+                path = pathlib.Path(folder) / name
+                if not path.is_symlink():
+                    members.append((path.relative_to(root).as_posix(), path,
+                                    stat.S_IMODE(path.stat().st_mode)))
+    else:
+        selected = []
+        for row in rows:
+            rel = _selected_rel(row)
+            members.append((rel, pathlib.Path(row["local"]), 0o644))  # the service's own verified copy
+            selected.append({"root": row["root"], "source": row["source"], "local": rel, "selected_path": row["path"],
+                             "source_sha256": row["sha256"], "source_size": row["size"],
+                             "sha256": row["sha256"], "size": row["size"]})
+        members.append(("inputs.json", json.dumps(selected, ensure_ascii=False, indent=2).encode("utf-8"), 0o644))
+    work_domain.import_tree(target, members)
+    return target
 
 
 def _write_manifest(root: pathlib.Path, lineage: List[Dict[str, Any]], receipt: List[Dict[str, Any]]) -> None:
@@ -360,21 +448,30 @@ def _owned_container(base: pathlib.Path) -> pathlib.Path:
 
 
 def _lineage_copies(ctx: Any, root: pathlib.Path) -> List[Dict[str, Any]]:
-    from ouroboros.artifacts import stream_artifact_file
+    """Every permitted lineage file's exact bytes under ROOT, each its own inode (``artifacts.copy_artifact_file``):
+    a clone where the volume makes one, captured whole at one instant, else a bounded stream that refuses a source
+    changing while read. Bytes only: a copy gets ROOT's new-file mode, never the source's mode or times. A file a
+    supported ``record_compression`` pass may compress (``in_scope``) streams until already compressed, since an APFS clone
+    keeps its source shared while it lives (before macOS 14, for good); an already compressed record keeps its
+    compression in the clone."""
+    from ouroboros.artifact_storage import compression_supported, is_compressed
+    from ouroboros.artifacts import copy_artifact_file
     from ouroboros.protected_artifacts import block_reason_for_path
-    from ouroboros.task_custody import fence_publication
+    from ouroboros.record_compression import in_scope
     from ouroboros.tool_access import (
         active_tool_profile,
         build_resolved_resource_binding,
+        canonical_data_root,
         decide_tool_access,
         lineage_read_roots,
     )
-    from ouroboros.utils import write_bytes_atomic
     from ouroboros.tools.core_file_tools import _runtime_data_read_check
 
     reader = copy.copy(ctx)
     reader.task_constraint = {"mode": "local_readonly_subagent"}
-    manifest = []
+    manifest, data = [], canonical_data_root(ctx)
+    preserve_compression = compression_supported()
+    mode = stat.S_IMODE(root.stat().st_mode) & 0o666  # ROOT is this start's new folder: what a new file gets here
     runtime_check = _runtime_data_read_check(reader)
     for label in ("task_drive", "artifact_store"):
         if not decide_tool_access(profile=active_tool_profile(reader), root=label, operation="read").allow:
@@ -395,16 +492,12 @@ def _lineage_copies(ctx: Any, root: pathlib.Path) -> List[Dict[str, Any]]:
                 if block_reason_for_path(reader, binding.target_path, "read_bytes", binding):
                     continue
                 local = pathlib.Path("inputs") / label / str(index) / relative
-                # Verify the original once, then copy its exact bytes. The owned
-                # copy does not inherit source permissions or workspace authority.
-                fence_publication()
-                contents = io.BytesIO()
-                measured = stream_artifact_file(binding.target_path, contents)
-                raw = contents.getvalue()
-                write_bytes_atomic(root / local, raw)
+                clone = (not preserve_compression or not in_scope(data, binding.target_path)
+                         or is_compressed(os.lstat(binding.target_path)))
+                measured = copy_artifact_file(binding.target_path, root / local, mode=mode, clone=clone)  # fenced, verified
                 manifest.append({"root": label, "source": str(source), "local": local.as_posix(),
                                  "source_sha256": measured["sha256"], "source_size": measured["size"],
-                                 "sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)})
+                                 "sha256": measured["sha256"], "size": measured["size"]})
     return manifest
 
 

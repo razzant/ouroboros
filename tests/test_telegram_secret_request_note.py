@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 
-from tests.test_telegram_quiz_answers import _LAST_CLIENT, Api, Client, _load_plugin, _run_poller, _settings
+from tests.test_telegram_quiz_answers import (
+    _LAST_CLIENT, Api, Client, _card_messages, _load_plugin, _run_poller, _settings,
+)
 from tests._cases import case_folders
 
 CANARY = "zq7-CANARY-Ωlj3~p0+kx/2"
@@ -32,13 +34,14 @@ def _send_note(plugin, tmp_path, monkeypatch):
 
 def test_a_secret_request_is_a_note_without_keyboard_wait_line_or_reply_prompt(tmp_path, monkeypatch):
     plugin = _load_plugin()
+    before = len(_LAST_CLIENT)
     api = _send_note(plugin, tmp_path, monkeypatch)
-    client = _LAST_CLIENT[-1]
-    assert client.panels == []
-    assert client.sent == [(42, f"Question: {_HINT}\nA reply here is not sent to Ouroboros.")]
+    sent, panels = _card_messages(_LAST_CLIENT[before:])
+    assert panels == []
+    assert sent == [(42, f"Question: {_HINT}\nA reply here is not sent to Ouroboros.")]
     record = plugin.telegram_quiz.quiz_for_message(api, "", 42, 1)
     assert record["secret"] is True and record["options"] == []
-    assert "Reply to this message" not in client.sent[0][1] and "Waiting for your answer" not in client.sent[0][1]
+    assert "Reply to this message" not in sent[0][1] and "Waiting for your answer" not in sent[0][1]
 
 
 def test_a_reply_with_a_value_is_answered_locally_and_posted_nowhere(tmp_path, monkeypatch):

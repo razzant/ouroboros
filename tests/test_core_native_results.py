@@ -283,9 +283,11 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
     published = _published(ctx, tool, call, owner_delta="" if code == "OK" else "A.20")
 
     assert published.code == code
-    assert published.text == text
-    # A refused delivery queues nothing; a published success queues exactly one event.
+    receipt, _, show = published.text.partition("\nHost fact: ")
+    assert receipt == text
+    # A refused delivery queues nothing; a published success queues exactly one event and records what it put up.
     assert len(ctx.pending_events) == (1 if code == "OK" else 0)
+    assert bool(show) is (code == "OK")
 
 
 @pytest.mark.parametrize(

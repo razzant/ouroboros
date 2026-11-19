@@ -125,7 +125,7 @@ def _waited_run(tmp_path, monkeypatch, summary, requested_model="m",
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
     ctx.task_id = "t-a"
     ctx.task_metadata = {"root_task_id": "t-a"}
-    payload = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    payload = json.loads(delegate._read_run(ctx, "run-1"))
     delegate._CUSTODY.clear()
     return payload
 

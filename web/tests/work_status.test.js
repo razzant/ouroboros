@@ -15,9 +15,9 @@ import { censusTaskPhase, desiredLiveCardPhase, pausePhaseLabel, taskActivityPre
 import { markView } from '../modules/status_mark.js';
 import { summarizeRoom } from '../modules/project_activity.js';
 import {
-    OUTCOME_TONES, activityWord, applyCardWorkViews, cardControls, cardMenuActions, cardWorkView, clock, emptyWorkState,
+    OUTCOME_TONES, activityWord, amberNote, applyCardWorkViews, cardControls, cardMenuActions, cardWorkView, clock, emptyWorkState,
     memberPaused, memberState, ownStopPress, reasonText, reconcileWorkState, resumeAttemptClause, resumeAttemptWords,
-    resumeTargets, roomStatusView, workControls, workLine, workMenuActions, workQuestion, workRowView,
+    resumeTargets, roomAmber, roomStatusView, workControls, workLine, workMenuActions, workQuestion, workRowView,
 } from '../modules/work_status.js';
 import { SERVER_REASONS, SERVER_SLEEPS, room, serverMark, work as builtWork } from './work_fixture.js';
 
@@ -72,15 +72,34 @@ test('the mark is the server\'s shape; whose move it is stands beside it, said i
         'a Pause still settling: neutral ink, the server\'s moving mark');
     const queued = roomStatusView({ room: room('queued') });
     assert.deepEqual([queued.text, queued.mark, queued.tone], ['Queued', 'still', 'queued']);
-    // A working room with a question elsewhere keeps its word and its shape; the owner's dot takes the mark's place.
+    // A working room with a question elsewhere keeps its word and its moving shape, in the owner's hue.
     const mixed = roomStatusView({ room: room('working', { turn: [{ kind: 'question', task_id: 'x', quiz_id: 'q' }] }) });
     assert.deepEqual([mixed.text, mixed.tone, mixed.mark, mixed.owner, mixed.amber], ['Working', 'live', 'moving', true, 'question']);
-    assert.deepEqual(markView(mixed), { shape: 'dot', hue: 'owner' });
+    assert.deepEqual(markView(mixed), { shape: 'moving', hue: 'owner' });
     assert.deepEqual(markView(view('held_continue')), { shape: 'moving', hue: 'ink' });
     // Every room the server rolls up keeps the server's own mark: nothing on the client chooses another shape.
     for (const [name, { rooms }] of Object.entries(CASES)) {
         for (const [chat, served] of Object.entries(rooms || {})) assert.equal(view(name, Number(chat)).mark, served.mark, name);
     }
+});
+
+test('a room\'s note says what waits: a question a task stands on, then an action, then an open question or its delivery', () => {
+    const note = (...turn) => amberNote(roomAmber(room('idle', { turn })));
+    const standing = { kind: 'question', task_id: 'a', quiz_id: 'q' };
+    const action = { kind: 'action', task_id: 'b' };
+    const open = { kind: 'open_question', task_id: 'c', quiz_id: 'q' };
+    const delivery = { kind: 'open_question', task_id: 'd', quiz_id: 'q', code: 'delivery_unknown' };
+    assert.equal(note(open, standing, action), 'A question waits for your answer');
+    // An owner action outranks an unanswered question, in either order.
+    assert.equal(note(open, action), 'Something here waits for you');
+    assert.equal(note(action, open), 'Something here waits for you');
+    assert.equal(note(open), 'An unanswered question is here');
+    // Only answers whose delivery is unknown: the note says that, never an unanswered question; one open beside it
+    // is said as unanswered, in either order.
+    assert.equal(note(delivery), 'An answer here was recorded; its delivery is unknown');
+    assert.equal(note(delivery, open), 'An unanswered question is here');
+    assert.equal(note(open, delivery), 'An unanswered question is here');
+    assert.equal(note(), '', 'nothing waits: no note');
 });
 
 test('only the client facts overlay the room, each with its mark: socket closed, own send, start, own Stop press', () => {
@@ -89,13 +108,45 @@ test('only the client facts overlay the room, each with its mark: socket closed,
         { kind: 'offline', text: 'Reconnecting…', tone: 'offline', mark: 'ring', owner: false, amber: '' });
     assert.equal(roomStatusView(stateOf('spending_limit'), { connected: false }).owner, false,
         'a closed socket proves nothing current, the owner\'s move included');
+    // The socket's own observation is said beside its word (the step a short bar drops first), never a cause.
+    assert.deepEqual(roomStatusView(working, { connected: false, serverAnswers: true }),
+        { kind: 'offline', text: 'Reconnecting…', tone: 'offline', mark: 'ring', owner: false, amber: '',
+            step: 'server answers', title: 'The server answers, but live updates cannot connect.' });
+    assert.deepEqual(roomStatusView(working, { serverAnswers: true }), roomStatusView(working),
+        'a connected room says its work, whatever the socket observed before');
+    // Shown again or reconnected, a room still reading what it missed says so over its last known state.
+    assert.deepEqual(roomStatusView(working, { catchingUp: true }),
+        { kind: 'starting', text: 'Updating…', tone: 'updating', mark: 'ring', owner: false, amber: '' });
+    const catchingUp = roomStatusView(stateOf('spending_limit'), { catchingUp: true });
+    assert.deepEqual([catchingUp.text, catchingUp.owner, catchingUp.amber], ['Updating…', true, 'action']);
+    const question = roomStatusView({ room: room('working', { turn: [{ kind: 'question', task_id: 'x', quiz_id: 'q' }] }) },
+        { catchingUp: true });
+    assert.deepEqual([question.text, question.owner, question.amber], ['Updating…', true, 'question']);
+    assert.deepEqual(markView(question), { shape: 'dot', hue: 'owner' });
+    assert.equal(roomStatusView(working, { connected: false, catchingUp: true }).text, 'Reconnecting…', 'an outage outranks it');
     const idle = emptyWorkState();
     assert.deepEqual(roomStatusView(idle),
         { kind: 'online', text: 'Online', tone: 'online', mark: 'none', owner: false, amber: '' });
+    // A room at rest keeps the owner's turn: a question whose work ended still waits there, Online beside the owner's dot.
+    assert.deepEqual(roomStatusView({ room: room('idle', { turn: [{ kind: 'open_question', task_id: 't', quiz_id: 'q' }] }) }),
+        { kind: 'online', text: 'Online', tone: 'online', mark: 'none', owner: true, amber: 'unanswered' });
     assert.deepEqual(roomStatusView(idle, { ready: false }),
-        { kind: 'starting', text: 'Starting…', tone: 'starting', mark: 'none', owner: false, amber: '', title: '' });
+        { kind: 'starting', text: 'Starting…', tone: 'starting', mark: 'none', owner: false, amber: '', step: '', title: '', detail: '' });
+    // The start lies over the room's word, never over its owner's turn: an open question stays amber while the host
+    // starts (as while it catches up), whether the start goes on or failed.
+    const asked = { room: room('idle', { turn: [{ kind: 'open_question', task_id: 't', quiz_id: 'q' }] }) };
+    const askedStart = roomStatusView(asked, { ready: false, boot: { phase: 'serving', dialogue_ready: true,
+        steps: [{ name: 'extensions', state: 'running' }] } });
+    assert.deepEqual(['kind', 'text', 'step', 'mark', 'owner', 'amber'].map((key) => askedStart[key]),
+        ['starting', 'Chat ready', 'loading extensions', 'none', true, 'unanswered']);
+    assert.deepEqual(markView(askedStart), { shape: 'dot', hue: 'owner' });
+    const askedFailed = roomStatusView(asked, { ready: false, boot: { phase: 'failed', error: 'Supervisor init failed: x', steps: [] } });
+    assert.deepEqual([askedFailed.text, askedFailed.tone, askedFailed.owner, askedFailed.amber], ['Start failed', 'failed', true, 'unanswered']);
     // The owner's own unconfirmed send outranks a quiet room, never work the room already does; it moves.
     const said = (state, overlay) => ['text', 'mark', 'owner'].map((key) => roomStatusView(state, overlay)[key]);
+    // Work the room does keeps its own word and the owner's move while the host starts.
+    assert.deepEqual(said(working, { ready: false }), said(working));
+    assert.deepEqual(said(stateOf('spending_limit'), { ready: false }), said(stateOf('spending_limit')));
     assert.deepEqual(said(idle, { sending: true }), ['Sending', 'moving', false]);
     assert.deepEqual(said(stateOf('paused_by_owner'), { sending: true }), ['Sending', 'moving', false]);
     assert.deepEqual(said(stateOf('spending_limit'), { sending: true }), ['Sending', 'moving', true],
@@ -132,13 +183,13 @@ test('a turn still preparing says its start step beside Preparing on the bar and
     assert.ok(!('step' in roomStatusView(called)) && !('step' in roomStatusView(stateOf('working_call'))),
         'a working room says no start step');
     // Only a preparing room says a line in the bar: a working room's reason stays beside its work.
-    assert.equal(workLine(stateOf('held_continue').works[0]), 'Continue starts when 3 helpers of the earlier attempt finish');
+    assert.equal(workLine(stateOf('held_continue').works[0]), 'Continue starts when 3 subagents of the earlier attempt finish');
     assert.equal(roomStatusView(stateOf('held_continue')).text, 'Working');
 });
 
 test('reasons read their code through the catalog; counts stay parameters; an unknown code reads its sentence', () => {
     const held = work('held_continue');
-    assert.equal(reasonText(held.because[0]), 'Continue starts when 3 helpers of the earlier attempt finish');
+    assert.equal(reasonText(held.because[0]), 'Continue starts when 3 subagents of the earlier attempt finish');
     assert.equal(reasonText({ code: 'brand_new_reason', text: 'A sentence no client knows yet' }), 'A sentence no client knows yet');
     assert.equal(reasonText({ code: '', text: 'raw' }), 'raw');
     assert.equal(reasonText(null), '');
@@ -155,7 +206,7 @@ test('reasons read their code through the catalog; counts stay parameters; an un
     const prior = currentPayload();
     try {
         applyPayload({ language: 'ru', english: false, entries: {
-            'Continue starts when {count} helpers of the earlier attempt finish':
+            'Continue starts when {count} subagents of the earlier attempt finish':
                 { text: 'Продолжение начнётся, когда закончат {count} помощника прошлой попытки' },
             '{count} external runs may still be running': { text: 'Возможно, ещё работают внешние запуски: {count}' },
             'Ouroboros: {reason}': { text: 'Уроборос: {reason}' },
@@ -166,7 +217,7 @@ test('reasons read their code through the catalog; counts stay parameters; an un
         } });
         // The count is a parameter of the translated template, never a number baked into a translation.
         assert.equal(reasonText(held.because[0]), 'Продолжение начнётся, когда закончат 3 помощника прошлой попытки');
-        assert.equal(reasonText({ ...held.because[0], count: 18, text: 'Continue starts when 18 helpers of the earlier attempt finish' }),
+        assert.equal(reasonText({ ...held.because[0], count: 18, text: 'Continue starts when 18 subagents of the earlier attempt finish' }),
             'Продолжение начнётся, когда закончат 18 помощника прошлой попытки');
         assert.equal(reasonText({ ...held.because[0], count: 1 }), 'Продолжение начнётся, когда закончит помощник');
         assert.equal(reasonText({ ...unconfirmed, count: 2, text: '2 external runs may still be running' }), 'Возможно, ещё работают внешние запуски: 2');
@@ -219,42 +270,42 @@ test('a sleep whose chosen helper still awaits its own Resume says so beside Wai
     const state = stateOf('sleeping_on_paused_helper');
     const row = workRowView(state.works[0]);
     assert.deepEqual(row, { word: 'Waiting', tone: 'held', mark: 'still', owner: false, outcome: '', focus: '',
-        secondary: 'Sleeping until the task it chose finishes or a message arrives · 1 helper it waits for is paused until Ouroboros resumes it' });
+        secondary: 'Sleeping until the task it chose finishes or a message arrives · 1 subagent it waits for is paused until Ouroboros resumes it' });
     // The sleeping root keeps exactly its own controls; the helper's Resume stays Ouroboros's selection.
     const grouped = workControls(state.works[0]);
-    assert.deepEqual(grouped, { stop: ['sw'], stopEarlier: [], pause: 'sw', resume: '', hurry: 'sw', wrapUp: 'sw' });
+    assert.deepEqual(grouped, { stop: ['sw'], stopEarlier: [], pause: 'sw', resume: '', hurry: 'sw', wrapUp: 'sw', model: '' });
     assert.deepEqual([roomStatusView(state).owner, roomStatusView(state).amber], [false, '']);
     // A translation keeps the count; the helper's own Activity sentence is unchanged.
     assert.equal(reasonText({ code: 'awaited_helpers_mind', count: 3, text: 'x' }),
-        '3 helpers it waits for are paused until Ouroboros resumes them');
+        '3 subagents it waits for are paused until Ouroboros resumes them');
     assert.equal(memberState(state, 'sw-c').because[0].code, 'awaiting_selection');
 });
 
 test('a reusable slot gets no control by its id; a real target keeps its own', () => {
     const slot = { controls: [{ action: 'stop', target: 'active' }, { action: 'pause', target: 'active' },
         { action: 'stop', target: 't-1' }] };
-    assert.deepEqual(workControls(slot), { stop: ['t-1'], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '' });
+    assert.deepEqual(workControls(slot), { stop: ['t-1'], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '', model: '' });
 });
 
 test('a held Continue with three helpers of its failed earlier attempt: one working row with the reason, Stop and Stop earlier attempt, no Resume', () => {
     const state = stateOf('held_continue');
     assert.equal(state.works.length, 1, 'one work, one row: the Continue and its earlier helpers are inside it');
     const row = workRowView(state.works[0]);
-    assert.deepEqual(row, { word: 'Working', secondary: 'Continue starts when 3 helpers of the earlier attempt finish',
+    assert.deepEqual(row, { word: 'Working', secondary: 'Continue starts when 3 subagents of the earlier attempt finish',
         tone: 'live', mark: 'moving', owner: false, outcome: '', focus: '' });
     const grouped = workControls(state.works[0]);
-    assert.deepEqual(grouped, { stop: ['c', 'p'], stopEarlier: ['p'], pause: '', resume: '', hurry: '', wrapUp: '' });
+    assert.deepEqual(grouped, { stop: ['c', 'p'], stopEarlier: ['p'], pause: '', resume: '', hurry: '', wrapUp: '', model: '' });
     assert.deepEqual(workMenuActions(grouped), [ACTION_STOP_EARLIER, ACTION_STOP_NOW]);
     assert.equal(TASK_CONTROL_LABELS[ACTION_STOP_EARLIER], 'Stop earlier attempt');
     // The held Continue's own card says the work's word and reason, and offers no Resume.
     const card = cardControls(state, 'c');
     assert.deepEqual([card.resume, card.menu, Boolean(card.work)], [false, true, true]);
     assert.deepEqual(cardWorkView(state.works[0]), { phase: 'working', text: 'Working',
-        secondary: 'Continue starts when 3 helpers of the earlier attempt finish', classes: 'working',
+        secondary: 'Continue starts when 3 subagents of the earlier attempt finish', classes: 'working',
         tone: 'live', waiting: false });
     // A count says itself the same from one helper to eighteen; the structure does not change.
     const many = { ...state.works[0], because: [{ code: 'earlier_attempt_finishing', count: 18,
-        text: 'Continue starts when 18 helpers of the earlier attempt finish' }] };
+        text: 'Continue starts when 18 subagents of the earlier attempt finish' }] };
     assert.deepEqual(Object.keys(workRowView(many)), Object.keys(row));
     assert.equal(workRowView(many).tone, row.tone);
 });
@@ -288,7 +339,7 @@ test('rows: their word, the line beside it, tone, mark and the owner\'s move fro
     assert.deepEqual(markView(row('finalizing_failed')), { shape: 'dot', hue: 'failed' });
     assert.deepEqual(['word', 'tone', 'mark'].map((key) => row('unknown')[key]), ['Activity unconfirmed', 'unknown', 'ring']);
     assert.deepEqual([row('ended_with_runs').word, row('ended_with_runs').secondary], ['Working', '2 external runs still working']);
-    assert.deepEqual([row('helper_after_parent').word, row('helper_after_parent').secondary], ['Working', '1 helper still working']);
+    assert.deepEqual([row('helper_after_parent').word, row('helper_after_parent').secondary], ['Working', '1 subagent still working']);
     // A paused work whose review still finishes stays Paused, its bars on its row; the review is the line's second fact.
     assert.deepEqual(['word', 'secondary', 'tone', 'mark'].map((key) => row('paused_review_finishing')[key]),
         ['Paused', `You paused it · ${PRESSED} · Review work finishing`, 'held', 'pause']);
@@ -308,6 +359,8 @@ test('a known outcome beside Finalizing… is a dot in its tone: Done with warni
     assert.deepEqual(said('rejected_duplicate'), ['Done with warnings', 'Finalizing…', 'done', 'warn', { shape: 'dot', hue: 'ok' }]);
     assert.deepEqual(said('cancelled'), ['Stopped', 'Finalizing…', 'stopped', 'cancelled', { shape: 'dot', hue: 'neutral' }]);
     assert.deepEqual(said('failed'), ['Failed', 'Finalizing…', 'failed', 'error', { shape: 'dot', hue: 'failed' }]);
+    // #2801: a lifecycle that has not settled is no outcome: plain Finalizing…, never Done.
+    assert.deepEqual(said('running').slice(0, 4), ['Finalizing…', '', 'live', '']);
     assert.deepEqual(OUTCOME_TONES, { done: 'done', warn: 'done', cancelled: 'stopped', error: 'failed', timeout: 'failed',
         lifecycle_error: 'failed' });
 });
@@ -316,11 +369,14 @@ test('whatever waits for the owner takes a row\'s mark place beside any word; th
     const question = [{ kind: 'question', task_id: 'w', quiz_id: 'q' }];
     const asking = workRowView({ ...work('working_call'), turn: question });
     assert.deepEqual([asking.word, asking.tone, asking.mark, asking.owner], ['Sending', 'live', 'moving', true]);
-    assert.deepEqual(markView(asking), { shape: 'dot', hue: 'owner' });
-    // The owner's own Stop press says itself and keeps the owner's dot; an outcome yields to it too.
+    assert.deepEqual(markView(asking), { shape: 'moving', hue: 'owner' }, 'moving work keeps its shape in the owner hue');
+    // The owner's own Stop press says itself and keeps the owner's hue; an outcome yields to it too.
     const stopping = workRowView({ ...work('working_call'), turn: question }, { stopping: 'finalize' });
-    assert.deepEqual([stopping.word, stopping.mark, markView(stopping)], ['Finalizing…', 'moving', { shape: 'dot', hue: 'owner' }]);
+    assert.deepEqual([stopping.word, stopping.mark, markView(stopping)], ['Finalizing…', 'moving', { shape: 'moving', hue: 'owner' }]);
     assert.deepEqual(markView(workRowView({ ...work('finalizing_failed'), turn: [{ kind: 'action' }] })),
+        { shape: 'moving', hue: 'owner' });
+    // Where nothing moves, the owner's move stands alone as the amber dot.
+    assert.deepEqual(markView(workRowView({ ...work('paused_by_owner'), turn: [{ kind: 'action' }] })),
         { shape: 'dot', hue: 'owner' });
     // Nothing for the owner: the work's shape in the word's ink.
     assert.deepEqual(markView(workRowView(work('working_call'))), { shape: 'moving', hue: 'ink' });
@@ -381,7 +437,7 @@ test('a sleep says every source it chose in the server\'s words, joined by "or",
         `Sleeping until Draft the release notes finishes or writes or ${clock(at)}`);
     // The chosen helper by its census name, never its id; what still runs beside it stays its own fact.
     assert.equal(workLine(work('sleeping_on_named_helper')),
-        'Sleeping until Draft the release notes finishes or writes · 1 helper still working');
+        'Sleeping until Draft the release notes finishes or writes · 1 subagent still working');
     assert.equal(workLine(work('sleeping_until_time')), `Sleeping until a message arrives or ${clock(at)}`);
     assert.ok(!workLine(work('sleeping_on_named_helper')).includes('sn-c'));
     // A clause this client does not know, or a time it cannot read, keeps the server's sentence whole.
@@ -440,7 +496,9 @@ test('controls group by action with exact targets; Resume is a button, a pending
     assert.deepEqual(workMenuActions(workControls(work('direct_question'))), [ACTION_PAUSE, ACTION_STOP_NOW],
         'a direct turn waiting for its answer can be paused and stopped, as its doors take it');
     assert.deepEqual(workControls({ controls: [{ action: 'teleport', target: 'x' }, { action: 'stop', target: '' }] }),
-        { stop: [], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '' }, 'unknown or targetless actions are not offered');
+        { stop: [], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '', model: '' }, 'unknown or targetless actions are not offered');
+    assert.equal(workControls({ controls: [{ action: 'model', target: 't1' }] }).model, 't1', 'the model control names its task');
+    assert.equal(running.model, '', 'a work the server offers no model control for has none');
     assert.deepEqual([...resumeTargets(body('paused_by_owner'))], ['o']);
     assert.deepEqual([...resumeTargets(body('held_continue'))], [], 'a held Continue is never resumed by the owner');
 });
@@ -543,6 +601,23 @@ test('an incomplete body keeps what it omitted, unconfirmed and without controls
     assert.equal(roomStatusView(reconcileWorkState(emptyWorkState(), { works: [], works_complete: false }, 42)).text, 'Online');
 });
 
+test('a question row\'s facts live in the reconciled state with the turn item that makes the row', () => {
+    const item = { kind: 'open_question', task_id: 't', quiz_id: 'q' };
+    const row = { task_id: 't', quiz_id: 'q', quiz_state: 'open', question: 'Which format?' };
+    const read = (turn, questions) => ({ supervisor_ready: true, works: [], works_complete: true,
+        rooms: { 42: { ...room('idle'), turn, amber: turn.length > 0 } }, current_questions: questions });
+    const first = reconcileWorkState(emptyWorkState(), read([item], [row, { task_id: 'other', quiz_id: 'q' }]), 42);
+    assert.deepEqual([...first.questions], [['t:q', row]], 'only the rows of this room\'s open questions');
+    // Listed again without its row: the row it came with stays; a failed read changes nothing.
+    const kept = reconcileWorkState(first, read([item], []), 42);
+    assert.equal(kept.questions.get('t:q'), row);
+    assert.equal(reconcileWorkState(kept, null, 42).questions.get('t:q'), row);
+    const answered = { ...row, quiz_state: 'answered' };
+    assert.equal(reconcileWorkState(kept, read([item], [answered]), 42).questions.get('t:q'), answered);
+    // Its item gone, its row goes too.
+    assert.equal(reconcileWorkState(kept, read([], [row]), 42).questions.size, 0);
+});
+
 test('a room reads only its own works; every room feeds the card index and the member ids', () => {
     const merged = { supervisor_ready: true, works_complete: true,
         works: [...CASES.held_continue.works, ...CASES.direct_question.works],
@@ -576,9 +651,9 @@ test('a work card says its work\'s word alone, its line beside it; plain running
     assert.equal(view('unconfirmed_run'), null, 'unconfirmed work keeps the card\'s own words');
     assert.equal(view('ended_with_runs'), null, 'an ended episode keeps its own outcome');
     // Plain running work says its own word too once something runs beside it: the line names what.
-    const helper = { kind: 'helper', state: 'live', code: 'helpers_running', text: '1 helper still working', count: 1, ids: ['h'] };
+    const helper = { kind: 'helper', state: 'live', code: 'helpers_running', text: '1 subagent still working', count: 1, ids: ['h'] };
     const busy = cardWorkView({ ...work('working_call'), tails: [helper] });
-    assert.deepEqual([busy.text, busy.secondary, busy.tone, busy.waiting], ['Sending', '1 helper still working', 'live', false]);
+    assert.deepEqual([busy.text, busy.secondary, busy.tone, busy.waiting], ['Sending', '1 subagent still working', 'live', false]);
     // Its exact model call still explains that word in the card's details, never another word.
     const sending = { groupId: 'w', censusPhase: 'working', modelActivity: { phase: 'awaiting_response' }, workView: busy,
         workLook: { mark: 'moving', owner: false } };
@@ -598,9 +673,9 @@ test('a work card says its work\'s word alone, its line beside it; plain running
 });
 
 // The work's look reaches its card apart from the word: a running parent whose helper waits for the owner keeps
-// its own live word with the owner's amber dot (the server takes the turn from every member), and the look survives
-// the card's outcome, its record adapter and its painter (docs/DESIGN.md "Status marks").
-test('a work card keeps its work\'s look beside its own words: the owner\'s dot reaches a running parent', () => {
+// its own live word and its moving dots in the owner's hue (the server takes the turn from every member), and the
+// look survives the card's outcome, its record adapter and its painter (docs/DESIGN.md "Status marks").
+test('a work card keeps its work\'s look beside its own words: the owner\'s hue reaches a running parent', () => {
     const parent = structuredClone(CASES.working_call.works[0]);
     assert.equal(cardWorkView(parent), null, 'plain running work keeps the card\'s own words');
     parent.turn = [{ kind: 'question', task_id: 'helper', quiz_id: 'q1' }];
@@ -608,10 +683,11 @@ test('a work card keeps its work\'s look beside its own words: the owner\'s dot 
     const state = reconcileWorkState(emptyWorkState(), body, 42);
     const record = { groupId: parent.episode.task_id };
     assert.equal(applyCardWorkViews(new Map([['w', record]]), state), true);
-    assert.deepEqual([record.workView, record.workLook], [null, { mark: 'moving', owner: true }]);
+    assert.deepEqual([record.workView, record.workLook],
+        [null, { mark: 'moving', owner: true, note: 'A question waits for your answer' }]);
     const view = desiredLiveCardPhase(record);
     assert.deepEqual([view.text, view.tone, view.owner, view.mark], ['Working', 'live', true, 'moving']);
-    // The outcome owns the chip while its work finalizes; the owner's move stays its dot.
+    // The outcome owns the chip while its work finalizes; the owner's move keeps its hue.
     const late = desiredLiveCardPhase({ ...record, finalizingHold: true, observedOutcome: 'done' });
     assert.deepEqual([late.text, late.tone, late.owner, late.secondary], ['Done', 'ok', true, 'Finalizing…']);
     // The work's own word that is the owner's move takes the amber body too.
@@ -619,17 +695,38 @@ test('a work card keeps its work\'s look beside its own words: the owner\'s dot 
     const waits = { ...record, workView: cardWorkView(limit), workLook: { mark: limit.mark, owner: limit.turn.length > 0 } };
     assert.deepEqual(['text', 'secondary', 'tone', 'owner'].map((key) => desiredLiveCardPhase(waits)[key]),
         ['Paused', 'Spending limit reached', 'owner', true]);
-    // A turn the body lists is a fact even when another member could not be confirmed: the dot stays.
+    // A turn the body lists is a fact even when another member could not be confirmed: the owner's hue stays.
     const partial = { ...parent, confirmed: false };
     const read = reconcileWorkState(emptyWorkState(), { ...body, works_complete: false, works: [partial] }, 42);
     applyCardWorkViews(new Map([['w', record]]), read);
-    assert.deepEqual([record.workView, record.workLook], [null, { mark: 'moving', owner: true }]);
+    assert.deepEqual([record.workView, record.workLook],
+        [null, { mark: 'moving', owner: true, note: 'A question waits for your answer' }]);
     assert.deepEqual([desiredLiveCardPhase(record).text, desiredLiveCardPhase(record).owner], ['Working', true]);
     // A work an incomplete body omitted proves nothing: no look, so the card's own words and shape stand.
     const kept = reconcileWorkState(state, { supervisor_ready: true, works_complete: false, works: [], rooms: {} }, 42);
     applyCardWorkViews(new Map([['w', record]]), kept);
     assert.deepEqual([record.workView, record.workLook], [null, null]);
     assert.equal(desiredLiveCardPhase(record).owner, false);
+});
+
+test('a card chip names what its work\'s turn holds as the room\'s note does, by one rule', () => {
+    const open = { kind: 'open_question', task_id: 'w', quiz_id: 'q' };
+    const turns = { unanswered: [open], delivery: [{ ...open, code: 'delivery_unknown' }],
+        action: [open, { kind: 'action', task_id: 'w' }], question: [{ kind: 'question', task_id: 'w', quiz_id: 'q' }] };
+    for (const [kind, turn] of Object.entries(turns)) {
+        const parent = { ...structuredClone(CASES.working_call.works[0]), turn };
+        const record = { groupId: parent.episode.task_id };
+        applyCardWorkViews(new Map([['w', record]]), reconcileWorkState(emptyWorkState(),
+            { supervisor_ready: true, works_complete: true, works: [parent], rooms: {} }, 42));
+        // The chip's name and the room's note say the same thing for the same turn.
+        assert.equal(record.workLook.note, amberNote(roomAmber(room('working', { turn }))), kind);
+        assert.equal(desiredLiveCardPhase(record).ownerNote, record.workLook.note, kind);
+    }
+    assert.equal(amberNote(roomAmber(room('working', { turn: turns.unanswered }))), 'An unanswered question is here');
+    // Nothing waits: no note.
+    const quiet = { groupId: CASES.working_call.works[0].episode.task_id };
+    applyCardWorkViews(new Map([['w', quiet]]), reconcileWorkState(emptyWorkState(), body('working_call'), 42));
+    assert.equal(quiet.workLook?.note, undefined);
 });
 
 test('a census pause says its word alone; only the reviews a settled Pause lets finish stand beside it', () => {
@@ -724,9 +821,9 @@ test('helpers and external runs still working side by side are said once; either
         { code: 'external_runs_unconfirmed', kind: 'run', state: 'unknown', count: 1, text: 'u' },
     ];
     const line = (helpers, runs) => workLine({ activity: 'working', transition: 'none', because: [], tails: tails(helpers, runs) });
-    assert.equal(line(3, 2), '3 helpers and 2 external runs still working · 1 external run may still be running');
-    assert.equal(line(1, 1), '1 helper and 1 external run still working · 1 external run may still be running');
-    assert.equal(line(2, 0), '2 helpers still working · 1 external run may still be running');
+    assert.equal(line(3, 2), '3 subagents and 2 external runs still working · 1 external run may still be running');
+    assert.equal(line(1, 1), '1 subagent and 1 external run still working · 1 external run may still be running');
+    assert.equal(line(2, 0), '2 subagents still working · 1 external run may still be running');
     assert.equal(line(0, 1), '1 external run still working · 1 external run may still be running');
 });
 
@@ -815,4 +912,13 @@ test('a Continue whose own start was refused after its earlier work settled says
     assert.equal(cardWorkView(held).note, `Start refused at ${REFUSED}: accounting unavailable`);
     assert.equal(workControls(held).resume, '', 'it tries again by itself: no Resume is offered');
     assert.ok(!/earlier attempt's work is confirmed finished/.test(workLine(held)), 'never the stale wait');
+});
+
+test('a silent work says since when in its line; without a date it keeps the host sentence', () => {
+    const at = Date.parse('2026-11-09T02:10:00Z') / 1000;
+    const dated = reasonText({ code: 'no_progress', text: 'No recorded progress', since: at });
+    assert.match(dated, /^No recorded progress since \S/);
+    assert.ok(!dated.includes('undefined'));
+    assert.equal(reasonText({ code: 'no_progress', text: 'No recorded progress' }), 'No recorded progress');
+    assert.equal(workLine({ activity: 'working', because: [{ code: 'no_progress', text: 'No recorded progress', since: at }] }), dated);
 });

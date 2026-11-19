@@ -142,13 +142,15 @@ def test_a_successful_mac_input_carries_the_mark(tmp_path, monkeypatch, tool, ar
 
 @pytest.mark.parametrize("outcome", [1, TIMEOUT])
 def test_a_failed_or_timed_out_single_process_carries_no_mark(tmp_path, monkeypatch, outcome):
-    """One process whose outcome is unknown (a nonzero exit of a multi-argument cliclick, or a timeout)."""
+    """One process whose outcome is unknown (a nonzero exit of a multi-argument cliclick or of the Command chord
+    program, or a timeout): unlike the chord program's own refusal, it may have posted something."""
     tools, transport = desktop(tmp_path, monkeypatch, "macos", tools=MAC, answer=fail_at(0, outcome=outcome))
-    for tool, args in (("click", {"x": 1, "y": 2, "raw": True}), ("key", {"keys": "cmd+s"}),
-                       ("type_text", {"text": "x"})):
+    for tool, args, helper in (("click", {"x": 1, "y": 2, "raw": True}, "cliclick"), ("key", {"keys": "cmd+s"}, "osascript"),
+                               ("key", {"keys": "cmd+shift+s"}, "cliclick"), ("type_text", {"text": "x"}, "cliclick")):
         result = receipt(tools[tool](**args))
-        assert result["ok"] is False and not marked(result), result
-        assert result["error"] and result["cmd"][0] == "cliclick", "the diagnostics stay"
+        assert result["ok"] is False and not marked(result) and result["dispatched"] is True, result
+        assert "unknown" in result["note"] and "not sent" not in result["note"], result
+        assert result["error"] and result["cmd"][0] == helper, "the diagnostics stay"
         transport.calls.clear()
         transport.answer = fail_at(0, outcome=outcome)
 

@@ -306,7 +306,6 @@ export function createAccountResourcesController({ store, render }) {
             if (!button) continue;
             const open = expanded.has(key);
             button.setAttribute('aria-expanded', String(open));
-            button.textContent = `${open ? '▾' : '▸'} Resources`;
             button.onclick = () => {
                 const identity = focusIdentity(button);
                 if (open) expanded.delete(key); else expanded.add(key);

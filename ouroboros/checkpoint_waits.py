@@ -1,7 +1,8 @@
-"""Host wait episodes in the progress stream: accounting and control-storage waits.
+"""Host wait episodes in the progress stream: accounting, control-storage and Safety-check waits.
 
 A wait is how the host ran, not the turn's work. Its producers write both phases of every episode
-under its own ``episode_id`` (``_usage_wait._hold``, ``owner_pause.wait_member_fence``; owner
+under its own ``episode_id`` (``_usage_wait._hold``, ``owner_pause.wait_member_fence``,
+``safety_records.safety_check_wait``; owner
 decision 1A(3), 14 Oct 2026, keeps them whole). Readers fold them: the model's ``## Recent
 progress`` shows each run of waits as one line, and neither that window nor a chat history page
 spends its quota on a wait row. The browser twin is ``web/modules/task_checkpoints.js``
@@ -18,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 WAIT_LABELS = {
     "usage_lock_wait": ("Waiting for accounting access", "Accounting wait ended", "Accounting waits"),
     "control_store_wait": ("Waiting for control storage", "Control storage wait ended", "Control storage waits"),
+    "safety_check_wait": ("Checking safety", "Safety check ended", "Safety checks"),
 }
 
 

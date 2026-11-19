@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -16,6 +17,8 @@ import urllib.parse
 import urllib.request
 from collections import OrderedDict
 from typing import Any, Dict, Iterable, Iterator, List, Optional
+
+from ouroboros.utils import json_dumps_utf8
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -36,6 +39,10 @@ class TaskTimeoutCLIError(CLIError):
 
 class ConnectionCLIError(CLIError):
     pass
+
+
+class StreamInterruptedCLIError(ConnectionCLIError):
+    """An answered event stream that broke off: a read timeout, reset or truncated response."""
 
 
 class OuroborosHTTPClient:
@@ -115,6 +122,9 @@ class OuroborosHTTPClient:
             raise CLIError(f"HTTP {exc.code}: {raw}") from exc
         except urllib.error.URLError as exc:
             raise ConnectionCLIError(f"cannot stream from Ouroboros server at {self.base_url}: {exc}") from exc
+        except (TimeoutError, ConnectionError, http.client.HTTPException) as exc:
+            raise StreamInterruptedCLIError(
+                f"stream from Ouroboros server at {self.base_url} broke off: {exc or type(exc).__name__}") from exc
 
 
 def _server_command(args: argparse.Namespace) -> int:
@@ -253,7 +263,7 @@ def _run_command(args: argparse.Namespace) -> int:
         raise CLIError(f"task creation did not return task_id: {created}")
     if args.detach:
         if args.jsonl:
-            print(json.dumps({"type": "task_created", "task_id": task_id, "data": created}, ensure_ascii=False))
+            print(json_dumps_utf8({"type": "task_created", "task_id": task_id, "data": created}, ensure_ascii=False))
         else:
             print(task_id)
         return 0
@@ -261,7 +271,7 @@ def _run_command(args: argparse.Namespace) -> int:
     wait_timeout = _deadline_wait_timeout(timeout)
     if args.no_stream:
         if args.jsonl:
-            print(json.dumps({"type": "task_created", "task_id": task_id, "data": created}, ensure_ascii=False))
+            print(json_dumps_utf8({"type": "task_created", "task_id": task_id, "data": created}, ensure_ascii=False))
         result = _wait_task(client, task_id, timeout_sec=wait_timeout)
     else:
         _watch_task(client, task_id, jsonl=args.jsonl, quiet=args.quiet, timeout_sec=wait_timeout)
@@ -279,11 +289,11 @@ def _run_command(args: argparse.Namespace) -> int:
         pathlib.Path(args.patch_out).expanduser().write_text(patch, encoding="utf-8")
     if args.result_json_out:
         pathlib.Path(args.result_json_out).expanduser().write_text(
-            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+            json_dumps_utf8(result, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
     if args.jsonl:
-        print(json.dumps({"type": "final", "task_id": task_id, "result": result}, ensure_ascii=False))
+        print(json_dumps_utf8({"type": "final", "task_id": task_id, "result": result}, ensure_ascii=False))
     elif args.patch:
         patch = _patch_from_result(client, task_id, result, strict=True)
         print(patch, end="" if patch.endswith("\n") else "\n")
@@ -342,7 +352,7 @@ def _logs_tail_command(args: argparse.Namespace) -> int:
         _print_json(data)
     else:
         for entry in data.get("entries", []):
-            print(json.dumps(entry, ensure_ascii=False))
+            print(json_dumps_utf8(entry, ensure_ascii=False))
     return 0
 
 
@@ -356,7 +366,7 @@ def _log_row_identity(entry: Dict[str, Any]) -> tuple:
     stable hash of the row with the positional fields stripped."""
     payload = {key: value for key, value in entry.items() if key not in ("_line", "_source_root")}
     digest = hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        json_dumps_utf8(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
     return (str(entry.get("_source_root") or ""), str(entry.get("ts") or ""), digest)
 
@@ -372,7 +382,7 @@ def _logs_follow_command(args: argparse.Namespace) -> int:
             if marker in seen:
                 continue
             seen.add(marker)
-            print(json.dumps(entry, ensure_ascii=False), flush=True)
+            print(json_dumps_utf8(entry, ensure_ascii=False), flush=True)
         time.sleep(max(0.5, float(args.interval)))
 
 
@@ -878,6 +888,9 @@ def _watch_task(
     Streams with POST v2 (resumable cursor); falls back to GET with a sequence
     number only when the first connection, before any event, fails with HTTP 405.
     Replays are deduplicated by log identity over the most recent 4096 identities.
+    A stream that broke off after its cursor moved reconnects from the last event
+    consumed; one that broke off without moving it is a connection error, so a
+    failure that recurs at the same place is reported, never retried forever.
     """
     cursor: Optional[dict] = None
     legacy_seq = 0
@@ -899,6 +912,7 @@ def _watch_task(
             request_timeout = max(1.0, min(40.0, remaining + 1.0))
         path = f"/api/tasks/{urllib.parse.quote(task_id)}/events"
         saw_event = False
+        resumed_from = (cursor, legacy_seq)
         try:
             events = (client.stream_sse(f"{path}?cursor={legacy_seq}&wait={wait_param}", timeout=request_timeout)
                       if legacy else client.stream_sse(path, timeout=request_timeout,
@@ -913,7 +927,7 @@ def _watch_task(
                 duplicate = bool(identity) and identity in seen
                 if not duplicate:
                     if jsonl:
-                        print(json.dumps(event, ensure_ascii=False), flush=True)
+                        print(json_dumps_utf8(event, ensure_ascii=False), flush=True)
                     elif not quiet:
                         rendered = _render_event_for_stderr(event)
                         if rendered:
@@ -933,6 +947,11 @@ def _watch_task(
                         raise CLIError("v2 task event is missing its cursor")
                     cursor = next_cursor
                 legacy_seq = max(legacy_seq, int(event.get("seq") or legacy_seq))
+        except StreamInterruptedCLIError:
+            if deadline is not None and time.time() >= deadline:
+                raise TaskTimeoutCLIError(f"task {task_id} did not finish within {timeout_sec:g}s")
+            if (cursor, legacy_seq) == resumed_from:
+                raise  # nothing this connection delivered moved the stream
         except CLIError as exc:
             if (first_connection and not saw_event and not legacy
                     and isinstance(exc.__cause__, urllib.error.HTTPError) and exc.__cause__.code == 405):
@@ -1133,7 +1152,7 @@ def _is_terminal_success(result: Dict[str, Any]) -> bool:
 
 
 def _print_json(data: Any) -> None:
-    print(json.dumps(data, ensure_ascii=False, indent=2))
+    print(json_dumps_utf8(data, ensure_ascii=False, indent=2))
 
 
 def main(argv: list[str] | None = None) -> int:

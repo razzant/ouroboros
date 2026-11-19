@@ -10,8 +10,9 @@ not orphaning spawned subagent children:
 The shared lineage/ledger helpers (_status_drive_root, _is_own_child,
 _record_child_decision_beacon), the reads that tell finalization which direct children
 still owe a disposition (_load_direct_child_results, _child_disposition_state; the loop
-re-exports both) and the cancel_task handler (moved here from control.py, upgraded with
-a recorded reason + lineage gate) live here too.
+re-exports both), the cancel_task handler (moved here from control.py, upgraded with
+a recorded reason + lineage gate) and what a cancelled child's retained result still
+admits (``_cancelled_result_*``, applied by integrate_subagent_patch) live here too.
 """
 
 from __future__ import annotations
@@ -19,11 +20,13 @@ from __future__ import annotations
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 
 import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Any, Dict
 
-from ouroboros.task_results import validate_task_id
+from ouroboros.headless_status import ARTIFACT_READY_STATUSES
+from ouroboros.task_results import cancellation_blocks_child_result, validate_task_id
 from ouroboros.task_status import load_effective_task_result, observe_cancellation_target
 from ouroboros.tool_access_paths import canonical_data_root as _status_drive_root
 from ouroboros.task_tree_ledger import (
@@ -95,7 +98,7 @@ def _child_result_sha256(result: Dict[str, Any]) -> str:
                 identity["name"] = Path(raw_path).name
         if not identity:
             continue
-        encoded_identity = json_dumps_utf8(identity, ensure_ascii=False, sort_keys=True, default=str)
+        encoded_identity = json.dumps(identity, ensure_ascii=False, sort_keys=True, default=str)
         if encoded_identity in seen:
             continue
         seen.add(encoded_identity)
@@ -107,7 +110,7 @@ def _child_result_sha256(result: Dict[str, Any]) -> str:
         "artifact_status": str(semantic_result.get("artifact_status") or bundle.get("status") or ""),
         "artifacts": sorted(
             identities,
-            key=lambda item: json_dumps_utf8(item, ensure_ascii=False, sort_keys=True, default=str),
+            key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, default=str),
         ),
     }
     from ouroboros.task_finalization import terminal_host_notice_text
@@ -171,8 +174,18 @@ def _load_direct_child_results(
 
 
 def _child_disposition_state(child: Dict[str, Any]) -> str:
-    """Return cancellation, the current task-tree exact-hash disposition, or host attention."""
+    """Return the current task-tree exact-hash disposition, else cancellation.
 
+    An integrated or irrelevant decision on a cancelled child's exact retained
+    result is its state (the task stays cancelled); a deferral does not
+    outrank the cancellation."""
+
+    try:
+        current = _current_child_result_disposition(child)
+    except Exception:
+        current = ""
+    if current in ("integrated", "irrelevant"):
+        return current
     # Explicit cancellation wins every completion race; late scratch results are
     # not recovered. Only a SETTLED ``cancelled`` counts as handled (GR2-8c):
     # ``cancel_requested`` is intent, so such a child stays cancel-pending.
@@ -181,20 +194,61 @@ def _child_disposition_state(child: Dict[str, Any]) -> str:
         and str(child.get("status") or "").strip().lower() == "cancelled"
     ):
         return "cancelled"
-    try:
-        current = _current_child_result_disposition(child)
-        if current:
-            return current
-    except Exception:
-        pass
-    # A host-minted silence diagnostic is attention to this task, not work it
-    # delegated: it stays listed, accounted and readable, but owes no author
-    # disposition, pending or settled (#1376). An explicit one above still wins.
-    from ouroboros.work_diagnostics import diagnostic_ref
+    return current
 
-    ref = diagnostic_ref(child)
-    minted = bool(ref) and str(child.get("task_id") or child.get("id") or "") == "silence-" + ref["episode_id"]
-    return "host_attention" if minted and str(child.get("parent_task_id") or "") == ref["task_id"] else ""
+
+def _cancelled_result_facts(result: Dict[str, Any], manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """What a decision on a cancelled child's consumed result names ({} unless it is cancelled).
+
+    The task stays cancelled and only its retained capture is judged: the capture's time
+    and its manifest's recorded identity, ``unknown`` where unrecorded."""
+    if not cancellation_blocks_child_result(result):
+        return {}
+    capture = next((row for row in result.get("artifacts") or []
+                    if isinstance(row, dict) and row.get("kind") == "workspace_patch_manifest"), {})
+    origin = result.get("cancel_origin")
+    return {"status": "cancelled", "cancel_origin": dict(origin) if isinstance(origin, dict) and origin else "unknown",
+            "artifact_attribution": str(result.get("artifact_attribution") or "unknown"),
+            "capture_created_at": str(manifest.get("created_at") or "unknown"),
+            "capture_manifest_sha256": str(capture.get("sha256") or "unknown")}
+
+
+def _cancelled_result_note(child_task_id: str, facts: Dict[str, Any]) -> str:
+    """The decider's reminder of those facts beside the outcome."""
+    origin = facts["cancel_origin"] if isinstance(facts["cancel_origin"], dict) else {}
+    cause = ": ".join(str(origin[key]) for key in ("source", "reason") if origin.get(key)) or "cause unknown"
+    return (f"\n{child_task_id} stays cancelled ({cause}). Only its retained capture was judged: captured "
+            f"{facts['capture_created_at']}, manifest sha256 {facts['capture_manifest_sha256']}, attribution "
+            f"{facts['artifact_attribution']}; work after that capture, if any, is not in it.")
+
+
+def _cancelled_result_refusal(ctx: ToolContext, child_task_id: str, result: Dict[str, Any], reason: str,
+                              target: str) -> str:
+    """Why a cancelled child's retained result cannot be applied, verified or accepted now; "" when it can.
+
+    Its capture must be ready with nothing owed, since a cancelled owner's capture is never
+    completed later; the decider gives a reason; and a shared result waits while a direct
+    run of its own in that folder may be live. Rejecting it is never refused here."""
+    status, owed = str(result.get("artifact_status") or ""), sorted(result.get("native_capture_pending") or {})
+    if status not in ARTIFACT_READY_STATUSES or owed:
+        return (f"⚠️ INTEGRATE_NATIVE_CANCELLED: {child_task_id} was cancelled and its retained capture is not ready "
+                f"(artifact status {status or 'unknown'!r}{f'; capture owed for {owed}' if owed else ''}). A cancelled "
+                "child's capture is never completed later, so nothing of it can be applied, verified or accepted; "
+                "decision='reject' records a rejection, and a delegated run's own capture stays separate.")
+    from ouroboros.tools.patch_verdict import decision_reason_refusal
+
+    if refusal := decision_reason_refusal(reason, f"{child_task_id} was cancelled; deciding its retained result "
+                                                  "needs reason, your judgment after reading it"):
+        return refusal
+    constraint = result.get("task_constraint") if isinstance(result.get("task_constraint"), dict) else {}
+    if constraint.get("surface") == "external_workspace":
+        from ouroboros.delegate_directory import live_direct_writers
+
+        if live := live_direct_writers(_status_drive_root(ctx), child_task_id, target):
+            return (f"⚠️ INTEGRATE_NATIVE_CANCELLED: {child_task_id} was cancelled, but a direct run of its own in its shared "
+                    f"folder {target} may still be live ({'; '.join(live)}); nothing was verified or accepted. Decide "
+                    "again once custody records its end, or reject.")
+    return ""
 
 
 def _record_child_result_disposition(
@@ -820,7 +874,7 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "", stop_action_i
             "be recorded; nothing was cancelled. Retry, or report the failure."
         )
     observation["matches_cancel_target"] = observation.get("observed_task_id") == str(intent.get("task_id") or tid)
-    observed_note = ("\n[OBSERVED_TARGET]\n" + json_dumps_utf8(observation, ensure_ascii=False)
+    observed_note = ("\n[OBSERVED_TARGET]\n" + json.dumps(observation, ensure_ascii=False)
                      + "\n[/OBSERVED_TARGET]\nThese source observations are separate from the caller's reason; "
                      "missing or stale facts do not prove that no work or spending occurred.")
     if intent.get("already_settled"):
@@ -915,8 +969,7 @@ def get_tools() -> list[ToolEntry]:
                            "(partial_finding/blocker/question/milestone) and a tail of its result — "
                            "a PURE READ. Use this to check intermediate findings or decide whether to keep "
                            "waiting / steer / cancel, without committing to a finalization decision. It "
-                           "changes no state: the pre-finalization reminder is change-based and is cleared "
-                           "only by discard_child_result / cancel_task, not by reading.",
+                           "changes no state: reading records no decision about the child's result.",
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string"},
                 "view": {"type": "string", "enum": ["summary", "partials", "tail"], "default": "summary",

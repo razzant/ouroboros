@@ -88,6 +88,13 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     # producers' cutover.
     "ACCESS_DENIED": Delta(False, "ok", True, "blocked", "A.4", "an access denial recorded as success is the worst under-reporting"),
     "ACTING_SUBAGENT_TOOL_NOT_GRANTED": Delta(False, "ok", True, "blocked", "A.4", "an ungranted tool for the acting subagent is a denial"),
+    # Owner 2026-11-12, audit 08-11.11 item 8 ("п.8: брать" — the undeclared-output reminder stops being a
+    # refusal): the note rides a finished command, so the call is no error. The typed producer and the
+    # retired marker-first text keep the note's own bucket; behind an autocorrect line that retired text
+    # reads as the autocorrected success it was, as every trailing note of a shell result does.
+    "ARTIFACT_OUTPUT_UNDECLARED": Delta(True, "artifact_output_undeclared", False, "artifact_output_undeclared", "A.audit1111-8", "a note on a finished command is no refusal; its bucket stays readable"),
+    "shape:shell_undeclared": Delta(True, "artifact_output_undeclared", False, "artifact_output_undeclared", "A.audit1111-8", "a note on a finished command is no refusal; its bucket stays readable"),
+    "edge:autocorrect_undeclared": Delta(True, "artifact_output_undeclared", False, "ok_autocorrected", "A.audit1111-8", "the autocorrected success carries the note in its text, like its other trailing notes"),
     "CANCEL_INTENT_PROJECTION_CORRUPT": Delta(False, "ok", True, "error", "A.5", "a corrupted cancel projection is an error, not a success"),
     "CAPABILITY_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "CHILD_RESULT_LINEAGE_FORBIDDEN": Delta(False, "ok", True, "blocked", "A.4", "a refused child-result lineage is a denial"),
@@ -97,7 +104,8 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     # `_UNAVAILABLE` marker keeps its own status instead of the coarse error).
     "REVIEW_BINDING_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "REVIEW_STATE_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
-    "SAFETY_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
+    "SAFETY_UNAVAILABLE": Delta(True, "error", True, "safety_unavailable", "A.18",
+                                "a missing Safety reading gets its own status name: no failure, named on the card"),
     "SUBAGENT_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "EXTRACT_VIDEO_FRAMES_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "GH_TARGET_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
@@ -358,6 +366,18 @@ def _golden() -> dict[str, dict]:
 # unavailable. Keep the historical corpus intact and assert the new observed
 # outcome explicitly rather than manufacture old evidence (04-AGENCY S1/S3).
 CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's size notice rides a successful update_world
+    # workpad_write: a blind overwrite of a version this task did not write landed; its receipt rides LEGACY_WARNING (ok,
+    # not OK), so a finishing turn reads it (memory_texts.write_text).
+    "BLIND_OVERWRITE": (False, "ok"),
+    # check_safety: a flagged call returns before any effect with its own status (no failure of the tool); a call let
+    # through without a new reading trails the tool's own result with a note, so the note alone reads ok.
+    "SAFETY_RETURNED": (True, "safety_returned"),
+    "SAFETY_NOTE": (False, "ok"),
+    # read_archive: a file that is no ZIP, a folder, an encrypted member or a compression the reader does not decode is
+    # named without reading anything, as the PDF reader's own UNAVAILABLE notices are; a damaged member fails the read.
+    "ARCHIVE_UNAVAILABLE": (True, "unavailable"),
+    "ARCHIVE_MEMBER_UNAVAILABLE": (True, "unavailable"),
+    "ARCHIVE_READ_FAILED": (True, "error"),
     # mcp_oauth: a remote MCP server that needs the owner's sign-in ran nothing; the substrate cannot serve the call yet.
     "MCP_AUTH_REQUIRED": (True, "unavailable"),
     # start_task / schedule_followup / manage_schedules: owner_words not found verbatim in my human's words that reached
@@ -368,6 +388,8 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     "OUTPUT_NOT_UTF8": (False, "ok"),
     # Staging was refused before any effect; the producer must publish that refusal, not a successful warning.
     "GIT_INDEX_OUTSIDE_SELECTION_BLOCKED": (True, "blocked"),
+    # commit_reviewed refused to switch branches under a staged merge (a checkout would drop it); nothing changed.
+    "GIT_MERGE_IN_PROGRESS_BLOCKED": (True, "blocked"),
     # The new retained-review selection guard refuses a changed subject before dispatch or Git; no old answer exists.
     "REVIEW_SELECTION_CHANGED_BLOCKED": (True, "blocked"),
     # tools/tool_discovery.py `enable_tools`: a load none of which fits the route's schema ceiling;
@@ -473,7 +495,6 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     "OWNER_OPERATION_REFUSED": (True, "blocked"),
     "TOOL_ADMISSION_UNAVAILABLE": (True, "unavailable"),
     "STOP_ACTION_CONFLICT": (True, "blocked"),
-    "SAFETY_ADVICE": (False, "ok"),
     "LIGHT_MODE_REPO_CHANGED": (False, "ok"),
     "BROWSER_ACTION_OUTCOME_UNKNOWN": (True, "error"),
     # tools/vision.py `_no_image_route`: no configured model could take the image at all,
@@ -614,10 +635,6 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # Owner decision (PR #1636): an exact edit that leaves .py/.json unparsable is
     # applied and reported, never refused; the warning is a successful call.
     "SYNTAX_WARNING": (False, "ok"),
-    # #1376: a silence diagnostic's capability gate (registry_guards) is a new producer
-    # after the retired oracle; a refused tool never ran, as for its subagent peers.
-    "DIAGNOSTIC_CAPABILITY_BLOCKED": (True, "blocked"),
-    "native:ACCESS_BLOCKED:DIAGNOSTIC_CAPABILITY_BLOCKED": (True, "blocked"),
     # control_runtime `_send_user_message`: a relay answer that cannot be recorded as owed sends nothing and
     # keeps the relay open, published as native CAPABILITY_UNAVAILABLE. The bare warning names no suffix the
     # retired text chain keyed on, so it is the generic ok the retired chain gave FOCUS_STALE and CHERRY_PICK_CONFLICT.
@@ -641,6 +658,36 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # control_runtime `_update_scratchpad`: the canonical blocks hold the change and only the markdown
     # projection is stale, so the warning trails a SUCCESSFUL write (status ok, code OK).
     "SCRATCHPAD_PROJECTION_STALE": (False, "ok"),
+    # #3054 deployment policy: a repo mutation of the serving checkout or a write into an extension the
+    # administrator requires is refused before any effect (registry_core.py publishes status blocked, code
+    # MANAGED_BY_DEPLOYMENT; integrate_delegated_patch carries the same text in its string ABI). The code's own
+    # spec (tool_result.py) is the protected bucket CORE_PROTECTION_BLOCKED already reads as, in both forms.
+    "MANAGED_BY_DEPLOYMENT": (True, "protected_blocked"),
+    "native:MANAGED_BY_DEPLOYMENT:MANAGED_BY_DEPLOYMENT": (True, "protected_blocked"),
+    # #3054 services `_stop_kept_service`: only a root task stops a service another task kept; refused before
+    # any signal (native ACCESS_BLOCKED, completed_no_effect), the `_BLOCKED` family answer in both forms.
+    "SERVICE_STOP_BLOCKED": (True, "blocked"),
+    "native:ACCESS_BLOCKED:SERVICE_STOP_BLOCKED": (True, "blocked"),
+    # The same stop's receipt refused (TOOL_ARG_ERROR) or naming no such service (LEGACY_UNAVAILABLE), both
+    # completed_no_effect. The bare warnings name no suffix the retired chain keyed on, so they read the generic
+    # ok its other `_REFUSED`/`_NOT_FOUND` rows gave (SERVICE_NOT_FOUND); only the typed result carries the refusal.
+    "SERVICE_STOP_REFUSED": (False, "ok"),
+    "native:TOOL_ARG_ERROR:SERVICE_STOP_REFUSED": (True, "argument_error"),
+    "SERVICE_STOP_NOT_FOUND": (False, "ok"),
+    "native:LEGACY_UNAVAILABLE:SERVICE_STOP_NOT_FOUND": (True, "unavailable"),
+    # #3054 query_code over a work folder whose process the container did not confirm ended (WorkDomainUnsettled):
+    # native TOOL_ERROR, backend_settled false; the first native publication, with its recorded text row's answer.
+    "QUERY_CODE_ERROR": (True, "error"),
+    "native:TOOL_ERROR:QUERY_CODE_ERROR": (True, "error"),
+    # #3061 services `_stop_kept_service`: the kept service ended but its declared outputs are not all captured; the
+    # first native publication of this identifier, with the same answer its recorded text row has.
+    "ARTIFACT_OUTPUT_ERROR": (True, "artifact_output_error"),
+    "native:ARTIFACT_OUTPUT_ERROR:ARTIFACT_OUTPUT_ERROR": (True, "artifact_output_error"),
+    # #3032 review collection (#2779): the shared review-state lock refused a collection before it settled its wave;
+    # nothing staged, the record kept, the same reference collects later. Both producers (review_change,
+    # review_collection) publish native LEGACY_UNAVAILABLE; the bare `_BUSY` warning is the retired chain's ok.
+    "REVIEW_STATE_BUSY": (False, "ok"),
+    "native:LEGACY_UNAVAILABLE:REVIEW_STATE_BUSY": (True, "unavailable"),
 }
 
 

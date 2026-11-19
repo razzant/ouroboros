@@ -36,19 +36,17 @@ def refuse_long_pytest_launches(monkeypatch, limit=WINDOWS_COMMAND_LINE):
     """Refuse a pytest launch whose command line reaches ``limit`` characters, as Windows does (WinError 206)
     before the program starts: this platform takes such a line, so the guard is what makes a long scope fail
     here. Returns the argv of every pytest launch that was accepted."""
-    from ouroboros.process_containment import ProcessContainer
+    real, accepted = subprocess.Popen, []
 
-    spawn, accepted = ProcessContainer.spawn, []
+    class Bounded(real):
+        def __init__(self, args, *rest, **options):
+            if list(args[1:3]) == ["-m", "pytest"]:
+                if len(subprocess.list2cmdline(args)) >= limit:
+                    raise FileNotFoundError(2, "[WinError 206] The filename or extension is too long")
+                accepted.append(list(args))
+            super().__init__(args, *rest, **options)
 
-    def bounded(container, args, *rest, **options):
-        if list(args[1:3]) == ["-m", "pytest"]:
-            if len(subprocess.list2cmdline(args)) >= limit:
-                raise FileNotFoundError(2, "[WinError 206] The filename or extension is too long")
-            accepted.append(list(args))
-        return spawn(container, args, *rest, **options)
-
-    # Observe the pytest door without replacing the class tracked Git births need.
-    monkeypatch.setattr(ProcessContainer, "spawn", bounded)
+    monkeypatch.setattr(subprocess, "Popen", Bounded)
     return accepted
 
 
@@ -70,7 +68,7 @@ def test_selected_cli_skips_unrelated_collection_and_records_both_lanes(tmp_path
     monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # nested slots: the selected passes run two real workers
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
     node = []
-    monkeypatch.setattr(cli, "_node_lane", lambda: node.append(True) or 0)
+    monkeypatch.setattr(cli, "_node_lane", lambda: node.append(True) or (0, ""))
     (repo / "leaf.py").write_text("value = 2\n", encoding="utf-8")
     evidence = tmp_path / "evidence"
     github_output = tmp_path / "github-output"
@@ -117,7 +115,7 @@ def test_selected_cli_runs_a_changed_test_modules_importers_and_only_selects_opt
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
     monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # nested slots: the selected passes run two real workers
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
-    monkeypatch.setattr(cli, "_node_lane", lambda: 0)
+    monkeypatch.setattr(cli, "_node_lane", lambda: (0, ""))
     (repo / "tests/test_hub.py").write_text(hub + "# changed\n", encoding="utf-8")
     evidence = tmp_path / "evidence"
     assert cli.main(["--selected", "--base", "HEAD", "--evidence-dir", str(evidence)]) == 0
@@ -165,7 +163,7 @@ def test_selected_cli_starts_pytest_with_a_scope_longer_than_one_windows_command
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
     monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # nested slots: the selected passes run two real workers
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
-    monkeypatch.setattr(cli, "_node_lane", lambda: 0)
+    monkeypatch.setattr(cli, "_node_lane", lambda: (0, ""))
     (repo / "leaf.py").write_text("value = 2\n", encoding="utf-8")
     # The control: spelled out inline, as its spec names it, this scope is past what Windows launches.
     inline = selection_passes(test_selection.select_tests(repo))[0].args
@@ -216,7 +214,7 @@ def test_selected_cli_runs_where_the_evidence_directory_and_a_module_spell_templ
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
     monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # nested slots: the selected passes run two real workers
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
-    monkeypatch.setattr(cli, "_node_lane", lambda: 0)
+    monkeypatch.setattr(cli, "_node_lane", lambda: (0, ""))
     (repo / named).write_text("def test_named(): assert True\n# changed\n", encoding="utf-8")
     evidence = tmp_path.joinpath(*TEMPLATE_FIELDS)  # an evidence directory that spells every field
     assert cli.main(["--selected", "--base", "HEAD", "--evidence-dir", str(evidence)]) == 0

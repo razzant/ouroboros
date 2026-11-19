@@ -24,6 +24,8 @@ import threading
 from hashlib import sha256
 from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from ouroboros import work_domain
+from ouroboros.delegate_named_evidence import _held_named_evidence as _held_named_evidence, workspace_evidence_exclusions
 from ouroboros.artifact_storage import compress_in_place
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.git_observation import numstat_paths
@@ -34,7 +36,6 @@ from ouroboros.headless_status import (
 )
 from ouroboros.utils import atomic_write_json, utc_now_iso
 from ouroboros.workspace_patch_rules import (
-    NAMED_EVIDENCE_EXCLUSION,
     _PATCH_EXCLUDE_RULES_VERSION,
     _PATCH_MAX_UNTRACKED_FILE_BYTES,
     _incidental_lockfile_excludes,
@@ -71,33 +72,9 @@ def build_workspace_patch(workspace_root: pathlib.Path) -> str:
     return ""
 
 
-def _held_named_evidence(root: pathlib.Path, host_evidence: str, changed: set, baseline: set,
-                         retain_dir: Optional[pathlib.Path], previous: Optional[Dict[str, Any]],
-                         ) -> Tuple[set, Optional[Dict[str, Any]]]:
-    """The changed paths a capture holds out as the copy's named evidence, and the retention summary when
-    this capture retains them. Task retention always uses ``EVIDENCE_DIRNAME``; without ``retain_dir``,
-    ``host_evidence`` can name the delegated run's folder. Only paths NEW since the recorded
-    baseline (untracked, staged or committed in the copy) are evidence, a path the baseline holds is the
-    project's own (#2711). With ``retain_dir`` the folder is retained there once
-    (``delegate_named_evidence.retain_workspace_evidence``, ``previous`` reused while unchanged); when that
-    fails nothing is held out, so the files ride the capture as before: never zero copies."""
-    from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
-
-    evidence = pathlib.PurePosixPath((EVIDENCE_DIRNAME if retain_dir is not None else host_evidence or EVIDENCE_DIRNAME).strip("/"))
-    under = lambda rel: pathlib.PurePosixPath(rel).is_relative_to(evidence)  # noqa: E731
-    held = {rel for rel in changed if rel not in baseline and under(rel)}
-    if not held or retain_dir is None:  # a run, not this capture, retains the folder (or there is nothing new)
-        return held, None
-    from ouroboros.delegate_named_evidence import retain_workspace_evidence
-
-    products = {pathlib.PurePosixPath(rel).relative_to(evidence.parent).as_posix() for rel in baseline if under(rel)}
-    summary = retain_workspace_evidence(root / evidence.parent, retain_dir, product_paths=products, previous=previous)
-    return (held if summary.get("status") == "retained" else set()), summary
-
-
 def _evidence_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
     """The manifest's compact row for a retained (or unretained) evidence folder."""
-    return {**{key: summary[key] for key in ("status", "evidence_dir", "summary_path", "error") if key in summary},
+    return {**{key: summary[key] for key in ("status", "evidence_dir", "summary_path", "error", "retained_bytes") if key in summary},
             "files": len(summary.get("files") or []), "gaps": len(summary.get("gaps") or [])}
 
 
@@ -110,11 +87,11 @@ def write_workspace_patch_artifacts(
     retain_evidence_dir: Optional[pathlib.Path] = None, retained_evidence: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Stream workspace patch and manifest artifacts into ``artifact_dir``; the copy's evidence folder is held out
-    (``_held_named_evidence``) and, given ``retain_evidence_dir``, retained once (``retained_evidence``: last summary)."""
+    (``workspace_evidence_exclusions``) and, given ``retain_evidence_dir``, retained once (``retained_evidence``: last summary)."""
 
     from ouroboros.artifacts import stream_artifact_file
 
-    root = pathlib.Path(workspace_root).resolve(strict=False)
+    root = work_domain.settle(workspace_root)  # a work tree keeps its spelling; its Git and probes are the work's
     artifact_dir.mkdir(parents=True, exist_ok=True)
     patch_path = artifact_dir / "workspace.patch"
     manifest_path = artifact_dir / "workspace_patch.json"
@@ -178,14 +155,14 @@ def write_workspace_patch_artifacts(
     # v6.52.2: declared ephemeral scratch (run_command/run_script `scratch=[...]`) never leaks into the patch.
     scratch = _declared_scratch(scratch_dir or artifact_dir, root)
     base_sizes = baseline_blob_sizes(root, base_ref, errors=errors)
-    held, named_evidence = _held_named_evidence(
-        root, str(metadata.get("host_evidence") or ""), {*untracked, *changed_tracked}, {*base_sizes, *file_baseline},
-        retain_evidence_dir, retained_evidence)
-    excluded.extend({"path": rel, "reason": NAMED_EVIDENCE_EXCLUSION} for rel in sorted(held & set(untracked)))
-    held_tracked = sorted(held - set(untracked))
-    tracked_excluded.extend({"path": rel, "reason": NAMED_EVIDENCE_EXCLUSION} for rel in held_tracked)
-    untracked = [rel for rel in untracked if rel not in held]
+    held, named_evidence = workspace_evidence_exclusions(
+        root, metadata.get("host_evidence"), set(untracked + changed_tracked),
+        base_sizes.keys() | selected_files, retain_evidence_dir, retained_evidence)
+    excluded.extend(held[rel] for rel in untracked if rel in held)
+    held_tracked = sorted(held.keys() - set(untracked))
+    tracked_excluded.extend(held[rel] for rel in held_tracked)
     changed_tracked = [rel for rel in changed_tracked if rel not in held]
+    untracked = [rel for rel in untracked if rel not in held]
     # git's binary verdict for the whole inventory in one process (two when empty
     # files need their attribute verdict; #1241); the loop below keeps its per-file
     # order and reads the verdict instead of spawning ``git diff --numstat`` per file.
@@ -194,42 +171,30 @@ def write_workspace_patch_artifacts(
         if _is_declared_scratch(root, rel, *scratch):
             excluded.append({"path": rel, "reason": "declared ephemeral scratch (v6.52.2)"})
             continue
-        sensitive_reason = _sensitive_untracked_reason(rel)
-        if sensitive_reason:
-            sensitive.append({"path": rel, "reason": sensitive_reason})
-            continue
-        reason = _patch_exclude_reason(rel) or _wal_index_reason(root, rel)
-        if reason:
-            excluded.append({"path": rel, "reason": reason})
-            continue
-        blob_reason = _untracked_blob_exclude_reason(
+        reason = untracked_capture_veto_reason(
             root, rel, file_outputs=file_output_paths, warnings=diagnostics, binary_verdicts=binary_verdicts)
-        if blob_reason:
-            excluded.append({"path": rel, "reason": blob_reason})
-            continue
-        included_untracked.append(rel)
+        if reason:
+            records = sensitive if _sensitive_untracked_reason(rel) else excluded
+            records.append({"path": rel, "reason": reason})
+        else:
+            included_untracked.append(rel)
     captured_inputs: List[str] = []
     for rel in file_input_paths:
+        if reason := _patch_exclude_reason(rel):
+            excluded.append({"path": rel, "reason": reason})
+            continue
         sensitive_reason = _sensitive_untracked_reason(rel) or pem_capture_refusal(root, rel, warnings=diagnostics)
         if sensitive_reason:
             sensitive.append({"path": rel, "reason": sensitive_reason})
             continue
-        if reason := _patch_exclude_reason(rel):
-            excluded.append({"path": rel, "reason": reason})
-            continue
         captured_inputs.append(rel)
-        if (root / rel).is_file() and not (root / rel).is_symlink():
+        if work_domain.kind(root / rel) == "file":
             file_output_paths.append(rel)
     incidental_lock_excludes = _incidental_lockfile_excludes([*changed_tracked, *included_untracked])
     excluded.extend({"path": rel, "reason": "incidental lockfile without sibling manifest change"}
                     for rel in included_untracked if rel in incidental_lock_excludes)
     included_untracked = [rel for rel in included_untracked if rel not in incidental_lock_excludes]
-    # A sensitive-shaped untracked file is a PER-FILE exclusion (disclosed in
-    # ``sensitive_blocked``), never a manifest error: the error path suppressed
-    # the ENTIRE patch write, so one credential-shaped NAME (public.pem,
-    # token_count.json) annihilated the whole tracked diff. The snapshot path
-    # (untracked_capture_veto_reason → provision_execution_snapshot) always
-    # treated the same hit as a per-file skip; the patch now matches it (#447).
+    # One sensitive untracked name cannot suppress unrelated product changes (#447).
 
     # Large generated data rides a file artifact, never a giant binary Git patch.
     large_tracked = []
@@ -237,17 +202,17 @@ def write_workspace_patch_artifacts(
         if rel in selected_files:
             continue
         path = root / rel
-        present = path.is_file() and not path.is_symlink()
-        size = path.stat().st_size if present else 0
+        present = (what := work_domain.kind(path)) == "file"  # its own metadata (a work path: confined), unfollowed
+        size = work_domain.lstat(path).st_size if present else 0
         if max(size, base_sizes.get(rel, 0)) > _PATCH_FILE_REFERENCE_BYTES:
             large_tracked.append(rel)
             if present:
                 file_output_paths.append(rel)
             tracked_excluded.append({"path": rel, "reason": "captured as file-reference artifact",
                                      "size": size, "base_size": base_sizes.get(rel, 0),
-                                     "deleted": not path.exists() and not path.is_symlink(),
-                                     "symlink": path.is_symlink(),
-                                     "link_target": os.readlink(path) if path.is_symlink() else ""})
+                                     "deleted": what == "missing",
+                                     "symlink": what == "link",
+                                     "link_target": work_domain.readlink(path) if what == "link" else ""})
     file_outputs: List[Dict[str, Any]] = []
     if file_output_paths and not errors:
         from ouroboros.artifacts import copy_directory_to_task_artifacts
@@ -279,13 +244,13 @@ def write_workspace_patch_artifacts(
             for rel in tracked_lock_excludes:
                 tracked_excluded.append({"path": rel, "reason": "incidental lockfile without sibling manifest change"})
             diffstat = _git_stdout(
-                ["git", "diff", "--stat", "--no-ext-diff", "--no-color", base_ref, *tracked_pathspec],
+                ["git", "diff", "--stat", "--no-ext-diff", "--no-textconv", "--no-color", base_ref, *tracked_pathspec],
                 root,
                 allow_rc={0},
                 errors=errors,
             )
             total_size += _append_git_output(
-                ["git", "diff", "--binary", "--no-ext-diff", "--no-color", base_ref, *tracked_pathspec],
+                ["git", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", base_ref, *tracked_pathspec],
                 root,
                 fh,
                 allow_rc={0},
@@ -296,7 +261,7 @@ def write_workspace_patch_artifacts(
                 if total_size:
                     total_size += _write_patch_separator(fh)
                 total_size += _append_git_output(
-                    ["git", "diff", "--no-index", "--binary", "--no-ext-diff", "--no-color", "--", os.devnull, rel],
+                    ["git", "diff", "--no-index", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--", os.devnull, rel],
                     root,
                     fh,
                     allow_rc={0, 1},
@@ -432,13 +397,13 @@ def _is_declared_scratch(root: pathlib.Path, rel: str, by_rel: Dict[str, str], b
     want_sha = by_rel.get(rel)
     if not want_sha and by_abs:  # resolved only to match a declared scratch path
         try:
-            want_sha = by_abs.get(os.path.normcase(str((root / rel).resolve(strict=False))))
+            want_sha = by_abs.get(os.path.normcase(str(work_domain.settle(root / rel))))
         except (OSError, RuntimeError):  # a link that cannot be resolved (a loop) is no scratch file
             want_sha = None
     if not want_sha:
         return False
     try:
-        return sha256((root / rel).read_bytes()).hexdigest() == want_sha
+        return sha256(work_domain.read_bytes(root / rel)).hexdigest() == want_sha
     except OSError:
         return False
 
@@ -513,7 +478,7 @@ def _workspace_patch_base(
 
 def _git_empty_tree_oid(root: pathlib.Path, errors: List[Dict[str, Any]]) -> str:
     try:
-        result = subprocess.run(
+        result = work_domain.run(
             ["git", "hash-object", "-t", "tree", "--stdin"],
             cwd=str(root),
             input="",
@@ -554,7 +519,7 @@ def _head_reflog_exists(root: pathlib.Path) -> bool:
     if not path.is_absolute():
         path = root / path
     try:
-        return path.is_file() and path.stat().st_size > 0
+        return work_domain.is_file(path) and (work_domain.lstat(path) if work_domain.is_work(path) else path.stat()).st_size > 0
     except OSError:
         return False
 
@@ -580,7 +545,7 @@ def _git_bytes(
 ) -> bytes:
     from ouroboros.git_observation import host_git_env
     try:
-        result = subprocess.run(
+        result = work_domain.run(
             list(cmd),
             cwd=str(cwd),
             capture_output=True,
@@ -617,6 +582,8 @@ def _append_git_output(
     diagnostics: List[Dict[str, Any]],
 ) -> int:
     from ouroboros.git_observation import host_git_env
+    if work_domain.is_work(cwd):  # the same command, run as the work domain
+        return _append_work_git_output(cmd, cwd, fh, allow_rc=allow_rc, errors=errors, diagnostics=diagnostics)
     written_box = {"value": 0}
     read_errors: List[str] = []
     try:
@@ -688,6 +655,27 @@ def _append_git_output(
     return written
 
 
+def _append_work_git_output(cmd: Sequence[str], cwd: pathlib.Path, fh: BinaryIO, *, allow_rc: set[int],
+                            errors: List[Dict[str, Any]], diagnostics: List[Dict[str, Any]]) -> int:
+    """``_append_git_output`` for a work tree: the command runs as the work domain, its output appended once it ended."""
+    from ouroboros.git_observation import host_git_env
+
+    try:
+        done, written = work_domain.run_into(fh, list(cmd), cwd=str(cwd), stderr=subprocess.PIPE, env=host_git_env(),
+                                             timeout=30)
+    except subprocess.TimeoutExpired:
+        errors.append({"type": "git_timeout", "command": list(cmd), "message": "git command timed out"})
+        return 0
+    except Exception as exc:
+        errors.append({"type": "git_exception", "command": list(cmd), "message": f"{type(exc).__name__}: {exc}"})
+        return 0
+    if done.returncode not in allow_rc:
+        errors.append({"type": "git_error", "command": list(cmd), "returncode": done.returncode,
+                       "stderr": (done.stderr or b"").decode("utf-8", errors="replace")[-2000:]})
+    diagnostics.append({"command": list(cmd), "returncode": done.returncode, "bytes": written})
+    return written
+
+
 def _write_patch_separator(fh: BinaryIO) -> int:
     data = b"\n"
     fh.write(data)
@@ -709,9 +697,8 @@ def pem_private_key_reason(root: pathlib.Path, rel: str) -> str:
     the cooperative checkpoint and the attached-folder snapshot. Unreadable
     heads are treated as ordinary content (fail-soft: git still decides).
     """
-    try:
-        with (root / rel).open("rb") as fh:
-            head = fh.read(_PEM_HEAD_READ_BYTES)
+    try:  # a work file's head through the confined intake (a link on its path: the work domain's own read)
+        head = work_domain.read_bytes(root / rel, limit=_PEM_HEAD_READ_BYTES)
     except OSError:
         return ""
     return "private key material (PEM private-key header)" if _PEM_PRIVATE_KEY_RE.search(head) else ""
@@ -738,9 +725,7 @@ def _wal_index_reason(root: pathlib.Path, rel: str) -> str:
     """A SQLite WAL index never enters a capture: no raw reader opens it (``store.is_wal_index``:
     its bytes are shared memory under the holders' locks), and a copy of its database rebuilds its
     own from the log at the first open. It is excluded before any read, the PEM head included."""
-    from ouroboros.store import is_wal_index
-
-    return "SQLite WAL index (shared memory a database copy rebuilds from its log)" if is_wal_index(root / rel) else ""
+    return "SQLite WAL index (shared memory a database copy rebuilds from its log)" if work_domain.is_wal_index(root / rel) else ""
 
 
 def _untracked_blob_exclude_reason(root: pathlib.Path, rel: str, *, file_outputs: Optional[List[str]] = None,
@@ -757,7 +742,7 @@ def _untracked_blob_exclude_reason(root: pathlib.Path, rel: str, *, file_outputs
     file) for a caller that did not batch."""
 
     try:
-        size = (root / rel).lstat().st_size
+        size = work_domain.lstat(root / rel).st_size
     except OSError:
         return ""  # unreadable/symlink races: include and let git decide
     if reason := pem_capture_refusal(root, rel, warnings=warnings):
@@ -801,7 +786,7 @@ def binary_verdict_candidates(root: pathlib.Path, rels: Sequence[str]) -> List[s
                 or _wal_index_reason(root, rel)):
             continue
         try:
-            info = os.lstat(root / rel)
+            info = work_domain.lstat(root / rel)
         except OSError:
             continue
         if not stat.S_ISREG(info.st_mode):
@@ -836,7 +821,7 @@ def untracked_binary_verdicts(root: pathlib.Path, rels: Sequence[str], *, warnin
     regular: List[str] = []
     for rel in rels:
         try:
-            if rel and stat.S_ISREG(os.lstat(root / rel).st_mode):
+            if rel and stat.S_ISREG(work_domain.lstat(root / rel).st_mode):
                 regular.append(rel)
         except OSError:
             continue
@@ -844,10 +829,11 @@ def untracked_binary_verdicts(root: pathlib.Path, rels: Sequence[str], *, warnin
         return {}
     env = dict(os.environ)
     scratch = ""
+    work = work_domain.is_work(root)  # a work tree's scratch index lives in the staging root, beside its Git
 
     def _git(*args: str, data: bytes = b"") -> bytes:
-        return subprocess.run(["git", *args], cwd=str(root), capture_output=True, input=data,
-                              env=env, timeout=300, check=True).stdout
+        return work_domain.run(["git", *args], cwd=str(root), capture_output=True, input=data,
+                               env=env, timeout=300, check=True).stdout
 
     def _diff_against(staged: bytes, paths: List[str]) -> Dict[str, bool]:
         """One index-versus-worktree diff with every path staged as ``staged``: the
@@ -865,8 +851,11 @@ def untracked_binary_verdicts(root: pathlib.Path, rels: Sequence[str], *, warnin
         return seen
 
     try:
-        fd, scratch = tempfile.mkstemp(prefix="ouroboros-binary-verdict-", suffix=".index")
-        os.close(fd)
+        if work:
+            scratch = str(work_domain.private_dir(root, "ouroboros-binary-verdict-") / "index")
+        else:
+            fd, scratch = tempfile.mkstemp(prefix="ouroboros-binary-verdict-", suffix=".index")
+            os.close(fd)
         env["GIT_INDEX_FILE"] = scratch
         verdicts = _diff_against(b"", regular)
         omitted = [rel for rel in regular if rel not in verdicts]
@@ -880,7 +869,7 @@ def untracked_binary_verdicts(root: pathlib.Path, rels: Sequence[str], *, warnin
     finally:
         if scratch:
             try:
-                os.unlink(scratch)
+                work_domain.discard(os.path.dirname(scratch)) if work else os.unlink(scratch)
             except OSError:
                 pass
     return {rel: verdicts.get(rel, False) for rel in regular}
@@ -904,10 +893,7 @@ def untracked_capture_veto_reason(root: pathlib.Path, rel: str, *, file_outputs:
     ``binary_verdicts`` comes from one :func:`untracked_binary_verdicts` batch over
     the whole inventory (``None`` = per-file git verdict, see the blob check).
     """
-    reason = _sensitive_untracked_reason(rel)
-    if reason:
-        return reason
-    reason = _patch_exclude_reason(rel) or _wal_index_reason(root, rel)
+    reason = _sensitive_untracked_reason(rel) or _patch_exclude_reason(rel) or _wal_index_reason(root, rel)
     if reason:
         return reason
     return _untracked_blob_exclude_reason(root, rel, file_outputs=file_outputs, warnings=warnings,

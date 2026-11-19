@@ -77,7 +77,8 @@ def _live_setup(request: Request) -> tuple[dict, dict]:
 
     settings, _changed, _keys = apply_runtime_provider_defaults(load_settings())
     return settings, build_setup_bootstrap(settings, "web", fresh_install=not SETTINGS_PATH.exists(),
-                                           consciousness_enabled=_consciousness_enabled(request))
+                                           consciousness_enabled=_consciousness_enabled(request),
+                                           document=_owner_settings_document())
 
 
 async def onboarding_page(_request: Request) -> HTMLResponse:

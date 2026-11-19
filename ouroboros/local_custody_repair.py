@@ -38,13 +38,22 @@ Retirement changes local capability only: the effect stays ``unknown`` and is
 never replayed, a known return stays ``returned``; delegated runs, processes,
 merge and control receipts, patches and money keep their own custody.
 
-Separately, ``ended_unbound_model_request`` reads an unbound send's retained
-raised-failure fact for the passive writer census. It classifies an ended
-request, retires nothing and preserves unresolved money and late-receipt rights.
+An UNBOUND send (no consumer, birth or task attempt: no receiver) has no
+consumer to retire. Its recorded sending pid's positive absence
+(``unbound_owner_ended``: ESRCH or a zombie, a matching ``owner_proof``'s
+different kernel birth, or on this pid an earlier custody session; never
+EPERM, a live pid without proof or this session) is persisted once, only by
+the startup sweep and the addressed actions (``_repair_absent_receivers``;
+an exit door retires a process's claims and bound receivers, never these), in
+``retired_model_consumers`` under ``UNBOUND_KEY`` + its exact attempt id, so
+a reused pid revives nothing. The passive census reads that row and the
+retained raised-failure fact (``ended_unbound_model_request``); neither
+changes money, outcome or late-receipt rights, or lifts a Stop or Panic.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import pathlib
@@ -153,12 +162,43 @@ def ended_unbound_model_request(attempt: Dict[str, Any]) -> bool:
     retried. Bound or partially bound receivers, still-dispatched rows and
     rows without the retained fact stay held. No writes.
     """
-    if (attempt.get("state") != "unresolved" or attempt.get("local_answer_consumer_id")
-            or attempt.get("local_answer_owner_birth")
-            or attempt.get("local_answer_task_attempt") is not None):
+    if attempt.get("state") != "unresolved" or not _unbound(attempt):
         return False
     failure = attempt.get("physical_failure")
     return isinstance(failure, dict) and failure.get("stage") == "raised_exception"
+
+
+UNBOUND_KEY = "unbound-attempt:"  # never a consumer id (uuid hex): one retired unbound send, by its attempt
+
+
+def _unbound(attempt: Dict[str, Any]) -> bool:
+    """No receiver at all; a partial binding is neither bound nor unbound and stays held."""
+    return not (attempt.get("local_answer_consumer_id") or attempt.get("local_answer_owner_birth")
+                or attempt.get("local_answer_task_attempt") is not None)
+
+
+def retired_unbound_send(attempt: Dict[str, Any], retired: Any) -> bool:
+    """The census's read: THIS unbound attempt's ended sender was recorded (``_repair_absent_receivers``)."""
+    attempt_id = str(attempt.get("attempt_id") or "")
+    row = retired.get(UNBOUND_KEY + attempt_id) if isinstance(retired, dict) and attempt_id else None
+    return (_unbound(attempt) and isinstance(row, dict) and row.get("receiver") == "unbound"
+            and row.get("attempt_id") == attempt_id and bool(row.get("retired_at")))
+
+
+def unbound_owner_ended(pid: Any, proof: Any) -> bool:
+    """Positive absence of an unbound send's recorded sender. ``proof`` counts only for its own pid; a
+    live pid needs its validated different kernel birth, this pid an earlier non-empty custody session."""
+    from ouroboros.platform_layer import pid_provably_gone
+    from ouroboros.process_identity import different_birth, process_kernel_birth
+
+    if type(pid) is not int or pid <= 0:
+        return False
+    proof = proof if isinstance(proof, dict) and proof.get("pid") == pid else {}
+    if pid == os.getpid():
+        return bool(proof.get("session")) and not _this_session(proof)
+    kernel = str(proof.get("kernel_birth") or "")
+    return (pid_provably_gone(pid) or _exited_unreaped(pid)
+            or bool(kernel) and different_birth(process_kernel_birth(pid) or "", kernel))
 
 
 def retire_process_custody(root: Any, *, pid: int, process_birth: str, kernel_birth: str = "") -> Dict[str, Any]:
@@ -242,16 +282,21 @@ def retire_ended_process(root: Any, *, pid: int, process_birth: str, kernel_birt
         return {"claims": [], "receivers": 0, "owed": True}
 
 
-def _unretired(root: Any, by_task: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, int]]:
-    """Drop consumers whose retirement already landed: an idempotent pass writes nothing twice."""
+def _unretired(root: Any, by_task: Dict[str, Dict[str, Any]], *,
+               skip_taskless: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Drop rows whose retirement already landed: an idempotent pass writes nothing twice.
+    ``skip_taskless``: also a task without a lifecycle row (``put_handoffs`` refuses it; a provider
+    test's ``system:`` id), read in the same transaction and recorded nowhere: a later pass meets a row
+    that appears. A failed read still raises; it is never taken for absence."""
     from ouroboros.store import open_store
 
     if not by_task:
         return {}
     with open_store(pathlib.Path(root), write=False) as txn:
         return {task_id: kept for task_id, consumers in by_task.items()
-                if (kept := {consumer: attempt for consumer, attempt in consumers.items()
-                             if txn.handoff(task_id, consumer) is None})}
+                if (not skip_taskless or txn.row(task_id, "status"))
+                and (kept := {consumer: attempt for consumer, attempt in consumers.items()
+                              if txn.handoff(task_id, consumer) is None})}
 
 
 def _discharge(root: Any, witness_id: str, facts: Dict[str, Any]) -> bool:
@@ -334,10 +379,32 @@ def repair_ended_local_custody(root: Any, task_ids: Iterable[str], *, root_task_
         return (holder in members and str(facts.get("root_task_id") or "") == str(root_task_id)
                 if holder else str(facts.get("task_id") or "") in members)
     repaired, done = _discharge_witnesses(root, addressed), set()
-    for holder in sorted(members):
+    try:  # stripped as the holder's own strict read (``validate_task_id``) would take each id
+        holders = _claimed_holders(root, {member.strip() for member in members})
+    except Exception:  # unreadable authority: nothing is retired on a guess
+        log.warning("Claimed launch holders of %s unreadable; their claims stay held", root_task_id, exc_info=True)
+        holders = []
+    for holder in holders:
         repaired.extend(_repair_holder_claims(root, holder, done))
     repaired.extend(_repair_absent_receivers(root, members, str(root_task_id)))
     return repaired
+
+
+def _claimed_holders(root: Any, members: Optional[set] = None) -> List[str]:
+    """The tasks holding a ``claimed`` launch row, by the rows' typed ``state`` (``Txn.put_handoff``): the only
+    rows ``_repair_holder_claims`` judges (it retires their owners' processes), so a member without one is never
+    read. ``members`` narrows the open set to an addressed tree (a seek per member, no body decoded); ``None`` is
+    every task."""
+    from ouroboros.store import open_store
+
+    if members is not None and not members:
+        return []
+    where, params = "kind='launch_handoffs' AND state='claimed'", ()
+    if members is not None:
+        where, params = f"task_id IN (SELECT value FROM json_each(?)) AND {where}", (json.dumps(sorted(members)),)
+    with open_store(pathlib.Path(root), write=False) as txn:
+        rows = txn.conn.execute(f"SELECT DISTINCT task_id FROM task_handoffs WHERE {where}", params).fetchall()
+    return sorted({str(row[0]) for row in rows})
 
 
 def reconcile_open_local_custody(root: Any) -> List[Dict[str, Any]]:
@@ -346,12 +413,8 @@ def reconcile_open_local_custody(root: Any) -> List[Dict[str, Any]]:
     The open set only (claimed rows, open receivers, legacy witnesses), never
     task history; a live or unprovable owner stays held and is shown as such.
     """
-    from ouroboros.store import open_store
-
     repaired = _discharge_witnesses(root, lambda _facts: True)
-    with open_store(pathlib.Path(root), write=False) as txn:
-        holders = sorted({str(row[0]) for row in txn.conn.execute(
-            "SELECT DISTINCT task_id FROM task_handoffs WHERE kind='launch_handoffs' AND state='claimed'")})
+    holders = _claimed_holders(root)
     done: set = set()
     for holder in holders:
         repaired.extend(_repair_holder_claims(root, holder, done))
@@ -359,8 +422,9 @@ def reconcile_open_local_custody(root: Any) -> List[Dict[str, Any]]:
     return repaired
 
 
+# ``merge_effect_unknown``: a settled merge request (``merge_receipts.UNKNOWN_EFFECT``), whose receipt stays.
 ACCEPTABLE_UNKNOWN = frozenset({"local_completion_unknown", "owner_ended_effect_unknown",
-                                "returned_effect_unconfirmed"})
+                                "returned_effect_unconfirmed", "merge_effect_unknown"})
 
 
 def receiver_reason(attempt: Dict[str, Any]) -> str:
@@ -387,7 +451,9 @@ def accept_unknown_custody(root: Any, members: Iterable[str], ids: Iterable[str]
     Only what the census words as unknown is accepted: a tool call
     (``tool_custody.tool_handoff_reason``) or a model answer receiver
     (``receiver_reason``) in a worker that cannot be proven live or ended, or a
-    local call that is over while its outside effect is unconfirmed. A call in a
+    local call that is over while its outside effect is unconfirmed, or a settled
+    merge request of unknown outcome (``merge_receipts.accept_unknown``, judged and
+    recorded beside its unchanged receipt under the receipt lock). A call in a
     live worker is refused, so no second writer starts beside it. The accepted
     tool row leaves ``launch_handoffs`` and stays in ``retired_tool_invocations``
     as observed, with ``effect_outcome="unknown_accepted"``,
@@ -396,6 +462,7 @@ def accept_unknown_custody(root: Any, members: Iterable[str], ids: Iterable[str]
     same record. Nothing is re-run and the outside effect is declared neither
     done nor failed; a late return of an accepted call writes nothing.
     """
+    from ouroboros import merge_receipts
     from ouroboros.model_wait import retire_model_consumers
     from ouroboros.owner_pause import tree_model_requests
     from ouroboros.task_results import load_task_result, require_writable_task_result_schema, stamp_task_result_schema
@@ -413,9 +480,10 @@ def accept_unknown_custody(root: Any, members: Iterable[str], ids: Iterable[str]
         return reason in ACCEPTABLE_UNKNOWN
     for holder in sorted({str(task_id) for task_id in members if task_id}):
         try:  # the reasons are probed before the write: no process probe holds the store
-            claims = (load_task_result(pathlib.Path(root), holder, strict=True) or {}).get("launch_handoffs") or {}
+            record = load_task_result(pathlib.Path(root), holder, strict=True) or {}
         except Exception:
             continue  # unreadable authority: nothing is accepted on a guess
+        claims = record.get("launch_handoffs") or {}
         reasons = {op: tool_handoff_reason(claim)["reason"] for op, claim in claims.items()
                    if op in wanted and isinstance(claim, dict)}
         decided = {op: (claims[op].get("state"), why) for op, why in reasons.items() if judged(op, holder, why)}
@@ -440,6 +508,17 @@ def accept_unknown_custody(root: Any, members: Iterable[str], ids: Iterable[str]
             except Exception:
                 log.warning("Named decision on %s not recorded; its calls stay held", holder, exc_info=True)
                 refused.extend({"id": op, "task_id": holder, "reason": "unwritten"} for op in decided)
+        receipts = wanted & {str(r.get("receipt_id") or "") for r in record.get("merge_receipts") or []
+                             if isinstance(r, dict)}
+        if receipts:  # after the calls above: a request whose call was just accepted is judged without it
+            try:
+                accepted.extend(receipt_id for receipt_id, why in merge_receipts.accept_unknown(
+                    pathlib.Path(root), holder, receipts, by=by).items() if judged(receipt_id, holder, why))
+            except Exception:
+                log.warning("Named decision on %s's merge requests not recorded; they stay held", holder,
+                            exc_info=True)
+                refused.extend({"id": receipt_id, "task_id": holder, "reason": "unwritten"}
+                               for receipt_id in sorted(receipts))
     try:
         attempts = [row for row in tree_model_requests(pathlib.Path(root), root_task_id)  # the census's own read
                     if str(row.get("attempt_id") or "") in wanted]
@@ -470,8 +549,11 @@ def accept_unknown_custody(root: Any, members: Iterable[str], ids: Iterable[str]
 
 
 def _repair_absent_receivers(root: Any, members: Optional[set], root_task_id: Optional[str]) -> List[Dict[str, Any]]:
-    """Open attempts (of this tree, or all) whose recorded answer receiver's process positively ended."""
+    """Open attempts (of this tree, or all) whose recorded receiver's process, or unbound sender, positively
+    ended. Rows are read first, then probed; each retirement is written once (``_unretired``)."""
     from ouroboros.model_wait import retire_model_consumers
+    from ouroboros.task_store import put_handoffs
+    from ouroboros.utils import utc_now_iso
     from ouroboros import usage_store
 
     try:  # the tree's own open rows (root index), or the open set at startup; never history
@@ -482,26 +564,45 @@ def _repair_absent_receivers(root: Any, members: Optional[set], root_task_id: Op
     except Exception:
         log.warning("Open attempts unreadable; receivers stay held", exc_info=True)
         return []
-    by_task: Dict[str, Dict[str, int]] = {}
-    pids: Dict[str, Any] = {}
+    by_task: Dict[str, Dict[str, Any]] = {}  # task -> consumer -> task attempt, or UNBOUND_KEY+attempt -> its row
+    pids: Dict[tuple, Any] = {}  # (task, receiver kind) -> a recorded owner pid, for the report
     for row in rows:
         consumer, attempt = row.get("local_answer_consumer_id"), row.get("local_answer_task_attempt")
-        if type(attempt) is not int or not isinstance(consumer, str) or not consumer:
-            continue
         proof = row.get("local_answer_owner_proof") if isinstance(row.get("local_answer_owner_proof"), dict) else {}
-        if owner_ended(row.get("local_answer_owner_pid"), row.get("local_answer_owner_birth"),
-                       proof if proof.get("pid") == row.get("local_answer_owner_pid") else {}):
-            task_id = str(row.get("task_id") or "")
-            by_task.setdefault(task_id, {})[consumer] = attempt
-            pids[task_id] = row.get("local_answer_owner_pid")
+        pid, task_id = row.get("local_answer_owner_pid"), str(row.get("task_id") or "")
+        if type(attempt) is int and isinstance(consumer, str) and consumer:
+            if owner_ended(pid, row.get("local_answer_owner_birth"), proof if proof.get("pid") == pid else {}):
+                by_task.setdefault(task_id, {})[consumer], pids[(task_id, "bound")] = attempt, pid
+            continue
+        if row.get("state") not in {"dispatched", "unresolved"} or not _unbound(row) or not row.get("attempt_id"):
+            continue
+        try:
+            ended = unbound_owner_ended(pid, proof)
+        except Exception:  # an unreadable probe proves nothing
+            ended = False
+        if ended:
+            by_task.setdefault(task_id, {})[UNBOUND_KEY + str(row["attempt_id"])], pids[(task_id, "unbound")] = row, pid
     repaired: List[Dict[str, Any]] = []
     try:
-        for task_id, consumers in _unretired(root, by_task).items():
-            try:
-                retire_model_consumers(pathlib.Path(root), task_id, consumers)
-                repaired.append({"kind": "receiver_owner_absent", "task_id": task_id, "pid": pids[task_id]})
-            except Exception:
-                log.warning("Ended receivers of %s not retired; they stay held", task_id, exc_info=True)
+        for task_id, retiring in _unretired(root, by_task, skip_taskless=True).items():
+            unbound = {key: {"receiver": "unbound", "attempt_id": row["attempt_id"],
+                             "owner_pid": row.get("local_answer_owner_pid"), "retired_at": utc_now_iso()}
+                       for key, row in retiring.items() if key.startswith(UNBOUND_KEY)}
+            bound = {key: attempt for key, attempt in retiring.items() if key not in unbound}
+            # Two independent writes: one refused leaves only its own rows held, and each reports itself.
+            for receiver, rows_of, write in (
+                    ("unbound", unbound, lambda: put_handoffs(  # the exact attempt names it, nothing invented
+                        pathlib.Path(root), task_id, "retired_model_consumers", unbound, only_absent=True)),
+                    ("bound", bound, lambda: retire_model_consumers(pathlib.Path(root), task_id, bound))):
+                if not rows_of:
+                    continue
+                try:
+                    write()
+                    repaired.append({"kind": "receiver_owner_absent", "task_id": task_id, "receiver": receiver,
+                                     "pid": pids[(task_id, receiver)]})
+                except Exception:
+                    log.warning("Ended %s receivers of %s not retired; they stay held", receiver, task_id,
+                                exc_info=True)
     except Exception:
         log.warning("Retired receivers unreadable; receivers stay held", exc_info=True)
     return repaired

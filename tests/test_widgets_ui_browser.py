@@ -614,7 +614,11 @@ def test_ui_smoke_module_widgets_geometry_lifecycle(direct_server_with_data):
                 capped_height = capped_frame.evaluate("frame => frame.getBoundingClientRect().height")
                 assert capped_height == 640, capped_height
                 small_height = small_frame.evaluate("frame => frame.getBoundingClientRect().height")
-                assert 320 <= small_height < 700, small_height
+                # Measured short content: the board's frame is as tall as its document (320 px is a loading height
+                # only, docs/DESIGN.md "Widgets board"), and nothing of it is cut.
+                assert 0 < small_height < 320, small_height
+                assert small_frame.element_handle().content_frame().evaluate(
+                    "() => document.documentElement.scrollHeight <= innerHeight + 1"), "short content is cut"
 
                 page.screenshot(path=str(evidence_dir / "module-widgets-desktop.png"), full_page=True)
                 page.set_viewport_size({"width": 430, "height": 932})
@@ -804,8 +808,9 @@ def test_ui_smoke_module_widget_temporal_convergence(direct_server_with_data, br
                 assert 320 < initial_heights["auto"] < 1000, initial_heights
                 assert 320 < initial_heights["capped"] < 1000, initial_heights
                 assert initial_heights["fixed"] == 480, initial_heights
-                assert initial_heights["floor"] == 320, initial_heights
-                assert 320 <= initial_heights["wide"] < 700, initial_heights
+                # Short content under its author's 320 px ceiling, and the wide strip: as tall as their documents.
+                assert 0 < initial_heights["floor"] < 320, initial_heights
+                assert 0 < initial_heights["wide"] < 700, initial_heights
                 for tab_id in frames:
                     assert page.locator(frame_selector(tab_id)).get_attribute("scrolling") is None
                 auto_initial = child_metrics(frames["auto"])
@@ -815,9 +820,11 @@ def test_ui_smoke_module_widget_temporal_convergence(direct_server_with_data, br
                 assert auto_initial["htmlOverflowX"] != "hidden", auto_initial
                 assert auto_initial["bodyOverflowX"] == "hidden", auto_initial
 
+                # It fits under its ceiling, so the frame shows all of it and the document's scrollbar stays hidden.
                 floor_initial = child_metrics(frames["floor"])
-                assert floor_initial["htmlOverflowY"] != "hidden", floor_initial
-                assert floor_initial["bodyOverflowY"] != "hidden", floor_initial
+                assert floor_initial["htmlOverflowY"] == "hidden", floor_initial
+                assert floor_initial["bodyOverflowY"] == "hidden", floor_initial
+                assert floor_initial["scrollHeight"] <= floor_initial["height"] + 1, ("short content is cut", floor_initial)
 
                 fixed_initial = child_metrics(frames["fixed"])
                 assert fixed_initial["htmlOverflowY"] != "hidden", fixed_initial

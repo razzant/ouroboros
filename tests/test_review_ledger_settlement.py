@@ -89,7 +89,7 @@ def test_settlement_replaces_current_sources_and_keeps_historical_originals(tmp_
 
 
 def test_late_owner_settlement_keeps_the_collected_reply_call_refs(tmp_path):
-    """A left wave's reply collected by review_pause keeps its own call refs beside the dispatch prompt."""
+    """A left wave keeps the reply's call refs but cannot present its partial subtotal as a bill."""
     from ouroboros import review_pause
     from ouroboros.review_projection import ledger_record_panel
     from tests.test_review_seat_outcome import _body
@@ -102,11 +102,13 @@ def test_late_owner_settlement_keeps_the_collected_reply_call_refs(tmp_path):
     [prompt] = [s for s in record["rows"][0]["source_refs"] if s["role"] == "prompt"]
     late_call = {"call_id": "late-reply", "manifest_ref": {"path": "calls/late-reply.json", "sha256": "2" * 64}}
     seat = {"slot_id": "sol", "model": "m", "parts": list(BOTH), "operation_id": "op", "operation_state": "settled",
-            "status": "responded", "raw_text": _body(), "prompt_ref": {"call_id": "late-prompt"}, "response_ref": late_call}
+            "status": "responded", "raw_text": _body(), "prompt_ref": {"call_id": "late-prompt"}, "response_ref": late_call,
+            "usage": {"cost": 0.25, "cost_final": False, "cost_partial": True}, "cost_usd": 0.25}
     settled = review_pause._settle_left_record({"drive_root": str(tmp_path), "record_id": record["record_id"]},
                                                [seat], final=True)
     assert settled["state"] == "settled" and settled["verdict"]["aggregate"] == "PASS"
     row = settled["rows"][0]
+    assert (row["usd"], row["cost_kind"]) == (None, "unknown") and settled["cost"]["unknown"]
     current = {s["role"]: s for s in row["source_refs"]}
     assert current["prompt"] == prompt and current["response"]["status"] == "retained"
     assert current["observability_response"]["ref"] == late_call

@@ -5,12 +5,94 @@ Descriptive, not runtime validation. The browser twin is ``web/modules/work_type
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal, Optional
 
 try:  # Python 3.11+
     from typing import NotRequired, TypedDict  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - CI supports Python 3.10.
     from typing_extensions import NotRequired, TypedDict  # type: ignore[assignment]
+
+
+class ChatModelRoute(TypedDict):
+    """A model route shared by room choices, Main and owner recents."""
+
+    model: str
+    use_local: bool
+
+
+class CitedModelWords(TypedDict):
+    """Up to 1024 Unicode characters of the verified span; clipped says whether more was retained."""
+
+    text: str
+    clipped: bool
+
+
+class WorkPrimaryRoute(ChatModelRoute):
+    basis: str
+    cited: NotRequired[CitedModelWords]
+
+
+class WorkLead(WorkPrimaryRoute):
+    """Acting route and chooser; a departure names the primary it left."""
+
+    role: NotRequired[str]
+    primary: NotRequired[WorkPrimaryRoute]
+    since: NotRequired[str]
+    cause: NotRequired[str]
+    pending: NotRequired[ChatModelRoute]
+
+
+ProcessingTier = Literal["", "standard", "fast", "economy", "ultrafast"]  # '' = no tier of its own: the default resolution
+
+
+class ProcessingTiers(TypedDict):
+    """Main's own tier ('' = none: Main takes the default) and the default every lead pays (Settings values)."""
+
+    main: Literal["", "standard", "fast", "economy"]
+    default: Literal["", "standard", "fast", "economy"]
+
+
+class ProcessingReceipt(TypedDict):
+    """One call's processing as its receipt states it: what was asked, sent and seen (``_usage_response``), the
+    provider's own words beside the folded ones (an older Codex reports ``ultrafast`` it folds into ``fast``)."""
+
+    requested: Optional[str]
+    submitted: Optional[str]
+    submittedNative: NotRequired[Optional[str]]
+    observed: str  # standard, fast, economy or unknown
+    observedNative: NotRequired[List[str]]
+    reason: Optional[str]  # processing_not_submitted, submitted_mode_differs, provider_mode_changed
+
+
+class WorkProcessing(TypedDict):
+    """A root's own tier (its room's at admission, or the owner's card act; '' = the default resolution) and the
+    newest call's receipt this host saw, so a choice is never shown as what ran."""
+
+    choice: ProcessingTier
+    resolved: NotRequired[ProcessingTier]  # server resolver, including the acting fallback row
+    source: NotRequired[Literal["room", "owner"]]
+    last: NotRequired[ProcessingReceipt]
+
+
+class WorkLeadFields(TypedDict):
+    lead: NotRequired[WorkLead]
+    processing: NotRequired[WorkProcessing]
+
+
+class TaskModelRequest(TypedDict):
+    request_id: str
+    action: Literal["set", "follow", "return", "wait", "keep", "processing"]
+    model: NotRequired[str]
+    use_local: NotRequired[bool]
+    processing: NotRequired[ProcessingTier]  # action ``processing`` only: the work's own tier from its next call
+
+
+class TaskModelResponse(TypedDict):
+    ok: Literal[True]
+    task_id: str
+    applied: Literal["next_step", "at_start"]
+    lead: NotRequired[WorkLead]  # every model act
+    processing: NotRequired[WorkProcessing]  # a tier act
 
 
 class WorkReason(TypedDict):
@@ -75,9 +157,13 @@ class WorkTail(TypedDict):
 
 
 class WorkTurn(TypedDict):
-    """What waits for the owner: an unanswered question or an action only the owner takes."""
+    """What waits for the owner: ``question`` (a task waits for the answer), ``open_question`` (a current question
+    Main's pill counts while its work goes on, after it ended, or one held by no work at all) or ``action`` (only the
+    owner takes it). ``code`` ``delivery_unknown`` marks an ``open_question`` that was answered but whose delivery a
+    restart left unknown. In a room's ``turn`` an item a work holds names its ``work_id``; one no work holds has none."""
 
-    kind: str
+    kind: str  # question | open_question | action
+    work_id: NotRequired[str]  # in a room's turn: the work that holds it
     task_id: str
     quiz_id: NotRequired[str]
     wait_id: NotRequired[str]
@@ -107,7 +193,7 @@ class WorkFocus(TypedDict):
     at: Any
 
 
-class Work(TypedDict):
+class Work(WorkLeadFields):
     """One request with its Continue episodes and live members."""
 
     work_id: str
@@ -139,7 +225,9 @@ class Work(TypedDict):
 
 
 class RoomStatus(TypedDict):
-    """One room's status from its works: the most active work speaks; ``amber`` while something waits for the owner."""
+    """One room's status from its works: the most active work speaks; ``amber`` while something waits for the owner.
+    ``turn`` holds its works' items (with ``work_id``) and the room's own current questions no work holds (without):
+    a room at rest can be the owner's turn."""
 
     activity: str
     transition: str
@@ -153,7 +241,7 @@ class RoomStatus(TypedDict):
 
 class WorkSummary(TypedDict):
     counts: Dict[str, int]
-    turn: int
+    turn: int  # what waits for the owner: each work with a turn, and each standalone question no counted work carries
     confirmed: bool
 
 

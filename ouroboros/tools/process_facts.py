@@ -68,8 +68,8 @@ def redact_process_data(value):
 
 @contextlib.contextmanager
 def process_environment_scope(ctx, name, arguments):
-    """One admitted Settings snapshot shared by resolution and nested launchers."""
-    from ouroboros.config import load_settings, runtime_settings
+    """One current Settings selection at dispatch, shared by nested launchers."""
+    from ouroboros.config import load_settings, selection_settings
     from ouroboros.workspace_executor import resolve_process_env, validate_process_env
     from ouroboros.tools.tool_result import ToolResult
 
@@ -86,7 +86,7 @@ def process_environment_scope(ctx, name, arguments):
                     text="⚠️ PROCESS_ENV_REFERENCE_BLOCKED: this task cannot select settings-backed process environment.")
             else:
                 prepared = resolve_process_env(None, refs,
-                    settings=runtime_settings(settings_reader=load_settings) if refs else None)
+                    settings=selection_settings(settings_reader=load_settings) if refs else None)
         except ValueError as exc:
             error = ToolResult(status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR: {exc}")
     _process_facts_tls.environment = prepared
@@ -182,7 +182,7 @@ def _publish_script_source(ctx, before, after, fact):
     return after
 
 
-def wrap_script_result(ctx, result, audit_note, script_path):
+def wrap_script_result(ctx, result, audit_note, script_path, note_meta=None):
     """Close a run_script result with where its script text survives the removed temp file."""
     from ouroboros.tools.tool_result import _wrap_run_script_process_result
 
@@ -191,7 +191,7 @@ def wrap_script_result(ctx, result, audit_note, script_path):
         removed = "temporary file cleanup failed" if pathlib.Path(script_path).exists() else "temporary file removed after the run"
     except OSError:
         removed = "temporary file state unknown"
-    wrapped = _wrap_run_script_process_result(ctx, result, audit_note, f"{script_path} ({removed}; {held})")
+    wrapped = _wrap_run_script_process_result(ctx, result, audit_note, f"{script_path} ({removed}; {held})", note_meta)
     return _publish_script_source(ctx, wrapped, wrapped, fact)
 
 

@@ -15,7 +15,7 @@ const list = value => (Array.isArray(value) ? value : []).filter(item => item &&
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const shortSha = value => (/^[0-9a-f]{12,}$/i.test(text(value)) ? text(value).slice(0, 7) : text(value));
 export const SURFACE_LABELS = {
-    commit_gate: 'Code review', change: 'Code review', preflight: 'Early look', result: 'Result review', system: 'System review',
+    commit_gate: 'Code review', change: 'Code review', preflight: 'Pre-review', result: 'Result review', system: 'System review',
     plan: 'Plan', skill: 'Skill review', review_record: 'Review records', task_acceptance: 'Result review',
 };
 const GAP_WORDS = {
@@ -60,12 +60,15 @@ export function reviewViews(groups) {
 }
 
 const ledgerTally = (panel) => {
-    const counted = list(panel.actors).filter(actor => !seatAdviser(actor));
-    const answered = counted.filter(actorAnswered).length;
-    const owed = counted.filter(actor => seatOwed(actor, panel)).length;
-    const unavailable = counted.length - answered - owed;
-    const counts = text(panel.surface) === 'preflight' || !counted.length ? 'answered' : 'counted answered';
-    return [`${answered} of ${counted.length} ${counts}`, unavailable > 0 ? `${unavailable} unavailable` : '',
+    const actors = list(panel.actors), counted = actors.filter(actor => !seatAdviser(actor));
+    // A wave of advisers alone (Cyber Pro) tallies them as advisers: none of them is counted.
+    const seats = counted.length || text(panel.surface) === 'preflight' ? counted : actors;
+    const answered = seats.filter(actorAnswered).length;
+    const owed = seats.filter(actor => seatOwed(actor, panel)).length;
+    const unavailable = seats.length - answered - owed;
+    const counts = seats !== counted && seats.length ? 'advisers answered'
+        : text(panel.surface) === 'preflight' || !counted.length ? 'answered' : 'counted answered';
+    return [`${answered} of ${seats.length} ${counts}`, unavailable > 0 ? `${unavailable} unavailable` : '',
         owed ? `${owed} awaiting` : ''].filter(Boolean).join(' · ');
 };
 
@@ -206,7 +209,9 @@ function planRows(view, attempt, format, live) {
     const answered = participants.filter(participant => participant.status === 'answered').length;
     const head = `<p class="review-ask-line">${escape([attempt.label, attempt.summary ? `«${attempt.summary}»` : '',
         `${answered} of ${participants.length} answered`].filter(Boolean).join(' · '))}</p>`;
-    return head + participants.map((participant) => {
+    // The adapter's one sentence when the evidence prepared for this ask is incomplete, read whole; which and why
+    // stay in Record facts.
+    return head + line({ words: text(attempt.evidenceNotice), whole: true }) + participants.map((participant) => {
         const seatId = text(participant.seat_id);
         const state = participantState(participant, objections, live);
         const mine = (objections || []).filter(objection => objection.seat === seatId);

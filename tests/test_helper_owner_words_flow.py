@@ -367,7 +367,6 @@ def test_a_swarm_roots_words_stay_exact_with_ignored_legacy_metadata(tmp_path, m
     from ouroboros.context import build_user_content
     from ouroboros.review_evidence_sections import _owner_content_projection
 
-    monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "advisory")
     door = {"origin_message_ref": dict(ORIGIN_REF), "origin_message_text": ASKED,
             "subagents_mode": "swarm", "force_plan": True, "force_plan_source": "swarm"}
     turn = build_user_content({"text": ASKED, "metadata": door})

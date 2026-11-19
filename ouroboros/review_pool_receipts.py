@@ -203,9 +203,8 @@ def document_as_read(settings_path: Any, running: Mapping[str, Any]) -> Mapping[
     What RUNS (``config.load_settings``) differs from this document in exactly one place: the catalog the
     environment carries wins over rows the seam minted for a document that authored none
     (``review_pool_migration.environment_overridable_keys``). The process environment itself cannot witness
-    that — ``config.apply_settings_to_env`` projects the effective catalog back into it before the boot
-    reports, and the projection carries only the live settings keys, so a lane value a refused migration
-    kept in the document is absent from it (VD3-06). The document on disk is the one witness of both. A
+    that: the catalog is not projected, nor is a retired lane value a refused migration kept in the
+    document (VD3-06). The document on disk is the one witness of both. A
     document with no review settings of its own is read like no file: its factory catalog is minted over
     the configuration that runs (``review_pool_migration.apply_at_read_seam(merged=True)``)."""
     from ouroboros.config import normalize_settings_raw

@@ -40,13 +40,13 @@ def test_settings_defaults_include_phase2_keys():
 
     assert SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"] == "advanced"
     assert SETTINGS_DEFAULTS["OUROBOROS_SKILLS_REPO_PATH"] == ""
-    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL"] == "google/gemini-3.8-flash"
-    # Empty role slots inherit Main; Light (Luna 6) and Fallback (Luna 5.6, kept) use Luna explicitly.
+    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL"] == "google/gemini-4-hydrogen"
+    # Empty role slots inherit Main; Light (Luna 6) and Fallback (Terra 6.1, a stronger resilience path) are explicit.
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_HEAVY"] == ""
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_VISION"] == ""
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_CONSCIOUSNESS"] == ""
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"] == "openai/gpt-6-luna"
-    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"] == "openai/gpt-5.6-luna"
+    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"] == "openai/gpt-6.1-terra"
     # Retired (review pool): the deep-review model is a reviewer row of the subagent
     # catalog; the read seam migrates the key, so it is no shipped default any more.
     assert "OUROBOROS_MODEL_DEEP_SELF_REVIEW" not in SETTINGS_DEFAULTS
@@ -295,18 +295,6 @@ def test_state_response_typeddict_declares_phase2_keys():
 # ===========================================================================
 
 
-def test_settings_js_reads_and_writes_phase2_keys():
-    src = "\n".join((REPO / "web" / "modules" / name).read_text(encoding="utf-8")
-                     for name in ("settings.js", "settings_local_model.js"))
-    assert "OUROBOROS_RUNTIME_MODE" in src
-    assert "OUROBOROS_CONTEXT_MODE'" in src
-    assert "OUROBOROS_SKILLS_REPO_PATH" in src
-    assert "['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced']" in src
-    assert "['s-context-mode', 'OUROBOROS_CONTEXT_MODE', 'max']" in src
-    assert "['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH']" in src
-    assert "fieldValue(id).trim()" in src
-
-
 def test_the_protected_path_messages_name_the_review_panel_and_the_review_gate(monkeypatch):
     """V-D4-07, the owner's approval of 2026-10-08 for exactly three phrases of the protected
     ``runtime_mode_policy``: the module docstring, the advanced-mode refusal and the pro-mode
@@ -318,7 +306,7 @@ def test_the_protected_path_messages_name_the_review_panel_and_the_review_gate(m
     refusal = policy.protected_write_block_message(path="BIBLE.md", runtime_mode="advanced", action="run tool 'write_file' against")
     assert refusal.endswith("Switch to runtime_mode='pro' and let the normal review panel "
                             "cover the protected core/contract/release change before commit.")
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     notice = policy.core_patch_notice(["BIBLE.md"])
     assert notice.endswith("These changes can be committed only through the normal review gate.")
     for text in (policy.__doc__ or "", refusal, notice):
@@ -361,11 +349,12 @@ def test_api_settings_post_clamps_unknown_runtime_mode(tmp_path, monkeypatch):
         return out
 
     def fake_save_settings(payload, *, allow_elevation: bool = False, allow_context_lowering: bool = False,
-                           authored_keys=(), boundary=None):
+                           authored_keys=(), boundary=None, expected_digest="", if_unchanged=None, unset=()):
         # Stands in for both save_settings (allow_elevation) and _owner_write_settings
         # (allow_context_lowering, added in v6.33.0 P4; authored_keys in v6.80.0 — the caller
         # names the disk-authored keys it really authors, see prepare_settings_for_persist;
-        # boundary marks the commit point, so the stub marks it as the real writer would).
+        # boundary marks the commit point, so the stub marks it as the real writer would;
+        # expected_digest, if_unchanged and unset bind the save to its own read and a row's token).
         saved.clear()
         saved.update(payload)
         if boundary is not None:
@@ -410,11 +399,12 @@ def test_api_settings_post_silently_drops_runtime_mode_changes(monkeypatch):
         return out
 
     def fake_save_settings(payload, *, allow_elevation: bool = False, allow_context_lowering: bool = False,
-                           authored_keys=(), boundary=None):
+                           authored_keys=(), boundary=None, expected_digest="", if_unchanged=None, unset=()):
         # Stands in for both save_settings (allow_elevation) and _owner_write_settings
         # (allow_context_lowering, added in v6.33.0 P4; authored_keys in v6.80.0 — the caller
         # names the disk-authored keys it really authors, see prepare_settings_for_persist;
-        # boundary marks the commit point, so the stub marks it as the real writer would).
+        # boundary marks the commit point, so the stub marks it as the real writer would;
+        # expected_digest, if_unchanged and unset bind the save to its own read and a row's token).
         saved.clear()
         saved.update(payload)
         if boundary is not None:
@@ -690,9 +680,8 @@ def test_pro_commit_uses_normal_review_for_protected_paths(tmp_path, monkeypatch
         skip_advisory_pre_review=True,
     )
 
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
-    # The normal review ran; nonblocking enforcement returns its outcome before Git (#1741).
-    assert result["status"] == ("passed" if review_enforcement_blocks() else "reviewed")
+    # The normal review ran and its outcome returns before Git (#1741).
+    assert result["status"] == "reviewed"
     assert calls == {"review": 1}
 
 

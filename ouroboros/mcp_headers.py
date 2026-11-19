@@ -186,16 +186,18 @@ def _origin_text(origin: tuple) -> str:
 class _CredentialOriginGuard:
     """One connection's HTTP client factory: saved credentials stay on the configured origin.
 
-    The SDK client follows redirects, and the HTTP client strips only
-    ``Authorization`` when a redirect leaves the origin — every other configured
-    header would follow. While the server carries credentials, a request to a
-    different scheme, host or port (``http`` → ``https`` included) is stopped by
-    a request hook before it is sent; requests on the configured origin,
-    same-origin redirects included, are unchanged. A server without credentials
-    keeps the SDK's redirect behavior: a stored sign-in bearer (``mcp_oauth``) is
-    attached only on the configured origin and is ``Authorization``, which the
-    HTTP client drops when a redirect leaves it. The SDK factory keeps its
-    timeouts and the transport keeps the client's lifetime.
+    The SDK (mcp>=1.30) follows a redirect itself only within the endpoint's
+    origin, but it counts ``http`` → ``https`` on default ports as the same
+    origin, and an SSE message POST whose redirect it leaves unfollowed fails
+    only by its tool timeout. While the server carries credentials, a redirect
+    response that points to a different scheme, host or port is refused when it
+    arrives, and a request hook stops any request to another origin before it is
+    sent; requests on the configured origin, same-origin redirects included, are
+    unchanged. A server without credentials keeps the SDK's redirect behavior: a
+    stored sign-in bearer (``mcp_oauth``) is attached only on the configured
+    origin and is ``Authorization``, which the HTTP client drops when a redirect
+    leaves it. The SDK factory keeps its timeouts and the transport keeps the
+    client's lifetime.
     """
 
     def __init__(self, cfg: Any) -> None:  # an MCPServerConfig
@@ -207,10 +209,9 @@ class _CredentialOriginGuard:
 
         client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
         if self.cfg.carries_credentials():
-            async def stay_on_origin(request: Any) -> None:
-                expected, actual = _origin(self.cfg.url), _origin(request.url)
-                if actual == expected:
-                    return
+            expected = _origin(self.cfg.url)
+
+            async def refuse(actual: tuple) -> None:
                 self.refusal = MCPRedirectRefused(
                     f"MCP_REDIRECT_REFUSED: server {self.cfg.id!r} at {_origin_text(expected)} redirected a "
                     f"request to {_origin_text(actual)}. Saved headers go only to the configured origin (scheme, "
@@ -221,7 +222,18 @@ class _CredentialOriginGuard:
                 await client.aclose()
                 raise self.refusal
 
+            async def stay_on_origin(request: Any) -> None:
+                if _origin(request.url) != expected:
+                    await refuse(_origin(request.url))
+
+            async def redirect_stays_on_origin(response: Any) -> None:
+                if response.has_redirect_location:
+                    target = _origin(response.request.url.join(response.headers["Location"]))
+                    if target != expected:
+                        await refuse(target)
+
             client.event_hooks["request"].append(stay_on_origin)
+            client.event_hooks["response"].append(redirect_stays_on_origin)
         return client
 
 

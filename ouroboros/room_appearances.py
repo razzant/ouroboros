@@ -10,7 +10,8 @@ appended. Once, it also derives again, below the mark it began under, Main's row
 kept there alone: private Presence contact and the owner's direct Replies whose target that rule
 could not follow (``_contact_replies``), and so again the rows an older body wrote after this one
 (``_owe_uncovered``) and the planned rows another body imported (``owe_planned``, ``imported_here``).
-It is idempotent and touches nothing but the index: no row, revision, notification or delivery.
+It is idempotent and touches nothing but the index and the newest-message times of the Projects it finds a
+message in (``room_messages.shown``): no row, unread revision, notification or delivery.
 """
 from __future__ import annotations
 
@@ -18,6 +19,8 @@ import json
 import logging
 import pathlib
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+
+from ouroboros import room_messages
 
 log = logging.getLogger(__name__)
 
@@ -262,9 +265,11 @@ def run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
         nonlocal start, items
         keys = [(key, "chat", entry.seq) for entry in batch for key in (
             appearance_keys(entry.row, projects, rooms) if _candidate(entry.row) else ())]
+        dated = room_messages.shown(batch, projects, rooms)
         with ds.transaction(root, write=True) as conn:
             conn.execute(ds.APPEARANCES_DDL)
             conn.executemany("INSERT OR IGNORE INTO room_appearances (key, stream, seq) VALUES (?, ?, ?)", keys)
+            room_messages.note(conn, dated)
             moved = conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?",
                                  (json.dumps(upto), ds.APPEARANCES_MARK, json.dumps(start))).rowcount
             if moved:  # derived by this body's rule
@@ -283,11 +288,15 @@ def run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
     if not commit(end):
         return {"state": "pending", "items": items}
     for segment, base, upper in _older_imports(root):  # exactly the rows an older body imported below the mark
-        keys = [(key, "chat", entry.seq) for entry in ds.iter_rows(root, "chat", lower=base, upper=upper, batch=_BATCH)
-                for key in (appearance_keys(entry.row, projects, rooms) if _candidate(entry.row) else ())]
+        keys, dated = [], []
+        for entry in ds.iter_rows(root, "chat", lower=base, upper=upper, batch=_BATCH):
+            keys.extend((key, "chat", entry.seq) for key in (appearance_keys(entry.row, projects, rooms)
+                                                             if _candidate(entry.row) else ()))
+            dated.extend(room_messages.shown([entry], projects, rooms))
         with ds.transaction(root, write=True) as conn:
             conn.execute(ds.APPEARANCES_DDL)
             conn.executemany("INSERT OR IGNORE INTO room_appearances (key, stream, seq) VALUES (?, ?, ?)", keys)
+            room_messages.note(conn, dated)
             ds._set_meta(conn, ds.APPEARANCES_AWAITING,
                          [entry for entry in ds._meta(conn, ds.APPEARANCES_AWAITING) or [] if entry != segment])
         items += len(keys)
@@ -327,6 +336,20 @@ def _set_pass(conn: Any, first: int, last: int) -> None:
                  (json.dumps({"next": first, "upper": last}, sort_keys=True), ds.APPEARANCES_CONTACT_REPLIES))
 
 
+def owe_restored_targets(conn: Any) -> None:
+    """New archive coverage in either stream can restore a target previously proven absent: a plan after the
+    store's cutover fact. Before it every target not found reads as importing (``dialogue_store.require_imported``),
+    never absent, so the first cutover's plan owes nothing here.
+    Reuse the resumable Reply pass over the existing chat prefix; imports retire only their own
+    interval, leaving these older dependants owed. Ordinary appends never restart this pass."""
+    from ouroboros import dialogue_store as ds
+
+    state = ds._meta(conn, ds.APPEARANCES_CONTACT_REPLIES)
+    if isinstance(state, dict) and ds._meta(conn, "cutover") is not None:
+        end = int(conn.execute("SELECT next_seq FROM streams WHERE stream='chat'").fetchone()[0])
+        _set_pass(conn, 0, max(end, state["upper"]))
+
+
 def owe_planned(conn: Any, start: int, end: int) -> None:
     """In the planning transaction that moved the mark and this body's coverage over ``[start, end)``: a planned
     segment is no evidence its rows took this body's rule, whoever imports it (an older body retires its awaiting
@@ -351,8 +374,8 @@ def imported_here(conn: Any, lower: int, upper: int) -> None:
 
 
 def _contact_replies(root: Any, projects: frozenset, rooms: Any, should_stop: Callable[[], bool]) -> Tuple[int, bool]:
-    """``(keys, finished)`` of the one-time pass: Main's rows below its ``upper`` through the store's room
-    index, one index transaction a batch. Private Presence contact (``private_main_row``: my notice, my
+    """``(keys, finished)`` of the one-time/restoration pass below its ``upper``, one index transaction
+    a batch. Private Presence contact (``private_main_row``: my notice, my
     question, its answer) and an owner's direct Reply saved with a "none" stamp or with none at all take
     the keys ``room_membership.appearance_keys`` gives them now (a Reply's decision reads its exact target;
     any other stays as it was). The cursor moves only from the value this pass read, so a resumed or a
@@ -369,18 +392,20 @@ def _contact_replies(root: Any, projects: frozenset, rooms: Any, should_stop: Ca
     state, items = ds.meta(root, ds.APPEARANCES_CONTACT_REPLIES), 0
     while isinstance(state, dict) and state["next"] < state["upper"]:
         with ds.transaction(root, write=False) as conn:
-            page = ds._page(conn, "INDEXED BY dialogue_room WHERE stream='chat' AND chat_id IS 1 "
+            page = ds._page(conn, "WHERE stream='chat' "
                             "AND seq>=? AND seq<? ORDER BY seq LIMIT ?", (state["next"], state["upper"], _BATCH))
         entries = [ds._row(record) for record in ds._decoded(page)]
         upto = entries[-1].seq + 1 if len(entries) == _BATCH else state["upper"]
         keys = [(key, "chat", entry.seq) for entry in entries if older(entry.row)
                 for key in appearance_keys(entry.row, projects, rooms)]
+        dated = room_messages.shown([entry for entry in entries if older(entry.row)], projects, rooms)
         moved = {**state, "next": upto}
         with ds.transaction(root, write=True) as conn:
             if not conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?", (
                     json.dumps(moved, sort_keys=True), ds.APPEARANCES_CONTACT_REPLIES, json.dumps(state, sort_keys=True))).rowcount:
                 return items, False  # another pass moved it: the next look continues from there
             conn.executemany("INSERT OR IGNORE INTO room_appearances (key, stream, seq) VALUES (?, ?, ?)", keys)
+            room_messages.note(conn, dated)
         items, state = items + len(keys), moved
         if should_stop() and state["next"] < state["upper"]:
             return items, False
@@ -404,9 +429,11 @@ def _rederive_gaps(root: Any, projects: frozenset, rooms: Any) -> int:
     fresh = {seq: appearance_keys(entry.row, projects, rooms) for seq, entry in rows.items()}
     closed = {seq for seq, keys in fresh.items() if not any(key.startswith(GAP_KEYS) for key in keys)}
     if fresh:
+        dated = room_messages.shown([rows[seq] for seq in closed], projects, rooms)  # a target read since: its room
         with ds.transaction(root, write=True) as conn:
             conn.executemany("DELETE FROM room_appearances WHERE stream='chat' AND seq=? AND key>=? AND key<?",
                              [(seq, *gaps) for seq in closed for gaps in ranges])
             conn.executemany("INSERT OR IGNORE INTO room_appearances (key, stream, seq) VALUES (?, 'chat', ?)",
                              [(key, seq) for seq, keys in fresh.items() for key in keys])
+            room_messages.note(conn, dated)
     return len(closed)

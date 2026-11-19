@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
-import json
 import logging
 import os
 import re
@@ -50,9 +49,10 @@ from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 from ouroboros.workspace_executor import resolve_process_env, validate_process_env
 
 from ouroboros import mcp_catalog
+from ouroboros.mcp_catalog import MCPNameResolution
+from ouroboros.mcp_discovery import Discovery, settings_fingerprint
 from ouroboros.mcp_schema import (
     _redact_error_text as _redact_error_text,
-    _content_part_text as _content_part_text,
     _serialize_content_part as _serialize_content_part,
     _stringify_call_result as _stringify_call_result,
     _exception_text, _model_facing_description, _model_facing_result, _normalize_input_schema, _stderr_diagnostic,
@@ -128,6 +128,11 @@ class MCPServerConfig:
     task_session: bool = False
     # Requires task_session: that session's process may ask browser_policy about each request (mcp_browser_guard).
     browser_policy: bool = False
+    # A skill-bound row's launch, revision, settings digest and refusal: derived at every skill_mcp.bind_config.
+    skill: str = ""
+    skill_revision: str = ""
+    skill_settings: str = ""  # digest of the granted settings its start receives (never their values)
+    skill_error: str = ""
 
     def has_auth(self) -> bool:
         return bool(self.auth_token.strip())
@@ -292,46 +297,6 @@ def naming_rule_matches(requested_tool: str, tools: List[Dict[str, Any]]) -> Lis
     return matches
 
 
-@dataclass(frozen=True)
-class MCPNameResolution:
-    """What this process's current MCP catalog says about one requested name.
-
-    A pure lookup under the manager lock: no transport, refresh or settings
-    write. Only ``callable`` may proceed to the paid safety check and the call;
-    every other status is its own typed fact, kept distinct from a catalog miss.
-    """
-
-    status: str  # callable | not_found | disallowed | server_disabled | catalog_unavailable | mcp_disabled
-    server_id: str = ""
-    raw_name: str = ""
-    detail: str = ""
-
-    def refusal(self, requested: str) -> ToolResult:
-        """The reason alone; the registry composes the caller's callable view beside it."""
-        name, server = str(requested or ""), self.server_id
-        if self.status == "disallowed":
-            text = (
-                f"⚠️ MCP_TOOL_DISALLOWED: {self.raw_name!r} is not on the "
-                f"allowed_tools list for server {server!r}."
-            )
-            return ToolResult(status="blocked", code="ACCESS_BLOCKED", text=text)
-        if self.status == "not_found":
-            where = (f"the current tool catalog of MCP server {server!r}" if server
-                     else "the tool catalog of any configured MCP server")
-            text = f"⚠️ MCP_TOOL_NOT_FOUND: {name!r} is {self.detail or 'not in ' + where}. Nothing was executed."
-            return ToolResult(status="error", code="UNKNOWN_TOOL", text=text)
-        if self.status == "mcp_disabled":
-            text = "⚠️ MCP_DISABLED: enable MCP in Settings → Advanced to use this tool."
-        elif self.status == "server_disabled":
-            text = (f"⚠️ MCP_DISABLED: MCP server {server!r} is disabled in Settings → "
-                    f"Advanced; {name!r} was not executed.")
-        else:
-            text = (f"⚠️ MCP_CATALOG_UNAVAILABLE: MCP server {server!r} has incomplete discovery evidence "
-                    f"({self.detail}); whether {name!r} exists is "
-                    "unknown. Nothing was executed.")
-        return ToolResult(status="unavailable", code="MCP_CATALOG_UNAVAILABLE" if self.status == "catalog_unavailable" else "MCP_UNAVAILABLE", text=text)
-
-
 def _validate_url(url: str) -> str:
     """Normalize HTTP(S) URLs, applying metadata policy outside Cyber."""
     text = str(url or "").strip()
@@ -428,6 +393,11 @@ def _validate_call_lifetime(transport: str, task_session: bool, browser_policy: 
         raise ValueError("browser_policy requires task_session (its callback lives with the task's session)")
 
 
+def setting_flag(value: Any) -> bool:
+    """A settings boolean as the loader reads it: a bool, or ``1``/``true``/``yes``/``on`` text."""
+    return value if isinstance(value, bool) else str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _coerce_str_list(value: Any) -> List[str]:
     if value in (None, "", [], ()):
         return []
@@ -461,13 +431,12 @@ def normalize_server_config(
         return invalid("unsupported transport; use streamable_http, sse, or stdio")
 
     def flag(key: str) -> bool:
-        value = raw.get(key, False)
-        return value if isinstance(value, bool) else str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+        return setting_flag(raw.get(key, False))
 
     try:
         known = {"id", "slug", "name", "label", "enabled", "transport", "url", "command",
                  "args", "auth_header", "auth_token", "allowed_tools", "cwd", "env", "env_from_settings", "headers",
-                 "schemas_at_start", "task_session", "browser_policy"}
+                 "schemas_at_start", "task_session", "browser_policy", "skill"}
         unknown = set(raw) - known
         warnings = ("Fields retained but not applied: " + ", ".join(sorted(map(str, unknown))),) if unknown else ()
         cwd = raw.get("cwd", "")
@@ -481,11 +450,14 @@ def normalize_server_config(
         if transport == "stdio" and raw.get("auth_header", "Authorization") not in (None, "", "Authorization"):
             raise ValueError("auth_header is unsupported for stdio")
         _validate_call_lifetime(transport, flag("task_session"), flag("browser_policy"))
+        skill = raw.get("skill") or ""
+        if skill and (transport != "stdio" or not isinstance(skill, str) or any(raw.get(k) for k in ("command", "args", "cwd"))):
+            raise ValueError("a skill-bound server is stdio and takes command, args and cwd from its skill, never from settings")
         if reserved := sorted(key for key in env if key.upper() in GUARD_ENV_NAMES):
             raise ValueError("env names reserved for the host's browser guard: " + ", ".join(reserved))
         if transport == "stdio":
             url = ""
-            command = _validate_stdio_command(raw.get("command"))
+            command = "" if skill else _validate_stdio_command(raw.get("command"))
             args = _validate_stdio_args(raw.get("args"))
             auth_header = "Authorization"
             auth_token = ""
@@ -529,6 +501,7 @@ def normalize_server_config(
         schemas_at_start=flag("schemas_at_start"),
         task_session=flag("task_session"),
         browser_policy=flag("browser_policy"),
+        skill=skill.strip(),
     )
 
 
@@ -613,18 +586,34 @@ def _redacted_sdk_logs(cfg: MCPServerConfig, logger_name: str):
 
 
 @asynccontextmanager
-async def _stdio_with_diagnostics(params: Any, cfg: MCPServerConfig):
+async def _stdio_with_diagnostics(params: Any, cfg: MCPServerConfig, launch: Any = None):
     # SDK stderr otherwise goes straight to the host console, outside masking.
     with _redacted_sdk_logs(cfg, "mcp.client.stdio"):
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stderr:
+            if launch is not None:  # a managed domain's server: its container side is the executor's record first
+                try:
+                    launch.require_cli()  # the only positive proof that nothing can start: nothing adopted either
+                except OSError as missing:
+                    missing.mcp_unsent_joined = True
+                    raise
+                launch.adopt()
             try:
                 async with stdio_client(params, errlog=stderr) as streams:
                     yield streams
             finally:  # a task session's file spans its task loop: a bounded tail, never the whole file
+                # Any failure after adoption may follow the CLI's spawn (the SDK can raise attaching its pipes), so
+                # the container side is settled, never abandoned: an unconfirmed end keeps the executor's record.
+                settled = launch is None or await asyncio.to_thread(launch.settle)
                 diagnostic = _stderr_diagnostic(stderr, cfg, MCP_STDIO_STDERR_TAIL_BYTES)
                 if diagnostic:
                     log.warning("MCP stdio stderr (%s): %s", cfg.id, diagnostic)
                     heard_from_server(_stderr_diagnostic(stderr, cfg, MCP_STDIO_STDERR_NOTE_BYTES))
+                if not settled:
+                    from ouroboros.work_domain import WorkDomainUnsettled
+
+                    raise WorkDomainUnsettled("The MCP container process group has not been confirmed ended; its "
+                                              "executor record is kept. The call may have completed; do not retry "
+                                              "without reconciling its result.")
 
 
 @asynccontextmanager
@@ -675,18 +664,31 @@ def _transport_factory(cfg: MCPServerConfig, host_env: Optional[Dict[str, str]] 
         # environment and its context-managed process shutdown sequence.
         # The SDK merges a plain dict onto its defaults. Windows env names are
         # case-insensitive: canonical names prevent a second Path/PATH entry.
+        from ouroboros.execution_domain import attached_launch
+        from ouroboros.node_runtime import forward_playwright_node
         from ouroboros.process_scope import installation_scope_entries
+        from ouroboros.skill_mcp import work_start  # a skill-bound server: its skill's environment and work copy
 
+        try:  # a managed domain runs the server in its pinned executor, never here
+            argv, cwd, start_env = work_start(cfg, {**cfg.env, **(host_env or {})})
+            launch = attached_launch(argv, cwd, start_env)
+        except (ValueError, RuntimeError, OSError) as refused:  # a path, network, grant or work-copy contract refused
+            refused.mcp_unsent_joined = True  # refused before any transport exists: a proven no-send
+            raise
         # The installation scope marker rides every stdio server (a long-lived shared
         # helper belongs to the installation, never to the task that first touched it);
         # a task session's ``host_env`` adds that task's scope marker and guard address last.
         env = {**installation_scope_entries(),
-               **{key.upper() if IS_WINDOWS else key: value for key, value in {**cfg.env, **(host_env or {})}.items()}}
+               **{key.upper() if IS_WINDOWS else key: value for key, value in start_env.items()}}
+        if launch is None:  # a managed executor keeps its own runtime, never a host driver path
+            forward_playwright_node(env)  # explicit config/host choices retain authority
         selected = {"env": env} if env else {}
-        if cfg.cwd:
-            selected["cwd"] = cfg.cwd
-        params = StdioServerParameters(command=cfg.command, args=list(cfg.args), **selected)
-        return _stdio_with_diagnostics(params, cfg)  # every server's stderr: masked, bounded, kept for a failure
+        if cwd:
+            selected["cwd"] = cwd
+        params = (StdioServerParameters(command=launch.argv[0], args=launch.argv[1:],
+                                        env={**installation_scope_entries(), **launch.env}) if launch is not None
+                  else StdioServerParameters(command=argv[0], args=argv[1:], **selected))
+        return _stdio_with_diagnostics(params, cfg, launch)  # every server's stderr: masked, bounded, kept for a failure
     raise RuntimeError(f"Unsupported transport: {cfg.transport!r}")
 
 
@@ -694,7 +696,7 @@ def _transport_factory(cfg: MCPServerConfig, host_env: Optional[Dict[str, str]] 
 async def _session(cfg: MCPServerConfig):
     """One fresh client session over ``cfg``'s transport; leaving it joins both contexts."""
     if not _MCP_SDK_AVAILABLE:  # raised before any transport exists: a proven no-send
-        missing = RuntimeError("MCP client SDK not installed. Add `mcp>=1.29` to the runtime.")
+        missing = RuntimeError("MCP client SDK not installed. Add `mcp>=1.30,<2.0` to the runtime.")
         missing.mcp_unsent_joined = True
         raise missing
     async with _transport_factory(cfg) as streams:  # every transport yields (read, write, ...)
@@ -761,10 +763,12 @@ async def _call_tool_async(
     from ouroboros.usage_accounting import UsageAccountingError
     from ouroboros.store import StoreError
     from ouroboros.mcp_result_images import with_returned
+    from ouroboros.work_domain import WorkDomainUnsettled
     unsent_joined = False
+    returned = None
 
     async def _do() -> ToolResult:
-        nonlocal unsent_joined
+        nonlocal unsent_joined, returned
         refusal = None
         async with _session(cfg) as session:
             try:
@@ -780,6 +784,7 @@ async def _call_tool_async(
                     refusal = exc
                 else:
                     result = await pending  # any error here may follow a send
+                    returned = with_returned(_tool_result_from_call_result(result), result)
         if refusal is not None:
             # Failed/unfinished cleanup never reaches this positive phase fact.
             unsent_joined = True
@@ -788,7 +793,7 @@ async def _call_tool_async(
                 active[2]["settled"] = True
             refusal.mcp_unsent_joined = True
             raise refusal
-        return with_returned(_tool_result_from_call_result(result), result)
+        return returned
 
     # Launch admission precedes transport entry: a stdio server starts there.
     with carrying_server_stderr():
@@ -799,6 +804,12 @@ async def _call_tool_async(
             raise
         try:
             return await asyncio.wait_for(pending, timeout=timeout_sec)
+        except WorkDomainUnsettled as exc:
+            if returned is None:
+                raise  # no result was received; the operation may have happened
+            return _replace_tool_result(returned, code="MCP_ERROR",
+                text=returned.text + "\n⚠️ The response above was received, but server cleanup is unconfirmed. "
+                "Do not repeat the completed call. " + str(exc), meta_updates={"backend_settled": False})
         except BaseException as exc:
             if unsent_joined:
                 # wait_for replaces CancelledError with TimeoutError; carry proof,
@@ -946,8 +957,8 @@ class MCPManager:
         self._configured = False
         self._settings_fingerprint = ""
         self._settings_mtime_ns: Optional[int] = None
-        self._refresh_running = False
-        self._refresh_pending = False
+        self.discovery = Discovery(self)
+        self._connection_fingerprint = ""
         self._listing_locks: dict[str, threading.Lock] = {}
         self._catalog_reader = mcp_catalog.CatalogReader()
         self._lister_pid: Optional[int] = None
@@ -975,23 +986,7 @@ class MCPManager:
 
     # -- configuration ------------------------------------------------------
 
-    @staticmethod
-    def _fingerprint(settings: Dict[str, Any]) -> str:
-        payload = {
-            "MCP_ENABLED": settings.get("MCP_ENABLED"),
-            "MCP_TOOL_TIMEOUT_SEC": settings.get("MCP_TOOL_TIMEOUT_SEC"),
-            "MCP_SERVERS": settings.get("MCP_SERVERS"),
-            "effective_runtime_mode": get_runtime_mode(),
-            "saved_runtime_mode": settings.get("OUROBOROS_RUNTIME_MODE"),
-        }
-        references = set()
-        servers = settings.get("MCP_SERVERS")
-        for server in servers if isinstance(servers, list) else []:
-            refs = server.get("env_from_settings") if isinstance(server, dict) else None
-            if isinstance(refs, dict):
-                references.update(ref for ref in refs.values() if isinstance(ref, str))
-        payload["selected_settings"] = {ref: settings.get(ref) for ref in references}
-        return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
+    _fingerprint = staticmethod(settings_fingerprint)
 
     def reconfigure(self, settings: Dict[str, Any], *, settings_mtime_ns: Optional[int] = None) -> bool:
         """Rebuild servers, preserving tools for unchanged configs."""
@@ -1000,7 +995,7 @@ class MCPManager:
             if self._configured and fingerprint == self._settings_fingerprint:
                 if settings_mtime_ns is not None:
                     self._settings_mtime_ns = settings_mtime_ns
-                self.reload_catalogs()
+                self.rebind()
                 return False
             self._configured = True
             self._settings_fingerprint = fingerprint
@@ -1011,21 +1006,23 @@ class MCPManager:
             except (TypeError, ValueError):
                 self._tool_timeout_sec = 60
             self._configuration_errors = []
-            new_configs = parse_servers(settings.get("MCP_SERVERS"), settings=settings, errors=self._configuration_errors)
-            new_servers: Dict[str, MCPServerRuntime] = {}
-            for cfg in new_configs:
-                old = self._servers.get(cfg.id)
-                if old is not None and mcp_catalog.identity(old.config) == mcp_catalog.identity(cfg):
-                    old.config = cfg
-                    new_servers[cfg.id] = old
-                else:
-                    new_servers[cfg.id] = MCPServerRuntime(config=cfg)
-            self._servers = new_servers
+            from ouroboros.skill_mcp import bind_config  # a skill-bound row launches only what its skill derives now
+            new_configs = [bind_config(cfg) for cfg in parse_servers(
+                settings.get("MCP_SERVERS"), settings=settings, errors=self._configuration_errors)]
+            self._servers = {cfg.id: self._runtime_for(cfg) for cfg in new_configs}
             from ouroboros.mcp_task_session import retire_changed  # a changed or disabled server ends its sessions
             retire_changed(new_configs if self._enabled else [])
             self._catalog_reader.retain(new_configs)
-            self.reload_catalogs()
+            self.rebind()
             return True
+
+    def _runtime_for(self, cfg: MCPServerConfig) -> MCPServerRuntime:
+        """``cfg``'s runtime: the current one, its listing kept, while the catalog identity holds; else a new one."""
+        runtime = self._servers.get(cfg.id)
+        if runtime is None or mcp_catalog.identity(runtime.config) != mcp_catalog.identity(cfg):
+            runtime = MCPServerRuntime(config=cfg)
+        runtime.config = cfg
+        return runtime
 
     def _adopt_catalog(self, runtime: MCPServerRuntime, envelope: Optional[dict]) -> None:
         """ONE post-listing item path for live publication, boot seed and adoption."""
@@ -1042,9 +1039,22 @@ class MCPManager:
         runtime.last_attempted = attempt.get("at", "")
         runtime.last_error = attempt.get("error", "") or ("; ".join(notes) if envelope else "")
 
-    def reload_catalogs(self) -> None:
-        """Adopt changed published files, without modifying any resident request array."""
+    def rebind(self, *, skill: str = "", server_id: str = "", event_queue: Any = None) -> List[str]:
+        """Re-derive skill bindings, retire changed sessions and adopt published catalogs, never discovering or
+        modifying a resident request array; return unlisted ready servers. Passive reads leave discovery owed
+        until an attempt; a worker's event queue asks the lister for it."""
+        from ouroboros.mcp_task_session import retire_changed
+        from ouroboros.skill_mcp import bind_config
+
         with self._lock:
+            bound = [rt.config for rt in self._servers.values()
+                     if rt.config.skill and skill in ("", rt.config.skill) and server_id in ("", rt.config.id)]
+        fresh = [(old, bind_config(old)) for old in bound]
+        with self._lock:
+            for old, cfg in fresh:
+                if (runtime := self._servers.get(cfg.id)) is not None and runtime.config is old and cfg != old:
+                    self._servers[cfg.id] = self._runtime_for(cfg)
+                    retire_changed([rt.config for rt in self._servers.values()] if self._enabled else [])
             for runtime in self._servers.values():
                 envelope = self._catalog_reader.load(runtime.config)
                 # A failed publication retains the local listing until disk changes.
@@ -1054,6 +1064,11 @@ class MCPManager:
                     runtime.publication_error = ""
                 if envelope is not runtime.catalog:
                     self._adopt_catalog(runtime, envelope)
+            unlisted = [cfg.id for _, cfg in fresh if self._enabled and cfg.enabled and not cfg.skill_error
+                        and (rt := self._servers.get(cfg.id)) is not None and rt.config == cfg and rt.catalog is None]
+        if unlisted and event_queue is not None and not self.is_lister:
+            event_queue.put_nowait({"type": "mcp_configuration_changed", "reason": "mcp_dispatch", "skill": skill})
+        return unlisted
 
     def configuration_changed(self, settings: dict, *, reason: str) -> None:
         """Server-owned boot/save/mtime event: prune, then schedule the latest pass."""
@@ -1062,8 +1077,18 @@ class MCPManager:
             configs = [rt.config for rt in self._servers.values()]
             mcp_catalog.prune_catalogs(configs)
             mcp_oauth.prune(configs)  # a removed server or a changed address loses its sign-in too
+            connections = self._fingerprint(settings, skill_settings=False)
+            values_only = connections == self._connection_fingerprint
+            self._connection_fingerprint = connections
             self._listing_fingerprint = self._settings_fingerprint
-        self.refresh_all_background(reason=reason)
+        if values_only:
+            self.discovery.refresh(reason, missing_only=True)
+        else:
+            self.refresh_all_background(reason=reason)
+
+    def listed(self, settings: Dict[str, Any]) -> bool:
+        """Whether this process's last server-owned configuration event already covered ``settings``."""
+        return self._listing_fingerprint == self._fingerprint(settings)
 
     def catalog_notices(self) -> list[dict]:
         with self._lock:
@@ -1085,10 +1110,6 @@ class MCPManager:
     def server_ids(self) -> List[str]:
         with self._lock:
             return list(self._servers.keys())
-
-    def server_count(self) -> int:
-        with self._lock:
-            return len(self._servers)
 
     def settings_mtime_ns(self) -> Optional[int]:
         with self._lock:
@@ -1113,9 +1134,11 @@ class MCPManager:
                     and not rt.catalog["latest_attempt"].get("partial")]
 
     def server_facts(self) -> Dict[str, Dict[str, Any]]:
-        """Each enabled server's display name, pin and redacted ``initialize`` instructions (the map's headers)."""
+        """Each enabled server's display name, pin, transport and ``task_session`` lifetime, and redacted
+        ``initialize`` instructions (the map's headers)."""
         with self._lock:
             return {rt.config.id: {"name": rt.config.name, "schemas_at_start": rt.config.schemas_at_start,
+                                   "transport": rt.config.transport, "task_session": rt.config.task_session,
                                    "instructions": _redact_error_text((rt.catalog or {}).get("instructions", ""), rt.config)}
                     for rt in self._servers.values() if self._enabled and rt.config.enabled}
 
@@ -1194,6 +1217,7 @@ class MCPManager:
                         "schemas_at_start": cfg.schemas_at_start,
                         "task_session": cfg.task_session,
                         "browser_policy": cfg.browser_policy,
+                        "skill": cfg.skill, "skill_error": cfg.skill_error,
                         "instructions": _redact_error_text((runtime.catalog or {}).get("instructions", ""), cfg),
                         "configuration_warnings": list(cfg.configuration_warnings),
                         "tool_count": len(runtime.tools),
@@ -1235,6 +1259,7 @@ class MCPManager:
             return self._refresh_server(server_id)
 
     def _refresh_server(self, server_id: str) -> Dict[str, Any]:
+        self.rebind(server_id=server_id)  # a skill-bound server lists only its current, ready payload
         with self._lock:
             if not self._enabled:
                 return {"ok": False, "error": "MCP client is disabled."}
@@ -1247,6 +1272,8 @@ class MCPManager:
             cfg, timeout = runtime.config, self._tool_timeout_sec
             if not cfg.enabled:
                 return {"ok": False, "error": f"MCP server {server_id!r} is disabled."}
+            if cfg.skill_error:
+                return {"ok": False, "not_started": True, "code": "MCP_SKILL_UNAVAILABLE", "error": cfg.skill_error}
         from ouroboros.owner_pause import OwnerPauseRefused
 
         items, complete, error, instructions, code = None, False, "", "", ""
@@ -1303,39 +1330,22 @@ class MCPManager:
         return {"refreshed": {key: self.refresh_server(key) for key in ids}}
 
     def refresh_all_background(self, *, reason: str = "settings") -> None:
-        """``refresh_all`` on a daemon thread, one at a time; with nothing to list, none starts."""
-        with self._lock:
-            if not self._enabled or not any(rt.config.enabled for rt in self._servers.values()):
-                return
-            if self._refresh_running:
-                self._refresh_pending = True
-                return
-            self._refresh_running = True
-
-        def _runner() -> None:
-            while True:
-                try:
-                    log.info("Refreshing MCP tools in background (%s)", reason)
-                    self.refresh_all()
-                except Exception:
-                    log.warning("Background MCP refresh failed", exc_info=True)
-                with self._lock:
-                    if not self._refresh_pending:
-                        self._refresh_running = False
-                        return
-                    self._refresh_pending = False
-
-        threading.Thread(target=_runner, name=f"mcp-refresh-{reason}", daemon=True).start()
+        """Schedule a listing on this manager's single background owner."""
+        self.discovery.refresh(reason)
 
     def test_server(self, raw_config: Dict[str, Any], *, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Probe a candidate config without persisting it."""
         errors: List[str] = []
         cfg = normalize_server_config(raw_config, settings=settings, errors=errors)
         if cfg is None:
+            return {"ok": False, "code": "MCP_CONFIG_ERROR", "error": "Invalid MCP server config: " + "; ".join(errors)}
+        from ouroboros.skill_mcp import bind_config
+        cfg = bind_config(cfg)
+        if cfg.skill_error:
             return {
                 "ok": False,
-                "code": "MCP_CONFIG_ERROR",
-                "error": "Invalid MCP server config: " + "; ".join(errors),
+                "code": "MCP_SKILL_UNAVAILABLE",
+                "error": cfg.skill_error,
             }
         timeout = self._tool_timeout_sec
         try:
@@ -1382,6 +1392,8 @@ class MCPManager:
         cfg = runtime.config
         if not cfg.enabled:
             return MCPNameResolution("server_disabled", cfg.id), cfg, None
+        if cfg.skill_error:  # its skill cannot run it now: that fact, before any catalog evidence
+            return MCPNameResolution("skill_unavailable", cfg.id, detail=cfg.skill_error), cfg, None
         allowed = set() if mode_has_unrestricted_agency(get_runtime_mode()) else set(cfg.allowed_tools)
         for tool in runtime.tools:
             if tool.prefixed_name == prefixed_name:
@@ -1418,6 +1430,8 @@ class MCPManager:
     ) -> ToolResult:
         """Invoke one MCP tool while retaining host-attested provider facts; the calling
         task's ``ctx`` lets ``mcp_result_images`` keep and project returned protocol images."""
+        self.rebind(server_id=(parse_tool_name(prefixed_name) or {}).get("server_slug", ""),
+                    event_queue=getattr(ctx, "event_queue", None))
         with self._lock:
             resolution, cfg, tool = self._resolve_locked(prefixed_name)
             timeout = self._tool_timeout_sec
@@ -1483,6 +1497,10 @@ class MCPManager:
             return ToolResult(status="error", code="MCP_ERROR", text=_model_facing_result(cfg, tool.raw_name, body),
                               meta={"dynamic_provider": True, "mcp_call_not_sent": not_sent})
         # The remote call is complete here; projecting it never turns it into a failure.
+        if result.status == "ok" and getattr(ctx, "drive_root", None):  # a post I made as an account: never my human's
+            from ouroboros.own_sends import record_result
+            from ouroboros.tool_access import canonical_data_root
+            record_result(canonical_data_root(ctx), tool.metadata, result.text, via=f"mcp:{cfg.id}/{tool.raw_name}")
         from ouroboros.mcp_result_images import project_returned
         projected = project_returned(result, getattr(result, "returned", None), ctx, cfg, tool.raw_name)
         if projected is None:
@@ -1524,12 +1542,12 @@ def reconfigure_from_settings(settings: Dict[str, Any]) -> None:
     get_manager().reconfigure(settings)
 
 
-def ensure_configured_from_settings() -> None:
+def ensure_configured_from_settings(*, event_queue: Any = None) -> None:
     """Adopt catalogs on reads; server settings-mtime changes also run configuration_changed."""
     from ouroboros.config import SETTINGS_PATH, load_settings
 
     manager = get_manager()
-    manager.reload_catalogs()
+    manager.rebind(event_queue=event_queue)
     try:
         mtime_ns = SETTINGS_PATH.stat().st_mtime_ns
     except OSError:

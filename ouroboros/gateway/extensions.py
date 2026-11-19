@@ -14,6 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ouroboros.extension_loader import list_routes, snapshot
+from ouroboros.deployment_extensions import discloses_failure, failure_words
 from ouroboros.gateway.contributions import contribution_catalog
 from ouroboros.gateway._helpers import (
     coerce_bool,
@@ -207,6 +208,22 @@ async def api_skill_daemons(_request: Request) -> JSONResponse:
         return json_exception(exc)
 
 
+def _skill_mcp_card_facts(skills: list) -> Any:
+    """``skill -> [declared server facts]`` (``skill_mcp.card_facts``); reads nothing without a declaring skill.
+    Bound servers are re-derived in memory first (``MCPManager.rebind``), so an edited, unreviewed or switched-off
+    skill reads as unavailable here exactly as its next call would; nothing durable is written or listed."""
+    if not any(skill.manifest.mcp_servers for skill in skills):
+        return lambda _skill: []
+    from ouroboros.config import load_settings
+    from ouroboros.mcp_client import get_manager
+    from ouroboros.skill_mcp import card_facts
+
+    settings, manager = load_settings(), get_manager()
+    manager.rebind()
+    rows = {row["id"]: row for row in manager.status_payload()["servers"] if row.get("id")}
+    return lambda skill: card_facts(skill, settings, rows) if skill.manifest.mcp_servers else []
+
+
 def _build_extensions_index(drive_root, repo_path):
     """Threaded, request-scope-free body for ``GET /api/extensions``."""
     from ouroboros.extension_loader import extension_name_prefix, runtime_state_for_loaded_skill
@@ -229,6 +246,11 @@ def _build_extensions_index(drive_root, repo_path):
         for s in unique_skills
         if s.manifest.is_extension()
     }
+    from ouroboros.deployment_extensions import state_rows, trust_state
+    from ouroboros.deployment_policy import when_unmet
+
+    # What the deployment requires, as this server process observes it; a missing package is still a row.
+    requirements = {row["name"]: {**row, "when_unmet": when_unmet()} for row in state_rows(drive_root, skills=skills)}
 
     def _live_tool_count(skill_name: str) -> int:
         prefix = extension_name_prefix(skill_name)
@@ -268,6 +290,37 @@ def _build_extensions_index(drive_root, repo_path):
     from ouroboros.extension_health import read_extension_health
     from ouroboros.skill_review_runner import skill_review_ui_projection
     from ouroboros.tools.github import github_token_from_env_or_settings
+
+    secret_view: dict[str, Any] = {}
+
+    def _secret_config(skill) -> dict[str, Any] | None:
+        """Whether each declared secret field holds a value: ``configured``, ``missing`` or ``unknown``.
+
+        A derived fact for the card, never a value, prefix or length, and no requirement: whether a
+        skill needs the field, and when it applies a saved one, is the skill's own. The secret form's
+        rule (``configured_fields``) judges one strict read of what skills read (``skill_settings``),
+        shared by the whole index."""
+        from ouroboros.secret_requests import SecretRequestError, configured_fields, declared_secret_fields
+        from ouroboros.settings_integrity import SettingsDocumentUnknown, skill_settings
+
+        try:
+            fields = declared_secret_fields(skill.manifest)
+        except SecretRequestError:
+            return None
+        if not fields:
+            return None
+        if not secret_view:
+            try:
+                secret_view["settings"] = skill_settings(strict=True)
+            except SettingsDocumentUnknown:
+                secret_view["settings"] = None
+        rows = [{"id": field_id, "setting_key": key} for field_id, key in fields.items()]
+        settings = secret_view["settings"]
+        configured = None if settings is None else configured_fields(settings, {"fields": rows})
+        return {"fields": [
+            {"id": row["id"], "key": row["setting_key"],
+             "state": "unknown" if configured is None else "configured" if configured[str(row["id"])] else "missing"}
+            for row in rows]}
     # Request-invariant: resolve the github-token state ONCE for the whole index, not
     # once per skill (FR1 — avoids N settings.json reads per GET /api/extensions).
     _gh_token_configured = (
@@ -275,6 +328,8 @@ def _build_extensions_index(drive_root, repo_path):
         if unique_skills
         else False
     )
+    # Request-invariant too: one settings read and one in-memory MCP status for every skill declaring servers.
+    mcp_facts = _skill_mcp_card_facts(skills)
 
     for s in skills:
         payload_root = ""
@@ -284,6 +339,7 @@ def _build_extensions_index(drive_root, repo_path):
                 payload_root = rel_skill_dir.as_posix()
         except Exception:
             payload_root = ""
+        trust = trust_state(s)  # under an execution domain: whether the service runs this extension's code
         entry: dict[str, Any] = {
             "name": s.name,
             "type": s.manifest.type,
@@ -301,6 +357,8 @@ def _build_extensions_index(drive_root, repo_path):
             "content_hash": str(getattr(s, "content_hash", "") or ""),
             "payload_root": payload_root,
             "installed_at": _path_installed_at(s.skill_dir),
+            **({"deployment": requirements[s.name]} if s.name in requirements else {}),
+            **({"trust": trust} if trust is not None else {}),
         }
         if bool(getattr(s, "identity_collision", False)):
             stale = True
@@ -359,6 +417,7 @@ def _build_extensions_index(drive_root, repo_path):
             ),
             "review_findings": list(s.review.findings or []),
             "skill_review": skill_review_ui_projection(drive_root, s.name),
+            "secret_config": _secret_config(s),
             # An extension row reuses the grant status its runtime state computed
             # above (same function, same drive_root and skill): one settings
             # read per skill, not two.
@@ -367,6 +426,7 @@ def _build_extensions_index(drive_root, repo_path):
                 if s.name in runtime_states
                 else grant_status_for_skill(drive_root, s)
             ),
+            "mcp_servers": mcp_facts(s),
         })
         # Durable OuroborosHub publication receipt (state-plane, survives bucket
         # moves). Collision rows above deliberately never read state, so these
@@ -407,6 +467,8 @@ def _build_extensions_index(drive_root, repo_path):
                     })
         catalog.append(entry)
     return {"skills": catalog, "live": live_snapshot,
+            **({"deployment": {"when_unmet": when_unmet(), "required": list(requirements.values())}}
+               if requirements else {}),
             **contribution_catalog(drive_root, repo_path, skills=skills, live=live_snapshot)}
 
 
@@ -604,8 +666,8 @@ async def api_extension_dispatch(request: Request) -> Response:
             )
             return child_result
         except Exception as exc:
-            log.exception("extension child dispatch failure: %s", mount)
-            return json_error(f"{type(exc).__name__}: {exc}", 502)
+            log.error("extension child dispatch failure: %s", mount, exc_info=discloses_failure(skill))
+            return json_error(failure_words(skill, exc), 502)
     handler = spec.get("handler")
     if not callable(handler):
         return json_error("registered handler is not callable")
@@ -622,8 +684,8 @@ async def api_extension_dispatch(request: Request) -> Response:
             surface=mount,
         )
     except Exception as exc:
-        log.exception("extension cost disclosure failure: %s", mount)
-        return json_error(f"model-cost disclosure failed: {type(exc).__name__}: {exc}", 502)
+        log.error("extension cost disclosure failure: %s", mount, exc_info=discloses_failure(skill))
+        return json_error(f"model-cost disclosure failed: {failure_words(skill, exc)}", 502)
     try:
         if inspect.iscoroutinefunction(handler):
             result = await handler(request)
@@ -632,9 +694,13 @@ async def api_extension_dispatch(request: Request) -> Response:
         if inspect.iscoroutine(result):
             result = await result
     except Exception as exc:
-        log.exception("extension dispatch failure: %s", mount)
-        return json_error(f"{type(exc).__name__}: {exc}")
+        log.error("extension dispatch failure: %s", mount, exc_info=discloses_failure(skill))
+        return json_error(failure_words(skill, exc))
     if isinstance(result, Response):
+        if not discloses_failure(skill):
+            from ouroboros.extension_route_stream import PolicyResponse
+
+            return PolicyResponse(result, skill)
         return result
     return JSONResponse(result if result is not None else {})
 
@@ -697,7 +763,9 @@ async def _run_owner_skill_action(request: Request, skill_name: str, action: str
             items=_grant_items_from_body(body) if action == "grant" else None,
             payload_root=str(body.get("payload_root") or ""), repo_path=get_skills_repo_path(),
             _owner_actor="owner_ui", _progress=handle,
-            _enable_after_grant=action == "grant" and body.get("enable_after_grant") is True)
+            _enable_after_grant=action == "grant" and body.get("enable_after_grant") is True,
+            settings_digest=str(body.get("settings_digest") or ""),
+            confirm_other_servers=body.get("confirm_other_servers") is True)
 
     def after(payload):
         if not payload.get("error"):
@@ -819,6 +887,30 @@ async def api_skill_grants(request: Request) -> JSONResponse:
     return JSONResponse(payload, status_code=int(payload.get("status_code") or 200))
 
 
+async def api_skill_mcp_connect(request: Request) -> JSONResponse:
+    """GET: the passive Connect tools preview. POST: its one confirm through the shared skill action owner."""
+    from ouroboros.gateway.schema import validate_ingress
+    from ouroboros.gateway.skill_mcp_contracts import SkillMcpConnectRequest
+    from ouroboros.skill_lifecycle_actions import preview_connect_mcp
+
+    skill_name = str(request.path_params.get("skill") or "").strip()
+    if not skill_name:  # the route's own typed refusal (its published 400 body), before any lane or job
+        return JSONResponse({"ok": False, "saved": False, "code": "missing_skill", "error": "missing skill name"},
+                            status_code=400)
+    if request.method == "GET":
+        ctx = _ApiReviewCtx(_request_drive_root(request), _request_repo_dir(request))
+        payload = await asyncio.to_thread(preview_connect_mcp, ctx, skill_name, _owner_actor="owner_ui")
+        return JSONResponse(payload, status_code=int(payload.pop("status_code", 0) or 200),
+                            headers={"Cache-Control": "no-store"})
+    body = await request_json_or(request, None)
+    if errors := validate_ingress(body, SkillMcpConnectRequest):
+        return JSONResponse({"ok": False, "saved": False, "code": "bad_request", "error": errors[0]}, status_code=400)
+    payload = await _run_owner_skill_action(request, skill_name, "connect_mcp", body)
+    if payload.get("error") and "saved" not in payload:
+        payload["saved"] = False  # early lifecycle refusals precede the settings writer
+    return JSONResponse(payload, status_code=int(payload.pop("status_code", 0) or 200))
+
+
 async def api_skill_reconcile(request: Request) -> JSONResponse:
     """Re-run the load gate, including after grants from older frozen launchers."""
     from ouroboros.config import get_skills_repo_path, load_settings
@@ -838,6 +930,15 @@ async def api_skill_reconcile(request: Request) -> JSONResponse:
         request, skill_name, state.get("action"), state.get("reason"),
     )
     return JSONResponse(extension_reconcile_receipt(skill_name, state))
+
+
+def skill_setup_routes() -> list:
+    """One installed skill's setup after its review: access grants, its declared tools' connection, its live state."""
+    from starlette.routing import Route
+
+    return [Route("/api/skills/{skill}/grants", endpoint=api_skill_grants, methods=["POST"]),
+            Route("/api/skills/{skill}/mcp-connect", endpoint=api_skill_mcp_connect, methods=["GET", "POST"]),
+            Route("/api/skills/{skill}/reconcile", endpoint=api_skill_reconcile, methods=["POST"])]
 
 
 async def api_skill_delete(request: Request) -> JSONResponse:
@@ -864,4 +965,5 @@ __all__ = [
     "api_skill_review",
     "api_skill_grants",
     "api_skill_reconcile",
+    "skill_setup_routes",
 ]

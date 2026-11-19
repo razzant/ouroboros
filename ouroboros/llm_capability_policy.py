@@ -44,6 +44,33 @@ def _catalog_path(drive_root: Any) -> pathlib.Path:
     return pathlib.Path(drive_root) / "state" / "openrouter_models.json"
 
 
+def _records_prices() -> bool:
+    try:
+        return any(isinstance(row, dict) and isinstance(row.get("pricing"), dict)
+                   for row in recorded_openrouter_catalog()[0].values())
+    except Exception:
+        return False
+
+
+def recorded_openrouter_catalog() -> tuple[dict, str]:
+    """Read the host's dated catalogue without fetching or asserting freshness.
+
+    Suggestions can name old observations; capability adoption still checks its TTL.
+    Both readers share this parser and the canonical installation root.
+    """
+    from ouroboros.capability_evidence import canonical_evidence_root
+    from ouroboros.utils import json_snapshot
+
+    try:
+        record = json_snapshot(_catalog_path(canonical_evidence_root())) or {}
+        models, observed = record.get("models"), str(record.get("observed_at") or "")
+        if isinstance(models, dict):
+            return {str(mid): row for mid, row in models.items() if isinstance(row, dict)}, observed
+    except Exception:
+        log.debug("The recorded OpenRouter catalogue is unreadable", exc_info=True)
+    return {}, ""
+
+
 def model_catalog(source: str, credential_profile_id: str | None = None, *,
                   requested_model: str | None = None, timeout_sec: float | None = None) -> dict:
     """Metadata-only transport under one connect, negotiation and read budget; the capability
@@ -132,6 +159,7 @@ class _CapabilityPolicyMixin:
             if cls._CATALOGUE_READS != finished:
                 return
             if cls._CAPABILITIES_FAILED_AT and _age_seconds(cls._CAPABILITIES_FAILED_AT) <= _FAILED_TTL_SEC:
+                cls._SUPPORTED_PARAMS_FETCHED, cls._CAPABILITIES_FETCH_OK = True, False  # that failure answers this reader
                 return
             try:
                 cls._read_openrouter_catalogue()
@@ -183,6 +211,8 @@ class _CapabilityPolicyMixin:
                 cl = m.get("context_length")
                 if mid and isinstance(cl, (int, float)) and cl > 0:
                     context_lengths[mid] = recorded.setdefault(mid, {})["context_length"] = int(cl)
+                if mid and isinstance(m.get("pricing"), dict):  # the tariff a display reads without a fetch (``llm_pricing``)
+                    recorded.setdefault(mid, {})["pricing"] = m["pricing"]
             cls._CONTEXT_LENGTH_CACHE, cls._CONTEXT_LENGTH_OBSERVED_AT = context_lengths, utc_now_iso()
             # Image input is a fact about this exact route: one parser, stored
             # under the OpenRouter route scope with this response's time, so any
@@ -210,18 +240,15 @@ class _CapabilityPolicyMixin:
     def _adopt_recorded_catalog(cls) -> bool:
         """Adopt the catalogue a process recorded while it is within the confirmed-evidence TTL:
         the caches, date and success its fetch left, without a GET. A model it lacks stays unknown."""
-        from ouroboros.capability_evidence import _CONFIRMED_TTL_SEC, _age_seconds, canonical_evidence_root
-        from ouroboros.utils import json_snapshot
+        from ouroboros.capability_evidence import _CONFIRMED_TTL_SEC, _age_seconds
 
         try:
-            record = json_snapshot(_catalog_path(canonical_evidence_root())) or {}
-            models, observed = record.get("models"), str(record.get("observed_at") or "")
-            if not isinstance(models, dict) or not observed or _age_seconds(observed) > _CONFIRMED_TTL_SEC:
+            models, observed = recorded_openrouter_catalog()
+            if not observed or _age_seconds(observed) > _CONFIRMED_TTL_SEC:
                 return False
-            rows = [(str(mid), row) for mid, row in models.items() if isinstance(row, dict)]
-            params = {mid: {str(name) for name in row["supported_parameters"]} for mid, row in rows
+            params = {mid: {str(name) for name in row["supported_parameters"]} for mid, row in models.items()
                       if isinstance(row.get("supported_parameters"), list) and row["supported_parameters"]}
-            lengths = {mid: row["context_length"] for mid, row in rows
+            lengths = {mid: row["context_length"] for mid, row in models.items()
                        if type(row.get("context_length")) is int and row["context_length"] > 0}
         except Exception:
             log.debug("The recorded OpenRouter catalogue is unreadable", exc_info=True)
@@ -233,9 +260,13 @@ class _CapabilityPolicyMixin:
 
     @classmethod
     def prefetch_openrouter_catalog(cls) -> None:
-        """At boot, off every turn: observe the catalogue unless a process recorded a current one."""
-        if not cls._adopt_recorded_catalog():
+        """At boot, off every turn: observe the catalogue unless a process recorded a current one with its prices (a
+        record from before prices were kept is observed once more, so Costs can split a period from the first look)."""
+        adopted = cls._adopt_recorded_catalog()
+        if not adopted or not _records_prices():
             cls._fetch_openrouter_capabilities()
+            if adopted and not cls._CAPABILITIES_FETCH_OK:
+                cls._adopt_recorded_catalog()  # a failed extra read keeps the record it had adopted
 
     @classmethod
     def metadata_fetch_attempted_and_failed(cls) -> bool:

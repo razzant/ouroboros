@@ -25,6 +25,7 @@ from ouroboros.configured_subagents import (
     SOURCE_INVALID,
     SOURCE_LEGACY_MIGRATED,
     SOURCE_UNDECIDED,
+    SUBAGENTS_SETTING,
     configured_subagents_fingerprint,
     resolve_configured_subagents,
     resolve_roster_selector,
@@ -86,13 +87,25 @@ def effective_runtime_subagent_settings(settings: Mapping[str, Any]) -> dict[str
     return effective
 
 
+def runtime_subagent_settings(*, settings_reader=None) -> dict[str, Any]:
+    """One catalog view for facts, inspection and selection, with a typed unknown refusal."""
+    from ouroboros.settings_integrity import SettingsDocumentUnknown, runtime_catalog_settings
+
+    try:
+        return effective_runtime_subagent_settings(runtime_catalog_settings(settings_reader=settings_reader))
+    except SettingsDocumentUnknown as exc:
+        raise SubagentSelectionError("subagent_catalog_unknown", f"{SUBAGENTS_SETTING} is unknown: {exc}") from exc
+
+
 def offered_subagents(settings: Mapping[str, Any]) -> ConfiguredSubagentsResolution:
     """The catalog NEW work chooses from (:func:`resolve_configured_subagents`): a valid,
     switched-on catalog with no rows at all offers the Main model as its one base agent —
     with no agent configured, the default model is the base agent. The row is stored id
-    ``main``, Main's model as a catalog row runs it under ``settings`` (route, account pin,
-    processing: ``subscription_install_presets.role_route_binding``) and is never saved. A
-    Main without access offers nothing, as before; a switched-off catalog stays off."""
+    ``main``, Main's model as a catalog row runs it under ``settings`` (route and account pin:
+    ``subscription_install_presets.role_route_binding``) and is never saved. It has no tier of its
+    own: like every row without one, a helper started from it takes its work's (owner 13.11), which
+    is Main's for work that follows Main. A Main without access offers nothing, as before; a
+    switched-off catalog stays off."""
     resolution = resolve_configured_subagents(settings)
     config = resolution.config
     if (config is None or config.items or not config.enabled
@@ -108,8 +121,7 @@ def offered_subagents(settings: Mapping[str, Any]) -> ConfiguredSubagentsResolut
     try:
         offered = make_configured_subagents([ConfiguredSubagent(
             subagent_id="main", recommended_use=PRIMARY_RECOMMENDATION,
-            route=RouteSpec(ROUTE_KIND_API_MODEL, target, pin),
-            processing_preference=binding.get("processing_preference", ""))])
+            route=RouteSpec(ROUTE_KIND_API_MODEL, target, pin))])
     except ValueError:  # a Main the catalog cannot carry offers nothing: the typed empty-list refusal stands
         return resolution
     return dataclass_replace(resolution, config=offered)
@@ -165,7 +177,7 @@ def model_visible_subagent_catalog(settings: Mapping[str, Any]) -> dict[str, Any
         projected["review_eligible"] = row.review_eligible
         if row.review_eligible and not session:
             projected["delivery"] = row.delivery or "native"
-        # The owner's words, verbatim and last: bounded intent, never a title.
+        # The row's guidance, verbatim and last; authorship is not recorded here.
         projected["recommended_use"] = row.recommended_use
         rows.append(projected)
     if not rows:
@@ -183,38 +195,35 @@ def subagents_availability(settings: Mapping[str, Any]) -> str:
 def current_model_visible_subagent_catalog() -> dict[str, Any]:
     """Read the current normalized settings and return the stable catalog."""
 
-    from ouroboros.config import runtime_settings
     from ouroboros.settings_integrity import effective_subagents_mode
 
+    try:
+        settings = runtime_subagent_settings()
+    except SubagentSelectionError as exc:
+        return {"source": "unknown", "error": exc.detail}
     if effective_subagents_mode() == "off":
         return {}
-    return model_visible_subagent_catalog(
-        effective_runtime_subagent_settings(runtime_settings())
-    )
+    return model_visible_subagent_catalog(settings)
 
 
 _REVIEW_RULES = {
     "cyber_pro": "Cyber Pro: review informs judgment; no finding, failure or unavailable review prohibits action.",
-    "blocking": ("Blocking: critical findings, a failed quorum, a review that was not performed or a review "
-                 "infrastructure failure stop the commit."),
-    "advisory": ("Advisory: material findings and review failures return to the author as the outcome before any Git "
-                 "effect; the author may continue explicitly on that outcome, and nothing is rewritten into PASS."),
+    "advisory": ("Material findings and review failures return to me as the outcome before any Git effect; I may "
+                 "continue explicitly on that outcome, and nothing is rewritten into PASS."),
 }
 
 
 _REVIEW_SURFACES = {
-    "commit_gate": {"blocking": "every ticked reviewer; a subset is widened and recorded",
-                    "advisory": "choose ticked reviewers; narrowing requires a reason; omitted means the whole pool; outcome returns before Git for an author disposition",
-                    "cyber_pro": "compose or skip, recording the departure; never holds"},
+    "commit_gate": {"advisory": "choose ticked reviewers; narrowing requires a reason; omitted means the whole pool; outcome returns before Git for an author disposition",
+                    "cyber_pro": "compose or skip, recording the departure"},
     "review_change": "own code follows commit composition; other repositories compose freely in every mode, record a missing reason and never bind",
-    "skill_review": {"blocking": "whole pool", "advisory": "choose ticked reviewers, with a reason when narrowed; omitted and owner-started mean whole pool; review-each blockers keep the skill off until clean review or owner Skip",
+    "skill_review": {"advisory": "choose ticked reviewers, with a reason when narrowed; omitted and owner-started mean whole pool; review-each blockers keep the skill off until clean review or owner Skip",
                      "cyber_pro": "panel, self-check or no review; the skill may run"},
-    "plan_review": "opening is optional; first own-code ask: Blocking adds missing ticked reviewers, Advisory requires a ticked reviewer and a reason when narrowed, Cyber Pro is free; later asks name rows; only a counted participant's objection holds, only under Blocking",
-    "advisers": "enabled unticked rows may be named in every mode: heard, not counted, never holding",
-    "result": ("review_change(subject=result): on a Required root, Blocking widens a named subset to every ticked "
-               "reviewer and records it; Advisory names ticked reviewers and requires a reason when narrowed, and if "
-               "nobody reviewed before delivery the host seats the whole pool (chosen by the host); Auto composes "
-               "freely; Cyber Pro composes freely and never holds; Off is refused; a child's own result review "
+    "plan_review": "opening is optional; a first own-code ask outside Cyber Pro requires a ticked reviewer and a reason when narrowed, Cyber Pro is free; later asks name rows; objections are disclosed, none holds",
+    "advisers": "enabled unticked rows may be named in every mode: heard, not counted",
+    "result": ("review_change(subject=result): on a Required root, name ticked reviewers, with a reason when narrowed, "
+               "and if nobody reviewed before delivery the host seats the whole pool (chosen by the host); Auto composes "
+               "freely; Cyber Pro composes freely; Off is refused; a child's own result review "
                "composes freely; advisers are heard, not counted; omitted reviewers mean the whole pool"),
     "preflight": "one enabled catalog row you name: commit_reviewed(preflight_reviewer=…); none → recorded as not performed",
     "system_review": "/review: one enabled catalog row, default Main",
@@ -250,26 +259,24 @@ def _api_review_cost_hint(slot: Any, category: str = "", unit: str = "review") -
 # The wizard's summary prints the same sentence (``subagents_settings.js`` ``PACKET_ONLY_POOL_WARNING``).
 PACKET_ONLY_POOL_WARNING = (
     "Every reviewer is a Packet row, so none reads the repository and the coupling question (how the "
-    "change fits the rest of the code) goes unanswered: with Blocking review, every commit to Ouroboros "
-    "itself stops as “not performed”. Mark a reviewer that reads the work itself, or choose Advisory.")
+    "change fits the rest of the code) goes unanswered: every review of a commit to Ouroboros itself "
+    "ends without a verdict. Mark a reviewer that reads the work itself.")
 
 
 def coupling_unanswerable(slots: Any) -> bool:
     """A non-empty pool none of whose seats reads the repository (every row Packet): no seat
     is asked the coupling part, so every commit-gate review ends ``NOT_PERFORMED``
-    (``coupling_not_performed``, ``review_ledger.reduce_verdict``) — a block under Blocking."""
+    (``coupling_not_performed``, ``review_ledger.reduce_verdict``)."""
     return bool(slots) and not any(getattr(slot, "retrieves", False) for slot in slots)
 
 
 def review_pool_save_warning(settings: Mapping[str, Any]) -> str:
     """The save-time warning, never a refusal, for a document whose pool cannot answer the
-    coupling part while review blocks (:func:`coupling_unanswerable`); ``""`` otherwise."""
+    coupling part (:func:`coupling_unanswerable`); ``""`` otherwise."""
     from ouroboros.reviewer_slot_config import review_pool_slots
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
 
-    enforcement = str(settings.get("OUROBOROS_REVIEW_ENFORCEMENT") or "").strip().lower()
     try:
-        warn = review_enforcement_blocks(enforcement) and coupling_unanswerable(review_pool_slots(dict(settings)))
+        warn = coupling_unanswerable(review_pool_slots(dict(settings)))
     except Exception:  # a malformed catalog has its own refusal; a warning never fails a landed save
         import logging
 
@@ -322,7 +329,8 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
     ``seat_id`` is the stored row id the records carry. Every row retains its model, effort and delivery.
     ``source`` is ``structured`` (a non-empty pool), ``empty`` (a readable catalog
     with no marked row — a loud, configured fact whose one seat is the Main model reviewing alone,
-    ``main_self_review: true``) or ``error`` (a malformed catalog or a refused migration). A seat without a
+    ``main_self_review: true``), ``error`` (a malformed catalog or a refused migration), or ``unknown``
+    (an unreadable document with no frozen catalog). A seat without a
     catalog row (the Main seat) is named by its ``seat_id``. Stable for the task (cache-marked prefix B).
 
     What every settled review on the install changes — each seat's measured price (``cost_hint``), its
@@ -331,25 +339,27 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
     the task's recent ledger records (:func:`review_records_block`). These facts never rank seats or
     change routing; a pool without seats appends nothing."""
     from ouroboros import reviewer_slot_config as rs
-    from ouroboros.config import get_review_enforcement, get_runtime_mode, resolve_data_dir, runtime_settings, task_settings_scope
+    from ouroboros.config import get_runtime_mode, resolve_data_dir, task_settings_scope
     from ouroboros.configured_subagents import SUBAGENTS_SETTING, parse_configured_subagents
     from ouroboros.provider_models import model_has_credentials_in_settings
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.review_price import PLAN_USAGE_CATEGORY
     from ouroboros.subagent_metrics import seat_facts
     from ouroboros.runtime_mode_policy import runtime_mode_at_least
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
 
     with task_settings_scope(snapshot) if snapshot is not None else contextlib.nullcontext():
-        settings = effective_runtime_subagent_settings(runtime_settings())
-        state = rs.review_pool_state(settings.get(SUBAGENTS_SETTING))
+        try:
+            settings = runtime_subagent_settings()
+            state = rs.review_pool_state(settings.get(SUBAGENTS_SETTING))
+        except SubagentSelectionError as exc:
+            settings, state = {}, {"state": "unknown", "error": exc.detail}
         source, error = state["state"], state["error"]
         pool: list[dict[str, Any]] = []
         activity: list[dict[str, Any]] = []
         slots: list[Any] = []
         without_credentials: list[str] = []
         recent = rs.reviewer_slot_last_executions()
-        if source != "error":
+        if source not in {"error", "unknown"}:
             try:
                 raw = settings.get(SUBAGENTS_SETTING)
                 roster = parse_configured_subagents(raw) if str(raw or "").strip() else None
@@ -384,20 +394,18 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
                 seat["measured"] = measured
         # No marked row: the seats built are the one Main seat (``review_pool_slots``).
         main_alone = state["state"] == "empty" and bool(slots)
-        migration = _review_migration_facts(settings)
+        migration = _review_migration_facts(settings) if source != "unknown" else {}
         if migration.get("error") and source != "error":
             source, error = "error", migration["error"]
         unanswerable = source == "structured" and coupling_unanswerable(slots)
-        enforcement, mode = get_review_enforcement(), get_runtime_mode()
-        blocks = review_enforcement_blocks(enforcement)
+        mode = get_runtime_mode()
     seats = len(pool)
     facts: dict[str, Any] = {
-        "source": source, "error": error,
-        "enforcement": enforcement, "enforcement_blocks": blocks, "mode": mode,
+        "source": source, "error": error, "mode": mode,
         # The rule is the EXECUTION rule of the effective authority (PR-1): what a
         # finding or a failed review does to the change. Who reviews is ``pool``
         # and ``surfaces``, never this sentence.
-        "rule": _REVIEW_RULES["cyber_pro" if runtime_mode_at_least(mode, "cyber_pro") else enforcement],
+        "rule": _REVIEW_RULES["cyber_pro" if runtime_mode_at_least(mode, "cyber_pro") else "advisory"],
         "pool": pool,
         "pool_empty": source == "empty",
         # The Main model reviews alone: one model, no second opinion, its own work.
@@ -424,7 +432,7 @@ def review_pool_host_section(facts: Mapping[str, Any]) -> str:
     """The producer's one-line current pool, with exceptional configuration facts intact."""
     from ouroboros.section_floor import HostSection
 
-    operative = (f"## Review\n\nenforcement={facts['enforcement']}; mode={facts['mode']}; "
+    operative = (f"## Review\n\nmode={facts['mode']}; "
                  f"reviewers={', '.join(row['subagent_id'] for row in facts['pool']) or 'none'}; source={facts['source']}")
     exceptions = {key: facts[key] for key in ('error', 'main_self_review', 'coupling_unanswerable',
                   'pool_without_credentials', 'no_pool_row_has_credentials', 'migration_snapshot') if facts.get(key)}
@@ -438,6 +446,9 @@ def subagent_catalog_section(catalog: Mapping[str, Any]) -> str:
     from ouroboros.section_floor import HostSection
 
     heading = "## Available subagents\n\n"
+    if catalog.get("error"):
+        return HostSection("subagents", heading + json.dumps(catalog, ensure_ascii=False),
+                           heading + f"source={catalog.get('source')}; {catalog['error']}")
     rows = [f"- {row.get('subagent_id', '?')}: {row.get('route_class', '?')}, effort {row.get('effort', '?')}"
             + (", reviews" if row.get("review_eligible") else "")
             + ("\n  recommended_use: " + row["recommended_use"] if row.get("recommended_use") else "")
@@ -563,7 +574,7 @@ def apply_task_start_settings() -> TaskSettingsSnapshot:
     try:
         with SETTINGS_ENV_LOCK:
             effective, _changed, _keys = apply_runtime_provider_defaults(
-                config.load_settings_lock_held(_settings_lock_held=fd is not None))
+                config.load_settings_lock_held(_settings_lock_held=fd is not None, strict=True))
             projected = dict(os.environ)
             config.apply_settings_to_env(effective, environ=projected)
             snapshot = task_settings_snapshot(effective, projected)
@@ -581,10 +592,15 @@ def apply_task_start_settings_or_disclose(task_id: str, emit_live_log: Any) -> T
     configuration with nobody told. The task itself stays runnable
     (fail-open), but the breakage becomes a visible live-log fact.
 
-    The common corruption case is probed explicitly: ``load_settings`` falls
-    back to defaults+env on an unreadable or malformed settings.json instead
-    of raising, which would keep exactly the silence this wrapper exists to
-    break. A MISSING file is legitimate (defaults-only install), not a fault.
+    Admission reads strictly under the settings lock: an unreadable or malformed
+    document never freezes defaults. A MISSING file is a legitimate defaults-only
+    install, not a fault.
+
+    The catalog rides no environment: the previous view keeps a variable the
+    environment still carries (an operator's, or an earlier projection's), else it
+    holds no catalog and its readers read the document strictly
+    (``settings_integrity.runtime_catalog_settings``) — never the shipped blank,
+    which reads as no catalog configured.
     """
     from ouroboros.settings_integrity import task_settings_snapshot
 
@@ -594,16 +610,11 @@ def apply_task_start_settings_or_disclose(task_id: str, emit_live_log: Any) -> T
         previous_env = dict(os.environ)
     previous_settings = dict(SETTINGS_DEFAULTS)
     previous_settings.update({key: previous_env.get(key, "") for key in settings_env_keys()})
+    previous_settings.pop(SUBAGENTS_SETTING)
+    if SUBAGENTS_SETTING in previous_env:
+        previous_settings[SUBAGENTS_SETTING] = previous_env[SUBAGENTS_SETTING]
     previous = task_settings_snapshot(previous_settings, previous_env)
     try:
-        from ouroboros import config as _config
-
-        try:
-            raw_settings_text = _config.SETTINGS_PATH.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            raw_settings_text = None
-        if raw_settings_text is not None:
-            json.loads(raw_settings_text)
         return apply_task_start_settings()
     except Exception as exc:
         import logging
@@ -719,9 +730,16 @@ def select_subagent_snapshot(
     legacy_model_lane_supplied: bool = False,
     legacy_executor_supplied: bool = False,
     access: Optional[str] = None,
+    work_tier: Optional[str] = None,
 ) -> tuple[dict[str, Any], bool]:
     """Resolve one row and return ``(immutable_snapshot, used_legacy_seam)``.
 
+    ``work_tier`` is the starting work's tier (``supervisor_route.work_tier``: its carrier, else Main's or the
+    default by its role): a row without a tier of its own runs on it from this start (owner 13.11), a resolved
+    ``""`` included, a row with one keeps its own, and a started helper never changes afterwards. ``None``
+    (unknown or unreadable) keeps the row's own resolution. It rides beside the row's identity as
+    ``work_processing`` (only where it differs), so the row's history and statistics
+    (``subagent_history.execution_identity``) stay the row's own.
     The snapshot is JSON-only so the queue/result stores can copy it losslessly.
     Availability is deliberately not embedded here: saved intent is immutable;
     dispatch/start records its dated live observation in a separate task field.
@@ -770,6 +788,7 @@ def select_subagent_snapshot(
         row = matches[0]
         used_legacy = True
 
+    own_tier = resolve_processing_preference(override=row.processing_preference or None, settings=dict(settings))
     return validate_subagent_snapshot({
         "schema": 1,
         "selected_subagent_id": row.subagent_id,
@@ -780,11 +799,21 @@ def select_subagent_snapshot(
             row.route, api_kind="api_model", pin_key="credential_profile_id"
         ),
         "effort": row.effort,
-        "processing_preference": resolve_processing_preference(
-            override=row.processing_preference or None, settings=dict(settings)),
+        "processing_preference": own_tier,
+        **({"work_processing": work_tier}
+           if work_tier is not None and not row.processing_preference and work_tier != own_tier else {}),
         **({"access": row.access} if row.route.is_session else {}),
         "selected_at": utc_now_iso(),
     }, access=access), used_legacy
+
+
+def run_processing(snapshot: Any) -> str:
+    """What a helper's run asks for: the work's tier a row without one took (``work_processing``), else the row's
+    own. The row's own stays its identity (history, statistics); this is the run's request only. A present
+    ``work_processing`` answers even empty: a continued run that asked for no tier keeps asking for none."""
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    key = "work_processing" if "work_processing" in snapshot else "processing_preference"
+    return str(snapshot.get(key) or "")
 
 
 def validate_subagent_snapshot(raw: Any, *, access: Optional[str] = None) -> dict[str, Any]:
@@ -818,12 +847,14 @@ def validate_subagent_snapshot(raw: Any, *, access: Optional[str] = None) -> dic
     if kind == "agent_session" and access in SESSION_ACCESS_LOWERING:
         if access == "readonly" or captured_access == "full":
             snapshot["access"] = access
-    from ouroboros.model_slots import normalize_processing_preference
+    from ouroboros.model_slots import normalize_call_tier
 
     try:
-        # An old durable snapshot captures legacy behavior, never today's global setting.
-        snapshot["processing_preference"] = normalize_processing_preference(
-            snapshot.get("processing_preference"))
+        # An old durable snapshot captures legacy behavior, never today's global setting; a captured work tier
+        # (Ultrafast included) stays as captured, beside the row's own.
+        snapshot["processing_preference"] = normalize_call_tier(snapshot.get("processing_preference"))
+        if "work_processing" in snapshot:
+            snapshot["work_processing"] = normalize_call_tier(snapshot.get("work_processing"))
     except ValueError as exc:
         raise SubagentSelectionError("subagent_snapshot_invalid", str(exc)) from exc
     return snapshot
@@ -950,9 +981,9 @@ def resolve_configured_actor_dispatch(
             )
             gateway = None
             try:
-                from ouroboros.claudexor_daemon import ensure_owned_gateway
+                from ouroboros.execution_domain import native_gateway
 
-                gateway = ensure_owned_gateway()
+                gateway = native_gateway()  # the engine a new native run uses: the domain's work engine, else owned
                 unavailable, reset_at = route_health(
                     gateway, exact_route.route_id, shape, route_model=exact_route.model,
                     pinned_profile=exact_route.profile_id,
@@ -1016,9 +1047,7 @@ def current_subagent_alternatives(exclude_id: str = "") -> list[dict[str, Any]]:
     """Project the current saved choices without ranking or probing them."""
 
     try:
-        from ouroboros.config import runtime_settings
-
-        settings = effective_runtime_subagent_settings(runtime_settings())
+        settings = runtime_subagent_settings()
         resolution = resolve_configured_subagents(settings)
         config = resolution.config
         if config is None or not config.enabled:
@@ -1124,13 +1153,15 @@ def prepare_delegate_start_actor(
         "route": route,
         "access": snapshot.get("access", "workspace_write"),
         "selected_subagent_id": selected_id,
-        "processing_preference": str(snapshot.get("processing_preference") or ""),
+        "processing_preference": run_processing(snapshot),  # what this run asks for, not the row's identity
         "config_fingerprint": config_fingerprint,
         "work_order_fingerprint": work_order_fingerprint,
         "authority_fingerprint": authority_fingerprint,
         "compiled_work_order": bool(selection.get("compiled_work_order")),
-        # The row's pin ("" = Auto) stays the receipt identity; the decided level is the fact.
+        # The row's pin ("" = Auto) and its own tier stay the receipt identity; the decided level and the run's
+        # tier (a work's, inherited) are the facts.
         "row_effort": str(snapshot.get("effort") or ""),
+        "row_processing": str(snapshot.get("processing_preference") or ""),
         "effort_fact": dict(fact),
     }, None
 
@@ -1238,12 +1269,20 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
                 "A fresh delegated start requires subagent_id; only retry_of replays without it.",
             )
         if selected_id:
-            from ouroboros.config import runtime_settings
+            from ouroboros.supervisor_route import work_tier
 
+            # A fresh helper without a tier of its own takes the work's, Main's included (owner 13.11); a
+            # continuation keeps the tier its session was captured with.
+            live_settings = runtime_subagent_settings()
             selected_snapshot, _legacy = select_subagent_snapshot(
-                effective_runtime_subagent_settings(runtime_settings()),
-                subagent_id=selected_id,
+                live_settings, subagent_id=selected_id, work_tier=work_tier(ctx, live_settings),
             )
+            if str(options.get("continue_from") or "").strip():
+                from ouroboros.delegate_continuation import inherited_processing
+
+                captured = inherited_processing(ctx, options["continue_from"])
+                if captured is not None:
+                    selected_snapshot = {**selected_snapshot, "work_processing": captured}
         if selected_snapshot is not None:
             from ouroboros.delegate_plan import inherited_mode
 

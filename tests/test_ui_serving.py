@@ -242,6 +242,7 @@ _IMPORT = re.compile(r"""(?:import\s+(?:[^'"]*?\s+from\s+)?|import\(\s*|export\s
 
 
 def test_the_wizard_document_and_its_module_graph_never_reach_the_selected_static_tree():
+    # This source walk includes JSDoc import() references; shared wire types must not pull in chat renderers.
     template = (WEB / "onboarding_template.html").read_text(encoding="utf-8")
     references = re.findall(r"""(?:src|href)="([^"]+)"|from '([^']+)'""", template)
     urls = [a or b for a, b in references]

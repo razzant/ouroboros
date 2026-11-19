@@ -103,7 +103,7 @@ _SCHEMA = {
         "declares in secret_fields (e.g. telegram: botToken). The value is saved to Settings and is not sent "
         "in this conversation; you then receive only secret_filled or secret_replaced {pluginName, fields}, "
         "or secret_cancelled. The owner sees whether a key is already set and may explicitly replace it. Root "
-        "tasks only; the task waits after this tool batch. Saving grants, enables and connects nothing: "
+        "tasks only; the task waits after this tool batch. Saving grants and enables nothing; enabled skills may apply new values automatically: "
         "afterwards check the skill's grant and status. Never ask for a secret in chat instead."
     ),
     "parameters": {

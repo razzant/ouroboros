@@ -7,7 +7,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import test from 'node:test';
 
 import { createChatInstance } from '../modules/chat.js';
-import { HOST_NOTICE_PREFIXES, RETIRED_HOST_NOTICE_PREFIXES, hostNoticeDisplayText, hostRowDisplayText } from '../modules/host_notice_text.js';
+import { HOST_NOTICE_PREFIXES, RETIRED_HOST_NOTICE_PREFIXES, hostNoticeDisplayText, hostRowDisplayText, toolErrorDisplayText } from '../modules/host_notice_text.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { cardRowSummary } from '../modules/chat_activity.js';
 import { loadSkillReviewDetail, renderSkillReviewDisclosure, summarizeSkillReviewMessage } from '../modules/skill_review_card.js';
@@ -46,6 +46,17 @@ test('a typed known prefix loses only its leading mark; everything else stays', 
 
 // Each entry is one producer's prefix: its mark (variation selector included) and its
 // opening words must exist in the backend sources, or the table silently cleans nothing.
+// A failed tool call's result opens with the host's warning mark before its code; its chip says the failure.
+test('a call typed as failed loses the host\'s warning mark before its error; any other text keeps it', () => {
+    const error = '⚠️ TOOL_ARG_ERROR (await_messages): this task has no continuation owner to sleep under';
+    assert.equal(toolErrorDisplayText({ is_error: true }, error), error.slice('⚠️ '.length));
+    for (const evt of [{}, { is_error: false }, { is_error: 'true' }]) assert.equal(toolErrorDisplayText(evt, error), error);
+    assert.equal(toolErrorDisplayText({ is_error: true }, 'exit 1 ⚠️ later'), 'exit 1 ⚠️ later', 'only a leading mark');
+    assert.equal(toolErrorDisplayText({ is_error: true }, undefined), undefined);
+    const producer = readFileSync(new URL('../../ouroboros/loop_tool_execution.py', import.meta.url), 'utf8');
+    assert.ok(producer.includes('f"⚠️ TOOL_ERROR ({fn_name})') && producer.includes('f"⚠️ TOOL_TIMEOUT ({fn_name})'), 'the mark the host writes');
+});
+
 test('every table entry names a mark and words a backend producer actually writes', () => {
     const root = new URL('../../', import.meta.url);
     const sources = [];
@@ -235,7 +246,7 @@ test('skill review paint changes only its generated opening, in legacy and lazy 
 // display table (which cannot detect a missing producer entry).
 test('command, plan and paused-evolution producer variants are covered', () => {
     const cases = [
-        ['server.py', 'command_reply', '🧠 Background consciousness: ', 'off'],
+        ['ouroboros/consciousness_view.py', 'command_reply', '🧠 Consciousness: ', 'Only when you write to it — 2 places are heard, not answered.'],
         ['ouroboros/tools/plan_ask.py', 'host_progress', '📐 Plan: ', 'ask a1 on revision 1 — sending to 2 participants.'],
         ['supervisor/evolution_lifecycle.py', 'evolution_notice', '🧬 Evolution paused: ', 'its next cycle was not admitted (consciousness_allowance_exhausted). /evolve start resumes it.'],
         // An OpenAI attempt and the stream's own search event stay two rows, each without its mark.
@@ -245,6 +256,9 @@ test('command, plan and paused-evolution producer variants are covered', () => {
         ['ouroboros/loop_model_call.py', 'host_progress', '⚡ Fallback: trying ', 'alt/a after a rejected request on primary.'],
         ['ouroboros/primary_route_observation.py', 'host_progress', '⚡ Fallback: ', 'alt/a is now the active route; it answered.'],
         ['ouroboros/loop_model_call.py', 'host_progress', '⚡ Fallback: the last attempt, on ', 'alt/a, ended without a usable reply.'],
+        // The engine wait's entry and recovery rows (`loop_transport.reconcile_transport_wait`).
+        ['ouroboros/loop_transport.py', 'host_progress', '🌐 The local Claudexor engine is not answering, ', 'so this request was not sent ($0 for it).'],
+        ['ouroboros/loop_transport.py', 'host_progress', '🌐 Model response received after ', '2.0 min — resuming.'],
     ];
     for (const [path, type, prefix, suffix] of cases) {
         assert.ok(readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8').includes(prefix));
@@ -252,6 +266,17 @@ test('command, plan and paused-evolution producer variants are covered', () => {
         assert.equal(hostNoticeDisplayText(raw, type), raw.slice(raw.indexOf(' ') + 1));
         assert.equal(hostNoticeDisplayText(raw, 'reminder'), raw);
     }
+});
+
+test('the switch-off row from /bg stop and from the mind\'s own toggle loses its mark like every consciousness notice', () => {
+    // consciousness_view.off_sentence opens the row (owner 09.11); /bg (server.py) and the runtime control add «🧠 ».
+    assert.ok(readFileSync(new URL('../../ouroboros/consciousness_view.py', import.meta.url), 'utf8').includes('Consciousness off: Ouroboros acts only when you write to it'));
+    const raw = '🧠 Consciousness off: Ouroboros acts only when you write to it. 2 places are heard, not answered. Stopping now: its wake-up.';
+    for (const [path, type] of [['server.py', 'command_reply'], ['supervisor/events_runtime_controls.py', 'consciousness_notice']]) {
+        assert.ok(readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8').includes('f"🧠 {result}'));
+        assert.equal(hostNoticeDisplayText(raw, type), raw.slice('🧠 '.length));
+    }
+    assert.equal(hostNoticeDisplayText(raw, 'reminder'), raw);
 });
 
 test('a stored fallback row of the old producer keeps its own words and loses the same mark', () => {
@@ -302,4 +327,14 @@ test('a progress wrapper is removed only with a known host opening', () => {
     assert.equal(hostRowDisplayText({ ...row, text: unknown }), unknown);
     assert.equal(hostRowDisplayText({ ...row, text: unknown }, '💬 translated unknown'), '💬 translated unknown');
     assert.equal(row.text, text);
+});
+
+test('the turn-on receipt at a $0 or spent allowance loses its mark like the ordinary one (review r3)', () => {
+    // consciousness_view.on_sentence opens the row; /bg (server.py) and the runtime control add «🧠 ».
+    const source = readFileSync(new URL('../../ouroboros/consciousness_view.py', import.meta.url), 'utf8');
+    assert.ok(source.includes('Consciousness on, but its allowance is $0.00') && source.includes('Consciousness on, but its allowance for the last 24 hours is spent'));
+    for (const type of ['command_reply', 'consciousness_notice']) {
+        const raw = '🧠 Consciousness on, but its allowance is $0.00: it cannot wake until you raise it in Costs.';
+        assert.equal(hostNoticeDisplayText(raw, type), raw.slice(raw.indexOf(' ') + 1));
+    }
 });

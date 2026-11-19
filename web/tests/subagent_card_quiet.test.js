@@ -92,31 +92,25 @@ test('the head holds identity, one availability word and a fixed Reviewer/action
     assert.match(head, /data-subagent-status data-tone="neutral" title="Agent session · live availability not checked">Not checked</);
 });
 
-for (const baseline of ['saved', 'generated']) {
-    test(`a page dirty indicator owns Unsaved changes while the editor keeps its ${baseline} meaning`, () => {
-        const dom = fakeEditorDom();
-        const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null,
-            hasPageDirtyIndicator: true, baseline });
-        const setting = { enabled: true, items: [session()] };
-        editor.load(setting);
-        const intent = dom.toolbar('[data-subagents-intent]');
-        const label = baseline === 'saved' ? 'Saved' : 'Generated draft';
-        assert.equal(intent.textContent, label);
-        dom.rows()[0].querySelector('[data-subagent-field="review_eligible"]')
-            .listeners.change({ target: { checked: true } });
-        assert.equal(editor.dirty, true);
-        assert.equal(intent.textContent, '');
-        assert.equal(intent.title, '');
-        assert.equal(intent.hidden, false, 'the reserved toolbar slot remains in the layout');
-        editor.load(setting);
-        assert.equal(intent.textContent, label);
-        editor.destroy();
-    });
-}
+test('setup names an edited draft itself: the intent word turns to Unsaved changes and back on a load', () => {
+    const dom = fakeEditorDom();
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null, baseline: 'generated' });
+    const setting = { enabled: true, items: [session()] };
+    editor.load(setting);
+    const intent = dom.toolbar('[data-subagents-intent]');
+    assert.equal(intent.textContent, 'Generated draft');
+    dom.rows()[0].querySelector('[data-subagent-field="review_eligible"]')
+        .listeners.change({ target: { checked: true } });
+    assert.equal(editor.dirty, true);
+    assert.equal(intent.textContent, 'Unsaved changes');
+    editor.load(setting);
+    assert.equal(intent.textContent, 'Generated draft');
+    editor.destroy();
+});
 
 test('the intent word is the read\'s fact: Automatic, Generated draft, Saved, and none before a load', () => {
     const dom = fakeEditorDom();
-    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null, hasPageDirtyIndicator: true });
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
     const intent = () => dom.toolbar('[data-subagents-intent]').textContent;
     editor.paint();
     assert.equal(intent(), '', 'still loading: no word');
@@ -140,7 +134,7 @@ test('fields are labelled Source and wide Model, then Account, Effort and Access
     const labels = [...grid.matchAll(/class="ui-field available-subagent-field[^"]*">(\w[\w ]*?) </g)].map((m) => m[1]);
     assert.deepEqual(labels, ['Source', 'Model', 'Account', 'Reasoning effort', 'Access']);
     assert.match(grid, /available-subagent-field-model">Model /);
-    assert.match(grid, /<option value="full" selected>Full system access<\/option><option value="workspace_write">Working files<\/option>/);
+    assert.match(grid, /<option value="full" selected>Full system access<\/option><option value="workspace_write">Workspace write<\/option>/);
     assert.match(grid, />koshak \(not checked\)</, 'the labelled field names the account alone and keeps the saved pin');
     const order = ['available-subagent-route', 'available-subagent-purpose', 'data-subagent-meta', 'data-processing-details', 'data-subagent-details']
         .map((marker) => html.indexOf(marker));
@@ -155,7 +149,11 @@ test('Details & history keeps review cost, both histories, the stored spelling, 
     const html = availableSubagentRowMarkup(api({ review_eligible: true, minted_from: 'factory_default' }), state, 0);
     const details = html.slice(html.indexOf('data-subagent-details'));
     assert.match(details, /<summary>Details &amp; history<\/summary>/);
-    assert.match(details, /<dt>Review cost<\/dt><dd data-subagent-review-facts>price appears after saving<\/dd>/);
+    assert.match(details, /<div hidden><dt>Review cost<\/dt><dd data-subagent-review-facts><\/dd><\/div>/, 'unsaved: no cost is promised');
+    const measured = new Map([[JSON.stringify([ROUTE_KIND_API_MODEL, 'openai::gpt-x', '']),
+        { usd_per_review: 0.5, basis: 'observed_reviews', reviews: 1, low: 0.5, high: 0.5 }]]);
+    assert.match(availableSubagentRowMarkup(api({ review_eligible: true }), { ...state, reviewCosts: measured }, 0),
+        /<div><dt>Review cost<\/dt><dd data-subagent-review-facts>≈\$0\.50 per review \(1 measured\)<\/dd><\/div>/);
     assert.match(details, /<div data-subagent-last-review><dt>Last review<\/dt><dd>API model · gpt-x · record rev_9<\/dd>/);
     assert.match(details, /<div hidden data-subagent-last-task><dt>Last task run<\/dt>/, 'no receipt, nothing claimed');
     assert.match(details, /<dt>Stored as<\/dt><dd>openai::gpt-x<\/dd>/);

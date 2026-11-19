@@ -96,7 +96,7 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "budget_pause": _handled(
         "supervisor.events_budget", "ouroboros/agent.py", idle_input=True),
     "mind_task_control": _handled(
-        "supervisor.events_mind_controls", "ouroboros/tools/control_mind.py", idle_input=True),
+        "supervisor.events_mind_controls", "ouroboros/tools/control_mind.py", "ouroboros/tools/control_models.py", idle_input=True),
     "budget_resume_child": _handled(
         # #1196 (owner Q9): the resumed root's model selects one paused child.
         "supervisor.events_budget", "ouroboros/tools/join_ledger.py", idle_input=True),
@@ -111,8 +111,6 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_runtime_controls", "ouroboros/tools/control_runtime.py"),
     "ensure_project_scope": _handled(
         "supervisor.events_project_routing", "ouroboros/tools/control_delegation.py"),
-    "external_wait_lease": _handled(
-        "supervisor.events_worker_reports", "ouroboros/delegate_progress.py", idle_input=True),
     "llm_usage": _handled(
         "supervisor.events_budget", "ouroboros/agent.py",
         "ouroboros/pricing.py", "ouroboros/tools/search.py", "ouroboros/tools/vision.py",
@@ -125,8 +123,9 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_worker_reports", "ouroboros/utils.py", lane=TELEMETRY_LANE,
         note="the envelope every worker log line rides; the payload types that "
              "need their own answer are the nested_log_event rows below"),
+    "work_lead": _handled("supervisor.events", "ouroboros/lead_fact.py"),
     "main_llm_call_state": _handled(
-        "supervisor.events", "ouroboros/loop_llm_call.py",
+        "supervisor.events", "ouroboros/llm_observability.py",
         note="the last handler still resolving on the facade itself", idle_input=True),
     "owner_message_injected": _handled(
         # v7 L-B split: the drain that emits the receipt lives in the round-limits leaf.
@@ -170,6 +169,9 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
              "the live quiz_state frame is a separate transport discriminator"),
     "send_video": _handled(
         "supervisor.events_chat_delivery", "ouroboros/tools/core_artifacts.py"),
+    "mcp_configuration_changed": _handled(
+        "supervisor.events_worker_reports", "ouroboros/skill_mcp.py", "ouroboros/mcp_client.py",
+        note="content-free: the server lister re-reads settings and lists a changed or moved MCP server"),
     "skill_exec_failed": _handled(
         "supervisor.events_worker_reports", "ouroboros/tools/skill_exec.py"),
     "skill_exec_finished": _handled(
@@ -187,7 +189,7 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         note="a carrier's start phase lands on its RUNNING row for the census"),
     "direct_turn_bound": _handled(
         "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
-        note="the Project basis the carrier bound lands on its RUNNING row (snapshot, park, restore)"),
+        note="the Project basis and admitted tier the carrier bound land on its RUNNING row (snapshot, park, restore)"),
     "task_named": _handled(
         "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
         note="a carrier coined a title: the bridge broadcasts it as the server's own namer did"),

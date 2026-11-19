@@ -26,17 +26,11 @@ import sys
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.deployment_policy import BODY_STATUS, body_replacement_refusal
 
 
 def _go():
-    """The parent module, read at call time.
-
-    ``supervisor.git_ops`` owns the rebindable module state (``init`` REBINDS
-    REPO_DIR, DRIVE_ROOT and BRANCH_*) and the helpers tests monkeypatch on
-    the parent (``git_capture``, ``_guard_live_repo_destructive_git``, the
-    sibling re-exports). Reading them through the module keeps one binding: a
-    from-import here would freeze the value this module saw at import time.
-    """
+    """Read the parent's rebindable state and monkeypatchable helpers at call time."""
     from supervisor import git_ops
 
     return git_ops
@@ -389,6 +383,8 @@ def _target_lacks_store(sha: str) -> bool:
 
 def checkout_and_reset(branch: str, reason: str = "unspecified",
                        unsynced_policy: str = "ignore") -> Tuple[bool, str]:
+    if refusal := body_replacement_refusal():  # the administrator's tree: no fetch, checkout, reset, clean or record
+        return False, refusal
     receipt = _bootstrap_receipt()
     if reason == "bootstrap" and receipt and receipt.get("branch") == branch:
         if receipt == _bootstrap_snapshot():
@@ -579,28 +575,26 @@ def _dependency_install_plan(repo_dir: pathlib.Path) -> Tuple[List[str], str, pa
 
 def runtime_dependency_command(repo_dir: pathlib.Path) -> Optional[List[str]]:
     """The same install command for a body switch that runs with no launcher; ``None`` where
-    this chokepoint installs nothing (a frozen bundle, an active test boundary)."""
-    if getattr(sys, 'frozen', False) or os.environ.get("OUROBOROS_PYTEST_ACTIVE") == "1":
-        return None
-    return _dependency_install_plan(pathlib.Path(repo_dir))[0]
+    this chokepoint installs nothing (``_installs_nothing``)."""
+    return None if _installs_nothing() else _dependency_install_plan(pathlib.Path(repo_dir))[0]
+
+
+def _installs_nothing() -> str:
+    """Why the one install chokepoint every caller reaches (bootstrap, managed update pre-restart, the reset fallbacks)
+    installs nothing here, else ``""``: a frozen bundle's packages are bundled, a managed deployment's interpreter is
+    its administrator's, and a verification run (tests/conftest.py's marker, re-injected into every scrubbed child
+    environment by ouroboros/test_environment.py) never mutates the interpreter, or fixture venv, it verifies."""
+    if getattr(sys, 'frozen', False):
+        return "frozen:bundled"
+    if body_replacement_refusal():
+        return "managed_by_deployment"
+    return "pytest:suppressed" if os.environ.get("OUROBOROS_PYTEST_ACTIVE") == "1" else ""
 
 
 def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
-    if getattr(sys, 'frozen', False):
-        log.info("Skipping pip install in frozen (PyInstaller) mode — deps are bundled.")
-        return True, "frozen:bundled"
-
-    # The one dependency-install chokepoint every caller reaches — bootstrap,
-    # managed update pre-restart and the reset fallbacks all route here — so the
-    # test boundary belongs on THIS line, not on one caller's local-dev branch.
-    # A verification run must never mutate the interpreter it is verifying (the
-    # operator's, or a fixture's dependency-only venv): the marker is set by
-    # tests/conftest.py and re-injected into every scrubbed child environment
-    # (ouroboros/test_environment.py), so a server started by a test inherits it.
-    # Production sets no such marker and keeps its install policy unchanged.
-    if os.environ.get("OUROBOROS_PYTEST_ACTIVE") == "1":
-        log.info("Skipping dependency sync under an active test boundary (%s).", reason)
-        return True, "pytest:suppressed"
+    if skipped := _installs_nothing():
+        log.info("Dependency sync installs nothing (%s; %s).", skipped, reason)
+        return True, skipped
 
     cmd, source, req_path = _dependency_install_plan(_go().REPO_DIR)
     try:
@@ -615,18 +609,22 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
         from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
 
-        with tracked_start() as publish:
-            proc = publish(contained_popen(
-                subprocess.Popen, cmd, cwd=str(_go().REPO_DIR), **subprocess_new_group_kwargs()
-            ))
-        try:
-            returncode = proc.wait(timeout=120)
-        except subprocess.TimeoutExpired:
-            kill_process_tree(proc)
-            proc.wait(timeout=10)
-            raise
-        finally:
-            retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
+        from ouroboros.process_logging import relayed_child_output
+
+        with relayed_child_output() as output:
+            with tracked_start() as publish:
+                proc = publish(contained_popen(
+                    subprocess.Popen, cmd, cwd=str(_go().REPO_DIR),
+                    stdout=output, stderr=output, **subprocess_new_group_kwargs()
+                ))
+            try:
+                returncode = proc.wait(timeout=120)
+            except subprocess.TimeoutExpired:
+                kill_process_tree(proc)
+                proc.wait(timeout=10)
+                raise
+            finally:
+                retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
         if returncode != 0:
             raise subprocess.CalledProcessError(returncode, cmd)
         try:
@@ -785,29 +783,30 @@ def safe_restart(
     reason: str,
     unsynced_policy: str = "rescue_and_reset",
 ) -> Tuple[bool, str]:
-    """Checkout dev, sync deps, import-test, then fall back to stable if needed.
-
-    ``OUROBOROS_DISABLE_MANAGED_UPDATES=1`` is the stand lever: it keeps the deps
-    sync and the import test but skips the checkout, so a stand pinned to one sha
-    stays on it. This is the choke point EVERY unrequested tree move goes through
-    (bootstrap, owner restart, agent restart) — the local-dev bootstrap branch in
-    server.py only covered the first of the three. An explicit owner version
-    change (Update / Rollback) calls ``checkout_and_reset`` directly and is
-    deliberately still honoured: that one the operator asked for.
-    """
-    if str(os.environ.get("OUROBOROS_DISABLE_MANAGED_UPDATES", "") or "").strip() == "1":
+    """Checkout dev, sync deps, import-test, else fall back to stable. ``git_ops._restart_keeps_checkout`` instead
+    keeps the tree (deployment policy, ``OUROBOROS_DISABLE_MANAGED_UPDATES=1``, a checkout boot sees unmanaged):
+    deps sync (none under a policy), import test, a stale managed stamp cleared; a failure is told, never repaired
+    with another tree. EVERY unrequested tree move comes here; Update / Rollback call ``checkout_and_reset``."""
+    managed = body_replacement_refusal()
+    kept = _go()._restart_keeps_checkout(bool(managed))
+    if kept:
         _go().append_jsonl(
             _go().current_drive_root() / "logs" / "supervisor.jsonl",
-            {"ts": _go().utc_now_iso(), "type": "managed_checkout_disabled",
-             "reason": reason, "target_branch": _go().BRANCH_DEV},
+            {"ts": _go().utc_now_iso(), "type": kept["event"],
+             "reason": reason, "target_branch": _go().BRANCH_DEV, **kept["receipt"]},
         )
-        deps_ok, deps_msg = _go().sync_runtime_dependencies(reason=reason)
+        if "facts" in kept:  # the tree did not move: its observed-SHA stamp still describes it
+            _record_checkout_facts(kept["facts"], invalidate_bootstrap=False, stamp_observed=False)
+        deps_ok, deps_msg = _go().sync_runtime_dependencies(reason=reason)  # managed: installs nothing
         if not deps_ok:
-            return False, f"Failed deps with managed checkout disabled: {deps_msg}"
+            return False, f"Failed deps {kept['where']}: {deps_msg}; the checkout was left untouched."
         t = _go().import_test()
         if t["ok"]:
-            return True, "OK: managed checkout disabled — staying on the current checkout"
-        return False, f"Import test failed with managed checkout disabled (rc={t.get('returncode', -1)})"
+            return True, kept["ok"]
+        if managed:  # an older recovery point is not the program this policy was deployed with
+            return False, (f"Import test failed (rc={t.get('returncode', -1)}); no other version or package was "
+                           f"tried. {BODY_STATUS}")
+        return False, f"Import test failed {kept['where']}{_go()._import_failure(t)}; the checkout was left untouched."
 
     ok, err = _checkout_outcome(_go().BRANCH_DEV, reason, unsynced_policy)
     if not ok:
@@ -850,7 +849,7 @@ def safe_restart(
     return False, "Both branches failed import (dev and stable)"
 
 
-def _record_checkout_facts(facts: dict, *, invalidate_bootstrap: bool = True) -> None:
+def _record_checkout_facts(facts: dict, *, invalidate_bootstrap: bool = True, stamp_observed: bool = True) -> None:
     """Field-update the checkout projection (#1307): never a stale whole-state write."""
     from supervisor.state import StateUnavailable
 
@@ -862,6 +861,8 @@ def _record_checkout_facts(facts: dict, *, invalidate_bootstrap: bool = True) ->
         _go().update_state(lambda live: live.update(facts))
     except StateUnavailable:
         log.warning("Checkout facts not recorded in state: runtime state unavailable", exc_info=True)
+        return
+    if not stamp_observed:
         return
     try:
         from ouroboros.startup_migrations import stamp

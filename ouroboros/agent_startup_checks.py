@@ -572,7 +572,7 @@ def check_review_continuations(env: Any) -> Tuple[dict, int]:
                 "tool_name": item.tool_name,
                 "attempt": item.attempt,
                 "block_reason": item.block_reason,
-                "obligation_ids": list(item.obligation_ids or []),
+                "review_record_id": item.review_record_id,
                 "critical_findings": len(item.critical_findings or []),
                 "advisory_findings": len(item.advisory_findings or []),
                 "updated_ts": item.updated_ts,

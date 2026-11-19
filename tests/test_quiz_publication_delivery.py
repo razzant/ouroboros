@@ -123,6 +123,9 @@ def test_strict_publication_failure_keeps_timed_debt_then_exposes_delivered_fact
     assert block["delivery"]["state"] == "owed"
     assert block["delivery"]["reason_code"] == "publication_write_failed"
     assert not block.get("published_at")
+    rows = [json.loads(line) for line in (publication.root / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()]
+    [failure] = [row for row in rows if row["type"] == "send_quiz_event_error"]
+    assert (failure["task_id"], failure["quiz_id"]) == ("t", "q") and failure["error"]
     # A duplicate event must not bypass the persisted retry delay.
     handlers._handle_send_quiz(publication.event, publication.ctx)
     assert observed == [1] and _block(publication)["delivery"] == block["delivery"]

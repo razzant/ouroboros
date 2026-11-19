@@ -167,18 +167,21 @@ def test_preflight_returns_plan_and_target_bound_effects(monkeypatch):
 
 
 def test_fetching_update_endpoints_leave_the_event_loop(monkeypatch):
+    loop_thread = threading.get_ident()
     calls = []
 
-    async def fake_to_thread(fn, *args, **kwargs):
-        calls.append((fn, args, kwargs))
+    def fetch_payload(*, fetch, include_tags):
+        calls.append((threading.get_ident(), fetch, include_tags))
         return {"available": False}
 
-    monkeypatch.setattr(control.asyncio, "to_thread", fake_to_thread)
-
+    monkeypatch.setattr(control, "_managed_update_payload", fetch_payload)
     response = asyncio.run(control.api_update_check(None))
 
     assert response.status_code == 200
-    assert calls == [(control._managed_update_payload, (), {"fetch": True, "include_tags": True})]
+    assert _body(response) == {"available": False}
+    [(fetch_thread, fetch, include_tags)] = calls
+    assert fetch_thread != loop_thread
+    assert fetch is True and include_tags is True
 
 
 def test_update_apply_keeps_the_event_loop_responsive(monkeypatch):

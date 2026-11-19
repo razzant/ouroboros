@@ -408,7 +408,7 @@ def test_owner_upload_preview_in_a_project_room_closes_with_back_and_navigation(
                 page.evaluate(OPEN_ROOM, other)
                 page.locator(f'#pchat-{other["id"]}-messages').wait_for(state="visible", timeout=30_000)
                 assert page.evaluate(LEFT_BEHIND, feed) == {
-                    "readers": 0, "open_dialogs": 0, "room": False, "focus_connected": True}
+                    "readers": 0, "open_dialogs": 0, "room_kept_away": True, "focus_connected": True}
                 page.locator(f'[id="pchat-{other["id"]}-input"]').click(timeout=5_000)
             finally:
                 browser.close()

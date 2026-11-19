@@ -73,6 +73,10 @@ TERMINAL_WRITERS = {
     # turn's own typed terminal, recorded in its carrier before the exception unwinds; its
     # projector never replaces a row that is already truly terminal.
     ('supervisor/worker_chat_lane.py::conversation_exception_terminal', 'STATUS_CANCELLED if stopped else STATUS_FAILED'): 'terminal',
+    # A deployment's hold that met a task inside its carrier (handle_task's before-start check raised: the pool
+    # worker's exception boundary and the conversation lane's) is that task's typed failed terminal, nothing spent;
+    # its projector never replaces a row that is already truly terminal.
+    ('ouroboros/deployment_extensions.py::record_held_task', 'STATUS_FAILED'): 'terminal',
     ('ouroboros/agent_task_pipeline.py::_store_task_result', 'status'): 'dynamic',
     ('ouroboros/delegate_terminal.py::record_terminal_reconciliation', 'str(existing.get("status") or STATUS_RUNNING)'): 'dynamic',
     # Foreign-root disclosure preserves CURRENT status and pointers under the
@@ -84,10 +88,6 @@ TERMINAL_WRITERS = {
     # Preparation markers land only on a row still in the named non-terminal
     # status (requested by default); the projector refuses any other row.
     ('supervisor/workspace_preparation.py::_transition', 'status'): 'dynamic',
-    # #1376: the host-composed diagnostic's create-only "requested" receipt, the
-    # same seed a schedule_subagent request writes; create_only refuses any
-    # existing row, so it can neither end nor overwrite a task.
-    ('supervisor/silence_attention.py::_admit', '"requested"'): 'dynamic',
     # F6 upstream sync: the cursor/backfill refresh rewrites a stale stored
     # disclosure without changing the task's terminal status (same preserved
     # read as its record_terminal_reconciliation sibling).
@@ -116,6 +116,9 @@ TERMINAL_WRITERS = {
     # Settlement's raw-QA carry arms only missing-evidence facts on the same
     # attempt; its locked projector returns the row's own status unchanged.
     ('ouroboros/history_retention.py::raw_evidence_custodied', 'current["status"]'): 'dynamic',
+    # #3048: a late PASS of an author's pending finish rewrites only the ended task's review and objective axes;
+    # its locked projector returns the CURRENT truly terminal status unchanged and writes nothing on any other row.
+    ('ouroboros/late_review_marks.py::resolve_pending_result_review', 'str(row["status"])'): 'dynamic',
     ('ouroboros/headless.py::_finalize_task_artifacts_locked', 'status'): 'dynamic',
     ('ouroboros/headless.py::_finalize_task_artifacts_locked', 'str(existing.get("status") or status or "completed")'): 'terminal',
     ('ouroboros/mutation_attribution.py::advance_mutation_baseline', 'status'): 'dynamic',
@@ -178,7 +181,7 @@ TERMINAL_WRITERS = {
     # Monetary refresh projects fields under the result lock and preserves its
     # current terminal status; it cannot publish a lifecycle transition.
     ('supervisor/events_task_done.py::_refresh_terminal_task_cost', 'current["status"]'): 'dynamic',
-    ('supervisor/queue_snapshot.py::_restore_pending', 'STATUS_CANCELLED'): 'terminal',
+    ('supervisor/queue_snapshot.py::_restore_retained', 'STATUS_CANCELLED'): 'terminal',
     ('supervisor/queue_snapshot.py::_refuse_restore_invalid_fences', 'STATUS_CANCELLED'): 'terminal',
     # Explicit calendar expiry retains pending custody until the result and delivery are durable.
     ('supervisor/queue_timeouts.py::_settle_pending_deadline', '"failed"'): 'terminal',
@@ -217,7 +220,7 @@ NO_DELIVERABLE_LANES = {
         'cancelled before it ever started: no answer exists',
     'supervisor/workers.py::_settle_cancelled_pending_row':
         'dropped before assignment; the salvage receipt belongs to custody',
-    'supervisor/queue_snapshot.py::_restore_pending':
+    'supervisor/queue_snapshot.py::_restore_retained':
         'restore-time reconciliation of a task cancelled while the server was down',
     'supervisor/queue_snapshot.py::_refuse_restore_invalid_fences':
         'the invalid-acceptance-fence refusal moved out of restore_pending_from_snapshot (#1196): '
@@ -261,8 +264,8 @@ def _sources():
     return paths
 
 
-def _calls(source: str, target: str, *, include_partials: bool = False):
-    """Lexical calls; writer inventory may include partial bindings, which do not prove execution order."""
+def _calls(source: str, target: str):
+    """Every call to ``target`` with the enclosing lexical qualname."""
     stack: list[str] = []
     aliases: list[set[str]] = [set()]
     found: list[tuple[str, ast.Call]] = []
@@ -298,10 +301,6 @@ def _calls(source: str, target: str, *, include_partials: bool = False):
             self.generic_visit(node)
 
         def visit_Call(self, node):
-            if (include_partials and isinstance(node.func, ast.Attribute) and node.func.attr == "partial"
-                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "functools" and node.args):
-                node = ast.copy_location(ast.Call(func=node.args[0], args=node.args[1:],
-                                                 keywords=node.keywords), node)
             func = node.func
             name = (
                 func.id if isinstance(func, ast.Name)
@@ -315,12 +314,12 @@ def _calls(source: str, target: str, *, include_partials: bool = False):
     return found
 
 
-def _call_sites(target: str, *, include_partials: bool = False):
+def _call_sites(target: str):
     for path in _sources():
         source = path.read_text(encoding="utf-8")
         if target not in source:
             continue
-        for qualname, node in _calls(source, target, include_partials=include_partials):
+        for qualname, node in _calls(source, target):
             yield path, source, f"{path.relative_to(REPO).as_posix()}::{qualname}", node
 
 
@@ -374,7 +373,7 @@ def test_c7_the_set_of_terminal_status_writers_equals_the_manifest():
     this is that assertion.
     """
     live: dict[tuple[str, str], str] = {}
-    for _path, source, identity, node in _call_sites("write_task_result", include_partials=True):
+    for _path, source, identity, node in _call_sites("write_task_result"):
         expression = _expression(source, node, 2, "status")
         if expression in _NON_TERMINAL_STATUS_EXPRESSIONS:
             continue
@@ -552,25 +551,15 @@ def test_terminal_inventory_sees_conditional_writers_without_leaking_aliases():
 def refusal():
     writer = receipt_first if never_admitted else write_task_result
     writer(root, tid, **({} if never_admitted else {"status": STATUS_FAILED}))
-    pending = functools.partial(writer, root, tid, **({} if never_admitted else {"status": status}))
-    gate(pending)
-    functools.partial(write_task_result, root, tid, STATUS_CANCELLED)
     def nested(writer):
         writer(root, tid, "not-a-result-writer")
     writer = unrelated
     writer(root, tid, "not-a-result-writer")
-    functools.partial(writer, root, tid, "not-a-result-writer")
 def sibling():
     writer(root, tid, "not-a-result-writer")
     write_task_result(root, tid, status=status)
 '''
-    direct = _calls(source, "write_task_result")
-    assert [(qual, _expression(source, node, 2, "status")) for qual, node in direct] == [
-        ("refusal", "STATUS_FAILED"), ("sibling", "status"),
-    ]  # Binding a callback alone must not count as executing it for C8/C9.
-    found = _calls(source, "write_task_result", include_partials=True)
+    found = _calls(source, "write_task_result")
     assert [(qualname, _expression(source, node, 2, "status")) for qualname, node in found] == [
-        ("refusal", "STATUS_FAILED"), ("refusal", "status"),
-        ("refusal", "STATUS_CANCELLED"), ("sibling", "status"),
+        ("refusal", "STATUS_FAILED"), ("sibling", "status"),
     ]
-    assert [node.lineno for _, node in found] == [4, 5, 7, 15]

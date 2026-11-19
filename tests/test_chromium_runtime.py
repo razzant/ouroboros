@@ -6,6 +6,7 @@ launches nothing else. Real launches of the pinned build are in the ``browser`` 
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -20,6 +21,7 @@ import pytest
 import ouroboros.tools.browser as browser_mod
 from ouroboros import chromium_runtime, verified_download
 from ouroboros.tools.registry import BrowserState
+from tests._browser_fakes import close_generations, coro, install_async_api
 
 PINNED = chromium_runtime.CHROMIUM_VERSION
 FOLDER = "chrome-headless-shell-test"
@@ -256,17 +258,22 @@ class _Chromium:
     def __init__(self, *, error=None, version=PINNED):
         self.calls, self.error, self.version, self.closed = [], error, version, []
 
-    def launch(self, **kwargs):
+    async def launch(self, **kwargs):
         self.calls.append(kwargs)
         if self.error is not None:
             raise self.error
-        return types.SimpleNamespace(version=self.version, close=lambda: self.closed.append(True))
+        return types.SimpleNamespace(version=self.version, close=coro(lambda: self.closed.append(True)))
+
+
+def _launch(chromium, **kwargs):
+    """The launch runs on a session's loop in production; one loop of its own here."""
+    return asyncio.run(browser_mod._launch_browser_with_fallback(types.SimpleNamespace(chromium=chromium), **kwargs))
 
 
 def test_no_pinned_executable_means_no_launch():
     chromium = _Chromium()
     with pytest.raises(chromium_runtime.ChromiumRefusal):
-        browser_mod._launch_browser_with_fallback(types.SimpleNamespace(chromium=chromium), executable_path=None)
+        _launch(chromium, executable_path=None)
     assert chromium.calls == []
 
 
@@ -274,8 +281,7 @@ def test_the_pin_launches_inside_its_sandbox_by_default(monkeypatch):
     monkeypatch.delenv(chromium_runtime.SANDBOX_ENV, raising=False)
     chromium = _Chromium()
 
-    browser = browser_mod._launch_browser_with_fallback(types.SimpleNamespace(chromium=chromium),
-                                                        executable_path="/pinned/chrome-headless-shell")
+    browser = _launch(chromium, executable_path="/pinned/chrome-headless-shell")
 
     assert browser.version == PINNED
     (kwargs,) = chromium.calls
@@ -288,8 +294,7 @@ def test_the_administrator_opt_out_launches_unsandboxed_and_warns(monkeypatch, c
     monkeypatch.setenv(chromium_runtime.SANDBOX_ENV, "off")
     chromium = _Chromium()
     with caplog.at_level(logging.WARNING, logger=browser_mod.log.name):
-        browser_mod._launch_browser_with_fallback(types.SimpleNamespace(chromium=chromium),
-                                                  executable_path="/pinned/chrome-headless-shell")
+        _launch(chromium, executable_path="/pinned/chrome-headless-shell")
     assert chromium.calls[0]["chromium_sandbox"] is False
     assert any("sandbox is OFF" in record.getMessage() for record in caplog.records)
 
@@ -297,8 +302,7 @@ def test_the_administrator_opt_out_launches_unsandboxed_and_warns(monkeypatch, c
 def test_a_sandbox_that_cannot_start_refuses_with_no_second_launch():
     chromium = _Chromium(error=RuntimeError("Browser logs:\nRunning as root without --no-sandbox is not supported."))
     with pytest.raises(chromium_runtime.ChromiumRefusal) as refused:
-        browser_mod._launch_browser_with_fallback(types.SimpleNamespace(chromium=chromium),
-                                                  executable_path="/pinned/x", sandbox=True)
+        _launch(chromium, executable_path="/pinned/x", sandbox=True)
     assert refused.value.code == chromium_runtime.SANDBOX_UNAVAILABLE and len(chromium.calls) == 1
     assert chromium.calls[0]["chromium_sandbox"] is True
 
@@ -307,33 +311,30 @@ def test_other_launch_failures_keep_their_own_error():
     error = RuntimeError("libnss3.so: cannot open shared object file")
     chromium = _Chromium(error=error)
     with pytest.raises(RuntimeError) as raised:
-        browser_mod._launch_browser_with_fallback(types.SimpleNamespace(chromium=chromium),
-                                                  executable_path="/pinned/x", sandbox=True)
+        _launch(chromium, executable_path="/pinned/x", sandbox=True)
     assert raised.value is error and len(chromium.calls) == 1
 
 
 def test_another_build_answering_is_closed_and_refused():
     chromium = _Chromium(version="151.0.7922.34")
     with pytest.raises(chromium_runtime.ChromiumRefusal) as refused:
-        browser_mod._launch_browser_with_fallback(types.SimpleNamespace(chromium=chromium),
-                                                  executable_path="/pinned/x", sandbox=True)
+        _launch(chromium, executable_path="/pinned/x", sandbox=True)
     assert "151.0.7922.34" in str(refused.value) and chromium.closed == [True]
 
 
 def _fake_session(monkeypatch, chromium):
     page = types.SimpleNamespace(set_default_timeout=lambda _ms: None, on=lambda *_a: None)
-    context = types.SimpleNamespace(new_page=lambda: page, route=lambda *_a: None, close=lambda: None)
+    context = types.SimpleNamespace(new_page=coro(lambda: page), route=coro(lambda *_a: None), close=coro(lambda: None))
     starts = []
 
-    def launch(**kwargs):
+    async def launch(**kwargs):
         chromium.calls.append(kwargs)
-        return types.SimpleNamespace(new_context=lambda **_kw: context, is_connected=lambda: True,
-                                     close=lambda: None, version=PINNED)
+        return types.SimpleNamespace(new_context=coro(lambda **_kw: context), is_connected=lambda: True,
+                                     close=coro(lambda: None), version=PINNED)
 
-    playwright = types.SimpleNamespace(chromium=types.SimpleNamespace(launch=launch), devices={}, stop=lambda: None)
-    sync_api = types.SimpleNamespace(sync_playwright=lambda: types.SimpleNamespace(
-        start=lambda: starts.append(True) or playwright))
-    monkeypatch.setitem(__import__("sys").modules, "playwright.sync_api", sync_api)
+    playwright = types.SimpleNamespace(chromium=types.SimpleNamespace(launch=launch), devices={},
+                                       stop=coro(lambda: None))
+    install_async_api(monkeypatch, playwright, starts)
     monkeypatch.setattr(browser_mod, "_HAS_STEALTH", False)
     monkeypatch.setattr(browser_mod, "_ensure_playwright_installed",
                         lambda *, engine, **_kw: "/pinned/chrome-headless-shell" if engine == "chromium" else None)
@@ -346,7 +347,10 @@ def test_the_opt_out_is_disclosed_by_every_observation_of_that_session(monkeypat
     _fake_session(monkeypatch, chromium)
     ctx = types.SimpleNamespace(browser_state=BrowserState(), task_constraint=None)
 
-    _page, generation = browser_mod._ensure_browser(ctx)
+    try:
+        _page, generation = browser_mod._ensure_browser(ctx)
+    finally:
+        close_generations(ctx.browser_state)
 
     assert chromium.calls[0]["chromium_sandbox"] is False
     assert generation.browser_conditions.startswith(

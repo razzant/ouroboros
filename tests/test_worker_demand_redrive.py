@@ -125,7 +125,7 @@ def _retired_rows(root):
 
 @pytest.mark.parametrize(("kind", "kill_raises"), [("idle", False), ("unready", True)])
 def test_a_retained_stop_spends_one_bounded_join_and_its_re_drives_never_wait(assigning, monkeypatch, kind, kill_raises):
-    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(3))
     monkeypatch.setattr(task_reaper, "_deferred_reap_jobs", [])
     kills, errors = _wedge(monkeypatch)
     proc = _NativeChild(43, wait=False)
@@ -170,7 +170,7 @@ def test_a_retained_stop_spends_one_bounded_join_and_its_re_drives_never_wait(as
 
 @pytest.mark.parametrize("kind", ["idle", "unready"])
 def test_a_new_generation_drops_the_retained_job_and_owns_its_own_bounded_join(assigning, monkeypatch, kind):
-    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(3))
     monkeypatch.setattr(task_reaper, "_deferred_reap_jobs", [])
     kills, _errors = _wedge(monkeypatch)
     proc = _NativeChild(43, wait=False)
@@ -208,13 +208,13 @@ def _tick_until(predicate, ticks=12):
 @pytest.mark.parametrize(("kind", "wedged"), [("idle", True), ("unready", False)])
 def test_an_unconfirmable_stop_never_starves_independent_dispatch_or_growth(
         assigning, monkeypatch, record_property, kind, wedged):
-    """Real reaper thread and assignment, MAX 3, slot 0 idle and ready. Before the fix each re-drive
+    """Real reaper thread and assignment, cap 3, slot 0 idle and ready. Before the fix each re-drive
     held the serializer for another 2 s join and no turn dispatched in 12 ticks."""
     jobs = _JobQueue()
     monkeypatch.setattr(queue, "_reap_queue", jobs)
     monkeypatch.setattr(task_reaper, "reap_queue", jobs)
     monkeypatch.setattr(task_reaper, "_deferred_reap_jobs", [])
-    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(3))
     handed = _watcher_handoffs(monkeypatch)
     if wedged:
         _wedge(monkeypatch)
@@ -236,10 +236,12 @@ def test_an_unconfirmable_stop_never_starves_independent_dispatch_or_growth(
         assert workers.RUNNING["fresh"]["worker_id"] == 0
         if wedged:
             workers.PENDING.extend([task("second"), task("third")])
-            assert _tick_until(lambda: len(proc.joins) >= 3 and len(workers.WORKERS) == 3) is not None
+            assert _tick_until(lambda: len(proc.joins) >= 3 and len(workers.WORKERS) == 4) is not None
             assert proc.joins[0] == 2 and set(proc.joins[1:]) == {0}, f"a re-drive blocked again: {proc.joins}"
             assert workers.WORKERS[1] is slot and slot.active_capacity and slot.reaping
-            assert len(assigning.created) == 1, "growth ran, and the failed slot kept its reservation"
+            # Growth ran beside it: the cap counts acting tasks and the machine measures the wedged process's
+            # memory itself, so it is charged as retiring until its death is seen, never as a held number.
+            assert len(assigning.created) == 2, "growth ran for both queued rows"
             proc.alive = False  # the stop lands
         else:
             assert dispatched_at <= 1 and proc.joins == [2]

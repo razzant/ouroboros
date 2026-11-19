@@ -197,7 +197,7 @@ ANCHOR_ROWS: tuple[AnchorRow, ...] = (
         _fields(_TOOL + " elapsed_ms is_error status"),
         optional=_fields(_TOOL_OPTIONAL + " result_preview args_ref result_ref tool_result_meta exit_code signal "
                                           "duration_ms timed_out killed_by_host pre_exec_failure resolved_runtime "
-                                          "runtime_provenance ws_relay_failures"),
+                                          "runtime_provenance ws_relay_failures tool_result_code control_reason"),
         content=_fields("args result_preview tool_result_meta"), natural_key=("invocation_id", "type"),
     ),
     AnchorRow(

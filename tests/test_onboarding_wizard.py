@@ -23,7 +23,7 @@ def _base_payload() -> dict:
         "MINIMAX_REGION": "",
         "TOTAL_BUDGET": 10,
         "OUROBOROS_PER_TASK_COST_USD": 20,
-        "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+        "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",  # a stale client's key: retired, never written
         "LOCAL_MODEL_SOURCE": "",
         "LOCAL_MODEL_FILENAME": "",
         "LOCAL_MODEL_CONTEXT_LENGTH": 16384,
@@ -55,7 +55,7 @@ def test_prepare_onboarding_settings_accepts_openai_only_setup():
     assert prepared["OUROBOROS_MODEL"] == "openai::gpt-5.5"
     assert prepared["TOTAL_BUDGET"] == 10.0
     assert prepared["OUROBOROS_PER_TASK_COST_USD"] == 20.0
-    assert prepared["OUROBOROS_REVIEW_ENFORCEMENT"] == "advisory"
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in prepared, "the retired key is never written"
     assert prepared["OUROBOROS_MODEL_CONSCIOUSNESS"] == ""
     # Onboarding no longer manages auto-grant; the global SSOT default applies.
     assert "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS" not in prepared
@@ -302,7 +302,8 @@ def test_a_finish_that_edits_nothing_keeps_the_legacy_pair_exactly():
     contract, state = bootstrap["contract"], bootstrap["initialState"]
     body = {row["settingKey"]: state[row["stateKey"]]
             for name in ("providerFields", "modelSlots", "budgetFields") for row in contract[name]}
-    body.update(OUROBOROS_REVIEW_ENFORCEMENT=state["reviewEnforcement"], OUROBOROS_RUNTIME_MODE=state["runtimeMode"])
+    assert "reviewEnforcement" not in state and "reviewModes" not in contract
+    body.update(OUROBOROS_RUNTIME_MODE=state["runtimeMode"])
     assert "OPENAI_BASE_URL" not in body
     for payload in (body, {**body, "OPENAI_BASE_URL": state["legacyCompatibleBaseUrl"]},
                     {**body, "OPENAI_BASE_URL": "http://127.0.0.1:1/v1"}):
@@ -439,7 +440,7 @@ def test_onboarding_steps_and_stylesheet_keep_their_owner_facing_shape():
     rails = {step["railCopy"] for step in contract["steps"]}
     css = (REPO / "web" / "onboarding.css").read_text(encoding="utf-8")
 
-    assert {"Connect your accounts", "Choose models", "Choose review mode", "Review limits"} <= titles
+    assert {"Connect your accounts", "Choose models", "Choose access", "Review limits"} <= titles
     assert {"Subscriptions + API", "model slots"} <= rails
     assert "@media (max-width: 720px)" in css
     assert "scroll-snap-type: x proximity;" in css
@@ -504,7 +505,11 @@ def test_setup_contract_groups_rarely_used_providers():
     assert {field["settingKey"]: field["group"] for field in fields} == {
         "OPENROUTER_API_KEY": "primary",
         "OPENAI_API_KEY": "primary",
+        "OPENAI_API_SURFACE": "more",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY": "more",
+        "GIGACHAT_CREDENTIALS": "more",
+        "GIGACHAT_USER": "more",
+        "GIGACHAT_PASSWORD": "more",
         "MINIMAX_API_KEY": "more",
         "MINIMAX_REGION": "more",
         "DEEPSEEK_API_KEY": "more",
@@ -526,10 +531,12 @@ def test_setup_contract_has_no_secret_values():
 
     assert contract["hostMode"] == "web"
     assert "providerFields" in contract
-    assert budget_fields["TOTAL_BUDGET"]["settingsInputId"] == "s-total-budget"
+    # The budgets have one editor in the app, the Costs rows, which find a field by its ``stateKey``: the contract
+    # names no Settings input for them (the second editor in Settings is gone).
+    assert all("settingsInputId" not in field for field in contract["budgetFields"])
+    assert [field["stateKey"] for field in contract["budgetFields"]] == ["totalBudget", "perTaskCostUsd"]
     assert budget_fields["TOTAL_BUDGET"]["min"] == "0.01"
     assert budget_fields["TOTAL_BUDGET"]["step"] == "any"
-    assert budget_fields["OUROBOROS_PER_TASK_COST_USD"]["settingsInputId"] == "s-settings-per-task-cost"
     assert "settingsInputId" in contract["providerFields"][0]
     assert "OPENROUTER_API_KEY" in text
     assert "sk-or-v1-super-secret" not in text
@@ -558,7 +565,7 @@ def test_setup_contract_has_no_secret_values():
     deepseek_initial = deepseek_bootstrap["initialState"]
     assert deepseek_initial["providerProfile"] == "deepseek"
     assert deepseek_initial["mainModel"] == "deepseek::deepseek-v4-pro"
-    assert deepseek_initial["lightModel"] == "deepseek::deepseek-v4-flash"
+    assert deepseek_initial["lightModel"] == "deepseek::deepseek-flash"
 
 
 # --- The served page must not hand back a stored credential -----------------
@@ -722,6 +729,7 @@ def test_api_settings_exposes_setup_contract_without_secrets(tmp_path):
         patch.object(srv, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
         patch.object(srv, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
         patch.object(gw_settings, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
+        patch.object(gw_settings, "settings_read_view", return_value=({"OPENROUTER_API_KEY": secret}, {})),
         patch.object(gw_settings, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
         patch("ouroboros.server_auth.get_configured_network_password", return_value=""),
     ]
@@ -1065,3 +1073,30 @@ def test_onboarding_rejects_malformed_connection_draft_without_partial_settings(
 def test_named_connection_needs_an_enabled_endpoint_for_remote_access(row):
     prepared, error = prepare_onboarding_settings({**_base_payload(), "OUROBOROS_CONNECTIONS": [row]}, {})
     assert prepared == {} and error == "Connect Codex, an API provider, or a local model before continuing."
+
+
+def test_onboarding_seeds_a_new_openai_key_on_responses_and_keeps_an_existing_choice():
+    """A key new to this install starts on Responses; a key the install already had keeps the API it ran (Chat
+    when never chosen), and a client that does not send the field never clears a saved one."""
+    from ouroboros.settings_setup_contract import derive_provider_profile
+
+    payload = {**_base_payload(), "OPENAI_API_KEY": "sk-openai-1234567890"}
+    prepared, error = prepare_onboarding_settings(payload, {})
+    assert error is None and prepared["OPENAI_API_SURFACE"] == "responses"
+    assert derive_provider_profile(prepared) == "openai-responses"
+    prepared, error = prepare_onboarding_settings(payload, {"OPENAI_API_KEY": "sk-openai-1234567890"})
+    assert error is None and prepared["OPENAI_API_SURFACE"] == ""
+    assert derive_provider_profile(prepared) == "openai"
+    kept, error = prepare_onboarding_settings(payload, {"OPENAI_API_KEY": "sk-openai-1234567890",
+                                                        "OPENAI_API_SURFACE": "responses"})
+    assert error is None and kept["OPENAI_API_SURFACE"] == "responses"
+    refused, error = prepare_onboarding_settings({**payload, "OPENAI_API_SURFACE": "auto"}, {})
+    assert refused == {} and error == "OpenAI API must be chat_completions or responses."
+
+
+def test_the_responses_profile_is_offered_beside_the_unchanged_chat_profile():
+    bootstrap = build_setup_bootstrap({}, "desktop")
+    assert bootstrap["modelDefaults"]["openai"]["main"] == "openai::gpt-5.6-terra"
+    assert (bootstrap["modelDefaults"]["openai-responses"]["main"], bootstrap["modelDefaults"]["openai-responses"]["light"],
+            bootstrap["modelDefaults"]["openai-responses"]["fallback"]) == (
+        "openai::gpt-6.1-terra", "openai::gpt-6-luna", "openai::gpt-6.1-sol")

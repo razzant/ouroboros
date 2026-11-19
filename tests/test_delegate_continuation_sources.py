@@ -99,14 +99,19 @@ def test_snapshot_continuation_preserves_source_coverage(
         pending, = custody.pending_invocations(tmp_path)
 
         class RecoveryGateway:
-            def start_run(self, body, *, idempotency_key):
+            def operations(self):
+                return [{"method": "POST", "path": "/v2/runs/lookup"}]
+            def lookup_run(self, body, *, idempotency_key):
                 assert body == request and idempotency_key == pending["invocation_id"]
-                return {"runId": "run-next"}
+                return {"status": "found", "storeId": "fixture-store", "handle": {
+                    "jobId": "accepted-next", "runId": "run-next", "state": "running"}}
+            def start_run(self, *_a, **_kw):
+                pytest.fail("an unknown continuation must be read, not automatically re-POSTed")
 
             def get_run(self, _run_id):
                 return {"summary": {"state": "running"}}
 
-        assert _recover_pending_invocation(tmp_path, RecoveryGateway(), pending)["action"] == "left_live"
+        assert _recover_pending_invocation(tmp_path, RecoveryGateway(), pending, may_read=True)["action"] == "left_live"
     else:
         assert payload["status"] == "started"
 
@@ -137,7 +142,11 @@ def test_snapshot_continuation_preserves_source_coverage(
 
     class AnswerGateway:
         def handshake(self, **_kwargs): return {}
-        def answer_interaction(self, run_id, interaction_id, answers):
+        def get_run(self, run_id, **_kwargs):  # the questions the engine holds the run on (legacy rows)
+            ids = [f"range-{new['source']['task_id']}-0", f"range-{old['source']['task_id']}-{midpoint}"]
+            return {"summary": {"state": "running", "waitingOnUser": True}, "lastSeq": 1, "pendingInteractions": [
+                {"interactionId": iid, "questions": [{"id": "source", "question": "Send it."}]} for iid in ids]}
+        def answer_interaction(self, run_id, interaction_id, answers, *, timeout_sec=None):
             deliveries.append((run_id, interaction_id, answers))
             return {"accepted": True, "status": "delivered"}
         def close(self): pass

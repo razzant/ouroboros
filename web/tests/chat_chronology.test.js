@@ -7,7 +7,7 @@ import {
     isNonTerminalMediaHistoryRow,
     rawTimestampEpoch,
 } from '../modules/chat_activity.js';
-import { insertTimelineNode } from '../modules/chat.js';
+import { insertTimelineNode } from '../modules/chat_render_batch.js';
 import { normalizeLogTs } from '../modules/log_events.js';
 
 function makeNode(id, ts = null, { height = 20, top = 100 } = {}) {

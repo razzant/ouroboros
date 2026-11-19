@@ -491,13 +491,6 @@ test('saving a choice paints the page from the answer; a refused save leaves the
     assert.equal(client.calls.filter(([name]) => name === 'uiI18n').length, 0);
 }));
 
-test('edits inside the language block never mark the Settings draft dirty', () => {
-    const source = readFileSync(new URL('../modules/settings.js', import.meta.url), 'utf8');
-    const handler = source.slice(source.indexOf('const onServerSettingEdited = (event) => {'), source.indexOf("page.addEventListener('input', onServerSettingEdited);"));
-    assert.match(handler, /closest\?\.\('\[data-i18n-settings\]'\)\) return;/, 'the language saves through its own endpoint');
-    assert.ok(handler.indexOf('[data-i18n-settings]') < handler.indexOf('onSettingsEdited();'), 'before the draft is touched');
-});
-
 test('the block mounted in the wizard offers Import only and hides what is hidden; Settings keeps Export and Regenerate', () => {
     const settings = languageBlockHtml();
     const wizard = languageBlockHtml({ onboarding: true });
@@ -508,9 +501,15 @@ test('the block mounted in the wizard offers Import only and hides what is hidde
         assert.ok(settings.includes(marker), `${marker} in Settings`);
         assert.ok(!wizard.includes(marker), `${marker} acts on a language a first run does not have yet`);
     }
-    // Setup's step is the card: the block in it is no second card (DESIGN principle 2), while Settings' block is one.
-    assert.match(settings, /class="form-section ui-card"/);
-    assert.doesNotMatch(wizard, /ui-card/);
+    // Setup's step is the card: the block in it is no second card (DESIGN principle 2). Settings draws rows in a card,
+    // the status in the language row's own line, and the rare actions in the page's fold, named by what it holds.
+    assert.match(settings, /<section class="ui-card settings-card"[^>]*>\s*<h3 class="settings-card-title"[^>]*>Everywhere<\/h3>/);
+    assert.match(settings, /data-setting-row="OUROBOROS_UI_LANGUAGE"[\s\S]*?<label class="ui-row-title" for="ui-language-select">Language<\/label>/);
+    assert.match(settings, /<details class="ui-disclosure" data-settings-fold>\s*<summary>More: translations<\/summary>/);
+    assert.ok(settings.indexOf('data-settings-fold') < settings.indexOf('data-i18n-import'), 'Import, Export and Regenerate sit in the fold');
+    // The select is the language block's own control: the row helper never takes its change as a second writer.
+    assert.doesNotMatch(settings, /data-setting-control/);
+    assert.doesNotMatch(wizard, /ui-card|settings-row/);
     // The wizard loads neither style.css (the global [hidden] rule) nor settings.css (the toolbar row):
     // its own stylesheet states both for this block, or "Other language" shows before "Other…" is chosen.
     const css = readFileSync(new URL('../onboarding.css', import.meta.url), 'utf8');

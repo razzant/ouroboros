@@ -1,4 +1,4 @@
-"""Pure usage and terminal-state projections for delegated-run custody."""
+"""Usage and terminal-state projections for delegated runs and review seats."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import logging
 import pathlib
 import time
 from contextlib import contextmanager
+# Standard library only: scripts/safe_test.py imports this chain without site-packages.
 from typing import Any, Dict, Literal, Optional, Tuple, TypedDict
 
 from ouroboros._usage_response import provider_cost_value
@@ -14,18 +15,29 @@ from ouroboros._usage_response import provider_cost_value
 log = logging.getLogger(__name__)
 
 
-class CostCustody(TypedDict):
-    """Execution coverage for the amount's scope; never another monetary store."""
-
+class _CostCustodyRequired(TypedDict):
     status: Literal["available", "unavailable"]
     open_run_ids: list[str]
     unrecorded_run_ids: list[str]
     pending_invocation_ids: list[str]
 
 
+class CostCustody(_CostCustodyRequired, total=False):
+    """Execution coverage for the amount's scope; never another monetary store.
+
+    ``unrecorded_run_ids`` names every run without a matching receipt. Its subset
+    ``closed_unrecorded_run_ids`` names those whose custody already closed (settled or
+    closed absent): no collector writes for them, so their cost is unknown, not pending.
+    Records written before that field lack it; absence keeps their earlier reading.
+    """
+
+    closed_unrecorded_run_ids: list[str]
+
+
 def unavailable_cost_custody() -> CostCustody:
     """A failed coverage read is unknown, even when no run identity is readable."""
-    return {"status": "unavailable", "open_run_ids": [], "unrecorded_run_ids": [], "pending_invocation_ids": []}
+    return {"status": "unavailable", "open_run_ids": [], "unrecorded_run_ids": [], "closed_unrecorded_run_ids": [],
+            "pending_invocation_ids": []}
 
 
 @contextmanager
@@ -165,6 +177,10 @@ def cost_coverage(snapshot, txn, root) -> dict:
     Counts/dollars stay ledger-owned. Even SETTLED/LEDGER_RECORDED is only a
     custody claim until its actual one-shot receipt belongs to this scope.
     Cleanup holds (patches, output, project retirement) are not monetary holds.
+    A settled run without that receipt is ``closed_unrecorded``: its custody is over
+    (SETTLED or CLOSED_ABSENT, whatever ``ledger_recorded`` claims) and no collection
+    follows, so no money will arrive. An unsettled run, terminal or not, may still
+    be collected and stays unrecorded only.
     """
     from ouroboros.delegate_custody import TERMINAL_STATES
 
@@ -183,6 +199,7 @@ def cost_coverage(snapshot, txn, root) -> dict:
         if not matching:
             missing.add(rid)
     return {**snapshot, "unrecorded": missing,
+            "closed_unrecorded": {rid for rid in missing if snapshot["runs"][rid].settled},
             "open": {rid for rid, entry in snapshot["runs"].items()
                      if not entry.settled and entry.terminal_state not in TERMINAL_STATES}}
 
@@ -196,6 +213,7 @@ def with_cost_coverage(summary, joined, *, task_id="", root_task_id=""):
     coverage: CostCustody = {
         "status": joined["status"], "open_run_ids": sorted(runs & joined["open"]),
         "unrecorded_run_ids": sorted(runs & joined["unrecorded"]),
+        "closed_unrecorded_run_ids": sorted(runs & joined["closed_unrecorded"]),
         "pending_invocation_ids": sorted({str(p["invocation_id"]) for p in joined["pending"]
                                           if selected(p.get("task_id"), p.get("root_task_id"))}),
     }
@@ -206,9 +224,19 @@ def with_cost_coverage(summary, joined, *, task_id="", root_task_id=""):
 
 
 def cost_coverage_open(summary) -> bool:
+    """Coverage leaves the amount incomplete: unreadable, live, uncollected or closed without a receipt."""
     coverage = summary.get("cost_custody") or {}
     return bool(coverage.get("status", "available") != "available"
                 or coverage.get("open_run_ids") or coverage.get("unrecorded_run_ids")
+                or coverage.get("pending_invocation_ids"))
+
+
+def cost_coverage_pending(summary) -> bool:
+    """Coverage may still bring money: as ``cost_coverage_open`` minus runs closed without a receipt."""
+    coverage = summary.get("cost_custody") or {}
+    closed = set(coverage.get("closed_unrecorded_run_ids") or ())
+    return bool(coverage.get("status", "available") != "available"
+                or coverage.get("open_run_ids") or set(coverage.get("unrecorded_run_ids") or ()) - closed
                 or coverage.get("pending_invocation_ids"))
 
 
@@ -269,35 +297,131 @@ def observe_review_usage(observer: Any, usage: Optional[Dict[str, Any]]) -> None
     observer(row)
 
 
-def observe_failed_review_send(observer: Any, exc: BaseException) -> None:
-    """Rows for every physically dispatched attempt behind a failed reviewer send."""
+def _review_attempt_rows(attempt_ids: list[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Read only these physical ids in the current review's billing scope."""
     from ouroboros import usage_store
-    from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES, _drive_root, current_usage_scope
+    from ouroboros.usage_accounting import _drive_root, current_usage_scope
+
+    if attempt_ids:
+        try:
+            scope = current_usage_scope()
+            with usage_store.read(_drive_root(getattr(scope, "drive_root", None)), allow_stale=True) as txn:
+                return {attempt_id: txn.attempt(attempt_id) for attempt_id in attempt_ids}
+        except Exception:
+            log.debug("failed to resolve review attempt states", exc_info=True)
+    return dict.fromkeys(attempt_ids)
+
+
+def _review_receipt_estimated(row: Dict[str, Any]) -> bool:
+    """For a priced row, keep an exact subtotal distinct from an estimate."""
+    return row.get("cost_final") is not True and not (
+        row.get("cost_partial") is True and row.get("cost_estimated") is False)
+
+
+def observe_failed_review_send(observer: Any, exc: BaseException) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Emit the failed send's physical events; share the same read with its seat's money projection."""
+    from ouroboros._usage_response import UnusableReplyError
+    from ouroboros.usage_accounting import PHYSICAL_ATTEMPT_STATES, POSITIVE_PHYSICAL_ATTEMPT_STATES
 
     capture = getattr(exc, "physical_attempt_capture", None)
-    attempt_ids = [str(value) for value in (getattr(exc, "ledger_attempt_ids", None) or []) if value]
+    attempt_ids = dict.fromkeys(str(value) for ids in (
+        getattr(exc, "ledger_attempt_ids", None),
+        exc.usage.get("ledger_attempt_ids") if isinstance(exc, UnusableReplyError) else None,
+    ) for value in ids or () if value)
     capture_id = str(getattr(capture, "attempt_id", "") or "")
-    if capture_id and capture_id not in attempt_ids:
-        attempt_ids.append(capture_id)
-    rows: Dict[str, Dict[str, Any]] = {}
-    try:
-        scope = current_usage_scope()
-        root = _drive_root(getattr(scope, "drive_root", None))
-        with usage_store.read(root) as txn:  # one PK lookup per attempt id
-            found = {attempt_id: txn.attempt(attempt_id) for attempt_id in attempt_ids}
-        rows = {attempt_id: row for attempt_id, row in found.items() if row is not None}
-    except Exception:
-        log.debug("failed to resolve review attempt states", exc_info=True)
+    if capture_id:
+        attempt_ids[capture_id] = None
+    rows = _review_attempt_rows(list(attempt_ids))
     capture_state = str(getattr(capture, "state", "") or "")
-    for attempt_id in attempt_ids:
-        row = rows.get(attempt_id, {})
+    any_read = any(row is not None for row in rows.values())
+    for attempt_id, receipt in rows.items():
+        row = receipt or {}
         state = str(row.get("state") or (capture_state if attempt_id == capture_id else ""))
         if state not in POSITIVE_PHYSICAL_ATTEMPT_STATES and not (
-            not rows and attempt_id != capture_id
+            not any_read and attempt_id != capture_id
         ):
             continue
-        observe_review_usage(observer, {
+        usage = {
             "resolved_model": str(row.get("model") or getattr(capture, "model", "") or ""),
             "provider": str(row.get("provider") or getattr(capture, "provider", "") or ""),
             "ledger_attempt_ids": [attempt_id],
-        })
+        }
+        if receipt is not None:
+            cash = provider_cost_value(row.get("cost_usd")) if state == "settled" else None
+            usage.update(cost=cash, cost_final=(cash is not None and row.get("cost_final") is True
+                                               and row.get("cost_partial") is not True),
+                         cost_estimated=cash is not None and _review_receipt_estimated(row))
+        observe_review_usage(observer, usage)
+    # Preserve the physical fact, but never infer money from an unread row.
+    if capture_state in PHYSICAL_ATTEMPT_STATES and capture_id and rows[capture_id] is None:
+        rows[capture_id] = {"state": capture_state}
+    return rows
+
+
+class ReviewAttemptCosts:
+    """Project an API review seat's settled spend once per physical id, not once per answer."""
+
+    def __init__(self) -> None:
+        self._observed: Dict[str, Optional[Dict[str, Any]]] = {}
+        self._unread: dict[str, None] = {}
+        self._returned_reply = False
+
+    def observe(self, usage: Optional[Dict[str, Any]], observer: Any) -> None:
+        from ouroboros.usage_accounting import last_physical_attempt_capture
+
+        self._returned_reply = True
+        reply = usage or {}
+        ids = [str(value) for value in reply.get("ledger_attempt_ids") or () if value]
+        for attempt_id in ids:
+            if attempt_id not in self._observed:
+                self._observed[attempt_id] = None
+                self._unread[attempt_id] = None
+        capture = last_physical_attempt_capture()
+        # Exact ordinary receipts already pass through settle_attempt. Read back only prices not
+        # accounted for by that receipt (internal resends, nonfinal and unreadable settlement).
+        if (ids and capture is not None and capture.attempt_id == ids[-1] and capture.state == "settled"
+                and reply.get("cost_final") is True and not any(reply.get(key) for key in (
+                    "cost_partial", "cost_estimated", "cost_invalid"))
+                and (cash := provider_cost_value(reply.get("cost"))) is not None):
+            self._observed[ids[-1]] = {"state": "settled", "cost_usd": cash, "cost_final": True}
+            self._unread.pop(ids[-1], None)
+        observe_review_usage(observer, usage)
+
+    def failed(self, rows: Optional[Dict[str, Optional[Dict[str, Any]]]]) -> None:
+        for attempt_id, row in (rows or {}).items():
+            self._unread.pop(attempt_id, None)
+            if row is not None or not self._observed.get(attempt_id):
+                self._observed[attempt_id] = row
+
+    def project(self, usage: Dict[str, Any]) -> Dict[str, Any]:
+        from ouroboros._usage_money import amount, exact_money
+        from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES
+
+        if not self._observed:
+            return usage  # uninstrumented legacy replies keep their existing usage grammar
+        self._observed.update(_review_attempt_rows(list(self._unread)))
+        self._unread.clear()
+        amounts = []
+        states = set()
+        partial = estimated = False
+        for row in (receipt or {} for receipt in self._observed.values()):
+            state = row.get("state")
+            states.add(state)
+            if state == "released":
+                continue
+            cash = amount(row.get("cost_usd")) if state == "settled" else None
+            partial |= cash is None or row.get("cost_partial") is True
+            if cash is not None:
+                amounts.append(cash)
+                estimated |= _review_receipt_estimated(row)
+        with exact_money():
+            subtotal = float(sum(amounts)) if amounts else None
+        projected = dict(usage)
+        projected.pop("cost_invalid", None)  # the ledger, not the last reply's price, is the projection's source
+        projected.update(ledger_attempt_ids=list(self._observed), cost=subtotal, cost_partial=partial,
+                         cost_estimated=estimated, cost_final=subtotal is not None and not (partial or estimated))
+        # Billing IDs can include holds that never left the host. Disambiguate only
+        # those receipts; an ordinary returned reply keeps its existing projection.
+        if states & {"reserved", "released"}:
+            projected["physical_dispatch_observed"] = self._returned_reply or bool(states & POSITIVE_PHYSICAL_ATTEMPT_STATES)
+        return projected

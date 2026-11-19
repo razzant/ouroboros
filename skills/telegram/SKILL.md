@@ -1,10 +1,10 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.3
+version: 1.4.16
 type: extension
 entry: plugin.py
-plugin_api: "2.0"
+plugin_api: "2.4"
 runtime: python3
 os: any
 permissions: [net, read_settings, widget, route, supervised_task, subscribe_event, inject_chat, subprocess, companion_process]
@@ -15,7 +15,7 @@ subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.docu
 conflicts: [telegram-bridge, telegram-miniapp-poc]
 when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.
 model_experience:
-  what_model_sees: No new tools; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants or connects nothing. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never routing instructions. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
+  what_model_sees: No new tools; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants, enables or resumes nothing; the enabled bridge applies a saved or cleared token by itself. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never routing instructions. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
   token_effect: Near-zero while idle — no per-round schema cost; incoming Telegram media arrive as ordinary attachments and cost what any chat attachment costs.
 timeout_sec: 60
 companion_processes:
@@ -33,7 +33,9 @@ and the optional Mini App. The first positive private Telegram chat binds as
 the sole owner. Text, photos and files (documents, video, audio and voice notes within
 this integration's 10 MiB download cap) can be sent to Ouroboros, with or without a
 caption; replies, photos, videos, documents, typing state, subagent cards, quiz
-cards, and opt-in notifications are mirrored back to that owner. Telegram's typing
+cards, and opt-in notifications are mirrored back to that owner. A helper's own final report
+stays in the app, where its card shows it; Ouroboros's answer speaks for it, while a helper's
+message to you, question or file still comes here. Telegram's typing
 indicator stays on while a reply you asked for, mirrored to this chat, is actively
 being prepared by Ouroboros or a working helper; it stops for Pause, Stop now and
 after the answer, and a question waiting for you, a model-access wait or background work
@@ -47,6 +49,14 @@ until Telegram reaches that second; a host behind can accept retained commands. 
 boundary second are accepted. Other slash commands keep their command-mode rules even in replies; quote a literal command
 as code or include it inside an explanation to send it as a quiz answer.
 
+A Project's mirrored messages lead with its name in italics; named work of its own
+in Main leads with that work's name. Direct replies in Main, completion and refusal notices
+that already name their work, and sources the host cannot name get no label; no
+label never means Main. Names are literal text and follow each new event, so a
+renamed Project updates its worker bubble. Long messages repeat the label on each
+part; a caption that no longer fits goes out as full text before its media.
+Quizzes keep the label through answers and edits.
+
 The bridge remembers every mirrored part, including media and completion
 notices, in a bounded durable message map. Replying passes its host row or work
 reference through normal chat; Ouroboros decides what it means. Unknown or
@@ -57,6 +67,85 @@ plain text, under where he wrote them and with the file names, above the note; a
 note between works that quotes none of his words stays in its room.
 Quiz buttons and replies keep their decision path; earlier parts of a long
 question carry ordinary references.
+
+Mirrored messages, files, cards and their updates leave through one outbox that
+survives restarts (`outbox/` in this skill's state): each is saved before it is sent
+or waits, and nothing that could not be saved is sent; what waits is bounded (500
+messages, 256 MiB), and one that does not fit is not sent. One that never left this
+computer, because Telegram or its proxy could not be reached, waits there and goes out
+by itself when Telegram answers, as does one Telegram's flood control asked to send
+later; while the outbox runs, nothing mirrored after it overtakes it, and a long
+message continues from its first part that did not arrive. When the answer is lost
+after a request was sent (a timeout, a dropped connection, a server error), the
+message or edit may already be on the phone, so nothing is sent again for it. One
+still waiting after a day is no longer sent, nor one that mirroring settings changed to
+leave out while it waited. Delivery, in this skill's Telegram settings, says what waits and
+whether the outbox can save; Delivery issues lists each recent one whose delivery was not
+confirmed (without a clear answer it may still have arrived), never its words: when, what,
+from which room, how many parts arrived, what happened, and where its content is: in the
+app, or kept on this computer as its only copy (a document whose task file is gone keeps its
+message and the file's reference). Progress, routing and subagent notes are never kept. Kept
+copies have no bound of their own, so no only copy is dropped to make room: their list starts
+with the space they take (they can fill the disk, and a message a full disk cannot save is not
+sent), and a saved file the outbox could not remove is listed there too. A kept copy is never
+sent again and stays until the owner ticks the box and presses Delete copies, which deletes
+exactly the ids its own field lists (names are never read back); one kept later stays, and a
+deleted copy's outcome stays listed. After a deletion that field is empty until the page is
+opened again. Completion notices keep their own retry; the bot's replies to commands, typing
+and `/panic` are sent once, as before.
+
+Before a body rollback or skill downgrade to native Telegram 1.4.14 or older,
+export needed kept copies with the recipe below and verify the saved artifacts.
+The older outbox does not honor `held` and can delete these only copies; rollback
+does not guarantee their retention.
+
+To give the owner a kept copy, save it as this task's file: never send it through
+Telegram, `send_file`, `send_photo` or `send_video`, and never paste a kept message's words
+into a reply. Run the script below with `run_script(script=…, cwd="task_drive", args=["<id>",
+"<name>"], outputs=["<name>"])`: `<id>` as Kept copies lists it (a record id or a `stray-` handle),
+`<name>` a plain file name. By default it saves the file's bytes regardless of extension,
+including `.txt`; a message without a file saves its words as UTF-8. To choose explicitly,
+append `"bytes"` or `"words"` as the third argument. `words` saves the message text or a
+photo's, video's or file's caption, not the file content. A reference-only file refuses
+byte extraction; its caption needs explicit `words`. Output reports the file name, size,
+SHA-256 and `words`: true when words were saved, false for file bytes. Give the owner the
+file's address `/api/tasks/<task id>/artifacts/<name>`. Your words with that address are
+mirrored as usual; the copy is not. Run it from a task whose `runtime_data` is this
+installation's (its `task_drive` is `runtime_data/task_drives/<task id>`).
+
+<!-- telegram-kept-copy-recipe -->
+```python
+import base64, hashlib, json, pathlib, sys
+copy_id, name = sys.argv[1], sys.argv[2]
+outbox = pathlib.Path.cwd().resolve().parents[1] / "state" / "skills" / "telegram" / "outbox"
+handle = lambda path: "stray-" + hashlib.sha256(path.name.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+found = [path for path in outbox.glob("*.event.json") if copy_id in (path.name[:-len(".event.json")], handle(path))]
+if pathlib.Path(name).name != name or len(found) != 1:
+    sys.exit(f"No kept copy {copy_id!r} in {outbox}, or {name!r} is not a plain file name.")
+event = json.loads(found[0].read_bytes())
+blob = next((event[key] for key in ("image_base64", "video_base64", "file_base64") if event.get(key) is not None), None)
+mode = sys.argv[3] if len(sys.argv) > 3 else ("bytes" if blob is not None or event.get("file_ref") else "words")
+if mode not in ("bytes", "words"):
+    sys.exit("Choose bytes or words as the third argument.")
+if mode == "bytes" and blob is None:
+    sys.exit(f"This copy holds no bytes, only its task file's reference: {json.dumps(event['file_ref'])}"
+             if event.get("file_ref") else "This copy holds no file bytes; use words for its message.")
+options = [o if isinstance(o, dict) else {"label": o} for o in event.get("options") or []]
+notice = event.get("completion_notice") if isinstance(event.get("completion_notice"), dict) else {}
+relay = event.get("relay") if isinstance(event.get("relay"), dict) else {}
+quotes = [quote.get("text") for quote in relay.get("quotes") or [relay] if isinstance(quote, dict)]
+words = [*quotes, event.get("text") or event.get("question") or event.get("title"), event.get("caption"),
+         notice.get("detail"), notice.get("review_gate"), notice.get("salvage"),
+         *(" — ".join(filter(None, (str(o.get("label") or ""), str(o.get("detail") or "")))) for o in options),
+         event.get("stake"), event.get("assumption"), event.get("host_facts"),
+         *(f"{a.get('label', '')} — {a.get('url', '')}" for a in event.get("actions") or [] if isinstance(a, dict))]
+text = "\n".join(str(word) for word in words if word)
+data = base64.b64decode(blob, validate=True) if mode == "bytes" else text.encode("utf-8")
+pathlib.Path(name).write_bytes(data)
+print(json.dumps({"file": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                  "words": mode == "words"}))
+```
+<!-- /telegram-kept-copy-recipe -->
 
 A derived reference map that cannot be saved only warns, blocking no owner message
 or later outbound part. Completion notifications
@@ -97,7 +186,7 @@ batch unconfirmed at the upgrade may repeat a turn.
 Version 1.4.1 declares `secret_fields` (`botToken` → `TELEGRAM_BOT_TOKEN`), so setup can
 ask for the bot token with `showSecretHitl('telegram', ['botToken'])`: the owner types it
 into Ouroboros's protected form in the web or desktop app, it goes to Settings, and the
-agent learns only that it was saved. Saving grants, enables and connects nothing. Another
+agent learns only that it was saved. Saving grants, enables and resumes nothing. Another
 secret request mirrored here arrives as a short note saying where to enter it, without
 buttons; a reply to that note, whatever it holds (text, a photo, a file, a voice message, a
 slash-looking token), is answered here and sent nowhere, apart from the local `/menu`, `/help`,
@@ -123,9 +212,9 @@ The bridge routes every Telegram API call through the optional skill-local
 and the companion's menu button lifecycle. The Settings form masks the proxy
 and never reads its stored credentials back into the browser.
 
-The bridge also forwards the owner's notes and skill notices (`reminder` and
-`skill_notice` System rows, written for the owner) to the pinned chat when the
-mirror mode is `telegram_only`; mode `all` already mirrored them.
+The bridge also forwards the owner's notes, skill notices and the Safety Supervisor's notices
+(`reminder`, `skill_notice` and `safety_notice` System rows, written for the owner) to the pinned
+chat when the mirror mode is `telegram_only`; mode `all` already mirrored them.
 
 The bridge speaks the install's interface language (Settings → Appearance → Language):
 `/language` lists English and the languages the install already has,
@@ -151,15 +240,28 @@ content still arrives. Ordinary replies, files and questions are independent, as
 remain seen, so enabling does not replay that backlog. Older summary rows without
 the host's compact cause projection retain their original reason text when On.
 
-The Mini App exposes the unchanged Ouroboros SPA through the established
-owner-authenticated sidecar and a pinned Cloudflare Quick Tunnel. It is enabled
-by default after owner binding and can be turned off independently without
-stopping the text bridge. Disabling the skill destroys process-memory Mini App
-sessions, stops public exposure, and best-effort restores the prior Telegram
-menu button. The bot token can be replaced while the skill is enabled, but the
-running poller keeps polling with the token it started with until it restarts,
-while every send already uses the new one; rotate it with the skill disabled, or
-disable and re-enable the skill right after the change.
+The Mini App exposes the Ouroboros SPA through the owner-authenticated sidecar
+and a pinned Cloudflare Quick Tunnel. The sidecar relays WebSocket failure codes
+without private exception text, within its 8 MiB message limit. Requests wait
+for an upstream socket with no pool timeout (32 connections, 8 kept alive). An
+upstream response closes however delivery ends; a stream stops
+once its phone leaves, which uvicorn tells only `receive()`. A request whose phone
+left while waiting still reaches the core when a socket frees, and reading its body ends
+it; closing the HTTP client alone cancels no queued wait. It is on
+by default after owner binding; turning it off keeps the text bridge. Disabling it destroys process-memory Mini App
+sessions, stops public exposure and best-effort restores Telegram's prior
+menu button. While it is on, a token saved, replaced or cleared applies within
+seconds without Disable/Enable: nothing new goes out with the old token, a long send stops
+after the parts already taken, and the Mini App restarts once the old process dies. No
+token is a quiet wait, never a crash; unreadable settings keep the last token.
+
+Share… on a saved Ouroboros message (DESIGN "Replies") passes its Text through Telegram's own chat
+picker in the Mini App: the page posts only the words it shows (up to 4096 characters) to `miniapp/prepare-share`,
+which answers only what the sidecar forwards for the owner's session, and the bridge's own client (its token, proxy
+and server) saves them as one prepared message for the owner (`savePreparedInlineMessage`: plain text, no link
+preview, for a person, a group or a channel). Telegram's `shareMessage` then lets the owner pick a chat and send it, or
+not; the bot sends nothing itself and logs no words. A client without Mini App API 8.0 has no picker: the sheet says so,
+and Copy stays.
 
 Delegated task cards lead with the executor's latest words (marked earlier
 when retained), followed by problems and compact activity counts. These are
@@ -287,5 +389,14 @@ fallback. A nonempty machine value takes precedence over the interpreter build;
 macOS and Linux use only the machine value.
 
 The Mini App is Beta. Its best-effort Cloudflare Quick Tunnel has no SLA and
-does not support Server-Sent Events (SSE). It targets native Telegram clients;
-Telegram WebA/WebK are not supported.
+lacks Server-Sent Events (SSE). Every new link is one more request to Cloudflare, so a
+new link has two minutes to register before answers without the Mini App's marker count
+toward replacing it. When cloudflared reports Cloudflare's HTTP 429 for that request,
+the companion plans the next one for an hour later (90 minutes after each further
+refusal until a link is allocated), and the Mini App status shows that planned time.
+The wait ends at that time on this computer's clock or after its full length, whichever
+comes first, so changing the clock meanwhile can bring the request sooner.
+Only the running companion process remembers this wait: a restart, an Update or a new
+token starts without it. Each run is a new origin: an earlier one's saved text
+preview stays in Telegram's storage after a later sign-out. It targets native clients;
+Telegram WebA/WebK are unsupported.

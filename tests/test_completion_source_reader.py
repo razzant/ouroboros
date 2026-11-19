@@ -13,13 +13,14 @@ from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests.test_completion_observations import _trace
 
 
-def source_reader(tmp_path, monkeypatch, mode):
+def source_reader(tmp_path, monkeypatch, mode, *, trace=None):
     canonical, execution, repo = [tmp_path / name for name in ('canonical', 'execution', 'repo')]
     for path in (canonical, execution, repo):
         path.mkdir()
     monkeypatch.setattr('ouroboros.skill_readiness.acceptance_skill_lifecycle', lambda *_a, **_k: [])
-    trace = _trace()
-    trace['tool_calls'][1]['result'] = 'Полный исходный ответ 🙂'
+    if trace is None:
+        trace = _trace()
+        trace['tool_calls'][1]['result'] = 'Полный исходный ответ 🙂'
     source = build_completion_observations(execution,
         {'id': 'source-task', 'budget_drive_root': str(canonical)}, trace)
     row = {'completion_observations': source}
@@ -45,6 +46,7 @@ def test_native_selector_retains_source_task_and_canonical_drive(tmp_path, monke
                         'arguments': {'task_id': 'source-task', 'include_completion_source': True}}
     raw = path.read_bytes()
     text = raw.decode('utf-8')
+    assert raw == json.dumps(json.loads(text), ensure_ascii=False, sort_keys=True).encode('utf-8')
     assert len(raw) > len(text)  # offsets count characters, not UTF-8 bytes
     metadata = json.loads(reg.execute(selector['tool'], selector['arguments']))['completion_source']
     assert metadata['reason'] == 'source_range_required' and 'text' not in metadata
@@ -69,6 +71,34 @@ def test_native_selector_retains_source_task_and_canonical_drive(tmp_path, monke
     assert path.read_bytes() == raw
 
 
+def test_completion_source_keeps_byte_names_and_exact_displaced_ranges(tmp_path, monkeypatch):
+    raw_name = b'notes-\xff.txt'
+    name = raw_name.decode('utf-8', 'surrogateescape')
+    answers = [f'Résumé: {name}', r'Résumé: notes-\udcff.txt']
+    delivery = {'tool': 'send_file', 'status': 'error', 'code': 'LEGACY_TOOL_ERROR',
+                'result': f'Not delivered: {name}', 'is_error': True}
+    reg, ref, path, _, _, row = source_reader(tmp_path, monkeypatch, 'split_readonly',
+        trace={'tool_calls': [delivery], 'displaced_answer': answers})
+    raw = path.read_bytes()
+    text = raw.decode('utf-8')
+    snapshot = json.loads(text)
+    assert snapshot['delivery_results'] == [delivery] and snapshot['displaced_answer'] == answers
+    assert snapshot['delivery_results'][0]['result'].removeprefix('Not delivered: ').encode(
+        'utf-8', 'surrogateescape') == raw_name
+    observations = row['completion_observations']
+    assert observations['delivery_counts']['send_file'] == {'calls': 1, 'reported_ok': 0, 'status_unknown': 0}
+    assert observations['displaced_answer']['count'] == 2
+    for selected, answer in zip(observations['displaced_answer']['answers'], answers):
+        start, end = selected['source_range']
+        assert selected['chars'] == len(answer)
+        result = json.loads(reg.execute('get_task_result', {**ref['reader']['arguments'],
+            'source_start_char': start, 'source_end_char': end}))['completion_source']
+        part = result['text']
+        assert part == text[start:end] and json.loads(part) == answer
+        assert result['complete_sha256'] == ref['sha256'] == hashlib.sha256(raw).hexdigest()
+        assert result['text_sha256'] == hashlib.sha256(part.encode('utf-8')).hexdigest()
+
+
 @pytest.mark.parametrize('start,end', [(None, 1), (0, None), (0, False), (-1, 2)])
 def test_completion_reader_preserves_the_existing_strict_range_contract(tmp_path, monkeypatch, start, end):
     reg, _ref, _path, _canonical, _execution, _row = source_reader(tmp_path, monkeypatch, 'split_readonly')
@@ -84,6 +114,33 @@ def test_completion_reader_preserves_the_existing_strict_range_contract(tmp_path
     # ("range_required" stays the no-range answer; "unavailable" would be false for a readable source.)
     assert result['complete_chars'] > 0 and result['requested_range'] == [start, end]
     assert 'range_required' not in result and 'status' not in result
+
+
+def test_an_end_past_the_source_reads_to_its_end_and_names_both_ranges(tmp_path, monkeypatch):
+    """A piecewise read's last piece overshoots by nature, and a receipt's `size` counts bytes: the end
+    is lowered to the source's and the answer names the range asked and the range delivered. The text
+    is the same exact slice an exact range returns; a start at the end is still an argument fault."""
+    reg, _ref, path, _canonical, _execution, _row = source_reader(tmp_path, monkeypatch, 'split_readonly')
+    raw = path.read_bytes()
+    total = len(raw.decode('utf-8'))
+    assert len(raw) > total  # the byte size a receipt names is itself an end past the source
+    base = {'task_id': 'source-task', 'include_completion_source': True}
+
+    typed = reg.execute_result('get_task_result', {**base, 'source_start_char': total - 5, 'source_end_char': len(raw)})
+    assert (typed.status, typed.code) == ('ok', 'OK')
+    tail = json.loads(typed.text)['completion_source']
+    assert (tail['start_char'], tail['end_char'], tail['text_chars']) == (total - 5, total, 5)
+    assert tail['requested_range'] == [total - 5, len(raw)] and tail['complete_chars'] == total
+    exact = json.loads(reg.execute('get_task_result', {
+        **base, 'source_start_char': total - 5, 'source_end_char': total}))['completion_source']
+    assert exact['text'] == tail['text'] and exact['text_sha256'] == tail['text_sha256']
+    assert 'requested_range' not in exact  # a range inside the source answers exactly as before
+
+    past = reg.execute_result('get_task_result', {**base, 'source_start_char': total, 'source_end_char': total + 9})
+    assert (past.status, past.code) == ('error', 'TOOL_ARG_ERROR')
+    refused = json.loads(past.text)['completion_source']
+    assert refused['reason'] == 'source_range_invalid' and 'text' not in refused
+    assert refused['requested_range'] == [total, total + 9] and refused['complete_chars'] == total
 
 
 @pytest.mark.parametrize('fault', ['digest', 'bytes', 'missing'])

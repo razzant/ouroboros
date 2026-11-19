@@ -194,7 +194,7 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
     unknown: List[str] = []
     pins: Dict[str, str] = {}
     read = read_records(root)
-    if read.unlistable or read.unreadable:
+    if read.unlistable or read.unreadable or read.import_pending:
         unknown.append("private_copies")
     for copy in read.rows:
         if str(copy.get("task_id") or "") != task_id:
@@ -213,7 +213,7 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
                 if entry.name.endswith(ENV_SUFFIX):
                     named = str((scratch_owner(entry) or {}).get("task_id") or "") or _copy_owner(entry.name[:-len(ENV_SUFFIX)])
                 elif entry.name.startswith(".") or entry.name == COPIES or entry.is_symlink() or not entry.is_dir() \
-                        or str(entry.resolve(strict=False)) in recorded or read.unlistable \
+                        or str(entry.resolve(strict=False)) in recorded or read.unlistable or read.import_pending \
                         or _record_file(entry, root).name in read.unreadable:
                     continue
                 else:

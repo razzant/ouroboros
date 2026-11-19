@@ -35,7 +35,7 @@ def _document() -> str:
         'import("/static/modules/skills.js"),import("/static/modules/host_modules.js"),import("/static/modules/contributions.js")]);'
         'if(new URL(location.href).searchParams.has("host_modules")){const contributions=getContributions();contributions.attach();window.hostRuntime=startHostModules({store:contributions});}'
         'window.skillsView=initSkills({showPage:(page)=>{window.shownPage=page;},'
-        'openSettingsTab:(tab)=>{window.settingsTab=tab;}});'
+        'openSettings:(path,options)=>{window.settingsOpened=[path,options];return true;}});'
         'document.querySelector("#page-skills").classList.add("active");'
         'window.dispatchEvent(new CustomEvent("ouro:page-shown",{detail:{page:"skills"}}));'
         '</script></body></html>'
@@ -51,6 +51,16 @@ def skills_browser():
 
     with sync_playwright() as playwright:
         yield playwright
+
+
+def open_place_sheet(page, place_id):
+    """The place sheet as Circles opens it, with the circles of the same real places read: a connector's sheet only
+    points to Circles, and this harness mounts the Skills page alone. `/api/places` must be answered."""
+    page.evaluate("""async id => {
+        const [{openPlaceSheet}, {readPlaces}] = await Promise.all([import('/static/modules/place_sheet.js'), import('/static/modules/consciousness_api.js')]);
+        const view = await readPlaces();
+        openPlaceSheet(view.places.find(row => row.id === id), {circles: view.circles});
+    }""", place_id)
 
 
 class SkillsPage:
@@ -169,7 +179,7 @@ def capture(page, browser_name, width, state):
     if location := os.environ.get("OUROBOROS_UI_EVIDENCE_OUT"):
         target = Path(location)
         target.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(target / f"skills-{browser_name}-{width}-{state}.png"))
+        page.screenshot(path=str(target / f"skills-{browser_name}-{width}-{state}.png"), animations="disabled")
 
 
 def no_overflow(page) -> bool:

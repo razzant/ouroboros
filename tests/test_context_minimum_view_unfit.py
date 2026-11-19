@@ -51,6 +51,38 @@ def test_both_raise_sites_name_their_measured_input_reserve_window_and_deficit(t
         assert f"{label}={value}" in str(error)
 
 
+@pytest.mark.parametrize("shape", ["fixed", "memory"])
+def test_the_refusal_a_person_reads_says_need_limit_and_next_step_without_internal_words(tmp_path, monkeypatch, shape):
+    """The terminal text of a start the window cannot hold: what the start needs against the route's limit (the
+    comparison the fitter refused on: input plus the reply's room), the step that changes it, then the measured
+    parts. The exception keeps its own labelled message for records; a person is never shown it."""
+    from ouroboros.agent_dispatch import _context_capacity_terminal
+
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build_minimum_view(tmp_path, monkeypatch, shape)
+    error = raised.value
+    text, usage, _trace = _context_capacity_terminal(error)
+    threshold = error.estimated_input_tokens + error.response_reserve_tokens
+    assert threshold > error.window_tokens, "the refusal's own comparison"
+    needs = math.ceil(threshold / 1000) * 1000
+    assert f"needs about {needs:,} tokens" in text and f"the model's limit here is {error.window_tokens:,}" in text
+    assert "larger window" in text and "send the request again" in text and "Context Length" in text
+    # A room's own model outlives the default: the room's control is named first, the default as what it is.
+    assert text.index("model button under the message box") < text.index("default for chats that follow Main")
+    # A window is a role's setting; a chat with its own model has none, so the correction names Main's alone.
+    assert "If this chat follows Main and the model's real limit is higher, set Main's window" in text
+    # No promise the host cannot keep: Continue keeps the work's recorded model, and Nano was already tried.
+    assert "Continue" not in text and "Context mode" not in text
+    assert str(error) not in text and "=" not in text and "cannot fit" not in text
+    measured = text.split("Measured", 1)[1]
+    for part in (error.estimated_input_tokens, error.fixed_input_tokens, error.memory_view_tokens,
+                 error.response_reserve_tokens, error.window_tokens):
+        assert f"{part:,}" in measured
+    # The room the fitter also wanted is no threshold: named only when it was counted, never added to the need.
+    assert ("further room the start wanted" in measured) is bool(error.work_room_tokens)
+    assert usage["reason_code"] == "context_capacity" and usage["execution_status"] == "infra_failed"
+
+
 def test_a_work_room_only_shortfall_starts_with_the_existing_notice(tmp_path, monkeypatch):
     plan = build_minimum_view(tmp_path, monkeypatch, "work_room")
     shown = plan.projection(plan.initial_mode)

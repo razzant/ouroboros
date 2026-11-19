@@ -353,7 +353,7 @@ class GrokSession(JsonSession):
                 # xAI's server VAD always interrupts. Drain usage before clearing
                 # active_response, but do not cancel it again from host Interrupt.
                 self.cancelled.add(self.active_response)
-            return [LiveEvent('input_started'), LiveEvent('speech_started')]
+            return [LiveEvent('input_started', {'item_id': item} if item else {}), LiveEvent('speech_started')]
         if kind == 'input_audio_buffer.speech_stopped':
             self.speech_active, self.vad_response_pending = False, True
             return [LiveEvent('input_done')]
@@ -361,6 +361,9 @@ class GrokSession(JsonSession):
             self.input_transcripts.add(item)
         if kind == 'conversation.item.input_audio_transcription.failed':
             self.input_transcripts.discard(item)
+            # The model still received the audio; these words close with no text, wherever newer ones stand. Their
+            # provisional text, if any, stays for teardown's salvage, as before.
+            return [LiveEvent('caption', {'speaker': 'owner', 'item_id': item, 'text': '', 'final': True})]
         if kind in {'response.audio.delta', 'response.output_audio.delta'}:
             self.output_transcripts.add(item)
             self.item_responses[item] = event.get('response_id') or self.active_response

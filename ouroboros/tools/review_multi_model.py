@@ -41,7 +41,7 @@ def _rev():
 
 
 # The commit panel is the review pool: every marked catalog row runs, so the
-# fan-out ceiling is the catalog's own ceiling (26), not a separate lane cap.
+# fan-out ceiling is the catalog's own ceiling, not a separate lane cap.
 MAX_MODELS = MAX_CONFIGURED_SUBAGENTS
 
 

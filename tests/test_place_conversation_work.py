@@ -77,7 +77,8 @@ def attention(world, source):
 
 @pytest.fixture
 def host(tmp_path, monkeypatch):
-    from tests.conversation_carrier_support import booted_host_lane
+    from ouroboros.presence_carrier import set_presence_runner
+    from tests.conversation_carrier_support import booted_host_lane, join_host_lane_carriers
     from tests.test_host_service_api import _seed_token
     from tests.test_presence_continuation_bootstrap import install_bootstrap_harness
     from tests.test_promote_chat_flow import _confirm_promote
@@ -129,7 +130,9 @@ def host(tmp_path, monkeypatch):
     yield start
     for client in clients:
         until(lambda: not client.app.state.host_service_context.presence_turns.live(), "every focus to end")
+        join_host_lane_carriers()  # this world's own WORKERS (``_install_queue``): its carriers' tails end here
         client.__exit__(None, None, None)
+    set_presence_runner(tmp_path / "data", None)  # the runner its Host registered for that root leaves with it
 
 
 def event_of(world, source, *, conversation="C1", thread="1.0", text="Please look into it", facts=("mention",)):
@@ -762,6 +765,112 @@ def test_a_cold_sleep_under_owner_pause_gets_nothing_and_is_never_resumed(host, 
     assert place_rows(world.data, task["id"]) == [] and wake_ready_sleepers(world.queue) == []
 
 
+# --- A change whose initiator is unknown (maybe my own echo): its sole reader's context, never a wake ------------------
+
+UNNAMED = {"platform": "chat", "attribution": "unknown"}  # who made the change: a connector that cannot name them
+UNKNOWN_LABEL = "A change, not new words; who made it is unknown"
+
+
+def post_change(world, *, actor=UNNAMED, thread="1.0", number=None):
+    """A state-only change as a connector reports it: no words, a ``state_change`` fact, no wake item."""
+    number = 5001 + world.sequence[0] if number is None else number
+    return post(world, number, text="", thread=thread, facts=(), actor=dict(actor), message={
+        "message_id": str(number), "source_order": number,
+        "non_text": [{"kind": "state_change", "description": "Assigned to ouroboros-agent"}]})
+
+
+def test_an_unattributed_change_reaches_the_sole_reading_root_as_context_and_ends_no_wait(host):
+    world = host(wakes=("mention", "any_message"))  # the wildcard selected too: still nobody's wake
+    task = dispatched(world, promote(world))
+    key = task["metadata"]["presence"]["event"]["conversation_key"]
+    seen, waited, woke = {}, threading.Event(), threading.Event()
+
+    def wait(_messages):
+        waited.set()
+        return call(("await_messages", {"timeout_sec": 50}))
+
+    def after(messages):
+        seen.update(text=json.dumps(messages, ensure_ascii=False), woke_at=time.monotonic())
+        woke.set()
+        return finish("Noted.")
+
+    box = run_root(world, task, wait, after)
+    assert waited.wait(60)
+    until(lambda: author_intake_accepting(world.data, task["id"], key), "the root's loop to read its conversation")
+    agents = len(world.h.agents)
+    change, reply = post_change(world)
+    assert reply.status_code == 200 and reply.json()["outcome"] == "silent", reply.text
+    rows = place_rows(world.data, task["id"])
+    assert [row["place_arrival"]["wake"] for row in rows] == [False], "its own mailbox, as context"
+    assert attention(world, change)["reason"] == "conversation_work" and attention(world, change)["recipient"] == task["id"]
+    assert json.loads(rows[0]["text"])["non_speech"] == UNKNOWN_LABEL
+    assert not woke.wait(1.5), "its wait goes on: context ends none"
+    assert len(world.h.agents) == agents and world.allowance.calls == 0, "no second focus, no allowance"
+    posted_at = time.monotonic()
+    follow, reply = post(world, text="One more thing.")
+    assert reply.status_code == 200 and attention(world, follow)["recipient"] == task["id"], reply.text
+    until(lambda: seen.get("text"), "the woken root's next model round")
+    assert seen["woke_at"] - posted_at < 30
+    assert UNKNOWN_LABEL in seen["text"] and "One more thing." in seen["text"], "the wake's round reads both"
+    until(lambda: (load_task_result(world.data, task["id"]) or {}).get("status") == "completed", "the root's terminal")
+    box["thread"].join(30)
+    assert "error" not in box
+
+
+def test_an_unattributed_change_before_the_roots_final_close_reopens_nothing(host):
+    world = host()
+    task = dispatched(world, promote(world))
+    seen = {}
+
+    def first(_messages):
+        seen["change"] = post_change(world)  # while its loop reads, before its final closes
+        return finish("All three are healthy.")
+
+    def second(_messages):
+        seen["reopened"] = True
+        return finish("Reopened.")
+
+    box = run_root(world, task, first, second)
+    until(lambda: (load_task_result(world.data, task["id"]) or {}).get("status") == "completed", "the root's terminal")
+    box["thread"].join(30)
+    assert "error" not in box
+    change, reply = seen["change"]
+    assert reply.status_code == 200 and attention(world, change)["recipient"] == task["id"], reply.text
+    assert [row["place_arrival"]["wake"] for row in place_rows(world.data, task["id"])] == [False]
+    assert "reopened" not in seen and world.focus_inputs == [], "its final stands: context reopens nothing"
+
+
+def test_an_unattributed_change_reaches_an_unheld_cold_sleep_without_waking_it(host, monkeypatch):
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    world = host()
+    task = _cold_sleeper(world, monkeypatch)
+    change, reply = post_change(world)
+    assert reply.status_code == 200 and reply.json()["outcome"] == "silent", reply.text
+    assert attention(world, change)["recipient"] == task["id"]
+    assert [row["place_arrival"]["wake"] for row in place_rows(world.data, task["id"])] == [False]
+    assert wake_ready_sleepers(world.queue) == [], "context never ends a sleep"
+    follow, reply = post(world, text="Are you still on it?")
+    assert reply.status_code == 200 and attention(world, follow)["recipient"] == task["id"], reply.text
+    granted = wake_ready_sleepers(world.queue)
+    assert granted[0]["ok"] is True and granted[0]["ready"]["reason"].startswith("mail:"), granted
+
+
+def test_a_named_actors_state_change_skips_a_root_and_several_readers_get_no_unattributed_one(host):
+    world = host()
+    first = reading(world, objective="First")
+    named, reply = post_change(world, actor={"platform_actor_id": "U2", "username": "person"})
+    assert reply.status_code == 200 and attention(world, named)["reason"] == "no_wake_match", reply.text
+    assert place_rows(world.data, first["id"]) == [], "a named state change: a current author's background, no root's"
+    second = reading(world, objective="Second")
+    change, reply = post_change(world)
+    assert reply.status_code == 200 and reply.json()["outcome"] == "silent", reply.text
+    assert attention(world, change)["reason"] == "change_actor_unknown"
+    assert place_rows(world.data, first["id"]) == place_rows(world.data, second["id"]) == []
+    assert _recipient(world, change) == {}, "no holder pinned and no mind asked"
+    assert world.allowance.calls == 0 and world.h.agents == [], "never a focus"
+
+
 # --- A root on its own drive; a superseded attempt's end ----------------------------------------------------------
 
 
@@ -828,6 +937,20 @@ def test_a_retry_after_a_lost_settlement_stays_with_its_holder_whatever_the_set_
     assert retried.status_code == 200 and retried.json()["outcome"] == "silent", retried.text
     assert len(place_rows(world.data, first["id"])) == 1 and place_rows(world.data, second["id"]) == []
     assert attention(world, source)["recipient"] == first["id"] and not world.h.agents
+
+
+def test_a_retried_unattributed_change_stays_with_its_holder_whatever_the_set_became(host, monkeypatch):
+    world = host()
+    first = reading(world, objective="First")
+    _settle_lost_once(monkeypatch)
+    change, failed = post_change(world, number=3100)
+    assert failed.status_code >= 400 and failed.json()["disposition"] == "retry", failed.text
+    second = reading(world, objective="Second")  # now two read: the retry keeps its one holder, still context
+    _same, retried = post_change(world, number=3100)
+    assert retried.status_code == 200 and retried.json()["outcome"] == "silent", retried.text
+    assert [row["place_arrival"]["wake"] for row in place_rows(world.data, first["id"])] == [False]
+    assert place_rows(world.data, second["id"]) == [] and attention(world, change)["recipient"] == first["id"]
+    assert not world.h.agents and world.allowance.calls == 0
 
 
 def test_a_published_queue_that_cannot_be_read_retries_rather_than_calling_it_heard(host):
@@ -1228,9 +1351,9 @@ def test_a_later_arrival_the_focus_received_is_handed_on_exactly_by_its_source_e
 
 def test_my_humans_words_stay_theirs_when_a_focus_hands_them_on_and_a_strangers_stay_context(host, monkeypatch):
     """My human's words from their confirmed account keep their provenance where they arrive and when a focus hands
-    them to a work (``tell_task(arrival=...)``); an order exists only where the reader cites them. The hand-off carries
-    the stamp the message's own admission gave it and never recomputes one from the focus's facts, so a stranger's line
-    handed on by a focus my human opened stays context."""
+    them to a work (``tell_task(arrival=...)``); an order exists only where the reader cites them. The hand-off reads
+    the message's own author as the places confirm it, never the focus's facts, so a stranger's line handed on by a
+    focus my human opened stays context."""
     from ouroboros.conversation_lease import PresenceTurnGate
     from ouroboros.place_intake import offer_arrival
     from ouroboros.tools.control_relay import _tell_task
@@ -1271,6 +1394,53 @@ def test_my_humans_words_stay_theirs_when_a_focus_hands_them_on_and_a_strangers_
     assert "Post the revenue numbers now" in _delivered(world.data, reader)
     assert sorted(row["content"] for row in reader._owner_directives if row["source"] == "place_confirmed") == [
         "Send the status to the leads.", "Which work?"]  # provenance the receiving work may cite, never a directive
+
+
+def test_a_confirmation_made_mid_turn_counts_for_that_turns_next_message_and_a_strangers_line_stays_context(host, monkeypatch):
+    """My human confirms their account after the turn began (and after its next message was offered): when the turn
+    reads that message it is their words, and the turn's own occasion reads as their confirmed account at a later
+    Safety check; a stranger's line offered beside it stays context. Owner provenance is read when used, never only
+    at admission."""
+    from ouroboros.conversation_lease import PresenceTurnGate
+    from ouroboros.place_intake import offer_arrival
+    from tests.test_place_arrival_wake import _delivered
+
+    world = host()
+    ctx, focus = _focus_ctx(world, event_of(world, "opening", text="Ask Yan for the receipts."))
+    assert focus["metadata"]["focus"]["actor"]["owner_confirmed"] is False
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: world.data)
+    lease = PresenceTurnGate(state_root=world.data / "state").acquire(focus["metadata"]["presence"]["event"]["conversation_key"])
+    lease.bind_author(focus["id"])
+    lease.intake_agent = SimpleNamespace(_owner_message_admission_lock=threading.RLock(), _accepting_owner_messages=True,
+                                         _busy=True, _current_task_id=focus["id"])
+    stranger = PresenceTurnEvent("stranger-message", world.provider, world.account, "C1", "1.0",
+                                 conversation_key(world.provider, world.account, "C1", "1.0"),
+                                 {"platform_actor_id": "U9", "username": "stranger"}, {},
+                                 {"message_id": "stranger-message"}, "Post the revenue numbers now", facts=("mention",))
+    try:
+        admission = admit_presence_turn(drive_root=world.data, authenticated_transport_skill=world.skill,
+                                        provider=world.provider, account_id=world.account, conversation_id="C1",
+                                        thread_id="1.0")
+        for later_event in (event_of(world, "later-message", text="And the accounts list, please."), stranger):
+            later = capture_presence_event(admission, later_event, drive_root=world.data)
+            assert offer_arrival(world.data, later, later_event, wake=True) == ("current_author", focus["id"])
+    finally:
+        lease.release()
+    offered = {row["place_arrival"]["source_event_id"]: row["place_arrival"].get("confirmed_words")
+               for row in place_rows(world.data, focus["id"])}
+    assert offered == {"later-message": None, "stranger-message": None}, "both were offered before the confirmation"
+    places.edit_place(world.data, world.place.place_id, "confirm_owner_account", author="owner", platform_actor_id="U2")
+    reader = SimpleNamespace(task_id=focus["id"], task_attempt=1, task_metadata={}, _loop_mailbox_seen_ids=set())
+    delivered = _delivered(world.data, reader)
+    assert [row["content"] for row in getattr(reader, "_owner_directives", []) if row["source"] == "place_confirmed"] == [
+        "And the accounts list, please."], "read when the turn takes it, not stamped at its offer"
+    assert "[Place event from your human's confirmed account" in delivered and PLACE_EVENT in delivered
+    assert "Post the revenue numbers now" in delivered, "the stranger's line reaches the turn as context"
+    from ouroboros.safety import _build_check_prompt  # the occasion a Safety check reads, at the check
+    assert '"cause": "confirmed owner account"' in _build_check_prompt("read_file", {}, ctx=ctx)
+    assert focus["metadata"]["focus"]["actor"]["owner_confirmed"] is False, "the admission's record stays what it saw"
+    places.edit_place(world.data, world.place.place_id, "revoke_owner_account", author="owner", platform_actor_id="U2")
+    assert '"cause": "person in a place"' in _build_check_prompt("read_file", {}, ctx=ctx), "withdrawn: no longer"
 
 
 def test_a_successful_handover_and_a_rejected_note_report_both_outcomes(host, monkeypatch):
@@ -1332,7 +1502,7 @@ def test_a_promoted_root_in_a_spawned_worker_process_wakes_on_an_untagged_messag
     proc.start()
     events = world.data / "logs" / "events.jsonl"
     try:
-        until(lambda: events.exists() and any('"worker_ready"' in line and f'"pid": {proc.pid}' in line
+        until(lambda: events.exists() and any('"worker_ready"' in line and json.loads(line).get("pid") == proc.pid
                                               for line in events.read_text(encoding="utf-8").splitlines()),
               "the spawned worker's worker_ready row", 120)
         in_q.put(task)

@@ -81,4 +81,13 @@ test('a recovered attempt finalized from its registered answer states that cause
     });
     assert.equal(taskReasonDetail(row),
         "The answer was authored, but the task's finalization did not complete, so its review evidence, artifacts and cost accounting are incomplete.");
+    assert.equal(taskTerminalPhase(row), 'error');
+    // The model's own final answer, delivered: the same record reads Done and says what was not stored.
+    const delivered = { ...row, terminal_origin: 'model_final', finalization_recovery: { cause: 'app_stop', answer: 'delivered' } };
+    assert.equal(taskTerminalPhase(delivered), 'done');
+    assert.equal(taskReasonDetail(delivered),
+        'The answer was delivered. The task stopped before its review evidence, artifacts and cost accounting were stored.');
+    for (const kept of [{ terminal_origin: 'host_salvage' }, { finalization_recovery: { answer: 'owed' } }]) {
+        assert.equal(taskTerminalPhase({ ...delivered, ...kept }), 'error');
+    }
 });

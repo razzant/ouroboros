@@ -38,13 +38,18 @@ def _liveness():
     return [time.monotonic(), {}, time.thread_time(), None]
 
 
-def test_one_events_pass_is_count_bounded_and_intake_runs_with_events_still_queued(monkeypatch, dispatch_spy):
+@pytest.mark.parametrize("stamped", [False, True])
+def test_one_events_pass_is_count_bounded_and_intake_runs_with_events_still_queued(monkeypatch, dispatch_spy, stamped):
     """A producer that keeps the queue non-empty still lets an owner message be taken
     by intake within one turn: the pass stops at its bound, the remainder stays queued
-    in FIFO order and the turn's next step (intake) sees the queue non-empty."""
+    in FIFO order and the turn's next step (intake) sees the queue non-empty. The lag
+    is the bus's own wait from its put stamp: a plain queue keeps none and measures no
+    lag, whatever ``ts`` its producers wrote."""
+    from supervisor.event_observation import ObservedEventQueue
+
     monkeypatch.setattr(sl, "SUPERVISOR_EVENT_BATCH_MAX_EVENTS", 5)
     monkeypatch.setattr(sl, "SUPERVISOR_EVENT_BATCH_MAX_SEC", 60.0)
-    event_q: "queue.Queue" = queue.Queue()
+    event_q: "queue.Queue" = ObservedEventQueue() if stamped else queue.Queue()
     for n in range(12):
         event_q.put({"type": "worker_event", "n": n, "ts": "2026-09-25T00:00:00+00:00"})
     ctx = _ctx([])
@@ -60,7 +65,7 @@ def test_one_events_pass_is_count_bounded_and_intake_runs_with_events_still_queu
     one_turn()
     assert turns == [(True, 7, "owner message")], turns
     assert ctx.dispatched == [0, 1, 2, 3, 4]
-    assert liveness[sl._LAG] is not None, "drained events are lag-observed"
+    assert (liveness[sl._LAG] is not None) is stamped, "the bus's own put-to-take wait, never a producer's ts"
     one_turn()
     one_turn()
     assert ctx.dispatched == list(range(12))

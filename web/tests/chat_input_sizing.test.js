@@ -279,6 +279,55 @@ test('a hidden field pins nothing and its reveal measures; only a new width re-m
     assert.ok(parseFloat(field.style.getPropertyValue('--chat-input-height')) > 80);
 });
 
+test('a field laid out at attach is measured in its first frame, with no observer report', async (t) => {
+    // An engine may send no first report for a field already laid out: Linux WebKit left Main's empty field at its
+    // unmeasured 33.2 px until the model strip opened, and the composer moved 0.2 px then. Attach asks one frame itself,
+    // once its caller has finished building.
+    const engine = installEngine();
+    t.after(engine.restore);
+    const field = new Field();
+    attachChatInputSizing(field);
+    assert.equal(field.borderBox, 33.2, 'unmeasured, one row is its line height and padding');
+    assert.equal(engine.pending(), 0, 'nothing is asked while the caller is still building');
+    await null;
+    assert.equal(engine.pending(), 1, 'attach asks one frame');
+    engine.flush();
+    assert.equal(field.style.getPropertyValue('--chat-input-height'), '33px', 'the first frame writes the whole-pixel height');
+    engine.report();
+    engine.flush();
+    assert.equal(field.writes.filter(([name]) => name === '--chat-input-height').length, 1,
+        'a later report at the same width writes nothing');
+});
+
+test('a draft measured at attach is not written again by the first frame', async (t) => {
+    // A restored draft is measured by sync() before the microtask: the first frame then finds the same width and cap.
+    const engine = installEngine();
+    t.after(engine.restore);
+    const field = new Field();
+    const sizing = attachChatInputSizing(field);
+    field.type(lines(3));
+    sizing.sync();
+    await null;
+    engine.flush();
+    assert.equal(field.writes.filter(([name]) => name === '--chat-input-height').length, 1, 'one write for the draft');
+});
+
+test('a content-sized field and a hidden one ask no first frame', async (t) => {
+    // The first frame is the measured mode's alone: in content mode a measurement would pin a height the engine keeps
+    // growing, and a hidden field has no width to wrap at until its reveal reports.
+    for (const [label, options, field] of [['content', { fieldSizing: true }, new Field()],
+        ['hidden', {}, new Field({ width: 0 })]]) {
+        const engine = installEngine(options);
+        try {
+            attachChatInputSizing(field);
+            await null;
+            assert.equal(engine.pending(), 0, `${label}: no frame is asked`);
+            engine.flush();
+            assert.deepEqual(field.writes, [], `${label}: nothing is written`);
+        } finally { engine.restore(); }
+    }
+});
+
 test('a font that finishes loading re-measures the same width once, in a frame', async (t) => {
     const engine = installEngine();
     t.after(engine.restore);
@@ -428,4 +477,82 @@ test('dispose disconnects, cancels a queued frame and makes later calls inert', 
     engine.flush();
     assert.deepEqual(field.writes, []);
     sizing.dispose();
+});
+
+test('a viewport resize that moves the cap re-measures the same width in a frame, one that moves nothing writes nothing', (t) => {
+    const priorWindow = globalThis.window;
+    t.after(() => { globalThis.window = priorWindow; });
+    const resizable = () => ({ heard: new Set(),
+        addEventListener(type, fn) { if (type === 'resize') this.heard.add(fn); },
+        removeEventListener(type, fn) { if (type === 'resize') this.heard.delete(fn); },
+        resize() { this.heard.forEach((fn) => fn()); } });
+    for (const fieldSizing of [false, true]) {
+        const engine = installEngine({ fieldSizing });
+        t.after(engine.restore);
+        globalThis.window = Object.assign(resizable(), { visualViewport: resizable() });
+        const field = new Field();
+        const sizing = attachChatInputSizing(field);
+        if (fieldSizing) {
+            assert.equal(globalThis.window.heard.size + globalThis.window.visualViewport.heard.size, 0,
+                'the engine sizes a content field: nothing to hear');
+            engine.restore();
+            continue;
+        }
+        field.type(lines(5));
+        sizing.sync();
+        assert.equal(field.dataset.sizing, 'fit');
+        // A resize that moves neither the width nor the cap writes nothing.
+        const quiet = field.writes.length;
+        globalThis.window.visualViewport.resize();
+        engine.flush();
+        assert.equal(field.writes.length, quiet, 'nothing moved: nothing measured');
+        // The phone keyboard rises in a short viewport: a quarter of it caps the field, the width unchanged.
+        field.computed.maxHeight = '62px';
+        globalThis.window.visualViewport.resize();
+        globalThis.window.resize();
+        assert.equal(engine.pending(), 1, 'one frame for both sources');
+        engine.flush();
+        assert.equal(field.dataset.sizing, 'capped');
+        assert.equal(field.style.getPropertyValue('--chat-input-height'), '62px');
+        sizing.dispose();
+        assert.equal(globalThis.window.heard.size + globalThis.window.visualViewport.heard.size, 0);
+        engine.restore();
+    }
+});
+
+test('the keyboard going away without a resize gives a capped draft its resting cap back in a frame', (t) => {
+    // app.js drops body.keyboard-open in the focusout's own frame and the cap (style.css, a quarter of the keyboard's
+    // viewport) returns to 140px with no resize: the written 62px changes no size a ResizeObserver could report.
+    for (const fieldSizing of [false, true]) {
+        const engine = installEngine({ fieldSizing });
+        t.after(engine.restore);
+        const body = globalThis.document.body;
+        const hears = () => engine.mutations.filter((o) => o.targets.some(([target, options]) => target === body
+            && options.attributeFilter?.includes('class')));
+        const field = new Field({ style: { maxHeight: '62px' } });
+        const sizing = attachChatInputSizing(field);
+        if (fieldSizing) {
+            assert.equal(hears().length, 0, 'the engine sizes a content field to its live cap: nothing to hear');
+            engine.restore();
+            continue;
+        }
+        field.type(lines(12));
+        sizing.sync();
+        assert.equal(field.style.getPropertyValue('--chat-input-height'), '62px');
+        assert.equal(hears().length, 1, 'a measured field hears the body class that scopes its cap');
+        field.computed.maxHeight = '140px';
+        hears()[0].callback([{ attributeName: 'class' }]);
+        engine.flush();
+        assert.equal(field.dataset.sizing, 'capped');
+        assert.equal(field.style.getPropertyValue('--chat-input-height'), '140px', 'the resting cap, without an edit');
+        // A class change that moves no cap (the drawer, a Project) writes nothing.
+        const quiet = field.writes.length;
+        hears()[0].callback([{ attributeName: 'class' }]);
+        engine.flush();
+        assert.equal(field.writes.length, quiet);
+        const observer = hears()[0];
+        sizing.dispose();
+        assert.ok(observer.disconnected, 'dispose stops listening');
+        engine.restore();
+    }
 });

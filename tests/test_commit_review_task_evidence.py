@@ -431,9 +431,8 @@ def test_fresh_stage_captures_current_evidence_over_a_stale_selection(evidence_c
     observed = []
     monkeypatch.setattr(git, "_run_parallel_review", lambda *a, **kw: (observed.append(ctx._commit_review_evidence) or None, None, "", []))
     result = git._run_reviewed_stage_cycle(ctx, "fresh", time.time(), paths=["README.md"], require_release_tag=False)
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
-    # Nonblocking enforcement returns even a clean outcome before Git (#1741).
-    assert result["status"] == ("passed" if review_enforcement_blocks() else "reviewed")
+    # Every outcome, a clean one included, returns before Git (#1741).
+    assert result["status"] == "reviewed"
     assert len(observed) == 1 and "NEW_ASSESSMENT" in observed[0]["preview"]
 
 

@@ -494,8 +494,18 @@ def resolve_subagent_lane(
     else:
         resolved_from, provenance = intended_lane(requested, parent_lane), "inherited"
     effective = resolved_from
-    model = _lane_model(effective)
-    if lane_ran_on_main(effective, model):
+    if effective == "light":
+        from ouroboros.route_choice import following_route
+
+        # The Light slot's one rule: an empty slot is Main's route unless its own box, checked under a
+        # cloud Main, sends it to the local runtime. That box's lane is Light's own, never recorded as Main.
+        model, use_local = following_route("light")
+        on_main = lane_ran_on_main(effective, model) and use_local == _use_local_for_lane("main", model)
+    else:
+        model = _lane_model(effective)
+        on_main = lane_ran_on_main(effective, model)
+        use_local = _use_local_for_lane("main" if on_main else effective, model)
+    if on_main:
         # Report the slot the model ACTUALLY came from. Asking for Heavy on an
         # install with no Heavy slot gets the Main model, and calling that
         # `effective_lane="heavy"` made the record claim a strength nobody
@@ -505,7 +515,7 @@ def resolve_subagent_lane(
         requested_lane=requested,
         effective_lane=effective,
         model=model,
-        use_local_model=_use_local_for_lane(effective, model),
+        use_local_model=use_local,
         resolved_from=resolved_from,
         provenance=provenance,
     )
@@ -802,8 +812,8 @@ def resolve_subagent_dispatch(
         # Durable-data tolerance: the schema refused anything invalid when it was
         # asked for, so an unknown STORED lane is stale, not an argument error.
         requested_lane = "auto"
-    # A row-less child (today only the silence diagnostic, `silence_attention._admit`)
-    # has no configured route, so it runs natively and asks the daemon nothing: an
+    # A row-less child (none is minted by the host today; the silence diagnostic was
+    # retired 09.11.2026) has no configured route, so it runs natively and asks the daemon nothing: an
     # ambiguous `auto` never host-routes (owner D23), and the legacy subagent-harness
     # key is read only for migration. A stored `harness` pin has no route to honor and
     # blocks through the table, as a pin must.

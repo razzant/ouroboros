@@ -586,6 +586,8 @@ class ReviewCoordinator:
                         break
             if raw_text.strip() and not slot.retrieves:
                 executor.answer_observer()
+            if isinstance(executor, ReviewSlotExecutor):
+                usage = executor.attempt_costs.project(usage or {})
             actor = ReviewActorRecord(
                 slot_id=slot.slot_id, model=slot.model,
                 status="ok" if raw_text.strip() else "empty", raw_text=raw_text,
@@ -608,6 +610,8 @@ class ReviewCoordinator:
             ) = _review_exception_projection(
                 exc, executor.failure_custody(), attempt_history, retry_state,
             )
+            if isinstance(executor, ReviewSlotExecutor):
+                failure_custody = executor.attempt_costs.project(failure_custody)
             actor = ReviewActorRecord(
                 slot_id=slot.slot_id,
                 model=slot.model,

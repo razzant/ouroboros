@@ -45,6 +45,16 @@ from ouroboros.request_wire_resolution import resolve_wire_actions
 from ouroboros.usage_accounting import PhysicalAttemptCapture
 
 
+
+def _actions_at(root, profile):
+    """The stored actions of ``profile`` under ``root``, as the contract records them."""
+    return tuple(wire._wire_action_dict(record.action) for record in wire._read_wire_action_records_at(root, profile))
+
+
+def _actions(profile):
+    return tuple(wire._wire_action_dict(record.action) for record in wire.read_wire_action_records(profile))
+
+
 def _target(provider="openai", model="gpt-future", base_url="https://API.Example/v1/"):
     return {
         "provider": provider,
@@ -308,13 +318,13 @@ def test_historical_strictness_evidence_stays_stored_but_authorizes_no_current_p
                                     "records": [{"action": action, "observed_at": now}]}
               for profile in legacy}
     path.write_text(json.dumps({"schema_version": 1, "profiles": stored}))
-    assert [wire._read_wire_actions_at(tmp_path, profile) for profile in legacy] == [(action,)] * 2
-    assert all(wire._read_wire_actions_at(tmp_path, profile) == () for profile in current.values())
+    assert [_actions_at(tmp_path, profile) for profile in legacy] == [(action,)] * 2
+    assert all(_actions_at(tmp_path, profile) == () for profile in current.values())
 
     learned = current[(False,)]
     receipt = _receipt(learned, (_pending(learned),), _strict_payload(False))
     assert wire._commit_wire_compatibility_at(tmp_path, receipt).committed
-    assert {values: wire._read_wire_actions_at(tmp_path, profile) for values, profile in current.items()} == {
+    assert {values: _actions_at(tmp_path, profile) for values, profile in current.items()} == {
         (_ABSENT,): (), (False,): (action,), (True, _ABSENT): (), (True, False): ()}
     profiles = json.loads(path.read_text())["profiles"]
     assert {key: profiles[key] for key in stored} == stored
@@ -468,6 +478,15 @@ def test_candidate_ladder_preserves_owner_order_and_caller_rail():
     assert len(owner_none) == 1 and not owner_none[0].task_local
     assert owner_none[0].reason_code == "requested_wire_form"
     assert two[0].reason_code == "requested_wire_form"
+    # A request with no effort carrier (Provider Test) takes the same rungs, ending on the task-local none.
+    unforced = direct_openai_tool_candidate_ladder("provider_default", remaining_physical_attempts=3)
+    assert [(item.tool_dialect, item.effort, item.reason_code) for item in unforced] == [
+        ("openai_chat_custom", "provider_default", "requested_wire_form"),
+        ("function", "provider_default", "provider_rejected_tool_dialect"),
+        ("function", "none", "task_local_availability_fallback"),
+    ]
+    with pytest.raises(ValueError, match="unsupported requested effort"):
+        direct_openai_tool_candidate_ladder("", remaining_physical_attempts=3)
 
 
 def test_terminal_receipt_enforces_semantic_success_and_physical_authority():
@@ -787,6 +806,12 @@ def test_payload_effort_and_semantic_matrix_cover_all_current_carriers():
         "thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}
     }) == "high"
     assert payload_effort({"thinking": {"type": "disabled"}}) == "none"
+    assert payload_effort({"thinking": {"type": "between_tools"}}) == "none"  # Sonnet 5.5's off state
+    assert payload_effort({"extra_body": {"thinking": {"type": "between_tools"}}}) == ""  # Anthropic-native only
+    from ouroboros.provider_models import ANTHROPIC_THINKING_OFF_TYPES
+
+    for off_type in ANTHROPIC_THINKING_OFF_TYPES.values():  # every off state the Anthropic leaf writes reads back
+        assert payload_effort({"thinking": {"type": off_type}}) == "none", off_type
     assert payload_effort({
         "extra_body": {"reasoning": {"effort": "low", "exclude": False}}
     }) == "low"
@@ -848,7 +873,7 @@ def test_store_commits_only_typed_receipt_and_uses_canonical_root(tmp_path, monk
     monkeypatch.setattr(wire, "canonical_wire_evidence_root", lambda: tmp_path)
     result = wire.commit_wire_compatibility(_receipt(profile, pending))
     assert result.committed
-    assert wire.read_wire_actions(profile)[0]["kind"] == "drop_field"
+    assert _actions(profile)[0]["kind"] == "drop_field"
 
 
 def test_store_ttl_future_time_and_malformed_rows_fail_open(tmp_path):
@@ -865,11 +890,11 @@ def test_store_ttl_future_time_and_malformed_rows_fail_open(tmp_path):
         "observed_at": utc_now().isoformat(),
     })
     path.write_text(json.dumps(data))
-    assert wire._read_wire_actions_at(tmp_path, profile) == ()
+    assert _actions_at(tmp_path, profile) == ()
 
     record["observed_at"] = (utc_now() + timedelta(days=3650)).isoformat()
     path.write_text(json.dumps(data))
-    assert wire._read_wire_actions_at(tmp_path, profile) == ()
+    assert _actions_at(tmp_path, profile) == ()
 
 
 def test_store_preserves_malformed_future_and_misbound_state(tmp_path):
@@ -901,9 +926,9 @@ def test_store_preserves_malformed_future_and_misbound_state(tmp_path):
             "records": [{"action": stale_action, "observed_at": utc_now().isoformat()}],
         }},
     }))
-    assert wire._read_wire_actions_at(tmp_path, profile) == ()
+    assert _actions_at(tmp_path, profile) == ()
     assert wire._commit_wire_compatibility_at(tmp_path, _receipt(profile, pending)).committed
-    actions = wire._read_wire_actions_at(tmp_path, profile)
+    actions = _actions_at(tmp_path, profile)
     assert len(actions) == 1 and actions[0]["kind"] == "drop_field"
 
 
@@ -924,7 +949,7 @@ def test_store_rejects_coerced_schema_versions(tmp_path, schema_version):
     }
     path.write_text(json.dumps(seeded))
     before = path.read_bytes()
-    assert wire._read_wire_actions_at(tmp_path, profile) == ()
+    assert _actions_at(tmp_path, profile) == ()
     result = wire._commit_wire_compatibility_at(
         tmp_path, _receipt(profile, (_pending(profile),))
     )
@@ -951,7 +976,7 @@ def test_store_rejects_seeded_durable_none_and_preserves_existing_empty_state(tm
             "records": [{"action": explicit_none, "observed_at": utc_now().isoformat()}],
         }},
     }))
-    assert wire._read_wire_actions_at(tmp_path, profile) == ()
+    assert _actions_at(tmp_path, profile) == ()
 
     path.write_text("{}")
     result = wire._commit_wire_compatibility_at(
@@ -988,4 +1013,4 @@ def test_store_cross_process_writers_do_not_lose_updates(tmp_path):
                 process.join(5)
     for index in range(4):
         profile = _profile(target=_target(model=f"model-{index}"))
-        assert wire._read_wire_actions_at(tmp_path, profile)[0]["kind"] == "drop_field"
+        assert _actions_at(tmp_path, profile)[0]["kind"] == "drop_field"

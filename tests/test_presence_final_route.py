@@ -452,13 +452,13 @@ def test_ordinary_project_and_main_receipts_name_only_acceptance(tmp_path):
 
     ctx = _ctx(tmp_path, _project(tmp_path), event_queue=queue_module.Queue())
     family = _family(ctx, tmp_path)
-    assert family["send_file"]() == "OK: file 'a.txt' accepted for delivery to Project room \"Launch\"."
+    assert family["send_file"]().split("\n")[0] == "OK: file 'a.txt' accepted for delivery to Project room \"Launch\"."
     assert family["send_user_message"]() == 'OK: message accepted for delivery to Project room "Launch".'
     assert json.loads(family["show_card"]())["delivery"] == 'OK: card accepted for delivery to Project room "Launch".'
     plain = _ctx(tmp_path / "other", 1, event_queue=queue_module.Queue())
     family = _family(plain, tmp_path)
     assert family["send_user_message"]() == "OK: message accepted for delivery to owner chat."
-    assert family["send_file"]() == "OK: file 'a.txt' accepted for delivery to owner chat."
+    assert family["send_file"]().split("\n")[0] == "OK: file 'a.txt' accepted for delivery to owner chat."
     assert json.loads(family["show_card"]())["delivery"] == "OK: card accepted for delivery to owner chat."
 
 
@@ -556,16 +556,8 @@ def test_room_label_cache_keeps_source_failure_and_ambiguous_names_unknown(tmp_p
 
 
 @pytest.mark.parametrize("event_queue", [None, _Refusing()], ids=["no_queue", "refused"])
-def test_an_inline_turn_with_no_consumer_is_told_nothing_was_delivered(fired_context, tmp_path, event_queue, monkeypatch):
+def test_an_inline_turn_with_no_consumer_is_told_nothing_was_delivered(fired_context, tmp_path, event_queue):
     from ouroboros.tools.control_runtime import _send_user_message
-    from supervisor import workers
-
-    def unattached(*, create):
-        assert create is False
-        raise RuntimeError("controlled unattached server bus")
-
-    monkeypatch.setattr("ouroboros.utils.in_worker_process", lambda: False)
-    monkeypatch.setattr(workers, "get_event_q", unattached)
 
     root, _pending, _first_request = fired_context
     ctx, _turn = _turn_ctx(root, event_queue=event_queue)

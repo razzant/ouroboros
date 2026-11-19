@@ -1,9 +1,12 @@
 """Selected context facts name their sources without adding advice or another allowance."""
 from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
 
 from ouroboros import capability_evidence as ce
-from ouroboros.context_window import record_observation, resolve_window
-from ouroboros.context_view_facts import memory_facts, window_fact
+from ouroboros.context_window import record_observation, record_refusal, resolve_window
+from ouroboros.context_view_facts import memory_facts, window_fact, window_projection
 from ouroboros import memory_view as mv
 from tests.test_memory_view_lever import plan
 from tests._memory_view_synthetic import conversation
@@ -25,6 +28,49 @@ def test_source_changes_on_numbered_refusal_and_later_acceptance(tmp_path, monke
     assert "metadata" in window_fact(other, 65536) and "accepted" not in window_fact(other, 65536)
 
 
+@pytest.mark.parametrize("basis,words", [
+    ("provider_stated", "provider stated"),
+    ("exact_local_count", "derived from an exact local count before sending"),
+    ("anchored_estimate", "derived from a refusal that stated no number"),
+    ("", "basis not recorded"),  # a row an earlier body stored, read as it was written
+])
+def test_a_refusal_window_names_how_its_number_was_known(tmp_path, monkeypatch, basis, words):
+    """The same refused size fixes the same limit whoever counted it (the provider, a local instance's exact count of
+    a request the host refused before sending, or the host's estimate anchored on an accepted request of a request
+    refused without a number); its window says which, so neither a count nor an estimate reads as a provider's
+    statement or as the other, and a row stored before bases were kept says so instead of guessing."""
+    from ouroboros.context_anchor import record_refused_input
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    plan_ = SimpleNamespace(route_fp="route", window_witness_bound=True, provider="openai", model="model")
+    # A provider's stated limit below an input this scope already had accepted writes no ceiling (it sizes that pass
+    # only), so the stated case stands on a smaller accepted input under a wider declared window; the other bases
+    # still overrule a larger accepted input.
+    stated = basis == "provider_stated"
+    record_observation(tmp_path, "route", accepted=800_000 if stated else 920_650, reserve=65_536, transmitted=65_536)
+    if stated:
+        record_refusal({"_last_llm_provider_message": "The input token count (900000) exceeds the maximum number "
+                                                      "of tokens allowed (883899)."}, plan_)
+    elif basis:  # the loop's seam: the refused candidate says how its size was known (a numberless refusal either way)
+        local = SimpleNamespace(input_tokens=883_899, context_window_tokens=890_000) if basis == "exact_local_count" else None
+        record_refused_input({"_last_llm_provider_message": "the local model's window of 890000 tokens leaves 6101 "
+                              "for the reply after 883899 exact input tokens, below the floor of 8192" if local else
+                              "Your input exceeds the context window of this model."}, plan_, 883_899, measured=True,
+                             candidate=local)
+    else:
+        record_observation(tmp_path, "route", refused=883_899, kind="input")
+    record = resolve_window(ce.CapabilityEvidence(1_000_000 if stated else 872_000, "confirmed", "metadata", "route"),
+                            65_536)
+    limit, projection = record.limiting, window_projection(record, under_way=True)
+    assert (limit.tokens, limit.kind, limit.source, record.usable, record.admitted) == (
+        883_899, "input", "refusal", 883_899, 883_899)  # what sizes and admits requests is the number alone
+    assert projection["basis"] == limit.basis == (basis or "unrecorded")
+    assert f"window 883,899 input: refusal {limit.observed_at.replace('T', ' ')[:16]} ({words}); usable input 883,899" \
+        in projection["text"]
+    [*_, row] = ce._load(tmp_path)["main_windows"]["route"]["observations"]
+    assert row.get("basis") == (basis or None)  # stored with its refusal; an older row is never rewritten
+
+
 def test_memory_line_names_the_memory_for_every_integrating_focus_and_none_for_helpers():
     p, snap = plan()
     line = memory_facts(p, "max")  # no Max room fact in this receipt: the memory alone
@@ -36,6 +82,25 @@ def test_memory_line_names_the_memory_for_every_integrating_focus_and_none_for_h
     wake = replace(snap, spec=replace(snap.spec, role="consciousness"), conversations=(conversation(1),))
     p = replace(p, core=replace(p.core, memory_view_json=mv.snapshot_json(wake)))
     assert "drafts awaiting" not in memory_facts(p, "max")
+
+
+@pytest.mark.parametrize("refused_input,limit,kind", [(850_000, 872_000, "total"), (700_000, 700_000, "input")])
+def test_numberless_refusal_can_confirm_a_stated_total(tmp_path, monkeypatch, refused_input, limit, kind):
+    """The real producer either confirms an existing total or derives an input limit; neither gets a false label."""
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    evidence = ce.CapabilityEvidence(872_000, "confirmed", "metadata", "route")
+    before = resolve_window(evidence, 65_536)
+    plan_ = SimpleNamespace(route_fp="route", window_witness_bound=True, provider="openai", model="model",
+                            window_record=before)
+    record_refusal({"_last_llm_provider_message": "Your input exceeds the context window of this model."},
+                   plan_, refused_input=refused_input)
+    after = resolve_window(evidence, 65_536)
+    projection = window_projection(after, under_way=True)
+    assert (after.limiting.tokens, after.limiting.kind, after.limiting.source) == (limit, kind, "refusal")
+    assert projection["basis"] == "anchored_estimate"  # compatible stored enum, not a description of every number
+    assert "derived from a refusal that stated no number" in projection["text"]
+    assert "host estimate" not in projection["text"] and "no provider number" not in projection["text"]
+    assert (after.usable, after.admitted) == ((806_464, 806_464) if kind == "total" else (700_000, 700_000))
 
 
 def test_memory_line_names_where_unfolded_pages_pile_up_what_is_addressed_and_the_marks():
@@ -71,7 +136,7 @@ def test_memory_facts_appear_once_while_visible_then_after_rebuild_or_change(mon
     p, snap = plan()
     ctx = SimpleNamespace(context_fit_plan=p, messages=[], accumulated_usage={}, active_context_mode="max",
                           active_model="test", round_idx=1, tool_schemas=[])
-    monkeypatch.setattr(lm, "cached_tariff_text", lambda *args: "tariff unknown")
+    monkeypatch.setattr(lm, "cached_tariff_text", lambda *args, **kwargs: "")
     memory = memory_facts(p, "max")
     first = lm.context_facts_line(ctx, money={}, measured=False, subagents_fact="")
     assert memory in first

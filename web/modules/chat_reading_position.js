@@ -13,13 +13,17 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
     let generation = 0, scheduled = false;
     let mutationDepth = 0;
     let viewportAnchor = null, width = feed.clientWidth;
-    // Every room opens following its newest message (owner decision 2026-10-05).
+    // Every room first opens following its newest message (owner decision 2026-10-05).
     let intent = null;
     // dragging: 'held'/'released' feed scrollbar, or 'owed' to a downward gesture's animation.
-    let approximate = false, dragging = '', claimed = null, scrolls = 0, arriving = null, relayout = false;
+    // returning: the claim of a ↓ still waiting for the present to be read (drawn busy on ↓).
+    let approximate = false, dragging = '', claimed = null, scrolls = 0, arriving = null, returning = null, relayout = false;
     // The feed's box at a drag's release: the drag's own last scrolls arrive in it, a resize's clamp in another.
     let releasedBox = '';
     const feedBox = () => `${feed.clientWidth}x${feed.clientHeight}`;
+    // The box the last reflow applied, or handed to a pending place. Until a changed box has had its reflow, a reader following the
+    // newest message follows it still, whatever a write finds in between (mutate).
+    let settledBox = feedBox();
     // Where the app's own write (mutate) moved the feed while a drag was released: a scroll there is that write's.
     let placed = null;
     // WebKit also ends each step of an animated page scroll, and each batch of a
@@ -71,6 +75,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
         get generation() { return generation; },
         // The unread opening still owed (`claim(true)`): its claim's generation, else null.
         get arriving() { return arriving === generation ? arriving : null; },
+        get returning() { return returning === generation; },
         get pending() { return Boolean(intent); },
         get target() { return intent; },
         get approximate() { return approximate; },
@@ -86,11 +91,11 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             // once those scrolls end, no part of the gesture.
             if (dragging === 'owed') { if (!relayout) { relayout = true; owedEnd(true); } return; }
             if (dragging === 'released') dragging = ''; // a resize is no part of a released drag
-            if (intent) { state.position(); return; }
+            if (intent) { if (visible()) settledBox = feedBox(); state.position(); return; }
             if (!visible()) return;
             if (state.stick) feed.scrollTop = feed.scrollHeight;
             else anchors.restore(viewportAnchor);
-            state.top = feed.scrollTop; state.remember(true); updateButton();
+            settledBox = feedBox(); state.top = feed.scrollTop; state.remember(true); updateButton();
         },
         scroll() {
             scrolls++;
@@ -120,7 +125,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                 if (remoteContent && result && !state.stick) activity();
                 return result;
             }
-            const follow = forceFollow || (state.stick && state.nearBottom());
+            const follow = forceFollow || (state.stick && (state.nearBottom() || feedBox() !== settledBox));
             const anchor = follow ? null : anchors.capture(excludeAnchorNode);
             const height = feed.scrollHeight, top = feed.scrollTop;
             mutationDepth++;
@@ -143,19 +148,28 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             }
         },
         cancel() {
+            const busy = state.returning;
             generation++; scheduled = false; intent = null; dragging = '';
             const notify = approximate;
             approximate = false; state.remember(true);
-            if (notify) changed();
+            if (notify) changed(); else if (busy) updateButton();
         },
-        /** An explicit navigation (↓) that awaits history before it moves: the
-         * reader's own later gesture supersedes it, even one a bounded box absorbs. */
+        /** One navigation (↓), including its later history load: the reader's
+         * own gesture supersedes it, even one a bounded box absorbs. */
         claim(arrive = false) {
             state.cancel();
             state.ownMove = false;
             const token = claimed = generation;
             arriving = arrive ? token : null;
             return () => token === generation;
+        },
+        /** ↓ (`current`: its claim) waits while the present is read: drawn busy on ↓ until `wait(current, false)`
+         * once that read has landed or failed, or until the reader's own gesture or another navigation supersedes
+         * the claim. A superseded claim's end changes nothing of a newer one. */
+        wait(current, waiting = true) {
+            if (!alive() || !current()) return;
+            returning = waiting ? generation : null;
+            updateButton();
         },
         bindGestures(navigate) {
             let touchY = null, pressed = null, latched = null, wheelAt = -Infinity, boxScrolled = null, gestures = 0;
@@ -193,6 +207,12 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                     dragging = event.target === feed ? 'held' : '';
                     return; // a scrollbar drag owns position, not archive traversal
                 }
+                // A second finger makes the touch a pinch, which only magnifies: no reading, paging or keyboard
+                // dismissal, until a new one-finger touch begins.
+                if (event.type === 'touchstart' || event.type === 'touchmove') {
+                    if (event.touches?.length > 1) axis = 'pinch';
+                    if (axis === 'pinch' && (event.type === 'touchmove' || event.touches?.length > 1)) return;
+                }
                 if (event.type === 'touchstart') {
                     const t = event.touches?.[0];
                     touchY = t?.clientY; touchStart = { x: t?.clientX ?? 0, y: t?.clientY ?? 0 }; axis = null; latched = null;
@@ -212,7 +232,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                 if (event.type === 'keydown' && (event.defaultPrevented
                         || event.target?.closest?.('input, textarea, select, [contenteditable="true"]')
                         || !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)
-                        || !origin)) return;
+                        || !origin || !visible())) return;  // a key pressed elsewhere is no reading of a room left
                 const y = event.touches?.[0]?.clientY;
                 const direction = event.type === 'wheel' ? Math.sign(event.deltaY)
                     : event.type === 'keydown' ? (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey) ? -1 : 1)
@@ -230,13 +250,15 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                 // still awaiting history, which must not override it later; other
                 // layout stays. The feed pages nothing, and following can only
                 // end: turning back or reading away from the live edge.
-                const follow = state.stick, absorb = () => { state.stick = follow && direction > 0 && state.nearBottom(); };
+                // Cancelling a pending ↓ also ends its follow, including a shared read's later row updates.
+                const follow = state.stick && !state.returning;
+                const absorb = () => { state.stick = follow && direction > 0 && state.nearBottom(); };
                 if (nested) {
                     // Box scrolling also ends an earlier feed gesture's queued frame and
                     // the scrolls it still owes, though not a scrollbar drag still held,
                     // and an unread opening still owed after its claim reached the present.
                     gestures++; if (dragging !== 'held') dragging = '';
-                    if (intent || approximate || claimed === generation || arriving === generation) state.cancel();
+                    if (intent || approximate || state.returning || claimed === generation || arriving === generation) state.cancel();
                     absorb();
                     return;
                 }
@@ -280,6 +302,10 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             dragging = '';
             if (!intent) intent = { scrollTop: state.top, stick: state.stick, historyAnchor: anchors.serialize() };
             state.position();
+        },
+        capture() {
+            const saved = intent || { scrollTop: feed.scrollTop, stick: state.stick, historyAnchor: anchors.serialize() };
+            return () => { state.cancel(); intent = saved; state.position(); };
         },
         /** An unread room opened (`claim(true)`) lands once on its newest message, `measure()`
          * px from the bottom, unless the reader moved first; `token` is that opening's

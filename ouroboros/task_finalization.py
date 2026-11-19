@@ -316,6 +316,7 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
     """Carry current custody and origin facts without minting empty custody envelopes."""
     from ouroboros.delegate_terminal import _stored_disclosure_matches
     from ouroboros.project_naming import summary_names_run
+    from ouroboros.text_sentences import first_sentence
     fields: Dict[str, Any] = {}
     audit = usage.get("delegate_terminal_reconciliation")
     prior = existing or {}
@@ -334,7 +335,7 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
     if usage.get("wake_summary"):
         fields["wake_summary"] = str(usage["wake_summary"])  # a self-started run's name, never over a title
         if summary_names_run(metadata, task_contract) and not str(title or prior.get("title") or "").strip():
-            fields["suggested_name"] = fields["wake_summary"]
+            fields["suggested_name"] = first_sentence(fields["wake_summary"])
         fields.update({"fold_read": True} if usage.get("fold_read") is True else {})  # it stands for what was read
     if usage.get("owner_message_sent") is True:
         fields["owner_message_sent"] = True
@@ -479,8 +480,12 @@ def register_final_answer_owed(
     return OWED_REGISTERED if registered else OWED_UNREGISTERED
 
 
-def build_completion_observations(drive_root: Any, task: Dict[str, Any], trace: Dict[str, Any]) -> Dict[str, Any]:
+def build_completion_observations(drive_root: Any, task: Dict[str, Any], trace: Dict[str, Any], *,
+                                  final_text: str = "") -> Dict[str, Any]:
     """Retain task-observed actions for synthesis without inventing delivery receipts.
+
+    Answers later finals displaced (``delivery_facts.DISPLACED_ANSWER_KEY``) are stored whole, each with its exact
+    character range in the stored source; one ``final_text`` contains whole is not stored again.
 
     The exact recorded returns live in the existing artifact store. Packet-only
     synthesis receives counts and the latest return of EACH send-family tool,
@@ -488,12 +493,14 @@ def build_completion_observations(drive_root: Any, task: Dict[str, Any], trace: 
     is the existing task-related readiness projection, not owner-click authorship.
     """
     from ouroboros.artifacts import store_actor_source_bytes
+    from ouroboros.delivery_facts import DISPLACED_ANSWER_KEY
     from ouroboros.observability import redact_projection
     from ouroboros.skill_readiness import acceptance_skill_lifecycle
     from ouroboros.tool_capabilities import OWNER_DELIVERY_TOOL_NAMES
-    from ouroboros.utils import utc_now_iso
+    from ouroboros.utils import json_dumps_utf8, utc_now_iso
 
     calls = trace.get("tool_calls")
+    displaced = [str(text) for text in trace.get(DISPLACED_ANSWER_KEY) or () if str(text) not in str(final_text or "")]
     deliveries = [{key: call[key] for key in (
         "tool", "tool_call_id", "status", "code", "result", "result_partial", "is_error",
     ) if key in call} for call in (calls or [])
@@ -514,6 +521,7 @@ def build_completion_observations(drive_root: Any, task: Dict[str, Any], trace: 
         "skill_history_coverage": coverage,
         "delivery_receipt_coverage": "not_observed_by_tool_trace",
         "skill_state_scope": "current_state_of_task_related_skills; not action attribution",
+        **({DISPLACED_ANSWER_KEY: displaced} if displaced else {}),
     }).value
     counts: Dict[str, Any] = {}
     latest: Dict[str, Any] = {}
@@ -528,9 +536,17 @@ def build_completion_observations(drive_root: Any, task: Dict[str, Any], trace: 
                   "delivery_results_omitted": len(deliveries) - len(latest),
                   "skill_state": snapshot["skill_state"][:_COMPLETION_SKILL_PREVIEW_ROWS],
                   "skill_state_omitted": max(0, len(skills) - _COMPLETION_SKILL_PREVIEW_ROWS)}
-    if not deliveries and not skills:
+    if not deliveries and not skills and not displaced:
         return projection  # no full action record to store for an ordinary empty turn
-    raw = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    text = json_dumps_utf8(snapshot, ensure_ascii=False, sort_keys=True, default=str)
+    raw = text.encode("utf-8")
+    if displaced:  # answers finals replaced: their bytes live in the stored source alone, apart from the final's
+        answers, at = [], text.index(f'"{DISPLACED_ANSWER_KEY}": [') + len(DISPLACED_ANSWER_KEY) + 5
+        for answer in snapshot[DISPLACED_ANSWER_KEY]:
+            value = json_dumps_utf8(answer, ensure_ascii=False)  # as the stored source spells it
+            answers.append({"chars": len(answer), "source_range": [at, at + len(value)]})
+            at += len(value) + 2
+        projection[DISPLACED_ANSWER_KEY] = {"count": len(answers), "answers": answers}
     try:
         projection["source_ref"] = store_actor_source_bytes(
             task.get("budget_drive_root") or drive_root, str(task.get("id") or ""),
@@ -545,6 +561,28 @@ def build_completion_observations(drive_root: Any, task: Dict[str, Any], trace: 
         projection["source_status"] = "unavailable"
         log.warning("Completion observations full source unavailable", exc_info=True)
     return projection
+
+
+def displaced_answer_note(result: Dict[str, Any]) -> str:
+    """One line for a reader of this result outside its room: its finals replaced earlier answers, how large, and the
+    exact call that reads each whole (``build_completion_observations``; past three, where all ranges are); a copy that
+    was not stored is said to be unavailable. Empty when nothing was displaced."""
+    observations = result.get("completion_observations") if isinstance(result, dict) else None
+    displaced = observations.get("displaced_answer") if isinstance(observations, dict) else None
+    if not isinstance(displaced, dict) or not displaced.get("answers"):
+        return ""
+    answers, reader = displaced["answers"], (observations.get("source_ref") or {}).get("reader") or {}
+    said = f"Before its final this task wrote {len(answers)} answer(s) that later answers replaced"
+    if observations.get("source_status") != "available" or not reader.get("arguments"):
+        return f"[{said}; their stored copy is unavailable (the completion source was not written)]"
+    calls = []
+    for answer in answers[:3]:
+        start, end = answer["source_range"]
+        arguments = {**reader["arguments"], "source_start_char": start, "source_end_char": end}
+        calls.append(f"{answer['chars']} chars: {reader.get('tool')}({json.dumps(arguments)})")
+    more = (f"; {len(answers) - 3} more, every range in completion_observations.displaced_answer.answers"
+            if len(answers) > 3 else "")
+    return f"[{said}; each call reads one whole, as a JSON string: " + "; ".join(calls) + more + "]"
 
 
 def completion_source_projection(

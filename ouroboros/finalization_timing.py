@@ -205,10 +205,13 @@ _FINALIZATION_CHILDREN = contextvars.ContextVar("finalization_children", default
 
 @contextmanager
 def finalization_child_scope():
-    """One child projection per root during a synchronous finalization pass.
+    """One child projection per query during a synchronous finalization pass.
 
-    End before model waits or later finalization passes: children may advance.
-    Nested reducers reuse the pass, with artifact-materialization modes separate.
+    End before a model wait, a service stop, a review, admission or a later pass: children may
+    advance, and the next pass reads them. The final delivery evidence check stays outside every
+    scope, reading fresh even after the preceding projection. Nested reducers reuse the pass.
+    Scope (direct or subtree) and artifact-materialization modes stay separate projections: a
+    direct reader never pays for, nor sees, a subtree.
     """
     if _FINALIZATION_CHILDREN.get() is not None:
         yield
@@ -227,13 +230,12 @@ def cached_finalization_children(function):
         if cache is None:
             return function(drive_root, **kwargs)
         parent, root = (str(kwargs.get(key) or "").strip() for key in ("parent_task_id", "root_task_id"))
+        scope = "direct" if str(kwargs.get("scope") or "subtree").strip().lower() == "direct" else "subtree"
         materialize = kwargs.get("materialize_artifacts", True)
-        key = (str(pathlib.Path(drive_root).resolve()), parent, root, materialize)
+        key = (str(pathlib.Path(drive_root).resolve()), parent, root, scope, materialize)
         if key not in cache:
             cache[key] = function(drive_root, parent_task_id=parent, root_task_id=root,
-                                  scope="subtree", materialize_artifacts=materialize)
-        direct = str(kwargs.get("scope") or "subtree").strip().lower() == "direct"
+                                  scope=scope, materialize_artifacts=materialize)
         excluded = str(kwargs.get("exclude_task_id") or "").strip()
-        return copy.deepcopy([row for row in cache[key] if row.get("task_id") != excluded
-                              and (not direct or bool(parent) and row.get("parent_task_id") == parent)])
+        return copy.deepcopy([row for row in cache[key] if row.get("task_id") != excluded])
     return children

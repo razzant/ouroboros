@@ -38,7 +38,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 from ouroboros.contracts.schema_versions import read_schema_version, with_schema_version
-from ouroboros.utils import append_jsonl, iter_jsonl_objects, utc_now_iso, write_text_atomic
+from ouroboros.utils import append_jsonl, iter_jsonl_objects, json_dumps_utf8, utc_now_iso, write_text_atomic
 
 log = logging.getLogger(__name__)
 
@@ -298,7 +298,7 @@ def _payload(record: Any) -> Dict[str, Any]:
 
 
 def _write_and_index(drive_root: Any, path: pathlib.Path, payload: Dict[str, Any]) -> None:
-    write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    write_text_atomic(path, json_dumps_utf8(payload, ensure_ascii=False, indent=2) + "\n")
     _keep_preflight_head(drive_root, payload)  # first, so a rotation cannot archive what the heads seed from
     _rotate_index_if_needed(drive_root)
     append_jsonl(index_path(drive_root), index_row(drive_root, payload))
@@ -480,13 +480,13 @@ def _rotate_index_if_needed(drive_root: Any) -> None:
     while target.exists():
         suffix += 1
         target = ledger_dir(drive_root) / f"index.{_stamp()}_{suffix}.jsonl"
-    write_text_atomic(target, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in archive))
-    write_text_atomic(hot, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in keep))
+    for path, rows in ((target, archive), (hot, keep)):
+        write_text_atomic(path, "".join(json_dumps_utf8(row, ensure_ascii=False) + "\n" for row in rows))
 
 
-def _newest_rows(paths: Iterable[pathlib.Path]) -> Iterator[Dict[str, Any]]:
+def _newest_rows(paths: Iterable[pathlib.Path], gap_reasons: set[str] | None) -> Iterator[Dict[str, Any]]:
     for path in paths:
-        yield from reversed([row for row in iter_jsonl_objects(path) if isinstance(row, dict)])
+        yield from reversed(list(iter_jsonl_objects(path, gap_reasons=gap_reasons)))
 
 
 def archived_segments_exist(drive_root: Any) -> bool:
@@ -521,11 +521,11 @@ def newest_rotation_ts(drive_root: Any) -> str:
 
 
 def _index_rows(drive_root: Any, *, task_id: str = "", surface: str = "", limit: Optional[int] = None,
-                hot_only: bool = False, exact_task: bool = False) -> List[Dict[str, Any]]:
+                hot_only: bool = False, exact_task: bool = False, gap_reasons: set[str] | None = None) -> List[Dict[str, Any]]:
     seen: Dict[str, int] = {}
     out: List[Dict[str, Any]] = []
     paths = [index_path(drive_root)] + ([] if hot_only else [*reversed(_index_segments(drive_root))])
-    for row in _newest_rows(paths):
+    for row in _newest_rows(paths, gap_reasons):
         record_id = str(row.get("record_id") or "")
         if not record_id or (task_id and task_id not in (row.get("task_id"), row.get("root_task_id"))):
             continue
@@ -553,15 +553,15 @@ def task_record_page(drive_root: Any, task_id: str, *, offset: int = 0, limit: i
 
 
 def recent_records(drive_root: Any, task_id: str = "", limit: int = 20, *, hot_only: bool = False,
-                   surface: str = "") -> List[Dict[str, Any]]:
+                   surface: str = "", gap_reasons: set[str] | None = None) -> List[Dict[str, Any]]:
     """Newest-first index rows (junction for context assembly): the hot index, then
     archived segments newest-first, one row per record at its highest revision.
     ``task_id`` matches the record's task OR root task; empty matches all; ``surface``
     keeps one surface's records. ``hot_only`` reads the bounded hot index alone
-    (``INDEX_MAX_BYTES``) and never opens an archived segment: the read a per-task
-    context capture can afford."""
-    wanted = max(1, int(limit))
-    return _index_rows(drive_root, task_id=task_id, surface=surface, limit=wanted, hot_only=hot_only)[:wanted]
+    (``INDEX_MAX_BYTES``) and leaves archived segments unopened. If supplied,
+    ``gap_reasons`` collects parse gaps from the segments actually read."""
+    return _index_rows(drive_root, task_id=task_id, surface=surface, limit=max(1, int(limit)),
+                       hot_only=hot_only, gap_reasons=gap_reasons)
 
 
 def surface_records(drive_root: Any, surface: str) -> List[Dict[str, Any]]:
@@ -809,6 +809,14 @@ def row_verdict(seat: Dict[str, Any]) -> str:
     return QUESTION_UNANSWERED
 
 
+def advisers_only(record: Dict[str, Any]) -> bool:
+    panel = record.get("panel") or {}
+    return panel.get("seats") == 0 and bool(panel.get("additional_seats"))
+
+def reusable_outcome(record: Dict[str, Any]) -> bool:
+    rows, verdict = record.get("rows") or [], record.get("verdict") or {}
+    return verdict.get("aggregate") in (VERDICT_PASS, VERDICT_FAIL) or (verdict.get("reason") == "no_counted_reviewers" and bool(rows) and all(row.get("additional") and row_verdict(row) in (VERDICT_PASS, VERDICT_FAIL) for row in rows))
+
 def question_verdict(rows: List[Dict[str, Any]], part: str, *, required: int) -> str:
     """One part across the panel: ``not_performed`` when no seat was asked, FAIL
     when any usable answer FAILed, PASS when at least ``required`` usable answers
@@ -821,27 +829,25 @@ def question_verdict(rows: List[Dict[str, Any]], part: str, *, required: int) ->
         return VERDICT_FAIL
     return VERDICT_PASS if verdicts.count(VERDICT_PASS) >= max(1, int(required)) else QUESTION_UNANSWERED
 
-
 def _quorum_for(count: int) -> int:
     from ouroboros.review_model_routes import adaptive_quorum
 
     return int(adaptive_quorum(count)) if count else 0
 
-
 def reduce_verdict(rows: List[Dict[str, Any]], *, gate_blocked: bool = False, gate_reason: str = "",
                    dispatch_refusal: Optional[Dict[str, Any]] = None, pending: bool = False,
                    quorum_required: Optional[int] = None) -> Dict[str, Any]:
-    """ASSIGNED seat rows → ``aggregate`` + ``per_question`` + ``quorum`` (§1.7), the ONE
-    aggregate the gate decides by and the record stores. Order: (1) a dispatch refusal
-    or nothing dispatched → NOT_DISPATCHED; (2) open custody → NOT_PERFORMED (the
-    record stays ``pending``); (3) fewer responded seats than ``adaptive_quorum`` of
-    the assigned → QUORUM_FAILED; (4) quorum met but no usable ``coupling`` answer
-    (nobody asked, or every asked seat left it unanswered) → NOT_PERFORMED; (5) FAIL
-    when any usable ``change`` answer carries a critical FAIL or ``coupling`` is FAIL;
-    PASS when both parts PASS and the gate did not block for another reason (a blocked
-    gate never reads PASS). ``reason`` names the branch that decided."""
+    """Reduce assigned seats to the shared aggregate; additional seats remain in ``per_row`` only. Order is refusal,
+    adviser-only ``no_counted_reviewers``, open custody, quorum, unanswered coupling, FAIL, then PASS. ``reason`` names
+    the branch and the record preserves the open state."""
     per_row = {str(seat.get("seat_id") or ""): row_verdict(seat) for seat in rows}
     single = single_question_part(rows)
+    if (counted := [seat for seat in rows if not seat.get("additional")]) != rows:
+        verdict = {**reduce_verdict(counted, gate_blocked=gate_blocked, gate_reason=gate_reason, dispatch_refusal=dispatch_refusal,
+                                    pending=pending, quorum_required=quorum_required), "per_row": per_row}
+        alone = not counted and dispatch_refusal is None and set(per_row.values()) != {VERDICT_NOT_DISPATCHED}
+        return {**verdict, "aggregate": VERDICT_NOT_PERFORMED, "reason": "no_counted_reviewers", "per_question": dict.fromkeys(
+            (single,) if single else PARTS, QUESTION_NOT_PERFORMED)} if alone else verdict
     if single:
         return _reduce_single_question_wave(rows, per_row, single, gate_blocked=gate_blocked, gate_reason=gate_reason,
                                             dispatch_refusal=dispatch_refusal, pending=pending,
@@ -873,8 +879,6 @@ def reduce_verdict(rows: List[Dict[str, Any]], *, gate_blocked: bool = False, ga
     else:
         aggregate, reason = VERDICT_NOT_PERFORMED, "change_unanswered"
     return {"aggregate": aggregate, "quorum": quorum, "per_row": per_row, "per_question": per_question, "reason": reason}
-
-
 def _reduce_single_question_wave(rows: List[Dict[str, Any]], per_row: Dict[str, str], part: str, *,
                                  gate_blocked: bool, gate_reason: str, dispatch_refusal: Optional[Dict[str, Any]],
                                  pending: bool, quorum_required: Optional[int]) -> Dict[str, Any]:
@@ -938,6 +942,7 @@ NOT_PERFORMED_PHRASES: Dict[str, str] = {
     "coupling_not_performed": "the coupling question (Part 2) was answered by no seat",
     "change_unanswered": "no seat answered the change (Part 1) with a PASS/FAIL verdict",
     "review_late_result_pending": "physical review operation(s) remain unresolved",
+    "no_counted_reviewers": "only additional reviewers were seated; their opinions are heard but never counted",
     "result_unanswered": "no seat answered the result question with a PASS/FAIL verdict",
     "skill_unanswered": "no seat answered the skill question with a PASS/FAIL verdict",
 }
@@ -1208,8 +1213,7 @@ def _reusable_in(drive_root: Any, key: str, path: pathlib.Path, lookup: Dict[str
         except ValueError:
             continue
         if (record is not None and record.get("state") == STATE_SETTLED
-                and str((record.get("fingerprints") or {}).get("reuse_key") or "") == key
-                and (record.get("verdict") or {}).get("aggregate") in (VERDICT_PASS, VERDICT_FAIL)):
+                and str((record.get("fingerprints") or {}).get("reuse_key") or "") == key and reusable_outcome(record)):
             return record
     return None
 
@@ -1217,7 +1221,7 @@ def _reusable_in(drive_root: Any, key: str, path: pathlib.Path, lookup: Dict[str
 def find_reusable(drive_root: Any, reuse_key: str, *, lookup: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """The newest SETTLED, DISPATCHED record carrying this reuse key, else ``None``.
     A pending record, a refusal (``NOT_DISPATCHED``) or an unperformed wave is never
-    reused: the author is owed a real wave, not a replayed gap.
+    reused: the author is owed a real wave, not a replayed gap (advisers alone who all answered are: ``reusable_outcome``).
 
     The read is staged and disclosed. The bounded hot index (``INDEX_MAX_BYTES``) is
     read first; archived segments are opened only after a hot miss — every new
@@ -1261,11 +1265,10 @@ def build_wave_record(facts: Dict[str, Any], *, surface: str, record_id: str = "
     if drive_root is not None:
         _retain_wave_sources(drive_root, task_id, record_id, rows, structured)
     refusal = facts.get("dispatch_refusal")
-    pending = counted_pending(rows, pending=bool(facts.get("pending")), lost_is_terminal=bool(facts.get("lost_seat_terminal")))
-    assigned_rows = [seat for seat in rows if not seat.get("additional")]
-    verdict = reduce_verdict(assigned_rows, gate_blocked=bool(facts.get("blocked")),
+    pending = counted_pending(rows if surface == "commit_gate" or any(not s.get("additional") for s in rows) else [  # advisers alone hold it
+        {**s, "additional": False} for s in rows], pending=bool(facts.get("pending")), lost_is_terminal=bool(facts.get("lost_seat_terminal")))
+    verdict = reduce_verdict(rows, gate_blocked=bool(facts.get("blocked")),
                              gate_reason=str(facts.get("block_reason") or ""), dispatch_refusal=refusal, pending=pending)
-    verdict["per_row"].update({str(seat.get("seat_id") or ""): row_verdict(seat) for seat in rows if seat.get("additional")})
     degraded = [str(x) for x in (facts.get("degraded_reasons") or []) if str(x).strip()]
     if facts.get("blocked") and facts.get("block_reason") and verdict["aggregate"] != VERDICT_FAIL:
         degraded.append(f"gate_block:{facts.get('block_reason')}")
@@ -1401,12 +1404,10 @@ def settle_pending_payload(prior: Dict[str, Any], fresh: Dict[str, Any]) -> Dict
         rows.append(merged)
     settled["rows"] = rows
     still_open = any(seat_open(row) for row in rows)
-    counted = [row for row in rows if not row.get("additional")]
     gate_reason = str((fresh.get("verdict") or {}).get("reason") or "")
-    verdict = reduce_verdict(counted, gate_blocked=gate_reason.startswith("gate_block"),
+    verdict = reduce_verdict(rows, gate_blocked=gate_reason.startswith("gate_block"),
                              gate_reason=gate_reason.removeprefix("gate_block:"), dispatch_refusal=settled.get("dispatch_refusal"),
-                             pending=any(seat_open(row) for row in counted))
-    verdict["per_row"].update({str(row.get("seat_id") or ""): row_verdict(row) for row in rows})
+                             pending=any(seat_open(row) for row in rows if not row.get("additional")))
     for name in (*HEAVY_VERDICT_FIELDS, "degraded_reasons", "wave_failures"):
         values = [*((prior.get("verdict") or {}).get(name) or []), *((fresh.get("verdict") or {}).get(name) or [])]
         verdict[name] = _merge_evidence(values)
@@ -1490,9 +1491,8 @@ def settle_from_collected(drive_root: Any, record_id: str, raws: Iterable[Dict[s
             seat.pop("raw_text", None)
             rows.append(seat)
         still_open = any(seat_open(seat) for seat in rows)
-        verdict = reduce_verdict([seat for seat in rows if not seat.get("additional")],
-                                 dispatch_refusal=prior.get("dispatch_refusal"), pending=any(seat_open(seat) for seat in rows if not seat.get("additional")))
-        verdict["per_row"].update({str(seat.get("seat_id") or ""): row_verdict(seat) for seat in rows if seat.get("additional")})
+        verdict = reduce_verdict(rows, dispatch_refusal=prior.get("dispatch_refusal"),
+                                 pending=any(seat_open(seat) for seat in rows if not seat.get("additional")))
         before = dict(prior.get("verdict") or {})
         found = dict(zip(HEAVY_VERDICT_FIELDS, seat_findings(
             applied, {str(seat.get("seat_id") or "") for seat in rows if seat.get("additional")})))

@@ -42,13 +42,15 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                   'sha256': hashlib.sha256(review_bytes).hexdigest(), 'size': len(review_bytes)}
     details = {
         'e1': {'task_id': 'e1', 'status': 'failed', 'reason_code': 'provider_unavailable',
-               'title': 'Original report', 'started_at': T, 'ts': T,
+               'title': 'Original report', 'wake_summary': 'Checked the first half.', 'started_at': T, 'ts': T,
                'review_projection': {'panels': [{'panel_id': 'old-review', 'surface': 'task_acceptance',
                    'aggregate_signal': 'FAIL', 'reason': 'Preserved independent review detail', 'actors': [],
                    'applied_source_status': 'available', 'applied_source_ref': review_ref}]},
                'artifacts': [{'name': 'earlier.txt', 'size': 16, 'status': 'ready'}]},
-        'e2': {'task_id': 'e2', 'status': 'running', 'title': 'Continue: check totals', 'started_at': T, 'ts': T},
-        'e3': {'task_id': 'e3', 'status': 'running', 'title': 'Continue: publish totals', 'started_at': T, 'ts': T},
+        'e2': {'task_id': 'e2', 'status': 'running', 'title': 'Continue: check totals', 'started_at': T, 'ts': T,
+               'continue_requester': 'owner', 'initiator': 'consciousness'},
+        'e3': {'task_id': 'e3', 'status': 'running', 'title': 'Continue: publish totals', 'started_at': T, 'ts': T,
+               'continue_requester': 'unknown', 'initiator': 'consciousness'},
     }
     history = []
     reads, posts = [], []
@@ -117,7 +119,8 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
 
                 def narrate(task_id, name, text):
                     row = {'chat_id': 1, 'task_id': task_id, 'role': 'assistant', 'is_progress': True,
-                           'narration': True, 'text': text, 'suggested_name': name, 'ts': T}
+                           'narration': True, 'text': text, 'suggested_name': name, 'ts': T,
+                           **{k: details[task_id][k] for k in ('continue_requester', 'initiator') if k in details[task_id]}}
                     emit('chat', row)
                     emit('task_named', {'task_id': task_id, 'suggested_name': name})
                     return row
@@ -147,6 +150,12 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 expand(second)
                 second.scroll_into_view_if_needed()
                 page.screenshot(path=str(evidence / 'names.png'))
+                own_facts = second.locator(':scope > .chat-live-details [data-live-facts]')
+                own_facts.wait_for(state='visible')
+                assert own_facts.locator('dt', has_text='Continued by').count() == 1
+                assert own_facts.locator('dd', has_text='You').count() == 1
+                assert own_facts.locator('dd', has_text='Consciousness').count() == 1
+                page.screenshot(path=str(evidence / 'continued-by-you.png'))
                 disclosure = second.locator('details[data-episode-task="e1"]')
                 disclosure.locator(':scope > summary').click()
                 disclosure.locator('[data-result-files]').wait_for(state='visible')
@@ -170,6 +179,8 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 assert disclosure.locator('[data-review-attempt-detail]').get_by_text('Preserved independent review detail', exact=True).is_visible()
                 assert 'Earlier independent criticism' in disclosure.inner_text()
                 assert 'Continue: check totals' in second.locator('[data-live-episodes]').inner_text()
+                assert second.locator('[data-live-episodes] [data-episode="1"] .chat-live-episode-summary').inner_text() == 'Checked the first half.'
+                assert 'Checked the first half.' in disclosure.locator(':scope > summary').inner_text()
                 assert second.locator(':scope > [data-live-summary-button] [data-live-title]').inner_text() == 'Original report'
                 assert first.is_hidden()
                 assert page.locator('.chat-live-card:visible').count() == 1
@@ -210,6 +221,10 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                               'status': 'failed', 'continued_by': details['e2']['continued_by'], 'ts': T})
                 third = page.locator('.chat-live-card[data-task-id="e3"]')
                 expand(third)
+                own_facts = third.locator(':scope > .chat-live-details [data-live-facts]')
+                own_facts.wait_for(state='visible')
+                assert own_facts.locator('dt', has_text='Continued by').count() == 1
+                assert own_facts.locator('dd', has_text='Not recorded').count() == 1
                 assert third.locator('details[data-episode-task]').count() == 2
                 assert third.locator('details[data-episode-task="e1"]').get_attribute('open') is not None
                 assert page.evaluate('window.originalReviewDoor===document.querySelector("details[data-episode-task=e1] [data-live-review-summary]")')
@@ -230,6 +245,8 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 expand(third)
                 assert third.locator('details[data-episode-task]').evaluate_all(
                     '(nodes)=>nodes.map(node=>node.dataset.episodeTask)') == ['e1', 'e2'], 'newer-link-first backfill keeps episode order'
+                third.scroll_into_view_if_needed()
+                page.screenshot(path=str(evidence / 'continued-by-unrecorded.png'))
                 old = third.locator('details[data-episode-task="e1"]')
                 old.locator(':scope > summary').click()
                 old.locator('[data-result-files]').wait_for(state='visible')

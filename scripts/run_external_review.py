@@ -4,7 +4,8 @@
 
 The operator lane reviews this checkout's staged index. The ``--contributor``
 lane reviews a committed base..head proposal with the configured review pool,
-blocking semantics, and a redacted shareable packet bound to base/head/tree/diff.
+verdict semantics (only a PASS passes), and a redacted shareable packet bound to base/head/tree/diff.
+Both lanes classify by the review record's verdict (``_record_outcome``).
 The runtime freezes the subject and reads it; the review flow and rules that run
 are the installed body's — the checkout this wrapper runs from — never the
 proposal's own copy (D31), so a checkout that already contains the proposal is
@@ -80,6 +81,7 @@ _OPENROUTER_MIN_REMAINING_USD = 10.0
 # retired advisory gate carried); retrieving actors read the files and are not bound by it.
 _PACKET_DIFF_CHARS_CAP = 500_000
 _CONTRIBUTOR_DEFAULT_BASE_REF = "upstream/ouroboros"
+_CATALOG = "OUROBOROS_SUBAGENTS"  # configured_subagents.SUBAGENTS_SETTING; no config import before isolation
 _CONTRIBUTOR_LANDING_OBLIGATION_ITEMS = frozenset({"version_bump"})
 # EVIDENCE ONLY, never a gate (D31): the lane always executes the installed
 # body's review flow and rules, never the proposal's copy, so nothing classifies
@@ -169,39 +171,45 @@ def _keys_file() -> pathlib.Path | None:
     return next((path for path in candidates if path is not None and path.is_file()), None)
 
 
-def _load_settings_into_env() -> None:
-    """Load data/settings.json scalars into env; never print secret values."""
+def _settings_document(*, warn: bool = True) -> tuple[dict | None, str]:
+    """``(document, pin)``: data/settings.json as this run reads it (``None`` when absent) and its integrity pin."""
+    from ouroboros.settings_integrity import read_settings_json_strict
+
     settings_path = pathlib.Path(
         os.environ.get("OUROBOROS_SETTINGS_PATH", "") or (DATA / "settings.json")
     ).expanduser().resolve(strict=False)
-    if settings_path.exists():
-        raw = settings_path.read_bytes()
-        pin = os.environ.get(SETTINGS_INTEGRITY_ENV, "")
-        if pin and hashlib.sha256(raw).hexdigest() != pin:
-            raise RuntimeError(f"{settings_path} changed after this review pinned it")
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except Exception as exc:  # pragma: no cover - operator script
-            print(f"WARN: could not parse settings.json: {exc}", file=sys.stderr)
-            data = None
-        if pin and not isinstance(data, dict):  # the pinned document is the review panel, never a default
-            raise RuntimeError(f"{settings_path} is pinned but is not a settings object")
-        named = retire_comma_lists(data) if pin else (data if isinstance(data, dict) else {})
-        for key, value in named.items():
-            if os.environ.get(key, "").strip() and not (pin and key in PINNED_PANEL_KEYS):
-                continue
-            if isinstance(value, bool):
-                os.environ[key] = "1" if value else "0"
-            elif isinstance(value, (str, int, float)) and str(value) != "":
-                os.environ[key] = str(value)
-            elif pin and key in PINNED_PANEL_KEYS and isinstance(value, (dict, list)) and value:
-                os.environ[key] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        if pin:  # a panel key the pinned document leaves unset reads the product default, as on the host
-            for key in PINNED_PANEL_KEYS:
-                if named.get(key) in (None, "", {}, []):
-                    os.environ.pop(key, None)
-    else:
+    pin = os.environ.get(SETTINGS_INTEGRITY_ENV, "")
+    data = read_settings_json_strict(settings_path, behind_writer=True)
+    if data is None and warn:
         print(f"WARN: settings.json not found at {settings_path}", file=sys.stderr)
+    return (retire_comma_lists(data) if pin else data), pin
+
+
+def _load_settings_into_env() -> None:
+    """Load data/settings.json scalars into env; never print secret values. The subagent catalog rides no
+    environment (``config.SETTINGS_KEYS_NOT_EXPORTED_TO_ENV``): ``_review_view`` carries the panel."""
+    from ouroboros.settings_integrity import SettingsDocumentUnknown
+
+    try:
+        named, pin = _settings_document()
+    except SettingsDocumentUnknown:
+        # An explicit operator catalog still names a panel; an unreadable saved one never names Main.
+        if os.environ.get(SETTINGS_INTEGRITY_ENV) or not os.environ.get(_CATALOG, "").strip():
+            raise
+        named, pin = None, ""
+    for key, value in (named or {}).items():
+        if key == _CATALOG or (os.environ.get(key, "").strip() and not (pin and key in PINNED_PANEL_KEYS)):
+            continue
+        if isinstance(value, bool):
+            os.environ[key] = "1" if value else "0"
+        elif isinstance(value, (str, int, float)) and str(value) != "":
+            os.environ[key] = str(value)
+        elif pin and key in PINNED_PANEL_KEYS and isinstance(value, (dict, list)) and value:
+            os.environ[key] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if pin and named is not None:  # a panel key the pinned document leaves unset reads the product default
+        for key in PINNED_PANEL_KEYS:
+            if key == _CATALOG or named.get(key) in (None, "", {}, []):
+                os.environ.pop(key, None)
 
     def _fallback(env_name: str, prefix: str) -> None:
         if os.environ.get(env_name, "").strip():
@@ -250,7 +258,6 @@ def _git_bytes(args: list[str], *, cwd: pathlib.Path | None = None) -> bytes:
 
 def _apply_contributor_review_env() -> None:
     """Pin readiness policy while preserving the contributor's reviewer slots."""
-    os.environ["OUROBOROS_REVIEW_ENFORCEMENT"] = "blocking"
     # Scope-review applicability follows the context mode (v6.80.0): pin max so the
     # operator review line always asks the blocking whole-repo coupling questions, even
     # when the host happens to sit in the owner's low mode.
@@ -420,21 +427,11 @@ def _probe_model_for_key(token: str, model: str) -> tuple[bool, str]:
     return True, f"model_ok({model})"
 
 
-def _review_probe_models() -> list[str]:
-    try:
-        from ouroboros.reviewer_slot_config import review_pool_rows
-
-        ordered = [row.target_id for row in review_pool_rows() if not row.is_session]
-        return list(dict.fromkeys(str(model) for model in ordered if str(model).strip()))
-    except Exception:
-        return []
-
-
 def _openrouter_key_health(
     token: str,
     *,
     probe_all_models: bool = False,
-    probe_models: list[str] | None = None,
+    probe_models: list[str],
 ) -> tuple[bool, str]:
     """Probe `limit_remaining`, then the exact reviewer model. (healthy, detail)."""
     try:
@@ -462,7 +459,7 @@ def _openrouter_key_health(
             return False, "unreadable_limit"
         if remaining < _OPENROUTER_MIN_REMAINING_USD:
             return False, f"remaining_below_${_OPENROUTER_MIN_REMAINING_USD:g}"
-    models = list(probe_models) if probe_models is not None else _review_probe_models()
+    models = list(probe_models)
     if not models:
         return True, "limit_ok_no_probe_model"
     if not probe_all_models:
@@ -480,7 +477,7 @@ def _select_healthy_openrouter_key(
     *,
     required: bool = False,
     probe_all_models: bool = False,
-    probe_models: list[str] | None = None,
+    probe_models: list[str],
 ) -> bool:
     """Pick the first healthy key from the allowed pool (values never printed)."""
     pool = _openrouter_pool()
@@ -518,8 +515,6 @@ def _assert_contributor_review_config(resolved_config: dict) -> None:
     ]
     if invalid:
         raise RuntimeError("contributor reviewer slots contain an invalid route")
-    if resolved_config.get("review_enforcement") != "blocking":
-        raise RuntimeError("contributor review enforcement did not resolve to blocking")
     if resolved_config.get("context_mode") != "max":
         raise RuntimeError("contributor scope review did not resolve in max context mode")
 
@@ -815,7 +810,7 @@ def _pinned_default_panel_view(profile: str):
     verified document over the product and provider defaults, never from an inherited
     projection (whose keys still serve the calls); a credential the document leaves empty
     is the run's own (environment or keys file), merged as a host task merges it
-    (``subagent_runtime.apply_task_start_settings``). Only this lane freezes what it resolves.
+    (``subagent_runtime.apply_task_start_settings``).
     """
     from ouroboros import config
     from ouroboros.provider_models import ALL_PROVIDER_CREDENTIAL_KEYS
@@ -833,20 +828,52 @@ def _pinned_default_panel_view(profile: str):
     return task_settings_snapshot(settings, projected)
 
 
-def _resolved_review_config(*, profile: str = "production_commit_gate") -> dict:
+def _panel_catalog() -> str | dict | None:
+    """The subagent catalog the panel is read from, chosen as ``_load_settings_into_env`` chooses every other
+    key: the pinned document's own under the integrity pin, else an explicit environment value over the
+    document's. ``None`` when neither names one (the key absent, null or a blank string): the settings read's
+    own catalog then stands, a never-configured install's factory reviewer rows. Any other value is named, so
+    a catalog saved empty (``items: []``) stays empty and a malformed one still fails the pool's parse."""
+    explicit = os.environ.get(_CATALOG, "")
+    if explicit.strip() and not os.environ.get(SETTINGS_INTEGRITY_ENV, ""):
+        return explicit
+    named, _pin = _settings_document(warn=False)
+    value = (named or {}).get(_CATALOG)
+    return None if value is None or (isinstance(value, str) and not value.strip()) else value
+
+
+def _review_view(pinned=None, catalog: str | None = None):
+    """The task view the panel is read under in preparation and execution alike (the catalog rides no
+    environment): ``pinned`` (``_pinned_default_panel_view``), else this process's own settings and
+    environment, so every other key keeps the authority ``_load_settings_into_env`` gave it; its catalog
+    is the frozen ``catalog``, else the wrapper's choice (``_panel_catalog``), else the settings read's own."""
+    from ouroboros import config
+    from ouroboros.settings_integrity import task_settings_snapshot
+
+    settings = dict(pinned.settings) if pinned is not None else config.load_settings()
+    if catalog is not None:
+        settings[_CATALOG] = catalog
+    elif pinned is None and (chosen := _panel_catalog()) is not None:
+        settings[_CATALOG] = chosen
+    return task_settings_snapshot(settings, dict(pinned.environ) if pinned is not None else dict(os.environ))
+
+
+def _resolved_review_config(*, profile: str = "production_commit_gate", catalog: str | None = None, view=None) -> dict:
     """Return the resolved review pool (catalog rows marked review-eligible) and
-    efforts after settings/env loading."""
-    from ouroboros.config import get_context_mode, get_review_enforcement, resolved_review_model_target
+    efforts after settings/env loading; a frozen ``catalog`` reads as execution reads it."""
+    from ouroboros.config import get_context_mode, resolved_review_model_target
     from ouroboros.model_slots import local_lane_label
     from ouroboros.reviewer_slot_config import review_pool_rows, row_effort
     from ouroboros.settings_integrity import task_settings_scope
 
-    view = _pinned_default_panel_view(profile)
+    pinned = catalog is None and profile == _CONTRIBUTOR_PROFILE and bool(os.environ.get(SETTINGS_INTEGRITY_ENV))
+    if view is None:
+        view = _review_view(_pinned_default_panel_view(profile) if pinned else None, catalog)
     with task_settings_scope(view):
         rows = review_pool_rows()
         # The view chose each row's lane; its frozen row says so, so probing and dispatch keep it.
         local = {row.target_id for row in rows
-                 if view is not None and resolved_review_model_target(row.target_id).provider_route == "local"}
+                 if pinned and resolved_review_model_target(row.target_id).provider_route == "local"}
 
     def _project(row) -> dict:
         route = {"kind": row.kind, "target_id": local_lane_label(row.target_id, row.target_id in local),
@@ -864,7 +891,6 @@ def _resolved_review_config(*, profile: str = "production_commit_gate") -> dict:
         "pool_slots": pool_slots,
         "pool_models": [row["route"]["target_id"] for row in pool_slots],
         "pool_efforts": [row["effort"] for row in pool_slots],
-        "review_enforcement": get_review_enforcement(),
         "context_mode": get_context_mode(),
         "runtime_mode": os.environ.get("OUROBOROS_RUNTIME_MODE", ""),
     }
@@ -901,10 +927,10 @@ def _frozen_pool_catalog(resolved_config: dict) -> str:
 
 
 def _freeze_contributor_slots(resolved_config: dict) -> dict:
-    """Pin the resolved pool so hot settings cannot change the executing panel."""
+    """Pin the resolved pool so hot settings cannot change the executing panel: the review runs under the
+    view of the frozen catalog (``_contributor_lane``), read here as it runs."""
     source = str(resolved_config.get("slot_config_source") or "")
-    os.environ["OUROBOROS_SUBAGENTS"] = _frozen_pool_catalog(resolved_config)
-    frozen = _resolved_review_config(profile=_CONTRIBUTOR_PROFILE)
+    frozen = _resolved_review_config(profile=_CONTRIBUTOR_PROFILE, catalog=_frozen_pool_catalog(resolved_config))
     if frozen.get("pool_slots") != resolved_config.get("pool_slots"):
         raise RuntimeError("contributor review pool freeze changed the resolved plan")
     frozen["slot_config_source"] = source
@@ -1034,7 +1060,7 @@ def _parse_args():
         action="store_true",
         help=(
             "Review the committed base-ref..head-ref proposal with the configured "
-            "triad/scope slots, blocking clean semantics, no Claude advisory, "
+            "triad/scope slots, verdict semantics (only a PASS passes), no Claude advisory, "
             "and a shareable route-aware evidence packet. Run it from a clean "
             "checkout of the installed body (for a contributor, the target base)."
         ),
@@ -1140,7 +1166,7 @@ def _build_review_request(
     return commit_message, goal, scope
 
 
-def _prepare_review_configuration(args) -> tuple[dict | None, dict]:
+def _prepare_review_configuration(args) -> tuple:
     isolation = isolate_review_data(
         host_data=DATA, drive_root=args.drive_root, run_cap=args.run_cap_usd,
         attach_host_engine=args.attach_host_engine) if args.contributor else None
@@ -1155,9 +1181,10 @@ def _prepare_review_configuration(args) -> tuple[dict | None, dict]:
         )
         _apply_contributor_review_env()
 
-    resolved_config = _resolved_review_config(
-        profile=_CONTRIBUTOR_PROFILE if args.contributor else "production_commit_gate"
-    )
+    profile = _CONTRIBUTOR_PROFILE if args.contributor else "production_commit_gate"
+    # Freeze every row before probing: unticked advisers and admission must see the same catalog as execution.
+    view = _review_view(_pinned_default_panel_view(profile))
+    resolved_config = _resolved_review_config(profile=profile, view=view)
     if args.contributor:
         _assert_contributor_review_config(resolved_config)
         resolved_config = _freeze_contributor_slots(resolved_config)
@@ -1179,8 +1206,12 @@ def _prepare_review_configuration(args) -> tuple[dict | None, dict]:
                 probe_models=openrouter_models,
             )
     else:
-        _select_healthy_openrouter_key()
-    return proposal, resolved_config
+        _select_healthy_openrouter_key(probe_models=_configured_openrouter_models(resolved_config))
+        from ouroboros.settings_integrity import task_settings_snapshot
+
+        # Keep the admitted catalog, but carry the credential the health probe just selected.
+        view = task_settings_snapshot(dict(view.settings), dict(os.environ))
+    return proposal, resolved_config, view
 
 
 def _operator_reviewable_diff_chars(fallback_chars: int) -> int:
@@ -1214,7 +1245,7 @@ def main() -> int:
     args = _parse_args()
 
     try:
-        proposal, resolved_config = _prepare_review_configuration(args)
+        proposal, resolved_config, view = _prepare_review_configuration(args)
     except Exception as exc:
         print(f"ERROR: review configuration preflight failed: {exc}", file=sys.stderr)
         return 3
@@ -1252,6 +1283,7 @@ def main() -> int:
     ).expanduser().resolve(strict=False)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    from ouroboros.settings_integrity import task_settings_scope
     from ouroboros.tools.registry import ToolContext
 
     review_drive_root = (
@@ -1263,12 +1295,14 @@ def main() -> int:
 
     host_ctx = ToolContext(repo_dir=REPO, drive_root=review_drive_root)
     commit_message, goal, scope = _build_review_request(args=args, version=version, contributor_snapshot=proposal)
-    if proposal is not None:
-        return _contributor_lane(args, host_ctx, proposal, resolved_config=resolved_config, goal=goal,
-                                 scope=scope, output_dir=output_dir, review_drive_root=review_drive_root)
-    return _operator_lane(args, host_ctx, commit_message, goal=goal, scope=scope, staged=staged,
-                          resolved_config=resolved_config, output_dir=output_dir,
-                          review_drive_root=review_drive_root)
+    if proposal is not None:  # the review runs the panel it froze (``_freeze_contributor_slots``)
+        with task_settings_scope(_review_view(catalog=_frozen_pool_catalog(resolved_config))):
+            return _contributor_lane(args, host_ctx, proposal, resolved_config=resolved_config, goal=goal,
+                                     scope=scope, output_dir=output_dir, review_drive_root=review_drive_root)
+    with task_settings_scope(view):
+        return _operator_lane(args, host_ctx, commit_message, goal=goal, scope=scope, staged=staged,
+                              resolved_config=resolved_config, output_dir=output_dir,
+                              review_drive_root=review_drive_root)
 
 
 def _contributor_lane(args, host_ctx, proposal: dict, *, resolved_config: dict, goal: str, scope: str,
@@ -1442,7 +1476,11 @@ def _operator_lane(args, host_ctx, commit_message: str, *, goal: str, scope: str
                       file=sys.stderr)
 
     record_id = str(outcome.get("review_record_id") or getattr(ctx, "_current_review_record_id", "") or "")
-    record, _problem = _review_record(ctx, {"record_id": record_id})
+    record, problem = _review_record(ctx, {"record_id": record_id})
+    if not retained and str(outcome.get("status") or "") in {"passed", "reviewed"}:
+        # The record's verdict decides, as in the contributor lane: the review-only cycle hands
+        # a FAIL back as ``reviewed`` (it never refuses on a verdict), and Cyber Pro passes it.
+        outcome = {**outcome, **_record_outcome(record, problem)}
     # Seat evidence reads the ledger record (the contributor packet's vocabulary); the
     # raw ctx rows stand in only when the cycle wrote no record.
     actors = _record_actors(record) if record else [

@@ -135,7 +135,8 @@ def test_indexed_census_preserves_legacy_members_and_reads_no_foreign_body(tmp_p
     assert any(b.get("task_id") == "legacy-child" for b in conflicting_writers(queue, "root"))
     assert "legacy-child" in decoded and not any(task_id.startswith("foreign-") for task_id in decoded)
     decoded.clear()
-    context = SimpleNamespace(drive_root=tmp_path, task_id="root", root_task_id="root")
+    # A top-level project sleeper: its cold sleep is the one that releases its tree's project lane.
+    context = SimpleNamespace(drive_root=tmp_path, task_id="root", root_task_id="root", project_id="room")
     assert any(b.get("detail") == "legacy-child" for b in cold_blockers(context))
     assert not any(task_id.startswith("foreign-") for task_id in decoded)
     with monkeypatch.context() as busy:

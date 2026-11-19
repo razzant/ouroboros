@@ -38,6 +38,7 @@ if sys.platform == "win32":
          (ctypes.wintypes.HANDLE, ctypes.c_int, ctypes.wintypes.LPVOID, ctypes.wintypes.DWORD, ctypes.POINTER(ctypes.wintypes.DWORD))),
         ("AssignProcessToJobObject", ctypes.wintypes.BOOL, (ctypes.wintypes.HANDLE, ctypes.wintypes.HANDLE)),
         ("TerminateJobObject", ctypes.wintypes.BOOL, (ctypes.wintypes.HANDLE, ctypes.wintypes.UINT)),
+        ("WaitForSingleObject", ctypes.wintypes.DWORD, (ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD)),
         ("CloseHandle", ctypes.wintypes.BOOL, (ctypes.wintypes.HANDLE,)),
         ("LockFileEx", ctypes.wintypes.BOOL,
          (ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD, ctypes.wintypes.DWORD,

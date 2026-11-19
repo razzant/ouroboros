@@ -84,6 +84,19 @@ def signature(root: Any, task_id: str, *, txn: Optional[Txn] = None) -> Optional
         return signature(root, task_id, txn=txn)
 
 
+def signatures(root: Any, task_ids: Iterable[str]) -> Dict[str, Tuple[int, Any]]:
+    """Each stored task's ``signature`` in ONE read, typed columns only: what a memo over many rows compares.
+    An id the store does not hold is absent."""
+    ids = sorted({str(task_id) for task_id in task_ids if str(task_id or "").strip()})
+    if not ids:
+        return {}
+    with open_store(root, write=False) as txn:
+        captured = capture(txn.conn, "SELECT task_id, write_seq, updated_at FROM tasks WHERE task_id IN "
+                           "(SELECT value FROM json_each(?))", (json.dumps(ids),),
+                           ("task_id", "write_seq", "updated_at"))
+    return {str(task_id): (seq, updated) for task_id, seq, updated in captured.tuples()}
+
+
 def terminal_writes_since(root: Any, counter: int) -> List[str]:
     """The task ids whose rows were written terminal after the terminal-write counter stood at COUNTER
     (``obligations.task_written`` stamps each such row with the counter's new value, ``terminal_seq``),
@@ -104,8 +117,9 @@ def delete_document(root: Any, task_id: str) -> bool:
         return present
 
 
-def patch_document(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]) -> Dict[str, Any]:
-    """Mutate CURRENT in one write; None writes nothing. Return the current document."""
+def patch_document(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]], *,
+                   last_word: Any = None) -> Dict[str, Any]:
+    """Mutate CURRENT in one write; None writes nothing. Return the current document. ``last_word``: ``store.update_task``."""
     from ouroboros.obligations import pending_drive_rule
 
     task_id = str(task_id)
@@ -115,7 +129,7 @@ def patch_document(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], 
         seen["current"] = current
         return mutator(current)
 
-    updated = store.update_task(root, task_id, _mutate, pending_drive=pending_drive_rule)
+    updated = store.update_task(root, task_id, _mutate, pending_drive=pending_drive_rule, last_word=last_word)
     return seen.get("current", {}) if updated is None else {**updated, "task_id": task_id}
 
 
@@ -351,12 +365,29 @@ def lineage_where(parent: str, root_id: str, *, direct_only: bool,
 
 
 def select_lineage(root: Any, parent: str, root_id: str, *, direct_only: bool = False,
-                   queue_members: Iterable[str] = ()) -> List[Dict[str, Any]]:
-    """The child-lookup candidates in ``task_id`` order (``lineage_where``); the Python projection decides the rest."""
+                   queue_members: Iterable[str] = (), unread: Iterable[str] = (),
+                   skipped: Optional[set] = None) -> List[Dict[str, Any]]:
+    """The child-lookup candidates in ``task_id`` order (``lineage_where``); the Python projection decides the rest.
+    A candidate named in UNREAD that no retry or supersession pointer redirects (its effective row is its own) is not
+    fetched: its id goes, in the same read, to SKIPPED, the set a caller passing UNREAD passes with it
+    (``task_status.find_child_tasks(settled=...)``)."""
     where, params = lineage_where(str(parent or ""), str(root_id or ""), direct_only=direct_only,
                                   queue_members=queue_members)
+    names = sorted({str(task_id) for task_id in unread if str(task_id or "")})
+    if names and skipped is None:
+        raise TypeError("select_lineage: UNREAD needs the SKIPPED set that receives the rows not fetched")
+    captured = None
     with open_store(root, write=False) as txn:
+        if names:
+            held = ("t.task_id IN (SELECT value FROM json_each(?)) AND t.superseded_by IS NULL "
+                    "AND t.retry_task_id IS NULL")
+            params = (*params, json.dumps(names))
+            captured = capture(txn.conn, "SELECT t.task_id FROM tasks AS t JOIN task_bodies AS b "
+                               f"ON b.task_id = t.task_id WHERE ({where}) AND {held}", params, ("task_id",))
+            where = f"({where}) AND NOT ({held})"
         fetched = _fetch(txn, where, params)
+    if captured is not None:
+        skipped.update(row[0] for row in captured.tuples())
     return _decode(fetched)
 
 
@@ -425,6 +456,44 @@ def documents_by_ids(root: Any, task_ids: Iterable[str]) -> Dict[str, Dict[str, 
     return dict(_documents(fetched))
 
 
+_NOTE_KEYS = ("task_id", "status", "working_notes")
+
+
+def working_note_documents(root: Any, task_ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    """Only identity, status and the working-notes pointer, from one current-body snapshot.
+
+    JSON1 selects inside SQLite; Python receives no result text, handoffs or card overlays.
+    Multi-path extraction preserves JSON types. A TEXT body SQLite does not take as RFC 8259
+    JSON (``json_valid`` 0, on every supported SQLite: the NaN/Infinity ``machine_json`` writes,
+    or a damaged body) travels whole and ``json.loads`` reads it as the full reader does, so a
+    non-finite value keeps its pointer and an undecodable body refuses only its own row.
+    Existing rows with missing, undecodable or non-object bodies remain empty documents for
+    strict admission to refuse, rather than disappearing as absent.
+    """
+    ids = sorted({str(task_id) for task_id in task_ids})
+    if not ids:
+        return {}
+    select = """SELECT t.task_id, CASE WHEN json_valid(b.body) THEN
+        CASE WHEN json_type(b.body) = 'object' THEN
+            '' || json_extract(b.body, '$.task_id', '$.status', '$.working_notes')
+        END END AS view, CASE WHEN typeof(b.body) = 'text' AND NOT json_valid(b.body) THEN b.body END AS raw
+        FROM tasks AS t LEFT JOIN task_bodies AS b ON b.task_id = t.task_id
+        WHERE t.task_id IN (SELECT value FROM json_each(?))"""
+    with open_store(root, write=False) as txn:
+        pages = [rows for _page, rows in _pages(txn, ids, select, ("task_id", "view", "raw"))]
+    return {row["task_id"]: _note_document(row["view"], row["raw"]) for page in pages for row in page.rows()}
+
+
+def _note_document(view: Optional[str], raw: Optional[str]) -> Dict[str, Any]:
+    if view is not None:
+        return dict(zip(_NOTE_KEYS, json.loads(view)))
+    try:
+        document = json.loads(raw) if raw is not None else None
+    except (ValueError, RecursionError):
+        return {}
+    return {key: document.get(key) for key in _NOTE_KEYS} if isinstance(document, dict) else {}
+
+
 def origin_documents(root: Any, origin: str) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
     """``(documents, faults)`` an owner message's operation may be: each row whose typed top-level origin is
     ORIGIN (``<chat_id>:<client_message_id>``, ``store_hot_facts.task_columns``), and each row an older writer
@@ -475,13 +544,16 @@ DISPLAY_DROPPED: Tuple[str, ...] = (
     "task_acceptance_review_accounting", "review_thread_releases", "delegated_result_taken",
     *(f"metadata.{key}" for key in (
         "task_contract", "main_routing_manifest", "governing_owner_words", "routing_contract",
-        "configured_subagent", "continuation", "project_routing_manifest", "subagent_envelope", "owner_corpus",
+        "configured_subagent", "project_routing_manifest", "subagent_envelope", "owner_corpus",
         "origin_message_text", "wake_observation", "project_last_task_result", "current_chat",
         "workspace_preflight", "workspace_copy", "late_answer")),
 )
 DISPLAY_KEPT: Dict[str, Tuple[str, ...]] = {
     "artifact_bundle": ("status",), "task_contract": ("deadline_at",),
     "loop_outcome": ("usage",), "loop_outcome.usage": ("total_rounds",),  # history's accepted solve responses
+    # Who asked for a Continue (``initiator_meta``), without the continuation's evidence.
+    "metadata.continuation": ("admission",), "metadata.continuation.admission": ("by",),
+    "metadata.continuation.admission.by": ("actor",),
 }
 _KEEP = "__keep__"  # a path no kept object holds: the no-op target of a conditional edit
 
@@ -588,6 +660,53 @@ def collection_flags(root: Any, task_ids: Iterable[str]) -> Dict[str, Tuple[Opti
                            ("task_id", "review_collection_pending", "plan_collection_pending"))
     return {str(task_id): (None if review is None else bool(review), None if plan is None else bool(plan))
             for task_id, review, plan in captured.tuples()}
+
+
+def stable_finals(root: Any, task_ids: Iterable[str]) -> Dict[str, Optional[bool]]:
+    """Each stored task's derived ``list_stable`` in ONE read, no body decoded: whether its writer found the stored
+    status final with no overlay of the effective reader able to change it (``task_status.stored_list_order_is_final``:
+    no retry or supersession pointer, no effective child overlay, workspace finalization settled). A fact about the
+    row its writer committed with the body, not a fresh read of that body. ``None`` while the row is underived; ``{}``
+    below the schema that holds the column. An id the store does not hold with a body, or not a valid id as given,
+    is absent."""
+    from ouroboros.store_hot_facts import LIST_VERSION
+    from ouroboros.task_results import validate_task_id
+
+    def exact(task_id: Any) -> bool:  # only an id its own reader would take as given: a padded one is not this row
+        try:
+            return validate_task_id(task_id) == task_id
+        except ValueError:
+            return False
+
+    ids = sorted({str(task_id) for task_id in task_ids if exact(str(task_id or ""))})
+    if not ids:
+        return {}
+    with open_store(root, write=False) as txn:
+        if int(txn.meta("schema_version") or 1) < LIST_VERSION:
+            return {}
+        captured = capture(txn.conn, "SELECT t.task_id, t.list_stable FROM tasks AS t JOIN task_bodies AS b "
+                           "ON b.task_id=t.task_id WHERE t.task_id IN (SELECT value FROM json_each(?))",
+                           (json.dumps(ids),), ("task_id", "list_stable"))
+    return {str(task_id): None if stable is None else bool(stable) for task_id, stable in captured.tuples()}
+
+
+def stated_roots(root: Any, task_ids: Iterable[str]) -> Dict[str, str]:
+    """The top-level ``root_task_id`` each task's own stored body states, for the rows no retry or supersession
+    pointer redirects, in ONE read: SQLite reads the one field, no body is decoded here. What the effective reader
+    answers for such a row (its replica and queue overlays never replace a stated root), for a body the store's writer
+    serialized (one key each: SQLite takes a repeated key's first value, Python its last). A row that states none
+    (absent, empty or not text), has no readable text body, or is redirected is absent: its own read answers."""
+    ids = sorted({str(task_id) for task_id in task_ids if str(task_id or "").strip()})
+    if not ids:
+        return {}
+    with open_store(root, write=False) as txn:
+        captured = capture(txn.conn, "SELECT t.task_id, CASE WHEN typeof(b.body)<>'text' THEN NULL WHEN NOT "
+                           "json_valid(b.body) THEN NULL WHEN json_type(b.body, '$.root_task_id')='text' THEN "
+                           "json_extract(b.body, '$.root_task_id') END AS stated FROM tasks AS t JOIN task_bodies AS b "
+                           "ON b.task_id=t.task_id WHERE t.task_id IN (SELECT value FROM json_each(?)) "
+                           "AND t.superseded_by IS NULL AND t.retry_task_id IS NULL", (json.dumps(ids),),
+                           ("task_id", "stated"))
+    return {str(task_id): str(stated) for task_id, stated in captured.tuples() if stated}
 
 
 def task_ids(root: Any) -> List[str]:

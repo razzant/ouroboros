@@ -7,14 +7,15 @@ usage event emission. Missing pricing is data, not a model-admission gate.
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import logging
 
-from ouroboros.provider_models import normalize_model_identity, provider_for_model
+from ouroboros.provider_models import normalize_model_identity, parse_model_route, provider_for_model
 from ouroboros.utils import utc_now_iso
 from ouroboros.config import runtime_setting
 
@@ -66,6 +67,11 @@ def _fetch_live_rows(provider: str, model: str = "") -> Dict[str, Tuple[Optional
     return {}
 
 
+# The routes ``get_pricing`` reads a live catalog for. Cloud.ru prices in roubles: its catalog is known only with a
+# positive ``OUROBOROS_RUB_USD_RATE`` (llm_pricing.fetch_cloudru_pricing).
+CATALOG_PROVIDERS = frozenset({"openrouter", "cloudru"})
+
+
 def get_pricing(
     *, provider: str = "openrouter", allow_live_fetch: bool = True, model: str = "",
 ) -> Dict[str, Tuple[Optional[float], ...]]:
@@ -78,7 +84,7 @@ def get_pricing(
     sharing this cache's TTL and in-flight owner. It never fetches all endpoints.
     """
     provider = str(provider or "").strip().lower()
-    if provider not in {"openrouter", "cloudru"} or (model and provider != "openrouter"):
+    if provider not in CATALOG_PROVIDERS or (model and provider != "openrouter"):
         return {}
     exact = str(model or "").strip()  # the slug the endpoints API names; the cache keys its identity
     model = normalize_model_identity(exact) if exact else ""
@@ -109,6 +115,24 @@ def get_pricing(
             # This is process-local and deliberately short, not a stale tariff cache.
             _pricing_retry_after[key] = time.time() + 30.0
         return dict(rows)
+
+
+def declared_token_limits(provider: str, model: str) -> Dict[int, Tuple[str, str]]:
+    """The token limits the route's endpoint catalogue declares for ``model``, each with what it limits and where:
+    ``max_prompt_tokens`` caps the input, ``context_length`` is a total that holds the reply.
+
+    Read from the endpoint rows ``get_pricing`` keeps beside the tariffs: its cache, else its one free bounded
+    fetch; a route without a catalogue, or a failed read, declares nothing. What one refusal's number may equal
+    (``context_anchor.cited_limit_refusal``), never a planning limit: one model id spans endpoints with different
+    windows, and the observation scope does not name the serving one."""
+    limits: Dict[int, Tuple[str, str]] = {}
+    for tag, row in get_pricing(provider=provider, model=parse_model_route(model).model).items():  # the slug, however the route spells it
+        source = getattr(row, "source", {})
+        for key, kind in (("max_prompt_tokens", "input"), ("context_length", "total")):
+            if type(source.get(key)) is int and source[key] > 0 and (
+                    source[key] not in limits or (kind, limits[source[key]][0]) == ("input", "total")):
+                limits[source[key]] = (kind, f"the endpoint catalogue ({tag} {key})")  # an input cap wins: it sheds less
+    return limits
 
 
 def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: int, *,
@@ -172,9 +196,10 @@ def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: in
     return _cost_from_pricing(pricing, prompt_tokens, completion_tokens, cache_usage)
 
 
-def _cost_from_pricing(pricing: tuple, prompt_tokens: int, completion_tokens: int,
-                       cache_usage: Optional[Dict[str, Any]], *, exact_cache_tiers: bool = False) -> Optional[float]:
-    """Price one complete tariff; endpoint bounds compare whole costs, not rate maxima."""
+def _cost_addends(pricing: tuple, prompt_tokens: int, completion_tokens: int, cache_usage: Optional[Dict[str, Any]],
+                  *, exact_cache_tiers: bool = False) -> Optional[Tuple[float, ...]]:
+    """One complete tariff's five addends in dollars for one call: uncached input, cache reads, default-tier
+    cache writes, extended-tier cache writes, output; None when a price it needs is unknown."""
     cache_row = cache_usage if isinstance(cache_usage, dict) else {}
     cached_tokens = int(cache_row.get("cached_tokens") or 0)
     cache_write_tokens = int(cache_row.get("cache_write_tokens") or 0)
@@ -211,14 +236,81 @@ def _cost_from_pricing(pricing: tuple, prompt_tokens: int, completion_tokens: in
                             else float(write_price or 0.0) * (2.0 / 1.25))
     if default_write_tokens and write_price is None or extended_write_tokens and extended_write_price is None:
         return None
-    cost = (
-        regular_input * input_price / 1_000_000
-        + cached_tokens * float(cached_price or 0.0) / 1_000_000
-        + default_write_tokens * float(write_price or 0.0) / 1_000_000
-        + extended_write_tokens * float(extended_write_price or 0.0) / 1_000_000
-        + completion_tokens * output_price / 1_000_000
+    return (
+        regular_input * input_price / 1_000_000,
+        cached_tokens * float(cached_price or 0.0) / 1_000_000,
+        default_write_tokens * float(write_price or 0.0) / 1_000_000,
+        extended_write_tokens * float(extended_write_price or 0.0) / 1_000_000,
+        completion_tokens * output_price / 1_000_000,
     )
+
+
+def _cost_from_pricing(pricing: tuple, prompt_tokens: int, completion_tokens: int,
+                       cache_usage: Optional[Dict[str, Any]], *, exact_cache_tiers: bool = False) -> Optional[float]:
+    """Price one complete tariff; endpoint bounds compare whole costs, not rate maxima."""
+    addends = _cost_addends(pricing, prompt_tokens, completion_tokens, cache_usage, exact_cache_tiers=exact_cache_tiers)
+    if addends is None:
+        return None
+    cost = addends[0] + addends[1] + addends[2] + addends[3] + addends[4]  # the order the one expression added them in
     return cost if exact_cache_tiers else round(cost, 6)
+
+
+COST_CLASSES = ("cache_write", "cache_read", "output", "uncached_input")
+
+
+def display_tariffs(provider: Optional[str]) -> Tuple[Dict[str, tuple], str]:
+    """The route's tariffs a price DISPLAY may use, never fetched: what this process holds, else what the install's
+    dated catalogue record holds (OpenRouter; the server prices no call itself). Keys are
+    ``normalize_model_identity`` names; the second value is the record's date when the record answered."""
+    route = str(provider or "openrouter").strip().lower()
+    rows = get_pricing(provider=route, allow_live_fetch=False)
+    if rows or route != "openrouter":
+        return rows, ""
+    from ouroboros.llm_pricing import recorded_openrouter_pricing
+
+    return recorded_openrouter_pricing()
+
+
+def cost_class_weights(pricing: Optional[tuple], usage: Dict[str, Any]) -> Optional[Dict[str, float]]:
+    """What ``pricing`` charges one call for each class of its tokens (``COST_CLASSES``), as WEIGHTS for sharing
+    that call's RECORDED cost out by class; None when a price or a token count it needs is unknown.
+
+    ``usage`` carries the usage-row fields (``prompt_tokens``, ``completion_tokens``, ``cached_tokens``,
+    ``cache_write_tokens``, ``prompt_cache_ttl``, the reported ``cache_write_tokens_by_ttl``). These are the
+    addends ``_cost_from_pricing`` sums; only their ratios are meant, the recorded cost stays the amount."""
+    counts = [usage.get(name) for name in ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens")]
+    if not pricing or any(count is None for count in counts):
+        return None  # a count the row does not have is unknown, never zero
+    prompt, completion, read, writes = (max(0, int(count)) for count in counts)
+    lifetimes = write_lifetimes(usage, writes)
+    if lifetimes is None:
+        return None  # written at a lifetime the row does not name: never assumed to be the cheaper one
+    addends = _cost_addends(pricing, prompt, completion, {"cached_tokens": read, "cache_write_tokens": writes})
+    if addends is None:
+        return None
+    rates = pricing
+    for min_prompt_tokens, tier_pricing in getattr(pricing, "tiers", ()):
+        if prompt >= int(min_prompt_tokens):
+            rates = tier_pricing
+    write_price = float(rates[2] or 0.0)
+    extended = getattr(rates, "cache_write_1h", None)  # a long-prompt tier's own 1-hour price, as the bill takes it
+    extended = float(extended) if extended is not None else write_price * (2.0 / 1.25)  # the estimator's own ratio
+    uncached, cache_read, _written, _extended, output = addends
+    write = (lifetimes[0] * write_price + lifetimes[1] * extended) / 1_000_000
+    return {"cache_write": write, "cache_read": cache_read, "output": output, "uncached_input": uncached}
+
+
+def write_lifetimes(usage: Dict[str, Any], writes: int) -> Optional[Tuple[int, int]]:
+    """``(5-minute, 1-hour)`` written tokens: the provider's own split when it accounts for every write, else the
+    one lifetime the row names; None when neither says (``default`` or an absent lifetime, a partial split)."""
+    if writes == 0:
+        return 0, 0
+    split = usage.get("cache_write_tokens_by_ttl")
+    if (isinstance(split, dict) and split and set(split) <= {"5m", "1h"}
+            and all(type(count) is int and count >= 0 for count in split.values()) and sum(split.values()) == writes):
+        return split.get("5m", 0), split.get("1h", 0)
+    named = str(usage.get("prompt_cache_ttl") or "")
+    return (writes, 0) if named == "5m" else (0, writes) if named == "1h" else None
 
 
 def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
@@ -417,3 +509,114 @@ def emit_llm_usage_event(
         })
     except Exception:
         log.debug("Failed to put llm_usage event to queue", exc_info=True)
+
+
+def price_source(provider: Any, settings: Optional[Mapping[str, Any]] = None, model: str = "", *,
+                 search: bool = False) -> str:
+    """How a route's price is known: ``local`` (no charge), ``subscription`` (the plan's time, not money),
+    ``catalog`` (its provider's live catalog, ``get_pricing``), ``unknown`` (a call adds nothing to known spend), or
+    only under a condition its published entry for ``model`` (or its ``search``) sets (DeepSeek,
+    ``pricing_catalog.price_condition``): ``off_peak_usd`` (a call wholly off-peak, on a key billed in USD) or
+    ``usd`` (a search on a key billed in USD)."""
+    kind = str(provider or "").strip().lower()
+    if kind in ("local", "claudexor"):
+        return "local" if kind == "local" else "subscription"
+    if kind == "deepseek":
+        from ouroboros.pricing_catalog import price_condition
+
+        return price_condition(model, search=search) or "unknown"
+    if kind == "cloudru":
+        read = settings.get if settings is not None else (lambda key: runtime_setting(key, ""))
+        try:
+            rate = float(read("OUROBOROS_RUB_USD_RATE") or 0)
+        except (TypeError, ValueError):
+            rate = 0.0
+        # One catalog for every Cloud.ru connection, read with the built-in one's key as the resolver finds it
+        # (llm_pricing.fetch_cloudru_pricing).
+        from ouroboros.provider_models import model_has_credentials, provider_has_credentials_in_settings
+        keyed = (provider_has_credentials_in_settings("cloudru", dict(settings)) if settings is not None
+                 else model_has_credentials("cloudru::"))
+        return "catalog" if rate > 0 and keyed else "unknown"
+    return "catalog" if kind in CATALOG_PROVIDERS else "unknown"
+
+
+# The Models roles in their order, with the label Settings gives each.
+_SPEND_ROLES = (("main", "Main"), ("light", "Light"), ("safety", "Safety Supervisor"), ("vision", "Vision"),
+                ("consciousness", "Consciousness"), ("fallback", "Fallback"))
+
+
+def _role_routes(settings: Mapping[str, Any], role: str) -> List[Tuple[str, bool]]:
+    """The ``(model, local)`` routes a role's calls may take by this document, as the runtime resolves them: the
+    one rule of a role's slot asked over the document (``route_choice.following_route``; a model labelled
+    `` (local)`` parses as the local lane). The fallback chain runs its entries on its own box."""
+    from ouroboros.route_choice import box_checked, following_route
+
+    read = settings.get
+    if role == "fallback":
+        local = box_checked(read("USE_LOCAL_FALLBACK"))
+        return [(entry.strip(), local) for entry in str(read("OUROBOROS_MODEL_FALLBACKS") or "").split(",") if entry.strip()]
+    return [following_route(role, read=read)]
+
+
+def _subagent_rows(value: Any) -> List[Mapping[str, Any]]:
+    """The catalog's rows: each enabled one can run even with the catalog switched off, since a review names any
+    enabled row (reviewer_slot_config.catalog_review_row)."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or "null")
+        except ValueError:
+            return []
+    items = value.get("items") if isinstance(value, Mapping) else value
+    return [row for row in items if isinstance(row, Mapping)] if isinstance(items, list) else []
+
+
+def spend_coverage(settings: Mapping[str, Any], subagents: Any = None) -> Tuple[List[str], List[Dict[str, str]]]:
+    """What spends money the limits cannot count, as Dashboard › Costs names it under them: ``(not counted,
+    partly counted)``. Not counted: a role whose route has no known price (``all model roles`` when none of the
+    configured ones has; the Safety Supervisor only while a Safety mode asks it), a leg of built-in web search (a
+    later one runs when the earlier fails, as a fallback model does), enabled API helpers (``Agents``;
+    ``subagents`` is the resolved list, else the document's). Partly counted, ``{name, condition}``: a group whose
+    every route is priced, some only under a ``price_source`` condition (``off_peak_usd`` outranks ``usd``).
+    ``off_peak_usd`` prices text input alone, so Vision, whose every call carries an image, is not counted there."""
+    from ouroboros.settings_scales import normalize_safety_mode
+
+    def source(model: str, local: bool) -> str:
+        if not model:
+            return "catalog"
+        route = parse_model_route(model)
+        return price_source("local" if local else route.kind, settings, "" if local else route.model)
+
+    def condition(sources: List[str]) -> str:
+        return ("unknown" if "unknown" in sources else "off_peak_usd" if "off_peak_usd" in sources
+                else "usd" if "usd" in sources else "")
+
+    checks = any(normalize_safety_mode(settings.get(key)) != "off"
+                 for key in ("OUROBOROS_SAFETY_MODE", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"))
+    routed = [(role, label, _role_routes(settings, role)) for role, label in _SPEND_ROLES if role != "safety" or checks]
+    routed = [(label, condition([("unknown" if said == "off_peak_usd" and role == "vision" else said)
+                                 for said in (source(model, local) for model, local in routes)]))
+              for role, label, routes in routed if any(model for model, _ in routes)]
+    groups: List[Tuple[str, str]] = []
+    for kind in ("unknown", "off_peak_usd"):
+        roles = [label for label, said in routed if said == kind]
+        groups += [("all model roles", kind)] if len(roles) > 1 and len(roles) == len(routed) else [
+            (label, kind) for label in roles]
+    try:
+        from ouroboros.search_routes import resolve_web_search_route
+        legs = resolve_web_search_route(settings=settings).get("legs") or []
+    except Exception:
+        log.debug("Could not resolve the web search route for the spend gaps", exc_info=True)
+        legs = []
+    sources = {str(leg.get("source") or "") for leg in legs} - {"", "ddgs"}
+    said = condition([price_source(name, settings, search=True) for name in sources])
+    if said:
+        groups.append(("Web search", said))
+    routes = [row.get("route") for row in _subagent_rows(subagents if subagents is not None
+                                                        else settings.get("OUROBOROS_SUBAGENTS"))
+              if row.get("enabled", True) is not False and isinstance(row.get("route"), Mapping)]
+    said = condition([source(str(route.get("target_id") or ""), False) for route in routes
+                      if route.get("kind") == "api_model"])
+    if said:
+        groups.append(("Agents", said))
+    return ([name for name, kind in groups if kind == "unknown"],
+            [{"name": name, "condition": kind} for name, kind in groups if kind != "unknown"])

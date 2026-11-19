@@ -163,7 +163,7 @@ def _run_core_ui_assertions(url: str) -> None:
 
 @pytest.mark.ui_browser
 def test_ui_projects_sidebar_unread_and_keyboard_menu(direct_server_with_data):
-    """Projects stays compact, paint-ACKs unread, and exposes a real keyboard menu."""
+    """Projects marks unread on its row, paint-ACKs it, and keeps its keyboard menu and Find usable."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
@@ -186,15 +186,19 @@ def test_ui_projects_sidebar_unread_and_keyboard_menu(direct_server_with_data):
                 add = page.locator("#nav-projects-add")
                 assert add.is_visible()
                 assert add.get_attribute("aria-label") == "New project"
-                assert page.locator("#nav-projects-count").inner_text() == "1"
+                assert page.locator("#nav-projects-count, #nav-projects-toggle, .nav-projects-facts").count() == 0
                 assert row.get_attribute("data-unread") == ""
+                assert row.locator('.status-mark').get_attribute('data-hue') == 'unread'
+                assert row.get_attribute('aria-label').endswith(' · new messages')
 
                 row.click()
                 page.wait_for_selector('#project-panel:not([hidden])', timeout=30_000)
                 page.wait_for_function(
-                    "() => document.querySelector('#nav-projects-count')?.textContent === ''",
+                    "() => !document.querySelector('.nav-project-row[data-project-id=\"alpha\"]')?.hasAttribute('data-unread')",
                     timeout=30_000,
                 )
+                assert row.locator('.status-mark').get_attribute('data-hue') != 'unread'
+                assert not row.get_attribute('aria-label').endswith(' · new messages')
                 page.click("#project-panel-close")
 
                 kebab = page.locator('.nav-project-kebab[aria-label="Actions for Alpha project"]')
@@ -212,11 +216,16 @@ def test_ui_projects_sidebar_unread_and_keyboard_menu(direct_server_with_data):
                 assert menu.count() == 0
                 assert page.locator(':focus').get_attribute("aria-label") == "Actions for Alpha project"
 
-                toggle = page.locator("#nav-projects-toggle")
-                toggle.focus()
-                toggle.press("Space")
-                assert toggle.get_attribute("aria-expanded") == "false"
-                assert page.locator("#nav-projects-list").is_hidden()
+                find = page.locator('.nav-find-input')
+                find.fill('no such project')
+                page.wait_for_function("() => !document.querySelector('.nav-project-row[data-project-id=\"alpha\"]')")
+                page.locator('#nav-projects-list').get_by_role('button', name='Clear search', exact=True).wait_for(state='visible')
+                find.press('Escape')
+                row.wait_for(state='visible')
+                assert find.input_value() == '' and find.evaluate('el => el === document.activeElement')
+                assert page.locator('#nav-projects-list .nav-project-row').count() == 1
+                find.press('ArrowDown')
+                assert row.evaluate('el => el === document.activeElement')
                 assert add.is_visible()
             finally:
                 browser.close()
@@ -910,11 +919,12 @@ def test_ui_smoke_phase3_declarative_widgets_and_settings(direct_server_with_dat
                 page.set_viewport_size({"width": 1440, "height": 1000})
                 page.wait_for_timeout(100)
 
-                page.click('[data-nav-page="settings"]')
-                page.locator('[data-settings-tab="advanced"]').click()
-                section = page.locator('.settings-extension-section').filter(
-                    has_text="Phase 3 settings"
-                )
+                # The skill's form stands on its own Settings page, titled by its one section.
+                page.wait_for_function("() => Boolean(window.__ouroSettings)")
+                assert page.evaluate("() => window.__ouroSettings.open('skill/phase3_widget_smoke')") is not False
+                page.locator('#page-settings [data-settings-lead-name]').filter(has_text="Phase 3 settings").wait_for(
+                    state="visible", timeout=30_000)
+                section = page.locator('.settings-extension-section')
                 section.wait_for(state="visible", timeout=30_000)
                 settings_form = section.locator('[data-extension-settings-form]')
                 settings_form.locator('[data-extension-settings-edit-anyway]').click()  # POST-only: values unknown (#1552)
@@ -1163,7 +1173,7 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                     arg=unique_tail,
                 )
                 page.screenshot(
-                    path=str(diagnostic_directory(data_dir.parent, "ui-smoke") / f"compact-activity-{browser_engine}-{width}.png"),
+                    path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / f"compact-activity-{browser_engine}-{width}.png"),
                     full_page=True,
                 )
 
@@ -1803,10 +1813,10 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
                 assert replay_child.locator('[data-live-line-key="terminal-subagent-lifecycle-child1"]').count() == 1
                 page.wait_for_timeout(900)  # cover the routine background history sync
                 assert replay_child.locator('.chat-live-line-repeat:not([hidden])').count() == 0
-                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "ui-smoke") / "review-truth-child-reconnect.png"), full_page=True)
+                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / "review-truth-child-reconnect.png"), full_page=True)
                 replay_progress.locator(".chat-live-line-toggle").click()
                 replay_child.scroll_into_view_if_needed()
-                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "ui-smoke") / "lifecycle-current-status.png"), full_page=True)
+                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / "lifecycle-current-status.png"), full_page=True)
                 assert page.locator(".chat-bubble.progress").count() == 0
                 assert page.locator(".chat-bubble", has_text="Final child answer should stay inside the child card.").count() == 0
 
@@ -2056,7 +2066,7 @@ def _mobile_keyboard_drawer_assertions(page, url: str, screenshot_path: pathlib.
     assert scroll["scrollHeight"] > scroll["clientHeight"], scroll
     assert scroll["scrollTop"] > 0, scroll
     assert scroll["overflowY"] in {"auto", "scroll"}, scroll
-    page.screenshot(path=str(diagnostic_directory(screenshot_path.parent, "ui-smoke") / screenshot_path.name), full_page=True)
+    page.screenshot(path=str(diagnostic_directory(screenshot_path.parent, "ui-smoke", publish=True) / screenshot_path.name), full_page=True)
 
     # Exercise the real backdrop click on the room's quarter left showing beside
     # the drawer (all the scrim covers), then require all state/ARIA projections
@@ -2438,6 +2448,26 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         )
         assert len(rendered_ids) == 11, rendered_ids
         facts = page.evaluate(mobile_geometry)
+        compact = [facts["cardFacts"][0]]
+        # A finished helper belongs to its finished parent's Details (owner 09.11 A). Walk all ten depths,
+        # measuring each compact identity BEFORE opening its parent to reach the next; no hidden depth is omitted.
+        for depth in range(1, 11):
+            pid = "layout-root" if depth == 1 else f"layout-child-{depth - 1:02}"
+            cid = f"layout-child-{depth:02}"
+            child = page.locator(f'.chat-live-card[data-task-id="{cid}"]')
+            if not child.is_visible():
+                page.locator(f'.chat-live-card[data-task-id="{pid}"] > [data-live-summary-button] [data-live-disclosure]').click()
+            child.wait_for(state="visible")
+            page.evaluate("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))")
+            if depth == 1:
+                # Measure its compact identity before Details also names the role among its facts.
+                assert page.get_by_text(long_role, exact=True).count() == 1
+            current = page.evaluate(mobile_geometry)
+            compact.append(next(card for card in current["cardFacts"] if card["id"] == cid))
+        facts["cardFacts"] = compact
+        # Opening the tree can add WebKit's scrollbar: compare both widths in the same settled layout.
+        for key in ("messageWidth", "rootWidth", "deepestWidth"):
+            facts[key] = current[key]
         assert facts["rootWidth"] >= facts["messageWidth"] * 0.95, facts
         assert facts["rootWidth"] - facts["deepestWidth"] <= 40, facts
         # Narrow regime: the side controls share the chip row, the title takes its own
@@ -2458,7 +2488,6 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         # #623: a collapsed child keeps its identity row: title beside chip and controls, whole if short, wrapped
         # if long (child-01). The summary is reading content, no button (#1998): the title holds the whole role
         # as its text, however much shows.
-        assert page.get_by_text(long_role, exact=True).count() == 1
         for card in facts["cardFacts"]:
             if card["collapsedChild"]:
                 assert 0 < card["titleClient"] and card["titleScroll"] <= card["titleClient"] + 1 and (
@@ -2494,7 +2523,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         assert expanded["titleWidth"] >= min(expanded["titleScrollWidth"], 150) - 1, expanded
         assert long_url in expanded["text"], expanded
 
-    def assert_jump_geometry(page, scope_selector, *, require_overflow=True):
+    def assert_jump_geometry(page, scope_selector, *, require_overflow=True, placement="line"):
         page.evaluate(
             """({scopeSelector, requireOverflow}) => {
                 const messages = document.querySelector(scopeSelector).querySelector('.chat-messages, #chat-messages');
@@ -2505,7 +2534,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         )
         page.wait_for_timeout(250)
         facts = page.evaluate(
-            """({scopeSelector, forceVisible}) => {
+            """({scopeSelector, forceVisible, placement}) => {
                 const scope = document.querySelector(scopeSelector);
                 const messages = scope.querySelector('.chat-messages, #chat-messages');
                 const button = scope.querySelector('.chat-scroll-bottom-btn');
@@ -2524,9 +2553,13 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                     remaining: messages.scrollHeight - messages.scrollTop - messages.clientHeight,
                     visible: button.classList.contains('visible'),
                     width: b.width, height: b.height,
-                    endInset: w.right - b.right,
-                    gap: w.top - b.bottom,
+                    endInset: (placement === 'phone' ? w : t).right - b.right,
+                    gap: (placement === 'phone' ? w : t).top - b.bottom,
+                    lineCentre: t.bottom - 16 - (b.top + b.height / 2),
                     toolbarOverlap: overlap(b, t),
+                    controlOverlap: Math.max(0, ...Array.from(toolbar.children)
+                        .filter(node => node !== button && getComputedStyle(node).visibility !== 'hidden')
+                        .map(node => overlap(b, node.getBoundingClientRect()))),
                     previewOverlap: preview ? overlap(b, preview.getBoundingClientRect()) : 0,
                     boxShadow: getComputedStyle(button).boxShadow,
                 };
@@ -2534,15 +2567,20 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 else button.style.removeProperty('transition');
                 return facts;
             }""",
-            {"scopeSelector": scope_selector, "forceVisible": not require_overflow},
+            {"scopeSelector": scope_selector, "forceVisible": not require_overflow, "placement": placement},
         )
         assert facts["visible"], facts
         if require_overflow:
             assert facts["remaining"] > 48, facts
-        assert abs(facts["width"] - 32) <= 1 and abs(facts["height"] - 32) <= 1, facts
-        # ↓ latest stands at the composer's end, never over the middle of the column.
-        assert abs(facts["endInset"] - 8) <= 1 and abs(facts["gap"] - 8) <= 1, facts
-        assert facts["toolbarOverlap"] == 0 and facts["previewOverlap"] == 0, facts
+        # Approved shell (79fac1cf4): chrome-sized at the line's end, above it on a phone or narrow panel.
+        size = 44 if placement == "phone" else 30
+        assert abs(facts["width"] - size) <= 1 and abs(facts["height"] - size) <= 1, facts
+        assert abs(facts["endInset"] - 8) <= 1, facts
+        if placement == "line":
+            assert abs(facts["lineCentre"]) <= 1 and facts["toolbarOverlap"] == size * size, facts
+        else:
+            assert abs(facts["gap"] - 8) <= 1 and facts["toolbarOverlap"] == 0, facts
+        assert facts["controlOverlap"] == 0 and facts["previewOverlap"] == 0, facts
         assert facts["boxShadow"] != "none", facts
         return facts
 
@@ -2564,9 +2602,9 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 mobile = mobile_context.new_page()
                 mobile.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 assert_mobile_geometry(mobile)
-                assert_jump_geometry(mobile, "#page-chat")
+                assert_jump_geometry(mobile, "#page-chat", placement="phone")
                 mobile.screenshot(
-                    path=str(diagnostic_directory(data_dir.parent, "ui-smoke") / f"live-card-depth-10-{browser_engine}.png"),
+                    path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / f"live-card-depth-10-{browser_engine}.png"),
                     full_page=True,
                 )
                 mobile.reload(wait_until="domcontentloaded", timeout=30_000)
@@ -2585,10 +2623,18 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                     "cards => cards.map(card => card.dataset.taskId)"
                 )
                 assert len(rendered_ids) == 11, rendered_ids
-                wide_facts = wide.evaluate(
-                    """() => {
+                wide_facts = []
+                for cid, parent in [('layout-root', None), ('layout-child-01', 'layout-root'),
+                                    ('layout-child-02', 'layout-child-01')]:
+                    card = wide.locator(f'.chat-live-card[data-task-id="{cid}"]')
+                    if parent and not card.is_visible():
+                        wide.locator(f'.chat-live-card[data-task-id="{parent}"] > [data-live-summary-button] [data-live-disclosure]').click()
+                    card.wait_for(state="visible")
+                    wide.evaluate("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))")
+                    wide_facts.extend(wide.evaluate(
+                    """id => {
                         const slot = """ + _ROW_SLOT + """;
-                        const ids = ['layout-root', 'layout-child-01', 'layout-child-02'];
+                        const ids = [id];
                         return ids.map((id) => {
                             const card = document.querySelector(`#page-chat .chat-live-card[data-task-id="${id}"]`);
                             const summary = card.querySelector(':scope > .chat-live-summary-button .chat-live-summary');
@@ -2610,8 +2656,8 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                                 scroll: card.scrollWidth,
                             };
                         });
-                    }"""
-                )
+                    }""", cid
+                    ))
                 assert wide_facts[1]["left"] - wide_facts[0]["left"] >= 30, wide_facts
                 assert wide_facts[2]["left"] - wide_facts[1]["left"] >= 30, wide_facts
                 assert all(card["scroll"] <= card["client"] + 1 for card in wide_facts), wide_facts
@@ -2669,6 +2715,10 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 for key in ("x", "y", "width", "height"):
                     assert abs(before_hover[key] - after_hover[key]) <= 1, (before_hover, after_hover)
                 jump.focus()
+                # Keyboard focus owns the ring; WebKit on macOS reaches buttons with Option-Tab.
+                wide.keyboard.press("Alt+Shift+Tab" if browser_engine == "webkit" else "Shift+Tab")
+                wide.keyboard.press("Alt+Tab" if browser_engine == "webkit" else "Tab")
+                assert jump.evaluate("node => node === document.activeElement && node.matches(':focus-visible')")
                 focus = jump.evaluate(
                     "node => ({style: getComputedStyle(node).outlineStyle, "
                     "width: parseFloat(getComputedStyle(node).outlineWidth)})"
@@ -2738,10 +2788,10 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 assert abs(panel_facts["mainTop"] - panel_facts["sideTop"]) <= 2, panel_facts
                 assert panel_facts["titleTop"] >= max(panel_facts["mainBottom"], panel_facts["sideBottom"]) - 1, panel_facts
                 assert_jump_geometry(
-                    wide, "#panel-pchat-layout-project", require_overflow=False
+                    wide, "#panel-pchat-layout-project", require_overflow=False, placement="panel"
                 )
                 wide.screenshot(
-                    path=str(diagnostic_directory(data_dir.parent, "ui-smoke") / f"live-card-project-panel-{browser_engine}.png"),
+                    path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / f"live-card-project-panel-{browser_engine}.png"),
                     full_page=True,
                 )
             finally:
@@ -2875,110 +2925,77 @@ def test_ui_smoke_v639_skip_review_button(direct_server_with_data):
 
 @pytest.mark.ui_browser
 def test_ui_smoke_v679_subagent_depth_zero_round_trips_through_settings(direct_server_with_data):
-    """v6.79.0: the owner can actually reach, save, and re-read a Subagent Depth of 0.
+    """v6.79.0: the owner can actually reach, save, and re-read a helper depth of 0.
 
     The structural fix (``_bounded_positive_int_setting`` honouring a configured 0) is
     unreachable if the visible control refuses the value or the load path rewrites it back to
-    the fallback. This drives the real consumer flow — Settings -> Advanced -> type -> save ->
-    full page reload — and pins the three neighbouring states so the fix cannot silently break
-    them: 0 (no delegation), a normal positive value, and empty (falls back, does not persist
-    an invalid value). Screenshots are written for vision inspection; a saved screenshot is
-    not verification on its own (docs/DEVELOPMENT.md "Responsive and accessible
-    behavior").
+    the fallback. This drives the real consumer flow (Settings › Agents › the fold's "Helpers of
+    helpers" row: type, leave the field, full page reload) and pins the three neighbouring
+    states so the fix cannot silently break them: 0 (no delegation), a normal positive value,
+    and empty (refused in the row; nothing invalid is persisted). Screenshots are written for
+    vision inspection; a saved screenshot is not verification on its own (docs/DEVELOPMENT.md
+    "Responsive and accessible behavior").
     """
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
+    from tests.settings_browser_helpers import commit_row, open_settings
 
     url = direct_server_with_data["url"]
     data_dir = direct_server_with_data["data_dir"]
     settings_path = data_dir / "settings.json"
     evidence_dir = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(data_dir.parent)))
     evidence_dir.mkdir(parents=True, exist_ok=True)
+    row = "OUROBOROS_MAX_SUBAGENT_DEPTH"
 
     def saved_depth():
-        return json.loads(settings_path.read_text(encoding="utf-8")).get("OUROBOROS_MAX_SUBAGENT_DEPTH", "<absent>")
+        return json.loads(settings_path.read_text(encoding="utf-8")).get(row, "<absent>")
 
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 1400, "height": 1000})
             try:
-                def open_settings_advanced():
-                    """Reload the whole app the way an owner would, then reopen the field."""
+                def open_depth(expected):
+                    """Reload the whole app the way an owner would, then land on the row: its fold opens."""
                     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                     page.click('[data-nav-page="settings"]')
-                    page.wait_for_selector("#s-subagent-depth", state="attached", timeout=30_000)
-                    # D-10: depth bounds the agents, so it lives in Agents -> Delegation.
-                    page.click('[data-settings-tab="agents"]')
-                    depth = page.locator("#s-subagent-depth")
+                    level = open_settings(page, "agents", row, timeout=30_000)
+                    depth = level.locator(f'[data-setting-row="{row}"] [data-setting-control]')
                     depth.wait_for(state="visible", timeout=30_000)
-                    # Saving is blocked until the settings load succeeds; waiting on the real
-                    # enablement avoids racing the first fetch.
-                    page.wait_for_function("() => document.querySelector('#btn-save-settings')?.disabled === false",
-                                           timeout=30_000)
-                    depth.scroll_into_view_if_needed()
+                    page.wait_for_function("([row, v]) => document.querySelector(`[data-setting-row=\"${row}\"] "
+                                           "[data-setting-control]`)?.value === v", arg=[row, expected], timeout=30_000)
                     return depth
-
-                def type_depth(value):
-                    page.fill("#s-subagent-depth", value)
-                    page.dispatch_event("#s-subagent-depth", "input")
-                    page.dispatch_event("#s-subagent-depth", "change")
 
                 def shot(name):
                     page.screenshot(path=str(evidence_dir / f"v679-depth-{name}.png"))
 
-                def save_and_wait(phrase="Settings saved"):
-                    with page.expect_response(lambda r: r.url.endswith("/api/settings")
-                                              and r.request.method == "POST", timeout=30_000) as answer:
-                        page.click("#btn-save-settings")
-                    assert bool(answer.value.json().get("no_changes")) is (phrase == "No changes detected")
-                    # This click showed "Saving…" before posting, so the status is its own.
-                    page.wait_for_function("p => document.querySelector('#settings-status')?.textContent"
-                                           ".startsWith(p)", arg=phrase, timeout=30_000)
-                    return answer.value.request.post_data_json["OUROBOROS_MAX_SUBAGENT_DEPTH"]
-
-                depth = open_settings_advanced()
-                # The control must admit 0 at all: a min of 1 would make it unreachable.
-                assert (depth.get_attribute("min"), depth.get_attribute("max")) == ("0", "10")
+                depth = open_depth("3")  # unset -> visible fallback
                 assert depth.is_enabled()
-                assert depth.input_value() == "3"  # unset -> visible fallback
                 shot("01-initial-unset")
 
-                # 0 is a valid value for the control, not a validation error.
-                type_depth("0")
-                assert depth.evaluate("e => [e.validity.valid, e.validationMessage]") == [True, ""]
-                shot("02-typed-zero")
-
-                assert save_and_wait() == 0
-                assert page.locator("#s-subagent-depth").input_value() == "0"
-                assert saved_depth() == 0
+                # 0 is a valid value for the row, not a refusal: leaving the field saves it.
+                assert commit_row(page, row, "0", timeout=30_000).startswith("Saved")
+                assert depth.input_value() == "0" and saved_depth() == 0
                 shot("03-saved-zero")
 
                 # The round trip is the point: a reload must not rewrite 0 back to 3.
-                open_settings_advanced()
-                assert page.locator("#s-subagent-depth").input_value() == "0"
+                open_depth("0")
                 assert saved_depth() == 0
                 shot("04-reload-zero")
 
                 # Neighbouring state: an ordinary positive value still round-trips.
-                type_depth("3")
-                assert save_and_wait() == 3
+                assert commit_row(page, row, "3", timeout=30_000).startswith("Saved")
                 assert saved_depth() == 3
-                open_settings_advanced()
-                assert page.locator("#s-subagent-depth").input_value() == "3"
+                open_depth("3")
                 shot("05-reload-three")
 
-                # Neighbouring state: empty is not a value — it falls back to 3 rather than
-                # persisting an unparsable setting. That is the saved 3, so Save is a no-op.
-                type_depth("")
-                shot("06-empty-typed")
+                # Neighbouring state: empty is not a value. The row refuses it and nothing is written.
                 before = settings_path.read_bytes()
-                assert save_and_wait("No changes detected") == 3
-                assert json.loads(settings_path.read_bytes()) == json.loads(before)
-                assert saved_depth() == 3
-                open_settings_advanced()
-                assert page.locator("#s-subagent-depth").input_value() == "3"
+                assert commit_row(page, row, "", timeout=30_000) == "Not saved. Enter a number from 0 to 10."
+                shot("06-empty-typed")
+                assert settings_path.read_bytes() == before and saved_depth() == 3
+                open_depth("3")
                 shot("07-reload-after-empty")
             finally:
                 browser.close()
@@ -3047,34 +3064,30 @@ def test_ui_owner_context_mode_and_reviewer_row_save(direct_server_with_data):
                 assert after["context_mode"] == "max"
                 assert after["context_mode_auto_low"] is False
 
-                # 2. A reviewer row saves with no window question anywhere.
-                # Select the fixture's configured provider, then edit its model;
-                # the grouped combobox uses provider-specific API choices.
+                # 2. A reviewer saves with no window question anywhere: on its agent's page the mark
+                # writes at once, then the page's Save writes the provider and the model.
+                from tests.settings_browser_helpers import open_entry, open_settings, press_editor_save
                 page.click('[data-nav-page="settings"]')
-                page.wait_for_selector("#s-context-mode", state="attached", timeout=30_000)
-                page.locator('[data-settings-tab="agents"]').click()
-                row_route = page.locator('[data-subagent-row] [data-subagent-field="route"]').first
-                row_route.wait_for(state="visible", timeout=30_000)
+                level = open_settings(page, "agents", timeout=30_000)
+                level.locator("[data-entry-id]").first.wait_for(state="visible", timeout=30_000)
+                form = open_entry(page, level.locator("[data-entry-id]").first.get_attribute("data-entry-id"), timeout=30_000)
+                mark = form.locator('[data-subagent-field="review_eligible"]')
+                if not mark.is_checked():
+                    form.locator('.agent-use:has([data-subagent-field="review_eligible"]) .ui-switch').click()
+                page.wait_for_function("() => { const i = document.querySelector('#page-settings [data-subagent-field=\"review_eligible\"]');"
+                                       " return i && i.checked && i.getAttribute('aria-busy') !== 'true'; }", timeout=60_000)
+                row_route = form.locator('[data-subagent-field="route"]')
                 row_route.select_option("api:openai-compatible")
                 assert row_route.input_value() == "api:openai-compatible"
-                custom_input = page.locator('[data-subagent-row] [data-subagent-field="model"]').first
-                custom_input.wait_for(state="visible", timeout=30_000)
-                custom_input.fill("scope-reviewer-x")
-                page.locator('[data-subagent-row] [data-subagent-field="review_eligible"]').first.check()
-                page.locator("#btn-save-settings").click()
-                page.wait_for_function(
-                    "() => !document.querySelector('#btn-save-settings').disabled",
-                    timeout=60_000,
-                )
+                form.locator('[data-subagent-field="model"]').fill("scope-reviewer-x")
+                status_text = press_editor_save(page, timeout=60_000)
                 page.screenshot(path=str(evidence_dir / "reviewer-row-save-no-window-question.png"),
                                 full_page=True)
 
                 # No dialog of any kind: the owner is never asked to confirm a
                 # reviewer's window, so a route with no evidence saves silently.
                 assert page.locator(".confirm-dialog").count() == 0
-                status_text = page.locator("#settings-status").inner_text()
-                assert "context window" not in status_text, status_text
-                assert "Settings saved" in status_text, status_text
+                assert "context window" not in status_text and status_text.startswith("Saved"), status_text
                 stored = json.loads(settings_path.read_text(encoding="utf-8"))
                 assert "OUROBOROS_REVIEWER_SLOTS" not in stored
                 rows = json.loads(stored["OUROBOROS_SUBAGENTS"])["items"]
@@ -3134,6 +3147,22 @@ def test_ui_smoke_superseded_input_dialog_resolves_object_result(direct_server_w
         raise
 
 
+def _open_login_provider(page, url):
+    """Mount the provider that owns login; keep unrelated discovery inside the test."""
+    from tests.settings_browser_helpers import open_settings
+    from tests.test_subscription_setup_browser import status_answer
+
+    page.route("**/api/claudexor/status*", lambda route: status_answer(route, {
+        "daemon": {"state": "running"}, "harnesses": [{"id": "codex", "display_name": "Codex"}],
+        "profiles": {"profiles": []}, "quota": [],
+        "reads": {"catalog": "ok", "accounts": "ok", "quota": "ok"},
+    }))
+    page.route("**/api/claudexor/maintenance/**", lambda route: route.fulfill(json={"harnesses": []}))
+    page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    open_settings(page, "accounts/codex")
+    page.locator('[data-family-login="codex"]').wait_for(state="attached")
+
+
 @pytest.mark.ui_browser
 def test_ui_smoke_login_recovery_reconcile_detach_and_retry_are_explicit(direct_server_with_data):
     """Recovery lifecycle."""
@@ -3190,7 +3219,7 @@ def test_ui_smoke_login_recovery_reconcile_detach_and_retry_are_explicit(direct_
                 page.route("**/api/claudexor/login", handle_create)
                 page.route("**/api/claudexor/login/*", handle_job)
                 page.route("**/api/claudexor/login/*/reconcile", handle_job)
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                _open_login_provider(page, url)
 
                 setup_result = page.evaluate(
                     """
@@ -3316,7 +3345,7 @@ def test_ui_smoke_dismiss_overlapping_start_cannot_drop_a_live_job(direct_server
 
                 page.route("**/api/claudexor/login", handle_create)
                 page.route("**/api/claudexor/login/*", handle_cancel)
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                _open_login_provider(page, url)
 
                 result = page.evaluate(
                     """
@@ -3411,7 +3440,7 @@ def test_ui_smoke_stale_get_cannot_overwrite_login_terminal_faces(
                 page.route("**/api/claudexor/login", handle_create)
                 page.route("**/api/claudexor/login/*", handle_job)
                 page.route("**/api/claudexor/login/*/reconcile", handle_reconcile)
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                _open_login_provider(page, url)
 
                 result = page.evaluate(
                     """
@@ -3571,7 +3600,7 @@ def test_ui_smoke_dismiss_overlapping_settle_never_freezes_the_card(direct_serve
                 page.route("**/api/claudexor/login", handle_create)
                 page.route("**/api/claudexor/login/*", handle_job)
                 page.route("**/api/claudexor/login/*/reconcile", handle_reconcile)
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                _open_login_provider(page, url)
 
                 result = page.evaluate(
                     """
@@ -3708,7 +3737,7 @@ def test_ui_smoke_cancel_run_button_eligibility_and_cancelled_state(direct_serve
                 page.keyboard.press("Escape")
                 menu.wait_for(state="detached", timeout=10_000)
                 assert cancel_btn.is_enabled()
-                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "ui-smoke") / "cancel-run.png"), full_page=True)
+                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / "cancel-run.png"), full_page=True)
             finally:
                 browser.close()
                 _release_mock_model()

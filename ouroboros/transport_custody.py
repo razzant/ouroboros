@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import ipaddress
 import logging
 import socket
@@ -9,6 +11,52 @@ from typing import Any
 from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
+
+# Two separate scopes carry a Main send's physical attempts. ``single_physical_send`` is the caller's strict one-send
+# claim: ``claim(reservation)`` writes ahead at the dispatch boundary and the lanes run no repair of their own.
+# ``track_physical_attempts`` keeps durable custody while retries stay with their owners (wire, image, context):
+# ``tracker(reservation)`` before each dispatch, ``tracker.attempt_ended(capture, error)`` at its end. Both may bind one
+# attempt at once; a tracker authorizes no retry.
+_SINGLE_SEND = contextvars.ContextVar("single_physical_send", default=None)
+_ATTEMPT_TRACKER = contextvars.ContextVar("physical_attempt_tracker", default=None)
+
+
+@contextlib.contextmanager
+def single_physical_send(claim):
+    token = _SINGLE_SEND.set(claim)
+    try:
+        yield
+    finally:
+        _SINGLE_SEND.reset(token)
+
+
+def single_send_claim() -> Any:
+    return _SINGLE_SEND.get()
+
+
+def single_physical_send_active() -> bool:
+    return _SINGLE_SEND.get() is not None
+
+
+@contextlib.contextmanager
+def track_physical_attempts(tracker):
+    token = _ATTEMPT_TRACKER.set(tracker)
+    try:
+        yield
+    finally:
+        _ATTEMPT_TRACKER.reset(token)
+
+
+def physical_attempt_tracker() -> Any:
+    return _ATTEMPT_TRACKER.get()
+
+
+def report_attempt_end(capture: Any, error: Any) -> None:
+    """Hand the bound tracker one attempt's end, as ``_record_attempt_capture`` records it; the capture taken before
+    dispatch (``reserved``, no error) is not an end."""
+    tracker = _ATTEMPT_TRACKER.get()
+    if tracker is not None and (error is not None or capture.state != "reserved"):
+        tracker.attempt_ended(capture, error)
 
 
 class ProviderNotDispatched(RuntimeError):
@@ -166,6 +214,28 @@ def outcome_unknown_on_chain(error: BaseException) -> bool:
     """
     return (stream_incomplete_on_chain(error, exclude_rejected=True)
             or getattr(_capture_on_chain(error), "state", None) in {"dispatched", "unresolved"})
+
+
+def attempt_end_known(capture: Any, error: BaseException | None) -> bool:
+    """Whether an ended attempt can never answer later, so a further send cannot overlap it.
+
+    It never left the host, its response came back (an unpriced one too: money is not the
+    response), its provider or engine answered with a typed status before any model output,
+    or its failure settled. No answer, a declared timeout, an abandoned receiver, a typed
+    unknown outcome or a stream cut after output stay unknown. Never a retry decision.
+    """
+    if capture is None:
+        return False
+    if capture.state == "released" or error is None:
+        return True
+    receipt = getattr(error, "stream_receipt", None)
+    quiet = isinstance(receipt, dict) and receipt.get("model_output_received") is False
+    if (getattr(error, "receiver_abandoned", False) or getattr(error, "explicit_timeout", False)
+            or getattr(error, "code", "") == "model_outcome_unknown"
+            or (stream_incomplete_on_chain(error, exclude_rejected=True) and not quiet)):
+        return False
+    status = capture.provider_status_code
+    return capture.state == "settled" or (type(status) is int and status >= 400)
 
 
 def _requests_protocol_death(exc: BaseException) -> Any:

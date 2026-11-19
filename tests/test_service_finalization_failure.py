@@ -88,7 +88,6 @@ def _ordinary_completion(tmp_path, monkeypatch, rows, answer):
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery",
                         lambda _ctx, content, _trace, _hold: reviewed.append(content) or False)
     monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_a, **_k: None)
-    monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", lambda *_a, **_k: None)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
 
     held = loop._no_tool_final_answer("The service is stopped.", ctx, trace, registry,

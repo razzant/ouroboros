@@ -83,7 +83,7 @@ def build_model_send_seal(
     """The ``model_send_seal`` block for one physical-candidate manifest.
 
     ``projected`` is the physical custody projection persist already computed;
-    ``redaction`` is the :class:`observability.RedactionResult` of the CAS write
+    ``redaction`` is the :class:`redaction.RedactionResult` of the CAS write
     (built by ``persist_call`` — the seal discloses the exact redaction
     instances that fired, it never re-runs them). ``custody_projected`` lets the
     caller pass the ``projected != candidate`` fact it already computed for its
@@ -123,17 +123,17 @@ def _exposure_atoms_manifest(candidate: Dict[str, Any]) -> Dict[str, Any]:
     messages = candidate.get("messages") if isinstance(candidate, dict) else None
     if not isinstance(messages, list) or not messages:
         return {}
-    from ouroboros.context_compaction import _source_atoms
+    from ouroboros.context_compaction import UNENCODABLE_SOURCE_ATOM, _source_atoms
 
     try:
         atoms = _source_atoms([m for m in messages if isinstance(m, dict)])
     except Exception:  # exposure evidence is additive: never fail the send record over it
         log.debug("exposure atoms unavailable for the prepared candidate", exc_info=True)
         return {}
+    atoms = {str(key): int(count) for key, count in atoms.items() if key != UNENCODABLE_SOURCE_ATOM}
     if not atoms:
         return {}
-    return {"exposure_atoms": {str(key): int(count) for key, count in atoms.items()},
-            "exposure_atoms_basis": EXPOSURE_ATOMS_BASIS}
+    return {"exposure_atoms": atoms, "exposure_atoms_basis": EXPOSURE_ATOMS_BASIS}
 
 
 def persist_physical_candidate(
@@ -165,7 +165,9 @@ def persist_physical_candidate(
     """
     from ouroboros.anthropic_native_custody import physical_custody_projection
     from ouroboros.observability import persist_call
+    from ouroboros.chronicle_lead import delivered_lead_rule
 
+    lead_rule = delivered_lead_rule(candidate)
     projected = physical_custody_projection(candidate)
     custody_projected = projected != candidate
     persisted = persist_call(
@@ -177,6 +179,7 @@ def persist_physical_candidate(
         keep_raw=False,
         manifest={
             "candidate_manifest_kind": "physical_llm_candidate",
+            "chronicle_lead_rule": lead_rule,
             "candidate_raw_digest_basis": "canonical_json_v1_pre_redaction",
             "redacted_projection_digest_basis": "observability_json_v1_post_default_redaction_cas",
             "anthropic_native_custody_projected": custody_projected,
@@ -196,6 +199,7 @@ def persist_physical_candidate(
     )
     persisted["manifest_ref"] = {
         **persisted["manifest_ref"], "model_send_seal_version": SEAL_VERSION,
+        "chronicle_lead_rule": lead_rule,
     }
     return persisted
 

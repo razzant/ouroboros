@@ -197,6 +197,10 @@ def test_update_quiesce_blocks_live_unparked_busy_direct_turn(
         assert task_id in payload["error"]
         assert "No work was stopped" in payload["error"]
         assert "restart Ouroboros" in payload["error"]
+        # The advice names its cost and its limit: a Pause never returns by itself, and a started review still blocks.
+        assert "Paused work stays paused until you resume it" in payload["error"]
+        assert "a review that is already running can still block the request" in payload["error"]
+        assert "update" not in payload["error"].lower()  # Restore and Replace are refused in the same words
     finally:
         release.set()
         worker.join(timeout=5.0)

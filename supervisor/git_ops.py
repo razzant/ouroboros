@@ -10,8 +10,9 @@ import re
 import shutil  # noqa: F401
 import subprocess
 import sys
+import tempfile
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from typing import Any, Dict, List, Optional, Tuple
 
 from supervisor.state import (
@@ -225,6 +226,36 @@ def _is_launcher_managed_repo() -> bool:
     return launcher_managed_repo_matches()
 
 
+def _restart_keeps_checkout(deployment_managed: bool) -> Dict[str, Any]:
+    """How a Restart stays on what is on disk; ``{}`` when ``checkout_and_reset`` owns it.
+
+    The boot predicate decides: a checkout it does not call launcher-managed keeps its branch, HEAD and files
+    unless Update armed an intent (gated as ``checkout_and_reset`` gates it, so a stray marker moves nothing).
+    """
+    disabled = "with managed checkout disabled"
+    live = {"current_branch": None, "current_sha": None}  # a managed past's stamp must not outrank the live read
+    if deployment_managed:
+        return {"event": "managed_by_deployment", "where": disabled, "receipt": {},
+                "ok": "OK: the deployed program, unchanged"}
+    if str(os.environ.get("OUROBOROS_DISABLE_MANAGED_UPDATES", "") or "").strip() == "1":
+        return {"event": "managed_checkout_disabled", "where": disabled, "receipt": {}, "facts": live,
+                "ok": "OK: managed checkout disabled — staying on the current checkout"}
+    if _is_launcher_managed_repo():
+        return {}
+    intent = _read_update_intent()
+    if intent and _read_managed_repo_meta() and str(intent.get("branch") or BRANCH_DEV) == BRANCH_DEV:
+        return {}
+    head = git_capture(["git", "rev-parse", "HEAD"])[1].strip()
+    return {"event": "unmanaged_checkout_kept", "where": "on this unmanaged checkout", "receipt": {"head": head},
+            "facts": live, "ok": f"OK: unmanaged checkout kept at {head[:12] or 'unknown HEAD'}"}
+
+
+def _import_failure(result: Dict[str, Any]) -> str:
+    """The exit code and stderr's last line, the part of a failed import an owner can act on."""
+    last = str(result.get("stderr") or "").strip().splitlines()[-1:]
+    return f" (rc={result.get('returncode', -1)})" + "".join(f": {line}" for line in last)
+
+
 def _list_remotes(*, capture=None, warnings: Optional[List[str]] = None) -> List[str]:
     capture_fn = capture or git_capture
     rc, remotes, error = capture_fn(["git", "remote"])
@@ -318,14 +349,11 @@ def _run_git_process_bounded(
     env: Optional[Dict[str, str]] = None, text: bool = True,
     input_data: Optional[Any] = None,
 ) -> Tuple[int, Any, Any]:
-    """Run one Git process through ``shell_process.tracked_start`` and terminate its tree on timeout.
-
-    ``timeout=None`` is ``git_capture``'s unbounded wait: no bound, the same
-    admission and publication, so Emergency Stop (and a begun stop outside
-    ``exit_finalization``) refuses the start as rc 127 or ends the child.
-    ``input_data`` (str when ``text=True``, bytes otherwise) is fed to the
-    process's stdin and the pipe is closed — the batch-stdin git plumbing
-    (e.g. ``git cat-file --batch``) rides the same timeout/kill semantics."""
+    """Tracked Git with tree cleanup on timeout; ``None`` keeps the unbounded wait.
+    Stop refuses admission as rc 127 or ends the published child, also without a
+    timeout (except begun Stop in ``exit_finalization``). Bytes with ``text=False``
+    ride a rewound file (``work_domain._stdin_source``); str keeps Popen's text pipe.
+    None inherits stdin; file preparation failure returns rc 127 before Git starts."""
     from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
     from ouroboros.tools.shell_process import (
         CommandAdmissionClosed,
@@ -337,71 +365,78 @@ def _run_git_process_bounded(
     limit = None if timeout is None else float(timeout)
     cleanup_timeout = 10  # the existing post-kill wait, also used after communication failures
     empty = "" if text else b""
-    try:
-        with tracked_start() as publish:
-            proc = publish(contained_popen(
-                subprocess.Popen, cmd,
-                cwd=str(cwd or current_repo_dir()),
-                stdin=subprocess.PIPE if input_data is not None else None,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=text,
-                env=env,
-                **subprocess_new_group_kwargs(),
-            ))
-    except (OSError, CommandAdmissionClosed) as exc:  # no Git process started
-        detail = str(exc)
-        return 127, empty, detail if text else detail.encode("utf-8", "replace")
-
+    inputs = ExitStack()
     try:
         try:
-            stdout, stderr = proc.communicate(input=input_data, timeout=limit)
-        except subprocess.TimeoutExpired as exc:
-            partial_error = getattr(exc, "stderr", None)
-            kill_process_tree(proc)
+            source, piped = None, input_data
+            if input_data is not None and not text:
+                source = inputs.enter_context(tempfile.TemporaryFile())
+                source.write(input_data)
+                source.seek(0)
+                piped = None
+            with tracked_start() as publish:
+                proc = publish(contained_popen(
+                    subprocess.Popen, cmd,
+                    cwd=str(cwd or current_repo_dir()),
+                    stdin=source if piped is None else subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=text,
+                    env=env,
+                    **subprocess_new_group_kwargs(),
+                ))
+        except (OSError, CommandAdmissionClosed) as exc:  # no Git process started
+            detail = str(exc)
+            return 127, empty, detail if text else detail.encode("utf-8", "replace")
+
+        try:
             try:
-                _tail_out, tail_error = proc.communicate(timeout=cleanup_timeout)
-            except Exception:
-                tail_error = None
-            raw_detail = tail_error or partial_error or empty
-            if isinstance(raw_detail, bytes):
-                detail = raw_detail.decode("utf-8", "replace").strip()
-            else:
-                detail = str(raw_detail or "").strip()
-            message = (
-                f"git process timed out after {limit:g}s and was terminated: "
-                f"{' '.join(cmd)}"
-            )
-            if detail:
-                message += f" ({detail})"
-            return (
-                FETCH_TIMEOUT_RC,
-                empty,
-                message if text else message.encode("utf-8", "replace"),
-            )
-        except BaseException:
-            # subprocess.run also cleans up on interruption/pipe errors. Keep that contract
-            # when using the tracked runner, without replacing the caller's original error.
-            try:
+                stdout, stderr = proc.communicate(input=piped, timeout=limit)
+                code = int(proc.returncode if proc.returncode is not None else 1)
+            except subprocess.TimeoutExpired as exc:
+                partial_error = getattr(exc, "stderr", None)
                 kill_process_tree(proc)
-                proc.wait(timeout=cleanup_timeout)
+                try:
+                    _tail_out, tail_error = proc.communicate(timeout=cleanup_timeout)
+                except Exception:
+                    tail_error = None
+                raw_detail = tail_error or partial_error or empty
+                if isinstance(raw_detail, bytes):
+                    detail = raw_detail.decode("utf-8", "replace").strip()
+                else:
+                    detail = str(raw_detail or "").strip()
+                message = (
+                    f"git process timed out after {limit:g}s and was terminated: "
+                    f"{' '.join(cmd)}"
+                )
+                if detail:
+                    message += f" ({detail})"
+                code, stdout = FETCH_TIMEOUT_RC, empty
+                stderr = message if text else message.encode("utf-8", "replace")
             except BaseException:
-                log.warning("Git exception cleanup is unconfirmed; its child stays tracked", exc_info=True)
-            raise
-        return (
-            int(proc.returncode if proc.returncode is not None else 1),
-            stdout if stdout is not None else empty,
-            stderr if stderr is not None else empty,
-        )
+                # subprocess.run also cleans up on interruption/pipe errors. Keep that contract
+                # when using the tracked runner, without replacing the caller's original error.
+                try:
+                    kill_process_tree(proc)
+                    proc.wait(timeout=cleanup_timeout)
+                except BaseException:
+                    log.warning("Git exception cleanup is unconfirmed; its child stays tracked", exc_info=True)
+                raise
+            return (code,
+                    stdout if stdout is not None else empty,
+                    stderr if stderr is not None else empty)
+        finally:
+            retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
+            if proc.returncode is not None:
+                for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                    if pipe is not None:
+                        try:
+                            pipe.close()
+                        except Exception:
+                            log.warning("Could not close an exited Git child's pipe", exc_info=True)
     finally:
-        retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
-        if proc.returncode is not None:
-            for pipe in (proc.stdin, proc.stdout, proc.stderr):
-                if pipe is not None:
-                    try:
-                        pipe.close()
-                    except Exception:
-                        log.warning("Could not close an exited Git child's pipe", exc_info=True)
+        with suppress(OSError):
+            inputs.close()  # a failed buffered write may fail again on close
 
 
 def git_capture(

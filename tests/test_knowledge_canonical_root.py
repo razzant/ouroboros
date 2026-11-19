@@ -143,7 +143,8 @@ def test_an_admitted_child_keeps_knowledge_where_every_reader_reads(tmp_path, mo
 
     room = f"project:{project}" if project else "global"
     sources = {topic: _receipt(registry.execute("knowledge_write", {
-        "topic": topic, "content": _note(f"SUMMARY {topic}"), **({"scope": scope} if scope else {})}))["knowledge_source"]
+        "topic": topic, "mode": "overwrite", "content": _note(f"SUMMARY {topic}"),
+        **({"scope": scope} if scope else {})}))["knowledge_source"]
         for topic, scope in (("lessons/root-unity", ""), ("people/ally", "global"), ("patterns", room))}
     assert {topic: Path(source["path"]) for topic, source in sources.items()} == {
         "lessons/root-unity": store.resolve_knowledge_address(drive, "lessons/root-unity", room).path,
@@ -215,7 +216,8 @@ def test_an_admitted_childs_extension_reads_its_notes_through_the_plugin_api(tmp
     child_drive = Path(task["drive_root"])
     notes = (("lessons/root-unity", "project:demo"), ("people/ally", "global"))
     sources = {topic: _receipt(agent.tools.execute("knowledge_write", {
-        "topic": topic, "scope": scope, "content": _note(f"SUMMARY {topic}")}))["knowledge_source"] for topic, scope in notes}
+        "topic": topic, "scope": scope, "mode": "overwrite", "content": _note(f"SUMMARY {topic}")}))["knowledge_source"]
+        for topic, scope in notes}
     for decoy in (child_drive, elsewhere):  # the same addresses on the execution drive and the ambient DATA_DIR
         for topic, scope in notes:
             assert store.write_knowledge_note(store.resolve_knowledge_address(decoy, topic, scope), _note("DECOY")).ok
@@ -264,7 +266,8 @@ def test_a_root_on_its_installation_drive_keeps_knowledge_on_that_drive(tmp_path
 
     room = f"project:{project}" if project else "global"
     sources = {topic: _receipt(registry.execute("knowledge_write", {
-        "topic": topic, "content": _note(f"SUMMARY {topic}"), **({"scope": scope} if scope else {})}))["knowledge_source"]
+        "topic": topic, "mode": "overwrite", "content": _note(f"SUMMARY {topic}"),
+        **({"scope": scope} if scope else {})}))["knowledge_source"]
         for topic, scope in (("lessons/root-unity", ""), ("people/ally", "global"), ("old-lesson", ""))}
     assert {topic: Path(source["path"]) for topic, source in sources.items()} == {
         topic: store.resolve_knowledge_address(drive, topic, "global" if topic == "people/ally" else room).path
@@ -308,7 +311,7 @@ def test_contract_shapes_write_read_list_and_retain_on_the_canonical_root(tmp_pa
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=execution)
     registry.set_context(ctx)
     args = {"topic": topic, **({"scope": scope} if scope else {})}
-    written = _receipt(registry.execute("knowledge_write", {**args, "content": _note("CONTRACT SUMMARY")}))
+    written = _receipt(registry.execute("knowledge_write", {**args, "mode": "overwrite", "content": _note("CONTRACT SUMMARY")}))
     expected = store.resolve_knowledge_address(
         root, topic, "global" if topic == "patterns" else scope, "" if topic == "patterns" else "demo")
     assert Path(written["knowledge_source"]["path"]) == expected.path

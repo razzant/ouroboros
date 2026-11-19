@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests.settings_browser_helpers import open_settings
 
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
@@ -33,7 +34,7 @@ def resources_ui(subscription_ui):
                   resource_capabilities={"read": True, "refresh": True, "reset": True, "inspect_reset": True})
     profiles = status["profiles"]["profiles"] = []
     for index in range(20):
-        target = TARGET if index == 0 else {"harness": "codex" if index % 2 else "claude",
+        target = TARGET if index == 0 else {"harness": "claude",
                                           "profile_id": f"account-{index:02}"}
         profiles.append({"profile": {"harness_id": target["harness"], "profile_id": target["profile_id"],
                                      "display_name": "Personal default" if index == 0 else f"Workspace {index:02}",
@@ -82,7 +83,7 @@ def open_accounts(ui, width=390, theme="dark"):
     page.set_viewport_size({"width": width, "height": 960})
     page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
     page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="providers"]').click()
+    open_settings(page, "accounts/claude")
     expect(page.locator(".harness-account-row[data-harness]")).to_have_count(20)
     return page, page.locator(ROW)
 
@@ -97,7 +98,7 @@ def passive_read(page):
 def frame_section(locator):
     """Position evidence below Settings' existing sticky fade, without product scrolling."""
     locator.evaluate("""element => {
-        const host = element.closest('.settings-scroll');
+        const host = element.closest('[data-settings-page]');
         if (host) host.scrollTop += element.getBoundingClientRect().top - host.getBoundingClientRect().top - 48;
         else element.scrollIntoView({block: 'center'});
     }""")
@@ -242,7 +243,7 @@ def test_timeout_before_receipt_survives_session_storage_loss_and_recovers_same_
     page.evaluate("sessionStorage.clear()")
     ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
-    page.locator('[data-settings-tab="providers"]').click()
+    open_settings(page, "accounts/claude")
     row.locator("[data-resources]").click()
     expect(row).to_contain_text("Reset outcome is unconfirmed")
     receipt = copy.deepcopy(ui["wire"]["receipt"])
@@ -294,7 +295,7 @@ def test_non_loopback_reset_keeps_original_request_after_reload(resources_ui, sc
     assert original[0] and original[1]["offer_id"] == offer_id and original[1]["target"] == TARGET
     ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
-    page.locator('[data-settings-tab="providers"]').click()
+    open_settings(page, "accounts/claude")
     row.locator("[data-resources]").click()
     expect(row).to_contain_text("Reset outcome is unconfirmed")
     assert len(ui["reset_calls"]) == 1, "reload must not resend an unresolved request"
@@ -453,7 +454,7 @@ def test_maintenance_and_resources_share_refresh_without_losing_pending_reset(re
 
     ui = resources_ui
     entry = _inventory_row("claude")
-    maintenance_only = _inventory_row("agy", targets=["latest"])
+    maintenance_only = _inventory_row("agy", exact=False)
     inventory = {"harnesses": [entry, maintenance_only]}
     operation = {"id": "program-update", "harness": "claude", "state": "running",
                  "phase": "installing", "target": {"kind": "latest", "version": "3.0.0"},
@@ -499,16 +500,18 @@ def test_maintenance_and_resources_share_refresh_without_losing_pending_reset(re
     details.locator("summary").click()
 
     hold_inventory = True
+    family.get_by_role("button", name="Details", exact=True).click()
     family.get_by_role("button", name="Check latest", exact=True).click()
     expect(family.get_by_role("button", name="Checking…", exact=True)).to_be_disabled()
     expect(details).to_have_attribute("open", "")
     assert held
     details.locator("summary").focus()
     hold_inventory = False
-    entry["available"] = {"version": "3.0.0", "observedAt": "2026-10-09T12:00:00Z"}
+    entry["newest"] = {"status": "available", "version": "3.0.0", "observedAt": "2026-10-09T12:00:00Z"}
+    entry["updateAvailable"] = "yes"
     for route in held:
         route.fulfill(json=inventory)
-    expect(family.locator(".harness-maintenance-line")).to_contain_text("Latest 3.0.0")
+    expect(family.locator(".harness-maintenance-line")).to_contain_text("3.0.0 available")
     expect(details).to_have_attribute("open", "")
     expect(details.locator("summary")).to_be_focused()
     expect(row.locator("[data-resources]")).to_have_attribute("aria-expanded", "true")
@@ -516,7 +519,7 @@ def test_maintenance_and_resources_share_refresh_without_losing_pending_reset(re
     assert ui["reset_calls"] == [original]
 
     family.get_by_role("button", name="Update", exact=True).click()
-    expect(family).to_contain_text("Installing 3.0.0")
+    expect(family).to_contain_text("Updating…")
     expect(row.locator("[data-refresh-account]")).to_have_attribute("aria-disabled", "false")
     before_inspections = len(inspections)
     ui["hold_refresh"].append(True)
@@ -539,8 +542,7 @@ def test_maintenance_and_resources_share_refresh_without_losing_pending_reset(re
     expect(family).to_contain_text("Update cancelled")
     assert len(updates) == len(cancellations) == 1
     assert updates[0][0] and updates[0][1] == {"harness": "claude", "target": {"kind": "latest"}}
-    orphan = page.locator('.agent-family-card[data-family="agy"]')
-    expect(orphan.locator("[data-family-add], [data-resources]")).to_have_count(0)
+    expect(page.locator('.agent-family-card[data-family="agy"]')).to_have_count(0)
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     frame_section(family.locator(".agent-family-head"))
     capture(page, f"combined-maintenance-resources-{width}-{theme}")
@@ -554,3 +556,661 @@ def test_maintenance_and_resources_share_refresh_without_losing_pending_reset(re
     frame_section(row.locator(".account-resource-panel"))
     capture(page, f"combined-maintenance-recovered-{width}-{theme}")
     assert not any("/login" in path or path == "/api/settings" for path, _ in ui["posts"])
+
+
+class ObservationTransport:
+    """Delay real SPA transports independently, capturing each reply at dispatch."""
+
+    def __init__(self, ui):
+        self.ui = ui
+        self.hold = set()
+        self.pending = {name: [] for name in ("full", "passive", "patch")}
+        self.calls = []
+        self.full_status = 200
+        self.passive_accounts = "ok"
+        self.passive_quota = "ok"
+        self.include_resources = True
+        ui["page"].route("**/api/claudexor/status**", self.status)
+        ui["page"].route("**/api/claudexor/credential-profiles/**", self.patch)
+
+    def status(self, route):
+        from urllib.parse import parse_qs
+
+        passive = parse_qs(urlparse(route.request.url).query).get("view") == ["quota"]
+        kind = "passive" if passive else "full"
+        self.calls.append(kind)
+        body = copy.deepcopy(self.ui["fixture"]["status"])
+        code = 200 if passive else self.full_status
+        if passive:
+            body = {key: body[key] for key in ("profiles", "quota", "resources", "quota_absences") if key in body}
+            body.update(view="quota", reads={"accounts": self.passive_accounts, "quota": self.passive_quota})
+            if not self.include_resources:
+                body.pop("resources", None)
+        elif code != 200:
+            body = {"error": "fixture full discovery unavailable"}
+        if kind in self.hold:
+            self.pending[kind].append((route, body, code))
+        else:
+            route.fulfill(status=code, json=body)
+
+    def patch(self, route):
+        self.calls.append("patch")
+        assert route.request.method == "PATCH"
+        wanted = route.request.post_data_json
+        self.ui["posts"].append((urlparse(route.request.url).path, wanted))
+        body = {"ok": True, **TARGET, "enabled": wanted["enabled"]}
+        if "patch" in self.hold:
+            self.pending["patch"].append((route, body, 200))
+        else:
+            route.fulfill(json=body)
+
+    def release(self, kind):
+        route, body, code = self.pending[kind].pop(0)
+        route.fulfill(status=code, json=body)
+
+
+def store_call(page, expression, *, wait=True):
+    """Use the actual singleton mounted by Accounts; never replace its implementation."""
+    return page.evaluate("async () => { const {claudexorStatus: s} = await import("
+                         "'/static/modules/claudexor_status_store.js'); "
+                         + (f"return await ({expression});" if wait else f"void ({expression});") + " }")
+
+
+def wait_pending(page, transport, kind):
+    # Sync Playwright dispatches route callbacks while the browser makes progress.
+    for _ in range(100):
+        if transport.pending[kind]:
+            return
+        page.wait_for_timeout(10)
+    assert transport.pending[kind], f"No {kind} request; observed {transport.calls}"
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_requested_switch_survives_rerender_patch_and_older_full(resources_ui, theme):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440, theme=theme)
+    switch = row.locator("[data-harness-toggle]")
+    expect(switch).not_to_be_checked()
+    row.locator("[data-resources]").click()
+    expect(row).to_contain_text("24.60 USD")
+    transport.hold.update({"full", "patch"})
+    store_call(page, "s.refresh()", wait=False)
+    wait_pending(page, transport, "full")
+    row.locator(".ui-switch-track").click()
+    wait_pending(page, transport, "patch")
+    expect(switch).to_be_checked()
+    expect(switch).to_be_disabled()
+    expect(switch).to_have_attribute("aria-busy", "true")
+    # A separate quota observation repaints the actual Accounts controls while PATCH waits.
+    store_call(page, "s.observe()")
+    expect(switch).to_be_checked()
+    expect(switch).to_be_disabled()
+    expect(row.locator("[data-resources]")).to_have_attribute("aria-expanded", "true")
+    frame_section(row)
+    capture(page, f"staged-accounts-{theme}-pending-switch")
+    # The engine has saved enabled=true; the held full reply still contains false.
+    ui["fixture"]["status"]["profiles"]["profiles"][0]["profile"]["enabled"] = True
+    transport.release("patch")
+    expect(switch).to_be_enabled()
+    expect(switch).to_be_checked()
+    transport.release("full")
+    page.wait_for_function("async () => !(await import('/static/modules/claudexor_status_store.js')).claudexorStatus.loading")
+    expect(switch).to_be_checked()
+    assert transport.calls.count("patch") == 1
+    capture(page, f"staged-accounts-{theme}-confirmed-switch")
+
+
+def test_fast_observation_recovers_facets_without_certifying_failed_catalog(resources_ui):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    transport.full_status = 503
+    store_call(page, "s.refresh()")
+    assert store_call(page, "s.reads") == {"catalog": "transport", "accounts": "transport", "quota": "transport"}
+    full_count = transport.calls.count("full")
+    store_call(page, "s.observe()")
+    assert store_call(page, "s.reads") == {"catalog": "transport", "accounts": "ok", "quota": "ok"}
+    expect(row.locator("[data-harness-toggle]")).to_be_enabled()
+    assert transport.calls.count("full") == full_count
+    assert "fixture full discovery unavailable" in store_call(page, "s.unavailableNote('catalog').text")
+    assert store_call(page, "s.unavailableNote('accounts')") is None
+    transport.passive_accounts = "failed"
+    store_call(page, "s.observe()")
+    assert store_call(page, "s.reads") == {"catalog": "transport", "accounts": "failed", "quota": "ok"}
+
+
+def test_provider_refresh_does_not_block_or_fence_passive_roster(resources_ui):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    row.locator("[data-resources]").click()
+    ui["hold_refresh"].append(True)
+    row.locator("[data-refresh-account]").click()
+    expect(row.locator("[data-refresh-account]")).to_have_attribute("aria-busy", "true")
+    transport.hold.add("passive")
+    sibling = ui["fixture"]["status"]["profiles"]["profiles"][1]
+    sibling["profile"]["display_name"] = "Roster changed during provider refresh"
+    sibling["identity"]["label"] = "Roster changed during provider refresh"
+    store_call(page, "s.observe()", wait=False)
+    wait_pending(page, transport, "passive")
+    # Provider completion must merge into current state without dating the roster/catalog.
+    ui["wire"]["quota"]["snapshots"][0]["constraints"][0]["used_ratio"] = 0.17
+    ui["pending_refresh"][0].fulfill(json=ui["wire"]["quota"])
+    expect(row.locator(".resource-window").first).to_contain_text("17% used")
+    transport.release("passive")
+    expect(page.locator('.harness-account-row[data-profile="account-01"]')).to_contain_text("Roster changed during provider refresh")
+    expect(row.locator(".resource-window").first).to_contain_text("17% used")
+    assert ui["refresh_calls"] == [{"target": TARGET}]
+
+
+def test_passive_omission_retains_resources_but_explicit_empty_replaces_them(resources_ui):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    row.locator("[data-resources]").click()
+    transport.include_resources = False
+    store_call(page, "s.observe()")
+    expect(row).to_contain_text("24.60 USD")
+    transport.include_resources = True
+    ui["fixture"]["status"]["resources"] = []
+    store_call(page, "s.observe()")
+    expect(row).not_to_contain_text("24.60 USD")
+
+
+def test_account_polling_stops_when_hidden_unmounted_and_disposed(resources_ui):
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page = ui["page"]
+    page.clock.install()
+    page, _ = open_accounts(ui, width=1440)
+    store_call(page, "s.refresh()")  # Let initial full discovery settle and arm its timer first.
+    page.clock.fast_forward(5100)
+    page.wait_for_timeout(50)
+    count = transport.calls.count("passive")
+    assert count >= 2  # Initial observation and the visible-page poll.
+    # Browser visibility is controlled, but the real document listener/predicate/timer runs.
+    page.evaluate("Object.defineProperty(document, 'hidden', {configurable: true, get: () => true}); document.dispatchEvent(new Event('visibilitychange'))")
+    page.clock.fast_forward(15000)
+    assert transport.calls.count("passive") == count
+    page.evaluate("Object.defineProperty(document, 'hidden', {configurable: true, get: () => false}); document.dispatchEvent(new Event('visibilitychange'))")
+    page.wait_for_timeout(20)
+    assert transport.calls.count("passive") > count
+    # A wide Settings home restores its last page; explicitly choose Ouroboros
+    # so Accounts really unmounts instead of remounting beside the home rail.
+    page.locator('[data-settings-overview-row]').click()
+    page.locator('[data-settings-page="accounts/claude"]').wait_for(state="detached")
+    assert store_call(page, "s.polling") is False
+    count = transport.calls.count("passive")
+    page.clock.fast_forward(15000)
+    assert transport.calls.count("passive") == count
+    store_call(page, "s.dispose()")
+    assert store_call(page, "s.polling") is False
+    page.clock.fast_forward(15000)
+    assert transport.calls.count("passive") == count
+    assert not any("/wake" in path or "/login" in path for path, _ in ui["posts"])
+
+
+@pytest.mark.parametrize("full_code", [200, 503])
+def test_activation_waits_for_fresh_full_before_any_daemon_write(resources_ui, full_code):
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, _ = open_accounts(ui, width=1440)
+    # Remember an installed-but-idle daemon without triggering an activation.
+    ui["fixture"]["status"]["daemon"] = {"state": "stale", "runtime": {"state": "ready"}}
+    store_call(page, "s.refresh()")
+    ui["fixture"]["status"]["daemon"] = {"state": "running", "runtime": {"state": "ready"}}
+    transport.full_status = full_code
+    transport.hold.add("full")
+    page.evaluate("window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', {detail: {path: 'accounts/claude'}}))")
+    wait_pending(page, transport, "full")
+    assert not any(path == "/api/claudexor/wake" for path, _ in ui["posts"])
+    transport.release("full")
+    page.wait_for_function("async () => !(await import('/static/modules/claudexor_status_store.js')).claudexorStatus.loading")
+    assert not any(path == "/api/claudexor/wake" for path, _ in ui["posts"])
+    assert store_call(page, "s.snapshot.daemon.state") == ("running" if full_code == 200 else "stale")
+
+
+def test_failed_switch_restores_saved_state_and_keeps_its_error(resources_ui):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    transport.hold.add("patch")
+    row.locator(".ui-switch-track").click()
+    wait_pending(page, transport, "patch")
+    switch = row.locator("[data-harness-toggle]")
+    expect(switch).to_be_checked()
+    expect(switch).to_be_disabled()
+    route, _, _ = transport.pending["patch"].pop()
+    route.fulfill(status=503, json={"error": "Fixture write refused"})
+    expect(switch).not_to_be_checked()
+    expect(switch).to_be_enabled()
+    expect(page.locator("#page-settings")).to_contain_text("Fixture write refused")
+    assert transport.calls.count("patch") == 1
+
+
+def test_dispose_ignores_already_dispatched_passive_reply(resources_ui):
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, _ = open_accounts(ui, width=1440)
+    store_call(page, "s.refresh()")
+    before = store_call(page, "({generation: s.generation, snapshot: s.snapshot})")
+    transport.hold.add("passive")
+    ui["fixture"]["status"]["profiles"]["profiles"] = []
+    page.evaluate("async () => { const {claudexorStatus: s} = await import('/static/modules/claudexor_status_store.js'); "
+                  "s.observe().then(() => window.__lateObservationSettled = true); }")
+    wait_pending(page, transport, "passive")
+    store_call(page, "s.dispose()")
+    transport.release("passive")
+    page.wait_for_function("window.__lateObservationSettled === true")
+    assert store_call(page, "({generation: s.generation, snapshot: s.snapshot})") == before
+    assert store_call(page, "s.polling") is False
+
+
+def test_visible_program_inspection_runs_while_full_discovery_waits(resources_ui):
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page = ui['page']
+    page.clock.install()
+    page, _ = open_accounts(ui, width=1440)
+    store_call(page, 's.refresh()')
+    inventory_path = '/api/claudexor/maintenance/harnesses'
+
+    def inspections():
+        return sum(urlparse(url).path == inventory_path for url in ui['reads'])
+
+    before = inspections()
+    transport.hold.add('full')
+    # The owner's showing inspects the programs at once, while its full discovery is held.
+    page.evaluate("window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', {detail: {path: 'accounts/claude'}}))")
+    wait_pending(page, transport, 'full')
+    page.wait_for_timeout(50)
+    shown = inspections()
+    assert shown > before, 'visible program maintenance must not await slow full discovery'
+    # Owner choice 2026-11-14: ticks never inspect, neither the 5 s observation nor the 120 s discovery.
+    page.clock.fast_forward(121000)
+    store_call(page, 's.observe()')
+    page.wait_for_timeout(50)
+    assert inspections() == shown, 'a status tick inspected the programs'
+    transport.release('full')
+
+
+@pytest.mark.parametrize("answer", ["lost", "refused"])
+def test_lost_switch_answer_is_unconfirmed_and_a_refusal_stays_an_error(resources_ui, answer):
+    import re
+
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    switch, note = row.locator("[data-harness-toggle]"), page.locator("#harness-accounts-error")
+    transport.hold.add("patch")
+    row.locator(".ui-switch-track").click()
+    wait_pending(page, transport, "patch")
+    route, _, _ = transport.pending["patch"].pop()
+    if answer == "lost":
+        ui["fixture"]["status"]["profiles"]["profiles"][0]["profile"]["enabled"] = True  # the engine saved it
+        route.abort("failed")
+        expect(switch).to_be_checked()  # the follow-up read shows the saved state
+        expect(note).to_have_text(re.compile(r'^Enabling "Personal default" is not confirmed: (Failed to fetch|Load failed)\.$'))
+        expect(note).to_have_attribute("data-tone", "warn")
+    else:
+        # A 4xx is the one refusal proven unapplied: here the host's own gate answers before any handler
+        # (ouroboros/server_auth.py); a 503 also follows an engine that kept the write (below).
+        route.fulfill(status=401, json={"error": "Authentication required."})
+        expect(switch).not_to_be_checked()
+        expect(note).to_have_text('Could not enable "Personal default": Authentication required.')
+        expect(note).to_have_attribute("data-tone", "error")
+    expect(switch).to_be_enabled()
+    frame_section(note)
+    capture(page, f"switch-answer-{answer}")
+    if answer == "lost":
+        # The owner's Refresh is a new action: the line about the earlier request ends with it.
+        page.locator("#btn-harness-refresh").click()
+        expect(note).to_be_hidden()
+        expect(switch).to_be_checked()  # what the engine holds, never inferred from the lost answer
+    assert transport.calls.count("patch") == 1
+
+
+# Evidence order: a reading is superseded only by a later event about the same thing, and an
+# event dates only what it read. Passive reads are held so no poll tick settles the state shown.
+SIBLING = '.harness-account-row[data-harness="claude"][data-profile="account-03"]'
+STORE_ERROR = ("async () => (await import('/static/modules/claudexor_status_store.js'))"
+               ".claudexorStatus.error !== ''")
+
+
+def lose_status(page, transport):
+    transport.full_status = 503
+    transport.hold.add("passive")
+    store_call(page, "s.refresh()")
+
+
+def frame_rows(page, row, name, *, panel=True):
+    """The open panel, then the rows beside it: a sibling's words are evidence too."""
+    if panel:
+        frame_section(row)
+        capture(page, f"{name}-panel")
+        row.locator("[data-resources]").click()
+    frame_section(row)
+    capture(page, f"{name}-rows")
+
+
+def test_a_status_request_lost_before_a_refresh_completed_keeps_that_reading(resources_ui):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    meta, sibling = row.locator(".harness-account-meta"), page.locator(SIBLING).locator(".harness-account-meta")
+    transport.passive_quota = "failed"  # an earlier failed quota facet
+    store_call(page, "s.observe()")
+    expect(meta).to_contain_text("Limits not checked")
+    transport.full_status = 503
+    transport.hold.update({"full", "passive"})
+    store_call(page, "s.refresh()", wait=False)  # dispatched before the Refresh, lost after it
+    wait_pending(page, transport, "full")
+    row.locator("[data-resources]").click()
+    row.locator("[data-refresh-account]").click()
+    expect(meta).to_contain_text("Limit reached")
+    transport.release("full")
+    page.wait_for_function(STORE_ERROR)
+    expect(meta).to_contain_text("Limit reached")
+    expect(row.locator(".resource-window").first).not_to_contain_text("Last known")
+    expect(sibling).to_contain_text("Limits not checked")
+    frame_rows(page, row, "refresh-reading-outlives-older-lost-status")
+    transport.hold.discard("full")
+    store_call(page, "s.refresh()")  # a request lost after the reading ages it
+    expect(meta).to_contain_text("Limits not checked")
+    frame_rows(page, row, "refresh-reading-retired-by-later-lost-status", panel=False)
+    row.locator("[data-resources]").click()
+    expect(row.locator(".resource-window").first).to_contain_text("Last known")
+    assert ui["refresh_calls"] == [{"target": TARGET}]
+
+
+def test_one_accounts_refresh_dates_no_sibling_after_a_lost_status_request(resources_ui):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    meta, sibling = row.locator(".harness-account-meta"), page.locator(SIBLING).locator(".harness-account-meta")
+    expect(sibling).to_contain_text("42% used")
+    lose_status(page, transport)
+    expect(sibling).to_contain_text("Limits not checked")
+    row.locator("[data-resources]").click()
+    row.locator("[data-refresh-account]").click()
+    expect(meta).to_contain_text("Limit reached")
+    expect(sibling).to_contain_text("Limits not checked")
+    expect(sibling).not_to_contain_text("42% used")
+    assert store_call(page, "s.reads") == {"catalog": "transport", "accounts": "transport", "quota": "transport"}
+    frame_rows(page, row, "target-refresh-leaves-sibling-last-known")
+    # Every account's Refresh is a quota read; it still reads no roster.
+    store_call(page, "s.refreshResources()")
+    expect(sibling).to_contain_text("42% used")
+    assert store_call(page, "s.reads") == {"catalog": "transport", "accounts": "transport", "quota": "ok"}
+    frame_rows(page, row, "every-account-refresh-dates-quota-not-roster", panel=False)
+    assert ui["refresh_calls"] == [{"target": TARGET}, {}]
+
+
+def test_a_refused_switch_is_no_roster_read_after_a_lost_status_request(resources_ui):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    badge, family = row.locator(".harness-account-main .ui-status"), page.locator(
+        '[data-family="claude"] .agent-family-id .ui-status')
+    expect(badge).to_have_count(0)  # a verified login is the quiet case
+    lose_status(page, transport)
+    expect(badge).to_have_text("Login verified — last known")
+    expect(family).to_contain_text("last known")
+    transport.hold.add("patch")
+    row.locator(".ui-switch-track").click()
+    wait_pending(page, transport, "patch")
+    route, _, _ = transport.pending["patch"].pop()
+    route.fulfill(status=401, json={"error": "Authentication required."})
+    expect(page.locator("#harness-accounts-error")).to_have_text(
+        'Could not enable "Personal default": Authentication required.')
+    expect(row.locator("[data-harness-toggle]")).to_be_enabled()
+    expect(badge).to_have_text("Login verified — last known")
+    expect(family).to_contain_text("last known")
+    assert store_call(page, "s.reads")["accounts"] == "transport"
+    frame_section(page.locator("#harness-accounts-error"))
+    capture(page, "refused-switch-keeps-roster-last-known")
+    # The read begun after the write is the observation that ends it.
+    transport.hold.discard("passive")
+    wait_pending(page, transport, "passive")
+    while transport.pending["passive"]:
+        transport.release("passive")
+    expect(badge).to_have_count(0)
+    expect(family).not_to_contain_text("last known")
+    assert store_call(page, "s.reads")["accounts"] == "ok"
+    frame_section(row)
+    capture(page, "read-after-switch-observes-roster")
+
+
+@pytest.fixture
+def engine_keeps_then_drops(resources_ui, monkeypatch, tmp_path):
+    """The actual host proxy and gateway over a loopback engine that applies a row write and closes unanswered."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros import claudexor_daemon as owned
+    from ouroboros.config import CLAUDEXOR_MIN_VERSION, CLAUDEXOR_PROTOCOL_MAJOR
+    from ouroboros.gateway.claudexor_accounts import api_claudexor_credential_profile
+
+    rows, writes, answers = resources_ui["fixture"]["status"]["profiles"]["profiles"], [], []
+
+    class Engine(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def body(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            return json.loads(self.rfile.read(length)) if length else None
+
+        def do_POST(self):
+            assert (self.path, self.body()["protocolMajor"]) == ("/v2/handshake", CLAUDEXOR_PROTOCOL_MAJOR)
+            reply = json.dumps({"compatible": True, "protocolMajor": CLAUDEXOR_PROTOCOL_MAJOR,
+                                "engine": {"version": CLAUDEXOR_MIN_VERSION}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(reply)))
+            self.end_headers()
+            self.wfile.write(reply)
+
+        def write(self):
+            wanted, key = self.body(), tuple(self.path.removeprefix("/v2/credential-profiles/").split("/"))
+            writes.append((self.command, *key, wanted))
+            for row in [row for row in rows if (row["profile"]["harness_id"], row["profile"]["profile_id"]) == key]:
+                if self.command == "DELETE":
+                    rows.remove(row)
+                else:
+                    row["profile"]["enabled"] = wanted["enabled"]
+            self.close_connection = True  # the engine kept it; its answer never leaves
+
+        do_PATCH = do_DELETE = write
+
+    engine = ThreadingHTTPServer(("127.0.0.1", 0), Engine)
+    Thread(target=engine.serve_forever, daemon=True).start()
+    home = tmp_path / "owned"
+    (home / "daemon").mkdir(parents=True)
+    (home / "token").write_text("fixture-token", encoding="utf-8")
+    (home / "daemon" / "control-api.json").write_text(json.dumps(
+        {"host": "127.0.0.1", "port": engine.server_address[1], "tokenPath": str(home / "token")}), encoding="utf-8")
+    monkeypatch.setattr(owned, "owned_config_dir", lambda: home)
+    client = TestClient(Starlette(routes=[Route("/api/claudexor/credential-profiles/{harness}/{profile_id}",
+                                                api_claudexor_credential_profile, methods=["DELETE", "PATCH"])]))
+
+    def forward(route):
+        request = route.request
+        result = client.request(request.method, urlparse(request.url).path, content=request.post_data_buffer,
+                                headers={"Content-Type": "application/json"} if request.post_data_buffer else {})
+        answers.append((request.method, result.status_code, result.json()))
+        route.fulfill(status=result.status_code, content_type="application/json", body=result.text)
+
+    # Bound after ObservationTransport, so this route answers the row writes.
+    yield lambda page: page.route("**/api/claudexor/credential-profiles/**", forward), writes, answers
+    client.close()
+    engine.shutdown()
+    engine.server_close()
+
+
+@pytest.mark.parametrize("write", ["switch", "remove"])
+def test_host_answer_after_the_engine_kept_a_write_claims_no_refusal(resources_ui, engine_keeps_then_drops, write):
+    import re
+
+    from playwright.sync_api import expect
+
+    bind, writes, answers = engine_keeps_then_drops
+    ui = resources_ui
+    ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    bind(page)
+    note, rows = page.locator("#harness-accounts-error"), page.locator(".harness-account-row[data-harness]")
+    if write == "switch":
+        row.locator(".ui-switch-track").click()
+        expect(note).to_have_text(re.compile(r'^Enabling "Personal default" is not confirmed: daemon_unreachable: '
+                                             r'Claudexor control PATCH /v2/credential-profiles/\.\.\. failed after '
+                                             r'[0-9.]+s: RemoteProtocolError\.$'))
+        expect(row.locator("[data-harness-toggle]")).to_be_checked()  # the read after it shows what the engine kept
+        expect(row.locator("[data-harness-toggle]")).to_be_enabled()
+        assert writes == [("PATCH", "claude", "claude-default", {"enabled": True})]
+    else:
+        row.locator("[data-resources]").click()
+        row.locator("[data-harness-remove]").click()
+        page.locator(".confirm-dialog [data-confirm-ok]").click()
+        expect(note).to_have_text(re.compile(r'^Removing "Personal default" is not confirmed: daemon_unreachable: '
+                                             r'Claudexor control DELETE /v2/credential-profiles/\.\.\. failed after '
+                                             r'[0-9.]+s: RemoteProtocolError\.$'))
+        expect(rows).to_have_count(19)  # the account the engine forgot is gone after the read, not "unchanged"
+        assert writes == [("DELETE", "claude", "claude-default", None)]
+    expect(note).to_have_attribute("data-tone", "warn")
+    # The real proxy's 503: what the browser read was the host's own answer, sent once and never retried.
+    assert [(method, status) for method, status, _ in answers] == [("PATCH" if write == "switch" else "DELETE", 503)]
+    assert answers[0][2]["error"].startswith("daemon_unreachable: ")
+    frame_section(note)
+    capture(page, f"engine-kept-{write}")
+
+
+def test_refused_removal_keeps_the_row_and_says_unchanged(resources_ui):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    deletes = []
+
+    def gate(route):
+        deletes.append(route.request.method)
+        route.fulfill(status=401, json={"error": "Authentication required."})  # the host's gate, before any handler
+
+    page.route("**/api/claudexor/credential-profiles/**", gate)
+    row.locator("[data-resources]").click()
+    row.locator("[data-harness-remove]").click()
+    page.locator(".confirm-dialog [data-confirm-ok]").click()
+    note = page.locator("#harness-accounts-error")
+    expect(note).to_have_text('Could not remove "Personal default": Authentication required. The account is unchanged.')
+    expect(note).to_have_attribute("data-tone", "error")
+    expect(page.locator(".harness-account-row[data-harness]")).to_have_count(20)
+    assert deletes == ["DELETE"]
+    frame_section(note)
+    capture(page, "remove-refused")
+
+
+def test_program_inspection_left_mid_read_is_replaced_on_return(resources_ui):
+    from urllib.parse import parse_qs
+
+    from playwright.sync_api import expect
+    from tests.test_harness_maintenance_browser import _inventory_row
+
+    ui = resources_ui
+    page = ui["page"]
+    entry = {**_inventory_row("claude"), "updateAvailable": "yes",
+             "newest": {"status": "available", "version": "2.1.0", "observedAt": "2026-11-14T12:00:00Z"}}
+    inspections, held = [], []
+
+    def maintenance(route):
+        if not urlparse(route.request.url).path.endswith("/harnesses"):
+            return route.fulfill(status=404, json={"error": "fixture: no operation"})
+        inspections.append(parse_qs(urlparse(route.request.url).query))
+        if len(inspections) == 1:
+            held.append(route)  # still inspecting when the owner leaves
+        else:
+            route.fulfill(json={"harnesses": [entry]})
+
+    page.route("**/api/claudexor/maintenance/**", maintenance)
+    page, _ = open_accounts(ui, width=1440)
+    family = page.locator('.agent-family-card[data-family="claude"]')
+    for _ in range(300):
+        if held:
+            break
+        page.wait_for_timeout(10)
+    assert inspections == [{"fresh": ["true"], "checkLatest": ["true"]}]
+
+    def leave():
+        # A wide Settings home restores its last page: choose Ouroboros so Accounts really unmounts.
+        page.locator("[data-settings-overview-row]").click()
+        page.locator('[data-settings-page="accounts/claude"]').wait_for(state="detached")
+
+    leave()
+    open_settings(page, "accounts/claude")
+    expect(family.locator(".harness-maintenance-line")).to_contain_text("2.1.0 available")
+    expect(family.get_by_role("button", name="Update", exact=True)).to_be_enabled()
+    assert inspections[1] == {"fresh": ["true"], "checkLatest": ["true"]}, inspections
+    held.pop().fulfill(json={"harnesses": [{**entry, "updateAvailable": "no"}]})  # the released view's late answer
+    page.wait_for_timeout(200)
+    expect(family.get_by_role("button", name="Update", exact=True)).to_be_enabled()
+    frame_section(family.locator("[data-family-maintenance]"))
+    capture(page, "program-inspection-replaced-on-return")
+    # Each showing is the owner's act and asks again; the late answer above changed nothing.
+    leave()
+    open_settings(page, "accounts/claude")
+    expect(family.get_by_role("button", name="Update", exact=True)).to_be_enabled()
+    page.wait_for_timeout(500)
+    assert inspections[2:] == [{"fresh": ["true"], "checkLatest": ["true"]}], inspections
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_first_screen_keeps_checking_until_the_first_full_read(resources_ui, theme):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    transport.hold.add("full")  # the first discovery probes every agent CLI
+    page = ui["page"]
+    page.set_viewport_size({"width": 1440, "height": 960})
+    page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
+    page.goto(ui["url"] + "/#settings")
+    open_settings(page, "accounts/claude")
+    wait_pending(page, transport, "full")
+    for _ in range(300):
+        if "passive" in transport.calls:
+            break
+        page.wait_for_timeout(10)
+    page.wait_for_timeout(200)  # the passive answer has landed and repainted
+    banner = page.locator("#agents-service-banner")
+    checking = "Checking Claudexor… the first read probes each agent CLI and can take a minute or more."
+    expect(banner).to_have_text(checking)
+    expect(page.locator('.agent-family-card[data-family="claude"]')).to_contain_text("Checking…")
+    expect(page.locator("#page-settings")).not_to_contain_text("were not read")
+    capture(page, f"first-screen-{theme}-checking")
+    while transport.pending["full"]:
+        transport.release("full")
+    expect(page.locator(".harness-account-row[data-harness]")).to_have_count(20)
+    expect(banner).to_have_text("Claudexor ready")

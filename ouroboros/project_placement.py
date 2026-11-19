@@ -90,14 +90,91 @@ def pending_placement(drive_root: Any, task: dict, *, bindings_snapshot: dict | 
                        != binding.get("bound_at")) else {}
 
 
-def refresh_pending_placement(drive_root: Any, task: dict, *, binding: dict | None = None) -> bool:
-    """Refresh pending lease identity before selection, keeping folder access unchanged."""
+def placement_folder(drive_root: Any, task: dict, project: dict | None, *, own: bool | None = None) -> str:
+    """The folder a moved work's readmission selects, as its lane reads it until then (``project_lease.lane_folder``):
+    its own recorded one when it keeps its resource (``own``, else ``keeps_own_resource``: an explicit folder or
+    opt-out, or body work), else the room's recorded one (``project``: that room's registry row)."""
+    if keeps_own_resource(drive_root, task)[0] if own is None else own:
+        return str(task.get("workspace_root") or "") if task.get("workspace_mode") == "external" else ""
+    return str((project or {}).get("working_dir") or "").strip()
+
+
+_OWN = "_placement_own"  # memory only: {bound_at, kind[, own, body]}, a moved row's ``keeps_own_resource`` for its move
+
+
+def _resource_basis(task: dict, binding: dict) -> dict:
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    return {"bound_at": binding.get("bound_at"), "kind": (metadata.get("resource_intent") or {}).get("kind")}
+
+
+def known_resource(task: dict, binding: dict) -> tuple[bool, bool] | None:
+    """``keeps_own_resource`` for this row's move as memory knows it, reading nothing; None when only the copy
+    records can say. An intent decides it unless body work may hold it (none, ``system_repo``); then the answer
+    read for this move and intent rides on the row (``settle_resource``, readmission). A queued root adds no
+    candidate: only the root prepares its own (``body_candidate._refusal_before_prepare`` refuses its helpers), and
+    readmission reads the records again at the launch, so one retired meanwhile moves the lane there."""
+    basis = _resource_basis(task, binding)
+    if basis["kind"] not in (None, "", "system_repo"):
+        return basis["kind"] in {"explicit_resource", "explicit_none"}, False
+    carried = task.get(_OWN)
+    if isinstance(carried, dict) and "own" in carried and {key: carried.get(key) for key in basis} == basis:
+        return bool(carried["own"]), bool(carried.get("body"))
+    return None
+
+
+def pending_resource(task: dict) -> dict | None:
+    """The move and intent whose ``keeps_own_resource`` the chooser reads off Q (``dispatch_choice._screen``) before
+    it decides the row, else None; until then the row's folder lane is provisionally none."""
+    carried = task.get(_OWN)
+    if not isinstance(carried, dict) or "own" in carried:
+        return None
+    return {key: carried.get(key) for key in ("bound_at", "kind")}
+
+
+def settle_resource(task: dict, basis: dict, own: bool, body: bool) -> bool:
+    """Under Q: the answer read off Q for ``basis``, if the row still awaits that one; its folder lane then follows
+    from the room's row its refresh admitted (``_project_admission``), reading nothing. Whether it settled."""
+    if pending_resource(task) != basis:
+        return False
+    task[_OWN] = {**basis, "own": own, "body": body}
+    task["_placement_folder"] = placement_folder(None, task, (task.get("_project_admission") or {}).get("project"),
+                                                 own=own)
+    return True
+
+
+def queued_lane_folder(drive_root: Any, task: dict, *, bindings_snapshot: dict | None = None) -> str:
+    """Off Q, for a queued row as a queue publication shows it: the folder lane it holds or waits for, as the
+    chooser reads it (a pending move's ``placement_folder`` from its durable binding and that room's row, else
+    its recorded folder). A readmitted or RUNNING row's lane is its recorded folder (``project_lease.lane_folder``)."""
+    from ouroboros.project_lease import lane_folder
+    from ouroboros.projects_registry import get_project
+
+    task = {key: value for key, value in task.items() if key != "_placement_folder"}
+    binding = pending_placement(drive_root, task, bindings_snapshot=bindings_snapshot)
+    if not binding:
+        return lane_folder(task)
+    moved = {**task, "project_id": binding["project_id"]}
+    room = get_project(drive_root, binding["project_id"], strict=True)
+    return lane_folder({**moved, "_placement_folder": placement_folder(drive_root, moved, room)})
+
+
+def refresh_pending_placement(drive_root: Any, task: dict, *, binding: dict | None = None,
+                              lane: bool = False) -> bool:
+    """Refresh pending lease identity before selection, keeping folder access unchanged.
+
+    ``lane`` (the chooser's stat read, ``worker_assignment._candidate_ineligible``): the folder lane meanwhile reads
+    ``_placement_folder``, the folder this work's readmission will select, so the chooser waits for the folder it
+    will work in. Memory decides it (``known_resource``) or it is none until the chooser read the copy records off
+    Q (``pending_resource``): nothing is read for it under Q. The queue snapshot carries it to the publication's
+    readers. Enqueue, restore, admission and readmission refresh identity only."""
     from ouroboros.sleep_custody import carrier_receipt
     from ouroboros.project_admission import project_admission_basis, project_admission_guard
 
     try:
         binding = pending_placement(drive_root, task) if binding is None else binding
         if not binding:
+            task.pop("_placement_folder", None)
+            task.pop(_OWN, None)
             return True
         if carrier_receipt(task).get("retains_project_lane"):
             return False
@@ -105,43 +182,75 @@ def refresh_pending_placement(drive_root: Any, task: dict, *, binding: dict | No
             task["project_id"] = binding["project_id"]
             task["_project_admission"] = project_admission_basis(binding["project_id"], project, frozen=True)
             task.pop("_project_scope_none", None)
+            if lane:
+                answer = known_resource(task, binding)
+                if answer is None:
+                    task[_OWN] = _resource_basis(task, binding)  # the chooser reads it off Q (``pending_resource``)
+                task["_placement_folder"] = "" if answer is None else placement_folder(drive_root, task, project,
+                                                                                       own=answer[0])
         return True
     except Exception:
         log.warning("Pending placement cannot be readmitted for %s", task.get("id"), exc_info=True)
         return False
 
 
-def readmit_placement(drive_root: Any, task: dict, *, repo_dir: Any, running: Any, pending: Any) -> bool:
-    """Under Q, acquire the selected room's lease before changing execution resources."""
-    from ouroboros.project_admission import project_admission_basis, project_admission_guard
-    from ouroboros.project_lease import candidate_is_leasable, cold_project_holders, running_project_ids
-    from ouroboros.workspace_admission import validate_workspace_root
+def keeps_own_resource(drive_root: Any, task: dict) -> tuple[bool, bool]:
+    """``(pinned, body)``: whether readmission leaves this moved work's resource alone, and whether as body work.
 
-    binding = pending_placement(drive_root, task)
-    if not binding:
-        return True
-    if not refresh_pending_placement(drive_root, task, binding=binding):
-        return False
-    if not candidate_is_leasable(task, running_project_ids(running.values()),
-                                cold_holders=cold_project_holders(pending)):
-        return False
-    # Placement changes the room's default, never a separately selected resource: an explicit
-    # folder or opt-out, or the candidate of body work. The registry holds that candidate when a
-    # restart dropped a direct actor's binding, or before a Continue inherits it (prepare).
+    Placement changes the room's default, never a separately selected resource: an explicit
+    folder or opt-out, or the candidate of body work. The registry holds that candidate when a
+    restart dropped a direct actor's binding, or before a Continue inherits it (prepare).
+    Unpinned work takes the room's folder as it stands at that boundary (``project_folder`` names it)."""
     from ouroboros.body_candidate import continuation_predecessor, find
 
-    metadata = task.setdefault("metadata", {})
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     kind = (metadata.get("resource_intent") or {}).get("kind")
     owner = str(metadata.get("root_task_id") or task.get("root_task_id") or task.get("id") or "")
     body = kind in (None, "", "system_repo") and any(
         find(lineage, drive_root, strict=True) for lineage in (owner, continuation_predecessor(task)) if lineage)
-    pinned = body or kind in {"explicit_resource", "explicit_none"}
+    return body or kind in {"explicit_resource", "explicit_none"}, body
+
+
+def readmit_placement(drive_root: Any, task: dict, *, repo_dir: Any, running: Any, pending: Any) -> bool:
+    """Under Q, acquire the selected room's lease and its folder's before changing execution resources.
+
+    ``running``: what holds lanes now, RUNNING with the launches claimed beside it
+    (``worker_assignment._started_projection``); a mapping is read by its values."""
+    from ouroboros.project_admission import project_admission_basis, project_admission_guard
+    from ouroboros.project_lease import candidate_is_leasable, lane_holders, running_project_ids
+    from ouroboros.workspace_admission import validate_workspace_root
+    from supervisor.conversation_lane import resumes_on_lane
+
+    binding = pending_placement(drive_root, task)
+    if not binding:
+        return True
+    if not refresh_pending_placement(drive_root, task, binding=binding, lane=False):
+        return False
+    running = list(running.values() if hasattr(running, "values") else running or ())
+    leased, holders = running_project_ids(running), lane_holders(running, pending)
+    # My human's returned turn holds no room lease, as on its lane (``resumes_on_lane``) and as a fresh turn: neither
+    # the room's running writer nor a tree that keeps its lane holds it; pooled work still serializes on both. The
+    # room's lane is read first, as before; the folder's once the resource below is selected.
+    pooled = not resumes_on_lane(task)
+    if pooled and not candidate_is_leasable({**task, "_placement_folder": ""}, leased, holders=holders):
+        return False
+    metadata = task.setdefault("metadata", {})
+    kind = (metadata.get("resource_intent") or {}).get("kind")
+    pinned, body = keeps_own_resource(drive_root, task)  # the launch reads it afresh, as it always did
+    task[_OWN] = {**_resource_basis(task, binding), "own": pinned, "body": body}  # the chooser's next pass reads it
     # Placement pins room identity; readmission consumes its current generation.
     with project_admission_guard(drive_root, {**binding["placement_admission"], "frozen": True}) as project:
         workspace = {"root": str(task.get("workspace_root") or ""), "mode": str(task.get("workspace_mode") or "")}
         if not pinned:
             folder = validate_workspace_root(project.get("working_dir"), system_repo_dir=repo_dir, drive_root=drive_root)
             workspace = {"root": str(folder or ""), "mode": "external" if folder else ""}
+        selected = workspace["root"] if workspace["mode"] == "external" else ""
+        if pooled and not candidate_is_leasable({**task, "_placement_folder": selected}, leased, holders=holders):
+            # The folder it would select is held: nothing of this work changed; the chooser waits for that folder.
+            task["_placement_folder"] = placement_folder(drive_root, task, project, own=pinned)
+            return False
+        task.pop("_placement_folder", None)
+        task.pop(_OWN, None)
         # A Presence turn keeps its source conversation's chat id: every room reader resolves its binding first.
         task.update(project_id=binding["project_id"], chat_id=task.get("chat_id") if metadata.get(
                         "presence_event_identity") else project.get("chat_id"),

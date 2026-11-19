@@ -71,10 +71,12 @@ def test_display_redacts_typed_details_without_mutating_custody():
 @pytest.mark.parametrize("code,status,unknown,kind,retry,wait,vendor", [
     ("provider_failed", 400, False, "context_overflow", False, "", "context_length_exceeded"),
     ("invalid_request", 400, False, "context_overflow", False, "", " context_length_exceeded "),
-    ("invalid_request", 400, False, "bad_request", False, "", "string_above_max_length"),
+    # One input string over its length (OpenAI's 10 MiB text, 07.11.2026): a smaller input cures it, as the window.
+    ("invalid_request", 400, False, "context_overflow", False, "", "string_above_max_length"),
+    ("invalid_request", 400, False, "bad_request", False, "", "invalid_value"),
 ])
 def test_vendor_facts_reach_shared_readers_without_changing_wrapper_custody(code, status, unknown, kind, retry, wait, vendor):
-    from ouroboros.llm_attempt import _is_structured_context_overflow_exception
+    from ouroboros.llm_attempt import is_size_refusal
     from ouroboros.loop_llm_call import classify_llm_exception
     from ouroboros.model_wait import model_wait_reason
 
@@ -85,7 +87,17 @@ def test_vendor_facts_reach_shared_readers_without_changing_wrapper_custody(code
     assert error.display_message and classify_llm_exception(error) == classified
     assert classified.kind == kind and classified.retry_same_request is retry
     assert model_wait_reason(error) == wait
-    assert _is_structured_context_overflow_exception(error) is (kind == "context_overflow")
+    assert is_size_refusal(error) is (kind == "context_overflow")
+    # The request that continues reads the engine's typed fields as fields: no sentence is invented for it.
+    from ouroboros.loop_transport import stamp_owner_provider_message
+    from ouroboros.primary_route_observation import failed_attempt_facts
+
+    usage = {"_last_llm_failure": {"model": "claudexor::codex=exact-model", "failure_code": classified.kind,
+                                   "status_code": status, "ts": "2026-11-15T18:20:21+00:00"}}
+    stamp_owner_provider_message(usage, error, classified)
+    told = failed_attempt_facts(usage, "claudexor::codex=exact-model", False)
+    assert f': its typed error code was "{vendor.strip()}"; its parameter was "input".' in told
+    assert " said " not in told and "Controlled model refusal" not in told and failed_attempt_facts(usage, "other/model", False) == ""
     wrapper = "model_outcome_unknown" if unknown else code
     assert error.code == wrapper and error.problem == problem
     assert error.body == ({"code": wrapper} if unknown else problem)
@@ -197,6 +209,11 @@ def setup(tmp_path, monkeypatch):
     root = tmp_path / "data"
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
+    # ``config.DATA_DIR`` is bound once per xdist worker (conftest ``_bind_pytest_runtime_roots``), and a request's
+    # runtime section reads the queue snapshot and the reviewer-slot records under it: what earlier tests of the
+    # worker left there is some 530 tokens of every later capture, and a view fitted near a mode's line then starts
+    # in another mode. This test's requests read its own tree.
+    monkeypatch.setattr(transport.config, "DATA_DIR", root)
     monkeypatch.setenv("TOTAL_BUDGET", "100")
     monkeypatch.delenv(MODEL_ACCOUNTS_KEY, raising=False)
     monkeypatch.setattr(transport.config, "CLAUDEXOR_MODEL_POLL_INTERVAL_SEC", 0.001)
@@ -210,6 +227,15 @@ def setup(tmp_path, monkeypatch):
 
 def ledger(root):
     return ledger_rows(root)
+
+
+def test_the_fixture_owns_its_data_root_for_every_reader(setup):
+    """Both spellings of the data root are this test's tree: the environment's, and ``config.DATA_DIR``, which
+    conftest binds once per worker and a request's runtime section reads (razzant/ouroboros#3394)."""
+    import os
+
+    root, _gateway, _client = setup
+    assert str(transport.config.DATA_DIR) == str(root) == os.environ["OUROBOROS_DATA_DIR"]
 
 
 def retained(root, suffix="response", *, raw=False):
@@ -382,6 +408,9 @@ def test_direct_provider_history_keeps_refusal_text_and_omits_stop_metadata(setu
     ("create", "http_400", 400, False, False),
     ("create", "auth_required", 401, False, False),
     ("get", "subscription_window_exhausted", 429, False, True),
+    # After engine retention, missing request bytes/receipts prove no old non-dispatch.
+    ("create", "resource_not_found", 404, False, False),
+    ("get", "model_operation_not_found", 404, False, True),
 ])
 def test_only_exact_pre_admission_create_refusal_releases_the_attempt(setup, monkeypatch, phase, code, status, not_sent, asynchronous):
     root, gateway, client = setup
@@ -638,6 +667,105 @@ def test_typed_subject_refusal_suppresses_next_auto_preference(setup):
 
     assert gateway.uploads[0][0]["account"]["preferredProfileId"] == "account-a"
     assert gateway.uploads[1][0]["account"] == {"mode": "auto"}
+
+
+def _plan(**change):
+    """A Main plan as ``send_account`` reads it: built on ROUTE's exact account with a known, fresh window."""
+    return SimpleNamespace(**{"provider": "claudexor", "model_role": "main", "account_pin": "", "window_witness_bound": True,
+                              "stale": False, "status": "confirmed", "model_route": dict(ROUTE), **change})
+
+
+def _planned_send(monkeypatch, plan, messages=(), **parameters):
+    monkeypatch.delenv(MODEL_ACCOUNTS_KEY, raising=False)
+    monkeypatch.setattr(transport, "current_model_wait",
+                        lambda: SimpleNamespace(tool_context=SimpleNamespace(context_fit_plan=plan)))
+    return transport._request({"source": "codex", "resolved_model": "exact-model"},
+                              [*messages, {"role": "user", "content": "hi"}], None, {"model_role": "main", **parameters})
+
+
+@pytest.mark.parametrize("change,parameters,named", [
+    ({}, {}, "account-a"),  # an exact account-bound plan: the first send names its account
+    ({"model_route": {"source": "codex", "model": "exact-model"}}, {}, None),  # a pool bound names no account
+    ({"status": "unprobeable", "stale": True}, {}, None),  # an unknown window
+    ({"model_route": {**ROUTE, "accountFingerprint": ""}}, {}, None),  # a profile name without its fingerprint
+    ({"model_route": {**ROUTE, "model": "other-model"}}, {}, None),  # another model's plan
+    ({"model_role": "light"}, {}, None),  # another role's plan
+    ({"account_pin": "account-a"}, {}, None),  # a pinned plan is no Auto plan
+    ({}, {"_no_account_preference": True}, None),  # a redo or a re-ask after a refusal
+])
+def test_the_first_send_names_the_account_of_an_exact_bound_plan_only(monkeypatch, change, parameters, named):
+    """H5 (W2, 12.11.2026): with no answer of this model in the conversation, the send names the account its plan was
+    built on as ``preferredProfileId``: advice the engine may overrule (a mark, a refusal, login or quota send it to the
+    pool), never a pin, and only for an exact account-bound record of the same source and model."""
+    payload = _planned_send(monkeypatch, _plan(**change), **parameters)
+    assert payload["account"] == ({"mode": "auto", "preferredProfileId": named} if named else {"mode": "auto"})
+
+
+def test_the_conversation_and_a_failed_account_outrank_the_plans_account(monkeypatch):
+    """The order is the pin, the last answer of this model, the plan's account. The account that just failed is named
+    by nothing: a prospective build reads that fact, only a dispatch spends it, and the plan's account returns after."""
+    from ouroboros import llm_substitution
+    from ouroboros.llm_substitution import send_account
+
+    answered = [{"role": "assistant", "content": "", "nativeContinuation": {"route": {
+        **ROUTE, "credentialProfileId": "account-b", "accountFingerprint": "fingerprint-b"}}}]
+    assert _planned_send(monkeypatch, _plan(), answered)["account"] == {"mode": "auto", "preferredProfileId": "account-b"}
+    assert send_account({"source": "codex", "resolved_model": "exact-model"}, answered, {"model_role": "main"},
+                        plan=_plan())[1]["accountFingerprint"] == "fingerprint-b"  # the identity its evidence binds
+    monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "account-c"}))
+    assert send_account({"source": "codex", "resolved_model": "exact-model"}, answered, {"model_role": "main"},
+                        plan=_plan()) == ({"mode": "pin", "profileId": "account-c"}, {})  # a pin stays a pin
+    token = llm_substitution._FAILED_PROFILE.set(("execution-a", "codex", "exact-model", "account-a"))
+    try:
+        assert _planned_send(monkeypatch, _plan(), cache_affinity="execution-a", prospective=True)["account"] == {"mode": "auto"}
+        assert _planned_send(monkeypatch, _plan(), cache_affinity="execution-a")["account"] == {"mode": "auto"}  # spent
+        assert _planned_send(monkeypatch, _plan(), cache_affinity="execution-a")["account"] == {
+            "mode": "auto", "preferredProfileId": "account-a"}
+    finally:
+        llm_substitution._FAILED_PROFILE.reset(token)
+
+
+def test_a_round_names_the_engines_account_choice_and_its_time_until_dispatch(setup, monkeypatch):
+    """W2 H7: a round's usage carries the account its send preferred, the engine's ``routing.selectionReason`` and the
+    time until dispatch started by the engine's own record (not bytes left for the vendor); its receipt names the
+    candidate's measurement and reservation. A field the engine leaves out adds nothing."""
+    import json as _json
+    from ouroboros.llm_observability import round_receipt, round_window
+
+    _, gateway, client = setup
+    detail = gateway.detail
+
+    def timed_detail(index):
+        value = detail(index)
+        return {**value, "startedAt": "2026-11-12T10:00:00.000Z", "routing": {"selectionReason": "preferred", "poolEvents": []},
+                "dispatch": {**value["dispatch"], "startedAt": "2026-11-12T10:00:01.930Z"}}
+
+    monkeypatch.setattr(gateway, "detail", timed_detail)
+    with round_window():
+        _, usage = client.chat([result()["message"], {"role": "user", "content": "next"}], MODEL)
+        receipt = round_receipt()
+    named = {key: usage["claudexor"][key] for key in ("preferred_profile", "selection_reason", "engine_until_dispatch_ms")}
+    assert named == {"preferred_profile": "account-a", "selection_reason": "preferred", "engine_until_dispatch_ms": 1930}
+    assert len(_json.dumps(named)) < 120  # what a round's line adds, in archives kept for good
+    assert {"candidate.measure", "candidate.reserve"} <= set(receipt["host_steps"]["sections_ms"])
+    monkeypatch.setattr(gateway, "detail", detail)
+    gateway.results.append(result())
+    gateway.dispatch.append("response_received")
+    _, plain = client.chat([{"role": "user", "content": "hi"}], MODEL)
+    assert not {"preferred_profile", "selection_reason", "engine_until_dispatch_ms"} & set(plain["claudexor"])
+
+
+def test_a_correlated_retry_never_gets_the_plans_account_back(tmp_path):
+    """The one engine-granted retry on another account is built from the refused send with ``{"mode": "auto"}``."""
+    from ouroboros.llm_substitution import CapabilityRetry
+
+    invocation = SimpleNamespace(payload={"account": {"mode": "auto", "preferredProfileId": "account-a"}, "messages": []},
+                                 operation_id="op-0", root=tmp_path, task_id="", role="main")
+    error = transport.ClaudexorModelNotDispatched({"code": "model_capability_refused", "message": "refused", "context": {
+        "retryOnOtherAccount": True, "generationStarted": False, "operationId": "op-0"}}, operation_id="op-0")
+    error.physical_attempt_capture = SimpleNamespace(state="released", attempt_id="attempt-0")
+    retry = CapabilityRetry().refused(invocation, error)
+    assert retry["account"] == {"mode": "auto"} and retry["retryOfOperationId"] == "op-0"
 
 
 @pytest.mark.parametrize("change", [{"credentialProfileId": "account-b", "accountFingerprint": "fingerprint-b"},
@@ -1089,6 +1217,34 @@ def test_unknown_engine_outcome_retains_response_without_resend_or_false_zero(se
     assert ledger(root)[-1].get("cost_usd") is None
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_a_tracked_send_is_recorded_before_create_and_hears_its_end(setup, asynchronous):
+    from ouroboros.llm_attempt import track_physical_attempts
+
+    root, gateway, client = setup
+
+    class Tracker:
+        def __init__(self):
+            self.claimed, self.creates_at_claim, self.heard = [], [], []
+
+        def __call__(self, reservation):
+            self.claimed.append(reservation.attempt_id)
+            self.creates_at_claim.append(len(gateway.creates))
+
+        def attempt_ended(self, capture, error):
+            self.heard.append((capture.attempt_id, capture.state, error is None))
+
+    tracker = Tracker()
+    with track_physical_attempts(tracker):
+        if asynchronous:
+            asyncio.run(client.chat_async([{"role": "user", "content": "hi"}], MODEL))
+        else:
+            client.chat([{"role": "user", "content": "hi"}], MODEL)
+    assert tracker.creates_at_claim == [0]
+    assert tracker.heard == [(tracker.claimed[0], "settled", True)]
+    assert ledger(root)[-1]["attempt_id"] == tracker.claimed[0]
+
+
 def test_continuation_repair_is_bounded_to_one_unstarted_operation(setup):
     root, gateway, client = setup
     changed = {**ROUTE, "credentialProfileId": "account-b"}
@@ -1246,6 +1402,35 @@ def test_daemon_read_timeout_repeats_only_before_create(setup, monkeypatch, phas
         assert rows[0]["state"] == "unresolved"
         assert usage["_last_llm_error_kind"] == "provider_outcome_unknown"
         assert 4.0 not in slept and 8.0 not in slept
+
+
+@pytest.mark.parametrize("served", [None, "other-model"])
+def test_a_failed_operation_route_names_the_model_it_requested(setup, monkeypatch, served):
+    """The engine's route of a failed operation may name no model (every Codex size refusal of 07.11 did). The loop's
+    receipt then names the model this operation requested, so the refusing account binds and a measured numberless
+    refusal bounds its window; a model the engine did name stays as named and binds nothing for this one. The error
+    event keeps the engine's raw route."""
+    from dataclasses import replace
+    from ouroboros import capability_evidence as ce
+    from ouroboros.context_anchor import record_refused_input
+    from ouroboros.loop_llm_call import call_llm_with_retry
+    from tests.test_context_fit_integration import _plan
+
+    root, gateway, client = setup
+    route = {**ROUTE, "model": served}
+    gateway.results = [result(outcome="failed", route=route, problem={
+        "code": "invalid_request", "message": "Codex model request was refused (HTTP 400).", "retryable": False,
+        "context": {"httpStatus": 400, "vendorCode": "context_length_exceeded", "parameter": "input"}})]
+    usage = {}
+    answer, _ = call_llm_with_retry(client, [{"role": "user", "content": "hello"}], MODEL, None, "high", 3,
+                                    root / "logs", "task-one", 1, None, usage)
+    assert answer is None and usage["_model_route"] == {**ROUTE, "model": served or "exact-model"}
+    events = [json.loads(line) for line in (root / "logs/events.jsonl").read_text().splitlines()]
+    assert [event["observed_route"] for event in events if event.get("type") == "llm_api_error"] == [route]
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: root)
+    auto = replace(_plan(), model=MODEL, provider="claudexor", route_fp="auto", window_witness_bound=False)
+    record_refused_input(usage, auto, 900_000, measured=True)
+    assert bool(ce._read(root).get("main_windows")) is (served is None)
 
 
 def test_caller_control_before_create_proves_no_dispatch(setup):

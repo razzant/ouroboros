@@ -1,4 +1,5 @@
 """Local capacity is a serving-instance fact, independent of training and health."""
+from ouroboros.local_model import RUNTIME_PROBE
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
@@ -129,6 +130,30 @@ def test_live_serving_capacity_reaches_main_and_review_consumers(manager, monkey
         assert reviewer.window_tokens == window
         assert reviewer.status == evidence.status
         assert local_context_limits(65536) == (window, window // 4 if window else 2048)
+    # Metadata and reviewer previews are read-only; a send/plan publishes order.
+    assert not ce._store_path(tmp_path).exists()
+
+
+def test_local_reviewer_keeps_its_served_window_when_its_remote_spelling_cannot_resolve(manager, monkeypatch, tmp_path):
+    """The local lane never sends to the row's remote spelling, so a connection that spelling
+    names and Settings no longer hold cannot turn the served window into an unknown one."""
+    from ouroboros.llm_attempt import ConnectionUnavailable
+    from ouroboros.llm_routing import resolve_target
+    from ouroboros.reviewer_window import resolve_reviewer_window
+
+    settings = {"OUROBOROS_MODEL_CONTEXT_WINDOWS": {}}
+    monkeypatch.setattr(config, "runtime_settings", lambda: settings)
+    monkeypatch.setattr("ouroboros.reviewer_window._LAZY_ROUTE_LOCKS", {})
+    monkeypatch.setenv("OUROBOROS_MODEL_CONTEXT_WINDOWS", "{}")
+    manager._context_length = 131072
+    manager._serving_context_length = 16384
+    removed = "openai-compatible@removed::served-model"
+    with pytest.raises(ConnectionUnavailable):
+        resolve_target(removed, settings)
+    for model in ("local-fixture", removed):
+        reviewer = resolve_reviewer_window(model, use_local=True)
+        assert reviewer.window_tokens == 16384, model
+        assert reviewer.capability_route == {}
     assert not ce._store_path(tmp_path).exists()
 
 
@@ -260,8 +285,12 @@ def test_main_forecast_rebinds_remote_local_restart_and_unknown(manager, main_pl
         fit = context_fit.measure_main_fit(plan, messages, None,
             profile="owner_" + mode, rendered_mode=mode, round_id="route-switch:round:2")
         assert fit.action == "send"
-        assert fit.measurement.capacity_total_tokens == (window or None)
         assert fit.measurement.response_reserve_tokens == (min(NANO_MIN_HEADROOM_TOKENS, reserve) if mode == "nano" else reserve)
+        # A local server's window is its one buffer, the reply inside it; the remote route's stated total is read
+        # less the reply floor until a size refusal says otherwise (``WindowRecord.admitted``).
+        line = (window - (fit.measurement.response_reserve_tokens if local else NANO_MIN_HEADROOM_TOKENS)) if window else None
+        capacity = fit.measurement.capacity_total_tokens
+        assert (capacity - fit.measurement.response_reserve_tokens if window else capacity) == line
 
 
 def test_actual_local_connection_error_is_not_a_synthetic_overflow(manager, monkeypatch):
@@ -448,7 +477,7 @@ def test_actual_pooled_worker_reads_the_serving_instance_its_server_process_owns
         return real_popen([cmd[0], str(stand_in), *cmd[3:]], **kwargs)
 
     def run(cmd, **kwargs):  # llama-cpp-python is not installed here.
-        if cmd[1:] == ["-c", "import llama_cpp"]:
+        if cmd[1:] == ["-c", RUNTIME_PROBE]:
             return subprocess.CompletedProcess(cmd, 0, "", "")
         return real_run(cmd, **kwargs)
 
@@ -673,3 +702,31 @@ def test_owned_local_health_never_consults_ambient_proxy_configuration(monkeypat
         server.server_close()
         thread.join(timeout=5)
         assert not thread.is_alive()
+
+
+def test_restarted_owned_instance_releases_prior_refusal(manager, monkeypatch, tmp_path):
+    from ouroboros.context_window import record_observation, resolve_window
+    manager._serving_context_length = 80000
+    manager._proc = SimpleNamespace(pid=123, poll=lambda: None)
+    first = ce.probe(tmp_path, provider='local', model='local-fixture', use_local=True, allow_fetch=False)
+    resolve_window(first, 8192, root=tmp_path)
+    record_observation(tmp_path, first.route_fp, refused=40000)
+    same = ce.probe(tmp_path, provider='local', model='local-fixture', use_local=True, allow_fetch=False)
+    assert resolve_window(same, 8192, root=tmp_path).total.tokens == 40000
+    manager._proc = SimpleNamespace(pid=456, poll=lambda: None)
+    restarted = ce.probe(tmp_path, provider='local', model='local-fixture', use_local=True, allow_fetch=False)
+    assert resolve_window(restarted, 8192, root=tmp_path).total.tokens == 80000
+
+
+def test_local_helper_keeps_the_plans_serving_instance(manager, monkeypatch, tmp_path):
+    from ouroboros.context_window import record_observation, resolve_window
+    from ouroboros.llm_helper_window import _helper_attempt_context
+    monkeypatch.setattr(ce, 'canonical_evidence_root', lambda: tmp_path)
+    monkeypatch.setattr('ouroboros.context_window.route_observation_scope', lambda *a, **k: 'r')
+    manager._serving_context_length = 80000
+    evidence = ce.probe(tmp_path, provider='local', model='local-fixture', use_local=True, allow_fetch=False)
+    resolve_window(evidence, 8192, root=tmp_path, observation_fp='r')
+    record_observation(tmp_path, 'r', refused=40000)
+    target, payload = LLMClient.__new__(LLMClient)._build_local_candidate(
+        [{'role':'user', 'content':'hi'}], None, 65536, 'auto')
+    assert _helper_attempt_context(target, payload).capacity_total_tokens == 40000

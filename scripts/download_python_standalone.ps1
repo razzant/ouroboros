@@ -10,7 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Release = "20261009"
-$PyVersion = "3.10.22"
+$PyVersion = "3.12.15"
 $Platform = "x86_64-pc-windows-msvc"
 
 # Pinned SHA256 (from the release's SHA256SUMS): a swapped/truncated archive
@@ -18,7 +18,7 @@ $Platform = "x86_64-pc-windows-msvc"
 # bumping $Release/$PyVersion, exactly as in download_python_standalone.sh, and
 # the release signing catalog's python.exe/pythonw.exe hashes with it
 # (windows_signing_catalog.json).
-$Sha256 = "f20288c45ff11e7fe026f40ddcfb2acfe695cec18860746639e289142a589745"
+$Sha256 = "11ed9f8a6ac64fb1b5a55e40e305a6744a3f77a70863c8f8197a6e4349abc64a"
 
 $Filename = "cpython-${PyVersion}+${Release}-${Platform}-install_only_stripped.tar.gz"
 $Url = "https://github.com/astral-sh/python-build-standalone/releases/download/${Release}/${Filename}"

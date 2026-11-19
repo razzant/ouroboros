@@ -458,7 +458,13 @@ async def fresh_after(live, wire):
 
 
 async def spoken_out(live):
-    """The turn has finished and been heard."""
+    """The turn has finished and been heard. The fake provider records an answer when it queues the answer's frames, and
+    until they cross the socket the call can still be quiet from the turn before, so the answer's final caption at the
+    page comes first and the call's quiet flags after it."""
+    answer = next((wire.spoken[-1] for wire in reversed(live.provider.connections) if wire.spoken), None)
+    if answer is not None:
+        await live.wait(lambda: any(row.get('speaker') == 'ouroboros' and row.get('text') == answer
+                                    and row.get('final') for row in live.page.controls), 30)
     await live.wait(lambda: not live.call.response_open and not live.call.pending_spoken and not live.call.unheard(), 30)
 
 

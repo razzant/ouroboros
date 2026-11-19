@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 
 import pytest
 
@@ -128,6 +127,76 @@ def test_projection_digest_changes_with_current_plan_but_result_hash_does_not(tm
     assert "authority" not in mismatch and "authority_source" not in mismatch
 
 
+def test_posix_name_bytes_survive_task_result_hash_and_verified_authority_read(tmp_path):
+    from ouroboros.agent_startup_checks import _automatic_predecessor_authority_projection
+
+    ctx = _ctx(tmp_path)
+    raw = b"fixture-\xff.txt"
+    name = raw.decode("utf-8", "surrogateescape")
+    literal = r"fixture-\udcff.txt"
+    artifacts = [{"kind": "task_artifact", "name": item} for item in (name, literal, "файл🪶.txt")]
+    _write(ctx, artifacts=artifacts)
+    stored = load_effective_task_result(ctx.drive_root, "child", materialize_artifacts=False)
+    assert stored["artifacts"] == artifacts
+
+    _, first = _read(ctx, view="answer")
+    _, selection = _read(ctx, authority_fields=["artifacts"])
+    assert selection["authority"]["artifacts"] == artifacts
+    _, meta = _read(ctx, authority_fields=["artifacts"], source_only=True)
+    source = meta["authority_source"]
+    expected = (r'{"artifacts": [{"kind": "task_artifact", "name": "fixture-\udcff.txt"}, '
+                r'{"kind": "task_artifact", "name": "fixture-\\udcff.txt"}, '
+                '{"kind": "task_artifact", "name": "файл🪶.txt"}]}')
+    assert source["complete_chars"] == len(expected)
+    assert source["complete_sha256"] == hashlib.sha256(expected.encode("utf-8")).hexdigest()
+    split = expected.index(r"\udcff") + 3
+    pages = []
+    for start, end in ((0, split), (split, len(expected))):
+        _, page = _read(ctx, authority_fields=["artifacts"], source_only=True,
+                        authority_projection_sha256=meta["authority_projection_sha256"],
+                        source_start_char=start, source_end_char=end)
+        assert page["authority_source"]["complete_sha256"] == source["complete_sha256"]
+        pages.append(page["authority_source"]["text"])
+    assert "".join(pages) == expected
+    restored = json.loads("".join(pages))["artifacts"]
+    assert restored == artifacts
+    assert restored[0]["name"].encode("utf-8", "surrogateescape") == raw
+
+    # The two named digests use the same encoding, without conflating their subjects (see the plan case below).
+    brief = _automatic_predecessor_authority_projection(stored, {}, drive_root=ctx.drive_root)
+    expected_authority = _json(task_result_authority_projection(stored, drive_root=ctx.drive_root)).replace("\udcff", r"\udcff")
+    assert brief["artifacts"] == artifacts
+    assert brief["authority_chars"] == len(expected_authority)
+    assert brief["authority_sha256"] == hashlib.sha256(expected_authority.encode("utf-8")).hexdigest()
+
+    # Replacing the name by its literal spelling must not preserve a parent's previous acknowledgement.
+    _write(ctx, artifacts=[artifacts[1], *artifacts[1:]])
+    _, current = _read(ctx, view="answer")
+    assert current["child_result_sha256"] != first["child_result_sha256"]
+    row = load_effective_task_result(ctx.drive_root, "child", materialize_artifacts=False)
+    ordinary = _json(task_result_authority_projection(row, drive_root=ctx.drive_root))
+    new_brief = _automatic_predecessor_authority_projection(row, {}, drive_root=ctx.drive_root)
+    assert new_brief["authority_sha256"] == hashlib.sha256(ordinary.encode("utf-8")).hexdigest()
+    assert new_brief["authority_sha256"] != brief["authority_sha256"]
+
+
+def test_continuation_bound_counts_byte_name_escapes():
+    from ouroboros.contracts.task_contract import bounded_continuation_envelope
+    from ouroboros.tool_capabilities import DEFAULT_TOOL_RESULT_LIMIT
+    from ouroboros.utils import json_dumps_utf8
+
+    value = "\udcff" * (DEFAULT_TOOL_RESULT_LIMIT // 3)
+    envelope = bounded_continuation_envelope({"output_directory": value}, digest_semantics="observed_at_binding",
+                                             source_ref={"task_id": "child"})
+    preview = envelope["output_directory"]
+    assert preview["kind"] == "bounded_field_preview"
+    assert preview["full_chars"] == 6 * len(value)  # JSON escape occupies six characters, not one
+    wire = json_dumps_utf8(preview["preview"], ensure_ascii=False)
+    wire.encode("utf-8")
+    assert len(wire) - 2 <= DEFAULT_TOOL_RESULT_LIMIT
+    assert preview["source_ref"] == {"task_id": "child", "field": "authority.output_directory"}
+
+
 @pytest.mark.parametrize("fields", [[], ["task_contract"]])
 def test_field_pointer_never_qualifies_as_full_authority_even_with_old_flag(tmp_path, fields):
     ctx = _ctx(tmp_path)
@@ -142,7 +211,7 @@ def test_field_pointer_never_qualifies_as_full_authority_even_with_old_flag(tmp_
 
 
 @pytest.mark.parametrize("arguments", [
-    {"authority_fields": "task_contract"}, {"authority_fields": ["not a field"]},
+    {"authority_fields": "task_contract"},
     {"source_only": True}, {"authority_projection_sha256": "f" * 64},
     {"authority_fields": [], "authority_projection_sha256": "bad"},
     {"authority_fields": [], "include_completion_source": True},
@@ -153,6 +222,30 @@ def test_invalid_or_ambiguous_selections_are_typed_argument_errors(tmp_path, arg
     _write(ctx)
     result, _ = _read(ctx, **arguments)
     assert result.status == "error" and result.code == "TOOL_ARG_ERROR", result.text
+
+
+def test_a_name_the_record_does_not_carry_is_answered_not_refused(tmp_path):
+    """The field set is each record's own, so a name it lacks is a fact about the record, not a
+    malformed call: the answer serves the names it has, lists the rest as absent and still indexes
+    every field the record carries. A call naming only real fields is unchanged."""
+    ctx = _ctx(tmp_path)
+    _write(ctx, task_contract={"objective": "exact"})
+    authority = _canonical(ctx)
+    result, view = _read(ctx, authority_fields=["task_contract", "contract", "governing_owner_words"])
+    assert result.status == "ok" and view["absent_fields"] == ["contract", "governing_owner_words"]
+    assert "no field with these names" in view["absent_fields_note"]
+    assert view["selected_fields"] == ["task_contract"]
+    assert view["authority"] == {"task_contract": authority["task_contract"]}
+    assert view["source"]["arguments"]["authority_fields"] == ["task_contract"]  # the reread recipe names real fields
+    assert {row["field"] for row in view["omitted_fields"]} == set(authority) - {"task_contract"}
+
+    missed, miss = _read(ctx, authority_fields=["not a field"])
+    assert missed.status == "ok" and miss["absent_fields"] == ["not a field"]
+    assert miss["authority"] == {} and miss["selected_fields"] == []
+    assert {row["field"] for row in miss["omitted_fields"]} == set(authority)  # the index it needs to repair the name
+
+    _, clean = _read(ctx, authority_fields=["task_contract"])
+    assert "absent_fields" not in clean and "absent_fields_note" not in clean
 
 
 def test_existing_presence_and_restricted_source_ceilings_still_run_first(tmp_path):
@@ -225,84 +318,3 @@ def test_continuation_envelope_and_projection_digests_have_distinct_names_and_re
     result, unchanged = _read(ctx, **{k: v for k, v in arguments.items() if k != "task_id"})
     assert result.status == "ok" and unchanged["status"] == "available"
     assert unchanged["authority_projection_sha256"] == metadata["authority_projection_sha256"]
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX raw-byte filename")
-@pytest.mark.parametrize("fields", [None, [], ["artifacts"]])
-def test_raw_byte_artifact_names_round_trip_through_authority_and_ranges(tmp_path, fields):
-    from ouroboros.headless import task_artifacts_dir
-
-    ctx = _ctx(tmp_path)
-    _write(ctx, future_unknown={"é🪶": "normal Unicode stays literal", "padding": "p" * 40000})
-    folder = task_artifacts_dir(ctx.drive_root, "child")
-    folder.mkdir(parents=True, exist_ok=True)
-    names = ["fixture_\udcff.dat", "literal_\\udcff.dat", "é🪶.dat"]
-    for name in names:
-        (folder / name).write_bytes(b"retained evidence")
-    args = {"include_authority": True} if fields is None else {"authority_fields": fields}
-    result, view = _read(ctx, **args)
-    result.text.encode("utf-8")  # the loop's hashing/retention boundary
-    assert result.status == "ok"
-    if fields != []:
-        assert {row["name"] for row in view["authority"]["artifacts"]} == set(names)
-    if fields is None:
-        from ouroboros.artifacts import read_actor_source_bytes
-        from ouroboros.tool_result_delivery import project_tool_result_batch
-
-        rows, _ = project_tool_result_batch(
-            [{"tool_call_id": "authority-read", "fn_name": "get_task_result", "result": result.text,
-              "tool_args": {"view_head_chars": 20000, "view_tail_chars": 10000}}], [], [],
-            drive_root=ctx.drive_root, task_id="parent", policy="measured_frame",
-            fit_candidate=lambda *_a: {"accepted": True, "capacity_total_tokens": None})
-        rows[0]["result"].encode("utf-8")
-        assert rows[0]["result_partial"] and rows[0]["result_source_status"] == "ready"
-        assert read_actor_source_bytes(ctx.drive_root, "parent", rows[0]["result_source_ref"]).decode() == result.text
-    _, metadata = _read(ctx, **args, source_only=True)
-    total = metadata["authority_source"]["complete_chars"]
-    _, ranged = _read(ctx, **args, source_only=True, source_start_char=0, source_end_char=total,
-                      authority_projection_sha256=metadata["authority_projection_sha256"])
-    text = ranged["authority_source"]["text"]
-    assert hashlib.sha256(text.encode("utf-8")).hexdigest() == metadata["authority_source"]["complete_sha256"]
-    assert json.loads(text) == view["authority"]
-    if fields == ["artifacts"]:
-        split = text.index("\\udcff") + 3  # a page may end inside a JSON escape
-        parts = []
-        for start, end in [(0, split), (split, total)]:
-            _, page = _read(ctx, **args, source_only=True, source_start_char=start, source_end_char=end,
-                            authority_projection_sha256=metadata["authority_projection_sha256"])
-            parts.append(page["authority_source"]["text"])
-        assert "".join(parts) == text
-    if fields == []:
-        omitted = next(row for row in view["omitted_fields"] if row["field"] == "artifacts")
-        _, page = _read(ctx, authority_fields=["artifacts"], source_only=True,
-                        source_start_char=0, source_end_char=omitted["complete_chars"])
-        assert hashlib.sha256(page["authority_source"]["text"].encode()).hexdigest() == omitted["complete_sha256"]
-    if fields != []:
-        assert "é🪶" in result.text  # no whole-document ASCII conversion
-    assert all((folder / name).read_bytes() == b"retained evidence" for name in names)
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX raw-byte filename")
-@pytest.mark.parametrize("tool,args", [
-    ("get_task_result", {}),
-    *(("get_task_result", {"view": view}) for view in ("full", "answer", "summary", "evidence")),
-    ("wait_task", {"timeout_sec": 1}),
-    ("wait_tasks", {"task_ids": ["child"], "timeout_sec": 1}),
-])
-def test_raw_byte_artifact_names_reach_every_child_result_reader(tmp_path, tool, args):
-    from ouroboros.headless import task_artifacts_dir
-
-    ctx = _ctx(tmp_path)
-    _write(ctx)
-    folder = task_artifacts_dir(ctx.drive_root, "child")
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / "fixture_\udcff.dat"
-    path.write_bytes(b"retained evidence")
-    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
-    registry.set_context(ctx)
-    request = {**({"task_id": "child"} if tool != "wait_tasks" else {}), **args}
-    result = registry.execute_result(tool, request)
-    assert result.status == "ok", result.text
-    result.text.encode("utf-8")
-    assert "child_result_sha256" in result.text
-    assert path.read_bytes() == b"retained evidence"

@@ -465,13 +465,21 @@ def owner_contact_refusal(ctx: ToolContext, chat_id: object) -> str:
     return ""
 
 
-def _main_notice_refusal(ctx: ToolContext, chat_id: object) -> str:
+# The refusal for a root already in Main: it names destination='current' itself, so the caller adds no remedy.
+_IN_MAIN = ("this root already runs in Main, its current room, so destination='current' reaches your human there; "
+            "'main' is for a Project or owner-started root, and this one is neither")
+
+
+def _main_notice_refusal(ctx: ToolContext, chat_id: object, *, asked_main: bool = False) -> str:
     """Why this caller may not address Main, or "" when it may.
 
     A retained Presence root uses source-bound private contact. Other callers
     need an owner-visible root room (a Project or an owner-started root).
+    ``asked_main`` marks the caller that chose ``destination="main"`` itself: only
+    that refusal names Main as the room the caller already runs in; the relay
+    return path shares the rule but not the sentence.
     """
-    from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID
+    from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID
     from ouroboros.dialogue_provenance import run_origin
 
     from ouroboros.presence_owner_contact import contact_origin
@@ -501,6 +509,11 @@ def _main_notice_refusal(ctx: ToolContext, chat_id: object) -> str:
     bound_chat = project_chat_for_task_tree(data_root, str(getattr(ctx, "task_id", "") or ""))
     if (visible_chat not in projects and bound_chat not in projects
             and not run_origin({"metadata": getattr(ctx, "task_metadata", None)})["owner_ingress"]):
+        if asked_main and visible_chat == WEB_UI_CHAT_ID:
+            # A wake or scheduled root already runs in Main: the host set its current room to the
+            # owner's main chat, so destination='current' reaches the owner there. Saying so grants no
+            # owner voice (the refusal stands); it only names the room the caller is in.
+            return _IN_MAIN
         return "this root is neither bound to a registered Project nor started by the owner"
     return ""
 
@@ -534,11 +547,11 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
             f"destination={destination!r} is not a destination; use 'current' (this room) or 'main' (the owner's main chat)",
         ], effect="Nothing was sent."), tool_name="send_user_message")
     if target == "main":
-        refusal = _main_notice_refusal(ctx, chat_id)
+        refusal = _main_notice_refusal(ctx, chat_id, asked_main=True)
         if refusal:
+            remedy = "" if refusal == _IN_MAIN else "; destination='current' still writes this work's own room"
             return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
-                f"⚠️ MAIN_NOTICE_BLOCKED: destination='main' refused: {refusal}. Nothing was sent; "
-                "destination='current' still writes this work's own room.")))
+                f"⚠️ MAIN_NOTICE_BLOCKED: destination='main' refused: {refusal}. Nothing was sent{remedy}.")))
         from ouroboros.presence_owner_contact import ContactRequestConflict, ContactRequestInvalid, contact_origin, send_main_message
         try:
             origin = contact_origin(ctx)
@@ -629,16 +642,11 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
     return publish_delivery_receipt(ctx, event, mode, "message")
 
 
-def _update_identity(ctx: ToolContext, content: str, expected_revision: str | None = None) -> str:
-    """Update identity manifest (who you are, who you want to become)."""
-    if not content or not isinstance(content, str) or len(content.strip()) < 50:
-        return (
-            _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("⚠️ REJECTED: content is empty or too short "
-            f"(got {type(content).__name__}, len={len(content) if isinstance(content, str) else 'N/A'}). "
-            "Identity must be a substantial text (50+ chars). "
-            "This likely means the tool call was malformed — check your arguments.")))
-        )
-    from ouroboros.memory import Memory
+def _update_identity(ctx: ToolContext, content: str | None = None, expected_revision: str | None = None,
+                     mode: str = "overwrite", old_str: str | None = None, new_str: str | None = None,
+                     edits: list | None = None, version: str | None = None, reason: str | None = "") -> str:
+    """Revise the identity manifest (who I am, who I want to become): overwrite, edit or revert (``memory_texts``)."""
+    from ouroboros.memory_texts import Deferred, identity_source, write_text
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.tool_access_reads import canonical_runtime_reader
 
@@ -646,82 +654,47 @@ def _update_identity(ctx: ToolContext, content: str, expected_revision: str | No
     # am speaking in, so a project room or an external conversation revises the
     # same continuous file. The root follows the same precedence as
     # _chat_history, so a forked execution drive still writes the identity the
-    # canonical root reads back.
-    mem = Memory(drive_root=canonical_data_root(ctx))
+    # canonical root reads back; it is resolved after the arguments parse.
+    def located():
+        root = canonical_data_root(ctx)
+        return identity_source(root, "Canonical identity reader:\n" + canonical_runtime_reader(
+            ctx, root, "memory/identity.md"))
 
-    from ouroboros.knowledge import focus_signature
-    from ouroboros.memory_publication import publish_memory_file, publication_refusal
-
-    publication = publish_memory_file(
-        mem.identity_path(), expected_revision, lambda _old: content,
-        journal=mem.identity_journal_path(), author=focus_signature(ctx),
-        source_type=str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role") or "task"))
-    reader = "\nCanonical identity reader:\n" + canonical_runtime_reader(ctx, canonical_data_root(ctx), "memory/identity.md")
-    if not publication.ok:
-        return _publish_tool_result(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
-            text=publication_refusal(publication, "canonical memory/identity.md") + reader))
-    old_content = publication.old_content
-    result = f"OK: identity updated ({len(content)} chars); revision={publication.revision}"
-    old_len = len(old_content)
-    if old_len >= 400 and len(content) < old_len * 0.5:
-        result += (
-            f"\n⚠️ SELF_OVERWRITE_NOTICE: this replaced a {old_len}-char identity with "
-            f"{len(content)} chars (>50% shrink). Identity is intentionally mutable (Bible P4), "
-            "but full rewrites should be rare and reflect genuine self-creation — not a trivial turn. "
-            "Read before writing (P12) and prefer evolving over replacing wholesale."
-        )
-    return result + reader
+    return write_text(ctx, Deferred("identity", "identity", True, located), content=content, mode=mode,
+                      expected_revision=expected_revision,
+                      old_str=old_str, new_str=new_str, edits=edits, version=version, reason=reason,
+                      source_type=str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role") or "task"))
 
 
-def _update_world(ctx: ToolContext, content: str, expected_revision: str | None = None) -> str:
-    """Publish my map of my world; the host's measured block is kept or restored."""
-    if not isinstance(content, str) or not content.strip():
-        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
-            "⚠️ REJECTED: content is empty. Read memory/WORLD.md, revise the map and send the whole file.")))
+def _world_notices(mode: str, content: str, publication) -> list[str]:
+    """Facts an update_world receipt adds: the host's block (``world_profiler.publication_notices``), the map's size."""
     from ouroboros.context_budget import WORLD_SECTION_BUDGET_CHARS
-    from ouroboros.memory import Memory
+    from ouroboros.world_profiler import publication_notices
+
+    lines = publication_notices(mode, content, publication.old_content, publication.content)
+    size = len(publication.content)
+    if size > WORLD_SECTION_BUDGET_CHARS:
+        lines.append(f"⚠️ WORLD_SIZE_NOTICE: the map is {size} chars, above the {WORLD_SECTION_BUDGET_CHARS}-char "
+                     "context budget. It still loads whole; move detail to knowledge_write and keep the map compact.")
+    return lines
+
+
+def _update_world(ctx: ToolContext, content: str | None = None, expected_revision: str | None = None,
+                  mode: str = "overwrite", old_str: str | None = None, new_str: str | None = None,
+                  edits: list | None = None, version: str | None = None, reason: str | None = "") -> str:
+    """Publish my map of my world; the host's measured block is kept or restored (``memory_texts``)."""
+    from ouroboros.memory_texts import Deferred, world_source, write_text
     from ouroboros.tool_access import canonical_data_root
-    from ouroboros.world_profiler import measured_block_was_edited, with_measured_block
 
     # One map, every room and every drive (P1): like identity, the canonical root
     # is the one the context reads back, so a forked child drive or Light mode
-    # keeps what it learned instead of writing a copy that dies with the task.
-    canonical = canonical_data_root(ctx)
-    mem = Memory(drive_root=canonical)
-
-    from ouroboros.knowledge import focus_signature
-    from ouroboros.memory_publication import publish_memory_file, publication_refusal
-
-    publication = publish_memory_file(
-        mem.world_path(), expected_revision,
-        lambda old: with_measured_block(content, old, str(getattr(ctx, "repo_dir", "") or ""), str(canonical)),
-        journal=mem.world_journal_path(), author=focus_signature(ctx),
-        source_type=str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role") or "task"))
-    if not publication.ok:
-        return _publish_tool_result(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
-            text=publication_refusal(publication, "memory/WORLD.md")
-            + f" The map lives at {mem.world_path()}; a forked drive holds only a copy of it."))
-    # A forked drive's copy (what a child's read_file opens) mirrors what it just published,
-    # so its next read carries the revision the canonical file now has.
-    fork_copy = Memory(drive_root=Path(getattr(ctx, "drive_root"))).world_path()
-    if fork_copy.resolve(strict=False) != mem.world_path().resolve(strict=False) and fork_copy.exists():
-        try:
-            from ouroboros.utils import write_bytes_atomic
-
-            write_bytes_atomic(fork_copy, publication.content.encode("utf-8"))
-        except OSError:
-            # The map already landed canonically; a stale copy only costs the next read a refusal.
-            log.debug("world map fork copy not mirrored", exc_info=True)
-    size = len(publication.content)
-    result = f"OK: world map updated ({size} chars); revision={publication.revision}"
-    if measured_block_was_edited(content, publication.old_content):
-        result += "\nThe measured block is the host's: your edits inside it were not applied; it refreshes at startup."
-    if size > WORLD_SECTION_BUDGET_CHARS:
-        result += (
-            f"\n⚠️ WORLD_SIZE_NOTICE: the map is {size} chars, above the {WORLD_SECTION_BUDGET_CHARS}-char "
-            "context budget. It still loads whole; move detail to knowledge_write and keep the map compact."
-        )
-    return result
+    # keeps what it learned instead of writing a copy that dies with the task; the
+    # forked drive's copy (what a child's read_file opens) follows each publication.
+    source = Deferred("world", "world map", True, lambda: world_source(
+        canonical_data_root(ctx), str(getattr(ctx, "repo_dir", "") or ""), getattr(ctx, "drive_root", None)))
+    return write_text(ctx, source, content=content, mode=mode, expected_revision=expected_revision, old_str=old_str,
+                      new_str=new_str, edits=edits, version=version, reason=reason, notices=_world_notices,
+                      source_type=str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role") or "task"))
 
 
 def _toggle_evolution(ctx: ToolContext, enabled: bool, objective: str = "") -> str:
@@ -794,6 +767,7 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
         LAST_SKIP_STATE_KEY,
         LAST_WAKE_STATE_KEY,
         NEXT_WAKE_STATE_KEY,
+        STOP_SOURCE_KEY,
         _iso,
         panic_blocks_wake,
     )
@@ -819,9 +793,9 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
             stored = loaded if isinstance(loaded, dict) else None
             gap = "" if stored is not None else "corrupt: the file is not a JSON object"
     facts = {"source": str(path), "observed_at": utc_now_iso()}
-    fields = (("enabled", "bg_consciousness_enabled"), ("stored_next_wake_at", NEXT_WAKE_STATE_KEY),
-              ("last_wake_ended_at", LAST_WAKE_STATE_KEY), ("chosen_interval_sec", INTERVAL_STATE_KEY),
-              ("last_skip", LAST_SKIP_STATE_KEY))
+    fields = (("enabled", "bg_consciousness_enabled"), ("stopped_by", STOP_SOURCE_KEY),  # owner, panic or agent_tool
+              ("stored_next_wake_at", NEXT_WAKE_STATE_KEY), ("last_wake_ended_at", LAST_WAKE_STATE_KEY),
+              ("chosen_interval_sec", INTERVAL_STATE_KEY), ("last_skip", LAST_SKIP_STATE_KEY))
     if stored is None:
         facts.update(read_gap=gap, not_read=[name for name, _key in fields])
     else:
@@ -836,10 +810,11 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
                     facts[name] = _iso(value)
                 except (OverflowError, OSError, ValueError):
                     pass
-        unproven = authority_reason(path.parent.parent, str(stored.get("initialization_id") or "")) or (
-            "" if control_value(stored, "bg_consciousness_enabled")[0] else "unconfirmed after a state recovery")
-        if "enabled" in facts and unproven:
-            facts["enabled"] = {"status": "unknown", "reason": unproven}
+        authority = authority_reason(path.parent.parent, str(stored.get("initialization_id") or ""))
+        for name, key in fields[:2]:  # the two controls: shown only as a copy that proves them
+            unproven = authority or ("" if control_value(stored, key)[0] else "unconfirmed after a state recovery")
+            if name in facts and unproven:
+                facts[name] = {"status": "unknown", "reason": unproven}
     if panic_blocks_wake(path.parent.parent):
         facts["panic_flag_kept"] = "state/panic_stop.flag is unreceived or unreadable: no wake starts until it is received"
     facts["configured_bounds_sec"] = {"min": get_bg_wakeup_min_sec(), "max": get_bg_wakeup_max_sec(),
@@ -892,14 +867,16 @@ def _set_next_wakeup(ctx: ToolContext, seconds: int) -> str:
             "next wake-up (a wake-up already pending keeps its time; a wake-up calling this sets its own next one).")
 
 
-def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: str = "") -> str:
+def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: str = "",
+                  owner_words: str = "", scope: str = "work", project_id: str = "", model_as_typed: bool = False) -> str:
     """LLM-driven model/effort switch (Constitution P5: LLM-first).
 
     Stored in ToolContext, applied on the next LLM call in the loop. ``primary``
     returns to this turn's primary binding (the acting model's choice): its model, role,
     locality and account policy with the owner's live wait-card choice for that
     role; "wait" also keeps a refusal there on the primary's own wait instead of
-    paid alternatives. Effort intent is untouched.
+    paid alternatives; after its content filter's stop nothing is there to wait for, so this run ends as
+    interrupted, without them. Effort intent is untouched.
 
     Effort follows the owner's range (``_effort_switch``): a Main focus — a chat turn,
     an ordinary root — keeps the level it works at outside Cyber Pro and the reply says
@@ -916,6 +893,15 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
     requested_effort = str(effort or "").strip().lower()
     if requested_effort and requested_effort not in EFFORT_SCALE:
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"⚠️ Unknown effort: {effort}. Valid: {', '.join(EFFORT_SCALE)}")))
+    from ouroboros.tools.control_models import cited_switch, refuse
+
+    if scope not in {"work", "room", "main"} or (project_id and scope != "room"):
+        return refuse(ctx, "scope must be work, room or main; project_id belongs to room only.")
+    if (owner_words or scope != "work") and primary:
+        return refuse(ctx, "primary return/wait acts on this work; omit owner_words, scope and project_id.")
+    if owner_words or scope != "work":
+        return cited_switch(ctx, model=model, owner_words=owner_words, scope=scope, project_id=project_id,
+                            effort=requested_effort, model_as_typed=model_as_typed)
     requested_primary = str(primary or "").strip().lower()
     route = getattr(ctx, "primary_route", None)
     if requested_primary and (requested_primary not in ("return", "wait") or model):
@@ -927,23 +913,25 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
 
     from ouroboros import route_choice
     if requested_primary:
-        waiter = getattr(ctx, "model_wait_context", None)
-        chosen = ((getattr(waiter, "overrides", None) or {}).get(route["role"]) or {})
-        ctx.active_model_override = str(chosen.get("model") or route["model"])
-        ctx.active_use_local_override = bool(chosen.get("use_local", route["use_local"]))
-        ctx.active_role_override = route["role"]
-        ctx.route_wait_on_primary = requested_primary == "wait"
-        # The primary's own choice again: a following primary is re-read at the round boundary (the CURRENT one).
-        ctx.route_choice = route_choice.explicit("wait_card") if chosen else route_choice.opening_choice(ctx)
-        changes.append(f"primary route {ctx.active_model_override}{' (local)' if ctx.active_use_local_override else ''}"
-                       f" (role {route['role']}; if it refuses: "
-                       f"{'wait for it' if requested_primary == 'wait' else 'configured routes again'})")
+        from ouroboros.owner_model import primary_action
+
+        changes.append(primary_action(ctx, requested_primary))
     elif model:
-        if model not in available:
-            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"⚠️ Unknown model: {model}. Available: {', '.join(available)}")))
+        from ouroboros.model_slots import local_lane_label
+
+        # Main's or Light's local route as `resolve_model` prints it (`X (local)`) names that role's own lane: an
+        # empty Light on the local runtime shares Main's id, so only the label tells the two apart. A bare id is
+        # read as before.
+        printed = {local_lane_label(*route): route for route in map(route_choice.following_route, ("light", "main"))
+                   if route[1]}
+        if model not in available and model not in printed:
+            offered = [*available, *(label for label in printed if label not in available)]  # every name it takes
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"⚠️ Unknown model: {model}. Available: {', '.join(offered)}")))
 
         use_local = False
-        if model == runtime_setting("OUROBOROS_MODEL") and runtime_setting("USE_LOCAL_MAIN", "").lower() in ("true", "1"):
+        if model in printed:
+            model, use_local = printed[model]
+        elif model == runtime_setting("OUROBOROS_MODEL") and runtime_setting("USE_LOCAL_MAIN", "").lower() in ("true", "1"):
             use_local = True
         elif model == runtime_setting("OUROBOROS_MODEL_LIGHT") and runtime_setting("USE_LOCAL_LIGHT", "").lower() in ("true", "1"):
             use_local = True
@@ -955,6 +943,7 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
         ctx.active_model_override = model
         ctx.active_use_local_override = use_local
         ctx.route_wait_on_primary, ctx.active_role_override = False, None  # an explicit route ends a declared wait
+        ctx._lead_return_from = None  # it also cancels the requested return's held fallback fact
         ctx.route_choice = route_choice.explicit("switch_model")  # the mind's own route: Settings no longer move it
         changes.append(f"model={model}{' (local)' if use_local else ''}")
 
@@ -1031,7 +1020,7 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  silent: bool = False, swarm_comparison: str | None = None, summary: str = "",
                  fold_read: bool = False) -> str:
     """Stage an author act; a self-started run (an own-clock or focused wake, a schedule-born root
-    without a Presence binding) may choose silence and may leave one sentence for its human.
+    without a Presence binding) may choose silence and may leave a gist for its human.
     A task that answers its own retained place conversation (its reply carrier: a promoted or
     scheduled place root) may choose silence too; inherited binding authority alone names no speaker."""
     request, error = completion_request(ctx, {
@@ -1077,9 +1066,9 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
     fold_read = arguments.get("fold_read")
     if fold_read is not None and not isinstance(fold_read, bool):
         return None, "fold_read must be true or false"
-    summary = " ".join((summary or "").split())
+    summary = (summary or "").strip()
     if fold_read and not summary:
-        return None, "fold_read folds what this run read into its summary: give the sentence"
+        return None, "fold_read folds what this run read into its summary: give the gist"
     if silent and action != "finish":
         return None, "silent requires action=finish"
     # A sentence for a human this run does not speak to is decorative: dropped and named, never a veto on the answer;
@@ -1149,6 +1138,9 @@ def checked_completion_request(ctx: ToolContext | None, request: dict, *, allow_
         parent_task_id=getattr(ctx, "parent_task_id", None),
     )["is_root_task"]:
         error = "pending_review is available only on root tasks"
+    elif request.get("pending_review") == "finish" and not str(request.get("rationale") or "").strip():
+        # Finishing before the reviewers answer is a root's conscious, recorded exception (owner, 8 Nov 2026).
+        error = "pending_review=finish requires a rationale: why you finish before the reviewers answer"
     if error:
         return None, error
     checked = {key: copy.deepcopy(value) for key, value in request.items() if value is not None}
@@ -1168,8 +1160,12 @@ def _stage_checked_completion(ctx: ToolContext, checked: dict, *, source: str, r
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
             text="ERROR: COMPLETION_CONFLICT: contradictory completion requests in one response; select again after seeing all results."))
     ctx._completion_request = staged
+    # A stop waits for nothing: an accepted pending_review is named as its own key, never in ``ignored``,
+    # whose emptiness keeps a root's summary and fold (``completion_request``).
+    inert = ({"pending_review": f"{staged['pending_review']}: no effect on a stop, which waits for nothing"}
+             if staged["action"] == "stop" and staged.get("pending_review") else {})
     return json.dumps({"status": "completion_requested", "completion_control": True, "action": staged["action"],
-                       **({"ignored": staged["ignored"]} if staged.get("ignored") else {})}, ensure_ascii=False)
+                       **({"ignored": staged["ignored"]} if staged.get("ignored") else {}), **inert}, ensure_ascii=False)
 
 
 _FINISH_TASK_ARGUMENTS = frozenset(inspect.signature(_finish_task).parameters) - {"ctx"}

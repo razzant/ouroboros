@@ -18,8 +18,15 @@ from ouroboros.tools.tool_result import (
 
 
 def ignored_argument_note(name: str, value: Any, why: str) -> str:
-    """One result line for an argument that took the omitted path."""
-    return f"{name}={value!r} ignored: {why}"
+    """One result line for an argument that took the omitted path.
+
+    A blank text says no more than its length, so it is echoed by its length where that is shorter
+    (``<9000 whitespace characters>``); a short one keeps its exact spelling (``' '``).
+    """
+    shown = repr(value)
+    if isinstance(value, str) and not value.strip():
+        shown = min(shown, f"<{len(value)} whitespace characters>", key=len)
+    return f"{name}={shown} ignored: {why}"
 
 
 def with_argument_notes(ctx: Any, result: str, notes: list[str]) -> str:

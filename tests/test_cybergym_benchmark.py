@@ -81,7 +81,7 @@ def test_profile_records_safe_runtime_and_budget_defaults():
     assert settings["OUROBOROS_SAFETY_MODE"] == "off"
     assert settings["OUROBOROS_CONTEXT_MODE"] == "max"
     assert settings["OUROBOROS_TASK_REVIEW_MODE"] == "off"
-    assert settings["OUROBOROS_REVIEW_ENFORCEMENT"] == "advisory"
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in settings
     assert settings["OUROBOROS_REVIEW_MAX_CYCLES"] == "2"
     for key in ("OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_MAX"):
         assert settings[key] == "high", key

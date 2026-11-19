@@ -18,7 +18,8 @@ import pytest
 
 from devtools.benchmarks.common.server_runner import _api
 from ouroboros.owner_mailbox import write_owner_message
-from tests.candidate_checkout import candidate_checkout
+from ouroboros.queue_observation import load_queue_document
+from tests._browser_candidate import wait_clone as wait_clone
 from tests.system_e2e.harness import (
     ArtifactOracle,
     ModelGate,
@@ -96,28 +97,6 @@ def local_form():
         server.server_close()
         thread.join(timeout=5)
         assert not thread.is_alive()
-
-
-@pytest.fixture
-def wait_clone(tmp_path):
-    pytest.importorskip("playwright.sync_api")
-    from playwright.sync_api import Error, sync_playwright
-    from ouroboros.tools.browser import _set_playwright_browsers_path_if_bundled
-
-    _set_playwright_browsers_path_if_bundled()
-    try:
-        # launch() never downloads an engine, and completing a real launch also
-        # settles the Playwright driver before this preflight context closes.
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch()
-            browser.close()
-    except Error as exc:
-        if os.environ.get("OUROBOROS_EXPECT_BROWSER_ENGINES"):
-            pytest.fail(str(exc))
-        pytest.skip(str(exc))
-    source = Path(__file__).resolve().parents[1]
-    with candidate_checkout(source, tmp_path / "clone", origin_proof=True) as candidate:
-        yield candidate
 
 
 def _running(oracle, task_id):
@@ -208,9 +187,9 @@ def test_owner_wait_preserves_form_and_lends_one_worker(wait_clone, local_form, 
 
             task_b = server.submit(f"[{_OTHER_TASK}] Open the independent local browser page.")
             assert gate.arrived.wait(120), f"B never executed in the lent slot: {oracle.queue_snapshot()}"
-            both = oracle.queue_snapshot()
+            both = load_queue_document(server.data_root)  # the pool's counts, certified on queue.alive
             assert {task_a, task_b} <= oracle.running_ids()
-            assert both["active_worker_count"] == 1 and both["parked_worker_count"] == 1
+            assert both["acting_worker_count"] == 1 and both["parked_worker_count"] == 1
             assert _running(oracle, task_b)["worker_id"] != parked["worker_id"]
             assert len(_rounds(stub, _FORM_TASK)) == 6, "parked A bought an empty round while B ran"
 

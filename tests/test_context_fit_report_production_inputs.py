@@ -138,8 +138,9 @@ def test_tools_row_is_the_serialized_projection_on_the_physical_estimator(tmp_pa
     sent = list(select_tool_schemas(scale.tools(), context_mode=result['mode']).schemas)
     row = next(row for row in result['blocks'] if row['block'] == 'tools')
     compact = estimate_tokens(_json.dumps(sent, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
-    # The request serializes compactly; the plan-side estimator counts separator spaces the wire does not carry.
-    assert abs(row['tokens'] - compact) <= 2 and row['tokens'] < cf.tool_schema_tokens(sent)
+    # The plan prices the schemas as the request serializes them: compactly, with no separator spaces; the row (two
+    # rounded counts apart) and the plan differ only by the "[]" the empty member held and that rounding.
+    assert cf.tool_schema_tokens(sent) == compact and abs(row['tokens'] - compact) <= 2
     assert result['estimator'].startswith('estimate_context_prompt_tokens') and row['count'] == len(sent)
     assert sum(block['tokens'] for block in result['blocks']) == result['input_tokens']
 

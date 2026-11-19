@@ -55,7 +55,6 @@ from ouroboros.gateway.owner_settings import (
     SettingsLockUnavailable,
     SettingsPreconditionFailed,
     _owner_audit,
-    _owner_read_settings_raw,
     _owner_write_settings,
     post_commit_failure_response,
     settings_document_digest,
@@ -568,20 +567,15 @@ def _write_precondition(expect_preset: bool, expect_safety_light: bool, read_fin
 # ---------------------------------------------------------------------------
 
 
-def _prepared_settings(
-    body: Dict[str, Any],
-    *,
-    base_settings: Optional[Mapping[str, Any]] = None,
-) -> Tuple[Dict[str, Any], Dict[str, Any], str]:
+def _prepared_settings(body: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], str]:
     """(old_settings, prepared_settings, error) through the SHARED validator."""
     from ouroboros.config import load_settings
     from ouroboros.onboarding_wizard import prepare_onboarding_settings
 
-    # Completion keeps the ordinary runtime loader (its one-shot compatibility
-    # migrations persisted just before, ``migrate=True``).  The read-only preview
-    # passes the existing pure owner-reader, which never applies them, so merely
-    # rendering an unsaved draft can never persist unrelated compatibility state.
-    old_settings = dict(base_settings) if base_settings is not None else load_settings()
+    # Preview and completion judge a draft against the settings the runtime resolves (#2969): an operator's
+    # environment key the wizard shows (a masked row, a built-in placeholder) is the key either sends. This lock-free
+    # read writes nothing; only completion persists the compatibility upgrades first (``migrate=True``).
+    old_settings = load_settings()
     error = roster_save_error(body.get(SUBAGENTS_SETTING), old_settings, body)  # twins: only a roster change is judged
     prepared, error = ({}, error) if error else prepare_onboarding_settings(body, old_settings)
     if error:
@@ -599,10 +593,28 @@ def _prepared_settings(
     return old_settings, normalized, ""
 
 
-def _configured_owner_draft(body: Mapping[str, Any]) -> Tuple[Optional[ConfiguredSubagents], str]:
-    """Validate an owner-edited canonical object without reading live status."""
+def install_catalog_kept() -> bool:
+    """Whether this install's catalog is its own (saved, Off and empty included, or an operator's variable), not the
+    read's automatic one: the wizard shows and saves it as it is, never gaining the preset's reviewers (#2969)."""
+    from ouroboros.gateway.owner_settings import _owner_settings_document
+    from ouroboros.server_runtime import automatic_catalog
+
+    return not automatic_catalog(_owner_settings_document())
+
+
+def _configured_owner_draft(body: Mapping[str, Any], *, saved: bool = False) -> Tuple[Optional[ConfiguredSubagents], str]:
+    """Validate an owner-edited canonical object without reading live status. ``saved`` (the preview): without one, a
+    catalog this install has (saved, Off and empty included, or an operator's: not ``automatic_catalog``) is the
+    draft as the Settings read shows it, so the wizard shows and posts it; only an automatic one is generated (#2969)."""
     if SUBAGENTS_SETTING not in body:
-        return None, ""
+        from ouroboros.config import load_settings
+        from ouroboros.server_runtime import settings_read_catalog
+
+        if not saved or not install_catalog_kept():
+            return None, ""
+        body = {SUBAGENTS_SETTING: settings_read_catalog(load_settings())}
+        if body[SUBAGENTS_SETTING] is None:
+            return None, ""
     try:
         return normalize_configured_subagents(body.get(SUBAGENTS_SETTING))[0], ""
     except ValueError as exc:
@@ -625,12 +637,15 @@ def with_factory_review_rows(catalog: Mapping[str, Any], doc: Mapping[str, Any])
 
 
 def shown_catalog(preset: SubscriptionInstallPreset, doc: Mapping[str, Any],
-                  owner_draft: Optional[ConfiguredSubagents], *, allow_empty: bool) -> Dict[str, Any]:
-    """The catalog the wizard shows and the completion saves. A posted draft holding reviewers, or
-    whose empty pool the owner confirmed, stays as posted: re-marking the reviewers the preview
-    showed would mint a twin of each. An unmarked draft keeps the reviewers the preset appends."""
+                  owner_draft: Optional[ConfiguredSubagents], *, allow_empty: bool,
+                  kept: bool = False) -> Dict[str, Any]:
+    """The catalog the wizard shows and the completion saves. A posted draft holding reviewers, whose empty pool
+    the owner confirmed, or of a catalog the install ``kept`` (``install_catalog_kept``) stays as posted: re-marking
+    the reviewers the preview showed would mint a twin of each. An unmarked draft of an automatic catalog keeps
+    the reviewers the preset appends."""
     draft = configured_subagents_dict(owner_draft) if owner_draft is not None else None
-    if draft is not None and (allow_empty or any(row.get("review_eligible") is True for row in draft["items"])):
+    if draft is not None and (allow_empty or kept
+                              or any(row.get("review_eligible") is True for row in draft["items"])):
         return draft
     catalog = json.loads(preset.available_subagents)
     return catalog if draft is not None else with_factory_review_rows(catalog, doc)
@@ -677,6 +692,29 @@ def review_rows_on_main(catalog: Mapping[str, Any], settings: Mapping[str, Any])
                                  for item in catalog.get("items") or []]}
 
 
+async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
+    """The model catalog of an unsaved setup draft: the access it names (keys, connection rows, local model) over
+    the saved settings, asked as ``GET /api/model-catalog`` asks the saved one. Only the access fields are read,
+    never the whole-draft validator: Main is picked from this list, so it answers while Main is blank."""
+    from ouroboros.config import load_settings
+    from ouroboros.gateway.models import draft_catalog
+    from ouroboros.provider_models import CONNECTIONS_KEY
+    from ouroboros.settings_setup_contract import draft_access
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        return unsaved_error("JSON body must be an object.", 400)
+    saved = load_settings()
+    connections, keys, typed, error = draft_access(body, saved)
+    if error:
+        return unsaved_error(error, 400, code="invalid_onboarding_settings")
+    local = {key: body[key] for key in ("LOCAL_MODEL_SOURCE", "LOCAL_MODEL_FILENAME", "LOCAL_MODEL_CONTEXT_LENGTH") if key in body}
+    return JSONResponse(await draft_catalog(saved, {**saved, **keys, CONNECTIONS_KEY: connections, **local}, typed))
+
+
 async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
     """Read-only canonical preview for the wizard; never persists or projects env."""
     try:
@@ -686,16 +724,13 @@ async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return unsaved_error("JSON body must be an object.", 400)
 
-    owner_draft, draft_error = _configured_owner_draft(body)
+    owner_draft, draft_error = _configured_owner_draft(body, saved=True)
     if draft_error:
         return unsaved_error(
             draft_error, 400, code="invalid_available_subagents",
             diagnostics=[{"code": "invalid_available_subagents", "message": draft_error}],
         )
-    _old_settings, current, error = _prepared_settings(
-        body,
-        base_settings=_owner_read_settings_raw(),
-    )
+    _old_settings, current, error = _prepared_settings(body)
     if error:
         return unsaved_error(
             error, 400, code="invalid_onboarding_settings",
@@ -716,16 +751,24 @@ async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
     assert preset is not None
     from ouroboros.gateway.settings import ALLOW_EMPTY_REVIEW_POOL
     try:
-        catalog = shown_catalog(preset, current, owner_draft, allow_empty=body.get(ALLOW_EMPTY_REVIEW_POOL) is True)
-        if subscriptions_connected and skip_presets:
+        kept = install_catalog_kept()
+        catalog = shown_catalog(preset, current, owner_draft, kept=kept,
+                                allow_empty=body.get(ALLOW_EMPTY_REVIEW_POOL) is True)
+        if subscriptions_connected and skip_presets and not kept:
             catalog = review_rows_on_main(catalog, current)
         available = normalize_configured_subagents(catalog)[0]
     except ValueError as exc:
         return unsaved_error(str(exc), 400, code="invalid_onboarding_settings")
+    from ouroboros.pricing import spend_coverage
+
+    shown = configured_subagents_dict(available)
+    gaps, partial = spend_coverage(current, shown)
     return JSONResponse({
         "ok": True,
         "model_settings": dict(preset.model_settings),
-        "available_subagents": configured_subagents_dict(available),
+        "available_subagents": shown,
+        # What the limits of this draft cannot count, as Dashboard › Costs names it after the save.
+        "known_spend_gaps": gaps, "partly_counted_spend": partial,
         "source": preset.source,
         "diagnostics": list(preset.diagnostics),
     })
@@ -818,7 +861,10 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
 
     subscriptions_connected, skip_presets = parse_subscription_intent(body)
     eligible = preset_eligible(old_settings)
-    safety_light = _fresh_settings_file()
+    from ouroboros.deployment_policy import choice_refusal
+
+    # The new-install Light default is a proposal: under a deployment's coverage floor it is never authored.
+    safety_light = _fresh_settings_file() and not choice_refusal("OUROBOROS_SAFETY_MODE", "light")
     if safety_light:
         current["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] = "full"
         # Rev.3-2 desktop-wizard parity: a genuinely FRESH install authors the new-install ``light``
@@ -857,7 +903,8 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
         return unsaved_error("The connected accounts do not provide a Main model. Connect Codex, an API provider, or a local model.",
                              400, code="model_source_unavailable")
     if install_preset_applied:  # the catalog the preview showed (``shown_catalog``)
-        preset = preset_saving(preset, shown_catalog(preset, current, owner_draft, allow_empty=allow_empty_pool))
+        preset = preset_saving(preset, shown_catalog(preset, current, owner_draft, allow_empty=allow_empty_pool,
+                                                     kept=install_catalog_kept()))
         current.update(preset.settings_keys(include_marker=False))
 
     pool_error = review_pool_save_judgement(current.get(SUBAGENTS_SETTING), old_settings, allow_empty=allow_empty_pool)
@@ -910,7 +957,11 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
                 # defaults genuinely bypasses the thing that failed.
                 return unsaved_error(str(exc), 503, code="settings_locked")
             if isinstance(exc, PermissionError):
-                return unsaved_error(str(exc), 403)
+                from ouroboros.deployment_policy import DeploymentPolicyRefusal
+                from ouroboros.gateway.owner_settings import MANAGED_BY_DEPLOYMENT
+
+                typed = {"code": MANAGED_BY_DEPLOYMENT} if isinstance(exc, DeploymentPolicyRefusal) else {}
+                return unsaved_error(str(exc), 403, **typed)
             log.exception("onboarding completion failed")
             return unsaved_error(f"{type(exc).__name__}: {exc}", 500)
 
@@ -941,7 +992,8 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
 
 
 __all__ = [
-    "PRESET_UNVERIFIED_MESSAGE", "PresetFailure", "api_onboarding_complete", "api_onboarding_subagents_preview",
+    "PRESET_UNVERIFIED_MESSAGE", "PresetFailure", "api_onboarding_complete", "api_onboarding_model_catalog",
+    "api_onboarding_subagents_preview",
     "install_is_unconfigured", "preset_eligible", "resolve_install_preset", "subscription_routable_harnesses",
     "verified_harness_discoveries",
 ]

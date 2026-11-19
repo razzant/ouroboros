@@ -9,7 +9,8 @@ from dataclasses import replace
 import pytest
 
 from ouroboros import context_compaction as cc
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND, ContextReclaimRequest
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+from tests._context_reclaim_fixtures import _request
 
 
 def _unit(call_id: str, fill: str) -> list[dict]:
@@ -31,25 +32,6 @@ def _unit(call_id: str, fill: str) -> list[dict]:
             "content": fill * 3_000 + f"-result-tail-{call_id}",
         },
     ]
-
-
-def _request(
-    messages: list[dict],
-    goal: int,
-    *,
-    allow_partial: bool = True,
-    measurement_basis: str = "cold_estimate",
-    measurement_density: float = 1.0,
-):
-    return ContextReclaimRequest(
-        route_fp="main-route",
-        round_id="round-1",
-        transcript_sha256=cc.context_reclaim_transcript_sha256(messages),
-        measurement_basis=measurement_basis,
-        measurement_density=measurement_density,
-        reclaim_goal_tokens=goal,
-        allow_partial_shrink=allow_partial,
-    )
 
 
 def _authored(messages: list[dict], goal: int = 100, *, note: str = "I kept the conclusion.", **fields):

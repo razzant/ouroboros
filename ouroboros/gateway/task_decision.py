@@ -139,16 +139,16 @@ def _mail_holder(task_id: str) -> Tuple[Optional[Dict[str, Any]], str]:
 
 
 def _quiz_answer_frame(
-    block: Dict[str, Any], option_index: Optional[int], comment: str,
+    block: Dict[str, Any], option_index: Optional[int], comment: str, *, asker: str = "",
 ) -> str:
-    """Host-authored structural frame around the owner's VERBATIM choice.
+    """Host-authored structural frame around the owner's VERBATIM answer.
 
     Thin alias of the ONE shared builder ``owner_quiz.quiz_answer_frame``, so
     the live mailbox control here and the late-answer delivery in the drain
-    render the same words."""
+    render the same words; ``asker`` names whose text a pressed label is."""
     from ouroboros.owner_quiz import quiz_answer_frame
 
-    return quiz_answer_frame(block, option_index, comment)
+    return quiz_answer_frame(block, option_index, comment, asker=asker)
 
 
 def _send_quiz_state(quiz_id: str, task_id: str, state: str, **fields: Any) -> None:
@@ -215,7 +215,8 @@ def _record_quiz_answer_history(
     index = block.get("answered_index")
     stored = log_chat(
         "system", address.get("chat_id"), 0,
-        _quiz_answer_frame(block, index if isinstance(index, int) else None, str(block.get("comment") or "")),
+        _quiz_answer_frame(block, index if isinstance(index, int) else None, str(block.get("comment") or ""),
+                           asker=task_id),  # the room's row: every reader is told whose text the label is
         ts=str(block["answered_at"]), source="owner_quiz_answer", task_id=task_id,
         client_message_id=source_id, record_type="quiz_answer", quiz=dict(block),
         message_meta=address, drive_root=drive_root, require_write=True,

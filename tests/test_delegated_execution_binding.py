@@ -6,8 +6,7 @@ import os
 from types import SimpleNamespace
 
 from ouroboros.delegate_start_instructions import (
-    apply_execution_binding, directory_copy_binding_instruction,
-    execution_binding_instruction,
+    directory_copy_binding_instruction, execution_binding_text,
 )
 from ouroboros.tools.delegate_integration import _capture_block
 
@@ -15,7 +14,7 @@ from ouroboros.tools.delegate_integration import _capture_block
 def test_execution_binding_makes_private_root_the_only_work_product_target():
     from ouroboros.delegate_start_instructions import scratch_fact
 
-    text = execution_binding_instruction("/tmp/private-snapshot", "/tmp/authority")
+    text = execution_binding_text("/tmp/private-snapshot", "/tmp/authority")
     assert "the private execution root for this run is /tmp/private-snapshot:" in text
     assert "goes only under it" in text and "every shell" not in text  # work product, not every process write
     assert "/tmp/authority" in text
@@ -37,18 +36,6 @@ def test_runtime_child_environment_drops_launcher_authority(monkeypatch):
     monkeypatch.setenv("OUROBOROS_MANAGED_REPO_DIR", "/private/launcher-repo")
     assert "OUROBOROS_MANAGED_BY_LAUNCHER" not in runtime_environ()
     assert "OUROBOROS_MANAGED_REPO_DIR" not in runtime_environ()
-
-
-def test_execution_binding_appends_without_rewriting_canonical_work_order():
-    instructions = (
-        "HOST TASK CONTRACT AUTHORITY (normalized JSON; predecessor is a brief):\n"
-        '{"workspace_root":"/authority","task_constraint":{"write_root":"/authority"}}'
-    )
-    bound = apply_execution_binding(instructions, "/private/snapshot", "/authority")
-    assert bound.startswith(instructions)
-    assert '"workspace_root":"/authority"' in bound
-    assert '"write_root":"/authority"' in bound
-    assert "the private execution root for this run is /private/snapshot:" in bound
 
 
 def test_directory_copy_binding_does_not_invent_source_as_execution_root():

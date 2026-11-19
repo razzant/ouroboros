@@ -151,7 +151,7 @@ def test_history_names_entries_as_given_while_status_and_diff_take_worktree_spel
 def test_docker_backend_paths_map_to_the_workspace_for_every_action(world):
     registry, ctx, _, project = world
     (project / "note.txt").write_text("changed\n")
-    assert registry.execute_result("vcs_read", {"action": "status", "path": "/app/note.txt"}).code == "GIT_ERROR"
+    assert registry.execute_result("vcs_read", {"action": "status", "path": "/app/note.txt"}).code == "TOOL_ARG_ERROR"
     ctx.task_metadata = {"executor_ref": {"type": "docker_exec", "container_name": "probe",
                                           "workspace_host_path": str(project), "workspace_backend_path": "/app"}}
     registry.set_context(ctx)
@@ -166,7 +166,7 @@ def test_a_root_refusal_names_vcs_reads_own_roots_and_the_readers_of_a_delegated
     delegated run's private copy; the readers now ride the refusal, never a working read."""
     registry, _ctx, _, project = world
     refused = registry.execute_result("vcs_read", {"action": "status", "repository": str(project.parent / "dlg_copy")})
-    assert refused.code == "GIT_ERROR" and "outside selected root" in refused.text, refused.text
+    assert (refused.status, refused.code) == ("error", "TOOL_ARG_ERROR") and "outside selected root" in refused.text, refused.text
     assert "root='active_workspace' or 'system_repo' only" in refused.text and "patch_read/manifest_read" in refused.text
     (project / "note.txt").write_text("changed\n")
     working = registry.execute_result("vcs_read", {"action": "status"})
@@ -256,3 +256,19 @@ def test_history_timeout_reaps_child_and_closes_pipe_readers(tmp_path, monkeypat
             if process.poll() is None:
                 process.kill()
                 process.wait()
+
+
+def test_a_binding_argument_fault_is_typed_as_one_while_a_binding_failure_stays_a_git_terminal():
+    """11 root/path refusals of 05–08.11 were recorded as successful calls: the call's own argument fault
+    (a ValueError of the binding) is an argument error with the roots hint; the machinery's own failure
+    keeps the Git terminal, so the pinned RuntimeError rows of test_registry_core stay as they are."""
+    from ouroboros.tools import tool_resolution
+
+    fault = tool_resolution._binding_error_text(
+        "vcs_read", "system_repo", ValueError("absolute path '/x' is outside selected root=system_repo"))
+    assert (fault.status, fault.code) == ("error", "TOOL_ARG_ERROR")
+    assert fault.text.startswith("⚠️ TOOL_ARG_ERROR (vcs_read): absolute path '/x' is outside selected root=system_repo")
+    assert "root='active_workspace' or 'system_repo' only" in fault.text
+    failure = tool_resolution._binding_error_text("vcs_read", "system_repo", RuntimeError("binding failed"))
+    assert (failure.status, failure.code) == ("ok", "GIT_ERROR")
+    assert failure.text.startswith("⚠️ GIT_ERROR: RuntimeError: binding failed")

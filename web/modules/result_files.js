@@ -10,6 +10,17 @@ import { formatBytes, number } from './storage_format.js';
 const RESULT_FILE_ROWS = 8;
 const FOLDER_TOOLTIP_PATHS = 20;
 
+// Display the original bytes as \xNN, not the renderer's replacement glyph.
+// Quote literal backslashes so a spelled-out escape can't look like the byte.
+function artifactNameText(name) {
+    return name.replace(/[\\\uD800-\uDFFF]/gu, (char) => {
+        if (char === '\\') return '\\\\';
+        const code = char.charCodeAt(0);
+        return code >= 0xDC80 && code <= 0xDCFF
+            ? `\\x${(code - 0xDC00).toString(16)}` : `\\u${code.toString(16)}`;
+    });
+}
+
 function artifactBytes(value) {
     const bytes = Number(value);
     return value === null || value === undefined || value === '' || !Number.isFinite(bytes) || bytes < 0
@@ -68,12 +79,14 @@ export function projectResultArtifacts(taskId, records, archives = null, wrapUp 
             folders.set(parts[0], folder);
             continue;
         }
-        const name = String(row.name || parts[0] || '').trim();
+        const name = String(row.name || parts[0] || '');
         if (!name) continue;
+        const url = serving ? taskArtifactDownloadUrl(taskId, name) : '';
         files.push({
             name, bytes,
-            note: serving ? (row.measured === false ? 'unverified' : '') : (status || 'unavailable'),
-            url: serving ? taskArtifactDownloadUrl(taskId, name) : '',
+            note: url ? (row.measured === false ? 'unverified' : '')
+                : serving ? 'download unavailable' : (status || 'unavailable'),
+            url,
         });
     }
     const dirs = [...folders.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -115,7 +128,7 @@ const metaTail = (parts) => parts.filter(Boolean).map((part) => ` · ${escapeHtm
 function folderTooltip(folder) {
     const shown = folder.relpaths.slice(0, FOLDER_TOOLTIP_PATHS);
     const more = folder.relpaths.length - shown.length;
-    return shown.join('\n') + (more > 0 ? `\n… ${number(more)} more` : '');
+    return shown.map(artifactNameText).join('\n') + (more > 0 ? `\n… ${number(more)} more` : '');
 }
 
 // Rows use the markdown list markup (`md-li`, `md-link`) this body already styles. Saved work
@@ -128,16 +141,16 @@ function resultArtifactsHtml(view, limit = RESULT_FILE_ROWS) {
         ...view.files.map((file) => ({
             files: 1,
             html: (file.url
-                ? `<a class="md-link" href="${escapeHtmlAttr(file.url)}" download="${escapeHtmlAttr(file.name)}">${escapeHtml(file.name)}</a>`
-                : escapeHtml(file.name))
+                ? `<a class="md-link" href="${escapeHtmlAttr(file.url)}" download="${escapeHtmlAttr(file.name)}">${escapeHtml(artifactNameText(file.name))}</a>`
+                : escapeHtml(artifactNameText(file.name)))
                 + metaTail([artifactBytes(file.bytes), file.note]),
         })),
         ...view.folders.map((folder) => ({
             files: folder.fileCount,
             html: `<span title="${escapeHtmlAttr(folderTooltip(folder))}">`
                 + (folder.archive?.available
-                    ? `<a class="md-link" href="${escapeHtmlAttr(folder.archive.url)}" download="${escapeHtmlAttr(folder.archive.name)}">${escapeHtml(folder.name)}/</a>`
-                    : `${escapeHtml(folder.name)}/`)
+                    ? `<a class="md-link" href="${escapeHtmlAttr(folder.archive.url)}" download="${escapeHtmlAttr(folder.archive.name)}">${escapeHtml(artifactNameText(folder.name))}/</a>`
+                    : `${escapeHtml(artifactNameText(folder.name))}/`)
                 + metaTail(folder.archive?.available
                     ? ['folder', fileCountText(folder.archive.fileCount), artifactBytes(folder.archive.bytes),
                         folder.archive.excluded ? `${number(folder.archive.excluded)} not archived` : '']
@@ -174,8 +187,13 @@ export function syncQuestionMaterials(card, records, render = null) {
     for (const item of records) {
         if (!item?.task_id || !item.name || !item.sha256) continue;
         const url = taskArtifactDownloadUrl(item.task_id, item.name);
-        if (!url) continue;
-        const label = item.label || item.name;
+        if (!url) {
+            const unavailable = document.createElement('span');
+            unavailable.textContent = `${artifactNameText(String(item.name))} · download unavailable`;
+            materials.append(unavailable);
+            continue;
+        }
+        const label = artifactNameText(String(item.label || item.name));
         // Reuse the ordinary file reader and photo preview with only a canonical custody URL.
         const extension = String(label).split('.').at(-1).toLowerCase();
         const image = ({ png: 'png', jpg: 'jpeg', jpeg: 'jpeg', gif: 'gif', webp: 'webp', avif: 'avif' })[extension];
@@ -185,7 +203,7 @@ export function syncQuestionMaterials(card, records, render = null) {
         if (content) { materials.append(content); continue; }
         const link = document.createElement('a');
         link.className = 'md-link';
-        link.textContent = item.label || item.name;
+        link.textContent = label;
         link.href = url;
         link.download = item.label || item.name;
         materials.append(link);

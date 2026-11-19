@@ -51,10 +51,11 @@ def test_a_preparing_direct_turn_says_the_start_step_it_stands_at(turn_phase, te
     assert state["reasons"] == [{"code": f"turn_{turn_phase}", "text": text}]
 
 
-@pytest.mark.parametrize("kind", ["direct_chat", "presence"])
+@pytest.mark.parametrize("kind", ["direct_chat", "presence", "managed_task"])
 def test_a_carried_turn_says_its_start_step_until_its_own_call(kind):
     # A conversation-lane row reads `working` once a carrier holds it (conversation_lane.lane_turn_rows); its
-    # frame-fed start step is still a start step (lost on that path with #2654, 02.11).
+    # frame-fed start step is still a start step (lost on that path with #2654, 02.11). A pooled root a worker runs
+    # says the same (`carrier` from gateway.state, #2862); one no worker is said to hold stays Working below.
     def carried(**extra):
         return row("d", "working", kind=kind, carrier="worker", **extra)
 
@@ -70,6 +71,8 @@ def test_a_carried_turn_says_its_start_step_until_its_own_call(kind):
         assert state["reasons"] == [] and state["call"] in {"working", "sending"}, done
     awaiting = ws.classify_member(row("d", "preparing", kind=kind, carrier="awaiting"))
     assert (awaiting["call"], awaiting["reasons"]) == ("preparing", [])
+    unheld = ws.classify_member(row("d", "working", kind=kind, turn_phase="context_building"))
+    assert (unheld["call"], unheld["reasons"]) == ("working", [])
 
 
 def test_a_start_step_speaks_only_while_preparing_and_a_started_call_reads_the_census_move():
@@ -179,8 +182,8 @@ def test_a_warm_sleep_names_only_the_helpers_it_chose_that_a_stop_holds_and_who_
     assert (work["activity"], work["because"][0]["code"], work["turn"], work["mark"]) == (
         "waiting", "sleeping", [], "still")
     assert [(tail["code"], tail["ids"], tail["state"], tail["text"]) for tail in work["tails"]] == [
-        ("awaited_helpers_mind", ["chosen"], "held", "1 helper it waits for is paused until Ouroboros resumes it"),
-        ("awaited_helpers_owner", ["panic"], "held", "1 helper it waits for is paused until you resume it")]
+        ("awaited_helpers_mind", ["chosen"], "held", "1 subagent it waits for is paused until Ouroboros resumes it"),
+        ("awaited_helpers_owner", ["panic"], "held", "1 subagent it waits for is paused until you resume it")]
     assert "other" not in str(work["tails"]), "a paused helper the sleep did not choose is not why it waits"
     controls = ws.controls_for(root, row("root"))
     assert "resume" not in [entry["action"] for entry in controls], "no Resume door is invented for a helper"
@@ -191,8 +194,8 @@ def test_a_warm_sleep_names_only_the_helpers_it_chose_that_a_stop_holds_and_who_
         "sleep": {"mode": "warm", "tasks": ["chosen", "panic"]}}})
     work = ws.roll_up_work("root", [later, selected, panic], episode={"task_id": "later", "state": later})
     assert [(tail["code"], tail["ids"], tail["text"]) for tail in work["tails"]] == [
-        ("awaited_helpers_owner", ["panic"], "1 helper it waits for is paused until you resume it"),
-        ("awaited_helpers_paused", ["chosen"], "1 helper it waits for is paused")]
+        ("awaited_helpers_owner", ["panic"], "1 subagent it waits for is paused until you resume it"),
+        ("awaited_helpers_paused", ["chosen"], "1 subagent it waits for is paused")]
     # Without the saved selection (or once the episode ended) the line says no such thing.
     awake = ws.roll_up_work("root", [sleeper(), selected], episode={"task_id": "root", "state": sleeper()})
     assert awake["tails"] == []
@@ -256,8 +259,25 @@ def test_under_a_settling_pause_only_running_helpers_are_said_still_working():
 def test_refused_source_keeps_resume_for_rechecking_and_unknown_without_a_stop_stays_held():
     state = ws.classify_member(row("t", "budget_paused", pause_cause="unknown"), {"hold": {"reason": "restore_refused:x"}})
     assert state["reasons"][0]["code"] == "restore_failed" and state["release"] == "mind"
+    # A start whose outcome is unknown says that, never that saved state was lost; Resume stays the same door.
+    unknown = ws.classify_member(row("t", "budget_paused", pause_cause="unknown"), {"hold": {"reason": "dispatch_outcome_unknown"}})
+    assert unknown["reasons"][0]["code"] == "start_unconfirmed" and unknown["release"] == "mind"
+    assert unknown["reasons"][0]["text"] == "Its last start is unconfirmed, or its saved work could not be read"
     raw = ws.classify_member(row("t", "budget_paused", pause_cause="mystery"), {"hold": {}})
     assert raw["reasons"][0]["code"] == "held" and raw["reasons"][0]["text"] == "Held"
+
+
+def test_the_word_beside_finalizing_follows_the_cards_status_fold():
+    """``shown_outcome`` says the stored lifecycle except where the card's fold reads otherwise: a delivered adopted
+    answer is ``completed`` there as on its card, one still owed stays ``failed``, an author's stop is ``cancelled``."""
+    cut = {"lifecycle": {"status": "failed"}, "execution": {"status": "infra_failed", "reason_code": "finalization_incomplete"}}
+    adopted = lambda answer: {"status": "failed", "reason_code": "finalization_incomplete", "outcome_axes": cut,  # noqa: E731
+                              "terminal_origin": "model_final", "finalization_recovery": {"answer": answer}}
+    assert ws.shown_outcome(adopted("delivered")) == "completed"
+    assert ws.shown_outcome(adopted("owed")) == "failed"
+    assert ws.shown_outcome({"status": "failed", "reason_code": "worker_crash_signal"}) == "failed"
+    assert ws.shown_outcome({"status": "completed", "outcome_axes": _AUTHOR_STOP_AXES, "result": "partial"}) == "cancelled"
+    assert ws.shown_outcome({"status": "completed"}) == "completed" and ws.shown_outcome({"status": "running"}) == "running"
 
 
 def test_owner_question_is_a_wait_on_the_owner_and_a_gap_is_unconfirmed():
@@ -306,12 +326,12 @@ def test_held_continue_with_running_helpers_is_working_and_says_why():
     work = ws.roll_up_work("p", members, episode={"task_id": "c", "state": current}, name="Release 7.7", room=42)
     assert work["activity"] == "working" and work["release"] == "self" and work["turn"] == []
     assert work["because"][0]["code"] == "earlier_attempt_finishing" and work["because"][0]["count"] == 3
-    assert work["because"][0]["text"] == "Continue starts when 3 helpers of the earlier attempt finish"
+    assert work["because"][0]["text"] == "Continue starts when 3 subagents of the earlier attempt finish"
     assert work["episode"] == {"task_id": "c", "live": True} and work["live"] is True
-    assert work["tails"] == []  # the sentence already names the helpers it waits for
+    assert work["tails"] == []  # the sentence already names the subagents it waits for
     assert sorted(work["members"]["ids"]) == ["c", "h0", "h1", "h2"]
     one = ws.roll_up_work("p", [current, *_helpers(1)], episode={"task_id": "c", "state": current})
-    assert one["because"][0]["text"] == "Continue starts when the helper of the earlier attempt finishes"
+    assert one["because"][0]["text"] == "Continue starts when the subagent of the earlier attempt finishes"
 
 
 def test_held_continue_waiting_on_external_runs_or_on_nothing_visible():
@@ -332,7 +352,7 @@ def test_helpers_of_an_ended_attempt_keep_the_work_working_with_its_outcome():
     assert work["because"] == []
     assert work["tails"] == [{**ws.reason("helpers_running", count=2, ids=["h0", "h1"]), "kind": "helper",
                               "state": "live"}]
-    assert work["tails"][0]["text"] == "2 helpers still working" and work["mark"] == "moving"
+    assert work["tails"][0]["text"] == "2 subagents still working" and work["mark"] == "moving"
     assert work["episode"]["live"] is False
 
 
@@ -402,6 +422,98 @@ def test_room_finalizing_only_says_finalizing_and_empty_rooms_are_idle_or_unknow
     assert ws.roll_up_room([], complete=False)["mark"] == "ring"
     unconfirmed = ws.roll_up_room([_work("paused", confirmed=False)])
     assert unconfirmed["confirmed"] is False and unconfirmed["mark"] == "ring"
+
+
+def _question(task_id, quiz_id="q1", *, state="open", project=None, **extra):
+    asked = {"task_id": task_id, "quiz_id": quiz_id, "quiz_state": state, "chat_id": 1, **extra}
+    return {**asked, "project_id": project[0], "project_chat_id": project[1]} if project else {**asked, "native": True}
+
+
+def test_a_current_question_is_its_rooms_turn_as_mains_pill_counts_it():
+    """The owner's turn is one set: what Main's pill counts in a room is that room's amber, whether the asking task
+    still waits, goes on with an assumption or has ended; a question that waits for nobody lights nothing."""
+    project = ("p1", 42)
+    live = {**_work("working", work_id="w"), "room": 42, "release": "self", "members": {"ids": ["w", "helper"]}}
+    asleep = {**_work("waiting", work_id="s"), "room": 42, "release": "self", "members": {"ids": ["s"]}}
+    waits = {**_work("waiting", work_id="b", turn=[{"kind": "question", "task_id": "b"}]), "room": 42,
+             "release": "owner", "members": {"ids": ["b"]}}
+    works = [live, asleep, waits]
+    loose = ws.place_questions(works, [
+        _question("helper", project=project),                                  # a helper asked and went on
+        _question("s", "q2", project=project),                                 # its task sleeps on something else
+        _question("b", "q3", project=project),                                 # the member's own wait already says it
+        _question("ended", "q4", state="expired_terminal", project=project),   # its task ended: no work holds it
+        _question("main-ended", "q5"),                                         # Main's own
+        _question("answered", "q6", state="answered", project=project),        # settled: waits for nobody
+        _question("elsewhere", "q7", project=("p2", 77)),                      # a Project with no work at all
+    ])
+    assert live["turn"] == [{"kind": "open_question", "task_id": "helper", "quiz_id": "q1"}]
+    assert asleep["turn"] == [{"kind": "open_question", "task_id": "s", "quiz_id": "q2"}]
+    # Said once, as the wait its task holds: the wait that named no quiz takes the one open question's address.
+    assert waits["turn"] == [{"kind": "question", "task_id": "b", "quiz_id": "q3"}]
+    # The works keep their word and who moves them: an open question is the owner's turn, never the work's state.
+    assert [(work["activity"], work["release"]) for work in works] == [
+        ("working", "self"), ("waiting", "self"), ("waiting", "owner")]
+    assert loose == {"42": [{"kind": "open_question", "task_id": "ended", "quiz_id": "q4"}],
+                     "1": [{"kind": "open_question", "task_id": "main-ended", "quiz_id": "q5"}],
+                     "77": [{"kind": "open_question", "task_id": "elsewhere", "quiz_id": "q7"}]}
+    room = ws.roll_up_room(works, questions=loose["42"])
+    assert room["amber"] is True and room["activity"] == "working"
+    assert [item["task_id"] for item in room["turn"]] == ["helper", "s", "b", "ended"]
+    assert room["turn"][0]["work_id"] == "w" and "work_id" not in room["turn"][-1]
+    # A room at rest with an open question is the owner's turn too; without one it stays quiet.
+    rest = ws.roll_up_room([], questions=loose["77"])
+    assert (rest["activity"], rest["mark"], rest["amber"]) == ("idle", "none", True)
+    assert ws.roll_up_room([])["amber"] is False and ws.place_questions([{**live, "turn": []}], []) == {}
+    # The tray's count: each work with a turn once, and each question no work holds.
+    assert ws.roll_up_summary({"42": room, "77": rest}, works)["turn"] == 3 + 2
+
+
+def test_a_wait_that_names_no_quiz_never_absorbs_an_exact_question():
+    """An exact current question keeps its address: a member's wait that names no quiz takes the address of its
+    task's one open question (it stays the question the task waits for); with several, each stands beside it as its own
+    item, and the tray still counts each question once."""
+    def waiting():
+        return {**_work("waiting", work_id="b", turn=[{"kind": "question", "task_id": "b"}]), "room": 42,
+                "release": "owner", "members": {"ids": ["b"]}}
+    project = ("p1", 42)
+    one = waiting()
+    assert ws.place_questions([one], [_question("b", "q1", project=project)]) == {}
+    assert one["turn"] == [{"kind": "question", "task_id": "b", "quiz_id": "q1"}]
+    two = waiting()
+    ws.place_questions([two], [_question("b", "q1", project=project), _question("b", "q2", project=project)])
+    assert two["turn"] == [{"kind": "question", "task_id": "b"},
+                           {"kind": "open_question", "task_id": "b", "quiz_id": "q1"},
+                           {"kind": "open_question", "task_id": "b", "quiz_id": "q2"}]
+    assert ws.roll_up_summary({"42": ws.roll_up_room([two])}, [two])["turn"] == 1
+
+
+def test_an_answer_whose_delivery_is_unknown_is_named_by_its_code():
+    """A Project's answered question whose delivery a restart left unknown is the owner's turn (Main's pill counts it)
+    and says so: its item carries ``delivery_unknown``; an unanswered one carries no code."""
+    owed = {"state": "owed", "reason_code": "late_answer_delivery_unknown"}
+    loose = ws.place_questions([], [_question("ended", "q1", state="answered", project=("p1", 42), question_delivery=owed),
+                                    _question("open", "q2", project=("p1", 42))])
+    assert loose == {"42": [{"kind": "open_question", "task_id": "ended", "quiz_id": "q1", "code": "delivery_unknown"},
+                            {"kind": "open_question", "task_id": "open", "quiz_id": "q2"}]}
+
+
+def test_one_question_is_counted_once_while_both_of_its_rooms_show_it():
+    """A private Presence question is asked in Main while the work that asked it waits in its Project: both rooms are
+    the owner's turn (Main, where the card is answered; the Project, where the work stands), and the tray counts the
+    question once. A loose question no counted work carries still counts, and another quiz of the same task too."""
+    waits = {**_work("waiting", work_id="b", turn=[{"kind": "question", "task_id": "b", "quiz_id": "q1"}]),
+             "room": 42, "release": "owner", "members": {"ids": ["b"]}}
+    loose = ws.place_questions([waits], [_question("b", "q1"), _question("b", "q2"), _question("main", "q3")])
+    rooms = {"42": ws.roll_up_room([waits]), "1": ws.roll_up_room([], questions=loose["1"])}
+    assert rooms["42"]["amber"] is True and rooms["1"]["amber"] is True
+    assert [item["quiz_id"] for item in rooms["1"]["turn"]] == ["q1", "q2", "q3"]
+    assert ws.roll_up_summary(rooms, [waits])["turn"] == 1 + 2  # the work, then q2 and q3; q1 is the work's own
+    # A work's turn that names no quiz carries its task's question as well; an action never stands for a question.
+    bare = {**waits, "turn": [{"kind": "question", "task_id": "b"}]}
+    assert ws.roll_up_summary(rooms, [bare])["turn"] == 1 + 1
+    acting = {**waits, "turn": [{"kind": "action", "task_id": "b"}]}
+    assert ws.roll_up_summary(rooms, [acting])["turn"] == 1 + 3
 
 
 # ---- the server adapter ------------------------------------------------------------------------------
@@ -775,3 +887,85 @@ def test_the_works_turn_and_mains_attention_share_one_rule():
         waits, resume = owner_actions(item)
         owner_turns = [turn for turn in ws.classify_member(item)["turn"] if turn["kind"] == "action"]
         assert bool(owner_turns) is bool(waits or resume), item["activity_id"]
+
+
+def test_a_silent_working_member_says_since_when_until_its_own_progress():
+    """The dated silence fact (owner 09.11, Q2 A) leads a working member's reasons; it is gone once the work moved,
+    and a member that is not working never borrows it."""
+    silent = {"silence_attention": {"state": "pending_attention", "last_progress_at": 1794190200.0, "episode_id": "e"}}
+    state = ws.classify_member(row("t", "working"), {"running": True, **silent})
+    assert state["reasons"][0] == {"code": "no_progress", "text": "No recorded progress", "since": 1794190200.0}
+    assert state["activity"] == "working" and state["live"] is True
+    # The owner's recorded Stop leads the line; the silence fact stays right behind it.
+    stopped = ws.classify_member(row("t", "working"), {"running": True, "cancel_pending": True, **silent})["reasons"]
+    assert [r["code"] for r in stopped[:2]] == ["stop_requested", "no_progress"]
+    # ...also over the step its turn stands at, which follows both.
+    building = row("t", "preparing", turn_phase="context_building")
+    assert [r["code"] for r in ws.classify_member(building, {"running": True, "cancel_pending": True, **silent})["reasons"]] == [
+        "stop_requested", "no_progress", "turn_context_building"]
+    assert ws.classify_member(building, {"running": True})["reasons"][0]["code"] == "turn_context_building"
+    moved = {"silence_attention": {**silent["silence_attention"], "state": "progress_observed"}}
+    assert all(r["code"] != "no_progress" for r in ws.classify_member(row("t", "working"), {"running": True, **moved})["reasons"])
+    assert all(r["code"] != "no_progress" for r in ws.classify_member(row("t", "working"), {"running": True})["reasons"])
+    assert all(r["code"] != "no_progress" for r in ws.classify_member(row("q", "queued"), {**silent})["reasons"])
+
+
+@pytest.mark.parametrize("carrier", ["managed", "lane_turn"])
+def test_the_live_silence_fact_reaches_the_work_line_from_the_running_row(tmp_path, monkeypatch, carrier):
+    """The fact lives on the RUNNING row (``silence_attention.observe``), never on its task: the census carries it to
+    the work projection, so the line says since when while the episode is open and drops it at the source's progress.
+    An owner turn the conversation lane carries is listed as its own direct row first; its silence joins that row."""
+    from ouroboros.gateway.state import _chat_activities_snapshot_safe
+    from ouroboros.gateway.work_projection import works_snapshot
+    from ouroboros.task_results import write_task_result
+    from supervisor import silence_attention
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    write_task_result(tmp_path, "quiet", "running", chat_id=7)
+    meta = {"task": {"id": "quiet", "type": "task", "chat_id": 7, "root_task_id": "quiet"}, "attempt": 1,
+            "started_at": 1794190000.0, "last_progress_at": 1794190200.0}
+    if carrier == "lane_turn":
+        from supervisor.conversation_lane import LANE_CONVERSATION
+        meta["task"].update(chat_id=1, _is_direct_chat=True)
+        meta.update(lane=LANE_CONVERSATION, worker_id=3)
+    workers.RUNNING["quiet"] = meta
+
+    def reasons():
+        raw, owners = {}, []
+        _chat_activities_snapshot_safe(tmp_path, work_facts=raw, decision_owners=owners)
+        [work] = works_snapshot(tmp_path, owners, raw)["works"]
+        return [(reason["code"], reason.get("since")) for reason in work["because"]]
+
+    assert all(code != "no_progress" for code, _since in reasons())
+    silence_attention.observe(queue, "quiet", meta, 1794193800.0, 600.0)
+    assert reasons()[0] == ("no_progress", 1794190200.0)
+    meta["last_progress_at"] = 1794193900.0
+    silence_attention.recovered(queue, "quiet", meta, 1794193900.0)
+    assert all(code != "no_progress" for code, _since in reasons())
+
+
+# #2801: the word beside Finalizing… is a settled lifecycle's. A split-drive root's census row stays its canonical
+# hot row (`running`) until copy-back; its settled word is the effective result's, the one its card reads.
+_AUTHOR_STOP_AXES = {"schema_version": 1, "lifecycle": {"status": "completed"},
+                     "execution": {"status": "ok", "task_completion": {"action": "stop", "source": "finish_task"}},
+                     "objective": {"status": "fail", "source": "task_completion", "review_status": "skipped",
+                                   "reason": "author_stop"}}
+
+
+@pytest.mark.parametrize("child_status, expected", [("completed", "cancelled"), ("running", None)])
+def test_a_finalizing_split_root_says_its_effective_outcome_not_its_hot_row(tmp_path, child_status, expected):
+    from ouroboros.task_results import write_task_result
+
+    data, child = tmp_path / "data", tmp_path / "child"
+    data.mkdir()
+    child.mkdir()
+    write_task_result(child, "fr", child_status, **({"outcome_axes": _AUTHOR_STOP_AXES, "result": "partial"}
+                                                      if child_status == "completed" else {}))
+    write_task_result(data, "fr", "running", child_drive_root=str(child),
+                      root_phase_checkpoint={"post_task_synthesis": "running"})
+    row = {"activity_id": "fr", "phase": "finalizing", "status": "running", "kind": "managed_task", "chat_id": 1,
+           "task_attempt": 1, "started_at": 100.0}
+    work = next(w for w in wp.works_snapshot(data, [row], {"fr": {"running": True}})["works"] if w["work_id"] == "fr")
+    assert work["transition"] == "finalizing"
+    assert work.get("outcome") == expected

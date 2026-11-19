@@ -46,6 +46,9 @@ EXTENSION_CHILD_CLEANUP_GRACE_SEC = 2
 # teardown — the terminal-custody write `kill_workers` — starts well inside the first. The pair is one
 # budget, not two knobs: raise the drain only with the launcher wait (which ships with a release).
 LAUNCHER_STOP_GRACE_SEC = 10.0
+# A warm macOS source handoff's wait for its windows to leave native full screen (about a second of animation);
+# it only delays a refusal. Panic and Quit never wait for it.
+MACOS_HANDOFF_FULLSCREEN_WAIT_SEC = 10.0
 SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SEC = 3.0
 # A process-ending stop waits at most this long for launches and Resumes already writing their marks to hand
 # over to the still-running pool before it names returns and retires the pool (``pause_admission``). On Quit
@@ -54,6 +57,13 @@ STOP_ADMISSION_DRAIN_SEC = 2.0
 # A direct Restart's spawned successor (Windows, POSIX exec fallback) starts while its parent still
 # holds the data root: admission waits the same handoff the old port gets (find_free_port), no longer.
 SERVER_ADMISSION_WAIT_SEC = 10.0
+# The server's interpreter switch interval (CPython's default 0.005 s): a computing thread is asked to hand the lock
+# over after this long when another thread waits (owner, 14.11.2026, #3399; ``server_entrypoint``). No setting.
+SERVER_SWITCH_INTERVAL_SEC = 0.001
+# The server's young-generation collection threshold (CPython's default 700 net new container objects): a large
+# JSON decode no longer runs a collection under the interpreter lock every 700 objects (owner, 15.11.2026, #3399;
+# ``server_entrypoint``). The older generations keep CPython's thresholds. No setting.
+SERVER_GC_THRESHOLD0 = 20_000
 NESTED_SETTLEMENT_MARGIN_SEC = 30  # Structural ordering margin, not a cognition timeout.
 # Owner-note cadence while a task waits out a provider-connection outage; the effective interval is min(this, idle_timeout/2) so the notes also keep the idle rail alive.
 NETWORK_WAIT_NOTE_INTERVAL_SEC = 300
@@ -148,8 +158,10 @@ def _bounded_positive_int_setting(key: str, *, default: int, hard_max: int, min_
     return max(min_value, min(parsed, hard_max))
 
 
-def get_max_workers() -> int:
-    return _clamped_number_setting("OUROBOROS_MAX_WORKERS", low=1, cast=int)
+def get_max_workers() -> Optional[int]:
+    """The owner's optional cap on acting project tasks, read live on every pass: None is no number (the machine's
+    memory is the limit); a typo reads finite, never as no cap (``settings_scales.optional_bound_value``)."""
+    return optional_bound_value("OUROBOROS_MAX_WORKERS", runtime_setting("OUROBOROS_MAX_WORKERS"))
 
 
 def get_task_idle_timeout_sec() -> int:
@@ -375,26 +387,6 @@ def get_max_subagent_depth() -> int:
         hard_max=MAX_SUBAGENT_DEPTH_HARD_CAP,
         min_value=0,
     )
-
-
-# One delegate_wait hold with its teardown, above the hard max WINDOW per call (F5) and
-# below the external-wait lease (delegate_progress): 1800 < 2100 < 2400. The call's own
-# outer bound is the task lifetime + 120 s, or none without one: neither widens a window.
-DELEGATE_WAIT_CEILING_SEC = 2100
-DELEGATE_WAIT_WINDOW_MAX_SEC = 1800
-
-
-def get_delegate_wait_max_sec() -> int:
-    """delegate_wait window ceiling: the setting NARROWS, never widens past 1800."""
-    return _clamped_number_setting(
-        "OUROBOROS_DELEGATE_WAIT_MAX_SEC", low=1, high=DELEGATE_WAIT_WINDOW_MAX_SEC, cast=int)
-
-
-def get_delegate_wait_sec() -> int:
-    """Default WINDOW one ``delegate_wait`` call holds — not a quiet cutoff: the
-    wait holds, returns its advances, and bounds the nanny's mailbox absence."""
-    return _clamped_number_setting(
-        "OUROBOROS_DELEGATE_WAIT_SEC", low=1, high=get_delegate_wait_max_sec(), cast=int)
 
 
 # Consciousness wake-ups. The interval between wakes is the MODEL's choice (``set_next_wakeup``),

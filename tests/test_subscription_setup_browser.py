@@ -23,6 +23,27 @@ pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
 
 
+def passive_status(status):
+    """The host's `GET /api/claudexor/status?view=quota` envelope (gateway/claudexor_passive.py) for a full answer."""
+    reads = status.get("reads") or {}
+    accounts, quota = reads.get("accounts", "ok"), reads.get("quota", "ok")
+    body = {"view": "quota", "profiles": status.get("profiles") or {}, "quota": status.get("quota") or [],
+            "quota_absences": status.get("quota_absences") or [], "unified_accounts": accounts == "ok",
+            "reads": {"catalog": "not_read", "accounts": accounts, "quota": quota},
+            "read_errors": {facet: {"code": (status.get("facets") or {}).get(facet, {}).get("error")}
+                            for facet in ("accounts", "quota") if reads.get(facet, "ok") != "ok"
+                            and (status.get("facets") or {}).get(facet, {}).get("error")},
+            "timings_ms": {}}
+    body.update({key: status[key] for key in ("resources", "availability_scope") if key in status})
+    return body
+
+
+def status_answer(route, status):
+    """Fulfill a Claudexor status route like the host: full, or the passive `?view=quota` envelope."""
+    passive = parse_qs(urlparse(route.request.url).query).get("view") == ["quota"]
+    route.fulfill(json=passive_status(status) if passive else status)
+
+
 @pytest.fixture
 def subscription_ui():
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
@@ -96,7 +117,8 @@ def subscription_ui():
         path = urlparse(request.url).path
         reads.append(request.url)
         body = {}
-        if request.method == "POST":
+        draft_catalog = path == "/api/onboarding/model-catalog"  # the wizard's catalog read: a POST answered below, as a GET's
+        if request.method == "POST" and not draft_catalog:
             payload = request.post_data_json or {}
             posts.append((path, payload))
             if path == "/api/onboarding/subagents/preview":
@@ -153,6 +175,8 @@ def subscription_ui():
                 body = {"ok": True}
         elif path == "/api/claudexor/status":
             body = fixture["status"]
+            if parse_qs(urlparse(request.url).query).get("view") == ["quota"]:
+                body = passive_status(body)
         elif path == "/api/settings":
             query = parse_qs(urlparse(request.url).query)
             if query.get("response_limit_preview") == ["1"] and backend.get("response_preview"):
@@ -169,8 +193,13 @@ def subscription_ui():
         elif path == "/api/review-pool":
             body = backend.get("review_pool", {"pool": [], "excluded": [], "last_executions": {},
                                                "row_costs": {}, "config_error": "", "migration": None})
-        elif path == "/api/model-catalog":
-            body = copy.deepcopy(backend.get("catalog_response", fixture["catalog"]))
+        elif path == "/api/model-catalog" or draft_catalog:
+            # The wizard reads the catalog of its draft's access (POST); Settings reads the saved one (GET). A fresh
+            # install has no engine rows before an account is connected, so a draft with none lists none of the
+            # fixture's subscription models (a provisioned engine would still answer its rows).
+            unconnected = draft_catalog and not fixture["status"]["profiles"]["profiles"]
+            body = copy.deepcopy(backend.get("catalog_response", {"items": [], "model_sources": [], "errors": []}
+                                             if unconnected else fixture["catalog"]))
             if backend.get("catalog_status"):
                 route.fulfill(status=backend["catalog_status"], content_type="application/json", body=json.dumps(body))
                 return
@@ -262,25 +291,25 @@ def test_cursor_login_and_catalog_are_not_execution_readiness(subscription_ui):
     ui["settings"]["OUROBOROS_SUBAGENTS"] = {"enabled": True, "items": []}
     assert all(source["id"] != "cursor" for source in ui["fixture"]["catalog"]["model_sources"])
     page = ui["page"]
-    page.goto(ui["url"])
-    page.click('[data-nav-page="settings"]')
-    page.click('[data-settings-tab="providers"]')
-    cursor = page.locator('[data-family="cursor"]')
+    from tests.settings_browser_helpers import open_settings
+    page.goto(ui["url"] + "/#settings")
+    # Settings › Accounts and keys › Cursor: the provider's own page holds its accounts.
+    cursor = open_settings(page, "accounts/cursor").locator('[data-family="cursor"]')
     cursor.get_by_text("Signed in", exact=True).wait_for()
-    assert "Login verified" in cursor.inner_text()
-    assert "Connected" not in cursor.inner_text()
-    # The section's copy opens behind its one Details, right under the lead.
-    page.locator("#harness-accounts-section > details.settings-section-details > summary").click()
-    assert "Sign-in does not verify main-chat support or agent execution" in page.locator(
-        "#harness-accounts-section").inner_text()
+    # A vendor-verified sign-in draws no warning beside the account (an ok badge has no words,
+    # harness_accounts.js rowHtml), and nothing on the page says the account is connected.
+    assert "Signed in — not verified live" not in cursor.text_content()
+    assert "Connected" not in cursor.text_content()
     cursor.scroll_into_view_if_needed()
     capture(page, "cursor-auth-only-settings")
     ui["errors"].watch(page)  # leaving Settings may cut off the page's own reads (tests/ui_console_errors.py)
     page.goto(ui["url"] + "/onboarding")
     page.wait_for_function("() => document.querySelector('#agents-outcome')?.textContent.includes('Signed in to Cursor')")
     outcome = page.locator("#agents-outcome").inner_text()
-    assert "Main still needs" in outcome
     assert "Sign-in does not verify main-chat support or agent execution" in outcome
+    # What Main still needs is said once, beside the disabled Continue.
+    page.wait_for_function("() => document.querySelector('.wizard-error').textContent.includes('Ouroboros itself still needs a model')")
+    assert "still needs" not in outcome
     capture(page, "cursor-auth-only-onboarding")
     assert not ui["posts"] or all(path == "/api/onboarding/subagents/preview" for path, _ in ui["posts"])
 
@@ -333,7 +362,7 @@ def test_quick_start_requires_a_model_source_for_the_connected_harness(subscript
     ui["fixture"]["catalog"]["model_sources"] = [
         {"id": "opaque-source", "label": "Managed models", "credentialHarness": credential_harness},
     ]
-    with page.expect_response("**/api/model-catalog"):
+    with page.expect_response("**/api/onboarding/model-catalog"):
         page.goto(ui["url"] + "/onboarding")
     page.wait_for_function(
         "expected => document.querySelector('#quick-start-btn').hidden !== expected", arg=expected)
@@ -456,21 +485,24 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
 
 
 def test_settings_accounts_and_model_roles_use_the_same_compact_components(subscription_ui):
+    from tests.settings_browser_helpers import open_settings
     ui = subscription_ui
     page = ui['page']
     page.goto(ui['url'] + '/#settings')
-    page.wait_for_selector('#settings-model-roles .model-role-row', state='attached')
-    assert page.locator('[data-settings-tab="providers"]').inner_text() == 'Accounts'
-    assert page.locator('[data-settings-panel="providers"] #harness-accounts-section').count() == 1
-    assert page.locator('[data-settings-panel="agents"] #harness-accounts-section').count() == 0
-    page.click('[data-settings-tab="models"]')
-    page.wait_for_function("() => document.querySelector('[data-settings-tab=models]').getAttribute('aria-selected') === 'true'")
-    main = page.locator('[data-model-role="main"]')
+    # Subscription accounts live on Accounts and keys, never on Agents.
+    accounts = open_settings(page, 'accounts')
+    accounts.locator('[data-open-path^="accounts/"]').first.wait_for(state='visible')
+    assert open_settings(page, 'agents').locator('#harness-accounts-groups, [data-open-path^="accounts/"]').count() == 0
+    role = open_settings(page, 'models/role/main')
+    main = role.locator('[data-model-role="main"]')
+    main.locator('[data-model-role-model]').wait_for(state='visible')
     main.locator('[data-model-role-account]').select_option('work')
-    inputs = main.locator('.model-role-controls > input, .model-role-controls > select')
-    tops = inputs.evaluate_all('(els) => els.filter(el => !el.hidden).map(el => el.getBoundingClientRect().top)')
-    assert max(tops) - min(tops) <= 2
-    assert main.locator('input').first.evaluate('(el) => getComputedStyle(el).fontSize') == '14px'
+    controls = main.locator('.model-role-controls input, .model-role-controls select')
+    shapes = controls.evaluate_all("""(els) => els.filter((el) => !el.hidden && el.getClientRects().length).map((el) => ({
+        font: getComputedStyle(el).fontSize, height: Math.round(el.getBoundingClientRect().height) }))""")
+    assert len(shapes) >= 3, shapes  # source, model and account at least
+    assert {shape['font'] for shape in shapes} == {'14px'}, shapes
+    assert max(s['height'] for s in shapes) - min(s['height'] for s in shapes) <= 2, shapes
     capture(page, 'settings-models-desktop')
     page.set_viewport_size({'width': 390, 'height': 844})
     wait_drawer_closed(page)
@@ -489,7 +521,8 @@ def test_cursor_only_does_not_claim_model_access_and_api_only_finishes(subscript
     page.wait_for_function("() => document.querySelector('[data-agent-family=cursor]').textContent.includes('Signed in')")
     assert page.locator('#quick-start-btn').is_hidden()
     assert page.locator('#next-btn').is_disabled()
-    assert 'Main still needs Codex' in page.locator('#agents-outcome').inner_text()
+    page.wait_for_function("() => document.querySelector('.wizard-error').textContent.startsWith('Cursor can run agents; Ouroboros itself still needs a model.')")
+    assert 'still needs' not in page.locator('#agents-outcome').inner_text()
     # Removing the optional agent gives the API-only path the same five steps.
     ui['fixture']['status']['profiles']['profiles'] = []
     ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
@@ -509,6 +542,58 @@ def test_cursor_only_does_not_claim_model_access_and_api_only_finishes(subscript
     assert body['OPENAI_API_KEY'] == 'fixture-api-credential'
     assert body['OUROBOROS_MODEL'].startswith('openai::')
     assert not body['subscriptionsConnected']
+
+
+@pytest.mark.parametrize('sources_read', [True, False])
+def test_an_agent_only_subscription_reads_what_it_runs_and_retry_stays_wherever_it_can_help(subscription_ui, sources_read):
+    """Only agent subscriptions connected. Once the engine has named its model sources and none of them is connected,
+    the reason beside Continue says what the subscriptions can run and what Ouroboros itself still needs; a healthy
+    read leaves discovery nothing to retry, so there is no Retry and no "Optional" on the way forward. Retry stays
+    wherever it can help: while the source list is unread, after a later read fails, and once a key makes the
+    button the catalog's manual refresh again."""
+    ui, page = subscription_ui, subscription_ui['page']
+    ui['fixture']['status']['profiles']['profiles'] = [{
+        'profile': {'profile_id': f'{harness}-only', 'harness_id': harness, 'enabled': True},
+        'status': {'verification': 'passed'},
+    } for harness in ('claude', 'cursor')]
+    if not sources_read:
+        ui['backend'].update(catalog_status=500, catalog_response={'error': 'Raw model service unavailable.'})
+    page.goto(ui['url'] + '/onboarding')
+    page.wait_for_function("() => document.querySelector('[data-agent-family=cursor]').textContent.includes('Signed in')")
+    reason = page.locator('.wizard-error')
+    retry = page.locator('#onboarding-access-retry')
+    optional = page.locator('[data-collapse="api-access"] > summary .selection-badge')
+    if not sources_read:
+        page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Raw model service unavailable')")
+        assert reason.inner_text().startswith('Could not confirm that a connected account can run')
+        assert 'Retry model discovery' in reason.inner_text() and retry.is_visible()
+        assert optional.is_visible() and optional.inner_text() == 'Optional'
+        assert page.locator('#next-btn').is_disabled()
+        return
+    page.wait_for_function("() => document.querySelector('.wizard-error').textContent.includes('still needs a model')")
+    text = reason.inner_text()
+    assert text == ('Claude Code and Cursor can run agents; Ouroboros itself still needs a model. '
+                    'Connect Codex, add an API key, or choose a local model.')
+    assert retry.is_hidden() and optional.is_hidden()
+    assert page.locator('#next-btn').is_disabled() and page.locator('#quick-start-btn').is_hidden()
+    capture(page, 'agent-only-sources-read')
+    # A later read that fails is named, and named failures keep their Retry.
+    ui['backend'].update(catalog_status=500, catalog_response={'error': 'Raw model service unavailable.'})
+    ui['fixture']['status']['profiles']['profiles'].pop()  # Cursor disconnects: the connected set changes, the catalog is read again
+    page.evaluate("async () => (await import('/onboarding/static/modules/claudexor_status_store.js')).claudexorStatus.refresh()")
+    page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Raw model service unavailable')")
+    assert retry.is_visible() and reason.inner_text().startswith('Claude Code can run agents;')
+    ui['backend'].pop('catalog_status'), ui['backend'].pop('catalog_response')
+    with page.expect_response('**/api/onboarding/model-catalog'):
+        retry.click()
+    page.wait_for_function("() => document.querySelector('#onboarding-access-retry').hidden")
+    # A key is another way to Main: Continue opens, and the button is the catalog's manual refresh again.
+    page.locator('[data-collapse="api-access"] > summary').click()
+    page.locator('#openai-key').fill('fixture-api-credential')
+    page.wait_for_selector('#next-btn:not([disabled])')
+    assert retry.is_visible() and reason.inner_text() == ''
+    assert optional.is_visible() and optional.inner_text() == 'Configured', 'the badge follows what is entered'
+    assert not any(path == '/api/onboarding/complete' for path, _ in ui['posts'])
 
 
 @pytest.mark.parametrize('edit_after_recovery', [False, True, 'main'])
@@ -630,6 +715,10 @@ def test_accounts_catalog_failure_is_visible_and_retry_keeps_the_draft(subscript
     page.goto(ui['url'] + '/onboarding')
     page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Raw model service unavailable')")
     assert page.locator('#next-btn').is_disabled()
+    # The note offers only what the buttons allow: with Continue disabled, a Retry alone.
+    page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.trim()"
+                           ".endsWith('Agent model discovery unavailable. Retry.')")
+    assert 'or Continue' not in page.locator('#onboarding-access-note').inner_text()
     page.locator('[data-collapse="api-access"] > summary').click()
     page.locator('#openai-key').fill('owner-draft-credential')
     ui['backend'].pop('catalog_status')
@@ -645,6 +734,8 @@ def test_accounts_catalog_failure_is_visible_and_retry_keeps_the_draft(subscript
 def test_declared_source_with_failed_inventory_preserves_stored_or_owner_authored_defaults(subscription_ui, fresh_install):
     ui, page = subscription_ui, subscription_ui['page']
     ui['bootstrap']['freshInstall'] = fresh_install
+    if not fresh_install:  # a stored install's bootstrap: its document sets every slot, none is the wizard's (#2969)
+        ui['bootstrap']['initialState']['automaticModels'] = []
     initial = ui['bootstrap']['initialState']['mainModel']
     ui['backend'].update(preview_error='Agent inventory unavailable.', catalog_response={
         'items': [], 'model_sources': ui['fixture']['catalog']['model_sources'],
@@ -673,7 +764,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     ui, page = subscription_ui, subscription_ui['page']
     ui['backend']['preview_error'] = 'Agent inventory unavailable.'
     held = []
-    page.route('**/api/model-catalog', lambda route: held.append(route))
+    page.route('**/api/onboarding/model-catalog', lambda route: held.append(route))
     page.goto(ui['url'] + '/onboarding')
     page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Checking model sources')")
     assert held
@@ -682,7 +773,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     page.wait_for_function("() => !document.querySelector('[data-agent-family=codex]').textContent.includes('Signed in')")
     for route in held:
         route.fulfill(content_type='application/json', body=json.dumps(ui['fixture']['catalog']))
-    page.unroute('**/api/model-catalog')
+    page.unroute('**/api/onboarding/model-catalog')
     assert page.locator('#next-btn').is_disabled()
     assert page.locator('#quick-start-btn').is_hidden()
 

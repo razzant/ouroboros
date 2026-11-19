@@ -20,7 +20,7 @@ from ouroboros.skill_review_status import STATUS_CLEAN, STATUS_WARNINGS, normali
 # Sources whose payload may be submitted to the hub (native without a marker is
 # handled by skill_loader reclassification, not here).
 PUBLISHABLE_SOURCES = ("external", "self_authored", "user_repo", "ouroboroshub", "clawhub")
-# Critic-authorized publication statuses; current Advisory author authority is separate.
+# Critic-authorized publication statuses; current author authority is separate.
 PUBLISHABLE_STATUSES = frozenset({STATUS_CLEAN, STATUS_WARNINGS})
 
 
@@ -50,7 +50,7 @@ def submit_hub_eligibility(
 
     ``disabled`` is only the compatibility projection of
     ``not task_start_allowed``.  Repairable review states keep the ordinary task
-    available; ordinary publication requires fresh critic or current Advisory author authority;
+    available; ordinary publication requires fresh critic or current author authority;
     Cyber Pro retains review and scanner evidence as advice.
     """
     src = str(source or "native").lower()
@@ -74,7 +74,7 @@ def submit_hub_eligibility(
             "task_start_allowed": False,
             "disabled": True,
             "state": "hard_block",
-            "reason": "Configure GITHUB_TOKEN in Settings → Secrets",
+            "reason": "Configure GITHUB_TOKEN in Settings → Accounts and keys",
         }
     if cyber:
         reason = "Open Publish to inspect current bytes; review and scanner findings are advisory in Cyber Pro"

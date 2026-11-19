@@ -8,15 +8,16 @@ dispatch: a gate that must durably record "this wave spent reviewer money"
 installs a :class:`ReviewPaidStamp` on ``ctx._review_paid_stamp`` for the
 duration of its wave. Its optional reservation write records the wave's roster
 before any worker starts (``parallel_review``); the coordinator captures the
-once-only stamp itself: session routes invoke it before their replayable
-``START_REQUESTED`` row, API routes bind it for the canonical physical-attempt
-boundary, and the custody entry (``review_custody.run_custodied_review_slots``)
-invokes it only for an executor that owns no route stamp. Assembly-only
-refusals, replays and refusals before a send never reach it (a rejoin's own
-send stamps the attempt it collects), so a $0 attempt stays outside every
-ceiling; a worker that outlives its logical caller stamps the row its
-reservation wrote, and a crash after dispatch keeps the durable paid fact.
-Commit review verifies these writes fail-closed; other callers retain
+once-only stamp itself: session routes first record the durable
+``START_REQUESTED`` row, then stamp the physical attempt immediately before
+POST (or after an ambiguous write), while API routes bind it at their
+canonical physical-attempt boundary. The custody entry
+(``review_custody.run_custodied_review_slots``) invokes it only for an
+executor that owns no route stamp. Assembly-only refusals, proven-unsent
+replays and refusals before a send never reach it, so a $0 attempt stays
+outside every ceiling; a worker that outlives its logical caller stamps the
+row its reservation wrote, and a crash after dispatch keeps the durable paid
+fact. Commit review verifies these writes fail-closed; other callers retain
 historical fail-open accounting. This seam also hosts the L-review lane's
 two-phase admission.
 """

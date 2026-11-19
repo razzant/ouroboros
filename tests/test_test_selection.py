@@ -36,6 +36,7 @@ def test_leaf_selects_only_direct_importers_and_changed_tests_above_floor(repo):
 @pytest.mark.parametrize("path", [
     "tests/conftest.py", "pyproject.toml", "tests/fixtures/sample.json",
     "ouroboros/preflight_probe.py", "ouroboros/test_bytecode.py",  # the gate's plugin and its warm: apparatus too
+    "ouroboros/host_memory.py",  # the memory reading behind test admission and the overload stop
 ])
 def test_verification_changes_require_full(repo, path):
     result = selection.select_from_paths(repo, [path], base="base")
@@ -296,6 +297,43 @@ def test_a_release_bump_alone_stays_selected_but_other_carrier_edits_run_full(re
 def test_floor_exists_in_this_checkout():
     root = Path(__file__).resolve().parents[1]
     assert all((root / path).is_file() and invariant for path, invariant in selection.FLOOR_TESTS.items())
+
+
+def test_a_change_an_inventory_reads_as_data_runs_its_pin_and_stays_selected():
+    """An inventory reads its sources as data, so changing them selects its pin through no import: a book
+    chapter (#3187), a new folder named like a data-layout entry (#3235) and a control's text (#3207) each
+    left the target red while the selection of its merge never named the pin. The pin runs for every change
+    now, and these changes still select nothing else and never escalate to full."""
+    root = Path(__file__).resolve().parents[1]
+    witnesses = {path.relative_to(root).as_posix() for path in (root / "tests").glob("test_*_static.py")}
+    for change in ("docs/architecture/01-high-level-architecture.md", "docs/llm-rating/data/latest.json",
+                   "web/modules/onboarding_wizard.js"):
+        result = selection.select_from_paths(root, [change], base="base")
+        assert "tests/test_generated_inventories.py" in result.files, change
+        # A file of the interface also runs the interface's static witnesses (below); nothing else, never full.
+        beside = witnesses if change.startswith("web/") else set()
+        assert result.tier == "selected" and set(result.files) == set(selection.FLOOR_TESTS) | beside, change
+
+
+def test_a_change_to_the_interface_runs_its_static_witnesses_and_nothing_else_does(repo):
+    """The interface's static witnesses read web/ as data, so no import selects them: a stylesheet edited alone
+    ran none and left the target red after its merge (#3308, #3311). A stylesheet, a module, the page or a Node
+    fixture under web/ selects every tests/test_*_static.py by name; a document, product code or another kind of
+    file does not, and a change that already runs everything names no witness."""
+    write(repo, "tests/test_shell_static.py")
+    write(repo, "tests/test_marks_static.py")
+    write(repo, "tests/test_statically.py")
+    write(repo, "tests/system_e2e/test_deep_static.py")
+    witnesses = {"tests/test_shell_static.py", "tests/test_marks_static.py"}
+    for change in ("web/ui.css", "web/modules/pages.js", "web/index.html", "web/tests/dom_fixture.js"):
+        result = selection.select_from_paths(repo, [change], base="base")
+        assert result.tier == "selected" and set(result.files) == {"tests/test_floor.py"} | witnesses, change
+        assert all("static witness of the interface" in dict(result.reasons)[path] for path in witnesses), change
+    for change in ("docs/DESIGN.md", "ouroboros/unused.py", "web/fonts/readme.txt", "site/app.js"):
+        result = selection.select_from_paths(repo, [change], base="base")
+        assert set(result.files) == {"tests/test_floor.py"}, change
+    everything = selection.select_from_paths(repo, ["web/ui.css", "server.py"], base="base")
+    assert everything.tier == "full" and not any("static witness" in reason for _, reason in everything.reasons)
 
 
 def test_reviewed_tool_binds_widening_and_force_uses_full(repo, monkeypatch):

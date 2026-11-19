@@ -45,15 +45,16 @@ from ouroboros.work_stop import STOP_TEXT, activity_stop_view, control_identity,
 REASON_TEXT = {
     **STOP_TEXT,
     "model_handoff": "a model request has no recorded result",
-    "earlier_attempt_finishing": ("Continue starts when the helper of the earlier attempt finishes",
-                                  "Continue starts when {count} helpers of the earlier attempt finish"),
+    "earlier_attempt_finishing": ("Continue starts when the subagent of the earlier attempt finishes",
+                                  "Continue starts when {count} subagents of the earlier attempt finish"),
     "earlier_runs_finishing": ("Continue starts when the external run of the earlier attempt finishes",
                                "Continue starts when {count} external runs of the earlier attempt finish"),
     # Its earlier attempt's work settled, and the host's own start was refused for another reason (``last_resume``).
     "start_refused": "Continue tries to start again by itself",
-    "helpers_running": ("1 helper still working", "{count} helpers still working"),
+    "helpers_running": ("1 subagent still working", "{count} subagents still working"),
     "delegated_running": ("1 external run still working", "{count} external runs still working"),
     "owner_answer": "Waiting for your answer",
+    "no_progress": "No recorded progress",
     "model_access": "The model needs you: sign in or restore access",
     "model_wait": "Waiting for the model to become available",
     "project_admission": "Waiting for Project verification",
@@ -61,11 +62,11 @@ REASON_TEXT = {
     "review_work_finishing": "Review work finishing",
     "external_runs_unconfirmed": ("1 external run may still be running", "{count} external runs may still be running"),
     # A sleeping episode's chosen helpers a stop holds, by who releases them (classify_member's release).
-    "awaited_helpers_mind": ("1 helper it waits for is paused until Ouroboros resumes it",
-                             "{count} helpers it waits for are paused until Ouroboros resumes them"),
-    "awaited_helpers_owner": ("1 helper it waits for is paused until you resume it",
-                              "{count} helpers it waits for are paused until you resume them"),
-    "awaited_helpers_paused": ("1 helper it waits for is paused", "{count} helpers it waits for are paused"),
+    "awaited_helpers_mind": ("1 subagent it waits for is paused until Ouroboros resumes it",
+                             "{count} subagents it waits for are paused until Ouroboros resumes them"),
+    "awaited_helpers_owner": ("1 subagent it waits for is paused until you resume it",
+                              "{count} subagents it waits for are paused until you resume them"),
+    "awaited_helpers_paused": ("1 subagent it waits for is paused", "{count} subagents it waits for are paused"),
     # A turn's start step before its own Main call (census ``turn_phase``, supervisor.active_activity.TURN_PHASES).
     "turn_admitted": "Setting up the turn",
     "turn_started": "Starting the turn",
@@ -193,8 +194,9 @@ def _waits_on(sleep: Any) -> List[str]:
 def _start_step(row: Mapping[str, Any]) -> str:
     """The start step a turn stands at before its own Main call, else ''. An inline executor's row says it by
     its census phase (``preparing``); a conversation-lane row's phase says only whether a carrier holds it
-    (``conversation_lane.lane_turn_rows``), so a row its carrier holds says it by its frame-fed ``turn_phase``
-    until a call of its own is observed."""
+    (``conversation_lane.lane_turn_rows``) and a pooled root's only that a worker runs it (``carrier``, from
+    ``gateway.state``), so a row its worker holds says it by its frame-fed ``turn_phase`` until a call of its
+    own is observed."""
     step = str(row.get("turn_phase") or "")
     if step not in _TURN_STEPS:
         return ""
@@ -330,10 +332,16 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         return state
     if phase in {"working", "thinking", "preparing"}:
         state.update(activity="working", call=_call(row), live=True)
-        if step := _start_step(row):
-            state["reasons"].append(reason(f"turn_{step}"))
+        # The owner's recorded Stop leads: a working work, a silent one above all, may not reach the step that ends
+        # it soon. The dated silence follows (owner 09.11, Q2 A) until the work's own progress ends the episode, a
+        # fact for whoever waits, never a stop or a mark; then where its turn started.
         if raw.get("cancel_pending"):
             state["reasons"].append(reason("stop_requested"))
+        silence = raw.get("silence_attention")
+        if isinstance(silence, Mapping) and silence.get("state") == "pending_attention" and silence.get("last_progress_at"):
+            state["reasons"].append(reason("no_progress", since=silence["last_progress_at"]))
+        if step := _start_step(row):
+            state["reasons"].append(reason(f"turn_{step}"))
         return state
     state["confirmed"] = False
     return state
@@ -400,14 +408,16 @@ def _outcome(row: Mapping[str, Any]) -> str:
 
 
 def shown_outcome(row: Mapping[str, Any]) -> str:
-    """The settled word a work says beside ``Finalizing…``: its stored lifecycle, except a turn its author or owner
-    stopped, which reads ``cancelled`` wherever its card's status fold says Stopped (``outcome_phase``)."""
+    """The settled word a work says beside ``Finalizing…``: its stored lifecycle, except where its card's status
+    fold reads otherwise (``outcome_phase``): a turn its author or owner stopped reads ``cancelled``, and a failed
+    record whose model answer was delivered before its finalization was cut reads ``completed``."""
     status = _outcome(row)
     if status in {"completed", "failed"}:
         from ouroboros.project_dialogue import outcome_phase
 
-        if outcome_phase({**row, "root_phase_checkpoint": {}}, {}) == "cancelled":
-            return "cancelled"
+        phase = outcome_phase({**row, "root_phase_checkpoint": {}}, {})
+        if phase == "cancelled" or (status == "failed" and phase in {"done", "warn"}):
+            return "cancelled" if phase == "cancelled" else "completed"
     return status
 
 
@@ -593,13 +603,65 @@ def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mappin
     return work
 
 
-def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True) -> Dict[str, Any]:
+def place_questions(works: List[Dict[str, Any]], questions: Iterable[Mapping[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Put every current question that waits for the owner (``main_decisions.question_waits``, the rule Main's
+    pill counts by) where its room shows it. A Project's question belongs to
+    the Project's room and Main's own to Main; a question whose task is a member of a work of that room joins the
+    work's ``turn`` (its row and card lead to it) as an ``open_question``, unless the member's own wait already put
+    it there as the ``question`` its task waits for. An open question is the owner's turn and never the work's word:
+    the work keeps its activity, its reason and its ``release`` (one that goes on with an assumption goes on by
+    itself). Returns the questions no work of their room holds (their task ended, or works elsewhere), by room, for
+    ``roll_up_room``."""
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros.gateway.main_decisions import question_waits
+
+    holders: Dict[tuple, Dict[str, Any]] = {}
+    for work in works:
+        for task_id in (work.get("members") or {}).get("ids") or ():
+            holders.setdefault((str(work.get("room") or 0), str(task_id)), work)
+    waiting = [row for row in questions or () if str(row.get("task_id") or "") and question_waits(row)]
+    # A member's own wait can name its question without the quiz: with exactly one open question of that task, the
+    # wait is that question and takes its address; with several, each stands beside it with its own.
+    unanswered: Dict[tuple, List[str]] = {}
+    for row in waiting:
+        if row.get("quiz_state") == "open" and row.get("quiz_id"):
+            key = (_question_room(row, WEB_UI_CHAT_ID), str(row["task_id"]))
+            unanswered.setdefault(key, []).append(str(row["quiz_id"]))
+    loose: Dict[str, List[Dict[str, Any]]] = {}
+    for row in waiting:
+        task_id, quiz_id = str(row.get("task_id") or ""), str(row.get("quiz_id") or "")
+        room = _question_room(row, WEB_UI_CHAT_ID)
+        item = {"kind": "open_question", "task_id": task_id, **({"quiz_id": quiz_id} if quiz_id else {})}
+        if row.get("quiz_state") not in {"open", "expired_terminal"}:
+            item["code"] = "delivery_unknown"  # answered: only its unknown delivery waits (``question_waits``)
+        work = holders.get((room, task_id))
+        held = loose.setdefault(room, []) if work is None else work["turn"]
+        if unanswered.get((room, task_id)) == [quiz_id]:
+            for entry in held:
+                if entry.get("kind") == "question" and entry.get("task_id") == task_id and not entry.get("quiz_id"):
+                    entry["quiz_id"] = quiz_id
+        # The same question is said once; an item that names no quiz never stands for an exact one.
+        if not any(entry.get("kind") in {"question", "open_question"} and entry.get("task_id") == task_id
+                   and entry.get("quiz_id") == (quiz_id or None) for entry in held):
+            held.append(item)
+    return {room: items for room, items in loose.items() if items}
+
+
+def _question_room(row: Mapping[str, Any], main_chat: Any) -> str:
+    """The room a current question belongs to: its Project's, else Main's."""
+    return str(row.get("project_chat_id") if row.get("project_id") else main_chat)
+
+
+def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True,
+                 questions: Iterable[Mapping[str, Any]] = ()) -> Dict[str, Any]:
     """One room from its works: the most active work speaks; whose turn it is never replaces it. The mark moves
     while anything in the room actually runs, a paused work's finishing review included: in a room, motion wins and
-    each work's row says the rest."""
+    each work's row says the rest. ``questions`` are the room's own that no work of it holds (``place_questions``):
+    they are the owner's turn there too, also in a room at rest."""
+    questions = [dict(item) for item in questions]
     if not works:
         activity = "idle" if complete else "unknown"
-        return {"activity": activity, "transition": "none", "call": "", "turn": [], "amber": False,
+        return {"activity": activity, "transition": "none", "call": "", "turn": questions, "amber": bool(questions),
                 "mark": "none" if complete else "ring", "confirmed": complete, "works": []}
     known = [work["activity"] for work in works if work["activity"] != "unknown"]
     activity = min(known, key=_rank) if known else "unknown"
@@ -611,7 +673,7 @@ def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True) -> Di
             and any(work["transition"] == "pausing" for work in working):
         transition = "pausing"
     calls = {work["call"] for work in working if work.get("call")}
-    turn = [{"work_id": work["work_id"], **item} for work in works for item in work["turn"]]
+    turn = [{"work_id": work["work_id"], **item} for work in works for item in work["turn"]] + questions
     confirmed = complete and all(work["confirmed"] for work in works)
     live = any(work.get("live") for work in works)
     unknown = any(tail.get("state") == "unknown" for work in works for tail in work.get("tails") or ())
@@ -620,11 +682,23 @@ def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True) -> Di
             "confirmed": confirmed, "works": [work["work_id"] for work in works]}
 
 
+def _same_question(one: Mapping[str, Any], other: Mapping[str, Any]) -> bool:
+    """The same task's question, by its quiz id when both name one."""
+    quizzes = (one.get("quiz_id"), other.get("quiz_id"))
+    return one.get("task_id") == other.get("task_id") and (None in quizzes or quizzes[0] == quizzes[1])
+
+
 def roll_up_summary(rooms: Mapping[Any, Mapping[str, Any]], works: List[Mapping[str, Any]],
                     *, complete: bool = True) -> Dict[str, Any]:
     """The tray's one line: counts by activity, how many wait for the owner, and confirmation."""
     counts = {activity: 0 for activity in ACTIVITY_ORDER}
     for work in works:
         counts[work["activity"] if work["activity"] in counts else "unknown"] += 1
-    return {"counts": counts, "turn": sum(bool(work["turn"]) for work in works),
+    # What waits for the owner: each work with a turn once, and each question no work holds (``place_questions``)
+    # unless a counted work already carries it (a private Presence question is asked in Main while its work stands
+    # in its Project): one question is counted once, though both rooms show it.
+    carried = [item for work in works for item in work["turn"] if item.get("kind") in {"question", "open_question"}]
+    loose = sum(1 for room in rooms.values() for item in room.get("turn") or ()
+                if not item.get("work_id") and not any(_same_question(item, held) for held in carried))
+    return {"counts": counts, "turn": sum(bool(work["turn"]) for work in works) + loose,
             "confirmed": complete and all(room.get("confirmed", True) for room in rooms.values())}

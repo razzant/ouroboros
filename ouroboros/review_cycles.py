@@ -9,7 +9,8 @@ shipped default with one loud log line. It is a string on purpose:
 default would silently swallow ``"unlimited"``. ``review_max_cycles()`` returns
 ``Optional[int]`` — ``None`` means unlimited.
 
-Per-gate meaning of the ONE number — on every gate it counts PAID cycles; a
+Per-gate meaning of the ONE number — on every gate it counts PAID cycles (and, on
+the result gate, the free rewording reminders too); a
 usable verdict on identical material is never re-reviewed for pay unless the
 mind sends it with answers, while an explicit identical request after a settled
 wave formed no verdict is a new paid wave (running or unknown work is collected,
@@ -20,7 +21,10 @@ never sent again):
   budget gate and deadline bound it; nothing here counts plan asks;
 * result review (``review_change(subject="result")``) — paid result waves per
   ROOT task, counted apart from the task's change-review waves (its own
-  ``tool_name`` on the attempt rows), so change reviews never spend it;
+  ``tool_name`` on the attempt rows), so change reviews never spend it; the same
+  number bounds the free reminders asking the author to reword a reviewed answer
+  (``tools/review_result._revised``, counted by its saved questions), while an
+  unread outcome and newer owner words still reach the author regardless;
 * commit gate — paid review-wave cycles per ROOT task (the whole task tree
   shares one ceiling; a manual session is its own task; a follow-up task is a
   fresh root). The paid fact is recorded on the attempt row AT DISPATCH and
@@ -28,14 +32,10 @@ never sent again):
   every dispatched wave counts whatever its terminal, and only UNDISPATCHED
   attempts (free refusals/replays, preflight and assembly failures) stay
   outside the count, which is also the only sense in which "infra retries
-  freely" applies to the ceiling. Independently of the number, a
-  byte-identical staged diff whose last terminal is a review-VERDICT block is
-  refused for FREE from the FIRST block (``identical_diff_refused``, quoting
-  the recorded verdict); a rebuttal is content-hashed and a hash new to the
-  streak buys exactly ONE paid re-review (a rebuttal is "spent" only when it
-  bought a dispatched, verdict-answered wave). Exhaustion under blocking is a
-  free typed refusal; under advisory the outcome returns with a typed
-  disclosure for explicit author continuation, without another paid dispatch;
+  freely" applies to the ceiling. A rebuttal is content-hashed into the
+  round's identity, so a new one buys a new paid wave within the ceiling.
+  Exhaustion returns the outcome with a typed disclosure for explicit author
+  continuation, without another paid dispatch;
 * skill review (``skill_review`` → ``review_change(subject="skill")``) — paid skill waves per
   root task for a task-driven review (shared across every skill that task reviews; a
   follow-up starts fresh), counted apart from the task's change and result waves (its own

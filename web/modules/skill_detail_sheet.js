@@ -4,6 +4,7 @@
 // comes from the card at once; the body reads the source's full entry and says
 // so while it does. Close, Escape and the backdrop return focus to the opener.
 import { bindDialogFocus } from './ui_interactions.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { mountConnectorPlaces } from './connector_places.js';
@@ -109,13 +110,14 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
             <div class="document-reader-actions" data-sheet-actions>${actionsHtml}</div>
             <button type="button" class="btn btn-default document-reader-close" data-sheet-close>Close</button>
         </div>
-        <div class="document-reader-body skills-sheet-body is-quiet-focus" tabindex="-1" data-sheet-body><section class="skills-sheet-section" data-sheet-places hidden></section><div class="skills-sheet-content" data-sheet-content></div></div>
+        <div class="document-reader-body skills-sheet-body scroll-fade-y is-quiet-focus" tabindex="-1" data-sheet-body><section class="skills-sheet-section" data-sheet-places hidden></section><div class="skills-sheet-content" data-sheet-content></div></div>
     </div>`;
     const body = dialog.querySelector('[data-sheet-body]');
     const content = dialog.querySelector('[data-sheet-content]');
     let disposePlaces = null;
     let closed = false;
     let disposeFocus = null;
+    const disposeFade = bindScrollFade(body);
     let controller = null;
     const close = () => {
         if (closed) return;
@@ -126,6 +128,7 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
         // Close the modal first: WebKit's own close moves focus to what was focused before it opened
         // (a pressed button is not focused there), and the restore below then returns it to the opener.
         if (dialog.open && typeof dialog.close === 'function') dialog.close();
+        disposeFade();
         disposeFocus?.();
         dialog.remove();
     };
@@ -175,7 +178,7 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
     disposeFocus = bindDialogFocus(dialog, { initialFocus: body, returnFocus, onEscape: close });
     if (installed && connectsServices(installed).length) {
         const places = dialog.querySelector('[data-sheet-places]'); places.hidden = false;
-        disposePlaces = mountConnectorPlaces(places, installed.name, { leave: close, returnFocus });
+        disposePlaces = mountConnectorPlaces(places, installed.name, { leave: close });
     }
     read();
     return {

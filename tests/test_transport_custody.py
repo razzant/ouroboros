@@ -492,3 +492,57 @@ def test_requests_proxy_tunnel_death_is_neither_pre_dispatch_nor_a_death():
     bare.physical_attempt_capture = _unresolved_capture(provider="anthropic")
     assert is_pre_dispatch_transport_failure(bare) is False
     assert is_retryable_transport_death(bare) is False
+
+
+def _capture(state, status=None):
+    return ua.PhysicalAttemptCapture(attempt_id="a", model="m", provider="p", state=state,
+                                     candidate_measurement_kind="canonical_json_v1", provider_status_code=status)
+
+
+def _failure(**facts):
+    error = RuntimeError("synthetic attempt failure")
+    for name, value in facts.items():
+        setattr(error, name, value)
+    return error
+
+
+@pytest.mark.parametrize(("state", "status", "error", "known"), [
+    ("released", None, _failure(), True),  # proven unsent, a typed no-start included
+    ("released", None, None, True),
+    ("settled", None, None, True),  # its response came back
+    ("unresolved", None, None, True),  # unpriced is not unanswered
+    ("dispatched", None, None, True),  # response read, accounting failed
+    ("unresolved", 400, _failure(), True),  # the provider answered an HTTP error
+    ("unresolved", 400, _failure(stream_incomplete=True, stream_receipt={"model_output_received": False}), True),
+    ("settled", None, _failure(), True),  # a settled typed failure (an engine verdict without a status)
+    ("unresolved", 400, _failure(stream_incomplete=True, stream_receipt={"model_output_received": True}), False),
+    ("unresolved", None, _failure(), False),  # no answer
+    ("unresolved", 504, _failure(explicit_timeout=True), False),
+    ("dispatched", 400, _failure(receiver_abandoned=True), False),
+    ("settled", None, _failure(code="model_outcome_unknown"), False),
+    ("settled", None, _failure(stream_incomplete=True, stream_receipt={"model_output_received": True}), False),
+    ("reserved", None, _failure(), False),  # its release could not be recorded
+])
+def test_attempt_end_known_reads_only_typed_attempt_facts(state, status, error, known):
+    from ouroboros.transport_custody import attempt_end_known
+
+    assert attempt_end_known(_capture(state, status), error) is known
+
+
+def test_attempt_end_known_without_a_capture_proves_nothing():
+    from ouroboros.transport_custody import attempt_end_known
+
+    assert attempt_end_known(None, None) is False
+
+
+def test_report_attempt_end_ignores_the_pre_dispatch_capture_and_an_unbound_tracker():
+    from ouroboros.transport_custody import report_attempt_end, track_physical_attempts
+
+    heard = []
+    tracker = type("Tracker", (), {"attempt_ended": lambda self, capture, error: heard.append((capture.state, error))})()
+    report_attempt_end(_capture("settled"), None)  # no tracker bound
+    with track_physical_attempts(tracker):
+        report_attempt_end(_capture("reserved"), None)
+        report_attempt_end(_capture("reserved", 400), error := _failure())  # a failed release is a reported end
+        report_attempt_end(_capture("settled"), None)
+    assert heard == [("reserved", error), ("settled", None)]

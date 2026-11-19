@@ -20,12 +20,13 @@ mutable file's bytes that no longer match it are refused typed (409
 under an identity a parent's disposition may have bound; a listing without a digest
 streams its current bytes and says so (``x-ouroboros-artifact-identity: unmeasured``).
 
-A directory archive includes only recorded regular files lexically under its
-own-store directory, with no failed/missing capture. One relpath is one member
-(canonical store first), named relative to the directory's parent. It
-spools in 1 MiB chunks through one anonymous temporary file (bounded memory, exact
-``Content-Length``, status settled before the first byte); a member that records a
-digest must match it while read, or the answer is a typed refusal. Wrap up's saved-work
+A directory download includes only recorded regular files lexically under its
+own-store directory, with no failed/missing capture and a Unicode ZIP name. The
+task detail counts exclusions; this ZIP is a view, not a proof of preservation.
+One relpath is one member (canonical store first), named relative to the
+directory's parent. It spools in 1 MiB chunks through one anonymous temporary
+file (bounded memory, exact ``Content-Length``, status settled before the first
+byte); a recorded digest must match while read, or the answer is a typed refusal. Wrap up's saved-work
 document (``?wrap_up=``) is written on read into such a spool the same way.
 
 Without a supported confined backend, ordinary files, archives and delegated
@@ -72,6 +73,7 @@ CONFINED, _DIR_FLAGS = CONFINED_OPEN_AVAILABLE, DIR_FLAGS
 _CHAT_MEDIA_DIGEST_RE = re.compile(r"chat-media-([0-9a-f]{64})\.[a-z0-9]+")
 _DELEGATED_SOURCE_RE = re.compile(r"source_handles/delegated_activity/([A-Za-z0-9][A-Za-z0-9_.-]*-([0-9a-f]{64})\.jsonl)")
 _ACCEPTANCE_SOURCE_RE = re.compile(r"source_handles/context_checkpoints/(acceptance-([0-9a-f]{64})\.json)")
+_ZIP_NON_UNICODE = re.compile(r"[\ud800-\udfff]")
 # An SVG is an image a browser also runs as a document. Its exact bytes, type and static
 # view stay; opened directly it gets the chat-upload inline policy (gateway/files.py):
 # no script or application origin, no sniffing. Other types keep their headers.
@@ -114,6 +116,12 @@ def _route(anchor: Optional[pathlib.Path], store: pathlib.Path, relpath: str) ->
     if anchor is not None and store != anchor and store.is_relative_to(anchor):
         return anchor, [*store.relative_to(anchor).parts, *segments]
     return store, segments
+
+
+def _zip_route(anchor: Optional[pathlib.Path], store: pathlib.Path, relpath: str) -> Optional[Route]:
+    # zipfile needs Unicode member names. Keep the recorded path in the task result,
+    # but leave members that cannot be encoded out of the ZIP and its member count.
+    return None if _ZIP_NON_UNICODE.search(relpath) else _route(anchor, store, relpath)
 
 
 class _Parents:
@@ -186,12 +194,14 @@ def directory_archives(stores: List[pathlib.Path], rows: Any, *, anchor: Any = N
                 continue
             location = task_artifact_location(stores, row.get("path"), spellings)
             relpath = location[2] if location else str(row.get("relpath") or "")
-            parts = plain_segments(relpath)
-            if len(parts) < 2:
-                continue  # a root file (or an unattributable row) belongs to no directory
-            entry = view.setdefault(parts[0], {"name": parts[0] + ARCHIVE_SUFFIX, "files": 0, "size": 0,
-                                               "excluded": 0, "available": False})
-            observed = (_member_stat(parents, _route(anchor, stores[location[0]], relpath))
+            directory, sep, _ = relpath.partition("/")
+            # Store membership and ZIP eligibility are separate. Unattributed rows
+            # still need a plain relpath even to count as exclusions.
+            if not sep or (location is None and not plain_segments(relpath)):
+                continue
+            entry = view.setdefault(directory, {"name": directory + ARCHIVE_SUFFIX, "files": 0, "size": 0,
+                                                "excluded": 0, "available": False})
+            observed = (_member_stat(parents, _zip_route(anchor, stores[location[0]], relpath))
                         if location and _eligible(row) else None)
             if observed is None:
                 entry["excluded"] += 1
@@ -219,7 +229,7 @@ def _archive_members(stores: List[pathlib.Path], rows: Any, directory: str, *,
             location = task_artifact_location(stores, row.get("path"), spellings) if isinstance(row, dict) else None
             if location is None or not location[2].startswith(prefix) or not _eligible(row):
                 continue
-            route = _route(anchor, stores[location[0]], location[2])
+            route = _zip_route(anchor, stores[location[0]], location[2])
             if route is not None and _member_stat(parents, route) is not None and (
                     location[2] not in picked or (location[0], order) < picked[location[2]][0]):
                 picked[location[2]] = ((location[0], order), route, row)

@@ -212,3 +212,86 @@ def test_failed_batch_measurement_keeps_pending_words_without_reemitting(tmp_pat
     process_tool_results([result], ctx.messages, {"tool_calls": []}, lambda *_: None, SimpleNamespace(_ctx=ctx))
     assert _dialogue(ctx.messages) == pending and not pending_owner_dialogue(ctx)
     assert ctx.event_queue.qsize() == 1
+
+
+# --- a Presence-bound run's words in Main or a Project room, my human's rooms (#3098) -----
+
+PLACE_BOUND = {"presence": {"binding_id": "b1", "place_id": "place-1", "event": {"conversation_key": "slack:c1"}}}
+
+
+def _place_bound(tmp_path, *, project, event_queue=True):
+    from ouroboros.loop_messages import _record_owner_directive
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    ctx = SimpleNamespace(messages=[], pending_events=[], drive_root=tmp_path, task_id="place-work",
+                          task_metadata=deepcopy(PLACE_BOUND), event_queue=queue.Queue() if event_queue else None,
+                          _owner_directives=[])
+    chat = 7
+    if project:
+        made = create_project(tmp_path, "launch", name="Launch")
+        bind_task_to_project(tmp_path, ctx.task_id, made["id"], made["chat_id"], origin={"absent": "system"})
+        chat = int(made["chat_id"])
+    _record_owner_directive(ctx, source="owner_mailbox", content="Is the report ready?", msg_id="m1")
+    return ctx, chat
+
+
+def _owed(ctx):
+    from ouroboros.loop_messages import owner_reply_owed
+
+    return owner_reply_owed(ctx)
+
+
+def test_presence_bound_live_send_in_a_project_room_answers_my_human_and_stays_dialogue(tmp_path):
+    ctx, chat = _place_bound(tmp_path, project=True)
+    assert _owed(ctx)
+    assert deliver_owner_event(ctx, {"type": "send_message", "chat_id": chat, "text": "The report is ready.",
+                                     "system_type": "proactive_message"}) == "live"
+    assert ctx._owner_reply_revision == 1 and not _owed(ctx)
+    [row] = pending_owner_dialogue(ctx)
+    assert "The report is ready." in row["content"] and _facts(row)["transport_mode"] == "live"
+
+
+@pytest.mark.parametrize("case", ["place-local-room", "unreadable", "resolved-peer", "frame-peer"])
+def test_presence_bound_send_elsewhere_discharges_and_retains_nothing(tmp_path, monkeypatch, case):
+    import ouroboros.tools.owner_delivery as delivery
+
+    ctx, chat = _place_bound(tmp_path, project=case != "place-local-room")
+    if case == "unreadable":
+        def unavailable(*_args, **_kwargs):
+            raise OSError("bindings temporarily unavailable")
+        monkeypatch.setattr(delivery, "_delivery_chat", unavailable)
+    if case == "resolved-peer":
+        monkeypatch.setattr(delivery, "_delivery_chat", lambda *_a: -5)
+    if case == "frame-peer":
+        chat = -5
+    mode = deliver_owner_event(ctx, {"type": "send_message", "chat_id": chat, "text": "Done.",
+                                     "system_type": "proactive_message"})
+    assert mode == ("deferred" if case == "frame-peer" else "live")
+    assert _owed(ctx) and not getattr(ctx, "_owner_reply_revision", None)
+    assert not pending_owner_dialogue(ctx)
+
+
+def test_presence_private_main_contact_still_answers_my_human(tmp_path):
+    ctx, _chat = _place_bound(tmp_path, project=False)
+    assert deliver_owner_event(ctx, {"type": "send_message", "chat_id": 1, "text": "Privately: it is done.",
+                                     "system_type": "main_notice",
+                                     "progress_meta": {"presence_contact": {"task_id": "place-work"}}}) == "live"
+    assert not _owed(ctx) and len(pending_owner_dialogue(ctx)) == 1
+
+
+def test_presence_bound_live_send_in_main_answers_my_human(tmp_path):
+    ctx, _chat = _place_bound(tmp_path, project=False)
+    assert deliver_owner_event(ctx, {"type": "send_message", "chat_id": 1, "text": "Done; details are here.",
+                                     "system_type": "proactive_message"}) == "live"
+    assert ctx._owner_reply_revision == 1 and not _owed(ctx)
+    assert len(pending_owner_dialogue(ctx)) == 1
+
+
+def test_presence_bound_deferred_project_words_stay_dialogue_and_answer_nothing(tmp_path):
+    """As for any Project work: deferred words are kept, and only a live send answers (``owner_reply_owed``)."""
+    ctx, chat = _place_bound(tmp_path, project=True, event_queue=False)
+    assert deliver_owner_event(ctx, {"type": "send_message", "chat_id": chat, "text": "Queued report.",
+                                     "system_type": "proactive_message"}) == "deferred"
+    assert _owed(ctx) and not getattr(ctx, "_owner_reply_revision", None)
+    [row] = pending_owner_dialogue(ctx)
+    assert "Queued report." in row["content"] and _facts(row)["transport_mode"] == "deferred"

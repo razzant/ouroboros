@@ -32,7 +32,7 @@ def _chapter_tails() -> dict[str, str]:
 def test_a_body_plan_packet_inlines_the_chapters_not_the_membership():
     from ouroboros.tools import plan_ask, plan_packet
 
-    prompt = plan_ask.stable_prompt(None, body=True, system_root=REPO, enforcement="blocking", by_retrieval=False)
+    prompt = plan_ask.stable_prompt(None, body=True, system_root=REPO, by_retrieval=False)
     assert "inline, in full, for a plan that changes Ouroboros's own body" in prompt
     for path, tail in _chapter_tails().items():
         if path.startswith("docs/architecture/"):
@@ -42,7 +42,7 @@ def test_a_body_plan_packet_inlines_the_chapters_not_the_membership():
     # membership page must not be assemblable at all.
     with pytest.raises(plan_packet.PlanPacketError):
         plan_packet.build_stable_prompt(
-            checklist_section="x", body=True, enforcement="blocking",
+            checklist_section="x", body=True,
             bible_text=plan_ask._governance_text(REPO, "BIBLE.md"), architecture_text="",
         )
 
@@ -50,6 +50,6 @@ def test_a_body_plan_packet_inlines_the_chapters_not_the_membership():
 def test_an_ordinary_plan_packet_inlines_no_chapter():
     from ouroboros.tools import plan_ask
 
-    prompt = plan_ask.stable_prompt(None, body=False, system_root=REPO, enforcement="advisory", by_retrieval=False)
+    prompt = plan_ask.stable_prompt(None, body=False, system_root=REPO, by_retrieval=False)
     for path, tail in _chapter_tails().items():
         assert tail not in prompt, f"an ordinary plan's packet must not inline {path}"

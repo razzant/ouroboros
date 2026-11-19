@@ -128,9 +128,7 @@ def _reject_schedule_task(
     loop); otherwise nothing is overwritten and the copy is freed only once
     another owner provably holds the row. A workspace child that never ran has
     no artifacts to finalize, so its artifact status is terminal (as the API
-    refusal records it). Receipt persistence alone resumes through the claim's
-    store gate: contention retains the chosen detail, before cleanup or notice.
-    Returns whether the refusal was durably confirmed.
+    refusal records it). Returns whether the refusal was durably confirmed.
     """
     log.warning("Rejecting scheduled task %s: %s", tid, detail)
     write_fields = {**result_fields, **(extra_fields or {})}
@@ -148,22 +146,18 @@ def _reject_schedule_task(
         try:
             from supervisor.task_admission import persist_never_admitted_refusal
 
-            write_refusal = persist_never_admitted_refusal if never_admitted else write_task_result
-            persist = functools.partial(write_refusal,
-                ctx.DRIVE_ROOT,
-                tid,
-                **({"admission_token": preparation.token} if preparation is not None
-                   else {} if never_admitted else {"status": status}),
-                **write_fields,
-                result=detail,
-                # ABI-3: a rejected schedule spent a confirmed zero — stamped
-                # under the honest name (the retired alias is read-only).
-                accounted_upper_bound_usd=0.0,
-            )
-            if preparation is None:
-                persist()
+            # ABI-3: a rejected schedule spent a confirmed zero — stamped
+            # under the honest name (the retired alias is read-only).
+            receipt = dict(result=detail, accounted_upper_bound_usd=0.0, **write_fields)
+            if preparation is not None:
+                # Rejoin only the chosen receipt. A closing generation must
+                # still settle it; copy disposal and notice are not retried.
+                preparation.store_gate(functools.partial(
+                    persist_never_admitted_refusal, ctx.DRIVE_ROOT, tid,
+                    admission_token=preparation.token, **receipt), controls=False)
             else:
-                preparation.store_gate(persist, controls=False)
+                write_refusal = persist_never_admitted_refusal if never_admitted else write_task_result
+                write_refusal(ctx.DRIVE_ROOT, tid, **({} if never_admitted else {"status": status}), **receipt)
             refusal_confirmed = True
         except Exception as exc:
             from supervisor.workspace_preparation import store_contention
@@ -846,12 +840,11 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
             progress_meta["queued_behind_active_cap"] = True
     else:
         progress_meta["task_event"] = "scheduled"
-    workers = getattr(view, "WORKERS", {}) or {}
-    from supervisor import workers as pool
-    active = [w for w in workers.values() if getattr(w, "active_capacity", True)]
-    if len(active) >= pool.MAX_WORKERS and all(getattr(w, "busy_task_id", None) for w in active):
-        progress_meta["worker_saturation_warning"] = True
-        suffix = " (all workers are currently busy; it will start when one is free)"
+    from supervisor.worker_pool_lifecycle import acting_room
+
+    if acting_room(getattr(view, "WORKERS", {}) or {}, getattr(view, "RUNNING", {}) or {}) == 0:
+        progress_meta["worker_saturation_warning"] = True  # the owner's cap counts acting tasks, not processes
+        suffix = " (the owner's limit of acting tasks is reached; it will start when one is free)"
     else:
         suffix = ""
     if delegation_role == "subagent" and queued_behind_active_cap:

@@ -104,7 +104,7 @@ def test_both_assignment_branches_grant_signed_memory_and_drop_the_old_bans():
         for claim in FALSE_CLAIMS:
             assert claim not in text
     # What stays forbidden is still said in each branch.
-    assert "Do NOT commit" in acting and "or write identity or scratchpad." in acting
+    assert "Committing, review gates" in acting and "writing identity or scratchpad are the parent's steps" in acting
     assert "Do not write local repo/data state" in readonly and "tree_note" in readonly
 
 

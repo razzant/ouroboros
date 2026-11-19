@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -16,6 +17,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
+from ouroboros.git_observation import unhide_live_entries
 from ouroboros.utils import write_bytes_atomic
 
 EVIDENCE_ENV = "OUROBOROS_TEST_EVIDENCE_ROOT"
@@ -117,7 +119,10 @@ def source_evidence(repo, destination) -> dict:
     """Keep the Git candidate recipe, not arbitrary command inputs or runtime data.
 
     One private copy of the index answers entries, tree and diff alike, so they
-    agree and the live ``index.lock`` is never taken. A persistent Git owner keeps
+    agree and the live ``index.lock`` is never taken. Its assume-unchanged and
+    present skip-worktree flags are cleared (``git_observation.unhide_live_entries``):
+    the diff holds the bytes the command read, the entries what is staged, and an
+    absent sparse entry its indexed blob. A persistent Git owner keeps
     its base tree; only index objects missing from that tree are packed. A
     disposable owner may vanish, so its pack holds base and index trees/blobs
     (never history). Git archive is unsuitable: export-ignore/export-subst alter bytes.
@@ -146,7 +151,8 @@ def source_evidence(repo, destination) -> dict:
         live_index = repo / os.fsdecode(git("rev-parse", "--git-path", "index").strip())
         env["GIT_INDEX_FILE"] = str(Path(private) / "index")
         if live_index.is_file():
-            shutil.copyfile(live_index, env["GIT_INDEX_FILE"])
+            shutil.copy2(live_index, env["GIT_INDEX_FILE"])  # with its time: see unhide_live_entries
+            unhide_live_entries(git, lambda path: os.path.lexists(repo / path))
         return _source_record(repo, destination, git)
 
 
@@ -308,14 +314,27 @@ def _source_record(repo, destination, git) -> dict:
     return record
 
 
-def diagnostic_directory(fallback, name="diagnostics") -> Path:
-    """Producer-owned output, external when a test owner supplied a destination."""
+# Inside one producer folder of a test owner's destination: that producer declared the folder's output for
+# publication. `run_diagnostics` selects by this declaration alone and never publishes it as output.
+PUBLISHED_DIAGNOSTICS_MARKER = "OUROBOROS_TEST_DIAGNOSTICS_PUBLISHED.txt"
+
+
+def diagnostic_directory(fallback, name="diagnostics", *, publish=False) -> Path:
+    """Producer-owned output, external when a test owner supplied a destination.
+
+    There it stays with the owner's run, unless ``publish`` declares it diagnostics to publish (frames, DOM,
+    facts, startup logs): then this folder, and only this one, carries ``PUBLISHED_DIAGNOSTICS_MARKER``, which
+    ``run_diagnostics`` selects by. A drive, a checkout, raw JUnit or a proof keeps the default."""
     parent = os.environ.get(EVIDENCE_ENV)
     # A producer may call repeatedly for one test; keep its filenames stable
     # within that invocation, but separate workers/parametrizations/repeated runs.
     key = hashlib.sha256(os.fsencode(Path(fallback).resolve())).hexdigest()[:16]
     path = Path(parent) / name / key if parent else Path(fallback)
     path.mkdir(parents=True, exist_ok=True)
+    if parent and publish and not (path / PUBLISHED_DIAGNOSTICS_MARKER).is_file():
+        (path / PUBLISHED_DIAGNOSTICS_MARKER).write_text(
+            "published test diagnostics: the producer of this folder declared its output for publication\n",
+            encoding="utf-8")
     return path
 
 
@@ -335,19 +354,36 @@ def diagnostics_incomplete(reason, source=None) -> None:
         retain_tree(root, f"test diagnostics incomplete: {reason}")
 
 
+def _failure_outcome(error: BaseException) -> bool:
+    """An error, or pytest's own failure outside ``Exception`` (``pytest.fail``, which a signal-method
+    pytest-timeout raises), never its xfail or its ``Exit`` (``pytest.exit``, an ``Exception``). pytest is not
+    imported: a process that never loaded it cannot have raised either. Interruption, exit, cancellation, skip
+    and generator close are no failure."""
+    outcomes = sys.modules.get("_pytest.outcomes")
+    if outcomes is None:
+        return isinstance(error, Exception)
+    return (isinstance(error, (Exception, outcomes.Failed))
+            and not isinstance(error, (outcomes.XFailed, outcomes.Exit)))
+
+
 @contextmanager
 def keep_startup_log(root, name):
     """A real server that never became ready keeps why, past its case's scratch.
 
     Its own stdio (``root/name``: a failed manager child's traceback lands nowhere else) and its data
-    logs go to the run's evidence, for a launcher releases the case's tree on red too. The failure goes on.
+    logs go to the run's evidence as published diagnostics, for a launcher releases the case's tree on red
+    too. The failure goes on.
+    Any other ``BaseException`` leaves at once, with no I/O (``_failure_outcome``); a thread-method timeout
+    or a hard exit raises nothing here, so nothing is copied.
     """
     try:
         yield
-    except Exception:
+    except BaseException as error:
+        if not _failure_outcome(error):
+            raise
         root, logs = Path(root), Path(root) / "data" / "logs"
         try:
-            kept = diagnostic_directory(root / "startup-diagnostics", "server-startup")
+            kept = diagnostic_directory(root / "startup-diagnostics", "server-startup", publish=True)
             for path in (root / name, *logs.glob("*.log"), *logs.glob("*.jsonl")):
                 if path.is_file():
                     target = kept / path.relative_to(root)
@@ -358,6 +394,129 @@ def keep_startup_log(root, name):
         except OSError as exc:
             diagnostics_incomplete(str(exc), root)
         raise
+
+
+# What `diagnostic_directory` names a producer's folder: its fallback path's SHA-256, 16 hex digits.
+_PRODUCER_FOLDER = re.compile(r"[0-9a-f]{16}")
+
+
+def _present(path) -> bool:
+    """Whether ``path`` exists, link or not. A denied answer raises: a gap, never an absence."""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _published_folders(entry: Path, gaps: list) -> list[Path]:
+    """The folders of one entry at a run's top that hold published diagnostics, never through a link."""
+    if not stat.S_ISDIR(entry.lstat().st_mode) or _present(entry / EVIDENCE_RUN_MARKER):
+        return []
+    if entry.name == "ui":
+        return [entry]
+    folders = []  # each producer folder declares itself: a public one never opens its retained neighbours
+    for child in sorted(entry.iterdir(), key=lambda path: path.name):
+        try:
+            if (_PRODUCER_FOLDER.fullmatch(child.name) and stat.S_ISDIR(child.lstat().st_mode)
+                    and _present(child / PUBLISHED_DIAGNOSTICS_MARKER)):
+                folders.append(child)
+        except OSError as error:
+            gaps.append((child, error))
+    return folders
+
+
+def run_diagnostics(run) -> tuple[list[Path], list[str], list[tuple[Path, OSError]]]:
+    """(files, names left at the top, gaps) of one evidence run, by the layout its owners write.
+
+    Its published diagnostics are ``ui/``, where scripts/safe_test.py and the commit gate point
+    ``OUROBOROS_UI_EVIDENCE_DIR`` by default, and each producer folder ``<family>/<key>/`` its producer
+    declared (``diagnostic_directory(..., publish=True)``: frames, facts, ``server-startup`` logs), without the
+    declaration. Everything else stays with the run: the owner's records (``owner.json``, ``result.json``,
+    ``source/``, the command's full streams), retained producer output, nested projections and any output
+    outside that contract. A folder marked as another run is that owner's record; links and special files
+    are never read. A path that cannot be listed or examined is a gap ``(path, error)``, and its siblings
+    are still read."""
+    run, roots, left, gaps = Path(run), [], [], []
+    for entry in sorted(run.iterdir(), key=lambda path: path.name):  # names: Windows paths sort case-insensitively
+        try:
+            folders = _published_folders(entry, gaps)
+        except OSError as error:
+            gaps.append((entry, error))
+            continue
+        roots += folders
+        if not folders:
+            left.append(entry.name)
+
+    def unlisted(error):  # os.walk's: a folder it could not list
+        gaps.append((Path(error.filename) if error.filename else top, error))
+
+    files = []
+    for top in roots:
+        for directory, dirs, names in os.walk(top, onerror=unlisted):  # links to folders are listed, never entered
+            if EVIDENCE_RUN_MARKER in names:
+                dirs[:] = []
+                continue
+            dirs.sort()
+            for path in (Path(directory) / name for name in sorted(names) if name != PUBLISHED_DIAGNOSTICS_MARKER):
+                try:
+                    if stat.S_ISREG(path.lstat().st_mode):
+                        files.append(path)
+                except OSError as error:
+                    gaps.append((path, error))
+    return files, left, gaps
+
+
+def export_diagnostics(raw, destination) -> dict:
+    """Copy every evidence run's diagnostics (``run_diagnostics``) beneath ``raw`` to the same relative
+    path beneath ``destination``, for publication apart from any proof. The source stays with its owner;
+    a folder or leaf that cannot be read or copied is a named gap, never a reason to stop copying the rest."""
+    raw, destination = Path(raw).resolve(), Path(destination)
+    facts = {"runs": [], "files": 0, "bytes": 0, "errors": []}
+
+    def gap(path, error):
+        facts["errors"].append(f"{Path(os.path.relpath(path, raw)).as_posix()}: {type(error).__name__}: {error}")
+
+    for directory, dirs, names in os.walk(raw, onerror=lambda error: gap(error.filename or raw, error)):
+        dirs.sort()
+        if EVIDENCE_RUN_MARKER not in names:
+            continue
+        dirs[:] = []  # a run's own tree is selected below, never searched for further runs
+        run = Path(directory)
+        relative = run.relative_to(raw)
+        try:
+            files, left, gaps = run_diagnostics(run)
+        except OSError as error:
+            gap(run, error)
+            continue
+        for path, error in gaps:
+            gap(path, error)
+        for path in files:
+            target = destination / relative / path.relative_to(run)
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target)
+                facts["bytes"] += target.stat().st_size
+                facts["files"] += 1
+            except OSError as error:
+                gap(path, error)
+        facts["runs"].append({"run": relative.as_posix(), "files": len(files), "left": left})
+    return facts
+
+
+def _export_main(argv) -> int:
+    """``python -m ouroboros.test_evidence export-diagnostics RAW DESTINATION``: 1 when a leaf is a gap."""
+    if len(argv) != 3 or argv[0] != "export-diagnostics":
+        print("usage: python -m ouroboros.test_evidence export-diagnostics RAW DESTINATION", file=sys.stderr)
+        return 2
+    facts = export_diagnostics(argv[1], argv[2])
+    for row in facts["runs"]:
+        print(f"CI_DIAGNOSTICS {row['run']}: {row['files']} file(s); left with the run: {', '.join(row['left'])}")
+    for error in facts["errors"]:
+        print(f"CI_DIAGNOSTICS_INCOMPLETE {error}")
+    print(f"CI_DIAGNOSTICS_EXPORTED {facts['files']} file(s), {facts['bytes']} bytes, "
+          f"from {len(facts['runs'])} run(s) into {argv[2]}", flush=True)
+    return 1 if facts["errors"] else 0
 
 
 def preview_file(path, limit=200_000) -> str:
@@ -437,22 +596,46 @@ class CapturedPass(tuple):
         return result
 
 
-def record_kept_scratch(ctx, root, kept, tokens) -> None:
+def _gate_container(root, identity):
+    """Resolve only this fresh gate's issued identity, using the shared scratch predicate."""
+    from ouroboros.session_scratch import SCRATCH_WORKSPACE, _recorded_scratch
+    from ouroboros.test_environment import default_temp_parent
+
+    if identity is None:
+        if (root.name == SCRATCH_WORKSPACE and root.parent.name.startswith("obs-")
+                and root.parent.parent == default_temp_parent().resolve()):
+            raise ValueError("no identity issued by this gate's fresh allocator")
+        return root  # an older or nested gate: no new identity can be inferred for it
+    if (not isinstance(identity, dict) or identity.get("schema_version") != 2
+            or identity.get("path") != str(root.parent) or root.name != SCRATCH_WORKSPACE):
+        raise ValueError("scratch identity was not issued for this gate workspace")
+    return _recorded_scratch(root, identity)
+
+
+def record_kept_scratch(ctx, root, kept, tokens, *, identity=None) -> None:
     """One session-scratch record (``workspace_preflight``'s shape, with what is kept and why) for a
     run's task: the custody pass over finished tasks then holds and releases a kept root like any
-    task's scratch, with no reader, sweeper or age of its own. The root's ``obs-`` name is what
-    that shape requires. A run with no task records nothing, nor does a root an outer owner releases."""
+    task's scratch, with no reader, sweeper or age of its own. New identity comes from the fresh
+    allocator's per-run carrier, not the contents of an unknown directory. Existing records are read
+    and re-noted unchanged, v1 included. A run with no task or with an outer owner records nothing."""
+    from ouroboros.session_scratch import recorded_scratch
     from ouroboros.test_environment import default_temp_parent
     from ouroboros.tool_access_paths import canonical_data_root
     from ouroboros.workspace_preflight import SESSION_SCRATCH_DIRNAME, _note_open_scratch, _owned_directory
 
     task_id, drive = str(getattr(ctx, "task_id", "") or ""), getattr(ctx, "drive_root", "")
+    root = _gate_container(root, identity)
     if not task_id or not drive or root.parent != default_temp_parent().resolve():
         return
     owner = _owned_directory(drive, ("task_drives", task_id, SESSION_SCRATCH_DIRNAME, root.name), root)
-    seen = root.lstat()
-    write_record(owner / "scratch.json", {"schema_version": 1, "path": str(root), "identity": [seen.st_dev, seen.st_ino],
-                                          "kept": kept, "containment_tokens": tokens})
+    record = owner / "scratch.json"
+    if os.path.lexists(record):
+        if recorded_scratch(record) != root:
+            raise ValueError("existing scratch record names another gate")
+    else:
+        if identity is None:
+            raise ValueError("no identity issued by this gate's fresh allocator")
+        write_record(record, {**identity, "kept": kept, "containment_tokens": tokens})
     _note_open_scratch(canonical_data_root(ctx), task_id, root.name, owner)
 
 
@@ -472,14 +655,25 @@ def finish_gate(evidence, verdict, phase, release, ctx=None) -> None:
     if cleanup and cleanup[1] in kept:
         hold = marker_text(kept[cleanup[1]][0])
     reason = hold or next((marker_text(found_in[0]) for found_in in kept.values()), "")
+    container, release_allowed = cleanup[1] if cleanup else None, True
+    try:
+        if cleanup:
+            container = _gate_container(cleanup[1], evidence.get("scratch_ownership"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        reason = hold = f"gate scratch identity unconfirmed: {exc}"
+        release_allowed = False
+        report_diagnostic(f"PREFLIGHT_EVIDENCE_INCOMPLETE {reason}")
+    errors = evidence.setdefault("evidence_errors", [])
+    if not release_allowed:
+        errors.append(reason)
     record = {"verdict": verdict, "phase": phase, "reused_from": evidence.get("reused_from"),
               "execution": evidence.get("reuse", evidence.get("execution", "not_run")),
-              "scratch": str(cleanup[1]) if cleanup else None,
+              "scratch": str(cleanup[1]) if cleanup else None, "scratch_ownership": evidence.get("scratch_ownership"),
               "containment_error": cleanup[4] if cleanup else None,
               "lanes": evidence.get("lanes", []), "workers": evidence.get("workers"),
               "budget_seconds": evidence.get("budget_seconds"), "elapsed_seconds": evidence.get("elapsed_seconds"),
-              "diagnostics_incomplete": bool(evidence.get("evidence_errors")),
-              "evidence_errors": evidence.get("evidence_errors", []),
+              "diagnostics_incomplete": bool(evidence.get("evidence_errors")) or not release_allowed,
+              "evidence_errors": errors,
               "retention_reason": reason, "cleanup": "pending" if cleanup else "not_created",
               "kept": [], "containment_tokens": []}
     try:
@@ -492,23 +686,42 @@ def finish_gate(evidence, verdict, phase, release, ctx=None) -> None:
     if cleanup:
         if hold:
             retain_tree(cleanup[1], hold)
+        cleanup_status = "unconfirmed"
+        held_root = cleanup[1]
         try:
-            release(*cleanup[:4], hold)
-        except OSError as exc:
+            if release_allowed:
+                release(*cleanup[:4], hold)
+                if container != cleanup[1] and not cleanup[1].exists():
+                    # The workspace owner proved release. Its outside marker still must match before
+                    # the enclosing allocation goes; partial/nested holds never reach this branch.
+                    _gate_container(cleanup[1], evidence["scratch_ownership"])
+                    remove_scratch_tree(container)
+                cleanup_status = "released"
+            if container.exists():
+                cleanup_status = "retained"
+        except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as exc:
             reason = hold = f"scratch release failed: {exc}"
-            retain_tree(cleanup[1], reason)
-        remains = cleanup[1].exists()
-        record.update(cleanup="retained" if remains else "released", retention_reason=reason)
-        if remains:
-            report_diagnostic(f"PREFLIGHT_RETAINED {cleanup[1]}: {reason or 'release incomplete'}")
+            held_root = container
+            # The directory can disappear during removal, or survive without a writable marker.
+            if retain_tree(container, reason) and os.path.lexists(container):
+                cleanup_status = "retained"
+            else:
+                cleanup_status = "unconfirmed"
+        record.update(cleanup=cleanup_status, retention_reason=reason)
+        if cleanup_status == "retained":
+            report_diagnostic(f"PREFLIGHT_RETAINED {held_root}: {reason or 'release incomplete'}")
             facts = kept_facts(kept) if kept and not hold else [
-                {"path": str(cleanup[1]), "reasons": [(reason or "release incomplete").split("\n")[0]]}]
+                {"path": str(held_root), "reasons": [(reason or "release incomplete").split("\n")[0]]}]
             tokens = [token for token in evidence.get("containment_tokens", ()) if token]
             record.update(kept=facts, containment_tokens=tokens)
             try:
-                record_kept_scratch(ctx, cleanup[1], facts, tokens)
+                record_kept_scratch(ctx, cleanup[1], facts, tokens, identity=evidence.get("scratch_ownership"))
             except (OSError, ValueError, KeyError, TypeError) as exc:  # the tree stays either way; its record is a gap
+                record["diagnostics_incomplete"] = True
+                record["evidence_errors"].append(f"no scratch record: {exc}")
                 report_diagnostic(f"PREFLIGHT_EVIDENCE_INCOMPLETE {cleanup[1]}: no scratch record: {exc}")
+        elif cleanup_status == "unconfirmed":
+            report_diagnostic(f"PREFLIGHT_CLEANUP_UNCONFIRMED {container}: {reason}")
         try:
             write_record(evidence["path"] / "result.json", record)
         except OSError as exc:
@@ -530,3 +743,7 @@ def remove_scratch_tree(path) -> None:
         function(name)  # Sharing/ACL failures still propagate to the owner.
 
     shutil.rmtree(path, onerror=onerror)
+
+
+if __name__ == "__main__":
+    raise SystemExit(_export_main(sys.argv[1:]))

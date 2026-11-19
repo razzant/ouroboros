@@ -24,6 +24,7 @@ from ouroboros.config import EFFORT_SCALE
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.llm import LLMClient
 from ouroboros.review_execution_projection import review_executions_from_actor_usage
+from ouroboros.review_records import reported_review_cost
 from ouroboros.tools.registry import ToolContext, active_repo_dir_for
 from ouroboros.utils import utc_now_iso
 
@@ -298,7 +299,7 @@ def _plan_row_from_actor(actor: Dict[str, Any], slot: Any) -> dict:
         "response_ref": actor.get("response_ref") or {},
         "tokens_in": usage.get("prompt_tokens", 0),
         "tokens_out": usage.get("completion_tokens", 0),
-        "cost": float(usage["cost"]) if usage.get("cost") is not None else None,
+        "cost": reported_review_cost(usage),
         # Presentation-only receipt from the actor's RETURNED usage. Requested
         # slot route/model, money, profile and raw telemetry never enter it.
         "executions": review_executions_from_actor_usage([actor]),
@@ -477,18 +478,19 @@ def plan_panel_health_snapshot(slots: list) -> Optional[Dict[str, Dict[str, str]
     session_slots = [slot for slot in slots if slot_is_session(slot)]
     if not session_slots:
         return {}
-    from ouroboros.claudexor_daemon import ensure_owned_gateway, owned_daemon_provisioned
+    from ouroboros.claudexor_daemon import owned_daemon_provisioned
+    from ouroboros.execution_domain import current as execution_domain, native_gateway
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.subagents import delegated_run_shape, route_health
     from ouroboros.review_execution import ReviewRouteUnavailable, session_route_for_review_slot
 
-    if not owned_daemon_provisioned():
+    if execution_domain() is None and not owned_daemon_provisioned():
         return None
     evidence: Dict[str, Dict[str, str]] = {}
     by_route: Dict[tuple, tuple[str, str]] = {}
     gateway = None
     try:
-        gateway = ensure_owned_gateway()
+        gateway = native_gateway()  # the seats' engine: the domain's work engine, else the owned one
         for slot in session_slots:
             try:
                 route = session_route_for_review_slot(slot)

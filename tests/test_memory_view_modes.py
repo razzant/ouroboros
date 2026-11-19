@@ -49,7 +49,7 @@ def test_honest_max_selects_low_before_folding_story_and_keeps_window_budget(tmp
     floor = tight.projection("low").memory_facts["floor"]
     assert floor["target_tokens"] is None and floor["budget_allowance_tokens"] is None
     assert floor["mode_switch"] == {"from": "max", "to": "low"}
-    assert "Low with chapter maps, a disclosed fact of this route" in tight.low_projection.system_content_json
+    assert "Max with chapter maps, for the window, a disclosed fact of this route" in tight.low_projection.system_content_json
     assert tight.projection("low").memory_facts["max_room"]["cause"] == "route"  # the books alone overflow 200k
     assert roomy.projection("max").memory_facts["max_room"]["cause"] == "held"
     assert "word word word word" not in tight.low_projection.system_content_json
@@ -89,6 +89,23 @@ def test_larger_or_fitting_route_keeps_bytes_and_smaller_route_uses_same_snapsho
     assert narrow.core.memory_view_json == plan.core.memory_view_json
 
 
+def test_a_narrowing_keeps_what_the_starts_request_took_with_no_memory(tmp_path, monkeypatch):
+    """3A: Low's missed target names what the start's request took with no memory (``floor.no_memory_tokens``), the
+    start's fact. A route that narrows the shown view keeps it, as it keeps the start's Max room, so the mode chooser can
+    warn while later sends still miss Low, until a new start measures again; a start without it gets none."""
+    _core, build = _built(tmp_path, monkeypatch, ratio=1, page_chars=400_000)
+    plan = build(1_000_000)
+
+    def missed(projection):
+        facts = projection.memory_facts
+        return dataclasses.replace(projection, memory_facts={**facts, "floor": {**facts["floor"], "no_memory_tokens": 315_536}})
+    marked = dataclasses.replace(plan, **{f"{mode}_projection": missed(plan.projection(mode)) for mode in ("max", "low", "nano")})
+    narrow = _on_route(marked, 65_537)
+    assert narrow.projection(narrow.initial_mode).memory_facts["floor"]["no_memory_tokens"] == 315_536
+    plain = _on_route(plan, 65_537)
+    assert "no_memory_tokens" not in plain.projection(plain.initial_mode).memory_facts["floor"]
+
+
 def test_smaller_route_addresses_memory_only_when_the_compact_request_exceeds_its_room(tmp_path, monkeypatch):
     from ouroboros import memory_view as mv
 
@@ -119,11 +136,11 @@ def test_start_uses_one_floor_walk_and_calibrates_before_book_choice(tmp_path, m
     _, build = _built(tmp_path, monkeypatch, books=600_000, ratio=1)
     render, walks = mf.render_view_for_mode, []
     def measured(*args, **kwargs):
-        walks.append(bool(kwargs.get("shortest")))  # True: a host step's price of the walk's end, never a chosen view
+        walks.append(bool(kwargs.get("shortest") or kwargs.get("level")))  # True: a host step's price, never a chosen view
         return render(*args, **kwargs)
     monkeypatch.setattr(mf, "render_view_for_mode", measured)
     assert build(330_000).initial_mode == "max"
-    assert walks == [False]  # a start whose room holds its request prices nothing and walks once
+    assert walks == [True, False]  # price the ordinary Max view, then walk the selected view once
     monkeypatch.setattr("ouroboros.context_fit._route_calibration_ratio", lambda *_a, **_kw: 4 / 2.7)
     assert build(330_000).initial_mode == "low"
     assert walks.count(False) == 2  # calibrated before the book choice: Low's one walk, never a Max walk first

@@ -621,8 +621,8 @@ def run_sm1(ctx: LaneContext) -> None:
     ledger = task_oracle.advisory_review()
     tools_rows = task_oracle.tools_rows()
     settled = tool_result_rows(tools_rows)
-    # The commit LANDED: under blocking enforcement that is only reachable through PASS verdicts from both review
-    # organs. Named by what the landing call's review record says it produced, read from that commit in the shared
+    # The commit LANDED: the author decided on the returned outcome, a FAIL included, and continued explicitly.
+    # Named by what the landing call's review record says it produced, read from that commit in the shared
     # object store, never from a worktree: it reaches the serving checkout only through the adoption checked below.
     gate = adoption.gate_identity(settled, ctx.data_root)
     commit = str(gate.get("commit_sha") or "")
@@ -991,13 +991,13 @@ def _skill_entry(base_url: str, name: str) -> dict:
 def sk1_review_gate(review: dict, entry: dict, findings: list) -> tuple[bool, dict]:
     """The SK1 review criterion is the PRODUCT gate (owner decision 2026-09-06): the review ran (HTTP 200 with
     recorded findings) and the ``/api/extensions`` row says ``executable_review`` — clean, warnings, or blockers
-    under advisory enforcement by operator choice (``skill_review_gate``). A clean all-PASS review is a recorded
+    Ouroboros may run (``skill_review_gate``). A clean all-PASS review is a recorded
     FACT, not the verdict: the rc.15 SK1 rerun on 560f7d71 authored one clean, one warnings and one blockers
     payload with every other lifecycle check green, so all-PASS measured the author model, not the product.
     The verdict also needs the review call itself to answer 200 with its own ``executable_review`` (the
     lifecycle's gate; a ``pending`` duplicate job never passes) and persisted findings (a review really ran).
-    The SK1 lane sets no enforcement, so it runs the tree default (advisory today) under both profiles: the
-    ``blockers under blocking enforcement`` branch is the product's rule, not a path the stand exercises."""
+    A source that reviews each skill keeps its blockers off until the owner skips the review; the SK1 lane
+    authors its own skills, so that branch is the product's rule, not a path the stand exercises."""
     gate = entry.get("review_gate") if isinstance(entry.get("review_gate"), dict) else {}
     failed = [f.get("item") for f in findings if str(f.get("verdict") or "") != "PASS"]
     ok = (review["status"] == 200 and review["body"].get("executable_review") is True
@@ -1116,8 +1116,8 @@ class Scenario:
 
 SCENARIOS: dict[str, Scenario] = {
     "SM1": Scenario(
-        "SM1", "Brand accent change lands as a reviewed release through commit_reviewed (advanced, blocking)",
-        sm1_prompt(), {"OUROBOROS_RUNTIME_MODE": "advanced", "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"},
+        "SM1", "Brand accent change lands as a reviewed release through commit_reviewed (advanced)",
+        sm1_prompt(), {"OUROBOROS_RUNTIME_MODE": "advanced"},
         True, run_sm1, sm1_stub_script, expects_absorb=True),
     "SW1": Scenario(
         "SW1", "Swarm: room mode + roster, two children, fanout receipt, cost rollup, no orphans",

@@ -4,9 +4,53 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from ouroboros import dialogue_import
 from ouroboros.gateway.history import make_chat_history_endpoint
 from tests._store_shared import seed_result
+
+
+@pytest.mark.parametrize("summary", ["Проверка завершена.", "Проверка завершена.\n\n42 строки в /tmp/result.csv. Следующий шаг за владельцем.", ""])
+def test_completion_gist_is_short_on_cards_room_rows_and_live_frames(tmp_path, summary):
+    from ouroboros.gateway.ws import _encode
+    from ouroboros.task_results import load_task_result
+    from tests._wake_summary_shared import seed_wake
+    from tests.test_task_list_selection import client_for
+
+    title = "Authored title. Keep both sentences."
+    stored = seed_wake(tmp_path, title=title, suggested_name=title, wake_summary=summary)
+    task_id = stored["task_id"]
+    logs = tmp_path / "logs"
+    logs.mkdir(exist_ok=True)
+    terminal = {"direction": "out", "chat_id": 1,
+                "ts": stored["ts"], "task_id": task_id, "text": "Done", "wake_summary": summary,
+                "task_terminal_status": "completed", "suggested_name": title}
+    (logs / "chat.jsonl").write_text(json.dumps(terminal) + "\n", encoding="utf-8")
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "1"})))
+    room_row = next(row for row in json.loads(response.body)["messages"] if row.get("task_id") == task_id)
+    client = client_for(tmp_path)
+    detail = client.get("/api/tasks/" + task_id)
+    assert detail.status_code == 200
+    listed = client.get("/api/tasks").json()["tasks"]
+    card = next(row for row in listed if row["task_id"] == task_id)
+    chat = json.loads(_encode({**terminal, "type": "chat"}))
+    log = json.loads(_encode({"type": "log", "data": {**terminal, "type": "task_done"}}))["data"]
+    for row in (room_row, detail.json(), card, chat, log):
+        assert row.get("wake_summary", "") == ("Проверка завершена." if summary else "")
+    for row in (detail.json(), card, chat, log):
+        assert row["suggested_name"] == title
+    assert load_task_result(tmp_path, task_id)["wake_summary"] == terminal["wake_summary"] == summary
+
+
+def test_schedule_gists_shorten_listed_rows_and_leave_other_answers_as_they_are():
+    from ouroboros.gateway.completion_gist import short_schedule_gists
+    assert short_schedule_gists({"available": False}) == {"available": False}  # an unavailable reader's answer
+    rows = {"available": True, "tasks": [{"id": "s1", "last_outcome": {"line": "Done. 42 rows in /tmp/r.csv."}},
+                                         {"id": "s2", "last_outcome": {"line": "Host notice. Detail.", "notice": True}}]}
+    shown = short_schedule_gists(rows)
+    assert shown["tasks"][0]["last_outcome"]["line"] == "Done." and shown["tasks"][1] == rows["tasks"][1]
+    assert rows["tasks"][0]["last_outcome"]["line"] == "Done. 42 rows in /tmp/r.csv."  # the cached outcome stays whole
 
 
 def test_chat_history_preserves_subagent_lane_group_metadata(tmp_path):
@@ -107,6 +151,45 @@ def test_chat_history_replays_delivered_document_row(tmp_path):
     assert rec["caption"] == "quarterly numbers"
     assert rec["task_id"] == "t-doc"
     assert rec["size_bytes"] == 4096
+
+
+def test_chat_history_replays_posix_document_labels_from_live_delivery(tmp_path, monkeypatch):
+    from ouroboros.chat_chain import recorded_context
+    from ouroboros.gateway.chat_search import make_chat_search_endpoint
+    from ouroboros.gateway.ws import _encode
+    from supervisor import message_bus
+
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"session_id": "s", "owner_id": 7})
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_args: None)
+    monkeypatch.setattr(message_bus, "utc_now_iso", lambda: "2026-07-09T00:00:00Z")
+    bridge, live = message_bus.LocalChatBridge(), []
+    bridge._broadcast_fn = lambda frame: live.append(json.loads(_encode(frame).encode("utf-8")))
+    filenames = ("report-\udcff.txt", r"report-\udcff.txt", "файл🪶.txt")
+    url = "/api/tasks/document/artifacts/captured.txt"
+    for name in filenames:
+        assert bridge.send_document(1, b"report\n", filename=name, download_url=url, task_id="document")[0]
+
+    endpoint = make_chat_history_endpoint(tmp_path)
+    response = asyncio.run(endpoint(SimpleNamespace(query_params={})))
+    assert response.status_code == 200
+    wire = response.body.decode("utf-8")
+    assert r'"report-\udcff.txt"' in wire and r'"report-\\udcff.txt"' in wire and "файл🪶.txt" in wire
+    rows = {row["filename"]: row for row in json.loads(wire)["messages"] if row.get("msg_type") == "document"}
+    assert set(rows) == set(filenames)
+    assert len({row["row_address"] for row in rows.values()}) == len(filenames)
+    for frame, name in zip(live, filenames, strict=True):
+        row = rows[name]
+        assert row["row_address"] == frame["row_address"] and frame["filename"] == name
+        assert row["caption"] == "" and row["download_url"] == url and "file_base64" not in row
+        _, source = recorded_context(tmp_path, row["row_address"])
+        assert json.loads(source.decode("utf-8"))["text"] == f"📎 {name}"
+
+    search = asyncio.run(make_chat_search_endpoint(tmp_path)(SimpleNamespace(query_params={"q": "report"})))
+    assert search.status_code == 200
+    candidates = json.loads(search.body.decode("utf-8"))["candidates"]
+    assert {item["filename"]: item["row_address"] for item in candidates if item.get("msg_type") == "document"} == {
+        name: row["row_address"] for name, row in rows.items()}
 
 
 def test_chat_history_replays_links_with_task_grouping_fields(tmp_path):

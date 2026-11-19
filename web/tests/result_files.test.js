@@ -6,7 +6,7 @@
 // Wrap up's saved work (`wrap_up_document`) leads the row past any number of files, uncounted.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { projectResultArtifacts, resultFilesItemHtml, syncResultFilesItem } from '../modules/result_files.js';
+import { projectResultArtifacts, resultFilesItemHtml, syncQuestionMaterials, syncResultFilesItem } from '../modules/result_files.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 const TASK = 'task-files';
@@ -73,6 +73,43 @@ test('the row bounds its length, escapes names and lists at most twenty tooltip 
     ]));
     assert.doesNotMatch(hostile, /<img|<b>/);
     assert.match(hostile, /&lt;img src=x onerror=1&gt;\.md/);
+});
+
+test('the Files row and material reader distinguish POSIX name bytes from literal escapes', () => {
+    const rawName = 'fixture-\uDCFF.txt';
+    const literalName = String.raw`fixture-\xff.txt`;
+    const normalName = 'файл🪶.txt';
+    const view = projectResultArtifacts(TASK, [
+        ...[rawName, literalName, normalName].map((name) => ({ name, status: 'ready' })),
+        { name: 'a', relpath: 'folder\uDC80/a', status: 'ready' },
+        ...[rawName, literalName].map((name) => ({ name, relpath: `regular/${name}`, status: 'ready' })),
+    ], { ['folder\uDC80']: { available: true, files: 1 } });
+    assert.deepEqual(view.files.map(({ name }) => name), [rawName, literalName, normalName]);
+    // Whitespace is part of a POSIX name, not a hint to select a different file.
+    const spaced = ` ${rawName} `;
+    assert.equal(projectResultArtifacts(TASK, [{ name: spaced }]).files[0].name, spaced);
+    assert.deepEqual(view.files.map(({ url }) => url), ['', '', `/api/tasks/${TASK}/artifacts/${encodeURIComponent(normalName)}`]);
+    const html = render(view);
+    assert.ok(html.includes(String.raw`fixture-\xff.txt · download unavailable`));
+    assert.ok(html.includes(String.raw`fixture-\\xff.txt · download unavailable`));
+    assert.ok(html.includes(String.raw`folder\x80/ · folder · 1 file · no archive`));
+    assert.ok(html.includes(`title="${String.raw`regular/fixture-\xff.txt`}\n${String.raw`regular/fixture-\\xff.txt`}"`));
+    assert.equal((html.match(/href=/g) || []).length, 1);
+    assert.match(html, /файл🪶\.txt<\/a>/);
+    assert.doesNotMatch(html, /[\uD800-\uDFFF]/u);
+
+    const { prior } = installDom();
+    try {
+        const card = document.createElement('div');
+        syncQuestionMaterials(card, [rawName, literalName, normalName].map((name) => ({ task_id: TASK, name, sha256: 'fixture' })));
+        const materials = card.querySelector('.chat-quiz-materials');
+        assert.deepEqual(materials.children.map((child) => [child.tagName, child.textContent]), [
+            ['SPAN', String.raw`fixture-\xff.txt · download unavailable`],
+            ['SPAN', String.raw`fixture-\\xff.txt · download unavailable`],
+            ['A', normalName],
+        ]);
+        assert.equal(materials.children[2].href, view.files[2].url);
+    } finally { restoreDom(prior); }
 });
 
 test('a card keeps one Files row in step with a settled detail only', () => {

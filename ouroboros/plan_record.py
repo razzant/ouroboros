@@ -321,13 +321,7 @@ def fold_objections(record: Mapping[str, Any], legacy: Optional[Mapping[str, Any
         for key, current in objections.items():
             if key[0] == seat and current.get("open") and key not in mentioned and not current.get("unknown_withdrawal"):
                 current["not_adjudicated"] = True
-    out = []
-    for key, current in objections.items():
-        if current.get("unknown_withdrawal"):
-            out.append(current)
-            continue
-        out.append({**current, "holds": bool(current.get("open") and current.get("owner_marked"))})
-    return out
+    return list(objections.values())
 
 
 def open_objections(record: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -390,31 +384,27 @@ def unknown_outcome_asks(record: Mapping[str, Any]) -> List[str]:
 
 # ------------------------------------------------------------------ gate
 
-def gate_projection(record: Mapping[str, Any], *, enforcement: str, cyber_pro: bool, hurry: bool,
+def gate_projection(record: Mapping[str, Any], *, cyber_pro: bool,
                     hard_rail: str = "", legacy: Optional[Mapping[str, Any]] = None,
                     unreadable: bool = False) -> Dict[str, Any]:
     """The ONE finalization decision over the plan record (pure).
 
-    ``held`` ⟺ Blocking, not Cyber Pro, no owner hurry, and some open objection was
-    raised by an owner-marked reviewer of the ask it answered — for any task. Silence,
-    pending asks, refusals and mind-added critics never hold. An unreadable record
-    is engaged, never absent.
+    No objection holds the final answer: open ones are disclosed with it. Outside Cyber Pro
+    an unreadable record holds it — engaged, never absent — until it can be read or the
+    author stops. Silence, pending asks and refusals never hold.
     """
-    policy = "blocking" if str(enforcement or "").lower() == "blocking" else "advisory"
     legacy_engaged = bool((legacy or {}).get("engaged"))
     if not unreadable and not engaged(record) and not legacy_engaged:
-        return {"required": False, "allow": True, "status": "not_required", "enforcement": policy,
-                "open_objections": [], "holding": [], "pending_asks": [], "revision": 0}
+        return {"required": False, "allow": True, "status": "not_required",
+                "open_objections": [], "pending_asks": [], "revision": 0}
     objections = open_objections(record, legacy)
-    holding = [o for o in objections if o.get("holds")]
     pending = [str(a.get("ask_id") or "") for a in pending_asks(record)] + [str(x) for x in (legacy or {}).get("pending_asks") or []]
     dispatched = asks_dispatched(record) + int((legacy or {}).get("asks_dispatched") or 0)
     latest = latest_revision(record)
     decision: Dict[str, Any] = {
-        "required": True, "enforcement": policy,
-        "open_objections": [{k: o.get(k) for k in ("seat_id", "id", "text", "holds", "not_adjudicated", "ask_id",
+        "required": True,
+        "open_objections": [{k: o.get(k) for k in ("seat_id", "id", "text", "not_adjudicated", "ask_id",
                                                      "revision", "owner_marked", "legacy")} for o in objections],
-        "holding": [f"{o['seat_id']}:{o['id']}" for o in holding],
         "pending_asks": pending, "asks_dispatched": dispatched, "asks_unroutable": unroutable_asks(record),
         "unknown_outcome": unknown_outcome_asks(record),
         "revision": int(latest.get("n") or 0) if latest else 0,
@@ -423,23 +413,12 @@ def gate_projection(record: Mapping[str, Any], *, enforcement: str, cyber_pro: b
     }
     if cyber_pro:
         decision["decision_authority"] = "cyber_pro"
-    if hurry and policy == "blocking":
-        decision["owner_hurry_local_advisory"] = True
-        decision["configured_enforcement"] = "blocking"
     if hard_rail:
         status, allow = "rail_degraded", True
-    elif cyber_pro:
-        status, allow = ("objections_open" if objections else "awaiting" if pending else "clear"), True
-    elif unreadable:
+    elif unreadable and not cyber_pro:
         status, allow = "unreadable", False  # a gate that cannot read its authority is engaged, not absent
-    elif holding and policy == "blocking" and not hurry:
-        status, allow = "held", False
-    elif objections:
-        status, allow = "objections_open", True
-    elif pending:
-        status, allow = "awaiting", True
     else:
-        status, allow = "clear", True
+        status, allow = ("objections_open" if objections else "awaiting" if pending else "clear"), True
     decision.update(status=status, allow=allow, review_only_awaited=status == "awaiting")
     return decision
 
@@ -466,7 +445,7 @@ def acceptance_view(record: Mapping[str, Any], ingress_claims: List[Dict[str, An
         "affected_paths": list(r.get("affected_paths") or []), "body": bool(r.get("body")),
         "seen_by_asks": seen_by.get(int(r.get("n") or 0), []),
     } for r in revisions]
-    objections = [{k: o.get(k) for k in ("seat_id", "id", "text", "holds", "not_adjudicated", "ask_id", "revision")}
+    objections = [{k: o.get(k) for k in ("seat_id", "id", "text", "not_adjudicated", "ask_id", "revision")}
                   for o in open_objections(record, legacy)]
     latest = latest_revision(record)
     exhibit: Dict[str, Any] = {"revisions": history, "open_objections": objections}
@@ -601,7 +580,7 @@ def read_view(record: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] = N
                                    for p in a.get("participants") or []],
                   "record_id": a.get("record_id")} for a in record.get("asks") or []],
         "participants": views,
-        "open_objections": {seat: [{k: o.get(k) for k in ("id", "text", "ask_id", "revision", "holds", "not_adjudicated", "legacy")}
+        "open_objections": {seat: [{k: o.get(k) for k in ("id", "text", "ask_id", "revision", "not_adjudicated", "legacy")}
                                    for o in rows] for seat, rows in by_seat.items()},
         "withdrawn": [{k: o.get(k) for k in ("seat_id", "id", "withdrawn_in", "why")}
                       for o in objections if not o.get("open") and not o.get("unknown_withdrawal")],
@@ -618,6 +597,47 @@ RECORD_HISTORY_RULE = (
     "answer does not close it and nobody votes. Each reply is its participant's own words from its "
     "retained source; silence is neither agreement nor an objection."
 )
+
+
+# Reasons ``plan_evidence.resolve_evidence`` records BESIDE content that still attached: a head cut at the per-item
+# bound, a chat range whose history has a gap. Any other reason on an attached locator (``duplicate_locator``,
+# ``source_unretained:*``) is a note on content that went whole; on a locator that did not attach, it says why.
+_PART_REASONS = ("truncated_to_", "chat_history_gap:")
+
+
+def ask_evidence(ask: Mapping[str, Any]) -> Dict[str, Any]:
+    """One ask's evidence as its row recorded it (``attach``, ``attached``, ``omissions``), one item per locator in
+    declared order: ``whole`` or ``part`` when it attached — prepared for the participants, which proves neither that
+    one was sent it (its own status says that) nor that one read it — ``not_attached`` otherwise, each with every
+    reason recorded for it. A field an older writer did not record is not recorded, never an empty list: without
+    ``attached`` an item's state is ``unknown``; without ``omissions`` an attached item's completeness is unknown."""
+    declared = ask.get("attach") if isinstance(ask.get("attach"), list) else None
+    attached = ask.get("attached") if isinstance(ask.get("attached"), list) else None
+    omissions = ask.get("omissions") if isinstance(ask.get("omissions"), list) else None
+    rows = {str(row.get("locator") or ""): row for row in attached or [] if isinstance(row, Mapping)}
+    reasons: Dict[str, List[str]] = {}
+    for row in omissions or []:
+        if isinstance(row, Mapping):
+            reasons.setdefault(str(row.get("locator") or ""), []).append(str(row.get("reason") or ""))
+    items = []
+    for locator in dict.fromkeys([*(str(raw or "").strip() for raw in declared or []), *rows, *reasons]):
+        row, why = rows.get(locator), reasons.get(locator, [])
+        if not locator:
+            continue
+        if row is not None:
+            state = "attached_unknown" if omissions is None else "part" if any(reason.startswith(_PART_REASONS) for reason in why) else "whole"
+        elif attached is None:
+            state = "unknown"
+        elif why or omissions is None:
+            state = "not_attached"
+        else:  # declared, yet neither attached nor named absent: no row says what became of it
+            state = "unknown"
+        items.append({"locator": locator, "state": state, "reasons": why,
+                      **({key: copy.deepcopy(row[key]) for key in ("bytes", "sha256", "ref") if row.get(key) is not None}
+                         if row is not None else {})})
+    return {"recorded": {"attach": declared is not None, "attached": attached is not None, "omissions": omissions is not None},
+            "items": items, "counts": {state: sum(1 for item in items if item["state"] == state)
+                                       for state in ("whole", "part", "attached_unknown", "not_attached", "unknown")}}
 
 
 def operative_revision(record: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
@@ -653,9 +673,12 @@ def record_history(drive_root: Any, task_id: str, record: Mapping[str, Any]) -> 
                 gaps.append(_gap("reply has no retained source; its typed projection is shown",
                                  plan_ask=ask.get("ask_id"), seat_id=participant.get("seat_id")))
             reviewers.append(seat)
+        # The ask's evidence as recorded: what it declared, attached and named cut or absent, apart (``ask_evidence``);
+        # a field an older writer did not record stays absent, never an empty list.
         rounds.append({"plan_ask": ask.get("ask_id"), "revision": ask.get("revision"), "ts": ask.get("ts"),
                        "message": ask.get("message"), "review_record_id": ask.get("record_id"),
-                       "attached": copy.deepcopy(ask.get("attached") or []), "reviewers": reviewers})
+                       **{key: copy.deepcopy(ask[key]) for key in ("attach", "attached", "omissions") if isinstance(ask.get(key), list)},
+                       "reviewers": reviewers})
     decision_rows = []
     for objection in fold_objections(record):
         if objection.get("unknown_withdrawal"):
@@ -663,8 +686,7 @@ def record_history(drive_root: Any, task_id: str, record: Mapping[str, Any]) -> 
         decision_rows.append({
             "decision_kind": "plan_objection", "plan_ask": objection.get("raised_in"),
             "seat_id": objection.get("seat_id"), "objection_id": objection.get("id"), "remark": objection.get("text"),
-            "status": {"open": bool(objection.get("open")), "holds": bool(objection.get("holds")),
-                       "owner_marked": bool(objection.get("owner_marked")),
+            "status": {"open": bool(objection.get("open")), "owner_marked": bool(objection.get("owner_marked")),
                        "not_adjudicated": bool(objection.get("not_adjudicated")),
                        "last_restated_in": objection.get("ask_id"), "withdrawn_in": objection.get("withdrawn_in") or ""},
             "reason": objection.get("why") or "", "history_role": "open" if objection.get("open") else "historical",

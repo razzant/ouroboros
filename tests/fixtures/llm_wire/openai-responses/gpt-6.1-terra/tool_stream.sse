@@ -1,0 +1,39 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"input_transformations":[],"id":"resp_fixture01","object":"response","created_at":1794896435,"completed_at":null,"status":"in_progress","background":false,"frequency_penalty":0.0,"presence_penalty":0.0,"moderation":null,"model":"gpt-6.1-terra","access_programs":{"cyber":"standard"},"previous_response_id":null,"instructions":null,"output":[],"error":null,"incomplete_details":null,"tools":[{"type":"function","name":"lookup","description":"Look up one English word's origin.","parameters":{"additionalProperties":false,"properties":{"word":{"type":"string"}},"required":["word"],"type":"object"},"output_schema":null,"strict":false}],"tool_choice":"required","parallel_tool_calls":true,"prompt_cache_key":null,"prompt_cache_retention":"24h","text":{"format":{"type":"text"},"verbosity":"medium"},"top_p":0.98,"top_logprobs":0,"temperature":1.0,"reasoning":{"effort":"medium","context":"all_turns","summary":null,"mode":"standard"},"user":null,"usage":null,"tool_usage":{"image_gen":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0},"output_tokens_details":{"image_tokens":0,"text_tokens":0}},"web_search":{"num_requests":0}},"safety_identifier":null,"store":false,"metadata":{},"max_output_tokens":4096,"max_tool_calls":null,"service_tier":"default","truncation":"disabled","image":{"context_compression":"disabled"}}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"input_transformations":[],"id":"resp_fixture01","object":"response","created_at":1794896435,"completed_at":null,"status":"in_progress","background":false,"frequency_penalty":0.0,"presence_penalty":0.0,"moderation":null,"model":"gpt-6.1-terra","access_programs":{"cyber":"standard"},"previous_response_id":null,"instructions":null,"output":[],"error":null,"incomplete_details":null,"tools":[{"type":"function","name":"lookup","description":"Look up one English word's origin.","parameters":{"additionalProperties":false,"properties":{"word":{"type":"string"}},"required":["word"],"type":"object"},"output_schema":null,"strict":false}],"tool_choice":"required","parallel_tool_calls":true,"prompt_cache_key":null,"prompt_cache_retention":"24h","text":{"format":{"type":"text"},"verbosity":"medium"},"top_p":0.98,"top_logprobs":0,"temperature":1.0,"reasoning":{"effort":"medium","context":"all_turns","summary":null,"mode":"standard"},"user":null,"usage":null,"tool_usage":{"image_gen":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0},"output_tokens_details":{"image_tokens":0,"text_tokens":0}},"web_search":{"num_requests":0}},"safety_identifier":null,"store":false,"metadata":{},"max_output_tokens":4096,"max_tool_calls":null,"service_tier":"default","truncation":"disabled","image":{"context_compression":"disabled"}}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"type":"function_call","id":"fc_fixture01","call_id":"call_fixture01","name":"lookup","arguments":"","status":"in_progress"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":3,"item_id":"fc_fixture01","output_index":0,"delta":"{\"","obfuscation":"xxxxxxxxxxxxxx"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":4,"item_id":"fc_fixture01","output_index":0,"delta":"word","obfuscation":"xxxxxxxxxxxx"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":5,"item_id":"fc_fixture01","output_index":0,"delta":"\":\"","obfuscation":"xxxxxxxxxxxxx"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":6,"item_id":"fc_fixture01","output_index":0,"delta":"ouro","obfuscation":"xxxxxxxxxxxx"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":7,"item_id":"fc_fixture01","output_index":0,"delta":"bor","obfuscation":"xxxxxxxxxxxxx"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":8,"item_id":"fc_fixture01","output_index":0,"delta":"os","obfuscation":"xxxxxxxxxxxxxx"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":9,"item_id":"fc_fixture01","output_index":0,"delta":"\"}","obfuscation":"xxxxxxxxxxxxxx"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":10,"item_id":"fc_fixture01","output_index":0,"arguments":"{\"word\":\"ouroboros\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":11,"output_index":0,"item":{"type":"function_call","id":"fc_fixture01","call_id":"call_fixture01","name":"lookup","arguments":"{\"word\":\"ouroboros\"}","status":"completed"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":12,"response":{"input_transformations":[],"id":"resp_fixture01","object":"response","created_at":1794896435,"completed_at":1794896436,"status":"completed","background":false,"frequency_penalty":0.0,"presence_penalty":0.0,"moderation":null,"model":"gpt-6.1-terra","access_programs":{"cyber":"standard"},"previous_response_id":null,"instructions":null,"output":[{"type":"function_call","id":"fc_fixture01","call_id":"call_fixture01","name":"lookup","arguments":"{\"word\":\"ouroboros\"}","status":"completed"}],"error":null,"incomplete_details":null,"tools":[{"type":"function","name":"lookup","description":"Look up one English word's origin.","parameters":{"additionalProperties":false,"properties":{"word":{"type":"string"}},"required":["word"],"type":"object"},"output_schema":null,"strict":false}],"tool_choice":"required","parallel_tool_calls":true,"prompt_cache_key":null,"prompt_cache_retention":"24h","text":{"format":{"type":"text"},"verbosity":"medium"},"top_p":0.98,"top_logprobs":0,"temperature":1.0,"reasoning":{"effort":"medium","context":"all_turns","summary":null,"mode":"standard"},"user":null,"usage":{"input_tokens":61,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0,"cache_write_tokens_details":{"ttl_30m_tokens":0,"ttl_12h_tokens":0}},"output_tokens":19,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":80},"tool_usage":{"image_gen":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0},"output_tokens_details":{"image_tokens":0,"text_tokens":0}},"web_search":{"num_requests":0}},"safety_identifier":null,"store":false,"metadata":{},"max_output_tokens":4096,"max_tool_calls":null,"service_tier":"default","truncation":"disabled","image":{"context_compression":"disabled"}}}
+

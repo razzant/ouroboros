@@ -105,6 +105,56 @@ def test_source_host_failures_publish_tool_error(ctx, monkeypatch, failure):
     assert (result.status, result.code) == ("error", "TOOL_ERROR")
 
 
+def _with_clawhub(hub, monkeypatch, search):
+    from ouroboros.marketplace import clawhub
+
+    rows = [*hub.rows(), {"id": "clawhub", "name": "ClawHub", "kind": "registry", "trust": "review", "confirmed": True}]
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps(rows))
+    monkeypatch.setattr(clawhub, "search", search)
+    return clawhub
+
+
+def test_skill_search_lists_a_named_registrys_popular_page(ctx, monkeypatch):
+    context, _drive, _reviews, hub = ctx
+    asked = []
+
+    def search(query, **kwargs):
+        asked.append((query, kwargs.get("sort")))
+        name = "weather-kit" if query else "popular-one"
+        return {"results": [clawhub._summary_from_record({"name": name, "summary": "Most downloaded."})]}
+
+    clawhub = _with_clawhub(hub, monkeypatch, search)
+    found = json.loads(_call("skill_search", context, source="clawhub"))
+    assert asked == [("", "popular")]
+    assert [item["id"] for item in found["items"]] == ["clawhub/popular-one"]
+    assert "most downloaded" in found["listing"] and found["count"] == 1
+    # Other calls keep their behaviour: no registry for an empty All sources, its text search for words.
+    asked.clear()
+    assert "listing" not in json.loads(_call("skill_search", context))
+    assert asked == []
+    words = json.loads(_call("skill_search", context, source="clawhub", query="weather"))
+    assert "listing" not in words
+    assert asked == [("weather", None)], "a text search asks the registry without a listing order"
+    assert "clawhub/weather-kit" in [item["id"] for item in words["items"]]
+    assert not [note for note in words["notes"] if note.startswith("ClawHub")]
+
+
+def test_skill_search_says_when_a_named_registry_cannot_be_listed(ctx, monkeypatch):
+    context, _drive, _reviews, hub = ctx
+    asked = []
+
+    def search(*_a, **_k):
+        asked.append(1)
+        raise RuntimeError("HTTP 503")
+
+    _with_clawhub(hub, monkeypatch, search)
+    failed = json.loads(_call("skill_search", context, source="clawhub"))
+    assert failed["items"] == [] and "listing" not in failed and "ClawHub: HTTP 503" in failed["notes"]
+    asked.clear()
+    by_category = json.loads(_call("skill_search", context, source="clawhub", category="writing"))
+    assert asked == [] and any("no categories" in note for note in by_category["notes"])
+
+
 @pytest.mark.parametrize("tool", ["skill_sources", "skill_install", "skill_update"])
 def test_successful_calls_publish_ok(ctx, tool):
     context, _drive, _reviews, _hub = ctx
@@ -162,15 +212,14 @@ def test_install_from_a_review_row_starts_the_review_and_records_the_reason(ctx)
     assert record["task_id"] == "task-1" and record["basis"] == "review"
 
 
-@pytest.mark.parametrize(("enforcement", "expected", "tool"), [
-    pytest.param("blocking", ["a", "b"], "skill_install", id='blocking-expected0-skill_install'),
-    pytest.param("advisory", ["a"], "skill_update", id='advisory-expected1-skill_update'),
+@pytest.mark.parametrize(("expected", "tool"), [
+    pytest.param(["a"], "skill_install", id='expected0-skill_install'),
+    pytest.param(["a"], "skill_update", id='expected1-skill_update'),
 ])
-def test_skill_tools_carry_the_admitted_panel_before_mutation(tmp_path, monkeypatch, tool, enforcement, expected):
+def test_skill_tools_carry_the_admitted_panel_before_mutation(tmp_path, monkeypatch, tool, expected):
     from ouroboros import skill_source_install as installer
     from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
     set_review_pool(monkeypatch, pool_roster(pool_seat("a", "openai/a"), pool_seat("b", "openai/b")))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     called, panels = [], []
     def install(*_args, **kwargs):
         called.append(kwargs)
@@ -184,11 +233,10 @@ def test_skill_tools_carry_the_admitted_panel_before_mutation(tmp_path, monkeypa
     invalid = _typed_call(tool, context, **args, reviewers=["a"], **{why: 42})
     assert invalid.code == "TOOL_ARG_ERROR" and f"{why} must be a string" in invalid.text
     assert called == panels == []
-    if enforcement == "advisory":
-        refused = _typed_call(tool, context, **args, reviewers=["a"])
-        assert refused.code == "TOOL_ARG_ERROR" and "REVIEW_PANEL_REASON_REQUIRED" in refused.text
-        assert f"Supply {why} or omit reviewers" in refused.text
-        assert called == panels == []
+    refused = _typed_call(tool, context, **args, reviewers=["a"])
+    assert refused.code == "TOOL_ARG_ERROR" and "REVIEW_PANEL_REASON_REQUIRED" in refused.text
+    assert f"Supply {why} or omit reviewers" in refused.text
+    assert called == panels == []
     result = _typed_call(tool, context, **args, reviewers=["a"], **{why: "one area changed"})
     assert result.code == "OK" and len(called) == len(panels) == 1
     assert panels[0].facts["assigned"] == expected and panels[0].facts["reason"] == "one area changed"

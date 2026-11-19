@@ -108,6 +108,7 @@ class ContinuationStart(NamedTuple):
     snapshot: Optional[AdoptedSnapshot] = None
     note: str = ""                   # the caller's text, for the prompt once the run is bound
     words: str = ""                  # my human's rows no START body of the line holds (``continuation_words``)
+    folder: str = ""                 # a plan-thread turn's: its thread's folder, as the engine names it ("" when it does not)
 
 
 NO_CONTINUATION = ContinuationStart()
@@ -345,6 +346,21 @@ def inherited_access(ctx: Any, run_id: Any) -> Optional[str]:
     return access if access in SESSION_ACCESS_LOWERING else None
 
 
+def inherited_processing(ctx: Any, run_id: Any) -> Optional[str]:
+    """The tier a ``continue_from`` keeps: the continued run's captured one ('' when it asked for none);
+    None when it recorded none or custody is unreadable, so the selected row's own resolution stands."""
+    from ouroboros.delegate_custody_current import run
+
+    drive = custody.custody_root(ctx)
+    try:
+        entry = None if custody.custody_log_unreadable(drive) else run(drive, str(run_id or "").strip())
+    except Exception:
+        log.debug("Continued run's processing unavailable for %s", run_id, exc_info=True)
+        return None
+    captured = getattr(entry, "processing_preference", None)
+    return captured if isinstance(captured, str) else None
+
+
 def _adopted_snapshot(entry: Any, authority: Any) -> Tuple[Optional[AdoptedSnapshot], str, str]:
     """The predecessor's undisposed snapshot a WRITING continuation runs in, or a refusal."""
     from ouroboros.configured_subagents import SESSION_ACCESS_PROFILES
@@ -470,17 +486,20 @@ def with_run_binding(start: ContinuationStart, authority: Any, binding: str, wor
     same renderers after provisioning, or, where none applies, the directory it starts
     in, plus this run's own selected ``input_files`` note, if any.
     A plan-thread turn (no ``workspace`` fact) keeps its own contract, plus my human's rows its line
-    lacks (``words``) and that note, even when the caller's text is empty; with neither to add it is
-    returned untouched, as a fresh start (``NO_CONTINUATION``, no facts) always is.
+    lacks (``words``) and that note, even when the caller's text is empty. A turn owing either, or a
+    promotion (whose access the thread's first instructions do not hold), restates this turn's typed
+    access, without inventing a new binding or cwd; one owing none is returned untouched, as a fresh
+    start (``NO_CONTINUATION``, no facts) always is.
     """
     from ouroboros.delegate_start_instructions import access_instruction, no_copy_binding_instruction
 
     if not start.facts:
         return start
     if "workspace" not in start.facts:
-        if not (start.words or inputs):
+        if not (start.words or inputs or start.facts.get("promotion")):
             return start
-        return start._replace(prompt="\n\n".join(part for part in (start.prompt, start.words, inputs) if part))
+        current = access_instruction(authority.access, investigation=authority.investigation).strip() if authority else ""
+        return start._replace(prompt="\n\n".join(part for part in (start.prompt, start.words, current, inputs) if part))
     current = (access_instruction(authority.access, investigation=authority.investigation)
                + (binding or no_copy_binding_instruction(workdir)) + inputs)
     return start._replace(prompt=continuation_prompt(start.facts, start.note, current, start.words))

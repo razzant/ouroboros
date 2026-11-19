@@ -260,6 +260,10 @@ def test_a_step_stopped_at_its_budget_is_owed_on_a_clock_that_has_not_ticked(dat
 
 
 def test_the_step_runs_in_the_job_and_a_source_removal_makes_it_due(data, tmp_path, monkeypatch):
+    """Each pass that unlinked files logs one ``runtime_retirement`` event, a pass stopped at its budget inside one
+    mirror (``unlinked`` without ``removed``) included (#3239); a closed gate's hold with nothing to remove logs none."""
+    import json
+
     from ouroboros import task_custody, worktree_removal
 
     retirement.record_startup(data, gaps=True)
@@ -272,16 +276,26 @@ def test_the_step_runs_in_the_job_and_a_source_removal_makes_it_due(data, tmp_pa
     def row():
         return maintenance_jobs.job(data, retirement.JOB) or {}
 
+    def retirements():
+        journal = data / "logs" / "events.jsonl"
+        rows = journal.read_text(encoding="utf-8").splitlines() if journal.exists() else []
+        return [event for event in map(json.loads, rows) if event.get("type") == "runtime_retirement"]
+
     assert retirement.run(data, lambda: False)["state"] == "done"
     assert row()["next_due"] is not None and retirement.due(data, row(), {}, False), "the rest is owed: due again"
+    [event] = retirements()
+    assert event["reports"]["bytecode"]["unlinked"] == 2 and event["reports"]["bytecode"]["removed"] == 0
+    assert event["errors"] == []
     monkeypatch.setattr(retirement, "BYTECODE_UNLINKS_PER_RUN", 10_000)
     retirement.run(data, lambda: False)
     assert not pyc.parent.exists() and row()["next_due"] is None
     assert not retirement.due(data, row(), {}, False), "nothing owed: at rest"
+    assert len(retirements()) == 2
     worktree_removal.retired({"path": str(tmp_path / "copy")}, data)
     assert retirement.due(data, row(), {}, False), "a retired copy makes the step due at once"
-    retirement.run(data, lambda: False)
+    retirement.run(data, lambda: False)  # owed, held at the gate, nothing left to remove
     assert not retirement.due(data, row(), {}, False)
+    assert len(retirements()) == 2
     trash = data / "state" / "custody_trash" / "drive-1"
     trash.mkdir(parents=True)
     assert task_custody.remove_custody_trash(data)["removed"] == 1

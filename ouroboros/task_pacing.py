@@ -733,6 +733,11 @@ def main_loop_wire_options(
     }
 
 
+def task_chat_conversation_id(task_id: str) -> str:
+    """The task owns its turns: Resume preserves the id; Continue starts a new one."""
+    return f"task:{task_id}" if task_id else ""
+
+
 def prospective_wrapup_attempt_request(
     *, llm: Any, messages: list[Dict[str, Any]], model: str,
     reasoning_effort: str, tools: Optional[list[Dict[str, Any]]] = None,
@@ -741,6 +746,7 @@ def prospective_wrapup_attempt_request(
     model_turn_state: Any = None,
     cache_affinity: str = "",
     processing_preference: Optional[str] = None,
+    task_id: str = "",
 ) -> Any:
     """Build the conservative request facts from the prospective wire payload.
 
@@ -751,6 +757,7 @@ def prospective_wrapup_attempt_request(
     sample, so its price is advice: the send seals a fresh line and is admitted
     again at its own price (``loop_forced_finalization._forced_admission_predicate``)."""
     from ouroboros.llm import _attempt_request, _finalized_physical_candidate
+    from ouroboros.llm_fallback import _wire_surface
     from ouroboros.loop_llm_call import MAIN_LOOP_MAX_TOKENS
     from ouroboros.request_wire_recovery import request_wire_call_scope
     from ouroboros.pricing import infer_provider_from_model
@@ -777,7 +784,8 @@ def prospective_wrapup_attempt_request(
             force_unknown_reservation=bool(processing_preference),
         ))[0]
 
-    target = {**resolved, "processing_preference": processing_preference}
+    target = {**resolved, "processing_preference": processing_preference,
+              "chat_conversation_id": task_chat_conversation_id(task_id)}
     if target.get("provider") == "claudexor":
         from ouroboros.llm_claudexor import _request, prepare_processing_target
 
@@ -801,7 +809,7 @@ def prospective_wrapup_attempt_request(
         anthropic = target.get("provider") == "anthropic"
         candidate = _finalized_physical_candidate(
             target, stamp_clock_note(candidate, blocks=anthropic),
-            "messages" if anthropic else "chat.completions",
+            _wire_surface(target),
         )
         llm._pop_thread_disclosure("_cache_breakpoint_tls")
     return _merge_scope(_attempt_request(target, candidate))[0]
@@ -816,14 +824,14 @@ def prepared_wrapup_candidate(
     turn, so the candidate is built from that same owner slot."""
     from ouroboros.llm_claudexor import cache_key_for_model
     from ouroboros.loop_llm_call import _prepare_main_messages
-    from ouroboros.model_slots import task_model_binding, task_processing_preference
+    from ouroboros.model_slots import acting_model_role, task_model_binding, task_processing_preference
     from ouroboros.model_wait import current_model_wait
     from ouroboros.send_clock import MainSendClock, main_clock_policy
     from ouroboros.transcript_prefix import append_reasoning_retirement_fact, retire_main_reasoning
 
     owner_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     waiter = current_model_wait()
-    role, account = task_model_binding({"model_role": getattr(ctx, "model_role", ""),
+    role, account = task_model_binding({"model_role": acting_model_role(owner_ctx, model_role=getattr(ctx, "model_role", "")),
         "task_metadata": getattr(owner_ctx, "task_metadata", {})},
         context_fit_plan=getattr(owner_ctx, "context_fit_plan", None),
         overrides=waiter.overrides if waiter else None)
@@ -855,7 +863,7 @@ def prepared_wrapup_candidate(
                                          task_type=str(getattr(ctx, "task_type", "") or ""))).bound(), \
             bind_physical_attempt_context(physical):
         request = prospective_wrapup_attempt_request(
-            llm=ctx.llm, messages=send_messages, model=ctx.active_model,
+            llm=ctx.llm, messages=send_messages, model=ctx.active_model, task_id=ctx.task_id,
             reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
             allow_server_web_search=allow_server_web_search,
             prompt_tokens=int(ctx.accumulated_usage.get("_context_prompt_estimate") or 0),
@@ -919,7 +927,7 @@ def wrapup_reservation_fits(
             return None
         if request is None and messages is not None and callable(getattr(llm, "_resolve_remote_target", None)):
             request = prospective_wrapup_attempt_request(
-                llm=llm, messages=messages, model=model, reasoning_effort=reasoning_effort,
+                llm=llm, messages=messages, model=model, reasoning_effort=reasoning_effort, task_id=task_id,
                 tools=tools, allow_server_web_search=allow_server_web_search,
             )
         if request is None:

@@ -365,7 +365,7 @@ def build_skill_publish_preflight(
             repository=repository,
             reason_code="github_token_missing",
             summary="GitHub authority is not configured.",
-            repair_hint="Add GitHub authority in Settings -> Secrets, then retry.",
+            repair_hint="Add GitHub authority in Settings -> Accounts and keys, then retry.",
             status_code=409,
         )
 

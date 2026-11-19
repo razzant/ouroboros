@@ -10,9 +10,14 @@ after its export is retained here (``review_thread_retention``), and over the sa
 managed document imports a finished work can no longer name (``delegate_documents``); an import that
 opens its obligation before the step's first pass sets where that pass starts reading
 (``release_opened``). A managed import owner's terminal write schedules this step even without local files.
-Otherwise waiting tasks run it only in a child running for another job; it yields between operations
+Otherwise waiting tasks, and the one-time walks while open (``delegate_result_taken``, ``historical_retirement``), run it
+only in a child running for another job; it yields between operations
 to a delegate capture that child's capture pass never had, the rest waiting for the next run.
 What the step newly saved of the engine's answers (``observed``) reaches ``logs/events.jsonl`` once.
+Task trees and service logs retire only behind the recovery gate. A pass that finds it closed (no
+startup recorded, a startup gap, unreadable recovery links) says so on its job row as the typed hold
+``source_recovery_pending``, its example naming the gap's first error or the first link that could not be
+followed, which Storage and the mind's ``storage`` fact read; an open gate leaves no hold.
 """
 from __future__ import annotations
 
@@ -32,16 +37,45 @@ from ouroboros.unindexed import BYTECODE, LEGACY_BYTECODE
 log = logging.getLogger(__name__)
 JOB = "runtime_retirement"
 STARTUP = "startup_recovery"
+RECOVERY_HOLD = "source_recovery_pending"  # the class ``headless.prune_task_trees`` gives a tree kept for recovery
 BYTECODE_UNLINKS_PER_RUN = 20_000  # removals of one run; the rest is owed to the next (FSEvents pacing)
 
 
-def record_startup(root, *, gaps):
-    """Publish the recovery gate before a child may retire task sources. Missing means unknown."""
+def record_startup(root, *, gaps, report=None):
+    """Publish the recovery gate before a child may retire task sources. Missing means unknown.
+    A gap also publishes how many records the recovery ``report`` left unresolved (its error lines
+    when it names none, one without a report), a trace for the operator that no pass reads, and its
+    first error, cut to a hold example's bound: the example of the pass's hold (``_startup_hold``),
+    which carries no count. Every start also publishes
+    ``workers_unconfirmed``, which ``record_compression``'s log plane reads beside the generation:
+    true unless the recovery report says the previous generation's workers ended
+    (``prior_workers_ended``, set only once its PID check passed; one of them may still hold a log
+    by inode). No report, a recovery skipped or one that returned before that check confirms
+    nothing. A start reads no history for it: the record costs the same on any install."""
     from ouroboros.plan_collection_job import recover_startup
 
+    errors = [str(error) for error in (report or {}).get("errors") or ()]
+    fact = {"generation": uuid.uuid4().hex, "gaps": bool(gaps),
+            "workers_unconfirmed": (report or {}).get("prior_workers_ended") is not True}
+    if gaps:
+        unresolved = {item for item in (report or {}).get("unresolved") or () if item != "*"}
+        example = errors[0] if errors else "startup recovery report missing" if report is None else ""
+        fact.update(count=len(unresolved) or len(errors) or 1, example=example[:maintenance_jobs.HOLD_EXAMPLE_CHARS])
     with store.open_store(root, write=True) as txn:
-        txn.set_meta(STARTUP, {"generation": uuid.uuid4().hex, "gaps": bool(gaps)})
+        txn.set_meta(STARTUP, fact)
         recover_startup(txn)
+
+
+def _startup_hold(startup):
+    """The hold a pass reports while the recorded startup keeps the recovery gate closed, ``None``
+    once a startup recorded no gap. No record is unknown, held like a gap. Its ``count`` is ``None``:
+    the gate keeps every task tree and service log without listing them, so how many it holds is
+    not known, and the recovery's own count is of records, not of what is held."""
+    if not isinstance(startup, dict):
+        return {"class": RECOVERY_HOLD, "count": None, "example": "no startup recovery record"}
+    if startup.get("gaps") is False:
+        return None
+    return {"class": RECOVERY_HOLD, "count": None, "example": str(startup.get("example") or "")}
 
 
 def _inputs(root):
@@ -127,13 +161,17 @@ def _owed(row, inputs):
 
 def due(root, row, facts, child):
     """The history-sized steps are owed; or, in a child already running for another job, the ``review_threads``
-    step left tasks waiting (``review_thread_retention.owed``), never by itself a reason to spawn one."""
+    step left tasks waiting (``review_thread_retention.owed``), its one-time ``taken`` walk is open
+    (``delegate_result_taken.walk_open``) or its historical walk is open or waits (``historical_retirement.owed``),
+    never by itself a reason to spawn one."""
     history_sized = _owed(row, lambda: _inputs(root))
     if history_sized or not child:
         return history_sized
+    from ouroboros import historical_retirement
+    from ouroboros.delegate_result_taken import walk_open
     from ouroboros.review_thread_retention import owed
 
-    return owed(row)
+    return owed(row) or walk_open(row) or historical_retirement.owed(row)
 
 
 def _capture_arrived(root):
@@ -167,6 +205,7 @@ def run(root, should_stop):
     before = maintenance_jobs.job(root, JOB) or {}
     owed = _owed(before, lambda: inputs)
     arrived = _capture_arrived(root)  # the child's capture pass ran first: only a request it never had yields
+    judged, hold = False, None  # the recovery gate as this pass read it: its hold while closed, None once open
     # Finished reviewer threads: exported and verified here first, then released by the engine. Between operations a
     # capture that arrived ends the step, its rest waiting for the child's next run. Alone when only its own work is
     # owed (``due``): the history-sized steps neither run nor change their facts.
@@ -181,11 +220,15 @@ def run(root, should_stop):
         # must never substitute its empty memory for the server's recovery result.
         with store.open_store(root, write=False) as txn:
             startup = txn.meta(STARTUP)
-        if isinstance(startup, dict) and startup.get("gaps") is False and not should_stop():
-            exclusions = startup_tree_exclusions(root)
+        if not should_stop():
+            judged, hold = True, _startup_hold(startup)
+            exclusions, link = (None, "") if hold else startup_tree_exclusions(root)
             if exclusions is not None:
                 steps[:0] = [("task_trees", lambda root: prune_task_trees(root, exclude_root_ids=exclusions)),
                              ("services", prune_service_logs)]
+            elif hold is None:
+                hold = {"class": RECOVERY_HOLD, "count": None,
+                        "example": f"recovery links unreadable: {link}"[:maintenance_jobs.HOLD_EXAMPLE_CHARS]}
     for name, retire in steps:
         if should_stop():
             break
@@ -204,10 +247,15 @@ def run(root, should_stop):
             current = txn.meta(maintenance_jobs.PREFIX + JOB) or {}
             if current.get("arrival") != before.get("arrival") and current.get("next_due") is not None:
                 deadlines.append(current["next_due"])
+            held = {"holds": maintenance_jobs._with_since([hold], current.get("holds"), utc_now_iso())} if hold else {}
             maintenance_jobs.record_in(txn, JOB, state=state, inputs=inputs, errors=errors,
-                                       next_due=min(deadlines) if deadlines else None)
-    if errors or any(report.get(key) for report in reports.values()
-                     for key in ("removed", "swept", "restored", "deleted_dirs", "deleted_files", "observed")):
+                                       next_due=min(deadlines) if deadlines else None, **held)
+            if judged and not hold and "holds" in current:
+                # An open gate holds nothing. The field goes: Storage reads any ``holds``, an empty
+                # list too, as a retirer pass's report.
+                maintenance_jobs.forget_in(txn, JOB, "holds")
+    if errors or any(report.get(key) for report in reports.values() for key in (
+            "removed", "pruned", "unlinked", "swept", "restored", "deleted_dirs", "deleted_files", "observed")):
         append_jsonl(pathlib.Path(root) / "logs/events.jsonl",
                      {"ts": utc_now_iso(), "type": "runtime_retirement", "reports": reports, "errors": errors})
     return {"state": state, "items": len(reports)}

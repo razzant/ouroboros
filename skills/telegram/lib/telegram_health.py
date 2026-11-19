@@ -6,7 +6,7 @@ import shutil
 import time
 from typing import Dict
 
-from ouroboros.queue_observation import pool_observation_status
+from ouroboros.queue_observation import load_queue_document, pool_observation_status
 
 from .telegram_api import _LOCALIZED_TEXTS
 from .telegram_i18n import Index
@@ -96,7 +96,7 @@ def _collect_health(api, lang: str = "en") -> str:
     s = _HEALTH[lang]
     data = _data_dir(api)
     out = []
-    snap = _read_json_file(data / "state" / "queue_snapshot.json")
+    snap = load_queue_document(data)  # the pool's counts as certified on queue.alive, as every queue reader sees them
     listed = snap.get("running") if isinstance(snap.get("running"), list) else []
     rc = max(0, int(snap.get("running_count") or 0) - (len(listed) - len(_owner_running(snap))))
     pc = int(snap.get("pending_count") or 0)

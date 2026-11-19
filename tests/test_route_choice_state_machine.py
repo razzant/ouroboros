@@ -19,7 +19,7 @@ from ouroboros import config, owner_wait, route_choice
 from ouroboros.loop_model_call import _apply_round_route_overrides
 from ouroboros.tools.control_runtime import _switch_model
 from ouroboros.tools.registry import ToolRegistry
-from tests.test_task_settings_snapshot import isolated_runtime, save_owner  # noqa: F401 -- the shared isolated, sealed root
+from tests._task_settings_helpers import isolated_runtime, save_owner  # noqa: F401 -- the shared isolated, sealed root
 
 A, B, C, D = "openai::a", "openai::b", "openai::c", "openai::d"
 
@@ -27,6 +27,16 @@ A, B, C, D = "openai::a", "openai::b", "openai::c", "openai::d"
 def _document(main, light=B, **extra):
     return {"OUROBOROS_MODEL": main, "OUROBOROS_MODEL_LIGHT": light, "OUROBOROS_MODEL_FALLBACKS": "",
             "OPENAI_API_KEY": "key", "OUROBOROS_MODEL_ACCOUNTS": json.dumps({"main": ""}), **extra}
+
+
+@pytest.mark.parametrize("carried_model", [None, B])
+@pytest.mark.parametrize("local", [False, True])
+def test_open_route_uses_locality_only_beside_a_carried_model(carried_model, local):
+    save_owner(_document(A, USE_LOCAL_MAIN=not local))
+    ctx = SimpleNamespace(task_model_override=carried_model, task_use_local_override=local)
+    model, use_local, choice = route_choice.open_route(ctx, None)
+    assert (model, use_local) == ((B, local) if carried_model else (A, not local))
+    assert choice == (route_choice.explicit("task_argument") if carried_model else route_choice.following("main"))
 
 
 @pytest.fixture
@@ -187,3 +197,51 @@ def test_a_consciousness_wake_resolves_its_slot_per_call_instead_of_copying_it(t
     save_owner(_document(C, OUROBOROS_MODEL_CONSCIOUSNESS="", USE_LOCAL_CONSCIOUSNESS=True))
     assert _round(tools, ctx, messages)[0] == (C, True)  # the slot's own local flag still decides
     assert ctx.primary_route == {"model": C, "use_local": True, "role": "consciousness"}
+
+
+@pytest.mark.parametrize("source", ["owner", "owner_words", "room", "main"])
+def test_owner_primary_stays_and_follower_moves_at_next_round(tmp_path, stubbed_rebind, source):
+    save_owner(_document(A))
+    lead = {"source": "main"} if source == "main" else {"source": source, "model": B, "use_local": False}
+    tools, ctx = _turn(tmp_path, {"lead": lead})
+    save_owner(_document(C))
+    route, notice = _round(tools, ctx, [])
+    assert route == (C if source == "main" else B, False)
+    assert bool(notice) is (source == "main")
+    expected = route_choice.following("main") if source == "main" else route_choice.explicit(source)
+    assert ctx.route_choice == expected
+    # Restart/Resume preserves the admitted primary and the route classification.
+    restored_tools, restored, _state = _resume(tmp_path, ctx, [], {"lead": lead})
+    save_owner(_document(D))
+    assert _round(restored_tools, restored, [])[0] == (D if source == "main" else B, False)
+    assert restored.route_choice == expected
+
+
+@pytest.mark.parametrize("source", ["owner", "main"])
+def test_primary_answer_after_fallback_walk_rejoins_its_own_choice(tmp_path, stubbed_rebind, monkeypatch, source):
+    from ouroboros.loop_model_call import _run_cross_model_fallback_chain
+
+    save_owner(_document(A, OUROBOROS_MODEL_FALLBACKS=D))
+    lead = {"source": "main"} if source == "main" else {"source": source, "model": B, "use_local": False}
+    tools, ctx = _turn(tmp_path, {"lead": lead})
+    calls = []
+    def answer(call):
+        calls.append((call.active_model, call.model_role))
+        return {"role": "assistant", "content": "answer"}, 0.0, "max"
+    monkeypatch.setattr(loop_mod, "_call_round_model", answer)
+    monkeypatch.setattr("ouroboros.fallback_cooldown.is_cooling_down", lambda *_a: False)
+    messages = [{"role": "user", "content": "go"}]
+    def walk(model):
+        result = _run_cross_model_fallback_chain(
+            llm=LLM, ctx=ctx, tools=tools, messages=messages, active_model=model, active_use_local=False,
+            tool_schemas=[], active_effort="medium", max_retries=1, drive_logs=tmp_path / "logs",
+            task_id=ctx.task_id, round_idx=1, event_queue=None, accumulated_usage={"_last_llm_error_kind": "bad_request"},
+            task_type="task", emit_progress=lambda *_a, **_kw: None, context_fit_plan=None, active_context_mode="max")
+        assert result[0]["content"] == "answer"
+        return result[1]
+    primary = A if source == "main" else B
+    assert walk(primary) == D and ctx.route_choice == route_choice.explicit("fallback")
+    assert walk(D) == primary
+    assert calls == [(D, "fallback:0"), (primary, "main" if source == "main" else "lead")]
+    assert ctx.route_choice == (route_choice.following("main") if source == "main" else route_choice.explicit("owner"))
+    assert ctx.primary_route["model"] == primary

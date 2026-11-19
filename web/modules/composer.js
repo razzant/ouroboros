@@ -1,7 +1,7 @@
 // The Main and Project composer (docs/DESIGN.md "Controls and editable choices", "Composer owner controls",
 // "Chat attachments"): its markup inside the room's input dock, the message field (its growth, Enter, the input
-// recall and the room's draft), the room's Subagents, Context and Effort capsules with their readback, the "+" menu
-// (Attach file first, then the sections later controls set), the voice and chips slots, the staged attachments with
+// recall and the room's draft), the room's Model, Subagents, Context and Effort capsules with their readback, the "+"
+// menu (Attach file first, then the sections later controls set), the voice and chips slots, the staged attachments with
 // their paste and drop routes, and the send path that turns the draft into the owner's frame. Skills' "+" items and
 // chips follow the live contributions (composer_plus.js, composer_chips.js). The room (chat.js) mounts the markup,
 // namespaces its ids and shows in its feed what was sent.
@@ -12,7 +12,7 @@ import { isPanicFrame } from './panic.js';
 import { clientSurfaceField } from './client_surface.js';
 import { apiClient, apiFetch } from './api_client.js';
 import { bindEnterSubmit, bindMenu } from './ui_interactions.js';
-import { controlIcon, strokeIcon } from './page_icons.js';
+import { controlIcon, fluentIcon } from './page_icons.js';
 import { renderMobileNavToggle } from './page_header.js';
 import { createComposerOwnerControls } from './composer_owner_controls.js';
 import { attachChatInputSizing } from './chat_input_sizing.js';
@@ -27,7 +27,8 @@ const CHAT_DRAFT_KEY = 'ouro_chat_draft';
 const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
 // The host icons a "+" item may name (`icon`); other names draw from the control glyphs a skill may name.
 const PLUS_ICONS = {
-    attach: strokeIcon('<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>', 16),
+    attach: fluentIcon('attach', 16, 'regular'),
+    search: fluentIcon('search', 16, 'regular'),
 };
 
 /** The composer inside the room's `.chat-input-wrap`; chat.js mounts it and namespaces its `chat-*` ids in a Project.
@@ -38,6 +39,7 @@ export function composerMarkup() {
                 <div id="chat-attachment-preview" class="chat-attachment-preview"></div>
                 <div class="chat-toolbar-row">
                     ${renderMobileNavToggle({ inComposer: true })}
+                    <div class="chat-model-mode" id="chat-model-mode"></div>
                     <div class="chat-subagents-mode" id="chat-subagents-mode"></div>
                     <div class="chat-context-mode" id="chat-context-mode" data-context-mode="max"></div>
                     <span class="chat-composer-chips" data-composer-chips hidden></span>
@@ -48,7 +50,7 @@ export function composerMarkup() {
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
                         </button>
                         <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*" multiple>
-                        <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+                        <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="on" autocapitalize="sentences" spellcheck="true"></textarea>
                         <span class="chat-voice-slot" data-composer-voice hidden></span>
                         <div class="chat-send-group">
                             <button class="chat-send-inline ui-hit-area" id="chat-send" title="Send message">Send</button>
@@ -169,7 +171,7 @@ export function createPlusMenu({ button, hostItems = [] }) {
  * resolves a namespaced id; `page` is the room (the drop target and the capsules' docking box); `ws` the shared
  * socket; `replies` the room's reply controller, whose reference rides the frame; `storeKey(base)` the room's
  * sessionStorage key. `refreshState()` re-reads the room's settings after a capsule saves, `openSettings(tab)` opens a
- * Settings tab (the Subagents capsule's way to Agents), `onLayout()` re-measures
+ * Settings tab (the Subagents capsule's way to Agents, the Model capsule's to Accounts), `onLayout()` re-measures
  * the room's dock, `onSent({ text, frame, result, views })` shows an accepted send in the feed and returns the row it
  * added (the sent draft rises into it, send_flight.js), and `readingBack()`
  * says whether the owner's own gesture took the room off its newest row (the phone fold reads it: composer_fold.js).
@@ -186,8 +188,10 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     const attachments = createComposerAttachments({ preview: byId('attachment-preview'), attachBtn: plusBtn, fileInput,
         input, showToast, onLayout: () => requestAnimationFrame(() => onLayout()) });
 
+    // Search this chat is the pointer's way to the room's search (Ctrl+F or Cmd+F on a keyboard; chat_search.js).
     const plusMenu = createPlusMenu({ button: plusBtn, hostItems: [
         { key: 'attach', label: 'Attach file', icon: 'attach', onSelect: () => fileInput.click() },
+        ...(replies?.search ? [{ key: 'search', label: 'Search this chat', icon: 'search', onSelect: () => replies.search.open() }] : []),
     ] });
 
     // Local-only staging avoids orphan uploads and fast-send races.
@@ -344,11 +348,11 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         }
     }
 
-    // Each composer owns its room's Subagents, Context and Effort settings.
+    // Each composer owns its room's Model, Subagents, Context and Effort settings.
     const ownerControls = createComposerOwnerControls({ row: page.querySelector('.chat-toolbar-row'), box: page, byId, apiFetch, showToast,
-        projectId, saveEffortRange: apiClient.ownerEffortRange,
-        saveSubagentsMode: apiClient.ownerSubagentsMode,
-        openSettings: () => openSettings?.('agents'), refreshState, onLayout, readingBack });
+        projectId, chatId, saveEffortRange: apiClient.ownerEffortRange,
+        saveSubagentsMode: apiClient.ownerSubagentsMode, saveChatModel: apiClient.ownerChatModel,
+        openSettings: (tab) => openSettings?.(tab), refreshState, onLayout, readingBack });
 
     // Rooms outside the bounded sidebar still read their settings.
     async function refreshProjectCognition() {
@@ -432,7 +436,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         // After a send, once the feed shows it: the emptied field's height and the room's dock.
         resize: resizeChatInput,
         seedInputHistory,
-        // The room's Subagents, Context and Effort readback, from Main's state or the named Project.
+        // The room's Model, Subagents, Context and Effort readback, from Main's state or the named Project.
         syncState(data) {
             ownerControls.syncState(data);
             if (projectId && !data?.projects?.some(project => project.id === projectId && project.cognition)) void refreshProjectCognition();
@@ -460,6 +464,6 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         },
     };
     const contributed = [bindComposerPlus({ composer }), bindComposerChips({ composer, menu: createPlusMenu }),
-        bindVoiceControls({ composer }), bindConversationControls({ composer, page, chatId, ws })];
+        bindVoiceControls({ composer }), bindConversationControls({ composer, page, chatId, ws: ws.socket || ws })];  // a call keeps its frames in a room away
     return composer;
 }

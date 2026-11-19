@@ -22,6 +22,7 @@ HEARTBEAT_INTERVAL_SEC = 10.0
 _STATES = {
     "starting",
     "waiting_owner",
+    "waiting_token",
     "reconnecting",
     "verifying",
     "syncing_menu",

@@ -375,10 +375,13 @@ def test_result_capture_keeps_only_attributed_paths_hashes_and_frozen_words(repo
     for prompt in (review_result._packet_prompt("rules", subject.diff_text),
                    review_result._retrieving_task("rules", "source", subject.diff_text)):
         assert HEADING in prompt and "## Workspace diff" not in prompt
-        assert "diff --git" not in prompt and "machine,data" not in prompt
+        assert "diff --git" not in prompt, "no diff rides the subject (FIX1)"
         assert "Full sources: the produced files" in prompt and "diff's file/blob" not in prompt
         assert str(large) in prompt and produced["files"][-1]["sha256"] in prompt
-        assert len(prompt) < 10_000
+        # A packet seat reads a bounded excerpt of each produced text file from its exact retained copy, its omission
+        # said; the 1.4 MB data file never rides whole (FIX1's inflation), its copy holds the rest.
+        assert produced["files"][-1]["retained"] in prompt and prompt.count("machine,data,not,owner,words") < 600
+        assert len(prompt) < 30_000 and f"### {large} (its first " in prompt
         assert "New visible notice" in prompt and "Review needs your answer" in prompt
         assert "Somebody else wrote this" not in prompt and "Later checkout words" not in prompt
     no_diff = review_result.compose_subject(ask="Explain", reply="Explanation", produced={}, verification="none")
@@ -408,7 +411,9 @@ def test_result_words_take_the_seats_share_of_the_window(repo, tmp_path, monkeyp
     section = review_result.produced_material(ctx)["words_section"]
     assert section.startswith(HEADING) and "Finding 0 reads" in section
     assert ("OMISSION NOTE" in section) is bounded
-    assert len(section) <= review_result._result_words_budget() < 4 * window
+    from ouroboros import result_material
+
+    assert len(section) <= result_material._result_words_budget() < 4 * window
 
 
 def test_result_word_capture_failure_does_not_undo_attribution(repo, tmp_path, monkeypatch):

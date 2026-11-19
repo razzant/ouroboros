@@ -557,17 +557,12 @@ class TreeActivity(NamedTuple):
 
 
 def _tree_activity(pending_events: Any = frozenset()) -> TreeActivity:
-    """Walk RUNNING and PENDING once (NO I/O: a timeout pass runs under the queue lock). A queued
-    or running diagnostic is attention to its source, never that source's subtree at work."""
-    from ouroboros.work_diagnostics import diagnostic_ref
-
+    """Walk RUNNING and PENDING once (NO I/O: a timeout pass runs under the queue lock)."""
     activity = TreeActivity({}, set(), set())
     for tid, meta in list(_queue().RUNNING.items()):
         if not isinstance(meta, dict):
             continue
         task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
-        if diagnostic_ref(task):
-            continue
         # Real progress only (NOT the bare 30s liveness heartbeat): a child that merely
         # pings but makes no progress must not keep its ancestor alive.
         newest = float(meta.get("last_progress_at") or meta.get("started_at") or 0.0)
@@ -578,7 +573,7 @@ def _tree_activity(pending_events: Any = frozenset()) -> TreeActivity:
             if observing:
                 activity.observing.add(ancestor)
     for task in list(_queue().PENDING):
-        if isinstance(task, dict) and not diagnostic_ref(task):
+        if isinstance(task, dict):
             activity.queued.update(_ancestors(task) - {str(task.get("id") or "")})
     return activity
 
@@ -661,14 +656,9 @@ def _enforce_task_timeouts_locked(
         newest_descendant = activity.progress.get(str(task_id), 0.0)
         subtree_progressing = bool(newest_descendant) and (now - newest_descendant) < idle_timeout
         own_progress = idle_sec < idle_timeout
-        # B3 external-wait lease: a held delegate_wait window over a live delegated run
-        # is legitimate silence (hard-bounded by events._handle_external_wait_lease);
-        # it spares ONLY this idle rail — ceiling/deadline/budget/cancel never consult it.
-        lease_ts = meta.get("external_wait_lease_until")
         active_llm_call = meta.get("active_llm_call")
         llm_call_in_flight = isinstance(active_llm_call, dict) and active_llm_call.get("task_attempt") == attempt
         progressing = (own_progress or subtree_progressing or str(task_id) in activity.queued
-                       or (isinstance(lease_ts, (int, float)) and float(lease_ts) > now)
                        or llm_call_in_flight
                        or model_waiting(meta) or waiting_on_owner(meta, attempt)
                        or _active_operation_progressing(meta, now))

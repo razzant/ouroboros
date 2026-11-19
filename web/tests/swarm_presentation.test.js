@@ -25,17 +25,17 @@ test('the receipt line says helpers, models, known money + not final, and subscr
     ];
     const full = swarmRoot({ swarm_efficiency: { subagent_count: 5, fanout_count: 2 }, swarm_receipt: { state: 'closed',
         actor_intervals: children(5), cost: { known_final_usd: 2.3, unknown_attempts: 2, total_usd: null, attempts } } });
-    assert.equal(swarmReceiptText(full), 'Swarm · 5 helpers started · 3 models · $2.30 known + 2 not final · 7 subscription sessions');
+    assert.equal(swarmReceiptText(full), 'Swarm · 5 subagents started · 3 models · $2.30 known + 2 not final · 7 subscription sessions');
     const one = swarmRoot({ swarm_efficiency: { subagent_count: 1 }, swarm_receipt: { actor_intervals: children(1),
         cost: { known_final_usd: 0.4, unknown_attempts: 0, attempts: [attempt('child-1', 'gpt-6', 'subscription_session')] } } });
-    assert.equal(swarmReceiptText(one), 'Swarm · 1 helper started · 1 model · $0.40 known · 1 subscription session');
+    assert.equal(swarmReceiptText(one), 'Swarm · 1 subagent started · 1 model · $0.40 known · 1 subscription session');
     // An amount nobody knows yet is a word, never $0; a free tree has no money part at all.
     const unknown = swarmRoot({ swarm_efficiency: { subagent_count: 2 }, swarm_receipt: { actor_intervals: children(2),
         cost: { known_final_usd: 0, unknown_attempts: 3, attempts: [attempt('child-1', 'gpt-6')] } } });
-    assert.equal(swarmReceiptText(unknown), 'Swarm · 2 helpers started · 1 model · 3 not final');
+    assert.equal(swarmReceiptText(unknown), 'Swarm · 2 subagents started · 1 model · 3 not final');
     const free = swarmRoot({ swarm_efficiency: { subagent_count: 2 }, swarm_receipt: { actor_intervals: children(2),
         cost: { known_final_usd: 0, unknown_attempts: 0 } } });
-    assert.equal(swarmReceiptText(free), 'Swarm · 2 helpers started');
+    assert.equal(swarmReceiptText(free), 'Swarm · 2 subagents started');
     for (const detail of [full, one, unknown, free]) assert.doesNotMatch(swarmReceiptText(detail), FORBIDDEN);
 });
 
@@ -60,16 +60,16 @@ test('no fan-out observed proves no helper attempt only beside a receipt that kn
     const line = (receipt, efficiency = NONE) => swarmReceiptText(swarmRoot({ swarm_efficiency: efficiency, ...(receipt ? { swarm_receipt: receipt } : {}) }));
     const root = actor('task:root-1', 'supervisor', 'root-1');
     // The host's observation counts fan-out, not a direct start: refused or still open, a direct start leaves it at 0.
-    assert.equal(line(null), 'Swarm · helpers unknown', 'the observation alone');
-    assert.equal(line({ cost: ownCost }), 'Swarm · helpers unknown · 1 model · $0.12 known', 'a receipt from before its actors');
+    assert.equal(line(null), 'Swarm · subagents unknown', 'the observation alone');
+    assert.equal(line({ cost: ownCost }), 'Swarm · subagents unknown · 1 model · $0.12 known', 'a receipt from before its actors');
     const older = closedTree();
     delete older.refused_starts;
-    assert.equal(line(older), 'Swarm · helpers unknown · 1 model · $0.12 known', 'a receipt from before it read refusals');
-    assert.equal(line({ ...closedTree(), coverage: undefined }), 'Swarm · helpers unknown · 1 model · $0.12 known', 'no coverage said');
+    assert.equal(line(older), 'Swarm · subagents unknown · 1 model · $0.12 known', 'a receipt from before it read refusals');
+    assert.equal(line({ ...closedTree(), coverage: undefined }), 'Swarm · subagents unknown · 1 model · $0.12 known', 'no coverage said');
     assert.equal(line({ ...closedTree(), coverage: { tree: 'unknown', gaps: ['measurement_stream_incomplete'] } }),
-        'Swarm · helpers unknown · 1 model · $0.12 known', 'a hole in the tree');
-    assert.equal(line({ ...closedTree(), refused_starts: 'none' }), 'Swarm · helpers unknown · 1 model · $0.12 known', 'an unreadable list');
-    assert.equal(line({ ...closedTree(), actor_intervals: [root, 'damaged'] }), 'Swarm · helpers unknown · 1 model · $0.12 known', 'a damaged actor');
+        'Swarm · subagents unknown · 1 model · $0.12 known', 'a hole in the tree');
+    assert.equal(line({ ...closedTree(), refused_starts: 'none' }), 'Swarm · subagents unknown · 1 model · $0.12 known', 'an unreadable list');
+    assert.equal(line({ ...closedTree(), actor_intervals: [root, 'damaged'] }), 'Swarm · subagents unknown · 1 model · $0.12 known', 'a damaged actor');
     assert.equal(line(closedTree()), '', 'the whole tree, the root alone: proven');
 });
 
@@ -81,25 +81,25 @@ test('starts, requests without a start, failures and open starts stand side by s
     const child = (id, start = TS) => actor(`task:${id}`, 'task', id, start, { parent_task_id: 'root-1' });
     // A run that started, beside a start still open: both, never the started run as open.
     assert.equal(line([run('r1', 'root-1', 2), pending('i1', 'root-1')], { subagent_count: 1 }),
-        'Swarm · 1 helper started · 1 helper start unconfirmed · 1 model · $0.12 known');
+        'Swarm · 1 subagent started · 1 subagent start unconfirmed · 1 model · $0.12 known');
     // A mixed tree: what started, what was requested and has no start, what is still open.
     assert.equal(line([child('c1'), child('c2'), child('c3', null)], { subagent_count: 3 }),
-        'Swarm · 3 helpers requested · 2 started · 1 model · $0.12 known');
+        'Swarm · 3 subagents requested · 2 started · 1 model · $0.12 known');
     assert.equal(line([child('c1'), child('c2', null), pending('i1', 'root-1')], { subagent_count: 2 }),
-        'Swarm · 2 helpers requested · 1 started · 1 helper start unconfirmed · 1 model · $0.12 known');
+        'Swarm · 2 subagents requested · 1 started · 1 subagent start unconfirmed · 1 model · $0.12 known');
     assert.equal(line([run('r1', 'root-1'), child('c1', null), child('c2', null)], { subagent_count: 3 }),
-        'Swarm · 3 helpers requested · 1 started · 1 model · $0.12 known', 'the root\'s own run among the requests');
+        'Swarm · 3 subagents requested · 1 started · 1 model · $0.12 known', 'the root\'s own run among the requests');
     // A child's own runs and starts count with that child: started, it is one helper; not yet, its start is open.
     assert.equal(line([child('c1'), pending('i9', 'c1'), run('r9', 'c1', null)], { subagent_count: 1 }),
-        'Swarm · 1 helper started · 1 model · $0.12 known');
+        'Swarm · 1 subagent started · 1 model · $0.12 known');
     assert.equal(line([child('c1', null), pending('i9', 'c1')], { subagent_count: 1 }),
-        'Swarm · 1 helper requested · 1 helper start unconfirmed · 1 model · $0.12 known');
+        'Swarm · 1 subagent requested · 1 subagent start unconfirmed · 1 model · $0.12 known');
     // A refusal is never folded away, a started child's own included.
     assert.equal(line([child('c1')], { subagent_count: 1 }, { refused_starts: [{ invocation_id: 'i5', task_id: 'c1' }] }),
-        'Swarm · 1 helper started · 1 helper start failed · 1 model · $0.12 known');
+        'Swarm · 1 subagent started · 1 subagent start failed · 1 model · $0.12 known');
     // `none started` only where the receipt knows its whole tree.
-    assert.equal(line([child('c1', null)], { subagent_count: 1 }), 'Swarm · 1 helper requested · none started · 1 model · $0.12 known');
-    assert.equal(line([child('c1', null)], { subagent_count: 1 }, { coverage: undefined }), 'Swarm · 1 helper requested · 1 model · $0.12 known');
+    assert.equal(line([child('c1', null)], { subagent_count: 1 }), 'Swarm · 1 subagent requested · none started · 1 model · $0.12 known');
+    assert.equal(line([child('c1', null)], { subagent_count: 1 }, { coverage: undefined }), 'Swarm · 1 subagent requested · 1 model · $0.12 known');
 });
 
 test('anything the record leaves open keeps a line: a failed start, an unconfirmed one, a request, an unknown', () => {
@@ -107,31 +107,31 @@ test('anything the record leaves open keeps a line: a failed start, an unconfirm
     const root = actor('task:root-1', 'supervisor', 'root-1');
     // A direct start the engine definitely refused left custody with no actor; the receipt keeps it.
     assert.equal(line(closedTree({ refused_starts: [{ invocation_id: 'i1', task_id: 'root-1', reason: 'engine_refused' }] })),
-        'Swarm · 1 helper start failed · 1 model · $0.12 known');
+        'Swarm · 1 subagent start failed · 1 model · $0.12 known');
     assert.equal(line({ ...closedTree({ refused_starts: [{ invocation_id: 'i1' }, { invocation_id: 'i2' }] }), actor_intervals: [root, actor('run:r1', 'delegated_run', 'root-1')] }),
-        'Swarm · 1 helper started · 2 helper starts failed · 1 model · $0.12 known', 'a failure stays beside a start');
+        'Swarm · 1 subagent started · 2 subagent starts failed · 1 model · $0.12 known', 'a failure stays beside a start');
     // A start nobody can confirm or deny is neither a start nor a zero.
     assert.equal(line(closedTree({ state: 'provisional', actor_intervals: [root, actor('invocation:i1', 'delegated_start', 'root-1', null, { state: 'pending' })] })),
-        'Swarm · 1 helper start unconfirmed · 1 model · $0.12 known');
+        'Swarm · 1 subagent start unconfirmed · 1 model · $0.12 known');
     assert.equal(line(closedTree({ actor_intervals: [root, actor('run:r1', 'delegated_run', 'root-1', null)] })),
-        'Swarm · 1 helper start unconfirmed · 1 model · $0.12 known');
+        'Swarm · 1 subagent start unconfirmed · 1 model · $0.12 known');
     assert.equal(line(closedTree({ actor_intervals: [root, actor('run:r1', 'delegated_run', 'root-1', null)] }), { subagent_count: 1 }),
-        'Swarm · 1 helper requested · 1 helper start unconfirmed · 1 model · $0.12 known', 'never `none started` over an open start');
+        'Swarm · 1 subagent requested · 1 subagent start unconfirmed · 1 model · $0.12 known', 'never `none started` over an open start');
     // A child with no start, on either side of the rollup.
     assert.equal(line(closedTree({ actor_intervals: [root, actor('task:child-1', 'task', 'child-1', null)] })),
-        'Swarm · 1 helper requested · none started · 1 model · $0.12 known');
+        'Swarm · 1 subagent requested · none started · 1 model · $0.12 known');
     // Not knowing is not zero: a hole in the tree, no observation, a session or attempt the root does not own.
     assert.equal(line(closedTree({ state: 'provisional', coverage: { tree: 'unknown', gaps: ['fanout_history_unavailable'] } })),
-        'Swarm · helpers unknown · 1 model · $0.12 known');
+        'Swarm · subagents unknown · 1 model · $0.12 known');
     assert.equal(line(closedTree({ state: 'provisional', coverage: { tree: 'unknown', gaps: ['missing_child_results'] } }), { subagent_count: 2 }),
-        'Swarm · 2 helpers requested · 1 model · $0.12 known', 'no `none started` over a hole in the tree');
-    assert.equal(line(closedTree(), null), 'Swarm · helpers unknown · 1 model · $0.12 known', 'no observation of fan-out');
-    assert.equal(line(closedTree(), { observed_started: 'unknown' }), 'Swarm · helpers unknown · 1 model · $0.12 known');
-    assert.equal(line(closedTree(), { subagent_count: 'a lot' }), 'Swarm · helpers unknown · 1 model · $0.12 known', 'an unreadable count is no zero');
+        'Swarm · 2 subagents requested · 1 model · $0.12 known', 'no `none started` over a hole in the tree');
+    assert.equal(line(closedTree(), null), 'Swarm · subagents unknown · 1 model · $0.12 known', 'no observation of fan-out');
+    assert.equal(line(closedTree(), { observed_started: 'unknown' }), 'Swarm · subagents unknown · 1 model · $0.12 known');
+    assert.equal(line(closedTree(), { subagent_count: 'a lot' }), 'Swarm · subagents unknown · 1 model · $0.12 known', 'an unreadable count is no zero');
     assert.equal(line(closedTree({ cost: { known_final_usd: 0, unknown_attempts: 0, attempts: [attempt('root-1', 'gpt-6', 'subscription_session', { actor_id: 'run:gone' })] } })),
-        'Swarm · helpers unknown · 1 model · 1 subscription session', 'a session of a run the receipt does not hold');
+        'Swarm · subagents unknown · 1 model · 1 subscription session', 'a session of a run the receipt does not hold');
     assert.equal(line(closedTree({ cost: { known_final_usd: 0.1, unknown_attempts: 0, attempts: [attempt('elsewhere', 'gpt-6')] } })),
-        'Swarm · helpers unknown · 1 model · $0.10 known', 'money of another task of the tree');
+        'Swarm · subagents unknown · 1 model · $0.10 known', 'money of another task of the tree');
 });
 
 test('a start is said only from a start fact: a request the host refused is no helper that started', () => {
@@ -139,9 +139,9 @@ test('a start is said only from a start fact: a request the host refused is no h
     const refused = swarmRoot({ swarm_efficiency: { subagent_count: 1, fanout_count: 1 }, swarm_receipt: { actor_intervals: [
         actor('task:root-1', 'supervisor', 'root-1'), actor('task:child-1', 'task', 'child-1', null, { parent_task_id: 'root-1' })],
     cost: { known_final_usd: 0.1, unknown_attempts: 0, attempts: [attempt('root-1', 'claude-opus-5-5')] } } });
-    assert.equal(swarmReceiptText(refused), 'Swarm · 1 helper requested · 1 model · $0.10 known', 'no coverage said: no zero');
+    assert.equal(swarmReceiptText(refused), 'Swarm · 1 subagent requested · 1 model · $0.10 known', 'no coverage said: no zero');
     refused.swarm_receipt.coverage = { tree: 'complete', gaps: [] };
-    assert.equal(swarmReceiptText(refused), 'Swarm · 1 helper requested · none started · 1 model · $0.10 known');
+    assert.equal(swarmReceiptText(refused), 'Swarm · 1 subagent requested · none started · 1 model · $0.10 known');
     // Each helper once: a child's waits split its actor, its own runs are that child; the root's own run is a helper of
     // its own; the root, a review and a start still pending are none.
     const started = swarmRoot({ swarm_efficiency: { subagent_count: 4 }, swarm_receipt: { actor_intervals: [
@@ -154,14 +154,14 @@ test('a start is said only from a start fact: a request the host refused is no h
         actor('invocation:i1', 'delegated_start', 'root-1', null, { state: 'pending' }),
         actor('review:o1', 'review', 'root-1'), actor('review_operation:op1', 'review_custody', 'root-1', null)],
     cost: { known_final_usd: 0.6, unknown_attempts: 0, attempts: [attempt('child-1', 'gpt-6')] } } });
-    assert.equal(swarmReceiptText(started), 'Swarm · 4 helpers requested · 3 started · 1 helper start unconfirmed · 1 model · $0.60 known',
+    assert.equal(swarmReceiptText(started), 'Swarm · 4 subagents requested · 3 started · 1 subagent start unconfirmed · 1 model · $0.60 known',
         'child-1 once, child-2 by its run, the root\'s run started; child-3 requested with none; the pending start open; '
         + 'never the root or the review');
     // No start recorded yet (a receipt without actors, or none at all): the requests are what is known.
     const requested = swarmRoot({ swarm_efficiency: { subagent_count: 3 },
         swarm_receipt: { cost: { known_final_usd: 0.2, unknown_attempts: 1, attempts: [attempt('child-1', 'gpt-6')] } } });
-    assert.equal(swarmReceiptText(requested), 'Swarm · 3 helpers requested · 1 model · $0.20 known + 1 not final');
-    assert.equal(swarmReceiptText(swarmRoot({ swarm_efficiency: { subagent_count: 1 } })), 'Swarm · 1 helper requested');
+    assert.equal(swarmReceiptText(requested), 'Swarm · 3 subagents requested · 1 model · $0.20 known + 1 not final');
+    assert.equal(swarmReceiptText(swarmRoot({ swarm_efficiency: { subagent_count: 1 } })), 'Swarm · 1 subagent requested');
     for (const detail of [refused, started, requested]) assert.doesNotMatch(swarmReceiptText(detail), FORBIDDEN);
 });
 
@@ -188,14 +188,14 @@ test('the card takes the line first in its foot, keeps it through frames without
         assert.equal(syncSwarmReceipt(record, detail), true);
         const line = footEl.children[0];
         assert.equal(line.className, 'chat-live-swarm-receipt');
-        assert.equal(line.textContent, 'Swarm · 2 helpers started · $1.50 known + 1 not final');
+        assert.equal(line.textContent, 'Swarm · 2 subagents started · $1.50 known + 1 not final');
         assert.equal(line.hasAttribute('data-i18n-skip'), true, 'data, not interface words');
         assert.equal(syncSwarmReceipt(record, detail), false, 'the same facts write nothing');
         assert.equal(syncSwarmReceipt(record, { task_id: 'root-1', status: 'completed' }), false, 'an event without the facts');
         assert.equal(footEl.children[0], line, 'the line stays');
         detail.swarm_receipt.cost = { known_final_usd: 1.9, unknown_attempts: 0 };
         assert.equal(syncSwarmReceipt(record, detail), true, 'a later revision');
-        assert.equal(line.textContent, 'Swarm · 2 helpers started · $1.90 known');
+        assert.equal(line.textContent, 'Swarm · 2 subagents started · $1.90 known');
         assert.equal(footEl.children.length, 2);
         assert.equal(syncSwarmReceipt({ root, footEl, isSubagent: true }, detail), false, 'a helper\'s card has none');
         assert.equal(syncSwarmReceipt(undefined, detail), false);
@@ -216,10 +216,10 @@ test('a line the facts no longer support leaves the foot: real transitions, and 
         // Never mounted: proof of nothing writes nothing.
         assert.equal(syncSwarmReceipt(record, proven), false);
         assert.deepEqual([footEl.children.length, record.swarmReceiptEl ?? null], [1, null]);
-        // Provisional (`helpers unknown` until the fan-out is observed), then proven: the line goes, and the foot is as it was.
+        // Provisional (`subagents unknown` until the fan-out is observed), then proven: the line goes, and the foot is as it was.
         const provisional = swarmRoot({ swarm_receipt: closedTree({ state: 'provisional' }) });
         assert.equal(syncSwarmReceipt(record, provisional), true);
-        assert.equal(footEl.children[0].textContent, 'Swarm · helpers unknown · 1 model · $0.12 known');
+        assert.equal(footEl.children[0].textContent, 'Swarm · subagents unknown · 1 model · $0.12 known');
         assert.equal(syncSwarmReceipt(record, { task_id: 'root-1', status: 'completed' }), false, 'an event without facts');
         assert.equal(syncSwarmReceipt(record, swarmRoot()), false, 'a row without facts');
         assert.equal(footEl.children.length, 2, 'the line stays through both');
@@ -228,7 +228,7 @@ test('a line the facts no longer support leaves the foot: real transitions, and 
         assert.equal(syncSwarmReceipt(record, proven), false, 'once');
         // A later revision can bring it back, once, first in the foot.
         assert.equal(syncSwarmReceipt(record, refused), true);
-        assert.deepEqual([footEl.children.length, footEl.children[0].textContent], [2, 'Swarm · 1 helper start failed · 1 model · $0.12 known']);
+        assert.deepEqual([footEl.children.length, footEl.children[0].textContent], [2, 'Swarm · 1 subagent start failed · 1 model · $0.12 known']);
         assert.equal(footEl.children[0].hasAttribute('data-i18n-skip'), true);
     } finally { restoreDom(prior); }
 });
@@ -340,7 +340,7 @@ test('chat: a Swarm root\'s card shows the receipt line once Details reads its d
         if (card.dataset.expanded === '1') toggle();
         toggle();
         await settle();
-        assert.equal(line()?.textContent, 'Swarm · 4 helpers started · 2 models · $0.85 known + 1 not final');
+        assert.equal(line()?.textContent, 'Swarm · 4 subagents started · 2 models · $0.85 known + 1 not final');
         assert.equal(card.querySelector('[data-live-foot]').children[0], line(), 'first in the foot, above the meta line');
     } finally { f.close(); }
 });

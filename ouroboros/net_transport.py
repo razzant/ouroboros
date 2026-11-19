@@ -216,17 +216,19 @@ def env_proxies_configured() -> bool:
     return any(scheme in ("http", "https", "all") for scheme in proxies)
 
 
-def keepalive_http_client(async_client: bool = False):
+def keepalive_http_client(async_client: bool = False, *, follow_redirects: bool = True):
     """openai Default(Async)HttpxClient on the keepalive transport, or None.
 
     None on proxy-routed installs without a trust bundle: they keep the SDK
     default construction so httpx env-proxy mounts survive (disclosed residual:
     no TCP-keepalive tuning there); with a bundle the Default client carries it
-    as ``verify`` and still mounts the env proxies.
+    as ``verify`` and still mounts the env proxies. ``follow_redirects=False`` is
+    held by the client itself (openai<2 has no per-request redirect option), so a
+    proxy-routed install then gets the Default client without a transport, not None.
     """
     proxied = env_proxies_configured()
     bundle = extra_ca_bundle()
-    if proxied and bundle is None:
+    if proxied and bundle is None and follow_redirects:
         return None
     import openai
 
@@ -247,6 +249,8 @@ def keepalive_http_client(async_client: bool = False):
         verify_kwargs() if proxied
         else {"transport": remote_httpx_transport(async_client, limits=_sdk_pool_limits())}
     )
+    if not follow_redirects:
+        kwargs["follow_redirects"] = False
     try:
         return cls(**kwargs)
     except TypeError:
@@ -370,9 +374,11 @@ def make_no_proxy_async_client(target: Dict[str, Any], timeout: Any) -> Tuple[An
 
 def web_search_openai_client(
     *, api_key: str, base_url: Optional[str], timeout: Optional[float] = None,
-    default_headers: Optional[Dict[str, str]] = None,
+    default_headers: Optional[Dict[str, str]] = None, follow_redirects: bool = True,
 ):
-    """Web-search OpenAI client (Q16 coverage) on the keepalive transport."""
+    """Web-search OpenAI client (Q16 coverage) on the keepalive transport.
+
+    ``follow_redirects=False`` (DeepSeek Search) fails closed on an SDK without a usable Default client."""
     from openai import OpenAI
 
     kwargs: Dict[str, Any] = {"api_key": api_key, "max_retries": 0}
@@ -382,7 +388,9 @@ def web_search_openai_client(
         kwargs["timeout"] = float(timeout)
     if default_headers:
         kwargs["default_headers"] = dict(default_headers)
-    http_client = keepalive_http_client()
+    http_client = keepalive_http_client(follow_redirects=follow_redirects)
+    if http_client is None and not follow_redirects:
+        raise RuntimeError("this openai SDK cannot build a web search client that refuses redirects")
     if http_client is not None:
         kwargs["http_client"] = http_client
     return OpenAI(**kwargs)

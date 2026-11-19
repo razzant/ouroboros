@@ -1,6 +1,7 @@
 """Canonical accepted quiz effects recover automatically with bounded durable retries."""
 import asyncio
 import base64
+import json
 import queue as queue_module
 import threading
 
@@ -66,7 +67,7 @@ def test_history_failure_recovers_without_client_retry_or_history_scan(runtime, 
     assert repaired["answered_at"] == original["answered_at"]
     assert repaired["answered_index"] == 1 and repaired["comment"] == " exact choice "
     [entry] = drain_owner_entries(runtime.root, runtime.task["id"], set())
-    assert entry["kind"] == "quiz_answer" and "option 2: Second" in entry["text"]
+    assert entry["kind"] == "quiz_answer" and "option 2 («Second», your text) and wrote:  exact choice " in entry["text"]
     assert acknowledge_transcript_entry(runtime.root, runtime.task["id"], entry)
     assert block(runtime)["delivery"]["state"] == "delivered"
     assert recover(runtime)["attempted"] == 0
@@ -222,7 +223,7 @@ def test_live_author_receives_an_answer_whose_card_address_is_unknown_once(runti
         return [entry for entry in drain_owner_entries(runtime.root, runtime.task["id"], set())
                 if entry["msg_id"] == "quiz_answer:task-quiz:q"]
     [entry] = mailbox()
-    assert entry["kind"] == "quiz_answer" and "option 2: Second" in entry["text"] and " exact words " in entry["text"]
+    assert entry["kind"] == "quiz_answer" and "option 2 («Second», your text) and wrote:  exact words " in entry["text"]
     debt = block(runtime)["delivery"]
     assert debt["mailbox_at"] and not debt.get("history_at") and not block(runtime).get("discharged_at")
     due(runtime)
@@ -313,6 +314,135 @@ def test_a_closure_owing_its_unpublished_ask_is_no_import_unknown(runtime, monke
     monkeypatch.setattr(startup_migrations, "_legacy_question_publications", lambda *a: pytest.fail("repeat import"))
     assert startup_migrations.prepare_startup_state(runtime.root)["question_publications"] == {}
     assert questions() == {f"question:{tid}:older"}
+
+
+@pytest.mark.parametrize("history", ["no_card_row", "ambiguous"])
+@pytest.mark.parametrize("attempt", ["this_body", "older_body", "import"])
+def test_a_closure_no_room_shows_retires_its_note_and_leaves_current_questions(runtime, monkeypatch, history, attempt):
+    """An older body's question whose card left no row in readable, stable history, closed by a model after its
+    task ended, owes its closure note nowhere: the closure's delivery attempt retires it as ``no_target`` (never
+    delivered, no guessed room, the closed record kept), its task leaves the current questions and its
+    ``question:`` unknown goes with it. One an older body's attempt left owed retires at this body's first boot,
+    once, or in a later import of its verdict (the legacy reconcile job); a stamped boot reads no row. An answer under the same verdict keeps its debt (it carries my human's
+    words); with an ambiguous history an import may still bind the address, so the closure note keeps waiting."""
+    from ouroboros import dialogue_store as ds, obligations, startup_migrations
+    from ouroboros.gateway.task_decision import answer_decision
+    from ouroboros.owner_quiz import (question_delivery_projection, quiz_needs_retention, reconcile_terminal,
+                                      record_quiz_delivery_failure)
+    from tests.test_main_decisions import older_body_ask
+
+    tid, other = runtime.task["id"], "answered-task"
+    write_task_result(runtime.root, other, "running", chat_id=1)
+    older_body_ask(runtime.root, tid, "closed", chat_id=1)
+    older_body_ask(runtime.root, other, "a", chat_id=1)
+    if history == "ambiguous":  # two card rows name different chats
+        for chat in (1, 2):
+            ds.append(runtime.root, "chat", {"direction": "out", "type": "quiz", "task_id": tid, "chat_id": chat,
+                                            "quiz": {"quiz_id": "closed"}})
+    assert startup_migrations.prepare_startup_state(runtime.root)["question_publications"] == {"bound": 0, "unknown": 2}
+    verdict = "publication_address_missing" if history == "no_card_row" else "publication_address_ambiguous"
+    assert obligations.members(runtime.root, "unknowns")[f"question:{tid}:closed"]["reason"] == verdict
+    monkeypatch.setattr(queue, "RUNNING", {})
+    for task_id in (tid, other):
+        write_task_result(runtime.root, task_id, "completed", result="finished")
+        reconcile_terminal(runtime.root, task_id)
+    assert record_closed(runtime.root, tid, quiz_id="closed", reason="Answered elsewhere", actor_task_id="closer")["ok"]
+    status, reply = asyncio.run(answer_decision(runtime.root, {"request_id": "late", "decision_id": f"quiz:{other}:a",
+                                                               "option_index": 0}))
+    assert status == 200 and reply["question_delivery"]["reason_code"] == "publication_address_unknown"
+    due(runtime, "closed")
+    if attempt == "this_body":
+        recover(runtime)  # the closure's attempt finds no address and reads the import's verdict
+    else:  # an older body's attempt left the note owed, and its watermarks know no such retirement
+        record_quiz_delivery_failure(runtime.root, tid, "closed", "publication_address_unknown")
+        marks = startup_migrations.watermarks(runtime.root)
+        assert marks.pop("closures_owed_nowhere_generation") == startup_migrations.CLOSURES_OWED_NOWHERE_GENERATION
+        (runtime.root / "state" / "migrations.json").write_text(json.dumps(marks), encoding="utf-8")
+        assert block(runtime, "closed")["delivery"]["reason_code"] == "publication_address_unknown"
+        assert {tid, other} <= set(obligations.members(runtime.root, "owner_questions"))
+    if attempt == "import":  # an attempt left the note owed; the legacy reconcile job repeats the import
+        record_quiz_delivery_failure(runtime.root, tid, "closed", "publication_address_unknown")
+        imported = startup_migrations.migrate_question_publications(runtime.root, legacy=True)
+
+    report = startup_migrations.prepare_startup_state(runtime.root)["question_publications"]
+    closed, answered = block(runtime, "closed"), quiz_states(runtime.root, other)["a"]
+    owner_questions, unknowns = obligations.members(runtime.root, "owner_questions"), obligations.members(runtime.root, "unknowns")
+    assert quiz_needs_retention(answered) and other in owner_questions and f"question:{other}:a" in unknowns
+    if history == "ambiguous":
+        assert report == {} and quiz_needs_retention(closed) and tid in owner_questions
+        assert closed["delivery"]["state"] == "owed" and f"question:{tid}:closed" in unknowns
+        return
+    assert report == ({"retired": 1} if attempt == "older_body" else {})
+    assert attempt != "import" or imported["retired"] == 1
+    assert (closed["state"], closed["closed_reason"]) == ("closed", "Answered elsewhere")
+    assert (closed["delivery"]["state"], closed["delivery"]["reason_code"]) == ("no_target", "no_publication_target")
+    assert not closed.get("discharged_at") and "publication_chat_id" not in closed and question_delivery_projection(closed) == {}
+    assert not quiz_needs_retention(closed) and tid not in owner_questions and f"question:{tid}:closed" not in unknowns
+    due(runtime, "closed")
+    assert recover(runtime)["attempted"] == 0 and block(runtime, "closed")["delivery"]["state"] == "no_target"
+    assert not [row for row in chat_rows(runtime.root) if row.get("type") == "quiz_closed"]
+    with monkeypatch.context() as patch:
+        patch.setattr(obligations, "members", lambda *_a: pytest.fail("a stamped boot reads no row"))
+        assert startup_migrations.prepare_startup_state(runtime.root)["question_publications"] == {}
+
+
+@pytest.mark.parametrize("author", ["running", "finished"])
+def test_an_owner_closure_retires_only_once_its_authors_letter_is_settled(runtime, monkeypatch, author):
+    """The owner closed an older body's question whose card no room shows; the delivery attempt recorded the missing
+    address and wrote no letter. A living author is still owed it, so no door retires that note yet (nothing writes
+    that letter later either); once the letter is written, the import retires it. A finished author's terminal status
+    never turns back, so no letter can reach it and the import retires the note at once."""
+    from ouroboros import startup_migrations
+    from ouroboros.owner_quiz import mark_quiz_history_written, record_quiz_delivery_failure
+    from tests.test_main_decisions import older_body_ask
+
+    tid = runtime.task["id"]
+    write_task_result(runtime.root, tid, "running", chat_id=1)
+    older_body_ask(runtime.root, tid, "closed", chat_id=1)
+    assert startup_migrations.prepare_startup_state(runtime.root)["question_publications"] == {"bound": 0, "unknown": 1}
+    assert record_closed(runtime.root, tid, quiz_id="closed", reason="Withdrawn", actor="owner", request_id="close-1")["ok"]
+    record_quiz_delivery_failure(runtime.root, tid, "closed", "publication_address_unknown")  # no letter was written
+    if author == "finished":
+        monkeypatch.setattr(queue, "RUNNING", {})
+        write_task_result(runtime.root, tid, "completed", result="finished")
+        assert startup_migrations.migrate_question_publications(runtime.root, legacy=True)["retired"] == 1
+        assert not block(runtime, "closed")["delivery"].get("mailbox_at")
+        assert block(runtime, "closed")["delivery"]["state"] == "no_target"
+        return
+    assert "retired" not in startup_migrations.migrate_question_publications(runtime.root, legacy=True)
+    assert block(runtime, "closed")["delivery"]["state"] == "owed"
+    mark_quiz_history_written(runtime.root, tid, "closed", receipt="mailbox_at")  # the letter reached its author
+    assert startup_migrations.migrate_question_publications(runtime.root, legacy=True)["retired"] == 1
+    assert block(runtime, "closed")["delivery"]["state"] == "no_target"
+
+
+@pytest.mark.parametrize("author", ["live", "finished"])
+def test_the_owner_closing_a_card_no_room_shows_settles_its_letter_before_the_note_retires(runtime, monkeypatch, author):
+    """The owner closes an older body's question whose card left no row in readable, stable history. Its delivery
+    attempt finds no address: a living author first gets the closure letter in its mailbox, then the note retires as
+    ``no_target``; a finished author is owed no letter and the note retires in the same attempt."""
+    from ouroboros import obligations, startup_migrations
+    from ouroboros.gateway.task_decision import answer_decision
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from tests.test_main_decisions import older_body_ask
+
+    tid = runtime.task["id"]
+    older_body_ask(runtime.root, tid, "closed", chat_id=1)
+    assert startup_migrations.prepare_startup_state(runtime.root)["question_publications"] == {"bound": 0, "unknown": 1}
+    assert obligations.members(runtime.root, "unknowns")[f"question:{tid}:closed"]["reason"] == "publication_address_missing"
+    if author == "finished":
+        monkeypatch.setattr(queue, "RUNNING", {})
+        write_task_result(runtime.root, tid, "completed", result="finished")
+    status, reply = asyncio.run(answer_decision(runtime.root, {
+        "request_id": "close-1", "decision_id": f"quiz:{tid}:closed", "action": "close", "reason": "Withdrawn"}))
+    assert status == 200 and reply["state"] == "closed"
+    letters = [entry for entry in drain_owner_entries(runtime.root, tid, set()) if entry["kind"] == "quiz_closed"]
+    assert len(letters) == (1 if author == "live" else 0)
+    delivery = block(runtime, "closed")["delivery"]
+    assert (delivery["state"], delivery["reason_code"]) == ("no_target", "no_publication_target")
+    assert bool(delivery.get("mailbox_at")) == (author == "live")
+    assert f"question:{tid}:closed" not in obligations.members(runtime.root, "unknowns")
+    assert not [row for row in chat_rows(runtime.root) if row.get("type") == "quiz_closed"]
 
 
 def test_photo_material_serves_exact_selected_bytes_at_existing_artifact_endpoint(tmp_path):

@@ -1,4 +1,4 @@
-"""One tree's writer census, its durable facts read once per change of the tree's own rows.
+"""One tree's writer census, its durable facts read once per change of the tree's own rows (only the rows that moved).
 
 The settle pass, Pause and Resume (``conflicting_writers``) and the display and
 roster readers (``model_handoffs``) all ask the same store the same question about one tree. They share
@@ -24,7 +24,7 @@ import threading
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 from ouroboros.utils import machine_json
-from ouroboros.work_stop import pause_marker
+from ouroboros.work_stop import held_for_release, pause_marker
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ _MEMO: "collections.OrderedDict[Tuple[str, str], _Facts]" = collections.OrderedD
 
 
 class Revision(NamedTuple):
-    members: tuple  # the tree's rows and their sequences, the tree's custody tasks, its requests
+    members: tuple  # the tree's rows and their signatures, the tree's custody tasks, its requests
     runs: Dict[str, tuple]  # per asked id: its runs' sequences and its open requests
 
 
@@ -96,9 +96,11 @@ def read_revision(root: pathlib.Path, tree: str, asked: Iterable[str] = ()) -> O
     with task_store.open_store(root, write=False) as txn:
         if int(txn.meta("schema_version") or VERSION) < VERSION:
             return None
-        rows = sorted((row["task_id"], row["write_seq"]) for row in txn.conn.execute(
-            "SELECT task_id,write_seq FROM tasks WHERE root_task_id=? UNION ALL "
-            "SELECT task_id,write_seq FROM tasks INDEXED BY tasks_underived_root WHERE root_task_id IS NULL", (tree,)))
+        # Each row by its store signature (``task_store.signature``): a row deleted and written again restarts
+        # its sequence, and a writer that stamps the time (``write_task_result``) moves the signature.
+        rows = sorted((row["task_id"], (row["write_seq"], row["updated_at"])) for row in txn.conn.execute(
+            "SELECT task_id,write_seq,updated_at FROM tasks WHERE root_task_id=? UNION ALL SELECT task_id,write_seq,"
+            "updated_at FROM tasks INDEXED BY tasks_underived_root WHERE root_task_id IS NULL", (tree,)))
         where, params = _selected(txn, _TREE, _LEGACY_TREE, (tree, tree))
         custody = sorted({row["task_id"] for row in txn.conn.execute(
             f"SELECT DISTINCT task_id FROM custody_runs WHERE {where}", params)})
@@ -126,20 +128,28 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
-def _read_facts(root: pathlib.Path, tree: str, linked: Iterable[str], key: Any) -> _Facts:
-    """Each source answers on its own: a failed body census still leaves custody and queue members observed."""
+def _read_facts(root: pathlib.Path, tree: str, linked: Iterable[str], key: Any,
+                held: Optional[_Facts] = None) -> _Facts:
+    """Each source answers on its own: a failed body census still leaves custody and queue members observed.
+    ``held`` (this tree's previous clean census) offers each row it read with the store signature of the revision
+    it was read after; ``tree_member_results`` keeps the rows whose signature still stands when it reads the members,
+    so one member's write decodes that member alone, not the whole tree again."""
     from ouroboros.delegate_custody_current import tree_task_ids
     from ouroboros.owner_pause import tree_member_results
 
     links = frozenset(map(str, linked))
     facts = _Facts(key, links)
+    known: Dict[str, tuple] = {}
+    if held is not None and key is not None:  # a held census was always read under a revision
+        signed = dict(held.key[0])
+        known = {task_id: (signed[task_id], row) for task_id, row in held.rows.items() if task_id in signed}
     try:
         # A member whose result has been collected can still own a remote start.
         facts.tree_ids = list(tree_task_ids(root, tree))  # the store answers or raises
     except Exception as exc:
         facts.tree_error = str(exc)[:200]
     try:
-        census = tree_member_results(root, tree, linked={*links, *facts.tree_ids})
+        census = tree_member_results(root, tree, linked={*links, *facts.tree_ids}, known=known)
         facts.rows = {task_id: {name: row[name] for name in MEMBER_FIELDS if name in row}
                       for task_id, row in census.members.items()}
         facts.unresolved = dict(census.unresolved)
@@ -167,7 +177,7 @@ def writer_facts(custody_root: Any, tree: str, *, linked: Optional[Iterable[str]
     if (held is not None and revision is not None and held.key == revision.members
             and (asked is None or not held.unresolved or asked == held.links)):
         return WriterFacts(root, held, revision)
-    facts = _read_facts(root, tree, asked or (), revision.members if revision is not None else None)
+    facts = _read_facts(root, tree, asked or (), revision.members if revision is not None else None, held)
     if revision is not None and not facts.tree_error and not facts.census_error:
         with _LOCK:
             _MEMO[key] = facts
@@ -194,8 +204,9 @@ def member_result_loader(custody_root: Any, tree: str) -> Any:
 
 
 # The ONE explicit purpose that may leave an independent review out of the
-# writer census: the owner's Continue. Every other consumer (Pause, Resume,
-# money, sleep, restart) keeps the whole observation.
+# writer census: the owner's Continue. Every other consumer (Pause, money,
+# sleep, restart) keeps the whole observation; an exact Resume reads it whole
+# and leaves the same reviews out of its own wait (``budget_resume``).
 CONTINUE_PURPOSE = "owner_continue"
 
 
@@ -211,8 +222,9 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None, own
     the census could tie to no tree (``tree_member_results``), never a writer,
     and only once every link source answered: until then such a row holds too.
     ``owner_pause_fence_id`` is the owner Pause's own census: a queued admitted
-    dispatch that only that exact accepted Pause's latch holds is not running
-    work (its earlier effects are still observed below). Continue never passes
+    dispatch that only that exact accepted Pause's latch holds, or a member its own
+    stop holds for a Resume (``held_for_release``), is not running work (its
+    earlier effects are still observed below). Continue never passes
     it: that row would dispatch again once the Pause is resumed. Callers pass the
     root's closed fence they just read; while its queue latch is not projected
     (``latch_pending``, or a park that could not read it) that durable fence alone
@@ -268,7 +280,7 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None, own
         tid = str(task.get("id") or "")
         if str(task.get("root_task_id") or tid) == predecessor:
             members.add(tid)
-            if owner_latched and queued_admitted_dispatch(task):
+            if owner_latched and (queued_admitted_dispatch(task) or held_for_release(task)):
                 continue
             if budget_pause_fact(task, fences) is None or (task.get("admitted_dispatch") == "possible"
                                                    and not pause_marker(task)):
@@ -338,7 +350,7 @@ def model_handoffs(custody_root, predecessor, *, member_results=None, for_contin
     none reads no member; one with some reads them from the census's memo (``tree_census``)."""
     blockers = []
     try:
-        from ouroboros.local_custody_repair import ended_unbound_model_request, receiver_reason
+        from ouroboros.local_custody_repair import ended_unbound_model_request, receiver_reason, retired_unbound_send
         from ouroboros.owner_pause import tree_model_requests
         if attempts is None:  # the root's open attempts only (the store's open-set index)
             attempts = tree_model_requests(custody_root, predecessor)
@@ -350,13 +362,14 @@ def model_handoffs(custody_root, predecessor, *, member_results=None, for_contin
         for attempt in attempts:
             if attempt.get("state") in {"dispatched", "unresolved"}:
                 consumer = attempt.get("local_answer_consumer_id")
-                retired = (member_results.get(str(attempt.get("task_id") or ""), {})
-                           .get("retired_model_consumers") or {}).get(consumer) if consumer else None
+                retirements = (member_results.get(str(attempt.get("task_id") or ""), {})
+                               .get("retired_model_consumers") or {})
+                retired = retirements.get(consumer) if consumer else None
                 if (isinstance(retired, dict) and retired.get("retired_at")
                         and type(attempt.get("local_answer_task_attempt")) is int
                         and retired.get("task_attempt") == attempt["local_answer_task_attempt"]):
                     continue
-                if ended_unbound_model_request(attempt):
+                if ended_unbound_model_request(attempt) or retired_unbound_send(attempt, retirements):
                     continue
                 # A reviewer's own send (its slot/skill attribution) is review
                 # custody: the owner Pause's readers list it as still finishing.
@@ -376,9 +389,10 @@ def model_handoffs(custody_root, predecessor, *, member_results=None, for_contin
 
 
 def trees_model_handoffs(custody_root: Any, roots: Any) -> Dict[str, List[Dict[str, Any]]]:
-    """``model_handoffs`` of many trees over ONE read of their open attempts: the display reader's seam over
-    every paused root. Only a tree that has an open attempt touches its members, from the memo. An unreadable
-    attempt store answers each tree as unreadable, as a single read would: unknown, never none."""
+    """``model_handoffs`` of many trees over ONE read of their dispatched/unresolved attempts, the only states
+    it names: the display reader's seam over every paused root. Only a tree with such an attempt touches its
+    members, from the memo. An unreadable attempt store answers each tree as unreadable, as a single read
+    would: unknown, never none."""
     from ouroboros.owner_pause import trees_model_requests
 
     roots = [str(root) for root in roots]

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import logging
 from pathlib import Path
 
 from ouroboros import chat_chain, dialogue_store, store
@@ -21,6 +22,45 @@ _IMPORTED = _ARRIVAL + " AND json_extract(body, '$.historical_import') IS NOT NU
 # its stored position. ``dialogue_room_reading`` keys these very expressions; ``reading_key`` mirrors them.
 READING_TIME = "COALESCE(json_extract(body,'$.source_order.time'),ts)"
 READING_ORDER = "COALESCE(json_extract(body,'$.source_order.order'),-1)"
+
+
+def _room_seek(place):
+    """The captured rooms of the place ``place`` names (a parameter or a column), through the room index."""
+    return (f"SELECT chat_id FROM dialogue INDEXED BY dialogue_place_rooms WHERE {_ARRIVAL} AND {_PLACE}={place} "
+            "AND chat_id IS NOT NULL")
+
+
+# A place's captured rooms: the loose scan of ``dialogue_place_rooms`` (one seek per room) inside ONE statement that
+# answers one row. Each row a cursor steps hands the interpreter lock over and takes it back, and on a busy server a
+# take waits up to a switch interval: a statement per room made a place with a thousand rooms cost seconds.
+_ROOM_SEEK = _room_seek("?1")
+_PLACE_ROOMS = (f"WITH RECURSIVE room(chat_id) AS (SELECT ({_ROOM_SEEK} ORDER BY chat_id LIMIT 1) UNION ALL "
+                f"SELECT ({_ROOM_SEEK} AND chat_id>room.chat_id ORDER BY chat_id LIMIT 1) FROM room "
+                "WHERE chat_id IS NOT NULL) SELECT json_group_array(chat_id) FROM room WHERE chat_id IS NOT NULL")
+# Every place's captured rooms in one statement: a loose scan of the places, then of each place's rooms, through the
+# same index (``place_room_chats``).
+_NEXT_PLACE = f"SELECT {_PLACE} FROM dialogue INDEXED BY dialogue_place_rooms WHERE {_ARRIVAL} AND {_PLACE}"
+_ALL_PLACE_ROOMS = (
+    f"WITH RECURSIVE place(id) AS (SELECT ({_NEXT_PLACE} IS NOT NULL ORDER BY {_PLACE} LIMIT 1) UNION ALL "
+    f"SELECT ({_NEXT_PLACE}>place.id ORDER BY {_PLACE} LIMIT 1) FROM place WHERE place.id IS NOT NULL), "
+    f"room(place_id, chat_id) AS (SELECT place.id, ({_room_seek('place.id')} ORDER BY chat_id LIMIT 1) FROM place "
+    f"WHERE place.id IS NOT NULL UNION ALL SELECT room.place_id, ({_room_seek('room.place_id')} AND "
+    "chat_id>room.chat_id ORDER BY chat_id LIMIT 1) FROM room WHERE room.chat_id IS NOT NULL) "
+    "SELECT json_group_array(chat_id) FROM room WHERE chat_id IS NOT NULL")
+# A place's newest arrival, and its newest 50 for the account candidates (``account_candidates``).
+_RECENT = f"FROM dialogue INDEXED BY dialogue_place_recent WHERE {_ARRIVAL} AND {_PLACE}=? ORDER BY ts DESC"
+_NEWEST = f"SELECT ts {_RECENT} LIMIT 1"
+_NEWEST_BEFORE = (f"SELECT ts FROM dialogue INDEXED BY dialogue_place_recent WHERE {_ARRIVAL} AND {_PLACE}=? AND ts<? "
+                  "ORDER BY ts DESC LIMIT 1")
+_CANDIDATES = ("SELECT json_extract(body,'$.sender_session_id') AS actor, "
+               "json_extract(body,'$.sender_label') AS label, json_extract(body,'$.transport.actor.is_bot') AS bot, "
+               "json_extract(body,'$.transport.actor.kind') AS kind, "
+               f"json_extract(body,'$.historical_import.authorship') AS authorship {_RECENT} LIMIT 50")
+
+
+def _place_rooms(conn, place_id):
+    """The chat ids of ``place_id``'s captured rooms, ascending (``_PLACE_ROOMS``)."""
+    return sorted(int(chat) for chat in json.loads(conn.execute(_PLACE_ROOMS, (place_id,)).fetchone()[0]))
 
 
 def reading_key(row, position):
@@ -87,6 +127,22 @@ def heard_replay(root, task_id, identity="", continuation_version=0):
     return PresenceTurnResult(outcome='silent', text='', task_id=task_id,
                               delivery_reporting_version=0 if imported else facts.get('delivery_reporting_version', 0),
                               continuation_version=continuation_version)
+
+
+def heard_attention(root, seqs):
+    """``{seq: place_attention}`` of these chat rows' heard decisions from their dedup records, in one read transaction
+    (batched under SQLite's parameter floor), decoded after it closes. A row without one is absent from the answer:
+    undecided, or a focus started (its task says so), never inferred."""
+    seqs, retained = sorted({int(seq) for seq in seqs}), []
+    if not seqs:
+        return {}
+    with dialogue_store.transaction(root, write=False) as conn:
+        for start in range(0, len(seqs), 500):
+            batch = seqs[start:start + 500]
+            retained += conn.execute("SELECT seq,dispatch_input FROM dialogue WHERE stream='chat' AND seq IN ("
+                                     + ','.join('?' for _ in batch) + ')', batch).fetchall()
+    heard = {row['seq']: json.loads(row['dispatch_input'] or '{}').get('place_attention') for row in retained}
+    return {seq: facts for seq, facts in heard.items() if isinstance(facts, dict) and facts.get('decision') == 'heard'}
 
 
 def record_heard(root, task, event, reason, *, captured_task_id=None, recipient=''):
@@ -226,36 +282,23 @@ def history_import_rooms(root, chat_ids):
 
 def place_room_chats(root):
     """Every room holding captured arrivals: a loose scan of their index, one seek per place and per
-    room, whatever the rooms hold. Main never shows an arrival (``room_membership``), so its
-    conversation reads leave these rooms out (``gateway.history_paging.room_lens``). A Main read never
-    builds the index: until a place read or an import has (``presence_history.record_history``), none
-    is left out and membership alone keeps arrivals out of Main."""
+    room, whatever the rooms hold, in one statement after the index check (``_ALL_PLACE_ROOMS``). Main
+    never shows an arrival (``room_membership``), so its conversation reads leave these rooms out
+    (``gateway.history_paging.room_lens``). A Main read never builds the index: until a place read or an
+    import has (``presence_history.record_history``), none is left out and membership alone keeps
+    arrivals out of Main."""
     if not dialogue_store.present(root):
         return set()
-    rooms, place = set(), None
     with dialogue_store.transaction(root, write=False) as conn:
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='dialogue_place_rooms'").fetchone() is None:
-            return rooms
-        while True:
-            row = conn.execute(f"SELECT {_PLACE} FROM dialogue INDEXED BY dialogue_place_rooms WHERE {_ARRIVAL} AND "
-                               f"{_PLACE} {'IS NOT NULL' if place is None else '>?'} ORDER BY {_PLACE} LIMIT 1",
-                               () if place is None else (place,)).fetchone()
-            if row is None:
-                return rooms
-            place, chat = row[0], None
-            while True:
-                bound = '' if chat is None else ' AND chat_id>?'
-                found = conn.execute(f"SELECT chat_id FROM dialogue INDEXED BY dialogue_place_rooms WHERE {_ARRIVAL} "
-                                     f"AND {_PLACE}=? AND chat_id IS NOT NULL{bound} ORDER BY chat_id LIMIT 1",
-                                     (place,) if chat is None else (place, chat)).fetchone()
-                if found is None:
-                    break
-                chat = int(found[0])
-                rooms.add(chat)
+            return set()
+        held = conn.execute(_ALL_PLACE_ROOMS).fetchone()[0]
+    return {int(chat) for chat in json.loads(held or "[]")}
 
 
-def _open_counts(root, place):
-    """One aggregate over indexed nonterminal focuses, never task-document loads."""
+def _open_counts(root, places):
+    """``{place id: {room: open focuses}}`` of ``places`` (each over its own and its legacy bindings): one aggregate
+    over indexed nonterminal focuses for them all, never task-document loads; None while the store is unknown."""
     if not (Path(root) / store.STORE_REL).exists() or store.migrating(root):
         return None
     with store.open_store(root, write=False) as txn:
@@ -263,15 +306,23 @@ def _open_counts(root, place):
     if not exists:
         with store.open_store(root, write=True) as txn:
             txn.conn.execute(f"CREATE INDEX IF NOT EXISTS tasks_place_open ON tasks(presence_binding_id,task_id) WHERE {_OPEN}")
-    bindings = tuple(dict.fromkeys((place.place_id, *place.legacy_binding_ids)))
+    owners, counts = {}, {place.place_id: {} for place in places}
+    for place in places:
+        for binding in dict.fromkeys((place.place_id, *place.legacy_binding_ids)):
+            owners.setdefault(binding, []).append(place.place_id)
     with store.open_store(root, write=False) as txn:
         rows = txn.conn.execute(
-            "SELECT json_extract(b.body,'$.chat_id') AS room,COUNT(*) AS count FROM tasks t INDEXED BY tasks_place_open "
-            "JOIN task_bodies b ON b.task_id=t.task_id WHERE " + _OPEN +
-            " AND t.presence_binding_id IN (" + ','.join('?' for _ in bindings) + ") "
+            "SELECT t.presence_binding_id AS binding,json_extract(b.body,'$.chat_id') AS room,COUNT(*) AS count "
+            "FROM tasks t INDEXED BY tasks_place_open JOIN task_bodies b ON b.task_id=t.task_id WHERE " + _OPEN +
+            " AND t.presence_binding_id IN (SELECT value FROM json_each(?)) "
             "AND json_extract(b.body,'$.metadata.wake_cause')='focus' "
-            "AND COALESCE(t.parent_task_id,'')='' GROUP BY room", bindings).fetchall()
-    return {int(r['room']): int(r['count']) for r in rows if r['room'] is not None}
+            "AND COALESCE(t.parent_task_id,'')='' GROUP BY binding,room", (json.dumps(list(owners)),)).fetchall()
+    for row in rows:
+        if row['room'] is not None:
+            for place_id in owners[row['binding']]:
+                held = counts[place_id]
+                held[int(row['room'])] = held.get(int(row['room']), 0) + int(row['count'])
+    return counts
 
 
 def _room_details(latest):
@@ -288,29 +339,27 @@ def _room_details(latest):
             'thread_id': str(transport.get('thread_id') or '')}
 
 
+def _room_entry(chat_id, counts):
+    """A room's index entry: its open focus count, None while the counts are unknown."""
+    return {'room_chat_id': chat_id, 'unanswered_count': None if counts is None else counts.get(chat_id, 0),
+            'address': f'chat:{chat_id}'}
+
+
 def room_index(root, place, *, details=False):
-    """Polls (/api/state, consciousness) read index entries only. ``details`` is the owner's
-    rooms read: the room's latest arrival by time, one seek per room (and, in a room holding
+    """One place's index entries (the views of a list read them through ``place_facts``). ``details`` is the
+    owner's rooms read: the room's latest arrival by time, one seek per room (and, in a room holding
     imported messages, a walk of its time index down to the newest one, past only the room's
     own non-arrival rows), the body decoded after the transaction closes."""
     if not _dialogue_indexes(root):
         return []
-    counts = _open_counts(root, place)
+    counts = _open_counts(root, [place])
+    counts = None if counts is None else counts[place.place_id]
     rooms, latest = [], []
     # A loose index scan: one seek per captured room, independent of arrival
     # history size. A busy room with a million heard rows still takes one seek.
     with dialogue_store.transaction(root, write=False) as conn:
-        last = None
-        while True:
-            bound = '' if last is None else ' AND chat_id>?'
-            args = (place.place_id,) if last is None else (place.place_id, last)
-            row = conn.execute(f"SELECT chat_id FROM dialogue INDEXED BY dialogue_place_rooms WHERE {_ARRIVAL} "
-                               f"AND {_PLACE}=? AND chat_id IS NOT NULL{bound} ORDER BY chat_id LIMIT 1", args).fetchone()
-            if row is None:
-                break
-            last = int(row[0])
-            rooms.append({'room_chat_id': last, 'unanswered_count': None if counts is None else counts.get(last, 0),
-                          'address': f'chat:{last}'})
+        for last in _place_rooms(conn, place.place_id):
+            rooms.append(_room_entry(last, counts))
             if details:
                 # Imported earlier messages are stored after the live ones they precede, so the
                 # room's latest by time is its newest import or a live arrival above it in time.
@@ -330,23 +379,60 @@ def room_index(root, place, *, details=False):
     return rooms
 
 
-def activity(root, place):
-    if not _dialogue_indexes(root):
-        return {'unanswered': 0, 'last_activity_at': ''}
-    counts = _open_counts(root, place)
-    # O(log arrivals + open focuses), not O(all historical arrivals). The
-    # newest row is an index-only LIMIT 1; counts decode no task documents.
+def place_facts(root, places, *, full=True):
+    """What place views read from the stores, for all of ``places`` in one read of the open focuses and one dialogue
+    transaction (a place's own reads took ten transactions): ``{place_id: facts}`` with ``rooms`` (``room_index``
+    entries; None when that place's room read failed, logged), and for the owner's ``full`` view ``unanswered``,
+    ``last_activity_at`` and ``account_candidates``. A brief list stays readable when its stores are not; a full one
+    raises with them. No place, no read."""
+    places = list(places)
+    facts = {place.place_id: {'rooms': None} for place in places}
+    if not places:
+        return facts
+    try:
+        if not _dialogue_indexes(root):
+            for fact in facts.values():
+                fact['rooms'] = []
+                if full:
+                    fact.update(unanswered=0, last_activity_at='', account_candidates=[])
+            return facts
+        counts = _open_counts(root, places)
+        with dialogue_store.transaction(root, write=False) as conn:
+            for place in places:
+                fact, held = facts[place.place_id], None if counts is None else counts[place.place_id]
+                try:
+                    fact['rooms'] = [_room_entry(last, held) for last in _place_rooms(conn, place.place_id)]
+                except Exception:
+                    logging.getLogger(__name__).warning("Place room index unavailable for %s", place.place_id,
+                                                        exc_info=True)
+                if full:
+                    newest = conn.execute(_NEWEST, (place.place_id,)).fetchone()
+                    fact.update(unanswered=None if held is None or fact['rooms'] is None else sum(held.values()),
+                                last_activity_at=newest[0] if newest else '',
+                                account_candidates=_people(conn.execute(_CANDIDATES, (place.place_id,)).fetchall()))
+    except Exception:
+        if full:
+            raise
+        logging.getLogger(__name__).warning("Place room index unavailable for %s",
+                                            ", ".join(place.place_id for place in places), exc_info=True)
+    return facts
+
+
+def newest_arrivals(root, place_ids, *, before=""):
+    """``{place_id: ts}`` of each place's newest arrival stamped before ``before`` (any, when empty), one seek of
+    ``dialogue_place_recent`` each, in one read; a place with none is absent."""
+    place_ids = list(dict.fromkeys(str(place_id) for place_id in place_ids))
+    if not place_ids or not _dialogue_indexes(root):
+        return {}
     with dialogue_store.transaction(root, write=False) as conn:
-        row = conn.execute(f"SELECT ts FROM dialogue INDEXED BY dialogue_place_recent WHERE {_ARRIVAL} "
-                           f"AND {_PLACE}=? ORDER BY ts DESC LIMIT 1", (place.place_id,)).fetchone()
-    return {'unanswered': None if counts is None else sum(counts.values()),
-            'last_activity_at': row[0] if row else ''}
+        found = {place_id: conn.execute(_NEWEST_BEFORE, (place_id, before)).fetchone() if before
+                 else conn.execute(_NEWEST, (place_id,)).fetchone() for place_id in place_ids}
+    return {place_id: row[0] for place_id, row in found.items() if row}
 
 
 def recent_identity(root, place_id, account_id=""):
     """First valid credential declaration among the place's newest 50 captured arrivals (of one account when the call
     names it); None when nothing was declared there or the room cannot be read."""
-    import logging
     from ouroboros.places import validate_presence_identity
 
     try:
@@ -374,7 +460,8 @@ def recent_identity(root, place_id, account_id=""):
 
 
 def account_candidates(root, place_id):
-    """At most 20 people from the newest 50 arrivals: one index seek + 50 rows.
+    """At most 20 people from the newest 50 arrivals: one index seek + 50 rows (one place's read of what
+    ``place_facts`` reads for a list of views, with the same statement and filter).
 
     This is a recent UI suggestion, never owner identity evidence or a history
     scan. It uses the existing place/time index and stores no second actor list.
@@ -384,17 +471,51 @@ def account_candidates(root, place_id):
     if not _dialogue_indexes(root):
         return []
     with dialogue_store.transaction(root, write=False) as conn:
-        rows = conn.execute(f"SELECT json_extract(body,'$.sender_session_id') AS actor, "
-                            "json_extract(body,'$.sender_label') AS label, "
-                            "json_extract(body,'$.transport.actor.is_bot') AS bot, "
-                            "json_extract(body,'$.transport.actor.kind') AS kind, "
-                            "json_extract(body,'$.historical_import.authorship') AS authorship "
-                            f"FROM dialogue INDEXED BY dialogue_place_recent WHERE {_ARRIVAL} "
-                            f"AND {_PLACE}=? ORDER BY ts DESC LIMIT 50", (place_id,)).fetchall()
+        rows = conn.execute(_CANDIDATES, (place_id,)).fetchall()
+    return _people(rows)
+
+
+_SINCE = ("SELECT json_extract(body,'$.sender_session_id') AS actor, json_extract(body,'$.sender_label') AS label, "
+          "json_extract(body,'$.transport.actor.is_bot') AS bot, "
+          "json_extract(body,'$.transport.actor.kind') AS kind, "
+          "json_extract(body,'$.transport.message.reaction.schema_version') AS reaction, json_extract(body,'$.text') AS text, "
+          f"json_extract(body,'$.historical_import.authorship') AS authorship FROM dialogue INDEXED BY dialogue_place_recent "
+          f"WHERE {_ARRIVAL} AND {_PLACE}=? AND ts>=? ORDER BY ts DESC LIMIT ?")
+PEOPLE_ROW_CAP = 2000  # per place: a busier week says «at least»
+
+
+def recent_people(root, place_ids, *, days: int, now: float | None = None, services: dict | None = None) -> dict | None:
+    """The people who wrote in these places in the last ``days`` (the switch's preview: «how many people wrote there
+    lately»): ``{"by_place": {id: n}, "total": distinct across places, "capped": bool, "capped_places": [id]}``, or
+    ``None`` when the index is unreadable. A reaction with no words is no writing (``dialogue_provenance``). ``services`` (place id → its service) keeps the same raw sender id on two services two people. One
+    index range per place, at most ``PEOPLE_ROW_CAP`` newest rows each (``capped`` then); the same filter as
+    ``account_candidates``: no bots, no connected account's own imports, no chat or anonymous actor."""
+    import time as _time
+    from datetime import datetime, timezone
+
+    if not _dialogue_indexes(root):
+        return None
+    since = datetime.fromtimestamp((now or _time.time()) - days * 86400, timezone.utc).isoformat()
+    by_place, everyone, capped_places = {}, set(), []
+    with dialogue_store.transaction(root, write=False) as conn:
+        for place_id in dict.fromkeys(place_ids):
+            rows = conn.execute(_SINCE, (place_id, since, PEOPLE_ROW_CAP)).fetchall()
+            if len(rows) >= PEOPLE_ROW_CAP:
+                capped_places.append(place_id)
+            wrote = [row for row in rows if not (row["reaction"] == 1 and not str(row["text"] or "").strip())]
+            people = {person["platform_actor_id"] for person in _people(wrote, limit=None)}
+            by_place[place_id] = len(people)
+            service = str((services or {}).get(place_id) or "")
+            everyone |= {(service, actor) for actor in people}
+    return {"by_place": by_place, "total": len(everyone), "capped": bool(capped_places), "capped_places": capped_places}
+
+
+def _people(rows, limit=20):
+    """``account_candidates`` of one place's newest 50 arrival rows (``limit=None``: every person among ``rows``)."""
     people = {}
     for row in rows:
         actor = str(row['actor'] or '')
         if (actor and not row['bot'] and row['authorship'] != 'platform_account' and actor not in people
                 and row['kind'] not in {'chat', 'anonymous'}):
             people[actor] = {'platform_actor_id': actor, 'label': str(row['label'] or actor)}
-    return list(people.values())[:20]
+    return list(people.values())[:limit]

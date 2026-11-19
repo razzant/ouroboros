@@ -7,11 +7,11 @@ A row whose arrival recorded its provider send time shows it (``sent_at``); ``ts
 """
 from __future__ import annotations
 
-import json
-
-from ouroboros import dialogue_store
 from ouroboros.dialogue_provenance import reaction_action_words, reaction_fact, reaction_words
+from ouroboros.place_arrivals import heard_attention
 from ouroboros.places import PlaceError, owner_confirmed_row, place_owner_accounts, row_place_id
+from ouroboros.presence_call import call_utterance
+from ouroboros.presence_message_facts import non_text_items
 from ouroboros.store import StoreError
 
 
@@ -34,8 +34,15 @@ def record_facts(entry):
     for key in ('identity', 'sends_as', 'sends_as_owner'):
         if (value := transport.get(key)) is not None:
             facts[key] = value
-    reaction = reaction_fact(transport.get('message'))
-    if reaction and kind != 'place_notice':  # English host words for the act; words the row sent stay its text
+    # The connector's message facts are this row's own only on an arrival or a delivery receipt: a v0 reply
+    # (``presence_runner._log_dialogue``) keeps the event it answered in its transport, and a call's utterance its
+    # opening's (``presence_call.call_utterance``), never facts about itself.
+    own = (direction == 'in' and not call_utterance(entry)) or kind == 'presence_delivery'
+    message = transport.get('message') if own else None
+    if non_text := non_text_items(message):  # connector facts beside the words, never speech
+        facts['non_text'] = [{'kind': item_kind, 'description': description} for item_kind, description in non_text]
+    reaction = reaction_fact(message)
+    if reaction:  # English host words for the act; words the row sent stay its text
         state = delivery.get('state') if isinstance(delivery, dict) else ''
         facts['reaction'] = {'summary': reaction_action_words(reaction, state) if kind == 'presence_delivery'
                              else reaction_words(reaction)}
@@ -51,26 +58,18 @@ def annotate_place_history(messages, entries, root, reads):
     sources = {entry.get('history_id'): entry for entry in entries or () if record_facts(entry)}
     candidates = [(message, sources[message['history_id']]) for message in messages
                   if message.get('history_id') in sources and not message.get('is_progress')]
-    arrivals = {entry['history_position']['offset']: entry for _, entry in candidates
-                if entry.get('type') == 'place_arrival' and entry.get('history_position', {}).get('source') == 'chat'
-                and not isinstance(entry.get('historical_import'), dict)}
-    retained = []
-    if arrivals:
-        with dialogue_store.transaction(root, write=False) as conn:
-            # A page is bounded, but may exceed SQLite's parameter floor.
-            offsets = list(arrivals)
-            for start in range(0, len(offsets), 500):
-                batch = offsets[start:start + 500]
-                retained += conn.execute("SELECT seq,dispatch_input FROM dialogue WHERE stream='chat' AND seq IN ("
-                                         + ','.join('?' for _ in batch) + ')', batch).fetchall()
-    # Decoded after the read transaction: JSON work never extends the transaction or its lock.
-    heard = {row['seq']: json.loads(row['dispatch_input'] or '{}').get('place_attention', {}) for row in retained}
+    heard = heard_attention(root, (entry['history_position']['offset'] for _, entry in candidates
+                                   if entry.get('type') == 'place_arrival'
+                                   and entry.get('history_position', {}).get('source') == 'chat'
+                                   and not isinstance(entry.get('historical_import'), dict)))
     accounts = None  # the places' current owner accounts, read once for the page when a person's row needs them
     for message, entry in candidates:
         facts = record_facts(entry)
-        block = entry.get('source_order')
+        # The provider send time the arrival recorded (``source_order``); a row without one has none, nor has a call's
+        # utterance. One stored before heard rows stopped carrying the opening's message holds the opening's time and,
+        # never rewritten, still reads there in a room ordered by time (``place_arrivals.READING_TIME``).
+        block = None if call_utterance(entry) else entry.get('source_order')
         if isinstance(block, dict) and isinstance(block.get('time'), str) and block['time']:
-            # The provider send time the arrival recorded (``source_order``); a row without one has none.
             facts['sent_at'] = block['time']
         imported = entry.get('historical_import')
         if isinstance(imported, dict):
@@ -92,8 +91,8 @@ def annotate_place_history(messages, entries, root, reads):
                                       **({'recipient': str(attention['recipient'])} if attention.get('recipient') else {})}
                 if attention.get('facts') is not None:
                     facts['facts'] = attention['facts']
-            elif entry.get('type') == 'place_arrival' and entry.get('task_id'):
-                try:
+            elif entry.get('type') == 'place_arrival' and entry.get('task_id') and not call_utterance(entry):
+                try:  # a call's utterances share its identity: only the opening's row started the focus
                     task = reads.load(root, entry['task_id']) or {}
                 except (OSError, ValueError, StoreError):
                     task = {}  # Missing task knowledge proves no attention outcome.

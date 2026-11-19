@@ -501,7 +501,9 @@ function highlightCodeIn(root) {
     });
 }
 
-function renderLatexIn(root) {
+/** Math in `root`'s text drawn by the vendored KaTeX auto-render, as a mounted message is enhanced; a formula it cannot
+ * parse stays its source text. The room's search (chat_search_words.js) reads a message's math the same way. */
+export function renderLatexIn(root) {
     if (typeof globalThis.renderMathInElement !== 'function') return;
     globalThis.renderMathInElement(root, {
         delimiters: [

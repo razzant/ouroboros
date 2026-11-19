@@ -3,6 +3,7 @@
 import ctypes
 import ctypes.util
 import json
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -310,8 +311,7 @@ def test_local_key_commands_are_prepared_once_before_activation(desktop, monkeyp
     desktop._native = native
     desktop._try = lambda cmd, **kw: sent.append(cmd) or (0, "", "")
     out = json.loads(desktop.key(keys="down A cmd+A", app="Editor"))
-    assert out["ok"] is True and sent == [["cliclick", "kp:arrow-down"], ["cliclick", "t:A"],
-                                          ["cliclick", "kd:cmd", "t:a", "ku:cmd"]]
+    assert out["ok"] is True and sent == [["cliclick", "kp:arrow-down"], ["cliclick", "t:A"], plugin.command_chord_argv("a")]
     assert not hasattr(desktop, "_last_base_raw")
 
 
@@ -366,7 +366,7 @@ def test_mac_local_and_ssh_share_real_cliclick_key_commands():
 
 
 @pytest.mark.parametrize("keys,mac,x11", [
-    ("cmd+S", ["kd:cmd", "t:s", "ku:cmd"], "super+s"),
+    ("cmd+S", None, "super+s"),  # None: the Command chord program given "s" (tests/test_unix_computer_use_paste_chord.py)
     ("ctrl+C", ["kd:ctrl", "t:c", "ku:ctrl"], "ctrl+c"),
     ("Control+S", ["kd:ctrl", "t:s", "ku:ctrl"], "ctrl+s"),
 ])
@@ -375,11 +375,12 @@ def test_a_letter_under_a_modifier_adds_no_shift_and_a_bare_letter_stays_as_writ
     sent, commands = [], []
     desktop._try = lambda cmd, **kw: sent.append(cmd) or (0, "", "")
     assert json.loads(desktop.key(keys=keys))["ok"] is True
-    assert sent == [["cliclick", *mac]]
+    assert sent == [plugin.command_chord_argv("s") if mac is None else ["cliclick", *mac]]
     select(desktop, "ssh_macos")
     desktop._ssh_run = lambda conn, command, **kw: commands.append(command) or (0, "", "")
     assert json.loads(desktop.key(keys=keys))["ok"] is True
-    assert " ".join(["cliclick", *mac]) + ";" in commands[0]
+    remote = shlex.join(plugin.command_chord_argv("s", remote=True)) if mac is None else " ".join(["cliclick", *mac])
+    assert remote + ";" in commands[0]
     desktop.use_local()
     monkeypatch.setattr(plugin, "_platform", lambda: "linux")
     monkeypatch.setattr(plugin, "_session_type", lambda: "x11")
@@ -451,7 +452,8 @@ def test_unknown_or_contradictory_completion_never_replays_a_paste(desktop, body
     pytest.param("type_text", {"text": "text"}, False, "ssh", id='type_text-kwargs2-False-ssh'),
 ])
 def test_never_policy_requires_front_without_any_activation(tmp_path, monkeypatch, host, front, method, kwargs):
-    from tests.test_unix_computer_use_targeting import mac, x11, KEYNOTE, SAFARI
+    from tests._unix_computer_use import mac, KEYNOTE, SAFARI
+    from tests.test_unix_computer_use_targeting import x11
     from tests.test_unix_computer_use_remote_targeting import ssh, mac_over_ssh, osworld, listing, KEYNOTE_FRONT, FIREFOX_FRONT
     if host == "macos":
         _, api, state = mac(tmp_path, monkeypatch, front=KEYNOTE if front else SAFARI)
@@ -486,7 +488,8 @@ def test_never_policy_requires_front_without_any_activation(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("host", ["macos", "x11", "osworld"])
 def test_never_policy_with_an_unread_front_claims_no_switch(tmp_path, monkeypatch, host):
-    from tests.test_unix_computer_use_targeting import mac, x11
+    from tests._unix_computer_use import mac
+    from tests.test_unix_computer_use_targeting import x11
     from tests.test_unix_computer_use_remote_targeting import ssh, osworld, listing, LISTING
     if host == "macos":
         _, api, state = mac(tmp_path, monkeypatch, lsappinfo=False)
@@ -543,7 +546,7 @@ def test_never_policy_x11_hold_refused_before_the_press_is_not_dispatched(tmp_pa
 
 
 def test_never_policy_keeps_the_later_step_words(tmp_path, monkeypatch):
-    from tests.test_unix_computer_use_targeting import mac, inputs, KEYNOTE, SAFARI
+    from tests._unix_computer_use import mac, inputs, KEYNOTE, SAFARI
     def switch(argv, state):
         if "kp:tab" in argv:
             state["front"] = SAFARI
@@ -559,7 +562,7 @@ def test_never_policy_keeps_the_later_step_words(tmp_path, monkeypatch):
     ("osworld", "front_unread", "__FRONT_UNREAD__"),
 ])
 def test_remote_precheck_after_no_switch_claims_none(tmp_path, monkeypatch, host, reason, marker):
-    from tests.test_unix_computer_use_targeting import KEYNOTE
+    from tests._unix_computer_use import KEYNOTE
     from tests.test_unix_computer_use_remote_targeting import ssh, osworld, listing, info_line, LISTING, KEYNOTE_FRONT
     other = "1|4242|Browser" if reason == "target_lost" else ""
     if host == "ssh":
@@ -575,7 +578,7 @@ def test_remote_precheck_after_no_switch_claims_none(tmp_path, monkeypatch, host
 
 
 def test_a_requested_switch_that_could_not_be_verified_still_says_so(tmp_path, monkeypatch):
-    from tests.test_unix_computer_use_targeting import mac, inputs
+    from tests._unix_computer_use import mac, inputs
     _, api, state = mac(tmp_path, monkeypatch, helper=lambda args, state: {
         "ok": False, "reason": "front_unread", "activated": None, "verified": False, "method": "ax_frontmost",
         "target": {"app": "Keynote", "pid": 200}, "error": "lsappinfo named no frontmost application after the switch"})
@@ -590,8 +593,9 @@ def test_ssh_super_modifier_preserves_existing_mapping(desktop):
     commands = []
     desktop._ssh_run = lambda conn, command, **kw: commands.append(command) or (0, "", "")
     out = json.loads(desktop.key(keys="super+a meta+b"))
-    assert out["ok"] is True
-    assert "cliclick kd:cmd t:a ku:cmd" in commands[0] and "cliclick kd:cmd t:b ku:cmd" in commands[1]
+    assert out["ok"] is True  # both name Command: the Command chord, its program and character quoted word by word
+    for command, char in zip(commands, "ab"):
+        assert shlex.join(plugin.command_chord_argv(char, remote=True)) + ";" in command and "cliclick kd:" not in command
 
 
 def test_x11_fn_modifier_reaches_name_validation_without_keyerror(desktop, monkeypatch):

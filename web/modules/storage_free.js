@@ -22,11 +22,11 @@ const attr = escapeHtmlAttr;
 export const FREE_GROUPS = {
     work_folders: {
         label: 'Finished tasks’ work folders',
-        loss: 'Scratch files and helper logs of finished tasks. Results, files, messages and the exact model history are already saved.',
+        loss: 'Scratch files and subagent logs of finished tasks. Results, files, messages and the exact model history are already saved.',
         unit: ['{n} folder', '{count} folders'],
     },
     working_copies: {
-        label: 'Working copies of finished work',
+        label: 'Worktrees of finished work',
         loss: 'Ready-to-use copies of code. Their results and commits are kept.',
         unit: ['{n} copy', '{count} copies'],
     },
@@ -45,7 +45,7 @@ export const FREE_GROUPS = {
         saved: true,
     },
     lost_copies: {
-        label: 'Helper copies no record names',
+        label: 'Subagent worktrees no record names',
         loss: 'Copies of code whose record is gone. They may hold changes that were never moved into the project.',
         unit: ['{n} copy', '{count} copies'],
         stays: 'Their record is gone, so nobody knows whether they hold changes never moved into a project.',
@@ -60,9 +60,9 @@ export const FREE_GROUPS = {
     },
     result_pins: {
         label: 'Git marks of results never applied',
-        loss: 'Git marks of helper results their finished task never applied or rejected. The saved change stays in the task results and can still be applied as a plain patch; the space returns at Git’s next cleanup.',
+        loss: 'Git marks of subagent results their finished task never applied or rejected. The saved change stays in the task results and can still be applied as a plain patch; the space returns at Git’s next cleanup.',
         unit: ['{n} result', '{count} results'],
-        stays: 'Helper results nobody has applied or rejected yet.',
+        stays: 'Subagent results nobody has applied or rejected yet.',
         saved: true,
     },
 };
@@ -88,7 +88,7 @@ const ADVANCED = 'advanced_group';  // left out of the pool only because a saved
 /** The kind of one item in the owner's words; `environment` is a whole temporary working environment. */
 const KINDS = {
     work_folder: { label: 'Work folder', unit: ['{n} work folder', '{count} work folders'] },
-    working_copy: { label: 'Working copy', unit: ['{n} working copy', '{count} working copies'] },
+    working_copy: { label: 'Worktree', unit: ['{n} worktree', '{count} worktrees'] },
     environment: { label: 'Temporary environment', unit: ['{n} temporary environment', '{count} temporary environments'] },
     scratch: { label: 'Session scratch', unit: ['{n} session scratch folder', '{count} session scratch folders'] },
     other: { label: 'Other item', unit: ['{n} other item', '{count} other items'] },
@@ -155,6 +155,10 @@ export const CAUSES = {
     nothing_unsaved: 'nothing in it is unsaved any more', nested_repository: 'a repository inside it cannot be saved as a patch',
     commits_unprotected: 'its commits are not held by a branch', generation_closed: 'stopped by a restart',
     removal_failed: 'its removal failed', younger_than_retention: 'it is still inside the retention days',
+    source_recovery_pending: 'startup recovery is not confirmed complete: old task folders and service logs are kept',
+    closed_set_unrecorded: 'closed log files waiting for the next app restart (no earlier run of the app saw them closed)',
+    prior_workers_unconfirmed: 'closed log files waiting for the next app restart (the previous run’s background processes are not confirmed stopped)',
+    closed_set_changed: 'closed log files waiting for the next app restart (their log’s archive changed since the last run saw it)',
 };
 /** A code's words from the one map, `''` when it has none. */
 const causeWords = (code) => CAUSES[code] || KEPT_REASONS[code] || '';
@@ -164,12 +168,18 @@ const reasonWords = (reason, cause = '') => cause ? fmt(causeWords(cause) || '{r
  *  1 you asked to keep it"; a class without words is shown by its name. */
 export function holdsPhrase(fact, now) {
     const holds = Array.isArray(fact.holds) ? fact.holds.filter((hold) => hold && hold.count > 0) : [];
+    // A hold whose count is unknown (`null`: what it keeps was never listed) is said by its reason alone, never a number.
+    const unknown = Array.isArray(fact.holds) ? fact.holds.filter((hold) => hold && hold.class && hold.count === null) : [];
     const held = holds.length ? holds.reduce((sum, hold) => sum + hold.count, 0) : (fact.held > 0 ? fact.held : 0);
-    if (!(held > 0)) return '';
-    const head = fact.held_since ? fmt('holding {n} since {when}', { n: number(held), when: whenLabel(fact.held_since, now) })
-        : fmt('holding {n}', { n: number(held) });
     const words = (hold) => (causeWords(hold.class) ? fmt(causeWords(hold.class)) : String(hold.class || '').replace(/_/g, ' '));
-    return holds.length ? `${head}: ${holds.map((hold) => `${number(hold.count)} ${words(hold)}`).join(', ')}` : head;
+    const parts = unknown.map((hold) => (hold.since ? fmt('held since {when}: {reason}', { when: whenLabel(hold.since, now), reason: words(hold) })
+        : fmt('held: {reason}', { reason: words(hold) })));
+    if (held > 0) {
+        const head = fact.held_since ? fmt('holding {n} since {when}', { n: number(held), when: whenLabel(fact.held_since, now) })
+            : fmt('holding {n}', { n: number(held) });
+        parts.unshift(holds.length ? `${head}: ${holds.map((hold) => `${number(hold.count)} ${words(hold)}`).join(', ')}` : head);
+    }
+    return parts.join(' · ');
 }
 
 /** What happened to the owner's own attempt, kept beside the server's current facts: `notice` outlives a plan the

@@ -38,6 +38,19 @@ test('one head: the name opens the detail sheet, marks stay beside it, the who l
     assert.doesNotMatch(html, / title="/, 'no explanation lives in a hover title');
 });
 
+test('Details lists each placed control in the Details row layout with a polarity-true Hide/Show', () => {
+    const rows = [{ key: 'demo:chip', label: 'Meter', place: 'Chip above the composer', hidden: false },
+        { key: 'demo:save', label: 'Save', place: 'On replies', hidden: true }];
+    const html = renderInstalledSkillCard(skill(), new Set(), new Set(), {}, { contributionVisibility: () => rows });
+    const section = html.split('data-skill-detail-contributions>')[1].split('<div class="skills-details-facts" data-skill-detail-facts>')[0];
+    assert.match(section, /<span class="skills-detail-label">Shown in chat<\/span>/);
+    assert.match(section, /data-contribution-row="demo:chip"><span class="skills-detail-label">Meter<\/span><span class="skills-detail-value">Chip above the composer <button[^>]*data-skill-action="toggle_contribution"[^>]*data-contribution-key="demo:chip" data-contribution-hidden="false" aria-label="Hide Meter, chip above the composer">Hide<\/button>/);
+    assert.match(section, /On replies · hidden <button[^>]*data-contribution-hidden="true" aria-label="Show Save, on replies">Show<\/button>/);
+    assert.doesNotMatch(section, /<small>|<strong>|<h4>/, 'no raw small text or ad-hoc headings');
+    assert.doesNotMatch(renderInstalledSkillCard(skill(), new Set(), new Set(), {}, { contributionVisibility: () => [] }),
+        /data-skill-detail-contributions/, 'a skill without placed controls has no such rows');
+});
+
 test('normal On and Off state lives in the switch; only attention states get a status chip', () => {
     assert.equal(chipOf(renderInstalledSkillCard(row('telegram'))), null);
     assert.equal(chipOf(renderInstalledSkillCard(skill())), null);
@@ -194,7 +207,21 @@ test('a passed review stays the evidence while a newer round has no verdict: one
     assert.doesNotMatch(detailsReview(renderInstalledSkillCard(waiting)), /ui-chip/, 'no verdict yet is no chip, never a green pending');
     // Without a newer round the passed review is said alone, beside its verdict.
     assert.equal(reviewSentence(skill()), 'Reviewed on this computer · passed.');
+    // Allowed to run is not passed: findings, an author's acceptance and Cyber Pro's judgment each say what they are.
+    const runs = (reason, facts = {}) => reviewSentence(skill({ review_gate: { executable_review: true, blocking_reason: reason }, ...facts }));
+    assert.equal(runs('blockers_allowed_by_advisory_enforcement', { review_status: 'blockers' }), 'Review found problems; it may still run.');
+    for (const [reason, facts] of [['cyber_authority', { review_status: 'pending' }], ['cyber_authority', { review_status: 'blockers', review_stale: true }],
+        ['author_accepted_advisory', { review_status: 'clean', review_stale: true }], ['author_accepted_advisory', { review_status: 'pending' }]]) {
+        assert.equal(runs(reason, facts), 'No review passed its current files; it may still run.', `${reason} ${JSON.stringify(facts)}`);
+    }
+    assert.equal(runs('cyber_authority', { review_status: 'blockers' }), 'Review found problems; it may still run.');
+    assert.equal(runs('cyber_authority'), 'Reviewed on this computer · passed.', 'a current clean verdict passed, whoever admits it');
+    assert.equal(runs('author_accepted_advisory', { review_status: 'warnings' }), 'Reviewed on this computer · passed with notes.');
     assert.match(detailsReview(renderInstalledSkillCard(skill())), /data-tone="ok"[^>]*>clean</);
+    // The word of a review of earlier files never stands beside "No review passed its current files"; current findings keep theirs.
+    const gate = { executable_review: true, blocking_reason: 'author_accepted_advisory' };
+    assert.doesNotMatch(detailsReview(renderInstalledSkillCard(skill({ review_gate: gate, review_status: 'clean', review_stale: true }))), /ui-chip/);
+    assert.match(detailsReview(renderInstalledSkillCard(skill({ review_gate: gate, review_status: 'blockers' }))), /data-tone="danger"[^>]*>blockers</);
 });
 
 test('per-release withdrawal names the withdrawn version supplied by the host', () => {
@@ -235,7 +262,7 @@ test('each rejected update states its cause and keeps the reviewed retry; only f
 test('conflicts lock an off switch with a visible reason but never trap an enabled skill', () => {
     const conflict = { code: 'skill_conflict', skills: ['beta'], omitted: 0 };
     const off = renderInstalledSkillCard(skill({ conflict }));
-    assert.match(off, /class="skills-switch is-locked"/);
+    assert.match(off, /class="ui-switch is-locked"/);
     assert.match(off, /input type="checkbox" class="skills-toggle"[^>]*disabled/);
     assert.match(traysOf(off), /Uses the same tool names as beta\. Turn one of them off to use the other\./);
     assert.match(off, /aria-describedby="skill-trays-demo"/, 'the locked switch points at the visible explanation');
@@ -300,7 +327,7 @@ test('Publish follows the host verdict: task_start_allowed decides, a missing to
     assert.match(allowed, /skills-submit-hub"[^>]*data-submit-disabled="false"[^>]*>Publish…</);
     const legacy = renderInstalledSkillCard(skill(), new Set(), new Set(), {}, { githubTokenConfigured: false });
     assert.match(legacy, /data-submit-disabled="true"/);
-    assert.match(legacy, /Publishing needs a GitHub token: Settings → Secrets → GITHUB_TOKEN\./);
+    assert.match(legacy, /Publishing needs a GitHub token: Settings › Accounts and keys › GitHub\./);
     assert.doesNotMatch(renderInstalledSkillCard(skill({ source: 'native' })), /skills-submit-hub/);
 });
 
@@ -408,4 +435,117 @@ test('a stopped Skills-page reviewer of these bytes is continued by its own acti
         assert.equal(continuableReview(stopped([other])), null);
         assert.doesNotMatch(renderInstalledSkillCard(stopped([other])), /continue_review/);
     }
+});
+
+test('a declared secret that is not set is a neutral tray with Open Accounts and keys and puts the card in Needs you; unknown is said, never a value', () => {
+    const fields = (state) => ({ secret_config: { fields: [{ id: 'botToken', key: 'TELEGRAM_BOT_TOKEN', state }] } });
+    const missing = renderInstalledSkillCard(skill({ enabled: true, ...fields('missing') }));
+    assert.match(traysOf(missing), /TELEGRAM_BOT_TOKEN is not set\.<div class="skills-tray-note">Save it in Settings › Accounts and keys\.<\/div>/);
+    assert.doesNotMatch(traysOf(missing), /next read|some skills|Disable and Enable/, 'when it applies is the skill’s own status');
+    assert.match(traysOf(missing), /data-skill-action="open_secrets"[^>]*>Open Accounts and keys</);
+    // The button names the keys it is about, so Accounts and keys opens at that key's row (skills.js `row`).
+    const keysOf = (html) => /data-skill-action="open_secrets" data-keys="([^"]*)"/.exec(traysOf(html))?.[1];
+    assert.equal(keysOf(missing), 'TELEGRAM_BOT_TOKEN');
+    const two = renderInstalledSkillCard(skill({ enabled: true, secret_config: { fields: [
+        { id: 'botToken', key: 'TELEGRAM_BOT_TOKEN', state: 'missing' }, { id: 'proxy', key: 'TELEGRAM_PROXY', state: 'missing' }] } }));
+    assert.match(traysOf(two), /TELEGRAM_BOT_TOKEN, TELEGRAM_PROXY are not set\.<div class="skills-tray-note">Save them in Settings › Accounts and keys\.<\/div>/);
+    assert.equal(keysOf(two), 'TELEGRAM_BOT_TOKEN,TELEGRAM_PROXY');
+    const mixed = renderInstalledSkillCard(skill({ enabled: true, secret_config: { fields: [
+        { id: 'proxy', key: 'TELEGRAM_PROXY', state: 'unknown' }, { id: 'botToken', key: 'TELEGRAM_BOT_TOKEN', state: 'missing' }] } }));
+    assert.equal(keysOf(mixed), 'TELEGRAM_BOT_TOKEN', 'a key that is not set leads; one that cannot be read waits');
+    assert.doesNotMatch(traysOf(missing), /data-tone="(warn|danger)"/, 'a fact, not the owner’s amber move');
+    assert.equal(chipOf(missing), null);
+    // Saving it is the owner's move, so the card is under Needs you; the tray stays neutral and adds no chip.
+    assert.equal(installedSkillModel(skill({ enabled: true, ...fields('missing') })).needs, true);
+    assert.match(missing, /<article [^>]*data-needs-you[ >]/);
+    const unknown = traysOf(renderInstalledSkillCard(skill({ enabled: true, ...fields('unknown') })));
+    assert.match(unknown, /Saved settings can’t be read now, so whether TELEGRAM_BOT_TOKEN is set is unknown\./);
+    assert.doesNotMatch(unknown, /skills-tray-note|Save it/, 'an unreadable value is not a reason to save it again');
+    assert.match(unknown, /data-skill-action="open_secrets" data-keys="TELEGRAM_BOT_TOKEN"/);
+    // Configured, an off skill, or a grant still missing: nothing here (the grant tray speaks for itself).
+    assert.doesNotMatch(renderInstalledSkillCard(skill({ enabled: true, ...fields('configured') })), /open_secrets/);
+    assert.doesNotMatch(renderInstalledSkillCard(skill({ ...fields('missing') })), /open_secrets/);
+    assert.doesNotMatch(renderInstalledSkillCard(skill({ enabled: true, grants: { all_granted: false, missing_keys: ['TELEGRAM_BOT_TOKEN'] },
+        ...fields('missing') })), /open_secrets/);
+    // Needs you follows the tray's own condition: an unreadable, a configured or an off skill's secret asks nothing;
+    // a grant still missing is already Needs access, once.
+    for (const overrides of [{ enabled: true, ...fields('unknown') }, { enabled: true, ...fields('configured') }, fields('missing')]) {
+        assert.equal(installedSkillModel(skill(overrides)).needs, false, JSON.stringify(overrides));
+        assert.doesNotMatch(renderInstalledSkillCard(skill(overrides)), /data-needs-you/);
+    }
+    const ungranted = skill({ enabled: true, grants: { all_granted: false, missing_keys: ['TELEGRAM_BOT_TOKEN'] }, ...fields('missing') });
+    assert.equal(installedSkillModel(ungranted).needs, true);
+    assert.deepEqual(chipOf(renderInstalledSkillCard(ungranted)).slice(1), ['warn', 'Needs access']);
+});
+
+test('a grant left behind by a byte change is named as the earlier version’s grant, never as missing keys', () => {
+    const earlier = { all_granted: false, missing_keys: ['GOOGLE_OAUTH_CLIENT_ID'],
+        earlier_grant: { keys: ['GOOGLE_OAUTH_CLIENT_ID'], permissions: [] } };
+    const named = traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: earlier })));
+    assert.match(named, /Wants to use GOOGLE_OAUTH_CLIENT_ID\./);
+    assert.match(named, /class="skills-tray-note">You granted this to an earlier version of the skill/);
+    // A new version asking for more than the earlier grant covered: the note does not claim all of it.
+    const wider = traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: { ...earlier, missing_keys: ['GOOGLE_OAUTH_CLIENT_ID', 'NEW_KEY'] } })));
+    assert.match(wider, /Wants to use GOOGLE_OAUTH_CLIENT_ID, NEW_KEY\./);
+    assert.match(wider, /You granted some of this to an earlier version/);
+    assert.match(named, /data-skill-action="grant" data-keys="GOOGLE_OAUTH_CLIENT_ID"/, 'the same Grant access button restores it');
+    // Never granted: the tray asks, and says nothing about an earlier version.
+    const fresh = traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: { all_granted: false, missing_keys: ['GOOGLE_OAUTH_CLIENT_ID'] } })));
+    assert.doesNotMatch(fresh, /earlier version|skills-tray-note/);
+});
+
+test('declared MCP servers: Connect tools once the skill is ready, then the configured and listed facts', () => {
+    const server = { id: 'chrome_browser', title: 'Chrome (shared tab)', conflict: false, configured: false, tool_count: 0, listed: false, error: '' };
+    const ready = skill({ type: 'script', enabled: true, mcp_servers: [server] });
+    assert.match(traysOf(renderInstalledSkillCard(ready)), /data-skill-action="connect_tools"[^>]*>Connect tools</);
+    assert.match(renderInstalledSkillCard(ready), /Chrome \(shared tab\): not connected/);
+    for (const blocked of [skill({ type: 'script', enabled: false, mcp_servers: [server] }),
+        skill({ type: 'script', enabled: true, grants: { all_granted: false, missing_permissions: ['net'] }, mcp_servers: [server] })]) {
+        assert.doesNotMatch(renderInstalledSkillCard(blocked), /connect_tools/);
+    }
+    const pending = renderInstalledSkillCard(skill({ ...ready, mcp_servers: [{ ...server, configured: true }] }));
+    assert.match(pending, /Chrome \(shared tab\): configured · listing its tools\. The skill’s own instructions say what else its tools need\./);
+    assert.doesNotMatch(pending, /…\./);
+    const listed = renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: [{ ...server, configured: true, listed: true, tool_count: 25 }] }));
+    assert.doesNotMatch(traysOf(listed), /connect_tools/);
+    assert.match(listed, /Chrome \(shared tab\): configured · 25 tools listed\. The skill’s own instructions say what else its tools need\./);
+    // The tray says the outcome in words; the host's refusal (code, ids, readiness tokens) is a Details fact, escaped.
+    const refusal = 'MCP_SKILL_UNAVAILABLE: server \'chrome_browser\' runs from skill \'demo\', which cannot run it now (review_stale). <b>x</b>';
+    const failedCard = renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: [{ ...server, configured: true, error: refusal }] }));
+    const failed = traysOf(failedCard);
+    assert.match(failed, /data-tone="danger"/);
+    assert.match(failed, /Its tools are configured but can’t be used now\.<div class="skills-tray-note">Details say why\.<\/div>/);
+    assert.doesNotMatch(failed, /MCP_SKILL_UNAVAILABLE|review_stale|chrome_browser/);
+    assert.match(failedCard, /<span class="skills-detail-label">Why unavailable<\/span><span class="skills-detail-value">MCP_SKILL_UNAVAILABLE: server &#39;chrome_browser&#39;[^<]*\(review_stale\)\. &lt;b&gt;x&lt;\/b&gt;<\/span>/);
+    const pair = renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: [{ ...server, configured: true, listed: true, tool_count: 25, error: 'x' },
+        { ...server, id: 'second', title: 'Second', configured: true, listed: true, tool_count: 2 }] }));
+    assert.match(pair, /Chrome \(shared tab\): configured · unavailable now; Second: configured · 2 tools listed\./);
+    assert.match(pair, /Why unavailable<\/span><span class="skills-detail-value">Chrome \(shared tab\): x<\/span>/);
+    const longReason = 'diagnostic '.repeat(100) + 'last detail';
+    assert.ok(renderInstalledSkillCard(skill({ type: 'script', enabled: true,
+        mcp_servers: [{ ...server, configured: true, error: longReason }] })).includes(longReason));
+    assert.doesNotMatch(renderInstalledSkillCard(ready), /Why unavailable/);
+    const conflict = traysOf(renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: [{ ...server, conflict: true }] })));
+    assert.match(conflict, /already has an MCP server named chrome_browser that isn’t this skill’s/);
+    assert.doesNotMatch(conflict, /connect_tools/);
+});
+
+
+test('declared MCP catalog notes and off binding stay independent from failures', () => {
+    const server = { id: 'chrome_browser', title: 'Chrome', bound: true, configured: true,
+        listed: true, tool_count: 1, error: '', notes: 'Some tools omitted <detail>' };
+    const render = (...servers) => renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: servers }));
+    const partial = render(server);
+    assert.match(partial, /configured · 1 tool listed/);
+    assert.match(partial, /Catalog notes<\/span><span class="skills-detail-value">Some tools omitted &lt;detail&gt;/);
+    assert.doesNotMatch(partial, /configured · unavailable|can’t be used|connect_tools/);
+    const off = render({ ...server, configured: false });
+    assert.match(off, /Chrome: off/);
+    assert.match(off, /Its tools are off/);
+    assert.match(off, /data-skill-action="connect_tools"/);
+    assert.doesNotMatch(off, /not connected/);
+    const failed = render({ ...server, error: 'Latest listing failed' });
+    assert.match(failed, /configured · unavailable now/);
+    assert.match(failed, /Latest listing failed/);
+    assert.match(failed, /can’t be used/);
 });

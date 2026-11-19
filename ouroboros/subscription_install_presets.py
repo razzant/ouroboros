@@ -11,8 +11,8 @@ shipped API default panel into catalog rows for the migration and the wizard.
 
 No settings or transport are read here. Exact discovery misses are typed
 refusals with no partial output; a policy's explicit ordered successor (Codex:
-gpt-6.1-sol, then gpt-5.6-sol) answers only from discovery, said in the receipt
-and diagnostics. Rows are unpinned by default so Claudexor owns
+Sol 6.1 → 5.6; Cursor: Grok 4.7 → 4.6; Agy: Hydrogen → Flash 3.8) answers only
+from discovery, said in the receipt and diagnostics. Rows are unpinned by default so Claudexor owns
 compatible account rotation; Cursor and Agy keep effort in both their compound
 model slug and the explicit row field.
 """
@@ -43,6 +43,7 @@ from ouroboros.configured_subagents import (
 from ouroboros.provider_models import (
     image_input_from_modalities,
     model_has_credentials_in_settings,
+    parse_model_route,
 )
 from ouroboros.route_spec import ROUTE_KIND_AGENT_SESSION, ROUTE_KIND_API_MODEL, RouteSpec
 
@@ -83,11 +84,13 @@ _MODEL_ALIASES: Dict[str, Dict[str, Tuple[str, ...]]] = {
         "gpt-5.6-sol": ("gpt-5.6-sol",),
     },
     HARNESS_CURSOR: {
+        "grok-4.7": ("grok-4.7-{effort}",),
         "grok-4.6": ("cursor-grok-4.6-{effort}", "grok-4.6-{effort}"),
     },
-    # agy (Antigravity) spells effort inside the id like cursor. Flash High is
-    # the automatic task actor; Pro remains an ordinary manual editor choice.
+    # agy (Antigravity) spells effort inside the id like cursor. Hydrogen High
+    # is preferred; Flash High remains its discovery-confirmed successor.
     HARNESS_AGY: {
+        "gemini-4-hydrogen": ("gemini-4-hydrogen-{effort}",),
         "gemini-3.8-flash": ("gemini-3.8-flash-{effort}",),
         "gemini-3.1-pro": ("gemini-3.1-pro-{effort}",),
     },
@@ -197,8 +200,10 @@ def _surface(preference: str, effort: str, then: Tuple[str, ...] = ()) -> Surfac
     return SurfacePolicy(preference=preference, effort=effort, then=then)
 
 
-# Codex prefers 6.1 Sol and takes 5.6 Sol only when live discovery lacks it (owner 2026-10-18).
+# Codex prefers 6.1 Sol and takes 5.6 Sol only when live discovery lacks it (owner 2026-10-18); Cursor
+# prefers the standard (not -fast) Grok 4.7 the same way, Grok 4.6 its successor (owner 2026-11-16).
 _CODEX_SOL = _surface("gpt-6.1-sol", "medium", ("gpt-5.6-sol",))
+_GROK = ("grok-4.6",)
 
 
 _REVIEWER_POLICIES: Dict[str, ReviewerHarnessPolicy] = {
@@ -211,16 +216,16 @@ _REVIEWER_POLICIES: Dict[str, ReviewerHarnessPolicy] = {
         scope=_CODEX_SOL,
     ),
     HARNESS_CURSOR: ReviewerHarnessPolicy(
-        triad=_surface("grok-4.6", "medium"),
-        scope=_surface("grok-4.6", "high"),
+        triad=_surface("grok-4.7", "medium", _GROK),
+        scope=_surface("grok-4.7", "high", _GROK),
     ),
 }
 
 _TASK_POLICIES: Dict[str, SurfacePolicy] = {
     HARNESS_CLAUDE: _surface("opus-5.5", "medium"),
     HARNESS_CODEX: _CODEX_SOL,
-    HARNESS_CURSOR: _surface("grok-4.6", "high"),
-    HARNESS_AGY: _surface("gemini-3.8-flash", "high"),
+    HARNESS_CURSOR: _surface("grok-4.7", "high", _GROK),
+    HARNESS_AGY: _surface("gemini-4-hydrogen", "high", ("gemini-3.8-flash",)),
 }
 
 _POLICY_HARNESSES = (HARNESS_CLAUDE, HARNESS_CODEX, HARNESS_CURSOR)
@@ -511,7 +516,7 @@ def factory_review_rows(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """The factory review pool for THIS settings document, as catalog rows (pure).
 
     The panel follows the Main the document runs (owner 4A), whatever other access sits beside
-    it: a reachable OpenRouter Main → OpenRouter's three ``OPENROUTER_REVIEW_DEFAULTS``; a
+    it: a reachable OpenRouter Main → OpenRouter's three ``OPENROUTER_REVIEW_DEFAULTS`` on Main's connection; a
     reachable direct Main → its provider's ``DIRECT_PROVIDER_REVIEW_ROLES`` panel (one Main row;
     MiniMax's Main, Light, Light), each seat in its ROLE's whole binding (a Light seat runs Light's,
     never Main's by a shared model name; a blank or another provider's Light leaves the provider's
@@ -531,7 +536,9 @@ def factory_review_rows(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:
     reviewer template.
     """
     from ouroboros.config import EFFORT_SCALE
-    from ouroboros.provider_models import compute_direct_review_seats, provider_for_model
+    from ouroboros.provider_models import (
+        compute_direct_review_seats, parse_model_route, provider_for_model, route_on_connection,
+    )
     from ouroboros.server_runtime import has_startup_ready_provider
     from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
 
@@ -541,6 +548,9 @@ def factory_review_rows(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:
     bindings = {role: role_route_binding(settings, role) for role in ("main", "light")}
     main = bindings["main"]["route"]["target_id"] if bindings["main"] else main
     router_main = provider_for_model(main) == "openrouter"
+    # The router panel runs on Main's connection: a named OpenRouter Main's key and routing pay for it.
+    router_panel = [route_on_connection(model, "openrouter", parse_model_route(main).connection)
+                    for model in router_panel] if router_main else router_panel
     if bindings["main"] and not router_main:
         seats = compute_direct_review_seats(provider_for_model(main), main, light) or [("main", main)]
     else:  # a router Main reviews on the diverse router panel, never as twins of itself
@@ -570,9 +580,9 @@ def factory_review_rows(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:
 
 def factory_actor_rows(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """The wizard's API/local task actors for a never-configured install (pure): one Auto
-    generalist on the reachable Main and a scout only for a reachable Light that differs in its
-    whole binding — exactly ``compile_available_subagents`` without sessions, as the wizard runs it,
-    so none without a reachable Main."""
+    generalist on the reachable Main, a scout only for a reachable Light that differs in its
+    whole binding and a reachable OpenRouter's helpers — exactly ``compile_available_subagents``
+    without sessions, as the wizard runs it, so none without a reachable Main."""
     available, _diagnostics = compile_available_subagents((), _factory_settings(doc))
     return configured_subagents_dict(available)["items"] if available is not None else []
 
@@ -585,7 +595,11 @@ def connected_preset_harnesses(discoveries: Sequence[HarnessDiscovery]) -> Tuple
 
 def _local_model(settings: Mapping[str, Any], slot: str, model: str) -> str:
     flag = str(settings.get(f"USE_LOCAL_{slot}") or "").strip().lower()
-    if flag not in {"1", "true", "yes", "on"}:
+    return _on_lane(settings, model, flag in {"1", "true", "yes", "on"})
+
+
+def _on_lane(settings: Mapping[str, Any], model: str, local: bool) -> str:
+    if not local:
         return model
     if not str(settings.get("LOCAL_MODEL_SOURCE") or "").strip():
         return ""
@@ -597,7 +611,12 @@ def _effective_api_models(settings: Mapping[str, Any]) -> Tuple[str, str]:
     light_raw = str(settings.get("OUROBOROS_MODEL_LIGHT") or "").strip()
     light = light_raw or main
     main = _local_model(settings, "MAIN", main) if main else ""
-    light = _local_model(settings, "LIGHT" if light_raw else "MAIN", light) if light else ""
+    if light_raw:
+        light = _local_model(settings, "LIGHT", light)
+    elif light:  # an empty Light is Main's model on the lane the one rule gives it (its own box under a cloud Main)
+        from ouroboros.route_choice import following_route
+
+        light = _on_lane(settings, light, following_route("light", read=settings.get)[1])
     if main and not model_has_credentials_in_settings(main, dict(settings)):
         main = ""
     if light and not model_has_credentials_in_settings(light, dict(settings)):
@@ -619,6 +638,34 @@ def _actor(
     )
 
 
+def _row_identity(route: RouteSpec, processing: str = "") -> Tuple[Any, ...]:
+    """A row's identity for de-duplication: kind, account pin, processing and an API target as the route grammar
+    reads it (``m``, ``openrouter::m`` and ``openrouter@default::m`` are one route; a named connection, the local
+    lane or another model is another, ``parse_model_route``). The row keeps its target as written."""
+    parts = parse_model_route(route.target_id) if route.kind == ROUTE_KIND_API_MODEL else None
+    target = (parts.kind, parts.connection, parts.model, parts.local) if parts and parts.valid else route.target_id
+    return (route.kind, target, route.credential_profile_id, processing)
+
+
+def _openrouter_helper_connection(settings: Mapping[str, Any]) -> Optional[str]:
+    """The OpenRouter connection the factory helpers run on ('' = the built-in key): the one Main runs on when Main's
+    effective route (``role_route_binding``: a local Main is no router route, whatever connection its id still names)
+    is OpenRouter on a connection that serves, else ``proposal_connection``'s (the built-in key first, else the only
+    named one). None when no OpenRouter connection serves, or several named ones and Main runs on none of them:
+    nothing is guessed while Settings asks for Main's (``server_runtime.main_connection_choice``)."""
+    from ouroboros.provider_connections import configured_connections
+    from ouroboros.provider_models import proposal_connection
+
+    served = {name for kind, name in configured_connections(settings) if kind == "openrouter"}
+    if not served:
+        return None
+    binding = role_route_binding(settings, "main")
+    main = parse_model_route(binding["route"]["target_id"]) if binding else None
+    if main and main.valid and main.kind == "openrouter" and main.connection in served:
+        return main.connection
+    return proposal_connection("openrouter", settings)
+
+
 def compile_available_subagents(
     session_rows: Sequence[Mapping[str, Any]],
     settings: Mapping[str, Any],
@@ -632,15 +679,18 @@ def compile_available_subagents(
     the owner's effort range decides — unless its model id spells the level
     (``_EFFORT_IN_MODEL_ID``); reviewer seats keep their explicit levels. An
     API/local row runs its role's whole binding (``role_route_binding``), and a
-    row's identity is that whole binding: rows alike in every setting are one,
+    row's identity is that whole binding, its route however spelled
+    (``_row_identity``): rows alike in every setting are one,
     a Light on Main's model with its own account pin or processing is a second.
     Main is read as the runtime runs it (a saved blank is the shipped Main); a
     Light row only joins a session or that Main, so an API-only setup whose Main
     has no access gets the typed ``main_without_access``, never a Light primary.
+    The ``OPENROUTER_HELPER_DEFAULTS`` join the same way, whatever Main's provider,
+    on the OpenRouter connection ``_openrouter_helper_connection`` names.
     """
     actors: list[ConfiguredSubagent] = []
     diagnostics: list[Dict[str, Any]] = []
-    seen: set[tuple[str, str, str, str]] = set()  # route kind, target, account pin, processing
+    seen: set[Tuple[Any, ...]] = set()  # ``_row_identity``: route kind, target, account pin, processing
 
     for index, row in enumerate(session_rows):
         harness = str(row["harness"])
@@ -649,7 +699,7 @@ def compile_available_subagents(
             str(row["target_id"]),
             str(row.get("credential_profile_id") or "").strip(),
         )
-        identity = (route.kind, route.target_id, route.credential_profile_id, "")
+        identity = _row_identity(route)
         if identity in seen:
             continue
         if index == 0:
@@ -669,7 +719,7 @@ def compile_available_subagents(
         route = RouteSpec(ROUTE_KIND_API_MODEL, binding["route"]["target_id"],
                           binding["route"].get("credential_profile_id", ""))
         processing = binding.get("processing_preference", "")
-        identity = (route.kind, route.target_id, route.credential_profile_id, processing)
+        identity = _row_identity(route, processing)
         if identity in seen:
             return False
         actors.append(_actor(row_id, recommendation, route, "", processing))
@@ -682,8 +732,21 @@ def compile_available_subagents(
     scout = bool(actors and light) and api_actor("fast-scout", SCOUT_RECOMMENDATION, "light")
     if len(session_rows) == 1 and main:
         api_actor("independent-perspective", INDEPENDENT_RECOMMENDATION, "main")
+    helpers = 0
+    connection = _openrouter_helper_connection(settings) if actors else None
+    if connection is not None:
+        from ouroboros.provider_models import route_on_connection
+        from ouroboros.settings_defaults import OPENROUTER_HELPER_DEFAULTS
 
-    if len(session_rows) == 1 and not (main or light):
+        for row_id, model, recommendation in OPENROUTER_HELPER_DEFAULTS:
+            route = RouteSpec(ROUTE_KIND_API_MODEL, route_on_connection(model, "openrouter", connection))
+            identity = _row_identity(route)
+            if identity not in seen:
+                actors.append(_actor(row_id, recommendation, route, ""))
+                seen.add(identity)
+                helpers += 1
+
+    if len(session_rows) == 1 and not (main or light or helpers):
         diagnostics.append({
             "code": "no_api_or_local_companion",
             "message": (

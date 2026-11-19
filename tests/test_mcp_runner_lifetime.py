@@ -30,9 +30,11 @@ ACTUAL_JOIN = threading.Thread.join
 @pytest.fixture(autouse=True)
 def _isolated_manager(tmp_path, monkeypatch):
     from ouroboros import config
+    from ouroboros.tools import shell_process
 
     assert mcp_client._MCP_SDK_AVAILABLE, "the real MCP SDK session is the subject under test"
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(shell_process, "_active_subprocesses", set())  # process-wide: rows other tests left pinned
     mcp_client.reset_manager_for_tests()
     yield
     mcp_client.reset_manager_for_tests()

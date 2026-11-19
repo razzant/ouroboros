@@ -1,4 +1,4 @@
-"""Wire assembly for completed Chat Completions and native Messages SSE replies.
+"""Wire assembly for completed Chat Completions, Responses and native Messages SSE replies.
 
 Doctrine: strict about completeness, tolerant about form. Terminal framing, a
 finish reason on every choice and structurally complete tool calls are the only
@@ -92,12 +92,12 @@ class ProviderStreamError(IncompleteProviderStream):
 
 
 class AssembledResponse:
-    """The two existing response readers share this detached, non-iterator value."""
+    """The existing response readers share this detached, non-iterator value."""
 
     def __init__(self, body: dict):
         self.body = body
 
-    def model_dump(self):
+    def model_dump(self, **_options):  # the assembled body is already exactly the wire's fields
         return copy.deepcopy(self.body)
 
     def json(self):
@@ -564,6 +564,62 @@ class AnthropicAccumulator(_Accumulator):
         return {**copy.deepcopy(self.body), "content": [copy.deepcopy(self.blocks[key]) for key in sorted(self.blocks)]}
 
 
+class ResponsesAccumulator(_Accumulator):
+    """Typed Responses events: the terminal ``response.completed``/``incomplete``/``failed`` event carries the
+    whole Response; ``output_item.done`` items fill an absent terminal ``output``. Deltas only show that output
+    arrived. An ``error`` event is the provider's own stream verdict; an end without a terminal event is an
+    unknown outcome, never a reply."""
+
+    _TERMINAL = frozenset({"response.completed", "response.incomplete", "response.failed"})
+
+    def __init__(self):
+        super().__init__()
+        self.body: dict = {}
+        self.items: dict[int, dict] = {}
+        self.received = False
+
+    def accept(self, event: str, data: str) -> None:
+        if self.done:
+            self._note("data after the terminal response event; ignored")
+            return
+        try:
+            chunk = json.loads(data)
+        except ValueError:
+            raise IncompleteProviderStream("Responses stream event is not JSON") from None
+        if not isinstance(chunk, dict):
+            raise IncompleteProviderStream("Responses stream event is not an object")
+        kind = str(chunk.get("type") or event or "")
+        if kind == "error":
+            raise ProviderStreamError({"error": {key: chunk.get(key) for key in ("code", "message", "param", "type")
+                                                 if chunk.get(key) is not None}})
+        if kind in self._TERMINAL or kind in {"response.created", "response.in_progress", "response.queued"}:
+            if isinstance(chunk.get("response"), dict):
+                self.body = copy.deepcopy(chunk["response"])
+            self.done = kind in self._TERMINAL
+        elif kind in {"response.output_item.added", "response.output_item.done"} and isinstance(chunk.get("item"), dict):
+            self.items[_index(chunk.get("output_index"))] = copy.deepcopy(chunk["item"])
+        elif kind.endswith(".delta") and _has_text(chunk.get("delta")):
+            self.received = True
+        # Other events (content parts, text done, summaries) are retained in the exact wire evidence.
+
+    def result(self) -> dict:
+        if not self.done:
+            raise IncompleteProviderStream("Responses stream ended without a terminal response event")
+        if not self.body.get("status"):
+            raise RejectedProviderStream("Responses terminal event carried no response status",
+                                         usage=self.body.get("usage"), anomalies=self.anomalies)
+        return self.partial()
+
+    def output_received(self) -> bool:
+        return self.received or bool(self.items) or bool(self.body.get("output"))
+
+    def partial(self) -> dict:
+        body = copy.deepcopy(self.body)
+        if not body.get("output") and self.items:
+            body["output"] = [copy.deepcopy(self.items[key]) for key in sorted(self.items)]
+        return body
+
+
 class _SSEFrames:
     """Incremental UTF-8 SSE framing; only CR/LF are line delimiters."""
 
@@ -598,7 +654,8 @@ class _SSEFrames:
 
 
 class _StreamAssembly:
-    def __init__(self, response: Any, native: bool, expected_choices: int, *, defer_binding: bool = False):
+    def __init__(self, response: Any, native: bool, expected_choices: int, *, defer_binding: bool = False,
+                 responses: bool = False, opencode_go: bool = False):
         from ouroboros.usage_accounting import (
             AttemptReservation, current_physical_attempt_drive_root, last_physical_attempt_capture,
         )
@@ -606,6 +663,7 @@ class _StreamAssembly:
         capture, root = last_physical_attempt_capture(), current_physical_attempt_drive_root()
         self.reservation = (AttemptReservation(capture.attempt_id, root, capture.model, capture.provider, None)
                             if capture is not None and root is not None else None)
+        self.cost_keys = ("cost",) if opencode_go else ("cost", "total_cost")
         self.defer_binding = defer_binding
         self.pending_generations = []
         self.generation_id = ""
@@ -613,7 +671,7 @@ class _StreamAssembly:
         self.conflicting_generation_id = ""
         self.generation_binding_error = ""
         self.generation_bound = False
-        self.accumulator = (AnthropicAccumulator() if native else
+        self.accumulator = (AnthropicAccumulator() if native else ResponsesAccumulator() if responses else
                             ChatAccumulator(expected_choices, self.observe_generation))
         self.frames = _SSEFrames()
         self.raw: list[bytes] = []
@@ -662,11 +720,11 @@ class _StreamAssembly:
         if not complete_usage:
             # message_start and unfinished Chat streams can carry partial counters.
             # An explicit price remains authoritative even on a partial message.
-            if not any(provider_cost_value(usage.get(key)) is not None for key in ("cost", "total_cost")):
+            if not any(provider_cost_value(usage.get(key)) is not None for key in self.cost_keys):
                 usage = {}
         received = getattr(error, "stream_usage", None)
         if isinstance(received, dict):
-            cost = next((value for source in (received, usage) for key in ("cost", "total_cost")
+            cost = next((value for source in (received, usage) for key in self.cost_keys
                          if (value := provider_cost_value(source.get(key))) is not None), None)
             _snapshot(usage, received)
             if cost is not None:
@@ -733,9 +791,10 @@ class _StreamAssembly:
         return self.accumulator.result()
 
 
-def consume_stream(stream: Any, *, native: bool = False, expected_choices: int = 1) -> AssembledResponse:
+def consume_stream(stream: Any, *, native: bool = False, expected_choices: int = 1,
+                   responses: bool = False, opencode_go: bool = False) -> AssembledResponse:
     response = stream if native else getattr(stream, "response", stream)
-    assembly = _StreamAssembly(response, native, expected_choices)
+    assembly = _StreamAssembly(response, native, expected_choices, responses=responses, opencode_go=opencode_go)
     try:
         chunks = response.iter_content(chunk_size=8192) if native else response.iter_bytes()
         for chunk in chunks:
@@ -755,11 +814,13 @@ def consume_stream(stream: Any, *, native: bool = False, expected_choices: int =
     return AssembledResponse(body)
 
 
-async def consume_stream_async(stream: Any, *, expected_choices: int = 1) -> AssembledResponse:
+async def consume_stream_async(stream: Any, *, expected_choices: int = 1, responses: bool = False,
+                               opencode_go: bool = False) -> AssembledResponse:
     from ouroboros._usage_wait import presend_off_loop
 
     response = getattr(stream, "response", stream)
-    assembly = _StreamAssembly(response, False, expected_choices, defer_binding=True)
+    assembly = _StreamAssembly(response, False, expected_choices, defer_binding=True, responses=responses,
+                               opencode_go=opencode_go)
     try:
         if assembly.pending_generations:
             await presend_off_loop(assembly.bind_pending_generations)

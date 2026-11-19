@@ -208,8 +208,8 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
     assert page.locator(WORK).get_attribute('data-unread') == ''
     assert page.locator('[data-project-id="p-queue"]').get_attribute('data-unread') is None
     assert page.locator('#nav-projects-list .nav-unread-dot, #nav-projects-list .nav-activity-marker').count() == 0
-    # The Projects number counts unread messages (owner Q1 = B): the working room's four, not one room.
-    assert page.locator('#nav-projects-count').inner_text() == '4'
+    # Each Project's mark says unread; the approved list has no aggregate count or heading.
+    assert page.locator('#nav-projects-count, #nav-projects-toggle').count() == 0
     assert page.locator(WORK).get_attribute('aria-label') == 'Working room · Working · new messages'
     # Ink: amber is only what waits for the owner and crimson only new messages, so this wait and the queue take the
     # row's own foreground: the marks never out-shout the name, and every name has one ink, read or not.
@@ -221,34 +221,23 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
         assert dot_color(page, project) != token_color(page, project, '--project')
     assert marker('p-queue').evaluate('el => getComputedStyle(el).opacity') == '0.4'
     assert marker('p-work').evaluate('el => getComputedStyle(el).opacity') == '1'
-    header = page.locator('.nav-projects-facts .status-mark')
-    # The header's mark stands in the rows' mark column, its count just before it, its chevron after its word.
-    geometry = page.evaluate("""() => {
-        const box = (el) => el.getBoundingClientRect();
-        const mark = box(document.querySelector('.nav-projects-facts .status-mark'));
-        const row = box(document.querySelector('[data-project-id="p-work"] .status-mark'));
-        const count = box(document.getElementById('nav-projects-count'));
-        const word = box(document.querySelector('#nav-projects-toggle .nav-row-label'));
-        const chevron = box(document.querySelector('#nav-projects-toggle .nav-chevron'));
-        const head = box(document.getElementById('nav-projects-toggle'));
-        return {mark: [mark.left, mark.right], row: [row.left, row.right], gap: mark.left - count.right,
-                chevron: chevron.left - word.right, middle: (mark.top + mark.bottom) / 2 - (head.top + head.bottom) / 2};
-    }""")
-    assert geometry['mark'] == pytest.approx(geometry['row'], abs=0.5), geometry
-    assert 8 <= geometry['gap'] <= 16 and 0 <= geometry['chevron'] <= 12, geometry
-    assert abs(geometry['middle']) <= 1, geometry
-    # The header's one mark: the strongest Project work in the toggle's ink (Main's own work never moves it).
-    assert (header.get_attribute('data-shape'), header.get_attribute('data-hue')) == ('moving', 'ink')
+    # Every room keeps its status in the trailing column of its second line, including rooms at rest.
+    geometry = page.locator('.nav-project-item:not(.is-deleting) .nav-mark-slot').evaluate_all("nodes => nodes.map(node => {"
+        " const box = node.getBoundingClientRect(); return [box.left, box.right]; })")
+    assert len(geometry) == 4
+    assert all(slot == pytest.approx(geometry[0], abs=0.5) for slot in geometry), geometry
     capture('states')
 
-    # The header's mark keeps its column in both states; collapse keeps only pinned rows; activity sorts nothing.
+    # Find replaces the removed collapse: a filter can hide all rooms, then Clear brings the same order back.
     order = page.locator('.nav-project-row').evaluate_all('els => els.map(el=>el.dataset.projectId)')
-    page.locator('#nav-projects-toggle').click()
-    assert page.locator('#nav-projects-list').is_hidden(), 'nothing pinned: no row stays, work or unread alike'
-    assert page.locator('#nav-projects-show-all').count() == 0
-    assert header.is_visible() and page.locator('#nav-projects-count').inner_text() == '4'
-    capture('collapsed')
-    page.locator('#nav-projects-toggle').click()
+    page.route('**/api/projects?all=1', lambda route: route.fulfill(json={'projects': projects}))
+    page.locator('.nav-find-input').fill('no matching room')
+    page.wait_for_function("() => document.querySelectorAll('.nav-project-row').length === 0")
+    assert page.locator('#nav-projects-count, #nav-projects-toggle').count() == 0
+    capture('filtered')
+    page.locator('.nav-find-clear').click()
+    page.wait_for_function("ids => JSON.stringify([...document.querySelectorAll('.nav-project-row')].map(row => row.dataset.projectId))"
+                           " === JSON.stringify(ids)", arg=order)
 
     # Keyboard opens the real portalled menu. Preserve the actual menu, focused
     # menu item, row and its mark through activity-only repaints.
@@ -270,8 +259,8 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
     assert page.locator(WORK).get_attribute('data-unread') == '', 'the unread fact stands under the amber'
     mixed = [owner_wait, activity('independent', 'p-work', 'finalizing')]
     refresh(active_chat_activities=mixed)
-    # Independent work goes on, but the owner's move stands alone in the mark; the row's name says both facts.
-    observe('p-work', 'dot', 'owner')
+    # Independent work goes on: its moving dots keep the owner's hue; the row's name says both facts.
+    observe('p-work', 'moving', 'owner')
     assert page.locator(WORK).get_attribute('aria-label').endswith(
         'Finalizing… · A question waits for your answer · new messages')
     assert page.evaluate("""() => sidebarKept.row === document.querySelector('[data-project-id="p-work"]')
@@ -282,6 +271,9 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
     page.keyboard.press('Escape')
     assert menu.count() == 0
     assert kebab.evaluate('el=>el===document.activeElement')
+    assert marker('p-work').is_hidden(), 'the focused control owns the end of the row'
+    page.locator('.nav-find-input').focus()
+    assert marker('p-work').is_visible(), 'the mark returns when the controls give way'
 
     # Resumed owner wait is computation again. A partial omission retains the
     # old row as unknown; a current positive row remains independently moving.
@@ -381,8 +373,7 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
     # At rest, a room with new messages is one crimson dot; a read one draws nothing, nor does the header.
     observe('p-work', 'dot', 'unread')
     observe('p-queue', 'none')
-    assert page.locator('.nav-projects-facts .status-mark').is_hidden()
-    assert page.locator('#nav-projects-count').inner_text() == '4'
+    assert page.locator('.nav-projects-facts, #nav-projects-count').count() == 0
     capture('complete-empty')
 
     # Merely observing state has not marked any project read. Keyboard opening
@@ -421,14 +412,21 @@ RAIL = """() => {
             id: row.dataset.projectId, shape: mark.dataset.shape, hue: mark.dataset.hue,
             unread: row.hasAttribute('data-unread'), deleting: item.classList.contains('is-deleting'),
             active: row.classList.contains('active'), row: rect(row), label: rect(label),
-            ellipsized: label.scrollWidth > label.clientWidth, marker: rect(mark),
+            line1: rect(row.querySelector('.nav-project-line1')), line2: rect(row.querySelector('.nav-project-line2')),
+            time: rect(row.querySelector('.nav-project-time')), slot: rect(row.querySelector('.nav-mark-slot')),
+            solo: row.hasAttribute('data-solo'), rowFill: getComputedStyle(row).backgroundColor,
+            controls: [...item.querySelectorAll('.nav-project-pin, .nav-project-kebab')].some(control => {
+                const box = control.getBoundingClientRect(), ink = getComputedStyle(control);
+                return box.width > 0 && box.height > 0 && ink.opacity === '1' && ink.visibility !== 'hidden';
+            }),
+            ellipsized: label.scrollWidth > label.clientWidth || label.scrollHeight > label.clientHeight, marker: rect(mark),
             drawn: style.display !== 'none' && style.visibility !== 'hidden', opacity: style.opacity,
             // Where each dot lies in the column: a moving dot's wave lifts and scales it for a moment, so its place
             // is read with the wave suspended (restoring it restarts the wave in the page's one phase).
             dots: dots.map((dot) => {
                 const wave = dot.style.animation;
                 dot.style.animation = 'none';
-                const left = rect(dot).left - rect(mark).left;
+                const left = rect(dot).left - rect(row.querySelector('.nav-mark-slot')).left;
                 dot.style.animation = wave;
                 return left;
             }),
@@ -460,28 +458,36 @@ def horizontal(rect):
 def assert_rail(page, rows, states):
     """Every drawn mark shares one 18px column, its shape and hue as the room and the row's unread fact say."""
     live = [row for row in rows.values() if not row['deleting']]
-    marker = next(row['marker'] for row in live if row['drawn'])
+    marker = live[0]['slot']
     tokens = {hue: token_color(page, live[0]['id'], token) for hue, token in
               (('unread', '--mark-unread'), ('owner', '--amber'))}
     project = token_color(page, live[0]['id'], '--project')
     for row in live:
         assert (row['shape'], row['hue']) == states[row['id']], (row['id'], row['shape'], row['hue'])
-        assert row['drawn'] == (row['shape'] != 'none'), row['id']
+        assert row['drawn'] == (row['shape'] != 'none' and not row['controls']), row['id']
         assert row['unread'] == (row['hue'] == 'unread'), row['id']
-        # One mark, nothing else after the name: no unread dot of its own.
+        # Two lines, with exactly one status slot at the second line's end; no separate unread dot.
         assert row['others'] == 2, row['id']
-        # The label cell ends one gap before the mark column in every row,
-        # so a row at rest (its mark removed from layout) still holds the slot.
-        assert row['label']['right'] == pytest.approx(marker['left'] - 8, abs=0.01), (row['id'], row['label'], marker)
+        assert row['label']['right'] == pytest.approx(row['time']['left'] - 8, abs=0.01), row
         assert row['trailingKind'] == 'nav-project-kebab'
-        assert row['trailing']['left'] >= row['row']['right'] - 0.01, (row['id'], row['trailing'], row['row'])
-        if not row['drawn']:
-            continue
+        assert row['trailing']['right'] <= row['row']['right'] + 0.5, row
         for key in ('left', 'right', 'width'):
-            assert row['marker'][key] == pytest.approx(marker[key], abs=0.01), (row['id'], key, row['marker'], marker)
-        assert row['marker']['width'] == pytest.approx(18, abs=0.01)  # three 4px dots, two 3px gaps
+            assert row['slot'][key] == pytest.approx(marker[key], abs=0.01), (row['id'], key, row['slot'], marker)
+        assert row['slot']['width'] == pytest.approx(18, abs=0.01)
+        assert row['slot']['top'] >= row['line1']['top'], row
+        assert row['slot']['top'] >= row['time']['bottom'] - 0.5, row  # on the second line, clear of the time above it
+        assert row['slot']['bottom'] <= row['row']['bottom'] - 6 + 0.5, row
+        if not row['solo']:
+            assert row['line2']['top'] >= row['line1']['bottom'], row
+        if row['shape'] == 'none':
+            continue
+        width = 18 if row['shape'] in ('moving', 'still') else 7
+        inset = (18 - width) / 2
+        assert row['marker']['width'] == pytest.approx(width, abs=0.01), row
+        assert row['marker']['left'] == pytest.approx(row['slot']['left'] + inset, abs=0.01), row
+        assert row['marker']['right'] == pytest.approx(row['slot']['right'] - inset, abs=0.01), row
         assert row['dots'] == pytest.approx(OFFSETS[row['shape']], abs=0.01), (row['id'], row['dots'])
-        assert abs((row['marker']['top'] + row['marker']['bottom']) - (row['row']['top'] + row['row']['bottom'])) <= 1
+        assert abs((row['marker']['top'] + row['marker']['bottom']) - (row['slot']['top'] + row['slot']['bottom'])) <= 1
         assert row['opacity'] == OPACITY.get((row['shape'], row['hue']), '1'), row['id']
         if row['hue'] in tokens:
             assert row['dotColor'] == tokens[row['hue']], (row['id'], row['dotColor'])
@@ -496,7 +502,7 @@ def assert_rail(page, rows, states):
         assert row['trailingKind'] == 'nav-project-deleting-status'
         assert row['label']['right'] <= row['trailing']['left'] + 0.01, (row['id'], row['label'], row['trailing'])
     assert any(row['ellipsized'] for row in live)
-    return {key: row['marker'] for key, row in rows.items()}
+    return {key: row['slot'] for key, row in rows.items()}
 
 
 @pytest.mark.parametrize('width,theme,reduced', [
@@ -552,13 +558,14 @@ def test_sidebar_activity_rail_geometry(subscription_ui, width, theme, reduced):
     reference = assert_rail(page, rail_rows(page), states)
     capture('default')
 
-    # Hovering a row reveals its sibling kebab and brightens the title; its working dots follow the row's ink.
-    plain = rail_rows(page)['p-w']['rowColor']
+    # Hovering draws the controls over the end and the row's fill; the mark gives way but keeps its ink and slot.
+    plain = rail_rows(page)['p-w']['rowFill']
     page.locator('[data-project-id="p-w"]').hover()
     page.wait_for_function("() => getComputedStyle(document.querySelector('[data-project-id=\"p-w\"] ~ .nav-project-kebab')).opacity === '1'")
     settled('p-w', '--text-primary')
     hovered = rail_rows(page)
-    assert hovered['p-w']['rowColor'] != plain and hovered['p-w']['dotColor'] == hovered['p-w']['rowColor']
+    assert hovered['p-w']['rowFill'] != plain and hovered['p-w']['dotColor'] == hovered['p-w']['rowColor']
+    assert hovered['p-w']['controls'] and not hovered['p-w']['drawn']
     same_rail(reference, assert_rail(page, hovered, states))
     capture('hover')
     page.mouse.move(width / 2, 600)
@@ -612,9 +619,8 @@ def test_sidebar_activity_rail_geometry(subscription_ui, width, theme, reduced):
     refresh(active_chat_activities=[])
     shaped('p-w', 'none')
     empty = rail_rows(page)
+    empty_states = {key: ('dot', 'unread') if row['unread'] else ('none', 'ink') for key, row in empty.items()}
     for key, row in empty.items():
-        expected = ('dot', 'unread') if row['unread'] else ('none', 'ink')
-        assert (row['shape'], row['hue']) == expected, key
-        if row['drawn']:
-            assert horizontal(row['marker']) == pytest.approx(horizontal(reference['p-w']), abs=0.01), key
+        assert (row['shape'], row['hue']) == empty_states[key], key
+    same_rail(reference, assert_rail(page, empty, empty_states))
     capture('empty')

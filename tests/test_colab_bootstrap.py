@@ -106,10 +106,10 @@ def test_build_colab_settings_accepts_vision_model_override():
     assert out["OUROBOROS_MODEL_VISION"] == "google/gemini-2.5-pro"
 
 
-# --- the three launch knobs: explicit launch value > what Drive saved > the first-launch triple ----------------
+# --- the three launch knobs: explicit launch value > what Drive saved > the first launch (no worker cap) ---------
 
 KNOBS = ("TOTAL_BUDGET", "OUROBOROS_RUNTIME_MODE", "OUROBOROS_MAX_WORKERS")
-FIRST_LAUNCH = (200.0, "advanced", 1)
+FIRST_LAUNCH = (200.0, "advanced", "")  # blank cap: the machine's memory is the limit (owner decision 09.11)
 SAVED_ON_DRIVE = {"TOTAL_BUDGET": 999.0, "OUROBOROS_RUNTIME_MODE": "pro", "OUROBOROS_MAX_WORKERS": 8,
                   "TELEGRAM_CHAT_ID": "12345", "OUROBOROS_MODEL": "custom/model"}
 
@@ -148,7 +148,8 @@ def _notebook_launch(monkeypatch, *, environment, drive):
 @pytest.mark.parametrize(("environment", "expected"), [
     ({}, (999.0, "pro", 8)),  # nothing explicit: every saved choice survives
     # An explicit value equal to the first-launch default is still a choice, and beats what Drive saved.
-    ({"TOTAL_BUDGET": "200", "OUROBOROS_RUNTIME_MODE": "advanced", "OUROBOROS_MAX_WORKERS": "1"}, FIRST_LAUNCH),
+    ({"TOTAL_BUDGET": "200", "OUROBOROS_RUNTIME_MODE": "advanced", "OUROBOROS_MAX_WORKERS": "1"},
+     (200.0, "advanced", 1)),
     ({"TOTAL_BUDGET": "200"}, (200.0, "pro", 8)),
 ])
 def test_notebook_launch_keeps_saved_knobs_unless_one_is_explicit(monkeypatch, environment, expected):
@@ -161,11 +162,31 @@ def test_notebook_launch_keeps_saved_knobs_unless_one_is_explicit(monkeypatch, e
 
 @pytest.mark.parametrize(("drive", "expected"), [
     ({}, FIRST_LAUNCH),  # a first launch: no Drive document at all
-    ({"TOTAL_BUDGET": 999.0}, (999.0, "advanced", 1)),  # a document holding one keeps it, the rest are first-launch
+    ({"TOTAL_BUDGET": 999.0}, (999.0, "advanced", "")),  # a document holding one keeps it, the rest are first-launch
     ({"OUROBOROS_MAX_WORKERS": 8}, (200.0, "advanced", 8)),
 ])
 def test_notebook_first_launch_takes_the_triple_only_for_what_drive_does_not_hold(monkeypatch, drive, expected):
     assert _knobs(_notebook_launch(monkeypatch, environment={}, drive=drive)) == expected
+
+
+@pytest.mark.parametrize(("saved", "marked", "expected"), [
+    (1, False, ""),  # Colab's own first-launch 1 from before the optional cap: read once as blank
+    (10, False, ""),  # the settings form's 10, saved on every save before: blank
+    ("10", False, ""),
+    (40, False, 40),  # any other number stays the owner's cap
+    (1, True, 1),  # a marked document's 1 is the owner's choice: never read as blank again
+    (10, True, 10),
+])
+def test_a_drive_document_from_before_the_optional_cap_reads_its_defaults_as_blank_once(saved, marked, expected):
+    """Owner decision 09.11, migration A: Colab's first-launch 1 and the form's 10 meant no choice; the launch reads them
+    as blank and writes the format marker, so a later 1 or 10 the owner sets stays theirs. Other values stay."""
+    from ouroboros.colab_bootstrap import build_colab_settings
+    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY
+
+    drive = {"OUROBOROS_MAX_WORKERS": saved, **({OWNER_CAP_FORMAT_KEY: 1} if marked else {})}
+    out = build_colab_settings({}, existing=drive)
+    assert out["OUROBOROS_MAX_WORKERS"] == expected and out[OWNER_CAP_FORMAT_KEY] == 1
+    assert build_colab_settings({}, existing=out)["OUROBOROS_MAX_WORKERS"] == expected, "it never repeats"
 
 
 def test_a_repeat_launch_through_drive_keeps_the_saved_triple_and_an_app_edit_between_launches(monkeypatch, tmp_path):

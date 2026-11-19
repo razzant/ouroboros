@@ -176,6 +176,21 @@ def test_minusC_into_runtime_still_blocked_from_any_cwd():
     assert _violation("git -C repo reset --hard", cwd="/Users/anton/Ouroboros")
 
 
+def test_empty_argument_keeps_its_position_in_every_git_classifier():
+    """`git -C ''` leaves the cwd unchanged, so `reset --hard` still runs; dropping the
+    empty value made `-C` swallow `reset` and the classifiers lost the block (#2919).
+    Inside `sh -c` the body is the word right after `-c`, even when it is empty."""
+    for cmd in (["git", "-C", "", "reset", "--hard"], ("git", "-C", "", "reset", "--hard"),
+                "git -C '' reset --hard"):
+        assert policy.run_shell_git_block_reason(cmd) == "git reset", cmd
+        assert policy.workspace_git_safety_violation(cmd, active_root=WS, cwd=str(WS)), cmd
+        assert _violation(cmd, cwd=str(REPO)), cmd
+    assert policy.run_shell_git_block_reason(["git", "-C", "", "status"]) == ""
+    assert _violation(["git", "-C", "", "status"], cwd=str(REPO)) == ""
+    assert policy.run_shell_git_block_reason(["sh", "-c", "git reset --hard", ""]) == "git reset"
+    assert policy.run_shell_git_block_reason(["sh", "-c", "", "git reset --hard"]) == ""
+
+
 def test_commit_minusC_message_reuse_is_not_a_path():
     # `git commit -C <commit>` (after the subcommand) reuses a commit message;
     # it must not be parsed as a path selector.

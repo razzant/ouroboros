@@ -353,9 +353,10 @@ def resolve_vision_caption_model(ctx: Any, llm: Any, *, use_local: bool = False,
                          bool(getattr(ctx, "active_use_local", False))),
     ]
     try:
-        from ouroboros.config import get_light_model, parse_fallback_chain
+        from ouroboros.config import parse_fallback_chain
+        from ouroboros.route_choice import following_route
 
-        automatic.append(slot_lane_label("light", get_light_model()))
+        automatic.append(local_lane_label(*following_route("light")))
         automatic.extend(slot_lane_label("fallback", model) for model in parse_fallback_chain())
     except Exception:
         pass
@@ -879,7 +880,7 @@ def prepare_messages_for_send(
 
 # The round's error stamps a retry that never left the host gives back unchanged.
 _ROUND_ERROR_KEYS = ("_last_llm_error", "_last_llm_error_kind", "_last_llm_retry_same_request", "_last_llm_status_code",
-                     "_last_llm_provider_code", "_last_llm_provider_message", "_last_llm_provider_fields",
+                     "_last_llm_provider_code", "_last_llm_provider_message", "_last_llm_provider_fields", "_last_llm_provider_answer",
                      "_last_llm_provider_message_cut", "_last_llm_resource_refusal", "_last_llm_reset_at",
                      "_last_llm_attempt_custody", "_last_llm_failure", "execution_status", "reason_code")
 

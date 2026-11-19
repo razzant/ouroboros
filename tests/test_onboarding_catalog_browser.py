@@ -27,12 +27,12 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
         status=response["status"], json=response["body"]))
     page.goto(ui["url"] + "/onboarding", wait_until="networkidle")
     page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
-    evidence = diagnostic_directory(tmp_path / "frames", "discovery-feedback")
+    evidence = diagnostic_directory(tmp_path / "frames", "discovery-feedback", publish=True)
     compact = viewport[0] <= 900 or viewport[1] <= 820
     columns = 1 if viewport[0] <= 760 else 2
     measurements = {}
 
-    def measure_grid(name, selector):
+    def measure_grid(name, selector, expected_columns=columns):
         grid = page.locator(selector).first
         expect(grid).to_be_visible()
         facts = grid.evaluate("""el => ({
@@ -42,21 +42,29 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
             bodyWidth: document.body.clientWidth, bodyScrollWidth: document.body.scrollWidth,
         })""")
         measurements[name] = facts
-        assert facts["columns"] == columns, facts
+        assert facts["columns"] == expected_columns, facts
         assert facts["scrollWidth"] <= facts["width"] + 1, facts
         assert facts["bodyScrollWidth"] <= facts["bodyWidth"] + 1, facts
         assert facts["titleSize"] == "24px", facts
 
     # Accounts' ordinary fields stay paired on a short desktop and stack on a
-    # phone. Compactness comes from hiding help, never from shrinking text.
+    # phone. Compactness drops ornament (the rail's sub-labels), never a
+    # field's note or the size of the text.
     api_access = page.locator('[data-collapse="api-access"]')
     if not api_access.evaluate("el => el.open"):
         api_access.locator("summary").first.click()
     measure_grid("accounts", ".field-grid")
     note = page.locator('.field-grid .field-note').first
-    expect(note).to_be_hidden() if compact else expect(note).to_be_visible()
-    footer = page.locator('.footer-copy')
-    expect(footer).to_be_hidden() if compact else expect(footer).to_be_visible()
+    expect(note).to_be_visible()
+    rail = page.locator('.wizard-step-copy').first
+    expect(rail).to_be_hidden() if compact else expect(rail).to_be_visible()
+    # The footer's aside leaves only a narrow window, where the pinned footer would take the step's own lines.
+    aside = page.locator('.footer-copy')
+    expect(aside).to_be_hidden() if viewport[0] <= 900 else expect(aside).to_be_visible()
+    # A warning in the aside is no ornament: every footer keeps it while no reason beside Continue takes its slot.
+    assert page.evaluate("""() => { const aside = document.querySelector('.footer-copy');
+        aside.classList.add('footer-warning'); const shown = getComputedStyle(aside).display !== 'none';
+        aside.classList.remove('footer-warning'); return shown; }"""), viewport
     label = page.locator('.field-grid label').first
     expect(label).to_have_css("font-size", "12px")
     page.screenshot(path=str(evidence / f"{viewport[0]}x{viewport[1]}-accounts.png"), animations="disabled")
@@ -75,9 +83,18 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
         expect(status).to_have_css("font-size", "12px")
 
     page.click("#next-btn")
-    # The Review choices are two columns; the separate Access grid deliberately
-    # has its own count, so it is not part of this two-column contract.
-    measure_grid("review", ".wizard-choice-grid")
+    # Reviewers are chosen under Models; this step has the four Access choices and the reviewer summary.
+    measure_grid("access", ".runtime-mode-card .wizard-choice-grid", 1 if viewport[0] <= 760 else 4)
+    expect(page.locator('[data-reviewers-note]')).to_be_visible()
+    assert page.locator('[data-runtime-mode]').count() == 4
+    # What each choice means, and the step's own sentence, are readable at every size: the step scrolls under
+    # the pinned footer instead.
+    expect(page.locator('.step-copy')).to_be_visible()
+    meanings = page.locator('.wizard-choice p')
+    assert meanings.count() == 4, meanings.count()
+    for index in range(meanings.count()):
+        expect(meanings.nth(index)).to_be_visible()
+    expect(page.locator('#next-btn')).to_be_in_viewport()
     page.click("#next-btn")
     budget = page.locator('[data-collapse="api-budget"]')
     if not budget.evaluate("el => el.open"):
@@ -91,7 +108,9 @@ def test_connection_discovery_survives_general_refresh_without_replacing_other_s
 
     ui, page = subscription_ui, subscription_ui['page']
     initial = ui['bootstrap']['initialState']
+    # These are saved owner choices, not the wizard's replaceable first-run proposals (#2969).
     initial.update(openaiKey='fixture', compatibleBaseUrl='http://127.0.0.1:1/v1',
+                   automaticModels=[],
                    mainModel='openai::same-model', lightModel='openai-compatible@alpha::same-model',
                    safetyModel='claudexor::service=gpt-test', modelAccounts={'safety': 'personal'},
                    connections=[{'kind': 'openai-compatible', 'name': name, 'label': name.title(),
@@ -142,9 +161,10 @@ def test_connection_discovery_survives_general_refresh_without_replacing_other_s
     assert choices(main) == ['same-model'], 'a connection list must not replace unrelated API suggestions'
     assert choices(light) == ['same-model']
     expect(main.locator('[data-model-role-source] option[value="subscription:service"]')).to_have_text('Codex (model)')
-    expect(main.locator('[data-model-role-status]')).to_have_text('')
+    # DESIGN "Onboarding density": an API role without a published price says so.
+    expect(main.locator('[data-model-role-status]')).to_have_text('Price unknown')
     kept()
-    evidence = diagnostic_directory(tmp_path / 'frames', 'mixed-catalog')
+    evidence = diagnostic_directory(tmp_path / 'frames', 'mixed-catalog', publish=True)
     report = []
     for label, response, status, expected_main, note in (
         ('transport', {'error': 'Controlled offline'}, 503, ['same-model'], 'could not be read'),
@@ -158,7 +178,7 @@ def test_connection_discovery_survives_general_refresh_without_replacing_other_s
     ):
         ui['backend'].update(catalog_response=response, catalog_status=status)
         page.click('#back-btn')
-        with page.expect_response('**/api/model-catalog'):
+        with page.expect_response('**/api/onboarding/model-catalog'):
             page.click('#onboarding-access-retry')
         expect(page.locator('#onboarding-access-retry')).to_be_enabled()
         page.click('#next-btn')
@@ -168,7 +188,7 @@ def test_connection_discovery_survives_general_refresh_without_replacing_other_s
         if note:
             expect(main.locator('[data-model-role-status]')).to_contain_text(note)
         else:
-            expect(main.locator('[data-model-role-status]')).to_have_text('')
+            expect(main.locator('[data-model-role-status]')).to_have_text('Price unknown')
         if label == 'empty':
             expect(main.locator('[data-model-role-source] option[value="subscription:service"]')).to_have_count(0)
             expect(main.locator('[data-model-role-source]')).to_contain_text('No model sources listed')

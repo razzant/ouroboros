@@ -11,6 +11,7 @@ import types
 from unittest.mock import patch
 
 import httpx
+import pytest
 
 from ouroboros import net_transport, platform_layer
 from ouroboros.config import (
@@ -471,6 +472,44 @@ def test_web_search_openai_client_carries_keepalive_transport(monkeypatch):
     assert isinstance(captured["http_client"], FakeDefaultHttpxClient)
     assert len(built_clients) == 1
     assert isinstance(built_clients[0].get("transport"), httpx.HTTPTransport)
+
+
+@pytest.mark.parametrize("proxied", [False, True], ids=["keepalive_transport", "proxy_routed"])
+def test_a_web_search_client_that_refuses_redirects_holds_it_on_its_own_http_client(monkeypatch, proxied):
+    """DeepSeek Search: openai<2 sends no per-request redirect option, so the real SDK's client itself sends one
+    request and returns the 307, on the keepalive transport and through a proxy-routed install's env proxy."""
+    import openai
+
+    _clear_proxy_env(monkeypatch)
+    if proxied:
+        monkeypatch.setattr("urllib.request.getproxies", lambda: {"https": "http://127.0.0.1:9"})
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    sent = []
+    init = httpx.HTTPTransport.__init__
+
+    def built(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        self.test_proxy = kwargs.get("proxy")
+
+    def handle_request(self, request):  # every transport, explicit or built by httpx: nothing leaves the process
+        sent.append((str(request.url), self.test_proxy is not None))
+        return httpx.Response(307, headers={"location": "https://elsewhere.invalid/"}, request=request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "__init__", built)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_request)
+    client = net_transport.web_search_openai_client(api_key="k", base_url="https://search.invalid/v1",
+                                                    follow_redirects=False)
+    with pytest.raises(openai.APIStatusError) as refused:
+        client.post("/tools/search", cast_to=httpx.Response, body={"query": "q"})
+    assert refused.value.status_code == 307 and sent == [("https://search.invalid/v1/tools/search", proxied)]
+
+
+def test_a_web_search_client_that_must_refuse_redirects_is_never_built_on_the_sdk_default(monkeypatch):
+    """An SDK without a Default client would build its own, which follows redirects: refused before any send."""
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=lambda **_k: pytest.fail("never built")))
+    with pytest.raises(RuntimeError, match="refuses redirects"):
+        net_transport.web_search_openai_client(api_key="k", base_url="https://search.invalid/v1", follow_redirects=False)
 
 
 def test_llm_openrouter_web_search_routes_through_net_transport_seam(monkeypatch):

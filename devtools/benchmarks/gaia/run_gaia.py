@@ -222,7 +222,8 @@ def _settings_env(settings_path: pathlib.Path, solve_model: str, run_dir: pathli
     env = {
         k: str(v)
         for k, v in settings.items()
-        if k not in _PROVIDER_ENV_KEYS and v not in (None, "") and not isinstance(v, (list, dict))
+        if k not in _PROVIDER_ENV_KEYS and k != "OUROBOROS_SUBAGENTS"
+        and v not in (None, "") and not isinstance(v, (list, dict))
     }
     for key in ACTIVE_MODEL_SLOT_KEYS:
         if key.startswith("OUROBOROS_EFFORT_") or key not in _GAIA_PINNED_MODEL_KEYS:
@@ -232,7 +233,8 @@ def _settings_env(settings_path: pathlib.Path, solve_model: str, run_dir: pathli
         else:
             env[key] = solve_model
     # The roster (actor + review pool) already written into the settings file wins
-    # (it honors the per-config --review-models panel); else the default panel.
+    # (it honors the per-config --review-models panel) and the server reads it there, never
+    # from an environment copy (config.SETTINGS_KEYS_NOT_EXPORTED_TO_ENV); else the default panel.
     if not str(settings.get("OUROBOROS_SUBAGENTS") or "").strip():
         env["OUROBOROS_SUBAGENTS"] = _gaia_subagents_setting(solve_model)
     env["OUROBOROS_SETTINGS_PATH"] = str(settings_path)

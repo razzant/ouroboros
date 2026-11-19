@@ -1,6 +1,7 @@
 """Resolved Supervisor authority through generic writers, browser and owner doors."""
 import json
 from types import SimpleNamespace
+from unittest.mock import ANY
 
 import pytest
 from starlette.applications import Starlette
@@ -16,7 +17,7 @@ def settings_root(tmp_path, monkeypatch):
     path = tmp_path / "settings.json"
     monkeypatch.setattr(config, "SETTINGS_PATH", path)
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv(config.BOOT_RUNTIME_MODE_ENV_KEY, "advanced")
     for key in config.SETTINGS_DEFAULTS:
         monkeypatch.delenv(key, raising=False)
     path.write_text(json.dumps({"OUROBOROS_MODEL": "main", "OUROBOROS_MODEL_LIGHT": "light",
@@ -24,7 +25,9 @@ def settings_root(tmp_path, monkeypatch):
     return config, path
 
 
-def test_slot_inherits_light_then_main_and_local(monkeypatch):
+def test_slot_inherits_lights_route_then_main_and_local(monkeypatch):
+    """An empty Supervisor checks on Light's route: Light's model on Light's box, and an empty Light by the one rule
+    of a role's slot (its own box, checked under a cloud Main, means the local runtime; unchecked follows Main)."""
     from ouroboros.model_slots import get_safety_model
     monkeypatch.delenv("OUROBOROS_MODEL_SAFETY", raising=False)
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "light")
@@ -36,6 +39,8 @@ def test_slot_inherits_light_then_main_and_local(monkeypatch):
     monkeypatch.setenv("OUROBOROS_MODEL_SAFETY", "")
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "")
     monkeypatch.setenv("USE_LOCAL_MAIN", "false")
+    assert get_safety_model() == "main (local)"  # Light's ticked box decides for its empty slot
+    monkeypatch.setenv("USE_LOCAL_LIGHT", "false")
     assert get_safety_model() == "main"
     monkeypatch.setenv("USE_LOCAL_MAIN", "true")
     assert get_safety_model() == "main (local)"
@@ -159,7 +164,8 @@ def test_owner_endpoints_keep_mode_response_shape_and_audit(settings_root):
     app.state.repo_dir = path.parent
     with TestClient(app) as client:
         response = client.post("/api/owner/safety-mode", json={"kind": "consciousness", "mode": "light"})
-        assert response.status_code == 200 and response.json() == {"ok": True, "safety_mode": "light"}
+        assert response.status_code == 200 and response.json() == {"ok": True, "safety_mode": "light", "changes": {
+            "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": {"old": "full", "new": "light", "token": ANY}}}
         assert json.loads(path.read_text())["OUROBOROS_SAFETY_MODE"] == "full"
         assert client.post("/api/owner/safety-mode", json={"kind": "forged", "mode": "off"}).status_code == 400
         response = client.post("/api/owner/safety-rules", json={"rules": "May send replies in my team."})
@@ -174,7 +180,7 @@ def test_owner_endpoints_keep_mode_response_shape_and_audit(settings_root):
 def test_generic_cyber_change_is_permitted_and_audited(settings_root, monkeypatch):
     config, path = settings_root
     from ouroboros.gateway import settings
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setenv(config.BOOT_RUNTIME_MODE_ENV_KEY, "cyber_pro")
     monkeypatch.setattr(settings, "_apply_settings_save_side_effects", lambda *a, **kw: None)
     monkeypatch.setattr(settings, "_start_supervisor_if_needed_for_request", lambda *a, **kw: False)
     app = Starlette(routes=[Route("/api/settings", settings.api_settings_post, methods=["POST"])])

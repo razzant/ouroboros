@@ -21,6 +21,13 @@ const EMPTY = Object.freeze({ contributions: [], offers: {}, preferences: {}, vo
 
 const objectOr = (value, fallback) => (value && typeof value === 'object' && !Array.isArray(value) ? value : fallback);
 
+// The placed controls an owner may hide one by one, each with the words naming where it shows.
+const VISIBILITY_PLACES = Object.freeze({
+    'composer.chips': 'Chip above the composer',
+    'composer.plus': 'In the + menu',
+    'message.action': 'On replies',
+});
+
 function normalized(payload) {
     return {
         contributions: Array.isArray(payload?.contributions) ? payload.contributions : [],
@@ -69,6 +76,11 @@ export function createContributionsStore({ client = apiClient } = {}) {
     }
 
     const byKey = (key) => snapshot.contributions.find((item) => item.key === key) || null;
+    const hiddenKeys = () => new Set(
+        Array.isArray(objectOr(snapshot.preferences.contributions, {}).hidden)
+            ? objectOr(snapshot.preferences.contributions, {}).hidden : [],
+    );
+    const bySkill = (skill) => snapshot.contributions.filter((item) => item.skill === skill);
     /** The reason `key` is off for this page, while the revision that failed is still the live one. */
     function fault(key) {
         const entry = faults.get(key);
@@ -118,6 +130,39 @@ export function createContributionsStore({ client = apiClient } = {}) {
         /** Contributions whose own page module runs in this page (`render.kind: "host"`). */
         hostEntries: () => snapshot.contributions.filter((item) => item.render?.kind === 'host' && item.render.url),
         byKey,
+        bySkill,
+        /** The skill's placed controls (`VISIBILITY_PLACES`), each with `place` words and the owner's `hidden`. */
+        visibilityForSkill(skill) {
+            const hidden = hiddenKeys();
+            return bySkill(skill).filter((item) => Object.hasOwn(VISIBILITY_PLACES, item.placement || ''))
+                .map((item) => ({ ...item, place: VISIBILITY_PLACES[item.placement], hidden: hidden.has(item.key) }));
+        },
+        hiddenKeys: () => [...hiddenKeys()],
+        /** Hide or show one control: the server adds or removes this one key under its lock (no list read-modify-write). */
+        async setHidden(key, hidden) {
+            const cleanKey = String(key || '').trim();
+            if (!cleanKey) throw new Error('Contribution key is missing.');
+            const write = (store._visibilityWrite || Promise.resolve()).then(async () => {
+                const saved = await client.saveUiPreferences({ contributions: { [hidden ? 'hide' : 'show']: [cleanKey] } });
+                const returned = saved?.contributions?.hidden;
+                await store.refresh();
+                const refreshFailed = Boolean(lastError);
+                if (refreshFailed && Array.isArray(returned)) {
+                    const nextPreferences = { ...snapshot.preferences,
+                        contributions: { ...objectOr(snapshot.preferences.contributions, {}), hidden: returned } };
+                    snapshot = { ...snapshot, preferences: nextPreferences };
+                    signature = JSON.stringify(snapshot);
+                    loaded = true;
+                    lastError = null;
+                    notify();
+                }
+                const applied = hiddenKeys().has(cleanKey) === Boolean(hidden);
+                if (!applied) throw new Error('Composer visibility could not be read back.');
+                return true;
+            });
+            store._visibilityWrite = write.catch(() => {});
+            return write;
+        },
         fault,
         preferences: () => snapshot.preferences,
         icons: () => snapshot.icons,
@@ -149,6 +194,10 @@ export function createContributionsStore({ client = apiClient } = {}) {
                 if (msg?.system_type === 'skill_lifecycle' && LIFECYCLE_ENDS.has(phase)) lifecycle();
             };
             const offs = [ws?.on?.('open', read), ws?.on?.('extension_lifecycle', lifecycle), ws?.on?.('chat', ended)];
+            // Another window (or this one) committed a contribution arrangement: one coalesced read.
+            offs.push(ws?.on?.('ui_preferences_changed', (msg) => {
+                if (!Array.isArray(msg?.keys) || msg.keys.includes('contributions')) read();
+            }));
             target?.addEventListener?.('ouro:skill-lifecycle', lifecycle);
             offs.push(() => target?.removeEventListener?.('ouro:skill-lifecycle', lifecycle));
             const detach = () => {

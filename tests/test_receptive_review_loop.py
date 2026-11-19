@@ -110,16 +110,13 @@ def _release_later(a, delay=0.4):
     threading.Timer(delay, a.reviewer.release).start()
 
 
-@pytest.mark.parametrize("mode,enforcement", [("pro", "advisory"), ("pro", "blocking"),
-                                              ("cyber_pro", "blocking")])
-def test_commit_mail_yield_parks_without_polling_then_collects_and_continues(main_loop, monkeypatch, mode, enforcement):
+@pytest.mark.parametrize("mode", ["pro", "cyber_pro"])
+def test_commit_mail_yield_parks_without_polling_then_collects_and_continues(main_loop, monkeypatch, mode):
     from ouroboros import config
 
     config.reset_runtime_mode_baseline_for_tests()
     config.initialize_runtime_mode_baseline(mode)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     f, a = main_loop, main_loop.a
-    gate_blocks = mode == "pro" and enforcement == "blocking"
 
     def started(messages):
         _mail_when_both_seats_started(a)
@@ -127,11 +124,8 @@ def test_commit_mail_yield_parks_without_polling_then_collects_and_continues(mai
 
     def yielded(messages):
         text = _tool_text(messages)
-        if gate_blocks:
-            assert "REVIEW_PENDING" in text and "An addressed message ended your wait" in text, text
-        else:
-            assert text.startswith("Review outcome returned before commit: reviewers are still running."), text
-            assert "An addressed message reached you" in text
+        assert text.startswith("Review outcome returned before commit: reviewers are still running."), text
+        assert "An addressed message reached you" in text
         assert "How is the commit going?" in str(messages[-3:]), "the addressed message reached Main"
         assert _commit_count(a) == 1 and not a.reviewer.gates["m1"].is_set()
         _release_later(a)
@@ -153,7 +147,7 @@ def test_commit_mail_yield_parks_without_polling_then_collects_and_continues(mai
         assert _commit_count(a) == 2, _tool_text(messages)
         return prose("Committed after the review settled.")
 
-    steps = [started, yielded, settled] + ([done] if gate_blocks else [collected, done])
+    steps = [started, yielded, settled, collected, done]
     answer, _usage, _trace = f.run(steps)
     assert answer == "Committed after the review settled."
     assert len(f.inputs) == len(steps), "no empty author round while the wave ran"

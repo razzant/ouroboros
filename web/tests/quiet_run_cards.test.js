@@ -3,6 +3,7 @@ import test, { after } from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { summarizeLogEvent, taskTerminalSummary } from '../modules/log_events.js';
 import { censusTaskPhase, desiredLiveCardPhase } from '../modules/task_phase_chip.js';
+import { TASK_CAUSE_PHRASES } from '../modules/task_reason_words.js';
 import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 // Retain each parsed row's markup, as in chat_activity_block.test.js.
@@ -118,5 +119,6 @@ test('silent intent alone keeps legacy rendering and unfinished work stays unfin
 test('effective quiet suppresses terminal explanation while a notice-bearing run retains it', () => {
     const facts = { wake_silent: true, reason_code: 'receipt_absent' };
     assert.equal(taskTerminalSummary(terminal({ ...facts, quiet_effective: true })).body, '');
-    assert.match(taskTerminalSummary(terminal({ ...facts, quiet_effective: false })).body, /No host verification receipt/);
+    assert.ok(taskTerminalSummary(terminal({ ...facts, quiet_effective: false })).body
+        .includes(TASK_CAUSE_PHRASES.receipt_absent.replace(/\.$/, '')));
 });

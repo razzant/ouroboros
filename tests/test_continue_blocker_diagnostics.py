@@ -256,3 +256,92 @@ def test_the_owner_pause_census_reads_its_closed_fence_only_for_queued_members(t
     expected = [("dispatchable_member", "queued-child"), ("running_member", "running-child")]
     assert members() == expected and members(purpose=CONTINUE_PURPOSE) == expected
     assert PRED not in queue.BUDGET_ROOT_FENCES, "the census projects nothing into the queue"
+
+
+def test_beside_a_helper_held_since_an_app_stop_every_other_census_fact_stands(tmp_path, monkeypatch):
+    """Controls for a tree whose helper an application stop holds for an explicit Resume (13 Nov 2026), whatever
+    the census decides about that helper's own stop: a running member stays a writer; an admitted queued row no
+    stop holds is left out only by the owner Pause's own latch (its existing exception) and holds a Continue; the
+    held helper's start of unknown outcome, its unreadable record and the root's unanswered model send stay
+    named for every purpose."""
+    from supervisor.continuation_admission import CONTINUE_PURPOSE, conflicting_writers
+    from supervisor.restart_retention import hold_stopped_queue
+    from tests.test_continue_independent_review import _open_attempt, _readonly_seat_request
+    from tests.test_tree_census_damage import _damage
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path, PRED)
+    member = {"type": "task", "root_task_id": PRED, "parent_task_id": PRED, "_attempt": 2,
+              "admitted_dispatch": "possible"}
+    workers.PENDING.extend([hold_stopped_queue({"id": "held-helper", **member}, tmp_path, "app_stop",
+                                               persist_result=False), {"id": "admitted-child", **member}])
+    workers.RUNNING["running-child"] = {"task": {"id": "running-child", "root_task_id": PRED}}
+    assert dc.record_start_requested(tmp_path, run_id="", task_id="held-helper", invocation_id="inv-held",
+                                     idempotency_key="inv-held", request=_readonly_seat_request(tmp_path),
+                                     route="codex")  # no review source: an ordinary start of unknown outcome
+    _damage(tmp_path, "held-helper", "array", parent_task_id=PRED)
+    _open_attempt(tmp_path, source="delegated_subagent")
+    dc._CUSTODY.clear()
+
+    def facts(**kwargs):
+        return {(b["kind"], b.get("task_id"), b.get("state", "")) for b in conflicting_writers(queue, PRED, **kwargs)}
+
+    kept = {("running_member", "running-child", ""), ("delegated_run", "held-helper", "stop_unknown"),
+            ("member_record_unreadable", "held-helper", ""), ("model_handoff", PRED, "")}
+    owner, held_continue = facts(owner_pause_fence_id="fence-closed"), facts(purpose=CONTINUE_PURPOSE)
+    assert kept <= owner and kept | {("dispatchable_member", "admitted-child", "")} <= held_continue, (
+        owner, held_continue)
+    assert ("dispatchable_member", "admitted-child", "") not in owner, "only that Pause's own latch keeps it queued"
+
+
+def test_only_the_matching_owner_pause_leaves_out_a_member_its_own_resume_stop_holds(tmp_path, monkeypatch):
+    """Every stop vocabulary row on an admitted queued member, as the census reads it. Only the root's matching
+    owner Pause leaves out a member its own explicit stop holds until a Resume or the owner (also beside a stale
+    ``_owner_wait_resume`` a failed stop conversion keeps, and beside a refusal that stop survives); a wait, an
+    unknown refusal, no fence, a foreign or money fence and Continue keep naming it dispatchable. A member left out
+    keeps its custody: its start of unknown outcome still holds."""
+    from ouroboros import work_stop as ws
+    from supervisor.continuation_admission import CONTINUE_PURPOSE, conflicting_writers
+    from tests.test_continue_independent_review import _readonly_seat_request
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path, PRED)
+    dc._CUSTODY.clear()
+
+    def row(tid, reason, **extra):
+        task = {"id": tid, "type": "task", "root_task_id": PRED, "parent_task_id": PRED,
+                "admitted_dispatch": "possible", **extra}
+        ws.declare_stop(task, ws.stop_record(reason, held_at="2026-11-13T00:00:00Z"))
+        return task
+
+    refused = row("refused-hold", "saved_work_hold")
+    ws.declare_stop(refused, {"reason": "dispatch_outcome_unknown", "held_at": "2026-11-13T00:00:00Z"})
+    assert ws.hold_fact(refused) and ws.continuation_refusal(refused), "a refusal sits beside its stop"
+    workers.PENDING.extend([row(reason, reason) for reason in ws.STOP_REASONS] + [
+        row("stale-wait", "saved_sleep_recovery", _owner_wait_resume={"pause_id": "p-old"}), refused,
+        {"id": "unknown", "type": "task", "root_task_id": PRED, "parent_task_id": PRED,
+         "admitted_dispatch": "possible", "_budget_pause_hold": {"reason": "an_unknown_name"}}])
+    named = {task["id"] for task in workers.PENDING}
+    released = {r for r, policy in ws.STOP_REASONS.items() if policy["cause"] != "wait"}
+    released |= {"stale-wait", "refused-hold"}
+    assert {r for r, policy in ws.STOP_REASONS.items() if policy["release"] == "none"} == {
+        "continuation_writer_unsettled", "sleep"}, "every wait, and only a wait, needs no Resume"
+
+    assert dc.record_start_requested(tmp_path, run_id="", task_id="saved_work_hold", invocation_id="inv-held",
+                                     idempotency_key="inv-held", request=_readonly_seat_request(tmp_path),
+                                     route="codex")  # known only through its queue row: no task record
+    dc._CUSTODY.clear()
+
+    def dispatchable(**kwargs):
+        return {b["task_id"] for b in conflicting_writers(queue, PRED, **kwargs) if b["kind"] == "dispatchable_member"}
+
+    assert dispatchable(owner_pause_fence_id="fence-owner") == named - released
+    assert {(b["kind"], b.get("state")) for b in conflicting_writers(queue, PRED, owner_pause_fence_id="fence-owner")
+            if b.get("task_id") == "saved_work_hold"} == {("delegated_run", "stop_unknown")}, "its custody stays"
+    assert dispatchable() == dispatchable(purpose=CONTINUE_PURPOSE) == named
+    for cause, fence_id in (("owner_pause", "fence-other"), ("budget", "fence-owner")):
+        queue.BUDGET_ROOT_FENCES[PRED] = {"root_task_id": PRED, "fence_id": fence_id, "cause": cause,
+                                          "status": "paused"}
+        assert dispatchable(owner_pause_fence_id="fence-owner") == named, cause
+    ws.clear_refusal(refused)
+    assert ws.hold_fact(refused)["reason"] == "saved_work_hold" and not ws.continuation_refusal(refused)

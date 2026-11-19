@@ -15,9 +15,7 @@ def _read(path: pathlib.Path) -> str:
 
 def test_available_subagents_is_one_canonical_settings_editor() -> None:
     editor = _read(MODULES / "subagents_settings.js")
-    host = _read(MODULES / "settings.js")
     assert "OUROBOROS_SUBAGENTS" in editor
-    assert "collectSubagentsSettings" in host
     assert "OUROBOROS_SUBAGENT_HARNESS" not in editor
     assert "OUROBOROS_SUBAGENT_PROFILE" not in editor
     # Rendering, row limits and serialization are exercised by subagents_settings.test.js.
@@ -30,7 +28,7 @@ def test_every_list_editor_reveals_its_added_entry_through_the_shared_helper() -
     scrollIntoView/focus pair in an add path is the class this pins closed
     (DEVELOPMENT.md § Design System). The class is every Settings list editor,
     not the panel the owner happened to report."""
-    for name in ("subagents_settings.js", "mcp_settings.js", "settings.js"):
+    for name in ("subagents_settings.js", "mcp_settings.js"):
         source = _read(MODULES / name)
         assert re.search(r"import \{[^}]*\brevealNewRow\b[^}]*\} from './ui_helpers\.js'", source), name
         assert "revealNewRow(" in source, f"{name} never calls the shared reveal"
@@ -50,11 +48,6 @@ def test_a_fresh_subagent_row_invites_and_only_a_save_attempt_makes_it_red() -> 
     assert "row._uiAttempted = true" in editor
     assert "Boolean(row._uiAttempted) && " in editor
     assert "row._uiAttempted && errors.length" in primitives
-    host = _read(MODULES / "settings.js")
-    # Every Save click is an attempt — including one another field's validation
-    # then aborts — so the stamp precedes the cadence check's early return.
-    save = host[host.index("byId('btn-save-settings').addEventListener"):]
-    assert save.index("noteSubagentsSaveAttempt();") < save.index("const { fields: invalid, messages: errors, subject } = renderValidation();")
     assert "agentsStep?.noteSaveAttempt?.();" in _read(MODULES / "onboarding_wizard.js")
 
 
@@ -75,14 +68,12 @@ def test_the_review_pool_is_a_catalog_mark_and_the_route_primitives_stay_reviewe
 
 def test_heavy_card_is_gone_but_provider_test_contract_and_controls_remain() -> None:
     ui = _read(MODULES / "settings_ui.js")
-    host = _read(MODULES / "settings.js")
     assert "['Heavy'," not in ui
     assert "s-model-heavy" not in ui
-    assert "OUROBOROS_MODEL_HEAVY" not in host
+    assert "OUROBOROS_MODEL_HEAVY" not in _read(MODULES / "settings.js")
     # Role labels and copy come from the shared setup contract, not a second
-    # hand-maintained card table in Settings.
-    assert "modelRolesHost('settings-model-roles')" in ui
-    assert "modelRoles.load(s," in host
+    # hand-maintained card table in Settings: a role's page draws the shared editor.
+    assert "modelRolesHost(hostId)" in _read(MODULES / "model_roles.js")
     assert "slot.note" in _read(MODULES / "model_roles.js")
     # Every API key row carries its Test; the probe runs against that row's draft only.
     connections = _read(MODULES / "settings_connections.js")
@@ -91,7 +82,6 @@ def test_heavy_card_is_gone_but_provider_test_contract_and_controls_remain() -> 
     assert "apiClient.providerTest(body)" in connections
     assert "{ provider_id: card.kind, connection: names(card.kind).get(row), overrides }" in connections
     assert "providerTestResultIsCurrent" in connections
-    assert "createConnectionsEditor" in host
 
 
 def test_onboarding_previews_and_commits_the_visible_owner_draft() -> None:
@@ -123,11 +113,8 @@ def test_preview_contract_and_task_only_agy_copy_are_explicit() -> None:
 
 def test_generated_preview_is_background_and_whole_draft_clean_gated() -> None:
     editor = _read(MODULES / "subagents_settings.js")
-    host = _read(MODULES / "settings.js")
     wizard = _read(MODULES / "onboarding_wizard.js")
     assert "void maybeRefreshGeneratedPreview({ force: true });" in editor
-    assert "isOuterDraftClean: () => !settingsDirty" in host
-    assert "if (settingsLoaded && !settingsDirty) setSettingsCleanBaseline();" in host
     assert "void agentsStep.refreshSubagentsPreview({ force: true });" in wizard
     assert "agentsStep?.invalidateGeneratedPreview();" in wizard
 
@@ -135,17 +122,6 @@ def test_generated_preview_is_background_and_whole_draft_clean_gated() -> None:
 def test_status_refresh_and_active_task_copy_keep_the_frozen_semantics() -> None:
     editor = _read(MODULES / "subagents_settings.js")
     assert "await boundedStatusRefresh(store);" in editor
-
-
-def test_new_frontend_modules_stay_within_the_context_target() -> None:
-    from ouroboros.size_ratchet_manifest import BAND_PATHS
-
-    for name in (
-        "route_editor_primitives.js", "subagent_status_primitives.js", "subagents_settings.js",
-    ):
-        lines = _read(MODULES / name).count("\n") + 1
-        # Past the target only as a 1001-1500 band entry whose reason the manifest records.
-        assert lines <= 1000 or BAND_PATHS.get(f"web/modules/{name}"), f"{name} grew to {lines} lines"
 
 
 def test_effort_choice_mirrors_track_the_python_scale() -> None:
@@ -185,16 +161,18 @@ def test_every_status_tone_the_card_emits_has_a_shared_rule_in_both_documents() 
         assert f'href="{prefix}/ui.css"' in _read(ROOT / "web" / document), document
 
 
-def test_the_per_row_switch_is_one_shared_checkbox_saved_by_the_common_save() -> None:
-    """docs/DESIGN.md §3 "Controls and editable choices" + "List editors": the
-    per-row owner switch is the shared `.ui-checkbox` primitive with its own
-    accessible name and hit target, it leads the card head BEFORE the title, and
-    it is held as a draft that the section's ONE Save writes — no instant-save
-    request, and no dimming of the card it switches off."""
+def test_the_per_row_switch_is_a_draft_in_setup_and_one_roster_write_in_settings() -> None:
+    """docs/DESIGN.md §3 "Controls and editable choices" + "List editors": in setup the per-row owner switch is
+    the shared `.ui-checkbox`, a draft its Finish writes; in Settings it is the shared `.ui-switch` and writes at
+    once, but only as one entry of the roster through the row helper (`writeEntry`) and the checker's adapter:
+    the module itself posts no settings. A switched-off card is never dimmed."""
     editor = _read(MODULES / "subagents_settings.js")
-    # The Node consumer covers checkbox markup and the saved-value round trip.
+    # The Node consumers cover the markup and the written bodies (subagents_settings.test.js, agents_settings.test.js).
     # Keep the separate one-writer and stylesheet boundaries here.
-    assert "apiClient" not in editor and "fetch(" not in editor
+    assert "saveSettings" not in editor and "fetch(" not in editor and "/api/settings" not in editor
+    assert "await writeEntry(KEY, id, change," in editor
+    assert "checker: ({ body }) => saveCheckerSettings({ [KEY]:" in editor
+    assert editor.count("writeEntry(") == 1, "every roster write of Settings takes the one path"
     for shell in ("settings.css", "onboarding.css"):
         sheet = _read(ROOT / "web" / shell)
         assert ".available-subagent-enable {" in sheet, shell

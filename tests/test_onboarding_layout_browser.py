@@ -116,7 +116,7 @@ def _assert_way_forward(facts):
 def test_an_ordinary_accounts_state_fits_the_setup_window(wizard, connected, theme, tmp_path):
     page = _open(wizard, SETUP_WINDOW, theme, connected)
     facts = _facts(page)
-    page.screenshot(path=str(diagnostic_directory(tmp_path / "frames", "fit") / f"{'connected' if connected else 'blank'}-{theme}.png"), animations="disabled")
+    page.screenshot(path=str(diagnostic_directory(tmp_path / "frames", "fit", publish=True) / f"{'connected' if connected else 'blank'}-{theme}.png"), animations="disabled")
     assert facts["overflow"] == 0, facts
     # Four equal subscriptions in two columns, each with its action, all in view without a scroll.
     assert (len(facts["rows"]), facts["columns"], facts["widths"]) == (4, 2, 1), facts["rows"]
@@ -144,7 +144,7 @@ def test_an_ordinary_accounts_state_fits_the_setup_window(wizard, connected, the
     ("claude-sign-in-phone", PHONE, "claude", False),
 ])
 def test_a_taller_state_scrolls_under_the_way_forward(wizard, scene, size, harness, keys, tmp_path):
-    evidence = diagnostic_directory(tmp_path / "frames", "scrolls")
+    evidence = diagnostic_directory(tmp_path / "frames", "scrolls", publish=True)
     page = wizard["page"]
     if harness:
         _serve_login(page, harness)
@@ -190,7 +190,7 @@ def test_a_narrow_window_wraps_the_top_bar_and_keeps_every_appearance_choice(wiz
     clips an overflow away; the setup window keeps the name and Appearance on one row."""
     from playwright.sync_api import expect
 
-    evidence = diagnostic_directory(tmp_path / "frames", "top-bar")
+    evidence = diagnostic_directory(tmp_path / "frames", "top-bar", publish=True)
     page = _open(wizard, SETUP_WINDOW)
     wide = page.evaluate(TOP_BAR)
     page.set_viewport_size({"width": width, "height": PHONE[1]})
@@ -238,7 +238,7 @@ def _walk_focus(page, tabs=12):
 
 def test_focus_stops_clear_of_the_footer_by_its_measured_height(wizard, tmp_path):
     """A guessed clearance breaks when the reason wraps: the padding is the footer's real height, whatever it says."""
-    evidence = diagnostic_directory(tmp_path / "frames", "focus")
+    evidence = diagnostic_directory(tmp_path / "frames", "focus", publish=True)
     page = _open(wizard, (390, 640))
     page.locator('[data-collapse="api-access"] > summary').click()
     report = {"short_reason": {"footer": _settled_clearance(page)}}
@@ -282,7 +282,7 @@ def test_revealing_a_pinned_control_never_moves_the_page(wizard, size):
 
 @pytest.mark.parametrize("size", [SETUP_WINDOW, PHONE], ids=["setup-window", "phone"])
 def test_every_step_keeps_the_way_forward_and_says_where_you_are(wizard, size, tmp_path):
-    evidence = diagnostic_directory(tmp_path / "frames", "steps")
+    evidence = diagnostic_directory(tmp_path / "frames", "steps", publish=True)
     page = _open(wizard, size, connected=True)
     page.locator('[data-collapse="api-access"] > summary').click()
     page.locator("#openrouter-key").fill("sk-or-draft-fixture-0123456789")
@@ -306,7 +306,7 @@ def test_every_step_keeps_the_way_forward_and_says_where_you_are(wizard, size, t
 def test_late_save_states_keep_their_actions_beside_a_wrapped_reason(wizard, size, tmp_path):
     from playwright.sync_api import expect
 
-    evidence = diagnostic_directory(tmp_path / "frames", "late-save")
+    evidence = diagnostic_directory(tmp_path / "frames", "late-save", publish=True)
     page = wizard["page"]
     answers = [{"status": 503, "json": {"ok": False, "code": "settings_save_timeout", "saved": None,
                                         "error": "Saving settings is still running after the settings writer's bound."}},

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ouroboros.artifacts import attachment_manifest_projection, resolve_attachment_manifest
-from ouroboros.config import get_max_subagent_depth, runtime_settings
+from ouroboros.config import get_max_subagent_depth
 from ouroboros.consciousness_authority import consciousness_origin_metadata
 from ouroboros.depth_evidence import parse_task_depth
 from ouroboros.dialogue_provenance import presence_binding_authority_metadata
@@ -36,7 +36,7 @@ from ouroboros.subagent_history import snapshot_handle
 from ouroboros.subagent_runtime import (
     SubagentSelectionError,
     _require_room_subagents,
-    effective_runtime_subagent_settings,
+    runtime_subagent_settings,
     select_subagent_snapshot,
 )
 from ouroboros.subagent_work_order import declared_words_fact
@@ -55,7 +55,9 @@ from ouroboros.tools.control_delegation import (
 from ouroboros.tools.control_events import _SCHEDULE_EMIT_LOCK, _emit_control_event
 from ouroboros.tools.control_subagent_spec import (
     _INTERNAL_SCHEDULE_OPTIONS,
+    SCHEDULE_REFUSAL,
     _validated_schedule_fields,
+    one_refusal,
     schedule_subagent_param_names,
 )
 from ouroboros.tool_access import canonical_data_root, folderless_scratch_dir
@@ -296,17 +298,20 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     leaf_scope_note = ""
     if route_kind == "agent_session" and not write_surface:
         selected = emission.get("input_files")
-        selected_note = " Selected input_files are retained; preparation is not a read." if selected else ""
+        selected_note = (" Selected input_files replace automatic folderless lineage copies; they are retained, "
+                         "and preparation is not a read." if selected else "")
         workspace = str(emission.get("workspace_root") or "").strip()
         if workspace:
             leaf_scope_note = f"\nagent_session selected source: workspace_root={workspace}; one directory."
         else:
             intent = emission.get("resource_intent") or {}
-            source = ("folderless task/artifact lineage and selected files" if intent.get("kind") == "explicit_none"
+            source = (("folderless selected files" if selected else "folderless task/artifact lineage")
+                      if intent.get("kind") == "explicit_none"
                       else "inherited repository/folder")
             leaf_scope_note = f"\nagent_session selected source: {source}."
         leaf_scope_note += (" First start confirms the scope or private checking copy; supervisor read roots "
-                            "are not a leaf-access guarantee. Prompt-only paths are not prepared." + selected_note)
+                            "are not a leaf-access guarantee. Native/nanny tools are not automatically leaf session "
+                            "tools. Prompt-only paths are not prepared." + selected_note)
     if write_surface in {"self_worktree", "genesis"}:
         write_note = f"\nwrite root: provisioned for this child at admission ({write_surface})"
     elif not write_surface:
@@ -773,21 +778,37 @@ def _schedule_resource_intent(ctx: ToolContext, metadata: Dict[str, Any], worksp
     return dict(metadata.get("resource_intent") or {})
 
 
+def _route_refusal(fields: Dict[str, Any], route: Dict[str, Any]) -> tuple[str, str]:
+    """``(text, reason)`` naming every requested field the selected row cannot take, else ``("", "")``. These depend
+    on the route, so they are named together once it is selected, never before (``_shape_problems``); one reads as it
+    always did, under its own code."""
+    if route.get("kind") == "agent_session":
+        return "", ""
+    found = [(code, problem) for wanted, code, problem in (
+        (fields.get("delegated_mode"), "delegated_mode_unsupported",
+         "mode requires an agent_session row; API children keep their ordinary task execution."),
+        ("attachment_paths" in fields or "attachment_import" in fields, "attachment_paths_unsupported",
+         "engine document attachment needs an agent_session row; API children read inherited inputs through "
+         "read_file(root='artifact_store'). Omit attachment_paths."),
+        (fields.get("directory_strategy") == "copy" or fields.get("workspace") == "in_place", "",
+         "directory_strategy=copy is unsupported for native/API children, which use shared files directly; select an "
+         "agent_session actor for copy or workspace=in_place."),
+    ) if wanted]
+    if len(found) == 1:
+        code, problem = found[0]
+        return (f"⚠️ {code}: {problem}" if code else SCHEDULE_REFUSAL + problem), code
+    return (one_refusal([f"{code}: {problem}" if code else problem for code, problem in found]) if found else "",
+            ",".join(code for code, _problem in found if code))
+
+
 def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, **params: Any) -> str:
     allowed_params = schedule_subagent_param_names() | HIDDEN_LEGACY_SCHEDULE_PARAMS
     unsupported = sorted(str(key) for key in params if key not in allowed_params)
-    if unsupported:
-        bad = ", ".join(unsupported)
-        return _publish_scheduling_refusal(
-            ctx, "error", "TOOL_ARG_ERROR", "⚠️ TOOL_ARG_ERROR (schedule_subagent): unsupported argument(s): "
-            f"{bad}. Use the strict schema: subagent_id, objective, expected_output, "
-            "optional role/context/constraints/memory_mode/workspace_root/effort and (for mutative children) "
-            "write_surface/write_root/protected_paths_grant/external_tool_grants.")
     internal = dict(internal or {})
     if set(internal) - _INTERNAL_SCHEDULE_OPTIONS:
         raise TypeError(f"_schedule_task: unknown internal scheduling option(s): "
                         f"{sorted(set(internal) - _INTERNAL_SCHEDULE_OPTIONS)}")
-    fields, arg_error = _validated_schedule_fields(params, ctx=ctx)
+    fields, arg_error = _validated_schedule_fields(params, ctx=ctx, unsupported=unsupported)
     if arg_error:
         return _publish_scheduling_refusal(
             ctx, "error", "TOOL_ARG_ERROR", arg_error, reason=fields.get("reason", ""))
@@ -805,9 +826,11 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         from ouroboros.supervisor_route import capture_cognitive_route
 
         _require_room_subagents()
-        settings = effective_runtime_subagent_settings(runtime_settings(settings_reader=_ctl().load_settings))
+        settings = runtime_subagent_settings(settings_reader=_ctl().load_settings)
+        from ouroboros.supervisor_route import work_tier
+
         configured_subagent, legacy_selection = select_subagent_snapshot(
-            settings,
+            settings, work_tier=work_tier(ctx, settings),
             subagent_id=str(params.get("subagent_id") or ""), access=params.get("access"),
             legacy_model_lane=params.get("model_lane"),
             legacy_executor=params.get("executor"),
@@ -819,19 +842,9 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     except SubagentSelectionError as exc:
         return _publish_scheduling_refusal(ctx, "error", "TOOL_ARG_ERROR", f"⚠️ {exc.code}: {exc.detail}", reason=exc.code)
     route = configured_subagent.get("route") if isinstance(configured_subagent.get("route"), dict) else {}
-    if fields.get("delegated_mode") and route.get("kind") != "agent_session":
-        return _publish_scheduling_refusal(ctx, "error", "TOOL_ARG_ERROR",
-            "⚠️ delegated_mode_unsupported: mode requires an agent_session row; API children keep their ordinary task execution.",
-            reason="delegated_mode_unsupported")
-    if ("attachment_paths" in fields or "attachment_import" in fields) and route.get("kind") != "agent_session":
-        return _publish_scheduling_refusal(ctx, "error", "TOOL_ARG_ERROR",
-            "⚠️ attachment_paths_unsupported: engine document attachment needs an agent_session row; API children "
-            "read inherited inputs through read_file(root='artifact_store'). Omit attachment_paths.",
-            reason="attachment_paths_unsupported")
-    if (fields.get("directory_strategy") == "copy" or fields.get("workspace") == "in_place") and route.get("kind") != "agent_session":
-        return _publish_scheduling_refusal(
-            ctx, "error", "TOOL_ARG_ERROR",
-            "⚠️ TOOL_ARG_ERROR (schedule_subagent): directory_strategy=copy is unsupported for native/API children, which use shared files directly; select an agent_session actor for copy or workspace=in_place.")
+    route_refusal, route_reason = _route_refusal(fields, route)
+    if route_refusal:
+        return _publish_scheduling_refusal(ctx, "error", "TOOL_ARG_ERROR", route_refusal, reason=route_reason)
     requested_model_lane = "auto"  # bounded historical projection only
     requested_executor = "harness" if route.get("kind") == "agent_session" else "native"
     current_depth, depth_error = _context_task_depth(ctx)

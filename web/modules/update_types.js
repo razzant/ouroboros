@@ -79,9 +79,9 @@
 
 /**
  * @typedef {Object} UpdateDescriptionRequest
- * @property {'write'|'rewrite'} mode
- * @property {string} base_sha
- * @property {string} target_sha
+ * @property {'write'|'rewrite'|'latest'} mode
+ * @property {string=} base_sha Write/Rewrite only.
+ * @property {string=} target_sha Write/Rewrite only.
  */
 
 /**
@@ -92,12 +92,21 @@
  */
 
 /**
+ * @typedef {Object} UpdateDescriptionLatestResponse
+ * @property {'queued'|'writing'|'current'|'no_update'|'check_failed'} status
+ * @property {Object} update That check's UpdateStatusResponse; a request it admitted shows in the next status read.
+ * @property {?Object} checked_key The range this check found on offer.
+ * @property {string=} task_id
+ * @property {Object=} key
+ */
+
+/**
  * @typedef {Object} UpdateDescriptionErrorResponse
  * @property {string} error
  * @property {string=} task_id
  * @property {string=} task_status
  * @property {Object[]=} legal_ranges
- * @property {string=} reason
+ * @property {string=} reason task_status_unknown refuses a second author and retains task_id with task_status unknown.
  */
 
 /**

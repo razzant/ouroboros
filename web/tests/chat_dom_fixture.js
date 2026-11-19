@@ -1,3 +1,5 @@
+import { backrefs } from './dom_backrefs.js';
+
 export class ClassList {
     constructor(node) { this.node = node; this.names = new Set(); }
     add(...names) { names.forEach((name) => this.names.add(name)); this.sync(); }
@@ -14,7 +16,10 @@ export class ClassList {
 }
 // A text node: a task chip keeps its words in one beside its status mark (task_phase_chip.paintTaskPhase).
 export class TextStub {
-    constructor(data = '') { this.nodeType = 3; this.data = String(data); this.children = []; this.dataset = {}; }
+    constructor(data = '') {
+        backrefs(this, ['parentNode', 'parentElement']);  // insertBefore/removeChild assign them on any node
+        this.nodeType = 3; this.data = String(data); this.children = []; this.dataset = {};
+    }
     get textContent() { return this.data; }
     set textContent(value) { this.data = String(value ?? ''); }
     get classList() { return { contains: () => false }; }
@@ -28,6 +33,7 @@ export class TextStub {
 }
 export class ElementStub {
     constructor(tag = 'div', doc = null) {
+        backrefs(this, ['ownerDocument', 'parentNode', 'parentElement']);
         this.tagName = tag.toUpperCase();
         this.ownerDocument = doc;
         this.dataset = {};
@@ -186,7 +192,7 @@ export class ElementStub {
 export function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ active_direct_turns: [] }) })) {
     const prior = {
         document: globalThis.document, window: globalThis.window,
-        sessionStorage: globalThis.sessionStorage, fetch: globalThis.fetch,
+        sessionStorage: globalThis.sessionStorage, localStorage: globalThis.localStorage, fetch: globalThis.fetch,
         ResizeObserver: globalThis.ResizeObserver,
         requestAnimationFrame: globalThis.requestAnimationFrame,
         getComputedStyle: globalThis.getComputedStyle,
@@ -234,6 +240,10 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
         setItem: (key, value) => storage.set(key, String(value)),
         removeItem: (key) => storage.delete(key),
     };
+    // The origin's persistent store (the saved preview, chat_preview.js), apart from the tab's.
+    const persistent = new Map();
+    globalThis.localStorage = { getItem: (key) => persistent.get(key) ?? null,
+        setItem: (key, value) => persistent.set(key, String(value)), removeItem: (key) => persistent.delete(key) };
     globalThis.fetch = fetchImpl;
     globalThis.ResizeObserver = class { observe() {} disconnect() {} };
     globalThis.requestAnimationFrame = (fn) => { fn(); return 1; };

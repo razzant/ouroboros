@@ -32,7 +32,7 @@ def _session_snapshot() -> dict:
     return select_subagent_snapshot(settings, subagent_id="session-builder")[0]
 
 
-def _pending_handoff(tmp_path, task_id: str):
+def _pending_handoff(tmp_path, task_id: str, *, input_files=None):
     import ouroboros.delegate_recovery as recovery
     from ouroboros import delegate_custody as custody
     from ouroboros.subagent_work_order import work_order_fingerprint
@@ -47,6 +47,8 @@ def _pending_handoff(tmp_path, task_id: str):
         "task_constraint": {},
         "task_contract": {"objective": "Build", "expected_output": "Patch"},
     }
+    if input_files is not None:
+        task["prepared_input_files"] = input_files
     authority = recovery.authority_fingerprint_from_task(task)
     fingerprint = work_order_fingerprint(task)
     invocation_id = f"inv-{task_id}"

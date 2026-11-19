@@ -5,8 +5,8 @@ The pure half of phase P4, and the file the review rounds kept landing in. A rec
 reconciled by ONE typed identity key; the outstanding sets count identities rather than
 rows; every reviewer-facing projection of a receipt discloses what it bounded and names
 the authority that actually decided. Each section below is the round that forced it,
-kept because the defect is easier to re-introduce than to re-find. The red-receipt nudge
-and the other consumers of these identities live in `test_v678_acceptance_state.py`.
+kept because the defect is easier to re-introduce than to re-find. The finish door that
+reads the red check lives in `test_completion_hold_observation.py`.
 
 Offline and layout-free: plain dicts through the real helpers, no ambient checkout state.
 """
@@ -93,12 +93,14 @@ def test_receipt_check_text_round_trips_so_two_argvs_are_two_verifications(tmp_p
 
     # The property, independent of any filesystem: join is the lexer's inverse.
     for argv in (["echo", "a b"], ["echo", "a", "b"], ["sh", "-c", "pytest -q | tail"],
-                 ["python", "-c", "assert v == 'a  b'"]):
+                 ["python", "-c", "assert v == 'a  b'"], ["pytest", "-m", ""]):
         assert shell_tokens(shlex.join(argv)) == argv
 
     # ...so the two argv spellings are two DIFFERENT verifications.
     assert R.receipt_identity({"check": shlex.join(["echo", "a b"])}) != \
         R.receipt_identity({"check": shlex.join(["echo", "a", "b"])})
+    assert R.receipt_identity({"check": shlex.join(["pytest", "-m", ""])}) != \
+        R.receipt_identity({"check": shlex.join(["pytest", "-m"])})
 
     if sys.platform == "win32" or not shutil.which("echo"):
         pytest.skip("the end-to-end half needs a POSIX `echo` binary")
@@ -136,6 +138,23 @@ def test_receipt_check_text_round_trips_so_two_argvs_are_two_verifications(tmp_p
     # Which is the point: a green on one no longer reconciles a red on the other.
     assert R.receipt_identity(receipts[0]) != R.receipt_identity(receipts[1])
 
+    # #2919: `pytest -m ""` (no marker filter) reaches pytest through the guard and the
+    # execution. Dropping the empty value made `-m` swallow the file name, deselecting both
+    # tests; that argv stays a different, still-red verification.
+    (repo / "test_marks.py").write_text(
+        "import pytest\n\n@pytest.mark.slow\ndef test_marked():\n    pass\n\n"
+        "def test_plain():\n    pass\n", encoding="utf-8")
+    run = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-m"]
+    for check in ([*run, "test_marks.py"], [*run, "", "test_marks.py"]):
+        registry.execute("verify_and_record", {
+            "contract_kind": "explicit_command", "check": check,
+            "expected": "2 passed", "cwd": str(repo),
+        })
+    red, green = read_verification_receipts(data, "task1")[-2:]
+    assert [red["status"], green["status"]] == ["fail", "pass"]
+    assert shell_tokens(green["check"]) == [*run, "", "test_marks.py"]
+    assert R.unreconciled_failed([red, green]) == [red]
+
 
 # --------------------------------------------------------------------------------------
 # P4 review round 5 — identity is ONE TYPED KEY, not a fallback chain. A chain over
@@ -168,3 +187,35 @@ def test_receipt_check_text_round_trips_so_two_argvs_are_two_verifications(tmp_p
 # to remove one. A receipt did not record WHICH renderer wrote its check text, so the
 # comparator could not tell the formats apart. It records it now.
 # --------------------------------------------------------------------------------------
+
+
+def _row(status, check="", **more):
+    return {"status": status, "contract_kind": "explicit_command", "check": check, **more}
+
+
+@pytest.mark.parametrize("name, rows, expected", [
+    ("a corrected check passed", [_row("fail", "pytest a", returncode=1), _row("pass", "pytest b")], (1, 0)),
+    ("the same check passed", [_row("fail", "pytest a"), _row("pass", "pytest a")], None),
+    ("the last verdict is the failure", [_row("pass", "a"), _row("fail", "b", returncode=1)], (0, 0)),
+    ("a later red of another check", [_row("fail", "a"), _row("pass", "b"), _row("fail", "c")], (0, 1)),
+    ("a declaration is no pass", [_row("fail", "a"), _row("declared", "read it")], (0, 0)),
+    ("a refused observation is no pass", [_row("fail", "a"), _row("refused_out_of_scope")], (0, 0)),
+    ("a confirmed path is one", [_row("fail", "a"), _row("observed", paths=["a.md"])], (1, 0)),
+    ("a pass through a masking pipe is one", [_row("fail", "a"), _row("pass", "b | tail", check_exit_masking=True)], (1, 0)),
+    ("two missing paths", [{"status": "fail", "contract_kind": "artifact_observation", "paths": [p], "summary": f"missing: {p}"}
+                           for p in ("store/d.md", "d.md")], (0, 1)),
+    ("no failure", [_row("pass", "a"), _row("declared", "b")], None),
+])
+def test_the_red_check_fact_counts_what_passed_after_it(name, rows, expected):
+    """The fact the finish door and the task record read: the newest check still red by the identity rule above, with
+    how many receipts of ANY check passed or confirmed their paths after it (0: the last recorded verdict is this
+    failure) and how many other checks stay red. An unrelated pass counts and clears nothing; a declaration and a
+    refused observation are neither a failure nor a pass."""
+    from ouroboros._outcome_receipts import red_check_fact
+
+    fact = red_check_fact(rows)
+    assert (fact and (fact["passed_after"], fact["more"])) == expected, name
+    if name == "two missing paths":  # the host's own words for a check that ran no command
+        assert (fact["kind"], fact["paths_named"], fact["check"]) == ("artifact_observation", 1, "missing: d.md")
+    if name == "the last verdict is the failure":
+        assert (fact["exit_code"], fact["check"]) == (1, "b")

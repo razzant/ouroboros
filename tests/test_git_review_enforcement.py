@@ -2,8 +2,8 @@
 
 Split verbatim out of ``tests/test_git_review_pipeline.py`` by theme. This
 module owns how a review verdict is read and applied: JSON parsing, the
-history the reviewers see, quorum arithmetic, and what blocking vs advisory
-enforcement does to critical findings.
+history the reviewers see, quorum arithmetic, and what the gate returns for
+critical findings.
 """
 import json
 import os
@@ -174,26 +174,13 @@ class TestReviewEnforcementModes:
         monkeypatch.setattr(_rbc, "capture_staged_diff",
                             lambda _repo, *, unified=3: diff_text)
 
-    def test_blocking_mode_blocks_critical_findings(self, review_ctx, monkeypatch):
+    @pytest.mark.parametrize("retired", ["blocking", "advisory", None])
+    def test_advisory_mode_downgrades_critical_findings(self, review_ctx, monkeypatch, retired):
+        """A critical finding returns as the outcome and never refuses, whatever the retired key says."""
         review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="x.py")
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-        monkeypatch.setattr(
-            review,
-            "_handle_multi_model_review",
-            lambda *args, **kwargs: self._fake_result(
-                '[{"item":"code_quality","verdict":"FAIL","severity":"critical","reason":"broken"}]',
-                '[{"item":"code_quality","verdict":"PASS","severity":"critical","reason":"ok"}]',
-            ),
-        )
-        result = review._run_unified_review(ctx, "test commit", repo_dir=ctx.repo_dir)
-        assert result is not None
-        assert "REVIEW_BLOCKED" in result
-
-    def test_advisory_mode_downgrades_critical_findings(self, review_ctx, monkeypatch):
-        review, ctx = review_ctx
-        self._mock_staged(monkeypatch, review, changed_files="x.py")
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+        if retired:
+            monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", retired)
         monkeypatch.setattr(
             review,
             "_handle_multi_model_review",
@@ -205,7 +192,7 @@ class TestReviewEnforcementModes:
         result = review._run_unified_review(ctx, "test commit", repo_dir=ctx.repo_dir)
         assert result is None
         assert any(
-            isinstance(w, str) and "critical findings require an explicit author decision" in w.lower()
+            isinstance(w, str) and "committing needs your explicit decision" in w.lower()
             for w in ctx._review_advisory
         )
         assert any(
@@ -220,7 +207,6 @@ class TestReviewEnforcementModes:
     def test_mixed_critical_minor_and_prior_warnings_survive(self, review_ctx, monkeypatch):
         review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="x.py")
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
         ctx._review_advisory = ["prior deterministic/preflight warning"]
         response = json.loads(self._fake_result(
             '[{"item":"contract","verdict":"FAIL","severity":"critical","reason":"material original finding"}]',
@@ -235,10 +221,7 @@ class TestReviewEnforcementModes:
         assert saved.count("prior deterministic/preflight warning") == 1
         assert saved.count("Note: 1 of 4 review models") == 1  # three seated answers + the failed row
 
-    @pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
-    def test_w2_an_empty_pool_reviews_on_the_main_model_alone_never_a_key_problem(
-        self, review_ctx, monkeypatch, enforcement
-    ):
+    def test_w2_an_empty_pool_reviews_on_the_main_model_alone_never_a_key_problem(self, review_ctx, monkeypatch):
         """The owner saved a catalog with no row marked Reviewer. The gate reviews on ONE
         seat, the Main model alone (owner decision B): it is dispatched, it answers both parts,
         and the review records a single reviewer with no diversity — never the retired typed
@@ -248,7 +231,6 @@ class TestReviewEnforcementModes:
 
         review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="x.py")
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
         monkeypatch.setenv("OUROBOROS_MODEL", "openai/main-model")
         set_review_pool(monkeypatch, pool_roster(pool_seat("helper", FACTORY_MODELS[0], marked=False)))
         dispatched = []
@@ -272,12 +254,11 @@ class TestReviewEnforcementModes:
         assert "OPENROUTER_API_KEY" not in said and "models list is required" not in said
 
     def test_w2_the_not_performed_sentence_names_the_reason_that_decided(self, review_ctx, monkeypatch):
-        """Under advisory enforcement an unresolved physical operation reduces to
+        """An unresolved physical operation reduces to
         NOT_PERFORMED ``review_late_result_pending``; the gate's sentence says so,
         and does not claim that no seat answered the change."""
         review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="x.py")
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
         response = json.loads(self._fake_result(
             '[{"item":"code_quality","verdict":"PASS","severity":"critical","reason":"ok"}]',
             '[{"item":"code_quality","verdict":"PASS","severity":"critical","reason":"ok"}]'))
@@ -292,50 +273,12 @@ class TestReviewEnforcementModes:
         assert "remain unresolved" in not_performed[0] and "model-1" in not_performed[0]
         assert "no seat answered the change" not in not_performed[0]
 
-    @pytest.mark.parametrize("failure", ["nonzero_rc", "non_utf8_rc"])
-    def test_uncapturable_staged_diff_blocks_instead_of_reviewing_a_placeholder(
-        self, review_ctx, monkeypatch, failure
-    ):
-        """The triad's change evidence is the staged diff, and the old ``run_cmd``
-        capture fell back to a ``(failed to get staged diff)`` STRING that a full,
-        authoritative review then ran against — findings about a diff nobody has.
-        It now goes through the hardened ``capture_staged_diff``; when git cannot
-        produce the diff the review fails closed in blocking mode (no reviewer is
-        dispatched), exactly like a checklist-load or reviewer-config infra
-        failure."""
-        review, ctx = review_ctx
-        # name-status / name-only still answer so we reach the diff capture, but
-        # the content capture is what fails.
-        self._mock_staged(monkeypatch, review, changed_files="x.py")
-        import ouroboros.tools.review_binary_context as rbc
-
-        def broken(_repo, *, unified=3):
-            detail = "fatal: bad object" if failure == "nonzero_rc" else "fatal: \udcffbad"
-            raise rbc.StagedDiffUnavailable(f"staged diff capture failed (rc 128): {detail}")
-
-        monkeypatch.setattr(rbc, "capture_staged_diff", broken)
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-        dispatched = []
-        monkeypatch.setattr(
-            review, "_handle_multi_model_review",
-            lambda *a, **k: dispatched.append(True) or self._fake_result("[]", "[]"),
-        )
-
-        result = review._run_unified_review(ctx, "test commit", repo_dir=ctx.repo_dir)
-
-        assert result is not None and "REVIEW_BLOCKED" in result
-        assert "staged diff" in result.lower()
-        assert "failed to get staged diff" not in result  # no placeholder anywhere
-        assert ctx._last_review_block_reason == "infra_failure"
-        assert dispatched == [], "no reviewer may run without the staged diff"
-
     def test_uncapturable_staged_diff_is_advisory_skip_not_placeholder_review(
         self, review_ctx, monkeypatch
     ):
-        """Advisory counterpart: review is non-blocking, so an infra failure to
-        capture the diff skips the triad with a durable warning instead of feeding
-        a placeholder into it. The commit proceeds (``None``) and the skip is
-        recorded, never a review of ``(failed to get staged diff)``."""
+        """An infra failure to capture the diff skips the triad with a durable warning
+        instead of feeding a placeholder into it: no reviewer runs, the outcome returns
+        (``None``) and the skip is recorded, never a review of ``(failed to get staged diff)``."""
         review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="x.py")
         import ouroboros.tools.review_binary_context as rbc
@@ -348,7 +291,6 @@ class TestReviewEnforcementModes:
             raise rbc.StagedDiffUnavailable("staged diff capture failed: boom")
 
         monkeypatch.setattr(rbc, "capture_staged_diff", broken)
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
 
         result = review._run_unified_review(ctx, "test commit", repo_dir=ctx.repo_dir)
 
@@ -375,14 +317,13 @@ class TestReviewEnforcementModes:
         review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="VERSION")
         monkeypatch.setattr(review, "_preflight_check", lambda *a, **kw: message)
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-        monkeypatch.setattr(
-            review, "_handle_multi_model_review",
-            lambda *a, **k: (_ for _ in ()).throw(AssertionError("no reviewer may run")),
-        )
+        reviewed = []
+        monkeypatch.setattr(review, "_handle_multi_model_review",
+                            lambda *a, **k: reviewed.append(True) or self._fake_result("[]", "[]"))
         result = review._run_unified_review(ctx, "v1.0.0: bump version", repo_dir=ctx.repo_dir)
-        assert result is not None and message in result
-        assert ctx._last_review_block_reason == expected
+        assert result is None and reviewed, "the finding is returned beside the review, never a refusal"
+        assert any(isinstance(w, str) and message.splitlines()[0] in w for w in ctx._review_advisory), ctx._review_advisory
+        assert ctx._last_review_block_reason in {expected, ""}  # the wave's own outcome may overwrite it
 
     def test_triad_one_pass_fit_removes_only_duplicated_context(self, review_ctx, monkeypatch):
         """Oversized triad evidence is compacted before its single dispatch."""
@@ -515,7 +456,6 @@ class TestReviewEnforcementModes:
     def test_advisory_mode_downgrades_quorum_failure(self, review_ctx, monkeypatch):
         review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="x.py")
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
         monkeypatch.setattr(
             review,
             "_handle_multi_model_review",
@@ -534,7 +474,6 @@ class TestReviewEnforcementModes:
     def test_advisory_mode_keeps_preflight_as_warning(self, review_ctx, monkeypatch):
         review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="VERSION")
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
         monkeypatch.setattr(
             review,
             "_handle_multi_model_review",
@@ -546,14 +485,14 @@ class TestReviewEnforcementModes:
         result = review._run_unified_review(ctx, "version update", repo_dir=ctx.repo_dir)
         assert result is None
         assert any(
-            isinstance(w, str) and "preflight warning did not block commit" in w.lower()
+            isinstance(w, str) and "preflight warning (it does not stop the commit)" in w.lower()
             for w in ctx._review_advisory
         )
 
     @pytest.mark.parametrize("item_id", _critical_triad_items())
     def test_advisory_downgrades_every_critical_item(self, item_id, review_ctx, monkeypatch):
-        """NW-2 guardrail (58a52c4 class): advisory enforcement must downgrade a
-        critical LLM finding for EVERY checklist item, with no per-item exception.
+        """NW-2 guardrail (58a52c4 class): a critical LLM finding for EVERY checklist
+        item returns as the outcome, with no per-item exception.
 
         The 58a52c4 incident added ``_ALWAYS_BLOCKING_ITEMS = {version_bump,
         forgotten_touchpoints}`` so those items blocked even under owner-chosen
@@ -564,7 +503,6 @@ class TestReviewEnforcementModes:
         """
         review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="x.py")
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
         monkeypatch.setattr(
             review,
             "_handle_multi_model_review",
@@ -594,12 +532,12 @@ class TestReviewEnforcementModes:
             changed_files="ouroboros/new_module.py\ntests/test_new_module.py",
             name_status_files="A\touroboros/new_module.py\nA\ttests/test_new_module.py",
         )
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+        monkeypatch.setattr(review, "_handle_multi_model_review", lambda *a, **k: self._fake_result("[]", "[]"))
         result = review._run_unified_review(ctx, "add new module", repo_dir=ctx.repo_dir)
-        # Should be blocked by preflight because ARCHITECTURE.md is not staged
-        assert result is not None
-        assert "PREFLIGHT_BLOCKED" in result
-        assert "ARCHITECTURE.md" in result
+        # The preflight finds ARCHITECTURE.md missing and returns it beside the review, never a refusal.
+        assert result is None
+        said = " ".join(w for w in ctx._review_advisory if isinstance(w, str))
+        assert "PREFLIGHT_BLOCKED" in said and "ARCHITECTURE.md" in said
 
     def test_rename_out_of_ouroboros_without_tests_passes(self):
         """Regression (#447): a rename/deletion of a .py file out of
@@ -790,11 +728,11 @@ class TestReviewEnforcementModes:
             changed_files="ouroboros/new_copy.py\ntests/test_new_copy.py",
             name_status_files="C100\touroboros/base.py\touroboros/new_copy.py\nA\ttests/test_new_copy.py",
         )
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+        monkeypatch.setattr(review, "_handle_multi_model_review", lambda *a, **k: self._fake_result("[]", "[]"))
         result = review._run_unified_review(ctx, "add copied module", repo_dir=ctx.repo_dir)
-        assert result is not None
-        assert "PREFLIGHT_BLOCKED" in result
-        assert "ARCHITECTURE.md" in result
+        assert result is None
+        said = " ".join(w for w in ctx._review_advisory if isinstance(w, str))
+        assert "PREFLIGHT_BLOCKED" in said and "ARCHITECTURE.md" in said
 
     # ``test_copy_source_not_treated_as_deletion`` was removed with the
     # tests-required preflight heuristic (#447): a false D entry for a copy
@@ -806,7 +744,6 @@ class TestReviewEnforcementModes:
 
 def _mock_triad_gates(review, monkeypatch, *, changed=("uv.lock", "VERSION")):
     """Deterministic gates around the touched-pack seam of _prepare_unified_review."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     name_status = "\n".join(f"M\t{p}" for p in changed)
     name_only = "\n".join(changed)
 

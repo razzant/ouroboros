@@ -18,8 +18,10 @@ ClaudexorReadState = Literal["ok", "not_read", "failed"]
 class ClaudexorStatusReads(TypedDict):
     """Independent status facets: harnesses/catalog, profiles/accounts and quota.
     ok means authoritative (including empty); not_read means never asked, including
-    a discovery failure before fan-out; failed means no usable answer to a read.
-    The login-capability manifest filter fails open and is not a reported facet."""
+    a discovery failure before fan-out, or an answer discarded as older than a confirmed
+    account write or a newer held read; failed means no usable answer to a read.
+    The login-eligibility filter (the catalog's setupLogin, or the manifests when the
+    catalog is not current evidence) fails open and is not a reported facet."""
 
     catalog: ClaudexorReadState
     accounts: ClaudexorReadState
@@ -41,6 +43,9 @@ class ClaudexorStatusResponse(TypedDict, total=False):
     daemon: Dict[str, Any]
     config_dir: str
     harnesses: List[Dict[str, Any]]
+    # Full Accounts adds profiles.login_capable_harnesses (list[str] | None):
+    # login eligibility from the catalog's setupLogin (the manifests when the
+    # catalog is not current evidence); None retains the unread fail-open.
     profiles: Dict[str, Any]
     quota: List[Dict[str, Any]]
     quota_absences: List[Dict[str, Any]]

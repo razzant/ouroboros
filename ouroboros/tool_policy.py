@@ -20,6 +20,22 @@ from ouroboros.contracts.task_contract import canonical_tool_name
 
 
 NANO_SCHEMA_META_NAMES = META_TOOL_NAMES | frozenset({"compact_context"})
+# Nano's standing work set: resident from a turn's first request to its last, each where this actor's
+# registry permits it, so finishing, reading memory and files, editing and a command never change the schema
+# prefix a local server caches. ``memory_read`` belongs to it: a Nano memory view is mostly its addresses.
+# ``enable_tools`` adds to it and never drops it; sending to the owner and the scratchpad load on demand.
+# ``presence_finish`` is the completion door only a pre-upgrade Presence registry still publishes.
+# Its estimate (8 141 on 16.11.2026) stays at most NANO_RESIDENT_SCHEMA_TOKENS (tests/test_nano_tool_policy.py).
+NANO_RESIDENT_SCHEMA_NAMES = NANO_SCHEMA_META_NAMES | frozenset({
+    "finish_task", "presence_finish", "read_file", "list_files", "search_code", "write_file", "edit_text",
+    "run_command", "memory_read", "knowledge_read",
+})
+NANO_RESIDENT_SCHEMA_TOKENS = 8_300
+
+
+def nano_standing(ctx: Any) -> bool:
+    """Whether this actor's Nano selections carry the standing set; a live call's host clears it (its own base)."""
+    return getattr(ctx, "_nano_standing", True) is not False
 
 
 @dataclass(frozen=True)
@@ -62,15 +78,17 @@ def _schema_names(names: Iterable[str] | None) -> tuple[str, ...]:
 def select_tool_schemas(
     canonical_schemas: Sequence[Dict[str, Any]], *, context_mode: str = "max",
     schema_names: Iterable[str] | None = None,
-    unavailable_reasons: Mapping[str, str] | None = None,
+    unavailable_reasons: Mapping[str, str] | None = None, standing: bool = True,
 ) -> ToolSchemaSelection:
-    """Pure selection from one permitted snapshot, retaining its canonical order."""
+    """Pure selection from one permitted snapshot, retaining its canonical order.
+
+    ``standing=False`` keeps only the selectors (a live call's own base: its feature names its tools)."""
     available = {schema["function"]["name"] for schema in canonical_schemas}
     requested = _schema_names(
         canonical_tool_name(name) if canonical_tool_name(name) in available else name
         for name in _schema_names(schema_names)
     )
-    selected = set(requested) | NANO_SCHEMA_META_NAMES
+    selected = set(requested) | (NANO_RESIDENT_SCHEMA_NAMES if standing else NANO_SCHEMA_META_NAMES)
     schemas = tuple(deepcopy(schema) for schema in canonical_schemas
                     if context_mode != "nano" or schema["function"]["name"] in selected)
     reasons = unavailable_reasons or {}
@@ -85,7 +103,7 @@ def select_tool_schemas(
 
 def initial_tool_schemas(
     registry: ToolSchemaProvider, context_mode: str = "max",
-    schema_names: Iterable[str] | None = None,
+    schema_names: Iterable[str] | None = None, *, standing: bool = True,
 ) -> List[Dict[str, Any]]:
     """Return full Low/Max or selected Nano schemas from the current registry.
 
@@ -101,7 +119,7 @@ def initial_tool_schemas(
     on_demand = getattr(registry, "on_demand_schema_names", frozenset)()
     requested = set(_schema_names(schema_names))
     return [schema for schema in select_tool_schemas(registry.schemas(), context_mode=context_mode,
-                                                     schema_names=schema_names).schemas
+                                                     schema_names=schema_names, standing=standing).schemas
             if schema["function"]["name"] not in on_demand or schema["function"]["name"] in requested]
 
 
@@ -112,12 +130,11 @@ def fit_tool_schemas_to_limit(
     """Fit one request's schemas under a route's physical ceiling: ``(kept, left_out)``.
 
     Under the ceiling (or without one) the list is unchanged. Above it, core and meta
-    schemas and Main's MCP gateway stay first, then ``protect`` (names this task's history already called),
+    schemas and the MCP gateway stay first, then ``protect`` (names this task's history already called),
     then ``first`` (the load being made now), then ``keep`` (names the actor loaded on
     purpose before), then the rest in their own order; the tail beyond the ceiling is
-    left out. Kept schemas retain their order, so the request's prefix is stable.
-    Nothing is withdrawn from the registry: a left-out schema stays callable and
-    ``enable_tools``, where the actor has it, loads it.
+    left out. The kept schemas retain their order. Omitted names stay callable;
+    ``enable_tools``, where available, shows or loads their schemas.
     """
     if limit is None or len(schemas) <= limit:
         return list(schemas), ()
@@ -152,8 +169,8 @@ def route_tool_limit_notice(model: str, limit: int, total: int, left_out: Sequen
     selectors = frozenset(selectors)
     ways = [way for name, way in (
         ("list_available_tools", "list_available_tools marks them not loaded"),
-        ("enable_tools", "enable_tools loads one (the request then leaves out another schema to stay within "
-                         "the limit)"),
+        ("enable_tools", "enable_tools loads one if it fits (possibly displacing another), or shows an MCP "
+                         "schema for a resident text gateway without taking a slot"),
     ) if name in selectors]
     return ("[SYSTEM NOTICE]\n"
             f"The route {model} accepts at most {limit} tool schemas in one request; this task had "
@@ -202,7 +219,7 @@ def request_tool_schema_selection(
     hidden_reason = getattr(registry, "policy_hidden_reason", lambda name: None)
     reasons = {name: reason for name in requested if name not in available
                if (reason := hidden_reason(name))}
-    selection = select_tool_schemas(canonical, context_mode=context_mode,
+    selection = select_tool_schemas(canonical, context_mode=context_mode, standing=nano_standing(ctx),
                                     schema_names=requested, unavailable_reasons=reasons)
     if context_mode != "nano":
         if pending is not None:

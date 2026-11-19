@@ -18,12 +18,13 @@ This module owns everything hurry-specific so the pinned surfaces
   ``supervisor/workers.py`` crash-requeue);
 - the non-chat ``owner_hurry`` event family (phases requested | applied |
   effect | not_applied, always ``is_progress=False``);
-- the task-local advisory plan-review projection.
+- the plan-review projection at the final answer.
 
-Effects are HOST RAILS only: a task-local advisory reading of an open
-force-plan gate. Commit triad/scope, advisory pre-review, deterministic P3
-gates, and safety NEVER consult hurry (§19.7.2 item 10); no global setting is
-read or written.
+Effects: the latch wakes a task parked on the owner or on reviewers, lets delivery skip
+showing review answers that just arrived, and the drain that arms it gives the running
+work one typed row, ``HURRY_WORDS``; how to finish sooner is the work's own call.
+Commit triad/scope, advisory pre-review, deterministic P3 gates, and safety NEVER
+consult hurry (§19.7.2 item 10); no global setting is read or written.
 """
 
 from __future__ import annotations
@@ -52,6 +53,10 @@ PHASE_REQUESTED = "requested"
 PHASE_APPLIED = "applied"
 PHASE_EFFECT = "effect"
 PHASE_NOT_APPLIED = "not_applied"
+
+# The one row the running work reads when the latch arms: the owner's act, never a directive.
+HURRY_WORDS = ("[My human pressed Hurry] My human asks me to finish this work sooner. It is a request, "
+               "not an answer to anything I asked; how to finish sooner is my call.")
 
 # Projection states for the ``owner_hurry`` task-result block.
 STATE_REQUESTED = "requested"
@@ -313,28 +318,23 @@ def latch_from_entry(ctx: Any, entry: Dict[str, Any]) -> bool:
     return True
 
 
-def apply_latch(ctx: Any, entry: Dict[str, Any], *, event_queue: Any = None) -> None:
-    """Arm the latch and persist the ``applied`` projection ONCE per attempt.
+def apply_latch(ctx: Any, entry: Dict[str, Any], *, event_queue: Any = None) -> bool:
+    """Arm the latch and persist the ``applied`` projection ONCE per attempt; whether it armed now.
 
     The one entry point the production drain calls for a ``kind=hurry`` mailbox
     entry. Fail-soft end to end: a projection/event failure never breaks the
     round loop, and a re-drain of the same (or another) hurry entry is a no-op.
     """
     if not latch_from_entry(ctx, entry):
-        return
+        return False
     task_id = str(getattr(ctx, "task_id", "") or "")
     root = _canonical_root(ctx)
     if not task_id or root is None:
-        return
+        return True
     # ``ctx.task_attempt`` is stamped by the agent from ``task["_attempt"]``;
     # a context without the stamp is attempt 1 (attempt_key(None) -> 1).
     attempt = attempt_key(getattr(ctx, "task_attempt", None))
-    record_applied(
-        root, task_id, attempt=attempt,
-        effects={
-            "plan_review": "task_local_advisory",
-        },
-    )
+    record_applied(root, task_id, attempt=attempt, effects={"words": "finish_sooner"})
     emit_event(
         event_queue, root, task_id,
         phase=PHASE_APPLIED,
@@ -342,6 +342,7 @@ def apply_latch(ctx: Any, entry: Dict[str, Any], *, event_queue: Any = None) -> 
         requested_at=str(entry.get("ts") or ""),
         attempt=attempt,
     )
+    return True
 
 
 def _canonical_root(ctx: Any) -> Optional[pathlib.Path]:
@@ -393,32 +394,18 @@ def _plan_facts(ctx: Any) -> tuple[Dict[str, Any], Dict[str, Any], bool]:
     return record, legacy, unreadable
 
 
-def plan_gate_decision(
-    ctx: Any, llm_trace: Dict[str, Any], *,
-    hard_rail: str = "", enforcement: Optional[str] = None,
-) -> Dict[str, Any]:
+def plan_gate_decision(ctx: Any, llm_trace: Dict[str, Any], *, hard_rail: str = "") -> Dict[str, Any]:
     """Project the planning gate at the task's normal final answer — the ONE seam.
 
-    ``plan_record.gate_projection`` decides: held only under Blocking (outside Cyber
-    Pro, no owner hurry) by an open objection an owner-marked reviewer raised in the
-    ask it answered — for any task (owner batch 2, Q2=B); silence, refusals, pending
-    asks and mind-added critics never hold. While the hurry latch is armed the
-    projection is computed as locally advisory and says so (attribution for the task
-    detail). ``enforcement`` is supplied by the loop wrapper from ITS namespace so the
-    existing ``loop.get_review_enforcement`` test seam holds.
+    ``plan_record.gate_projection`` decides: no reviewer's objection holds the answer (open
+    ones are disclosed); outside Cyber Pro only an unreadable plan record holds it.
     """
     from ouroboros import plan_record
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
+    from ouroboros.tools.review_helpers import cyber_review_authority
 
     record, legacy, unreadable = _plan_facts(ctx)
-    if enforcement is None:
-        from ouroboros.config import get_review_enforcement
-
-        enforcement = get_review_enforcement()
     decision = plan_record.gate_projection(
-        record, enforcement=str(enforcement or ""), cyber_pro=not review_enforcement_blocks("blocking"),
-        hurry=latched(ctx) is not None,
-        hard_rail=hard_rail, legacy=legacy, unreadable=unreadable)
+        record, cyber_pro=cyber_review_authority(), hard_rail=hard_rail, legacy=legacy, unreadable=unreadable)
     if decision.get("required") and (unreadable or decision.get("open_objections")):
         # The outcome class at delivery (``outcome_axes.execution.plan_review``): an unreadable record leaves the
         # review's state unknown, whatever objections a readable part still names.
@@ -426,10 +413,10 @@ def plan_gate_decision(
     return decision
 
 
-def _objection_lines(decision: Dict[str, Any], *, holding_only: bool) -> List[str]:
+def _objection_lines(decision: Dict[str, Any]) -> List[str]:
     from ouroboros.plan_record import ask_subject
 
-    rows = [o for o in decision.get("open_objections") or [] if not holding_only or o.get("holds")]
+    rows = list(decision.get("open_objections") or [])
     return [f"{o.get('seat_id')}/{o.get('id')} (ask {o.get('ask_id')}, {ask_subject(o.get('revision'))}"
             + ("; not adjudicated in its raiser's last reply" if o.get("not_adjudicated") else "")
             + ("; imported from the previous plan review" if o.get("legacy") else "") + f"): {o.get('text')}" for o in rows]
@@ -437,27 +424,15 @@ def _objection_lines(decision: Dict[str, Any], *, holding_only: bool) -> List[st
 
 def plan_review_reminder(decision: Dict[str, Any]) -> str:
     """The user-turn reminder appended while the planning gate holds the normal final
-    answer (``_enforce_plan_gate``)."""
-    tag = "[PLAN_REVIEW_HOLD]"
-    status = str(decision.get("status") or "")
-    if status == "unreadable":
-        return (f"{tag} This task's plan record cannot be read, so the gate holds until it can; "
-                "plan_task() reads it, and finish_task(action='stop') ends honestly with unfinished work.")
-    held = _objection_lines(decision, holding_only=True)
-    return (f"{tag} Blocking enforcement: {len(held)} open objection{'' if len(held) == 1 else 's'} of owner-marked "
-            "reviewers hold your normal final answer:\n- " + "\n- ".join(held) + "\n"
-            "Only the participant who raised an objection withdraws it: revise the plan or answer the objection, "
-            "then plan_task(ask=[<its seat id>], message=...) so it can withdraw or restate; argue in the message "
-            "when you disagree. Other exits: finish_task(action='stop') with unfinished work, or the owner's hurry "
-            "or a change of enforcement. Nobody votes and no verdict closes this.")
+    answer (``_enforce_plan_gate``): only an unreadable plan record holds it."""
+    return ("[PLAN_REVIEW_HOLD] This task's plan record cannot be read, so the gate holds until it can; "
+            "plan_task() reads it, and finish_task(action='stop') ends honestly with unfinished work.")
 
 
 def plan_review_disclosure(decision: Dict[str, Any], forced_reason: str = "", *, author_stop: bool = False) -> str:
-    """The loud host suffix when the planning gate did not hold the final answer but the
-    council's talk was not over: open objections (released by a rail, Advisory, Cyber Pro,
-    the owner's hurry, or under Blocking raised by reviewers whose objections do not hold),
-    asks whose answers had not arrived, or an unreadable record released by a rail or ended by
-    the author's own stop. ``author_stop`` comes only from that stop: a projection an earlier
+    """The loud host suffix when the council's talk was not over at the final answer: open
+    objections (disclosed; none holds the answer), asks whose answers had not arrived, or an
+    unreadable record released by a rail or ended by the author's own stop. ``author_stop`` comes only from that stop: a projection an earlier
     hold left behind on another exit never speaks for one."""
     if not decision.get("required"):
         return ""
@@ -467,11 +442,10 @@ def plan_review_disclosure(decision: Dict[str, Any], forced_reason: str = "", *,
     unreadable = bool(decision.get("unreadable"))
     if not objections and not pending and not unreadable:
         return ""
-    held = [o for o in objections if o.get("holds")]
+    marked = [o for o in objections if o.get("owner_marked")]
     count = (f"{len(objections)} open objection{'' if len(objections) == 1 else 's'}"
-             + (f" ({len(held)} from owner-marked reviewers)" if held and len(held) != len(objections) else ""))
-    listed = "; ".join(_objection_lines(decision, holding_only=False))
-    subject = "Blocking plan review" if str(decision.get("enforcement") or "") == "blocking" else "Plan review"
+             + (f" ({len(marked)} from owner-marked reviewers)" if marked and len(marked) != len(objections) else ""))
+    listed = "; ".join(_objection_lines(decision))
     if status == "rail_degraded":
         rail_reason = str(forced_reason or decision.get("reason") or "")
         rail = f"the task-wide rail `{rail_reason}`" if rail_reason else "a task-wide rail"
@@ -484,24 +458,16 @@ def plan_review_disclosure(decision: Dict[str, Any], forced_reason: str = "", *,
         if unreadable and (objections or pending):
             what = "the plan record could not be read; known " + what
         state = "state is unknown" if unreadable else "is open"
-        return f"\n\n⚠️ {subject} {state} ({what}); {rail} required best-effort finalization."
+        return f"\n\n⚠️ Plan review {state} ({what}); {rail} required best-effort finalization."
     if status == "unreadable" and author_stop:  # the gate held every normal answer it could not judge
         known = f" beyond {count}: {listed}" if objections else ""
         return ("\n\n⚠️ Plan review: the plan record could not be read, so the state of the plan review is unknown"
                 f"{known}; Ouroboros stopped with the work unfinished.")
     if objections:
-        cyber = decision.get("decision_authority") == "cyber_pro"
-        why = ("released by the owner's hurry request" if decision.get("owner_hurry_local_advisory") else
-               # A stop no gate decided never says the work proceeded (the stop is said below).
-               "" if author_stop and (cyber or decision.get("enforcement") != "blocking") else
-               "Cyber Pro: Ouroboros proceeded by its own judgment" if cyber else
-               # Blocking holds a normal answer over them: the one exit that delivers here is the author's stop.
-               "Blocking enforcement held the final answer" if status == "held" else
-               "under Blocking enforcement, objections of unmarked reviewers and advisers do not hold the answer"
-               if status == "objections_open" and decision.get("enforcement") == "blocking" else
-               "work proceeded under the owner-selected advisory enforcement")
-        if author_stop or status == "held":
-            why = " and ".join(part for part in (why, "Ouroboros stopped with the work unfinished") if part)
+        # A stop never says the work proceeded.
+        why = ("Ouroboros stopped with the work unfinished" if author_stop else
+               "Cyber Pro: Ouroboros proceeded by its own judgment" if decision.get("decision_authority") == "cyber_pro"
+               else "work proceeded with them open")
         return f"\n\n⚠️ Plan review: {count} remain{'s' if len(objections) == 1 else ''} open — {listed}; {why}."
     if pending:
         return ("\n\n⚠️ Plan review: the answers of ask(s) " + ", ".join(pending)

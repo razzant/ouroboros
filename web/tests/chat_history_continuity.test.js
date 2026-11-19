@@ -124,7 +124,7 @@ test('canonical legacy origin adopts the retained node despite a different sourc
 });
 
 for (const shallow of [false, true]) test(shallow
-    ? 'a partial recent window whose present ↓ need not read still lets a retained room reopen at its newest message'
+    ? 'a partial shallow recent window is repaired by ↓ before a retained room reopens at its newest message'
     : 'a clean latest read after a source-unavailable recent window lets a retained room reopen at its newest message', async () => {
     const span = (from, to) => ({ from, to, chain: 'c', gaps: [] });
     const coverage = (chat, progress) => ({ v: 1, view: 'v', upper: { chat: chat.to, progress: 0 }, spans: { chat, progress } });
@@ -136,6 +136,7 @@ for (const shallow of [false, true]) test(shallow
         { messages: rows(shallow ? 100 : 200), reason_code: 'history_source_unavailable', page_cursor: null, next_cursor: null,
             has_more: true, window: { complete: false, truncated_by: ['progress_source_unavailable'] },
             coverage: coverage(shallow ? span(100, 115) : span(200, 215), null) },
+        { ...page(rows(200), 'latest:1', 'older:2'), coverage: coverage(span(200, 215), empty) },
         { ...page(rows(200), 'latest:1', 'older:2'), coverage: coverage(span(200, 215), empty) },
     ];
     const calls = [];
@@ -155,22 +156,23 @@ for (const shallow of [false, true]) test(shallow
         note: feed.parentNode.querySelector('.chat-panel-statusbar').querySelector('.chat-load-older-note')?.textContent || '' });
     try {
         await instance.refreshHistory({ revision: 1 });
-        await instance.refreshHistory({ revision: 2 });
+        assert.equal((await instance.refreshHistory({ revision: 2 })).painted, false,
+            'a partial source cannot cover the new revision');
         assert.deepEqual(status(), { button: 'Retry loading messages', note: 'Some saved history could not be loaded.' });
         document.byId.get('chat-scroll-bottom').click();
         for (let i = 0; i < 10; i++) await tick();
-        if (shallow) {
-            assert.deepEqual(calls, [null, null], 'the present is loaded, so ↓ reads nothing');
-            assert.equal(status().button, 'Retry loading messages', 'the partial read stays disclosed');
-        } else {
-            assert.deepEqual(calls, [null, null, null], '↓ reads the present once');
-            assert.notEqual(status().button, 'Retry loading messages', 'the clean latest window supersedes the failed recent read');
-            assert.doesNotMatch(status().note, /could not be loaded/);
-        }
-        // A hidden pending-work room reopens at the newest message, at the same revision without another read.
+        assert.deepEqual(calls, [null, null, null], '↓ reads the unconfirmed present once, even with retained rows');
+        assert.notEqual(status().button, 'Retry loading messages', 'the clean latest window supersedes the failed recent read');
+        assert.doesNotMatch(status().note, /could not be loaded/);
+        // Reopening and an already covered revision reuse the repaired present.
         const before = calls.length;
         await instance.showLatest();
-        await instance.refreshHistory({ revision: 2 });
+        await instance.refreshHistory({ revision: 1 });
         assert.equal(calls.length, before);
+        // Revision 2 was never covered: its receipt still requires a successful read.
+        assert.equal((await instance.refreshHistory({ revision: 2 })).painted, true);
+        assert.equal(calls.length, before + 1);
+        await instance.refreshHistory({ revision: 2 });
+        assert.equal(calls.length, before + 1);
     } finally { instance.destroy(); restoreDom(prior); }
 });

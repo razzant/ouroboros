@@ -189,6 +189,13 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "use the reviewed protected-write path",
         ),
+        "MANAGED_BY_DEPLOYMENT": _code_spec(  # the serving checkout or a required extension (deployment_policy)
+            "blocked",
+            "protected_blocked",
+            "warning",
+            "author in a body candidate or another workspace; the administrator deploys the serving program "
+            "and the extensions it requires",
+        ),
         # The two demanded roots are DISTINCT codes and the merged `ROOT_REQUIRED`
         # parent is retired: the recovery walk credits a retry only when the write
         # lands on the root the redirect named, so a merged code makes that branch
@@ -310,11 +317,13 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "stay within the admitted repair surface",
         ),
+        # A completed command's observation, never a refusal: the call is no error, and
+        # its own bucket keeps the note readable in the journal and the trace.
         "ARTIFACT_OUTPUT_UNDECLARED": _code_spec(
-            "blocked",
+            "ok",
             "artifact_output_undeclared",
             "warning",
-            "declare the produced artifact",
+            "register a named file if it is a result for the human; otherwise none",
         ),
         # Family parents. Each carries the legacy status of the family the loop
         # chain matched by text prefix, so the whole family keeps landing in the
@@ -367,11 +376,17 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "use a permitted interpreter and script path",
         ),
-        "SAFETY_VIOLATION": _code_spec(
+        "SAFETY_VIOLATION": _code_spec(  # old records only: the Supervisor now returns a call or holds it
             "blocked",
             "safety_violation",
             "error",
             "choose a safe alternative",
+        ),
+        "SAFETY_RETURNED": _code_spec(
+            "blocked", "safety_returned", "warning", "change the call, drop it, or issue it again in a later step",
+        ),
+        "SAFETY_UNAVAILABLE": _code_spec(
+            "unavailable", "safety_unavailable", "warning", "issue the identical call again in a later step",
         ),
         "LEGACY_BLOCKED": _code_spec(
             "blocked",
@@ -458,7 +473,7 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "unavailable",
             "unavailable",
             "warning",
-            "the owner signs in (Settings → MCP, or a link from remote_mcp_sign_in)",
+            "the owner signs in (Settings → Tools, or a link from remote_mcp_sign_in)",
         ),
         "EXTENSION_UNAVAILABLE": _code_spec(
             "unavailable",
@@ -584,8 +599,8 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "error",
             "follow the legacy failure text",
         ),
-        # Unreachable from core producers (only SAFETY_VIOLATION spells a
-        # violation today, and it is claimed by an exact branch), but a skill or
+        # Unreachable from core producers (none spells a violation now; an old
+        # SAFETY_VIOLATION record is claimed by an exact branch), but a skill or
         # MCP payload can emit an arbitrary ``⚠️ X_VIOLATION`` and the legacy
         # chain gave it its own status. Ported rather than folded into `error`.
         "LEGACY_VIOLATION": _code_spec(
@@ -860,28 +875,25 @@ def _wrap_run_script_process_result(
     result: str,
     audit_note: str,
     script_path: Any,
+    note_meta: Mapping[str, Any] | None = None,
 ) -> str:
     """Republish an inner shell result after the exact run-script text wrapper."""
 
     if str(result).lstrip().startswith("⚠️"):
         # The result already owns line 1 with its own typed marker, which is what
-        # the failure classifier reads — the nudge appends after it.
+        # the failure classifier reads — the note appends after it.
         tail = f"\n{audit_note}" if audit_note else ""
         wrapped = f"{result}{tail}\n# script_path={script_path}"
-    elif audit_note:
-        # The nudge used to REPLACE the whole _run_shell payload (a successful
-        # script's answer was gone; re-running was the sole recovery). Marker
-        # first — ARTIFACT_OUTPUT_UNDECLARED is a typed policy-denial surface the
-        # classifier reads off line 1 — payload appended, as in run_command.
-        wrapped = f"{audit_note}\n\n# script_path={script_path}\n{result}"
     else:
-        wrapped = f"# script_path={script_path}\n{result}"
+        # The script's own answer leads; the undeclared-output note trails it, as
+        # in run_command: a first-line `⚠️ IDENTIFIER` reads as a refusal.
+        wrapped = f"# script_path={script_path}\n{result}" + (f"\n\n{audit_note}" if audit_note else "")
     base = _published_tool_result(ctx, None)
     if isinstance(base, ToolResult) and base.text == result:
         code = "ARTIFACT_OUTPUT_UNDECLARED" if audit_note and base.status == "ok" else base.code
         return _publish_tool_result(
             ctx,
-            _replace_tool_result(base, text=wrapped, code=code),
+            _replace_tool_result(base, text=wrapped, code=code, meta_updates=note_meta),
         )
     return wrapped
 
@@ -897,6 +909,7 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "LOCAL_READONLY_SUBAGENT_BLOCKED": "ACCESS_BLOCKED",
         "MUTATIVE_SUBAGENTS_DISABLED": "ACCESS_BLOCKED",
         "CORE_PROTECTION_BLOCKED": "CORE_PROTECTION_BLOCKED",
+        "MANAGED_BY_DEPLOYMENT": "MANAGED_BY_DEPLOYMENT",
         "ROOT_REQUIRED_USER_FILES": "ROOT_REQUIRED_USER_FILES",
         "ROOT_REQUIRED_ACTIVE_WORKSPACE": "ROOT_REQUIRED_ACTIVE_WORKSPACE",
         "USER_FILES_PATH_BLOCKED": "USER_FILES_PATH_BLOCKED",
@@ -923,8 +936,11 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "ARTIFACT_OUTPUT_UNDECLARED": "ARTIFACT_OUTPUT_UNDECLARED",
         "ARTIFACT_OUTPUT_ERROR": "ARTIFACT_OUTPUT_ERROR",
         "SAFETY_VIOLATION": "SAFETY_VIOLATION",
+        "SAFETY_RETURNED": "SAFETY_RETURNED",
+        "SAFETY_UNAVAILABLE": "SAFETY_UNAVAILABLE",
         "CAPABILITY_UNAVAILABLE": "CAPABILITY_UNAVAILABLE",
         "MCP_DISABLED": "MCP_UNAVAILABLE",
+        "MCP_SKILL_UNAVAILABLE": "MCP_UNAVAILABLE",  # a skill-bound server whose skill cannot run it now
         # Catalog gaps differ from proven absence and disabled providers.
         "MCP_CATALOG_UNAVAILABLE": "MCP_CATALOG_UNAVAILABLE",
         "MCP_TOOL_NOT_FOUND": "UNKNOWN_TOOL",
@@ -1077,6 +1093,12 @@ def _structured_failure(text: str) -> bool:
 def _classification(code: str, meta: Mapping[str, Any] | None = None) -> tuple[ToolStatus, str, dict[str, Any]]:
     spec = TOOL_CODE_SPECS[code]
     return spec.status, code, dict(meta or {})
+
+
+def safety_refusal(text: str) -> tuple[ToolStatus, str]:
+    """``(status, code)`` of a call ``check_safety`` did not let through: held without a reading, else returned."""
+    code = "SAFETY_UNAVAILABLE" if text.startswith("⚠️ SAFETY_UNAVAILABLE") else "SAFETY_RETURNED"
+    return TOOL_CODE_SPECS[code].status, code
 
 
 def _classify_legacy_text(

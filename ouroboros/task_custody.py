@@ -75,6 +75,7 @@ import logging
 import os
 import pathlib
 import shutil
+import time
 import uuid
 from typing import Any, Callable, ContextManager, Dict, Iterator, List, Optional, Tuple
 
@@ -114,7 +115,7 @@ class _Retained(Exception):
 
 
 class CustodyBusy(OSError):
-    """A publisher could not take the task's custody lock: retry later, nothing failed."""
+    """A publisher could not take the task's custody lock; the cause does not decide the task's outcome."""
 
 
 class PublicationClosed(OSError):
@@ -177,8 +178,12 @@ def _task_lock(drive_root: Any, task_id: str, suffix: str, timeout_sec: float) -
     require_owned_root(drive_root)
     tid = validate_task_id(task_id)
     path = custody_anchor(drive_root, tid) / "task_results" / f"{tid}.{suffix}.lock"
+    held: Dict[str, Any] = {}
     fd = acquire_exclusive_file_lock(path, timeout_sec=timeout_sec, stale_sec=120.0, poll_sec=0.01,
-                                     owner_aware_stale=True)
+                                     owner_aware_stale=True, outcome=held)
+    if fd is None and held.get("reason") != "contention":
+        code, text = held.get("errno"), f"{suffix} lock of {tid} was not taken: platform outcome {held.get('reason') or 'unknown'}"
+        raise CustodyBusy(code, f"{text} ({os.strerror(code)})") if isinstance(code, int) else CustodyBusy(text)
     try:
         yield fd is not None
     finally:
@@ -191,7 +196,7 @@ def task_custody_lock(drive_root: Any, task_id: str, *, timeout_sec: float = 5.0
     settlement take it around every file they place and the row write that lists it. It
     lives on the canonical side (``task_results/<id>.custody.lock``), never inside a drive
     that settlement deletes, for the canonical root and every own child drive alike.
-    Yields whether it was acquired."""
+    Yields whether acquired; a non-contention refusal raises CustodyBusy with the known platform cause."""
     return _task_lock(drive_root, task_id, "custody", timeout_sec)
 
 
@@ -230,15 +235,17 @@ def recorded_execution_drive(row: Dict[str, Any], drive: pathlib.Path, spellings
     return any(physical_path(spellings, recorded) == target for recorded in child_drive_candidates(row))
 
 
-def own_child_drives(canonical_root: Any, task_id: str, *,
-                     store_row: Optional[Dict[str, Any]] = None) -> List[pathlib.Path]:
+def own_child_drives(canonical_root: Any, task_id: str, *, store_row: Optional[Dict[str, Any]] = None,
+                     strict: bool = False) -> List[pathlib.Path]:
     """TASK's physical child layouts, never created; no row widens the layouts.
 
     ``store_row`` (the HTTP artifact view) keeps only layouts its canonical row
     records, before any directory IO: there, scratch existence does not authorize
-    a SQLite read. Other callers keep discovering the layouts that exist.
+    a SQLite read. Other callers keep discovering the layouts that exist. ``strict``
+    is for a reader whose only source these layouts are: a layout that could not be opened
+    raises, unknown and never absent, unless its path is missing or is no directory itself.
     """
-    from ouroboros.confined_files import confined_directory, root_spellings
+    from ouroboros.confined_files import confined_directory, real_directory, root_spellings
 
     spellings = root_spellings(canonical_root)
     canonical, tid = spellings[0], validate_task_id(task_id)
@@ -252,6 +259,8 @@ def own_child_drives(canonical_root: Any, task_id: str, *,
             with confined_directory(canonical, drive.relative_to(canonical).parts):
                 found.append(drive)
         except OSError:
+            if strict and real_directory(drive):
+                raise
             continue
     return found
 
@@ -1185,7 +1194,8 @@ def _recheck_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Di
 # I/O error) is attempted again on the next pass.
 TRANSIENT_RETENTIONS = frozenset({"liveness_unknown", "task_live", "generation_closed", "custody_busy",
                                    "mailbox_busy", "store_busy", "canonical_changed", "drive_occupant_changed",
-                                   "call_inventory_changed", "task_result_unreadable", "review_environment_held"})
+                                   "call_inventory_changed", "task_result_unreadable", "review_environment_held",
+                                   "kept_service_capture_owed"})
 
 
 def settlement_basis(parent: pathlib.Path, task_id: str, task_dir: pathlib.Path, drive: pathlib.Path) -> list:
@@ -1307,7 +1317,8 @@ def record_rest(rested: Optional[Dict[str, Any]], layout: str, parent: pathlib.P
 
 def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: Optional[LiveProbe],
                        guard: Optional[Guard] = None, stop: Optional[Callable[[], bool]] = None,
-                       admission_rollback: bool = False, report: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                       admission_rollback: bool = False, report: Optional[Dict[str, Any]] = None,
+                       owed: Any = None) -> Dict[str, Any]:
     """The one decision to delete one of TASK's own execution drives; see the module docstring.
 
     ``live(task_id)`` is the caller's supervisor probe (True live, False proven not live,
@@ -1316,13 +1327,16 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
     final census, probe and move happen inside it. ``stop()`` closes a maintenance
     generation between phases. ``admission_rollback`` additionally lets a never-started
     task's drive go without a settled row. Returns ``{"status": "removed" | "retained",
-    "reason", "published"}`` and, given a prune ``report``, records a kept drive.
+    "reason", "published"}`` and, given a prune ``report``, records a kept drive and Phase B's step seconds
+    (``under_q_sec``, on the event of a pass that writes its ``headless_task_drive_prune`` event, never its job row). ``owed``: the pass's one
+    read of the kept-output debts (``owed_declarations``) for the first gate; the move rechecks with its own.
     """
     canonical = pathlib.Path(canonical_root).resolve(strict=False)
     tid = validate_task_id(task_id)
     drive = pathlib.Path(drive).resolve(strict=False)
     base = drive.parent if drive.parent.name == tid and drive.name == "data" else drive
     outcome: Dict[str, Any] = {"status": "retained", "reason": "", "published": 0}
+    under_q: List[float] = []  # Phase B's steps under the guard (rechecks, locks, move): the pass's ``under_q_sec``
     staging = canonical / _STAGING_DIR / f"{tid}-{uuid.uuid4().hex[:12]}"
     closed = stop or (lambda: False)
     try:
@@ -1330,9 +1344,12 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
             raise _Retained("not_own_drive")
         if live is None:
             raise _Retained("liveness_unknown")
+        from ouroboros.tools.kept_service_outputs import owed_output_hold
         from ouroboros.workspace_preflight import review_scratch_held
         if review_scratch_held(canonical, drive):
             raise _Retained("review_environment_held")
+        if owed_output_hold(canonical, base, owed=owed):  # a kept service's declared outputs here still owe their capture
+            raise _Retained("kept_service_capture_owed")
         occupants = _occupants(drive, tid)
         prepared = [_prepare_occupant(canonical, drive, occupant, live=live, staging=staging,
                                       admission_rollback=admission_rollback and occupant == tid, stop=closed)
@@ -1359,17 +1376,23 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
             alive = live(item["task_id"])
             if alive is not False:
                 raise _Retained("liveness_unknown" if alive is None else "task_live")
-        with (guard() if guard is not None else contextlib.nullcontext(True)) as allowed:  # Phase B: the move
+        with contextlib.ExitStack() as phase_b:  # Phase B: the move, under the guard
+            allowed = phase_b.enter_context(guard() if guard is not None else contextlib.nullcontext(True))
+            phase_b.callback(lambda: under_q.append(time.monotonic()))  # its last step ends as the guard is left
+            under_q.append(time.monotonic())
             if not allowed:
                 raise _Retained("generation_closed")
             if _occupants(drive, tid) != occupants:
                 raise _Retained("drive_occupant_changed")
             if review_scratch_held(canonical, drive):
                 raise _Retained("review_environment_held")
+            if owed_output_hold(canonical, base):
+                raise _Retained("kept_service_capture_owed")
             for item in prepared:
                 alive = live(item["task_id"])
                 if alive is not False:
                     raise _Retained("liveness_unknown" if alive is None else "task_live")
+            under_q.append(time.monotonic())
             with contextlib.ExitStack() as stack:
                 for item in prepared:
                     if not stack.enter_context(task_custody_lock(canonical, item["task_id"],
@@ -1382,6 +1405,7 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                     raise _Retained("generation_closed")  # closed while the locks were awaited: no move
                 for item in prepared:
                     _recheck_occupant(canonical, drive, item)
+                under_q.append(time.monotonic())
                 trash = canonical / _TRASH_DIR / f"{tid}-{uuid.uuid4().hex[:12]}"
                 trash.parent.mkdir(parents=True, exist_ok=True)
                 try:  # this pass itself read the drive's store; Windows moves no folder with an open file
@@ -1401,6 +1425,9 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
             log.warning("Child drive %s kept: custody could not be proven", drive, exc_info=True)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+    if report is not None and len(under_q) > 1:
+        report.setdefault("under_q_sec", []).append({"task_id": tid, **{step: round(b - a, 3) for step, a, b in zip(
+            ("rechecks", "locks", "move"), under_q, under_q[1:])}})
     if report is not None:
         if outcome["published"]:
             report.setdefault("custodied", []).append({"task_id": tid, "published": outcome["published"]})
@@ -1469,10 +1496,12 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
     (``session_scratch.release_trash_entry``). A failed release or handoff, or a removal it survived, keeps
     the entry whole, its records included, as the hold ``removal_failed`` (its name and the failure)."""
     from ouroboros.session_scratch import aggregate_holds, release_trash_entry
+    from ouroboros.tools.kept_service_outputs import owed_declarations
 
     report: Dict[str, Any] = {"removed": 0, "stuck": {}, "holds": []}
     held: List[Any] = []
     root = pathlib.Path(canonical_root) / _TRASH_DIR
+    owed = owed_declarations(canonical_root)  # one selection for the whole pass: every entry reads the same debts
     try:
         entries = [] if root.is_symlink() else list(root.iterdir())
     except (FileNotFoundError, NotADirectoryError):
@@ -1482,7 +1511,7 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
             break
         holding, failed = False, ""
         try:  # the scratch release and every retained record's handoff are the conditions of the removal
-            holding, retained = release_trash_entry(canonical_root, entry)
+            holding, retained = release_trash_entry(canonical_root, entry, owed=owed)
         except Exception as exc:  # whatever failed, the entry and every record still in it wait
             failed = f"{entry.name}: {type(exc).__name__}"
             held += [(row["class"], row["example"], row["since"]) for row in getattr(exc, "retained", ())]

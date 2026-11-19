@@ -81,6 +81,7 @@ test('in English every catalog reading is the source text and matches the twin f
     assert.equal(en.yesterday.short, 'Yesterday, 10:05');
     assert.equal(en.older.short, 'Jan 5, 10:00');
     assert.equal(en.older.full, 'Jan 5, 2026 at 10:00');
+    assert.equal(en.older.exact, 'Jan 5, 2026 at 10:00:00', 'the full form to the second (a Logs time\'s tooltip)');
 });
 
 test('an install language reads the same tables by code; what the memory lacks stays English', () => {
@@ -109,6 +110,7 @@ test('an install language reads the same tables by code; what the memory lacks s
     assert.equal(ru.yesterday.short, 'Вчера, 10:05');
     assert.equal(ru.older.short, `${new Intl.DateTimeFormat('ru', { month: 'short' }).format(new Date('2026-01-05T10:00:00'))} 5, 10:00`);
     assert.ok(ru.older.full.includes(' 2026 в 10:00'));
+    assert.ok(ru.older.exact.endsWith(' 2026 в 10:00:00'));
     // Switching back restores every reading byte for byte.
     applyPayload(EN);
     assert.equal(JSON.stringify(englishReadings()), before);

@@ -14,6 +14,7 @@ import time  # noqa: F401  (prior import surface)
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ouroboros.model_wait import dispatch_deadline_remaining_sec, model_waitable
+from ouroboros._usage_response import UnusableReplyError, usage_reply_unfinished, usage_reply_usability
 from ouroboros.deadline_utils import caller_deadline_scoped
 
 from ouroboros.anthropic_native_custody import (  # noqa: F401  (prior import surface)
@@ -47,11 +48,8 @@ from ouroboros.llm_attempt import (
     _physical_candidate,  # noqa: F401 -- historical public import surface
     _finalized_physical_candidate,  # noqa: F401
     _is_provider_policy_refusal,  # noqa: F401
-    _is_structured_context_overflow_body,  # noqa: F401
-    _is_structured_context_overflow_exception,  # noqa: F401
     _PayloadCachePolicyMixin,  # noqa: F401
     _route_normalizes_cache_breakpoints,  # noqa: F401
-    _structured_error_values,  # noqa: F401
     _VALID_CACHE_TTLS,  # noqa: F401
     cache_ttl_seconds,  # noqa: F401
     supports_message_cache_control,  # noqa: F401
@@ -74,6 +72,7 @@ from ouroboros.context_budget import estimate_message_chars as _estimate_message
 from ouroboros.llm_local import (
     _LocalLaneMixin,  # noqa: F401
     LocalContextTooLargeError,  # noqa: F401
+    _split_leading_reasoning,
 )
 from ouroboros.llm_messages import (
     _MessageShapingMixin,  # noqa: F401
@@ -96,6 +95,7 @@ from ouroboros.llm_routing import (
     _ProviderRoutingMixin,  # noqa: F401
     _resolve_or_provider,  # noqa: F401
 )
+from ouroboros.llm_routing import _create_fn, _reply_dict
 from ouroboros.provider_models import (  # noqa: F401  (prior import surface)
     DEEPSEEK_BASE_URL,
     OPENROUTER_DEFAULTS,
@@ -139,6 +139,110 @@ from ouroboros.config import runtime_setting
 log = logging.getLogger(__name__)
 
 DEFAULT_LIGHT_MODEL = OPENROUTER_DEFAULTS["light"]
+
+
+def _declared_types(schema: Any) -> Set[str]:
+    """The JSON types a parameter schema allows, through ``anyOf``/``oneOf`` branches too."""
+    if not isinstance(schema, dict):
+        return set()
+    kinds = schema.get("type")
+    found = {kinds} if isinstance(kinds, str) else {
+        kind for kind in (kinds if isinstance(kinds, (list, tuple)) else ()) if isinstance(kind, str)}
+    for key in ("anyOf", "oneOf"):
+        branches = schema.get(key)
+        for branch in branches if isinstance(branches, (list, tuple)) else ():
+            found |= _declared_types(branch)
+    return found
+
+
+def _xml_tool_argument(value: str, schema: Any) -> Any:
+    """One ``<parameter>`` value typed as the tool declares it: the template writes strings raw, other values as
+    JSON. A value a string may hold stays text; an undeclared one stays text unless it is a JSON object or array."""
+    kinds = _declared_types(schema)
+    if "string" in kinds:
+        return value
+    if "boolean" in kinds and value.strip() in ("True", "False"):
+        return value.strip() == "True"
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        return value
+    if not kinds and not isinstance(parsed, (dict, list)):
+        return value
+    return parsed
+
+
+def _tool_call_bodies(text: str) -> Optional[List[str]]:
+    """The bodies of a reply that is nothing but ``<tool_call>`` blocks, else None. A JSON body is read by the JSON
+    decoder, so a string argument may itself contain ``</tool_call>``."""
+    decoder, bodies, i, n = json.JSONDecoder(), [], 0, len(text)
+    while True:
+        while i < n and text[i].isspace():
+            i += 1
+        if i == n:
+            return bodies or None
+        if not text.startswith("<tool_call>", i):
+            return None
+        i += len("<tool_call>")
+        while i < n and text[i].isspace():
+            i += 1
+        end = None
+        if text.startswith("{", i):
+            try:
+                end = decoder.raw_decode(text, i)[1]
+            except ValueError:
+                end = None  # a double-brace or malformed object: its own reader decides below
+        if end is None:
+            end = text.find("</tool_call>", i)
+            if end < 0:
+                return None
+        body, j = text[i:end], end
+        while j < n and text[j].isspace():
+            j += 1
+        if not text.startswith("</tool_call>", j):
+            return None
+        bodies.append(body.strip())
+        i = j + len("</tool_call>")
+
+
+def _parse_tool_call_block(body: str, tool_schemas: Optional[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
+    """``(name, arguments)`` of one ``<tool_call>`` body: a JSON object (Qwen3 and earlier) or a
+    ``<function=NAME><parameter=KEY>VALUE</parameter>…</function>`` block (Qwen3.5 and later)."""
+    if body.startswith("{"):
+        try:
+            obj = json.loads(body)
+        except json.JSONDecodeError:
+            if body.startswith("{{") and body.endswith("}}"):
+                obj = json.loads(body[1:-1])
+            else:
+                raise
+        if not isinstance(obj, dict):
+            raise ValueError("tool_call payload must be an object")
+        return str(obj.get("name", "")).strip(), obj.get("arguments", {})
+    function = re.fullmatch(r"<function=([^>\s]+)>(.*?)</function>", body, re.DOTALL)
+    if not function:
+        raise ValueError("tool_call is neither a JSON object nor a <function=...> block")
+    parameter = re.compile(r"<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>", re.DOTALL)
+    if parameter.sub("", function.group(2)).strip():
+        raise ValueError("text outside <parameter> blocks")
+    name = function.group(1).strip()
+    schema = (tool_schemas or {}).get(name) if isinstance(tool_schemas, dict) else None
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    properties = properties if isinstance(properties, dict) else {}
+    return name, {key: _xml_tool_argument(value, properties.get(key))
+                  for key, value in parameter.findall(function.group(2))}
+
+
+def _one_shot_result(result: Tuple[Dict[str, Any], Dict[str, Any]],
+                     tools: Optional[List[Dict[str, Any]]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """A tool-less call has no loop to continue an intermediate or unfinished reply in: it and a provider-stated
+    non-result (``reply_usability``) reach the caller as ``UnusableReplyError`` before any text or JSON is parsed."""
+    usability = usage_reply_usability(result[1], result[0])
+    if not tools and usability == "usable" and usage_reply_unfinished(result[1]):
+        usability = "unfinished"
+    if not tools and usability != "usable":
+        raise UnusableReplyError(usability, result[0], result[1])
+    return result
 
 
 class LLMClient(
@@ -203,6 +307,7 @@ class LLMClient(
         wait_for_resources: bool = True,
         processing_preference: str | None = None,
         caller_dispatch_deadline_ts: Optional[float] = None,
+        chat_conversation_id: str = "",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes.
 
@@ -223,7 +328,9 @@ class LLMClient(
         a confirmed quota/auth refusal to this caller without entering resource
         waiting; task overrides, controls and dispatched-operation custody remain.
         ``caller_dispatch_deadline_ts`` is a helper's send window, never a wait's end
-        (``deadline_utils.caller_deadline_scoped``)."""
+        (``deadline_utils.caller_deadline_scoped``). ``chat_conversation_id`` is
+        caller-owned wire affinity, separate from cache, role and billing scope;
+        no identity is inherited by other calls."""
         from ouroboros.llm_claudexor import turn_state_for_route
 
         messages = self._normalize_system_message_placement(messages)
@@ -242,7 +349,8 @@ class LLMClient(
                 # The spawner's transport policy (``utils.transport_no_proxy``): a forked child
                 # avoids OS proxy lookup; a spawned carrier keeps the server's policy.
                 no_proxy = no_proxy or transport_no_proxy()
-                target = {**self._resolve_remote_target(model), "processing_preference": processing_preference}
+                target = {**self._resolve_remote_target(model), "processing_preference": processing_preference,
+                          "chat_conversation_id": chat_conversation_id}
                 temperature = resolve_temperature_hint(target, temperature, default_temperature)
                 message, usage = self._chat_remote(
                     target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
@@ -260,7 +368,7 @@ class LLMClient(
                     **({"stream": True} if stream else {}),
                 )
             usage["ledger_attempt_ids"] = list(attempt_ids)
-            return message, usage
+            return _one_shot_result((message, usage), tools)
 
     @request_wire_scoped
     @caller_deadline_scoped
@@ -291,11 +399,12 @@ class LLMClient(
         wait_for_resources: bool = True,
         processing_preference: str | None = None,
         caller_dispatch_deadline_ts: Optional[float] = None,
+        chat_conversation_id: str = "",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Async remote chat; no_proxy keeps forked macOS workers off OS proxy APIs.
 
-        Host temperature hints, resource waiting and the active-turn transport
-        slot follow ``chat``'s effective-route contract."""
+        Temperature hints, resource waiting and caller conversation identity
+        follow ``chat``'s effective-route contract."""
         from ouroboros.llm_claudexor import turn_state_for_route
 
         messages = self._normalize_system_message_placement(messages)
@@ -323,7 +432,8 @@ class LLMClient(
                 adopt_physical_attempt_capture(capture)
             result[1]["ledger_attempt_ids"] = list(attempt_ids)
             return result
-        target = {**self._resolve_remote_target(model), "processing_preference": processing_preference}
+        target = {**self._resolve_remote_target(model), "processing_preference": processing_preference,
+                  "chat_conversation_id": chat_conversation_id}
         temperature = resolve_temperature_hint(target, temperature, default_temperature)
         carried_turn_state = turn_state_for_route(model_turn_state, target.get("provider"))
         if target.get("provider") == "claudexor":
@@ -378,16 +488,16 @@ class LLMClient(
                 prompt_cache_ttl = self._normalize_payload_cache_ttl(target, kwargs)
                 with capture_attempt_ids() as attempt_ids:
                     resp = await self._create_chat_completion_with_retries_async(
-                        _oa_client.chat.completions.create, kwargs, target,
+                        _create_fn(_oa_client, target), kwargs, target,
                     )
                 result = self._normalize_remote_response(
-                    resp.model_dump(),
+                    _reply_dict(resp, target),
                     target,
                     skip_cost_fetch=True,
                     prompt_cache_ttl=prompt_cache_ttl,
                 )
                 result[1]["ledger_attempt_ids"] = list(attempt_ids)
-                return result
+                return _one_shot_result(result, tools)
             finally:
                 try:
                     from ouroboros._usage_wait import aclose_after_model_send
@@ -410,19 +520,25 @@ class LLMClient(
         prompt_cache_ttl = self._normalize_payload_cache_ttl(target, kwargs)
         with capture_attempt_ids() as attempt_ids:
             resp = await self._create_chat_completion_with_retries_async(
-                client.chat.completions.create, kwargs, target,
+                _create_fn(client, target), kwargs, target,
             )
         result = self._normalize_remote_response(
-            resp.model_dump(),
+            _reply_dict(resp, target),
             target,
             prompt_cache_ttl=prompt_cache_ttl,
         )
         result[1]["ledger_attempt_ids"] = list(attempt_ids)
-        return result
+        return _one_shot_result(result, tools)
 
     @staticmethod
     def _strip_reasoning_wrappers(text: str):
         """Strip leading think/reasoning wrappers before the first <tool_call> only."""
+        reasoning_parts: list = []
+        # The same leading split the plain-answer path uses (``llm_local``): reasoning the template opened in the
+        # prompt arrives only closed (Qwen3.5 and later), and may itself mention a <tool_call>.
+        text, leading = _split_leading_reasoning(text)
+        if leading:
+            reasoning_parts.append(leading)
         # Split at first <tool_call> so we never touch JSON inside tool payloads.
         tool_call_start = re.search(r"<tool_call\b", text, re.IGNORECASE)
         if tool_call_start:
@@ -431,8 +547,6 @@ class LLMClient(
         else:
             prefix = text
             suffix = ""
-
-        reasoning_parts: list = []
 
         def _extract(tag: str, s: str) -> str:
             pattern = re.compile(
@@ -453,8 +567,11 @@ class LLMClient(
     def _parse_tool_calls_from_content(
         msg: Dict[str, Any],
         allowed_tool_names: Optional[Set[str]] = None,
+        tool_schemas: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Parse local <tool_call> XML output after a strict full-match guard."""
+        """Parse local <tool_call> output after a strict full-match guard.
+
+        ``tool_schemas`` (tool name -> its JSON parameters schema) types the values of the XML form."""
         content = str(msg.get("content", "") or "")
         stripped_raw = content.strip()
         if not stripped_raw:
@@ -466,14 +583,7 @@ class LLMClient(
             return msg
 
         # Upgrade only pure tool-call output; mixed prose stays plain text.
-        full_pattern = re.compile(
-            r"^(?:\s*<tool_call>\s*\{.*?\}\s*</tool_call>\s*)+$",
-            re.DOTALL,
-        )
-        if not full_pattern.fullmatch(stripped):
-            return msg
-
-        matches = re.findall(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", stripped, re.DOTALL)
+        matches = _tool_call_bodies(stripped)
         if not matches:
             return msg
 
@@ -481,18 +591,7 @@ class LLMClient(
         tool_calls = []
         for i, raw in enumerate(matches):
             try:
-                raw_stripped = raw.strip()
-                try:
-                    obj = json.loads(raw_stripped)
-                except json.JSONDecodeError:
-                    if raw_stripped.startswith("{{") and raw_stripped.endswith("}}"):
-                        obj = json.loads(raw_stripped[1:-1])
-                    else:
-                        raise
-                if not isinstance(obj, dict):
-                    raise ValueError("tool_call payload must be an object")
-                name = str(obj.get("name", "")).strip()
-                args = obj.get("arguments", {})
+                name, args = _parse_tool_call_block(raw, tool_schemas)
                 if not name:
                     raise ValueError("tool_call missing function name")
                 if allowed and name not in allowed:
@@ -507,7 +606,7 @@ class LLMClient(
                         "arguments": json.dumps(args),
                     },
                 })
-            except (json.JSONDecodeError, ValueError) as exc:
+            except (json.JSONDecodeError, ValueError, TypeError, AttributeError) as exc:
                 log.warning("Rejected local <tool_call> block: %s (%s)", raw[:200], exc)
                 return msg
 
@@ -516,8 +615,11 @@ class LLMClient(
 
         msg = dict(msg)
         msg["tool_calls"] = tool_calls
-        # Preserve reasoning text for loop progress; None/empty remains falsy.
-        msg["content"] = reasoning or None
+        # The calls are the reply; its reasoning is the model's, kept for progress in the portable ``reasoning`` that
+        # the outbound scrubber drops.
+        msg["content"] = None
+        if reasoning:
+            msg["reasoning"] = reasoning
         log.info("Parsed %d local tool call(s) from text output", len(tool_calls))
         return msg
 

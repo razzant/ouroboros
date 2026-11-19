@@ -13,6 +13,7 @@ import httpx
 from ouroboros.utils import iter_jsonl_objects, truncate_review_artifact
 
 from ..scripts.telegram_settings import load_settings
+from .telegram_api import OUTBOUND_JOURNAL
 from .telegram_i18n import Index
 
 
@@ -380,7 +381,10 @@ def _set_silent_msg(api, bot: str, chat_id: int, message_id: int) -> None:
 
 
 def _clear_silent_msg(api, chat_id: int) -> None:
-    """A new turn or a non-text message ends this chat's progress run, whichever bot tracked it."""
+    """A new turn or a non-text message ends this chat's progress run, whichever bot tracked it; the outbox's
+    decision run (``probing``) sends nothing, so it ends nothing."""
+    if getattr(OUTBOUND_JOURNAL.get(), "probing", False):
+        return
     state = _load_silent_state(api)
     tracked = [key for key in state if key == str(chat_id) or key.endswith(f":{chat_id}")]
     for key in tracked:
@@ -473,6 +477,21 @@ def _child_row_held_for_root(api, event: Dict[str, Any]) -> bool:
         return False
     status = str(stored.get("status") or "").strip().lower() if isinstance(stored, dict) else ""
     return status not in FINAL_STATUSES
+
+
+def _child_final_report(event: Dict[str, Any]) -> bool:
+    """Whether a row is a child task's own final report to its parent, never sent here.
+
+    Typed facts only: the child's lineage, no progress, card or lifecycle marking, no
+    host type and the plain assistant role. A child's deliberate message to the owner is
+    typed (``proactive_message``, ``relay_reply``, ``main_notice``), a host notice about
+    it carries the system role, and a row without lineage is never held back.
+    """
+    if str(event.get("delegation_role") or "").strip().lower() != "subagent":
+        return False
+    if event.get("is_progress") or event.get("card_row") or event.get("subagent_event") or event.get("system_type"):
+        return False
+    return str(event.get("role") or "assistant").strip().lower() == "assistant"
 
 
 _SUBAGENT_ICONS = {

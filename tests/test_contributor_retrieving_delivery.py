@@ -9,6 +9,7 @@ import pytest
 from scripts import run_external_review as runner
 from scripts.contributor_review_evidence import _compare_dispatch
 from ouroboros.reviewer_slot_config import review_pool_slots
+from ouroboros.settings_integrity import task_settings_scope
 from tests.review_pool_rosters import pool_roster, pool_seat
 
 
@@ -26,12 +27,14 @@ def test_freeze_keeps_reference_and_resolved_evidence(configured, monkeypatch):
     config = runner._resolved_review_config(profile="external_pr_readiness")
     frozen = runner._freeze_contributor_slots(config)
 
-    pinned = json.loads(os.environ["OUROBOROS_SUBAGENTS"])["items"]
+    pinned = json.loads(runner._frozen_pool_catalog(frozen))["items"]
     assert [(row["subagent_id"], row["route"], row["effort"], row["delivery"]) for row in pinned] == [
         ("critic", {"kind": "api_model", "target_id": "openrouter::openai/test"}, "high", "native")]
     assert frozen["pool_slots"] == [{"slot_id": "critic", "effort": "high", "delivery": "native",
                                      "route": {"kind": "api_chat", "target_id": "openrouter::openai/test"}}]
-    assert review_pool_slots()[0].native_retrieval
+    assert json.loads(os.environ["OUROBOROS_SUBAGENTS"]) == configured  # the freeze writes no environment
+    with task_settings_scope(runner._review_view(catalog=runner._frozen_pool_catalog(frozen))):
+        assert review_pool_slots()[0].native_retrieval
     assert not runner._diff_size_refusal(SimpleNamespace(contributor=True), frozen, 100, 1)
     assert runner._configured_openrouter_models(frozen) == ["openai/test"]
     # The evidence fingerprint binds what the pool row resolved to.
@@ -51,7 +54,7 @@ def test_native_retrieval_keeps_run_cap_and_probe(configured, monkeypatch):
     args = SimpleNamespace(contributor=True, base_ref="base", head_ref="head",
                            drive_root="", run_cap_usd="1", attach_host_engine=False)
     monkeypatch.delenv("TOTAL_BUDGET", raising=False)
-    _proposal, resolved = runner._prepare_review_configuration(args)
+    _proposal, resolved, _view = runner._prepare_review_configuration(args)
     assert [call["run_cap"] for call in isolated] == ["1"]  # isolated before settings load
     assert resolved["data_isolation"]["run_cap_usd"] == 1.0
     assert probes == [{"required": True, "probe_all_models": True, "probe_models": ["openai/test"]}]
@@ -83,7 +86,8 @@ def test_a_retrieving_pool_does_not_create_a_packet_size_refusal(monkeypatch, ki
         pool_seat("r2", "openrouter::openai/test", delivery="native")))
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     frozen = runner._freeze_contributor_slots(runner._resolved_review_config())
-    assert [slot.retrieves for slot in review_pool_slots()] == [not refuses, True]
+    with task_settings_scope(runner._review_view(catalog=runner._frozen_pool_catalog(frozen))):
+        assert [slot.retrieves for slot in review_pool_slots()] == [not refuses, True]
     # I3-D1: the same rule on both lanes — the operator lane is not refused on its own.
     assert runner._diff_size_refusal(SimpleNamespace(contributor=True), frozen, 500001, 500000) is refuses
     assert runner._diff_size_refusal(SimpleNamespace(contributor=False), frozen, 500001, 500000) is refuses

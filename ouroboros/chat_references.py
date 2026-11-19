@@ -43,13 +43,21 @@ def _preview(text) -> dict:
     return {"snippet": _snippet(full), **({"chars": len(full)} if len(" ".join(full.split())) > 160 else {})}
 
 
+def project_answer_text(row: dict) -> str:
+    """Authored words displayed instead of a Project lifecycle notice (project_answer.js).
+
+    The stored System row still owns its identity; replies and search share only this presentation.
+    """
+    return str(row.get("completion_answer") or "") if row.get("type") in {
+        "project_started", "project_handoff", "project_completion_summary"} else ""
+
+
 def reference_from_row(row: dict) -> dict:
     kind = str(row.get("type") or "message")
     # A lifecycle row carrying an authored answer is that answer in Ouroboros's
     # voice wherever Main shows it (project_answer.js::appendProjectRow); the
     # address still hashes the raw System row.
-    answer = str(row.get("completion_answer") or "") if kind in {
-        "project_started", "project_handoff", "project_completion_summary"} else ""
+    answer = project_answer_text(row)
     kind = ("question" if kind == "quiz" else "completion" if kind in
             {"project_completion_summary", "task_summary"} else
             "system" if row.get("direction") == "system" else "message")

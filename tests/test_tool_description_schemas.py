@@ -16,6 +16,41 @@ import pytest
 from ouroboros.tools.registry import ToolRegistry
 from tests._cases import case_folders
 
+
+@pytest.mark.parametrize("dialect", ["openai_function", "openai_custom", "anthropic", "gigachat", "external"])
+def test_finish_gist_rule_reaches_every_real_tool_projection(tmp_path, dialect):
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_claudexor import _request
+    from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
+    from ouroboros.tools.control import GIST_RULE
+
+    expected = (
+        "On a root task or self-started run, `summary` is my gist of the run for my human and my later self, "
+        "in my human's language; in a tight window it stands for this work's replies. "
+        "Its first sentence says what the run did, found or decided: a clean finish shows it on the card, "
+        "room row and portal, and that sentence represents this work in my other conversations. "
+        "Further sentences, when the work needs them, keep what a later reader needs without the rows: "
+        "numbers, paths, decisions, promises, what remains and whose step it is."
+    )
+    assert GIST_RULE == expected  # shrinking the constant cannot weaken this delivery check
+    registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
+    schema = registry.get_schema_by_name("finish_task")
+    assert schema["function"]["description"].startswith(expected + "\n\n")
+    field = schema["function"]["parameters"]["properties"]["summary"]
+    assert field["description"].startswith("The gist, as this tool's description says; a held cause takes precedence.")
+    if dialect == "openai_function":
+        projected = LLMClient._sanitize_chat_completion_tools([schema])[0]["function"]
+    elif dialect == "openai_custom":
+        projected = project_function_tools_to_openai_custom([schema]).wire_tools()[0]["custom"]
+    elif dialect == "anthropic":
+        projected = LLMClient._build_anthropic_tools([schema])[0]
+    elif dialect == "gigachat":
+        projected = LLMClient._gigachat_functions([schema])[0]
+    else:
+        projected = _request({"source": "codex", "resolved_model": "test-model"}, [], [schema],
+                             {"model_account_override": ""})["tools"][0]["function"]
+    assert projected["description"].startswith(expected)
+
 # Conditions the custom projection clipped, wholly or partly, from the schedule_subagent lead before
 # #502 (full and acting kept 2310 of its 3392 characters, readonly 2552 and so lost fewer), in the
 # wording that now reaches that consumer.
@@ -44,8 +79,8 @@ def test_schedule_readonly_choice_survives_custom_projection(tmp_path, constrain
     registry._ctx.task_constraint = constraint
     schema = next(tool for tool in registry.schemas() if tool["function"]["name"] == "schedule_subagent")
     function = schema["function"]
-    # Normal/pruned function schemas carry parameter prose; the custom codec
-    # strips it and keeps the tool prose only as far as its description bound allows.
+    # Normal/pruned function schemas carry parameter prose; the custom codec sends a tool this large
+    # without it and keeps the tool prose only as far as its description bound allows.
     assert "Select readonly for read-only session execution" in function["parameters"]["properties"]["access"]["description"]
     catalog = project_function_tools_to_openai_custom([schema])
     description = catalog.wire_tools()[0]["custom"]["description"]
@@ -96,14 +131,18 @@ _SQL_ONLY = "db, query, max_rows, snapshot and timeout_sec are op=sql only"
 # lead pays its custom-tool budget), #2593; before them
 # delegate_start 5e25716838978044 / 1326e91ef42b3cea, schedule_subagent e17e74235ea913fd / ec6b3c08c33ac3fa.
 # query_data: + kind "update_material" (the offered update range); before it f790f964764d75b7.
+# query_data: - kind "chat_log" (retired at dialogue-store cutover), #2998: 3b64a3753e957063.
+# + plane (canonical: a fork explicitly reads the installation's logs), #1701.
 # wait_tasks: + view, sleep_mode, wake_after_sec, wake_at and no timeout_sec default (an omitted
 # window stays distinguishable, PR1696 native task wait); before it c806a86311a0a965.
 # schedule_subagent: + memory_view (the fields a parent may widen a child's view by), #2924; its lead pays the
 # custom-tool budget again; before it 3d5b8e7b8e317503 / 2e04edea50ceb1b6.
+# delegate_wait: + sleep_mode (optional, in_slot|warm|cold: the task waits' choice), every profile; before it
+# 60ab2c0f421da812.
 _STRUCTURE = {
-    "query_data": {"full": "afe57ddd5ee0c17c", "readonly": "afe57ddd5ee0c17c", "acting": "afe57ddd5ee0c17c"},
+    "query_data": {"full": "d7100565e686c951", "readonly": "d7100565e686c951", "acting": "d7100565e686c951"},
     "delegate_start": {"full": "a2f6fdb7a8bf6822", "readonly": "e7dcf92431326bc5", "acting": "e7dcf92431326bc5"},
-    "delegate_wait": {"full": "60ab2c0f421da812", "readonly": "60ab2c0f421da812", "acting": "60ab2c0f421da812"},
+    "delegate_wait": {"full": "a5b3b83441b79479", "readonly": "a5b3b83441b79479", "acting": "a5b3b83441b79479"},
     "wait_tasks": {"full": "50667317e4bef21f", "readonly": "50667317e4bef21f", "acting": "50667317e4bef21f"},
     # readonly prunes write_surface, write_root, protected_paths_grant and external_tool_grants.
     "schedule_subagent": {"full": "f04afa9698352e6a", "readonly": "69f811a4b8ca2ba2", "acting": "f04afa9698352e6a"},
@@ -130,7 +169,7 @@ def test_prose_edits_keep_structure_and_deliver_conditions_in_every_profile(tmp_
         assert hashlib.sha256(structure.encode()).hexdigest()[:16] == _STRUCTURE[name][profile], name
         catalog = project_function_tools_to_openai_custom([schemas[name]])
         custom = catalog.wire_tools()[0]["custom"]["description"]
-        # The whole tool text survives the codec's bound; only parameter prose and defaults are dropped.
+        # The whole tool text survives the codec's bound, beside the whole schema or its bare structure.
         assert custom.startswith(" ".join(function["description"].split()) + "\n"), name
         assert catalog.schema_binding(name).schema() == function["parameters"]
         if name == "query_data":
@@ -210,13 +249,13 @@ def test_nano_selected_schedule_lead_stands_without_other_delegation_leads(subte
         with subtests.test(profile=profile):
             from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
             from ouroboros.tool_connections import connection_views
-            from ouroboros.tool_policy import NANO_SCHEMA_META_NAMES, initial_tool_schemas
+            from ouroboros.tool_policy import NANO_RESIDENT_SCHEMA_NAMES, initial_tool_schemas
 
             registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
             registry._ctx.task_constraint = _PROFILES[profile]
             schemas = initial_tool_schemas(registry, context_mode="nano", schema_names=["schedule_subagent"])
             names = {schema["function"]["name"] for schema in schemas}
-            assert "schedule_subagent" in names and names <= {"schedule_subagent", *NANO_SCHEMA_META_NAMES}, names
+            assert "schedule_subagent" in names and names <= {"schedule_subagent", *NANO_RESIDENT_SCHEMA_NAMES}, names
             function = next(schema["function"] for schema in schemas if schema["function"]["name"] == "schedule_subagent")
             custom = next(tool["custom"]["description"] for tool in project_function_tools_to_openai_custom(schemas).wire_tools()
                           if tool["custom"]["name"] == "schedule_subagent")

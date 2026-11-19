@@ -1,4 +1,4 @@
-"""knowledge_list(topics=...) is the read SYSTEM.md points at when the index shows only its outline."""
+"""knowledge_list, which the outline header names for full summaries, opens chosen notes' summaries with topics=[...]."""
 from __future__ import annotations
 
 import pathlib

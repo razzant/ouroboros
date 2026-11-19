@@ -177,7 +177,7 @@ def _terminal_wait(ctx, monkeypatch, *, run_id="run-p1",
             pass
 
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
-    return json.loads(delegate._delegate_wait(ctx, run_id, wait_sec=1))
+    return json.loads(delegate._read_run(ctx, run_id))
 
 
 # -- 1A: selector, authority, custody shape -------------------------------------
@@ -1010,13 +1010,14 @@ def test_recovered_pending_invocation_object_carries_the_shape(tmp_path, monkeyp
         max_seconds=60, request=body, project_id="p", project_owned=False,
         route="r", root_task_id="t-a", parent_task_id="", snapshot_id="snap1",
         execution_root="/x/exec", baseline_sha="b1", target_root="/x/target",
-        authority_source="skill_payload", resource_ref=ref)
+        authority_source="skill_payload", resource_ref=ref, daemon_store_id="fixture-store")
     record = custody.pending_invocations(drive)[0]
     monkeypatch.setattr(custody, "_reconcile_one", lambda *_a, **_k: {"ok": True})
 
     class _Gw:
+        store_identity = "fixture-store"  # the recorded receipt's store, while this test varies granted shape
         def start_run(self, request, *, idempotency_key=""):
-            return {"runId": "run-rec"}
+            return {"runId": "run-rec", "storeId": self.store_identity}
 
     custody._recover_pending_invocation(drive, _Gw(), record)
     obj = custody._CUSTODY["run-rec"]
@@ -1425,7 +1426,8 @@ def test_host_states_the_typed_access_profile_once_and_says_it_governs():
     # #1609: technical access alone decides the shape, so the read-only run is the
     # explicitly readonly one.
     readonly = _host_instructions(delegated_run_shape(False, "readonly"))
-    assert "ACCESS: you may read and run read-only commands inside this root" in readonly
+    assert "The starting folder is a location, not a read boundary." in readonly
+    assert "parent's existing read authority" in readonly and "Make no edits or writes" in readonly
     assert readonly.count(precedence) == 1  # one sentence, never a paragraph
     assert INVESTIGATION_INSTRUCTION not in readonly
 

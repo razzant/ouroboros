@@ -17,10 +17,10 @@ nonterminal ``task_done`` wedged the parent. This module separates the two:
 
 Ownership: every cancel ingress (agent ``cancel_task`` tool, HTTP single, HTTP
 cascade, boot migration of legacy latch files) writes an intent through
-``request_cancel``. The supervisor's ``cancel_task_custody`` is the ONE settle
-owner: it CLAIMS the intent before teardown and SETTLES it with the terminal
-outcome; the supervisor-tick watchdog only re-feeds unclaimed/stale intents back
-into custody. The canonical ``status`` never carries intent again.
+``request_cancel``. ``cancel_task_custody`` claims before teardown and settles
+cancellations with their terminal outcome. Custody and boot restore may instead
+withdraw an obsolete helper-closure intent without cancelling. The tick watchdog
+re-feeds unclaimed/stale intents; canonical ``status`` never carries intent.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ import pathlib
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros.utils import append_jsonl, update_json_locked, utc_now_iso
 
@@ -1220,6 +1220,44 @@ def settle_intent(
     return None
 
 
+def withdraw_intent(
+    drive_root: Any, task_id: str, *, withdrawable: Callable[[Dict[str, Any]], bool], detail: str = "",
+    expected_generation: Optional[int] = None, request_id: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Retire the caller's own intent WITHOUT a cancellation while its CURRENT row, read under the intent lock, is still
+    ``withdrawable``: ``None`` once withdrawn or already gone; else that row, unchanged and still owed (a Stop or
+    cascade joined it). Unlike ``settle_intent`` nothing is transferred, deferred or released. A row that is no longer
+    the caller's claim (the generation/request fence) raises, so the caller gives its custody back."""
+    tid = _valid_task_id(task_id)
+    seen: Dict[str, Any] = {}
+
+    def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        seen.clear()
+        intents = _load_intents(current, strict=True)
+        row = intents.get(tid)
+        if not isinstance(row, dict):
+            return None
+        seen.update(row, _reason=_generation_mismatch(row, expected_generation, request_id))
+        if seen["_reason"] or not withdrawable(row):
+            return None
+        intents.pop(tid)
+        seen["_withdrawn"] = True
+        return {"schema_version": _SCHEMA_VERSION, "intents": intents}
+
+    try:
+        update_json_locked(_intents_path(drive_root), _mutate, strict_existing_dict=True)
+    except ValueError as exc:
+        raise _refuse_corrupt(drive_root, tid, "withdraw_intent", exc) from exc
+    reason, withdrawn = seen.pop("_reason", ""), seen.pop("_withdrawn", False)
+    if reason:
+        raise RuntimeError(f"the intent of {tid} is no longer this claim's ({reason})")
+    if withdrawn:
+        _forensic(drive_root, {"event": "settled", "task_id": tid, "request_id": seen.get("request_id"),
+                               "outcome": "withdrawn", "detail": str(detail or "")[:500],
+                               "generation": seen.get("generation")})
+    return dict(seen) if seen and not withdrawn else None
+
+
 def claim_is_stale(intent: Dict[str, Any], *, now: Optional[float] = None) -> bool:
     """Whether a claimed intent's custody attempt is presumed dead by AGE."""
     if not isinstance(intent, dict) or intent.get("state") != INTENT_CLAIMED:
@@ -1420,3 +1458,41 @@ def cancel_pending(drive_root: Any, task_id: str, *, strict: bool = False, propa
             raise
         log.debug("cancel-pending legacy latch read failed for %s", task_id, exc_info=True)
         return False
+
+
+def immediate_stop_pending(drive_root: Any, task_id: str, *, tree_root_id: str = "") -> bool:
+    """An owner Stop with no wrap-up governs ``task_id`` now: its own pending cancel (``cancel_pending``) that
+    ``resolve_owner_stop_intent`` finds no graceful intent for. With ``tree_root_id`` also an immediate cascade over
+    an ancestor (a graceful cascade or a single Stop does not govern a member): the tree root first, then the
+    host-written parent chain, one strict row read per hop, read only while such a cascade is open for another
+    task. Unknown authority is never "no Stop": an unreadable projection or intent row, an absent, unbindable or
+    cyclic lineage link, or a contended store raises."""
+    if cancel_pending(pathlib.Path(drive_root), task_id, propagate_busy=True) and not resolve_owner_stop_intent(
+            drive_root, task_id, propagate_busy=True)[1]:
+        return True
+    if not tree_root_id:
+        return False
+    intents, unseen = read_active_intents(drive_root)
+    if unseen is None or task_id in unseen:
+        raise CancelIntentProjectionCorrupt(f"the cancel intent of {task_id} is unreadable")
+    governing = {tid for tid, row in intents.items()
+                 if str(row.get("scope") or "") == SCOPE_CASCADE and stop_policy(row) != STOP_POLICY_FINALIZE}
+    if not (governing | set(unseen)) - {task_id}:
+        return False
+    from ouroboros.task_results import load_task_result
+
+    ancestor, current, seen = tree_root_id if tree_root_id != task_id else "", task_id, {task_id}
+    while True:
+        if ancestor in unseen:
+            raise CancelIntentProjectionCorrupt(f"the cancel intent of {ancestor}, above {task_id}, is unreadable")
+        if ancestor in governing:
+            return True
+        row = load_task_result(drive_root, current, strict=True)
+        if row is None:
+            raise CancelIntentLineageIndeterminate(f"the lineage row of {current} is absent")
+        ancestor = current = str(row.get("parent_task_id") or "").strip()
+        if not ancestor or ancestor == tree_root_id:
+            return False
+        if ancestor in seen:
+            raise CancelIntentLineageIndeterminate(f"the parent chain of {task_id} returns to {ancestor}")
+        seen.add(ancestor)

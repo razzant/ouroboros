@@ -30,8 +30,10 @@ NOTE = "I retain charts. The owner authorized no new service; the rejected table
 
 
 def _capture(ctx):
-    runtime = _task_authority_projection(SimpleNamespace(drive_root=ctx.drive_root, repo_dir=ctx.repo_dir), {"id": ctx.task_id})
-    prefix, tail = view.capture_review_history_messages(runtime, task_id=ctx.task_id, drive_root=ctx.drive_root)
+    canonical = getattr(ctx, "budget_drive_root", "") or ctx.drive_root  # a task with its own data folder names it
+    runtime = _task_authority_projection(SimpleNamespace(drive_root=ctx.drive_root, budget_drive_root=canonical,
+                                                         repo_dir=ctx.repo_dir), {"id": ctx.task_id})
+    prefix, tail = view.capture_review_history_messages(runtime, task_id=ctx.task_id, drive_root=canonical)
     return [{"role": "system", "content": json.dumps(prefix)}, {"role": "user", "content": "Finish the authorized deck."}, *tail]
 
 
@@ -203,8 +205,10 @@ from tests.test_review_cold_history import staged_body as _staged_body, _run, _d
 staged_body = _staged_body
 
 
-@pytest.mark.parametrize("surface", ["commit", "change"])
-def test_commit_and_change_use_same_authored_selection_and_cold_packet(staged_body, tmp_path, monkeypatch, surface):
+@pytest.mark.parametrize(("surface", "own_folder"), [("commit", False), ("change", False), ("commit", True), ("change", True)])
+def test_commit_and_change_use_same_authored_selection_and_cold_packet(staged_body, tmp_path, monkeypatch, surface, own_folder):
+    """``own_folder``: a project-room task works from its own data folder; its selection is published to the
+    install's canonical folder and the next wave's brief reads it there."""
     from pathlib import Path
     from ouroboros import capability_evidence, reviewer_window, review_substrate, review_ledger
     from ouroboros.review_history import review_dispute_history
@@ -216,28 +220,35 @@ def test_commit_and_change_use_same_authored_selection_and_cold_packet(staged_bo
     monkeypatch.setattr(reviewer_window, "reviewer_context_window", lambda *a, **k: 1_000_000)
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "6")
     root, drive = Path(staged_body["repo"]), tmp_path / "authored-review"
+    own = drive / "state" / "headless_tasks" / "shared-review-view" / "data" if own_folder else drive
+
+    def context():
+        return ToolContext(repo_dir=root, drive_root=own, task_id="shared-review-view",
+                           budget_drive_root=str(drive) if own_folder else "",
+                           task_metadata={"budget_drive_root": str(drive)} if own_folder else {})
+
     records = []
     for version in range(3):
-        ctx = ToolContext(repo_dir=root, drive_root=drive, task_id="shared-review-view")
+        ctx = context()
         (root / "ouroboros/tools/review.py").write_text(f"RULES = 'authored version {version}'\n", encoding="utf-8")
         shared.git(root, "add", "-A")
         monkeypatch.setattr(review_substrate, "run_review_request", _dispatch([], f"Argument for version {version}"))
         records.append(_run(ctx, surface, "Keep the original reviewed rationale."))
     review_ledger.note_author_decision(drive, records[0], {"disposition": "rejected", "rationale": RATIONALE})
-    history = review_dispute_history(drive_root=drive, repo_root=root, task_id=ctx.task_id)
+    history = review_dispute_history(drive_root=drive, repo_root=root, task_id=ctx.task_id, attempts_root=own)
     assert len(history["rounds"]) == 3
     after, receipt, _ = _apply(ctx, _capture(ctx))
     assert receipt["status"] == "applied", receipt
     assert view.SELECTED_VIEW_FIELD in load_task_result(drive, ctx.task_id, strict=True)
     assert same_decisions(_index(after)[-1], history)
-    cold = _capture(ToolContext(repo_dir=root, drive_root=drive, task_id=ctx.task_id))
+    cold = _capture(context())
     assert NOTE in str(cold) and RATIONALE in str(cold)
     assert not [row for row in cold if view.REVIEW_HISTORY_MESSAGE_KEY in row]
     briefs = []
     monkeypatch.setattr(review_substrate, "run_review_request", _dispatch(briefs, "New fourth version"))
     (root / "ouroboros/tools/review.py").write_text("RULES = 'fourth authored version'\n", encoding="utf-8")
     shared.git(root, "add", "-A")
-    _run(ToolContext(repo_dir=root, drive_root=drive, task_id=ctx.task_id), surface, "New argument remains full.")
+    _run(context(), surface, "New argument remains full.")
     assert briefs
     for brief in briefs:
         text = _brief_text(brief)
@@ -291,8 +302,8 @@ def test_first_commit_gate_wave_reaches_the_next_request_after_the_authors_fold(
     monkeypatch.setattr(review_substrate, "run_review_request", _failing_dispatch() if dispatch == "fail" else crash)
     outcome = _run_non_committing_review_cycle(ctx, "fix: drop the redundant helper branch",
                                                skip_advisory_review=True, goal="Ship the bounded file design")
-    assert outcome["status"] != "passed", outcome
-    record = review_ledger.load_record(drive, outcome["review_record_id"])
+    assert outcome["status"] == "reviewed", outcome  # the outcome returns to its author for the decision
+    record = review_ledger.load_record(drive, outcome["review_reference"]["review_record_id"])
     assert record["verdict"]["aggregate"] == ("FAIL" if dispatch == "fail" else "NOT_PERFORMED"), record["verdict"]
     messages = [{"role": "system", "content": "Runtime."}, {"role": "user", "content": "Ship the bounded file design."}]
     assert not _index(messages)  # no resident index precedes this first wave
