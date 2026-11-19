@@ -1099,7 +1099,7 @@ export function initSkills(ctx = {}) {
             applyInstalledFilter();
             requestInstalledSkill(name, beforeOpen);
         },
-        showMadeHere: () => { filter = 'made'; selectTab('installed'); },
+        showMadeHere: () => { filter = 'made'; return section.open('installed'); },
         // Skill sources open here as a level over Sources; the rest of Settings with Back to Extensions.
         openSettings: (path, options = {}) => section.fromPage(path, options),
     };
@@ -1130,6 +1130,8 @@ export function initSkills(ctx = {}) {
         visible = true;
         activateTab(view);
         paintChrome();
+        // The retained cards must match the selected filter before the new read answers.
+        if (view === 'installed') applyInstalledFilter();
         showActive();
     }
 

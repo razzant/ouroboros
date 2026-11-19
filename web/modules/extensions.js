@@ -27,7 +27,7 @@ import { extensionsPageOf, isDoorId, settingsPageFor } from './settings_pages.js
 import { markView, paintStatusMark, statusMarkHtml } from './status_mark.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 // The registry pages this section opens: each registers its family when it is imported (settings_pages.js).
-import { configuredServerCount, mcpNeedsSignIn, mcpServerOn, refreshStatus } from './mcp_settings.js';
+import { configuredServerCount, mcpNeedsSignIn, mcpServerOn, refreshStatus, retireMcpStatusRead } from './mcp_settings.js';
 import './settings_extension_forms.js';
 
 const PLACE = 'skills';   // the registry id (pages.js), the address every other module already uses
@@ -275,10 +275,7 @@ export function createExtensions({ ctx = {}, viewsHtml = '', toolbarHtml = '', v
         });
     }
 
-    async function readTools() {
-        await refreshStatus({ join: true });
-        if (tools === undefined) { tools = null; paintAnswers(); }
-    }
+    const readTools = () => refreshStatus({ join: true });
 
     /* ---- Moving ---------------------------------------------------------------------------------------------------- */
     /** Open a page inside this section; external entry uses openFromOutside and the shell's jump. */
@@ -400,7 +397,7 @@ export function createExtensions({ ctx = {}, viewsHtml = '', toolbarHtml = '', v
         views.placeShown?.();
     };
     const onTools = (event) => {
-        tools = event.detail ?? tools;
+        tools = event.detail;
         paintAnswers();
         paintLead();   // a server saved under a new name is named so in the band at once
     };
@@ -414,7 +411,10 @@ export function createExtensions({ ctx = {}, viewsHtml = '', toolbarHtml = '', v
     window.addEventListener('ouro:page-shown', onPageShown);
     window.addEventListener('ouro:mcp-status-updated', onTools);
     document.addEventListener('visibilitychange', onVisible);
-    const offReconnect = ws?.on?.('open', (event) => { if (event?.previouslyConnected) onVisible(); });
+    const offReconnect = ws?.on?.('open', (event) => {
+        retireMcpStatusRead(event);
+        if (event?.previouslyConnected) onVisible();
+    });
     // A width that brings the list beside the page, or takes it away: the layers, the band and landing follow. Repaint
     // at the next frame, never inside the observer's callback.
     let frame = 0;

@@ -6,6 +6,7 @@
 import { bindMenu } from './ui_interactions.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { skillSourcesApi } from './api_client.js';
+import { fmt } from './i18n.js';
 import {
     openAddSourceDialog, openFirstStartDialog, openRemoveSourceDialog, openRenameSourceDialog, openTrustDialog, sourceProblemsHtml,
 } from './skill_dialogs.js';
@@ -98,16 +99,33 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
     const healthById = () => new Map((catalog?.sources || []).map((health) => [health.id, health]));
     const installedFrom = (id) => (host.installedSkills() || []).filter((row) => row?.install?.source?.id === id).map((row) => row.name);
 
+    function paintMadeHereCopy() {
+        const copy = pane.querySelector('[data-source-made-copy]');
+        if (!copy) return;
+        const madeHere = host.installedSkills()?.filter((row) => !row.install && ['external', 'self_authored'].includes(String(row.source || ''))).length;
+        const words = madeHere === undefined ? fmt('Skills made on this computer don’t come from a source.')
+            : fmt('Skills made on this computer ({n}) don’t come from a source.', { n: madeHere });
+        if (copy.textContent !== words) copy.textContent = words;
+    }
+
     function render() {
         if (destroyed) return;
+        // Keep the footer's navigation controls mounted: a jump's return may hold one during a Sources read.
+        if (!pane.querySelector('.skills-sources-card')) pane.innerHTML = `
+            <section class="ui-card skills-card skills-sources-card"></section>
+            <div class="skills-sources-foot">
+                <p><span data-source-made-copy data-i18n-skip></span> <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="made_here">Publish one to share it ›</button></p>
+                <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="auto_grant">Permissions and checks ›</button></p>
+                <p>The skills folder on this computer and the ClawHub address: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="skill_sources">Skill sources ›</button></p>
+            </div>`;
+        const card = pane.querySelector('.skills-sources-card');
         const active = document.activeElement;
-        const focused = pane.contains(active) ? active?.closest('[data-source-action], [data-source-menu]') : null;
+        const focused = card.contains(active) ? active?.closest('[data-source-action], [data-source-menu]') : null;
         const items = itemsBySource();
         const health = healthById();
-        const madeHere = (host.installedSkills() || []).filter((row) => !row.install && ['external', 'self_authored'].includes(String(row.source || ''))).length;
+        paintMadeHereCopy();
         const pendingRows = unconfirmedHubRows(sources);
-        pane.innerHTML = `
-            <section class="ui-card skills-card skills-sources-card">
+        card.innerHTML = `
                 <div class="skills-sources-head">
                     <div class="skills-sources-id"><h3>Sources</h3>${statusHtml(error ? `couldn’t be read: ${escapeHtml(error)}` : `${plural(sources.length, 'source')} connected`, error ? 'danger' : 'muted')}</div>
                     ${buttonHtml('Add source', { attrs: 'data-source-action="add"' })}
@@ -116,14 +134,8 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
                 ${host.sourcesProblem?.() ? trayHtml({ sentence: `Your saved list of sources couldn’t be used (${escapeHtml(host.sourcesProblem())}), so the default sources are shown.` }) : ''}
                 ${pendingRows.length ? trayHtml({ sentence: 'Confirm how skills from the Ouroboros hub install. Suggested choices are shown until you do.',
                     actions: buttonHtml('Confirm…', { tone: 'primary', attrs: 'data-source-action="first_start"' }) }) : ''}
-                <div class="skills-source-rows">${sources.map((source) => renderSourceRow(source, { items: items.get(source.id) || [], health: health.get(source.id) })).join('')}</div>
-            </section>
-            <div class="skills-sources-foot">
-                <p>Skills made on this computer${host.installedSkills() ? ` (${madeHere})` : ''} don’t come from a source. <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="made_here">Publish one to share it ›</button></p>
-                <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="auto_grant">Permissions and checks ›</button></p>
-                <p>The skills folder on this computer and the ClawHub address: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="skill_sources">Skill sources ›</button></p>
-            </div>`;
-        // A return can focus its door while the read is pending. Preserve that current control, not an old one.
+                <div class="skills-source-rows">${sources.map((source) => renderSourceRow(source, { items: items.get(source.id) || [], health: health.get(source.id) })).join('')}</div>`;
+        // A row drawn again keeps focus on its current control, not an old one.
         if (focused) {
             const target = [...pane.querySelectorAll('[data-source-action], [data-source-menu]')].find((node) =>
                 ['sourceAction', 'sourceId', 'sourceMenu'].every((key) => node.dataset[key] === focused.dataset[key]));
@@ -226,7 +238,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
                 const added = await openAddSourceDialog({ api, suggestions: host.sourceSuggestions?.() || [] });
                 if (added) await afterChange(`${added.name || 'The source'} added. Its skills are in Browse.`);
             } else if (action === 'first_start') await confirmFirstStart();
-            else if (action === 'made_here') host.showMadeHere();
+            else if (action === 'made_here') await host.showMadeHere();
             else if (action === 'auto_grant') host.openSettings('permissions', { row: 'OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS', opener: target });
             else if (action === 'skill_sources') host.openSettings('skill-sources', { opener: target });
             else if (source) await run(action, source);
@@ -235,6 +247,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
         }
     };
     pane.addEventListener('click', onClick);
+    window.addEventListener('ouro:language-changed', paintMadeHereCopy);
     return {
         show: (options) => load(options),
         refresh: () => load({ refresh: true }),
@@ -243,6 +256,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
             destroyed = true;
             activeMenu?.close();
             pane.removeEventListener('click', onClick);
+            window.removeEventListener('ouro:language-changed', paintMadeHereCopy);
         },
     };
 }

@@ -164,6 +164,30 @@ def test_settings_and_extensions_lead_to_each_other_and_back(subscription_ui, wi
     page.close()
 
 
+@pytest.mark.parametrize("width,height", SIZES, ids=["desk", "phone"])
+def test_publish_one_returns_to_the_pressed_sources_door(subscription_ui, width, height):
+    from playwright.sync_api import expect
+
+    page, _ = _page(subscription_ui, width, height)
+    page.route("**/api/skill-sources", lambda route: route.fulfill(json={"sources": []}))
+    page.route("**/api/skill-catalog", lambda route: route.fulfill(json={"items": [], "sources": []}))
+    page.goto(subscription_ui["url"] + "/#skills")
+    sources = page.locator(f'{EXTENSIONS} [data-extensions-open="sources"]')
+    sources.click()
+    door = page.get_by_role("button", name="Publish one to share it ›", exact=True)
+    original = door.element_handle()
+    door.click()  # WebKit does not necessarily focus a pointer-pressed button.
+    expect(page.locator('#skills-installed-filters [data-installed-filter="made"]')).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#skills-pane-installed")).to_be_visible()
+    expect(header_back(page)).to_have_attribute("aria-label", "Back to Extensions › Sources")
+    with page.expect_response("**/api/skill-sources"):
+        header_back(page).click()
+    expect(door).to_be_focused()
+    assert original.evaluate("el => el.isConnected && el === document.activeElement")
+    assert sources.get_attribute("aria-current") == "page"
+    page.close()
+
+
 def test_leaving_extensions_for_settings_closes_the_server_import(subscription_ui):
     page, _ = _page(subscription_ui, 1360, 900)
     page.goto(subscription_ui["url"] + "/#skills")

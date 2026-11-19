@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createExtensions, extensionsPageOf, installedAnswer, mcpServersAnswer } from '../modules/extensions.js';
+import { refreshStatus } from '../modules/mcp_settings.js';
 import { initSettings } from '../modules/settings.js';
 import { homeAnswers, searchEntries, searchSettings } from '../modules/settings_home.js';
 import { registerSettingsPage, settingsPageFor } from '../modules/settings_pages.js';
@@ -64,7 +65,7 @@ test('the rows\' answers say both kinds by their own names, and the owner\'s mov
 
 // Real page-navigation and section owners; only the DOM, geometry and page data are fixtures. Browser tests
 // exercise the same paths in app.js with real history, focus and the 40rem container query.
-function sectionWorld(t, { wide = false, draft = false } = {}) {
+function sectionWorld(t, { wide = false, draft = false, realTools = false } = {}) {
     const store = memoryStorage(t), history = [];
     const base = world(t, { history: { pushState: () => history.push('push'), back: () => history.push('back') } });
     const { env, state, layers } = base;
@@ -83,7 +84,7 @@ function sectionWorld(t, { wide = false, draft = false } = {}) {
         body.innerHTML = '<input data-draft><button data-door>Accounts</button>';
         return { unsaved: () => draft && Boolean(body.querySelector('[data-draft]').value), unmount: () => gone.push(path) };
     } });
-    registerSettingsPage('tools', fake(path => path === 'tools' ? 'MCP servers' : path.split('/').at(-1)));
+    if (!realTools) registerSettingsPage('tools', fake(path => path === 'tools' ? 'MCP servers' : path.split('/').at(-1)));
     registerSettingsPage('skill', fake('Skill form'));
     registerSettingsPage('test-accounts', fake('Accounts'));
     registerSettingsPage('test-voice', fake('Voice'));
@@ -100,8 +101,19 @@ function sectionWorld(t, { wide = false, draft = false } = {}) {
         capture: opener => capturePagePlace({ state, navState: {}, settingsControls: settings, skillsControls: section,
             doc: env.document, commitPage, restorePlaces: { capture: (_root, target) => () => target?.focus?.() } }, opener) });
     const showPage = (name, options = {}) => navigation.go(options.key || name, () => commitPage(name, options), options);
-    settings = initSettings({ state, layers, showPage, ws: env.ws, openExtensions: (...args) => section.open(...args) });
-    section = createExtensions({ ctx: { state, layers, showPage, ws: env.ws, openSettings: settings.open },
+    // As with the real socket, both sections hear the same open event object, in registration order.
+    const opens = new Set();
+    const ws = { ...env.ws, on(type, fn) {
+        if (type !== 'open') return env.ws.on(type, fn);
+        opens.add(fn);
+        return () => opens.delete(fn);
+    } };
+    const socketOpen = (previouslyConnected) => {
+        const event = { previouslyConnected };
+        opens.forEach((fn) => fn(event));
+    };
+    settings = initSettings({ state, layers, showPage, ws, openExtensions: (...args) => section.open(...args) });
+    section = createExtensions({ ctx: { state, layers, showPage, ws, openSettings: settings.open },
         viewsHtml: '<div class="skills-scroll"></div>', views: { show: view => views.push(view), hide: () => views.push('hidden') },
         facts: () => ({ installed: 3, needs: 1, sources: 2 }) });
     for (const page of [settings.page, section.page]) {
@@ -127,7 +139,7 @@ function sectionWorld(t, { wide = false, draft = false } = {}) {
         Object.assign(globalThis, { window: env.window, document: env.document });
         try { section.destroy(); } finally { Object.assign(globalThis, kept); }
     });
-    return { ...base, store, history, settings, section, navigation, showPage, resize, close, back, current, bodies, contexts, mounted, gone, views };
+    return { ...base, store, history, settings, section, navigation, showPage, resize, close, back, current, bodies, contexts, mounted, gone, views, socketOpen };
 }
 
 test('old addresses and Settings search doors forward into Extensions without callback navigation', async t => {
@@ -240,6 +252,98 @@ test('a remembered landing and an explicit page request have separate meanings',
     assert.deepEqual(w.current(), ['installed']);
     assert.equal(w.views.at(-1), 'installed');
     assert.equal(w.back().getAttribute('aria-label'), 'Back to Main');
+});
+
+test('a failed passive MCP read clears the Extensions count and dot; only the newest request paints', async t => {
+    const w = sectionWorld(t, { wide: true });
+    const needed = { enabled: true, servers: [{ id: 'docs', enabled: true, tool_count: 0, sign_in: { state: 'needed' } }] };
+    const reply = (body, status = 200) => ({ ok: status === 200, status, json: async () => body });
+    w.env.routes.set('/api/mcp/status', () => reply(needed));
+    await w.section.open('', { map: true }); await settle();
+    const row = w.section.page.querySelector('[data-extensions-open="tools"]');
+    const mark = row.querySelector('.extensions-mark');
+    const view = () => [row.querySelector('[data-extensions-answer]').textContent, mark.dataset.hue, mark.hidden];
+    assert.deepEqual(view(), ['1 of 1 on · 1 needs sign-in', 'owner', false]);
+
+    let finishOld;
+    const holdOld = () => {
+        w.env.routes.set('/api/mcp/status', () => new Promise(resolve => { finishOld = resolve; }));
+        return refreshStatus();
+    };
+    const before = w.env.calls.length;
+    const oldSuccess = holdOld();
+    w.env.routes.set('/api/mcp/status', () => reply({}, 503));
+    await refreshStatus();
+    assert.deepEqual(view(), ['Not checked', 'ink', true]);
+    finishOld(reply(needed));
+    await oldSuccess;
+    assert.deepEqual(view(), ['Not checked', 'ink', true]);
+
+    const oldFailure = holdOld();
+    w.env.routes.set('/api/mcp/status', () => reply(needed));
+    await refreshStatus();
+    finishOld(reply({}, 503));
+    await oldFailure;
+    assert.deepEqual(view(), ['1 of 1 on · 1 needs sign-in', 'owner', false]);
+    assert.deepEqual(w.env.calls.slice(before), Array(4).fill('/api/mcp/status'));
+    assert.deepEqual(w.posts, []);
+});
+
+test('passive MCP mounts and reconnects share a fresh status request, never a pre-reconnect flight', async t => {
+    const w = sectionWorld(t, { wide: true, realTools: true });
+    const requests = [];
+    const reply = (body) => ({ ok: true, status: 200, json: async () => body });
+    const status = (needsSignIn) => ({ enabled: true, sdk_available: true, servers: [{ id: 'fixture', enabled: true, tool_count: 0,
+        ...(needsSignIn ? { sign_in: { state: 'sign_in_required' } } : {}) }] });
+    w.env.routes.set('/api/settings', () => reply({ MCP_ENABLED: true,
+        MCP_SERVERS: [{ id: 'fixture', name: 'Fixture', enabled: true, url: 'https://example.test/mcp' }] }));
+    w.env.routes.set('/api/mcp/status', (_url, init) => new Promise(resolve => requests.push({ resolve, signal: init.signal })));
+    const row = w.section.page.querySelector('[data-extensions-open="tools"]');
+    const answer = () => row.querySelector('[data-extensions-answer]').textContent;
+
+    await w.section.open('tools/fixture', { map: true });
+    await settle();
+    assert.equal(requests.length, 1, 'Extensions, MCP list, editor and shown signal coalesce');
+    w.socketOpen(false);
+    assert.equal(requests.length, 1, 'the first open is not a reconnect');
+    w.socketOpen(true);
+    await settle();
+    assert.equal(requests.length, 2, 'one post-reconnect GET while the earlier one is still unanswered');
+    assert.equal(requests[0].signal.aborted, true);
+    requests[1].resolve(reply(status(false)));
+    await settle();
+    assert.equal(answer(), '1 of 1 on');
+    requests[0].resolve(reply(status(true)));  // simulate an earlier transport whose reply arrives despite abort
+    await settle();
+    assert.equal(answer(), '1 of 1 on');
+
+    await w.settings.open('', { map: true });
+    await settle();
+    assert.equal(requests.length, 3);
+    w.socketOpen(true);
+    await settle();
+    assert.equal(requests.length, 4, 'the Settings list also needs a post-reconnect read, and the hidden section adds none');
+    assert.equal(requests[2].signal.aborted, true);
+    requests[3].resolve(reply(status(true)));
+    requests[2].resolve(reply(status(false)));
+    await settle();
+    assert.ok(w.settings.page.querySelector('[data-needs="tool-sign-in"]'));
+
+    await w.section.open('tools', { map: true });
+    await settle();
+    assert.equal(requests.length, 5);
+    await w.showPage('chat', { map: true });
+    w.socketOpen(true);
+    assert.equal(requests.length, 5, 'no GET starts with both sections away');
+    assert.equal(requests[4].signal.aborted, true);
+    await w.section.open('tools', { map: true });
+    await settle();
+    assert.equal(requests.length, 6, 'return does not join a request predating an off-screen reconnect');
+    requests[5].resolve(reply(status(false)));
+    requests[4].resolve(reply(status(true)));
+    await settle();
+    assert.equal(answer(), '1 of 1 on');
+    assert.deepEqual(w.posts, []);
 });
 
 for (const draft of [false, true]) for (const wide of [false, true]) {

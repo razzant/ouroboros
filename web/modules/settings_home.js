@@ -23,7 +23,7 @@ import { refreshActionKind, verificationBadge } from './harness_accounts.js';
 import { harnessPresentation } from './harness_presentation.js';
 import { START_FAILED_LEAD, bootPhase, createHostStart, startingStatus, supervisorReady } from './host_starting_status.js';
 import { fmt, tr, translateString } from './i18n.js';
-import { configuredServerCount, mcpNeedsSignIn, mcpServerOn } from './mcp_settings.js';
+import { configuredServerCount, mcpNeedsSignIn, mcpServerOn, mcpStatusSeen, refreshStatus } from './mcp_settings.js';
 import { readNotifyPrefs } from './notifications.js';
 import { PAGE_ICONS, SHELL_ICONS, controlIcon, fluentIcon } from './page_icons.js';
 import { readSkills, skillForms } from './settings_extension_forms.js';
@@ -157,14 +157,12 @@ function toolsWords(tools) {
         owner: servers.some(mcpNeedsSignIn) };
 }
 
-/** Extensions' one door: its skills and its MCP servers, each by its own name; a server that waits for a sign-in is the
- *  owner's move here, as it was on the Tools row. A source that is not read yet says nothing; a failed read, Not checked. */
+/** Extensions' one door: its skills and its MCP servers, with independent read outcomes; sign-in is the owner's move. */
 function extensionsWords(skills, tools) {
     const parts = [];
     if (skills !== undefined) parts.push(Array.isArray(skills?.skills) ? count(skills.skills.length, '{n} skill', '{n} skills') : fmt(NOT_CHECKED));
-    const servers = tools ? toolsWords(tools) : undefined;
+    const servers = tools ? toolsWords(tools) : tools === null ? fmt('MCP status unavailable') : undefined;
     if (servers !== undefined) parts.push(typeof servers === 'string' ? servers : servers.text);
-    if (tools === null && !parts.length) parts.push(fmt(NOT_CHECKED));
     if (!parts.length) return undefined;
     return { text: parts.join(' · '), owner: Boolean(servers?.owner) };
 }
@@ -514,7 +512,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     };
     const READS = {
         settings: () => ctx.readSettings(),
-        tools: (signal) => fetchJson('/api/mcp/status', { cache: 'no-store', signal }),
+        tools: () => refreshStatus({ join: true }),
         skills: (signal) => readSkills({ signal }),
         places: (signal) => fetchJson('/api/places', { cache: 'no-store', signal }),
         update: (signal) => apiClient.updateStatus({ signal }),
@@ -534,6 +532,8 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     // One read of a source at a time: asked again while it runs, it runs once more after it. Its answer is painted
     // unless its own request was dropped (the list left the screen, or is gone).
     function read(name) {
+        // The shared MCP reader publishes the current answer, including failure, in request order to both sections.
+        if (name === 'tools') return READS.tools();
         const flight = flights.get(name);
         if (flight) { flight.again = true; return flight.done; }
         const mine = { controller: new AbortController(), again: false };
@@ -558,11 +558,12 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         hidden = false;
         readDevice();
         facts.state = ctx.stateSnapshots?.latest?.() || facts.state;
+        facts.tools = mcpStatusSeen();  // the shared read may have settled while this list was put away
         readAccounts();
         paint();
         return Promise.all(names.map(read));
     }
-    // Off screen: the reads in flight are dropped and free their connections; none starts until it is shown again.
+    // Off screen: home-owned reads release their connections; the shared MCP read can still serve the other section.
     function hide() {
         hidden = true;
         flights.forEach((flight) => flight.controller.abort());

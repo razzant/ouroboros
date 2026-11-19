@@ -1,5 +1,5 @@
-// The Skills page controller's pure decisions: lifecycle merge, the Installed
-// filter strip, «Update all», publish destinations and the repair prompt.
+// The Skills page controller: lifecycle merge, the Installed filter strip,
+// «Update all», publish destinations and the repair prompt.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -8,10 +8,10 @@ import { createMySkillsDestination } from '../modules/skill_dialogs.js';
 import { publicationDisclosure } from '../modules/skill_presentation.js';
 import { browseCardState } from '../modules/skill_browse.js';
 import { installedSkillModel } from '../modules/skill_card_renderer.js';
-import { Stub } from './helpers/settings_dom.js';
+import { settle, Stub, world } from './helpers/settings_dom.js';
 
 import {
-    buildHealPrompt, destinationFromChoice, inFlightCount, installedFilterCounts, lifecycleEventsFromQueue,
+    buildHealPrompt, destinationFromChoice, inFlightCount, initSkills, installedFilterCounts, lifecycleEventsFromQueue,
     matchesInstalledFilter, mergeLifecycleEvents, publishDestinations, updateAllCandidates, skillsViewsTemplate,
     SKILLS_ACTIONS,
 } from '../modules/skills.js';
@@ -120,6 +120,61 @@ test('the filter strip counts facts of the loaded list', () => {
     assert.equal(matchesInstalledFilter(byName('old_tool'), 'updates'), true, 'withdrawn counts as an update to act on');
     assert.equal(matchesInstalledFilter(byName('minecraft-widget'), 'made'), true);
     assert.equal(matchesInstalledFilter({ name: 'v', lifecycle_virtual: true, enabled: false }, 'off'), false);
+});
+
+test('Sources Publish one filters the retained Installed cards even while the refresh is pending and if it fails', async (t) => {
+    const { env, state, layers, showPage } = world(t);
+    const reply = (body, status = 200) => ({ ok: status === 200, status, json: async () => body });
+    const initial = reply({ skills: [
+        { name: 'local-example', source: 'external' },
+        { name: 'downloaded-example', source: 'external', install: { source: { id: 'catalog-example' } } },
+    ] });
+    let finish;
+    env.routes.set('/api/extensions', () => new Promise((resolve) => { finish = resolve; }));
+    env.routes.set('/api/state', reply({ github_token_configured: false }));
+    env.routes.set('/api/skills/lifecycle-queue', reply({ events: [] }));
+    env.routes.set('/api/skill-sources', reply({ sources: [] }));
+    env.routes.set('/api/skill-catalog', reply({ items: [], sources: [] }));
+    const controls = initSkills({ state, layers, showPage });
+    try {
+        const { document } = env;
+        document.getElementById('skills-installed-search').value = '';
+        const list = document.getElementById('skills-list');
+        const query = list.querySelectorAll.bind(list);
+        // Supply this one direct-child selector to the Node DOM fixture.
+        list.querySelectorAll = (selector) => selector === ':scope > .skills-card'
+            ? list.children.filter((node) => node.matches('.skills-card')) : query(selector);
+        await controls.open('installed');
+        await settle(); // Let optional facts arrive before the first list; this fixture does not model template enrichment.
+        finish(initial);
+        await settle();
+        const local = list.querySelector('[data-skill="local-example"]');
+        const downloaded = list.querySelector('[data-skill="downloaded-example"]');
+        assert.equal(local.hidden, false);
+        assert.equal(downloaded.hidden, false);
+
+        await controls.open('sources');
+        await settle();
+        finish = undefined;
+        const pane = document.getElementById('skills-pane-sources');
+        await pane.fire('click', { target: pane.querySelector('[data-source-action="made_here"]') });
+        assert.equal(typeof finish, 'function', 'the fresh listing has started but has not answered');
+        assert.equal(document.getElementById('skills-pane-installed').hidden, false);
+        assert.equal(document.getElementById('skills-installed-filters').querySelector('[data-installed-filter="made"]')
+            .getAttribute('aria-pressed'), 'true');
+        assert.equal(local.hidden, false);
+        assert.equal(downloaded.hidden, true, 'the retained cards already match Made here');
+
+        finish(reply({ error: 'fixture unavailable' }, 503));
+        await settle();
+        assert.match(document.getElementById('skills-status').textContent, /Showing the previous list/);
+        assert.equal(list.querySelector('[data-skill="local-example"]'), local);
+        assert.equal(list.querySelector('[data-skill="downloaded-example"]'), downloaded);
+        assert.equal(local.hidden, false);
+        assert.equal(downloaded.hidden, true);
+    } finally {
+        controls.destroy();
+    }
 });
 
 test('Needs you counts an enabled, permitted skill whose declared secret is not set, and nothing else for that secret', () => {

@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import '../modules/settings.js';
 import { SAFETY_MODEL_KEYS } from '../modules/consciousness_api.js';
-import { applyMcpSettings, collectMcpSettings } from '../modules/mcp_settings.js';
+import { applyMcpSettings, collectMcpSettings, refreshStatus } from '../modules/mcp_settings.js';
 import { MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_KEY, fallbackBody, fallbackEntries, roleBody, routeWords,
     writeModelKeys } from '../modules/model_roles.js';
 import { MODEL_PROCESSING_PREFERENCES_KEY } from '../modules/route_editor_primitives.js';
@@ -246,6 +246,98 @@ test('a server\'s page is drawn again only while it is the page on screen: a rea
     top = 'tools/files';
     await shown();
     assert.equal(name(), 'Files (team)');
+});
+
+test('MCP list shows a passive failure and recovery while an unchanged editor keeps its live client ID control', async t => {
+    const path = 'tools/slack';
+    let top = path;
+    const page = await open(t, path, { onScreen: (candidate) => candidate === top });
+    const markShown = async () => {
+        page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path, place: 'skills' } }));
+        await settle();
+    };
+    const list = new NodeStub();
+    const handle = settingsPageFor('tools').mount(list, { path: 'tools', ctx: page.ctx });
+    t.after(() => handle.unmount());
+    await settle();
+    const listState = () => head(list, 'slack').querySelector('[data-mcp-state]').textContent;
+    const listSignIn = () => head(list, 'slack').querySelector('[data-entry-sign-in]');
+    const lead = () => list.querySelector('[data-mcp-global]').textContent;
+    const clientId = (container = page.container) => container.querySelector('[data-mcp-sign-in-client-id]');
+    const input = clientId();
+    input.closest('details').open = true;
+    input.focus();
+    input.value = 'fixture-app-id';
+    const retained = () => {
+        assert.ok(clientId() === input, 'keep the actual input, not an equivalent replacement');
+        assert.ok(page.document.activeElement === input, 'the same input still has focus');
+        assert.equal(input.value, 'fixture-app-id');
+        assert.equal(input.closest('details').open, true);
+    };
+
+    assert.match(listState(), /^3 tools · listed/);
+    assert.ok(listSignIn());
+    await markShown();  // an ordinary equivalent settings/status read while actively typing
+    retained();
+    assert.equal(page.handle.unsaved(), false, 'not a settings edit');
+
+    top = '';
+    page.routes.set('/api/mcp/status', () => response({}, 503));
+    await refreshStatus();
+    assert.equal(lead(), 'MCP status unavailable');
+    assert.equal(listState(), 'MCP status unavailable');
+    assert.equal(listSignIn(), null);
+    top = path;
+    await markShown();
+    retained();
+
+    const status = (signIn) => response({ enabled: true, sdk_available: true, servers: [{ id: 'slack', enabled: true,
+        tool_count: 5, listed_at: '2026-11-18T00:00:00Z', sign_in: signIn }] });
+    page.routes.set('/api/mcp/status', () => status({ state: 'not_signed_in', reason: 'expired' }));
+    await refreshStatus();
+    assert.match(lead(), /^1 server configured, 5 tools discovered/);
+    assert.match(listState(), /^5 tools · listed/);
+    assert.ok(listSignIn());
+    retained();
+
+    // A detached form may still be subscribed while its mount's settings read settles.
+    let connected = false;
+    Object.defineProperty(page.container, 'isConnected', { get: () => connected });
+    page.routes.set('/api/mcp/status', () => status({ state: 'signed_in' }));
+    await refreshStatus();
+    assert.equal(listSignIn(), null);
+    retained();
+    connected = true;
+    await markShown();
+    assert.equal(clientId(), null, 'a changed sign-in shape is drawn when the editor is shown again');
+
+    // Changing the actual saved entry starts a new form, even with the same sign-in status.
+    page.routes.set('/api/mcp/status', () => status({ state: 'not_signed_in', reason: 'expired' }));
+    await refreshStatus();
+    const beforeRename = clientId();
+    beforeRename.value = 'different-fixture-id';
+    page.server.values.MCP_SERVERS[0].name = 'Renamed fixture';
+    page.server.tokens.MCP_SERVERS += 1;
+    await markShown();
+    assert.ok(clientId() !== beforeRename);
+    assert.equal(clientId().value || '', '');
+    assert.equal(page.container.querySelector('[data-mcp-field="name"]').getAttribute('value'), 'Renamed fixture');
+
+    await typeInto(page.container.querySelector('[data-mcp-field="url"]'), 'https://example.test/edit');
+    const discarded = clientId();
+    discarded.value = 'discarded-fixture-id';
+    await page.container.querySelector('[data-editor-discard]').fire('click');
+    assert.ok(clientId() !== discarded, 'an explicit Discard rebuilds the form');
+    assert.equal(clientId().value || '', '');
+
+    clientId().value = 'closed-fixture-id';
+    page.handle.unmount();
+    const fresh = new NodeStub();
+    const reopened = await settingsPageFor(path).mount(fresh, { path, ctx: page.ctx });
+    t.after(() => reopened.unmount());
+    assert.equal(clientId(fresh).value || '', '', 'a new mount does not inherit the old form input');
+    assert.deepEqual(page.server.posts, []);
+    assert.ok(!page.calls.includes('/api/mcp/sign-in'));
 });
 
 test('a new server is saved as one more entry with an ID, and a taken ID is refused before anything is sent', async (t) => {

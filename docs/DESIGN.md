@@ -3372,7 +3372,7 @@ Settings, Dashboard and Extensions share a list and page layout. From a 40rem se
 (`--section-rail-w`) beside its page. The band holds list controls (Settings' search; on phones, in the list) and
 page controls. The chosen row names its page; the heading stays for readers, deeper levels keep their names.
 A page is always open: initially Models in Settings, Skills in Extensions; later the device's last choice.
-Extensions holds Skills, MCP servers, Browse and Sources; server and skill editors open over their lists.
+Extensions holds Skills, MCP servers, Browse and Sources. Editors open over their lists; Sources’ Publish one jumps to Skills with Back.
 Narrower, the list stands under the section name and Ouroboros's picture, or the page under Back and its name.
 Choosing a row keeps the list's position; the page arrives on `--motion-fade`. Section pages are never tabs (§3).
 

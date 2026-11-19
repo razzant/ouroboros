@@ -56,7 +56,7 @@ test('accounts that need sign-in again are one row per harness, only over an acc
     assert.deepEqual(needRows({}), [], 'nothing read yet says nothing');
 });
 
-test('a tool server that needs sign-in is a row; a status that could not be read is no row, and the Extensions row says Not checked', () => {
+test('a tool server that needs sign-in is a row; unreadable MCP status is named apart from the skills count', () => {
     const servers = [
         { id: 'slack', name: 'Slack', enabled: true, tool_count: 0, sign_in: { state: 'needed', reason: 'expired' } },
         { id: 'docs', name: 'Docs', enabled: true, tool_count: 0, sign_in: { state: 'signed_in', reason: 'insufficient_scope', required_scope: 'write' } },
@@ -71,7 +71,10 @@ test('a tool server that needs sign-in is a row; a status that could not be read
     assert.deepEqual(needRows({ tools: { enabled: true, servers: servers.slice(2) } }), []);
     // A status that could not be read is no line of the card: the Extensions row says it was not checked.
     assert.deepEqual(needRows({ tools: null }), []);
-    assert.deepEqual(homeAnswers({ tools: null })['page:skills'], { text: 'Not checked', owner: false });
+    assert.deepEqual(homeAnswers({ tools: null })['page:skills'], { text: 'MCP status unavailable', owner: false });
+    const skills = { skills: [{}, {}] };
+    assert.deepEqual(homeAnswers({ skills })['page:skills'], { text: '2 skills', owner: false });
+    assert.deepEqual(homeAnswers({ skills, tools: null })['page:skills'], { text: '2 skills · MCP status unavailable', owner: false });
     assert.equal(homeAnswers({ tools: null }).tools, undefined, 'Settings has no Tools row now');
     // A server waiting for its sign-in is the owner's move on Extensions' one door.
     assert.deepEqual(homeAnswers({ tools: { enabled: true, servers } })['page:skills'], { text: '3 of 5 MCP servers on', owner: true });
@@ -142,9 +145,10 @@ test('a row answers its fact, says when it was not read, and marks the owner\'s 
     // Not read yet: no answer is claimed. A read that failed says so, and an unread accounts facet never prints a count.
     assert.deepEqual(homeAnswers({}), {});
     const failed = homeAnswers({ settings: null, state: null, tools: null, storage: null, update: null, skills: null, places: null });
-    for (const to of ['models', 'agents', 'rules', 'permissions', 'page:skills', 'dashboard:storage', 'dashboard:costs', 'dashboard:updates']) {
+    for (const to of ['models', 'agents', 'rules', 'permissions', 'dashboard:storage', 'dashboard:costs', 'dashboard:updates']) {
         assert.equal(failed[to].text, 'Not checked', to);
     }
+    assert.deepEqual(failed['page:skills'], { text: 'Not checked · MCP status unavailable', owner: false });
     assert.equal(homeAnswers({ settings, accounts: accounts([account('codex', 'a', 'passed')], 'not_read') }).accounts.text, '2 API keys');
     // A sign-in is the owner's move on the row too, only over what was read.
     const signIn = (read) => homeAnswers({ settings, accounts: accounts([account('codex', 'a', 'failed')], read) }).accounts.owner;
@@ -908,7 +912,8 @@ test('one read of a source at a time: asked again in flight it starts no second 
 
 test('the MCP servers status writer updates Extensions\' door beside another page without reading; off screen it paints and reads nothing', async (t) => {
     const { env, content } = world(t);
-    const status = (enabled) => ({ sdk_available: true, enabled: true, servers: [{ id: 'docs', enabled, tool_count: 3 }] });
+    const status = (enabled) => ({ sdk_available: true, enabled: true, servers: [{ id: 'docs', enabled, tool_count: 3,
+        ...(enabled ? { sign_in: { state: 'sign_in_required' } } : {}) }] });
     env.routes.set('/api/mcp/status', () => reply(status(false)));
     const { home, answer } = listHome(t, content);
     await home.refresh();
@@ -924,6 +929,7 @@ test('the MCP servers status writer updates Extensions\' door beside another pag
     pending.resolve(reply(status(true)));  // the page's completed status is stored by refreshStatus
     await settle();
     assert.equal(answer('page:skills'), '1 skill · 1 of 1 MCP server on');
+    assert.ok(content.querySelector('[data-needs="tool-sign-in"]'));
     assert.deepEqual(env.calls, before, 'adopting the completed status starts no request');
     const late = deferred();
     env.routes.set('/api/mcp/status', () => late.promise);
@@ -932,12 +938,18 @@ test('the MCP servers status writer updates Extensions\' door beside another pag
     home.hide();
     const hiddenReads = [...env.calls];
     const hiddenText = content.textContent;
-    late.resolve(reply(status(false)));
+    late.resolve({ ok: false, status: 503, json: async () => ({}) });
     await settle();
     assert.equal(content.textContent, hiddenText, 'a completed status paints nothing off screen');
     assert.deepEqual(env.calls, hiddenReads, 'a completed status reads nothing off screen');
-    await home.refresh(['tools']);
-    assert.equal(answer('page:skills'), '1 skill · 0 of 1 MCP server on', 'showing the list reads its current answer');
+    const recovery = deferred();
+    env.routes.set('/api/mcp/status', () => recovery.promise);
+    const reopened = home.refresh(['tools']);
+    assert.equal(answer('page:skills'), '1 skill · MCP status unavailable', 'use the shared completed failure before the new read settles');
+    assert.equal(content.querySelector('[data-needs="tool-sign-in"]'), null, 'no flash of the old sign-in need');
+    recovery.resolve(reply(status(false)));
+    await reopened;
+    assert.equal(answer('page:skills'), '1 skill · 0 of 1 MCP server on', 'the status updates when the new read answers');
 });
 
 test('an answer is painted though another source was read meanwhile: a slow source, and the state snapshot by its sequencer', async (t) => {

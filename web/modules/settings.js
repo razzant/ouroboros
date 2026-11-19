@@ -24,6 +24,7 @@ import { renderPageHeader } from './page_header.js';
 import { revealPastFade, bindScrollFade } from './scroll_fade.js';
 import { readSettings } from './settings_controls.js';
 import { isDoorId, mountSettingsHome, settingsTitle } from './settings_home.js';
+import { retireMcpStatusRead } from './mcp_settings.js';
 import { extensionsPageOf, settingsPageFor } from './settings_pages.js';
 import { createSectionLevels, isVisible as visible } from './section_levels.js';
 import { HOME_ROWS } from './settings_rows.js';
@@ -343,7 +344,10 @@ export function initSettings(ctx = {}) {
         else { announce(); ensurePage(); }
     };
     const onVisible = () => (document.hidden ? look() : announce());
-    const offReconnect = ws?.on?.('open', (event) => announce(Boolean(event?.previouslyConnected)));  // a reconnect, not the first open
+    const offReconnect = ws?.on?.('open', (event) => {
+        retireMcpStatusRead(event);
+        announce(Boolean(event?.previouslyConnected));
+    });
     // A width that puts the home beside the page, or takes it away: the layers follow, the home comes back where it
     // was left, and reads when it comes on screen.
     const resized = () => {

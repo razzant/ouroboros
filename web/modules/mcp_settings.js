@@ -42,7 +42,8 @@ let draftServer = null;     // the server of tools/new, until its first Save
 let loaded = false;
 let reloadSerial = 0;
 let savedGeneration = 0;
-let [mcpStatusByServer, mcpStatusEnvelope] = [{}, null];
+let [mcpStatusByServer, mcpStatusEnvelope] = [{}, undefined];
+const STATUS_UNAVAILABLE = 'MCP status unavailable';
 let listView = null;        // the list on screen: { el, ctx, heads }
 let editorView = null;      // the form on screen: { host, path, entry, server, ctx }
 // The stored identity used by writeEntry and kept secrets, the saved address and switch, and the entry as read.
@@ -379,8 +380,8 @@ function paintState(el, server) {
     el.classList.toggle('ui-status', LOUD.includes(tone));
     if (LOUD.includes(tone)) el.dataset.tone = tone; else delete el.dataset.tone;
 }
-function stateHtml(server) {
-    const { badgeText, tone } = statusParts(server);
+function stateHtml(server, unavailable = false) {
+    const { badgeText, tone } = unavailable ? { badgeText: STATUS_UNAVAILABLE, tone: 'warn' } : statusParts(server);
     return `<span${LOUD.includes(tone) ? ` class="ui-status" data-tone="${tone}"` : ''} data-mcp-state>${escapeHtml(badgeText)}</span>`;
 }
 
@@ -394,8 +395,12 @@ const toolsListHtml = (toolItems) => (toolItems
  */
 function paintStatus() {
     paintList();
+    paintEditorStatus();
+}
+
+function paintEditorStatus() {
     const server = editorView?.server;
-    const card = server && cardFor(server);
+    const card = server && editorShown(editorView) && cardFor(server);
     if (!card) return;
     const { factItems, toolItems } = statusParts(server);
     const weight = card.querySelector('[data-mcp-weight]');
@@ -1012,13 +1017,14 @@ const VIA = { streamable_http: 'HTTP', sse: 'SSE', stdio: 'Local program' };
 /** A server's head on the list: its name, its state in the status's own words and how it is reached; Sign in when
  *  the status asks for it; its switch. Pressing the head opens the server's page. */
 function headHtml(server) {
-    const need = signInNeed(server);
+    const unavailable = mcpStatusEnvelope === null;
+    const need = unavailable ? '' : signInNeed(server);
     const busy = wanted.has(server);
     return `<div class="ui-row settings-head" data-entry-id="${escapeHtml(pageId(server))}"${need ? ' data-actions' : ''}>
         <span class="settings-head-glyph" aria-hidden="true">${controlIcon('plug', 16)}</span>
         <button type="button" class="settings-head-open ui-hit-area" data-entry-open>
             <span class="ui-row-title">${escapeHtml(serverName(server))}</span>
-            <span class="ui-row-meta">${stateHtml(server)}<span> · ${VIA[server.transport] || escapeHtml(String(server.transport))}</span></span>
+            <span class="ui-row-meta">${stateHtml(server, unavailable)}<span> · ${VIA[server.transport] || escapeHtml(String(server.transport))}</span></span>
         </button>
         <div class="ui-row-actions">${need ? `<button type="button" class="btn btn-default btn-sm" data-entry-sign-in>${need}</button>` : ''}
             ${switchHtml(`data-entry-switch aria-label="Use ${escapeHtml(serverName(server))}"${busy ? ' disabled aria-busy="true"' : ''}`, busy ? wanted.get(server) : Boolean(server.enabled))}${doorSign()}</div>
@@ -1028,6 +1034,7 @@ function headHtml(server) {
 // The card's one line about every server: what is listed and what it weighs in a request, in the status's sentences.
 function envelopeWords() {
     const envelope = mcpStatusEnvelope;
+    if (envelope === null) return { text: STATUS_UNAVAILABLE, tone: 'warn' };
     if (!envelope) return { text: '', tone: '' };
     if (!envelope.sdk_available) return { text: `MCP servers cannot run: ${envelope.sdk_error || 'install `mcp>=1.10` to use them.'}`, tone: 'warn' };
     if (!envelope.enabled) return { text: 'All MCP servers are off. Their settings are kept.', tone: '' };
@@ -1074,19 +1081,35 @@ function paintList() {
 }
 
 let statusRead = null;
+let lastReconnect;
+/** Both sections hear the same socket event. Retire the pre-reconnect GET once, before either section reads. */
+export function retireMcpStatusRead(event) {
+    if (!event?.previouslyConnected || event === lastReconnect) return;
+    lastReconnect = event;
+    const previous = statusRead;
+    statusRead = null;
+    previous?.controller.abort();
+}
+
+/** The last completed read, including failure, for a summary returning to the screen. */
+export const mcpStatusSeen = () => mcpStatusEnvelope;
+
 export function refreshStatus({ join = false } = {}) {
-    if (join && statusRead) return statusRead;
-    const read = fetchJson('/api/mcp/status', { cache: 'no-store' }).then((status) => {
+    if (join && statusRead) return statusRead.done;
+    const controller = new AbortController();
+    const read = { controller };
+    read.done = fetchJson('/api/mcp/status', { cache: 'no-store', signal: controller.signal }).catch(() => null).then((result) => {
         if (statusRead !== read) return;
+        const status = Array.isArray(result?.servers) ? result : null;
         mcpStatusEnvelope = status;
-        mcpStatusByServer = Object.fromEntries((mcpStatusEnvelope.servers || []).filter((entry) => entry?.id).map((entry) => [entry.id, entry]));
-        globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:mcp-status-updated',
-            { detail: mcpStatusEnvelope }));
-        paintStatus();
-    }).catch(() => { /* the pages keep the status they show */ })
-        .finally(() => { if (statusRead === read) statusRead = null; });
+        if (status) mcpStatusByServer = Object.fromEntries(status.servers.filter((entry) => entry?.id).map((entry) => [entry.id, entry]));
+        // The list and summaries say failure; the mounted editor keeps its last read and sign-in fields.
+        globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:mcp-status-updated', { detail: status }));
+        if (status) paintStatus();
+        else paintList();
+    }).finally(() => { if (statusRead === read) statusRead = null; });
     statusRead = read;
-    return read;
+    return read.done;
 }
 
 /** Connect tools settled. Read the list when mounted and publish its passive status to both sections. */
@@ -1247,7 +1270,7 @@ function mountEditor(container, { path, ctx }, entry) {
             view.server = serverOfPage(entry);
             drawEditor();
         } else {
-            paintEditorActions(view);
+            paintEditorStatus();
         }
         void read();
     };
@@ -1263,7 +1286,7 @@ function mountEditor(container, { path, ctx }, entry) {
 const serverOfPage = (id) => heldDrafts.get(id) || mcpServers.find((server) => isServer(server) && pageId(server) === id) || null;
 // A page mounted by a section knows whether it is the page on screen; one mounted outside a section is taken as shown.
 const listShown = (ctx, path) => typeof ctx?.onScreen !== 'function' || ctx.onScreen(path);
-const editorShown = (view) => listShown(view?.ctx, view?.path);
+const editorShown = (view) => Boolean(view?.host.isConnected && listShown(view.ctx, view.path));
 const entryOf = (path) => { try { return decodeURIComponent(String(path).split('/')[1] || ''); } catch { return ''; } };
 
 registerSettingsPage('tools', {
@@ -1276,6 +1299,7 @@ registerSettingsPage('tools', {
  *  by its saved identity until the owner discards it. The views on screen are drawn from the result. */
 export function applyMcpSettings(settings) {
     const incoming = Array.isArray(settings?.MCP_SERVERS) ? settings.MCP_SERVERS : [];
+    const token = settings?._meta?.tokens?.[KEY];
     for (const [id, server] of heldDrafts) {
         if (!dirty.has(server)) heldDrafts.delete(id);
     }
@@ -1287,20 +1311,27 @@ export function applyMcpSettings(settings) {
     NAMES.clear();
     // auth_configured belongs to Settings response metadata, not user config;
     // the legacy pair's masked token itself becomes a header row.
-    mcpServers = incoming.map((entry) => {
+    mcpServers = incoming.map((entry, index) => {
         if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
         const { auth_configured: _authConfigured, ...s } = entry;
         const id = canonicalServerId(serverIdentity(s));
-        let kept = typed.get(asRead(entry));
+        const read = asRead(entry);
+        const previous = mcpServers[index];
+        const savedPrevious = savedMcpSecrets.get(previous);
+        // A passive reread of the same saved entry is not a new form. Save and Discard still own their redraw.
+        const unchanged = savedPrevious && savedPrevious.read === read && savedPrevious.token === token
+            && savedPrevious.enabled === Boolean(s.enabled) && !savedPrevious.submitted
+            && !dirty.has(previous) && !held.has(previous) && !saving.has(previous);
+        let kept = typed.get(read) || (unchanged ? previous : null);
         const draft = heldDrafts.get(id);
         if (draft && savedMcpSecrets.get(draft).submitted && incoming.filter(row => isServer(row) && canonicalServerId(serverIdentity(row)) === id).length === 1) {
             const saved = savedMcpSecrets.get(draft);
             const sent = saved.submitted;
-            const receipt = saved.token && saved.token === settings._meta?.tokens?.[KEY];
+            const receipt = saved.token && saved.token === token;
             // A neighbour can change the list token. The public row can still match, but
             // masked values cannot settle overlapping edits to the headers themselves.
             const headersConfirmed = sent.unchanged || !sent.maskedHeaders || headerRevision(draft) === sent.headers.revision;
-            if (receipt || (headersConfirmed && saved.read === asRead(entry))) {
+            if (receipt || (headersConfirmed && saved.read === read)) {
                 kept = draft;
                 heldDrafts.delete(id);
                 if (cardMessages.get(draft)?.kind === 'conflict') sayNewerEdits(draft, {});
@@ -1325,7 +1356,7 @@ export function applyMcpSettings(settings) {
             args: s.args ?? [], auth_header: String(s.auth_header ?? 'Authorization'), auth_token: String(s.auth_token ?? ''),
             allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [], schemas_at_start: isPinned(s),
         };
-        if (!kept || submitted) savedMcpSecrets.set(server, savedEntry(s, submitted ? baseline.token : settings._meta?.tokens?.[KEY]));
+        if (!kept || submitted) savedMcpSecrets.set(server, savedEntry(s, submitted ? baseline.token : token));
         else baseline.enabled = Boolean(s.enabled);
         if (pageId(server)) NAMES.set(pageId(server), serverName(server));
         return server;
@@ -1341,7 +1372,7 @@ export function applyMcpSettings(settings) {
     // draws it when it comes back. The list is drawn either way: a Save or Remove lands on the list it returns to.
     if (editorView && editorView.entry !== 'new' && !editorView.savedAs && saving.get(editorView.server) !== 'writing' && editorShown(editorView)) {
         const [was, next] = [editorView.server, serverOfPage(editorView.entry)];
-        if (next !== was || !dirty.has(next) || editorView.boundEntry !== savedMcpSecrets.get(next)) {
+        if (next !== was || !next || editorView.boundEntry !== savedMcpSecrets.get(next)) {
             editorView.server = next;
             drawEditor();
         } else paintUse();
