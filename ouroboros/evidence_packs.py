@@ -276,19 +276,25 @@ def index_tier(root: pathlib.Path) -> str:
     return store.TIER_ENFORCED if kernel_file_locks_enforced(root / "state" / store.LOCK_NAME) else store.TIER_NAME
 
 
-def _index_valid(path: pathlib.Path, tier: str, *, wait_sec: float = INDEX_WAIT_SEC) -> bool:
-    """The cache's O(1) facts: its header names ``tier`` and its meta row this schema version. Nothing
-    reads the whole live file: a damaged page surfaces as the SQLite error of the read that meets it."""
+def _damaged(exc: BaseException) -> bool:
+    """SQLite's verdict on the file itself: never a caller's failed statement or a process's own failure to open it."""
+    return type(exc) is sqlite3.DatabaseError and any(text in str(exc) for text in ("malformed", "not a database"))
+
+
+def _index_valid(path: pathlib.Path, tier: str, *, wait_sec: float = INDEX_WAIT_SEC, reader: bool = False) -> bool:
+    """The cache's O(1) facts: its header names ``tier`` and its meta row this schema version; a damaged page
+    behind them surfaces as the SQLite error of the read that meets it. A ``reader``'s own failure to open the
+    file (no descriptor, I/O, another runtime's journal) is no fact of it and propagates; the builder rebuilds."""
     if store.header_tier(path, _APPLICATION_ID) != tier:
         return False
     try:
         with contextlib.closing(store.connect(path, tier, wait_sec=wait_sec)) as conn:
             version = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-    except sqlite3.OperationalError as exc:
+    except sqlite3.Error as exc:
         if store.busy(exc):
             raise store.StoreBusy("evidence index validation busy", reason="contention") from exc
-        return False
-    except sqlite3.Error:
+        if reader and not _damaged(exc):
+            raise
         return False
     return version is not None and version[0] == str(INDEX_SCHEMA_VERSION)
 
@@ -375,13 +381,13 @@ def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_S
     """One transaction under the name lock, narrowed by the caller's acquisition budget. A cache whose O(1)
     facts fail (``_index_valid``) is ``EvidenceUnavailable``: it awaits the packing pass's rebuild
     (``ensure_index``), never its reader's; that, like SQLite's verdict that the live file is damaged (behind
-    those facts; never a caller's failed statement), leaves ``DAMAGED_MARK`` for that pass, best effort.
-    ``store.StoreBusy`` on contention."""
+    those facts), leaves ``DAMAGED_MARK`` for that pass, best effort; a caller's failed statement or the
+    reader's own failure to open the file marks nothing. ``store.StoreBusy`` on contention."""
     root = pathlib.Path(root)
     path, tier = packs_dir(root) / INDEX_NAME, index_tier(root)
     wait_sec = _index_wait(wait_sec)
     with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=wait_sec):
-        if not _index_valid(path, tier, wait_sec=wait_sec):
+        if not _index_valid(path, tier, wait_sec=wait_sec, reader=True):
             with contextlib.suppress(OSError):  # the pass's due fact; a read-only root keeps the answer
                 (path.parent / DAMAGED_MARK).touch()
             raise EvidenceUnavailable("evidence_unavailable: the evidence index awaits the packing pass's rebuild",
@@ -391,9 +397,7 @@ def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_S
                 with store.transaction(conn, write=write):
                     yield conn
         except sqlite3.DatabaseError as exc:
-            # SQLite's verdict on the file (SQLITE_CORRUPT, SQLITE_NOTADB) is exactly this class with these texts; a
-            # caller's mistyped, refused or interrupted statement (the mind's SQL in query_data) says nothing of it.
-            if type(exc) is sqlite3.DatabaseError and any(text in str(exc) for text in ("malformed", "not a database")):
+            if _damaged(exc):  # SQLITE_CORRUPT, SQLITE_NOTADB; never the mind's mistyped or refused SQL (query_data)
                 with contextlib.suppress(OSError):  # a root may be read-only: the read's answer stands either way
                     (path.parent / DAMAGED_MARK).touch()
             raise

@@ -191,7 +191,9 @@ def test_page_damage_behind_a_sound_header_is_marked_where_it_is_met_and_healed_
     answers ``evidence_unavailable`` (damaged) and leaves the damage mark beside the index, which makes the
     packing job owe a rebuild; the pass rebuilds the cache, checks its own file, publishes it and removes the
     mark, and the same read answers again. A read naming its task answers from that task's sidecars
-    throughout; a sound index, a merely held lock and a caller's failed statement leave no mark."""
+    throughout; a sound index, a merely held lock, a caller's failed statement and a reader's own failure to
+    open the file (a non-busy ``OperationalError``: no descriptor left, an I/O error) leave no mark, so the
+    pass rebuilds nothing and the next read answers."""
     from tests._store_journal_shared import use_journal
 
     use_journal(monkeypatch, "PERSIST")  # the damaged page lies in the file itself, not in a WAL
@@ -212,6 +214,20 @@ def test_page_damage_behind_a_sound_header_is_marked_where_it_is_met_and_healed_
                     other.set_authorizer(lambda *facts: sqlite3.SQLITE_DENY)
                 other.execute(failed or "SELECT 1")
     assert not mark.exists() and "evidence_packing" not in maintenance.due(root)  # no fact about the file
+    connect, failed, built = store.connect, [], index.stat().st_ino
+
+    def once(path, *args, **kwargs):  # this process cannot open the file once: no descriptor left
+        if pathlib.Path(path).name == packs.INDEX_NAME and not failed:
+            failed.append(path)
+            raise sqlite3.OperationalError("unable to open database file")
+        return connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(store, "connect", once)
+    with pytest.raises(packs.EvidenceUnavailable):
+        packs.blob_bytes(root, refs["a"])
+    assert failed and not mark.exists() and "evidence_packing" not in maintenance.due(root)
+    assert packs.ensure_index(root) is None and index.stat().st_ino == built  # the pass's builder finds it usable
+    assert packs.blob_bytes(root, refs["a"]) == whole
     with contextlib.closing(sqlite3.connect(index)) as conn:  # the members' key, behind a sound header and meta row
         page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name='sqlite_autoindex_members_1'").fetchone()[0]
         size = conn.execute("PRAGMA page_size").fetchone()[0]
