@@ -110,6 +110,8 @@ def _historical_anchor(ctx, observation, roots, task_id):
     # not a reason to duplicate identical first/latest input bodies.
     view = {key: redacted.value.get(key) for key in (
         "selected_messages", "physical_messages", "physical_source_status", "presence_origin")}
+    if payload["physical_source_status"] == "evidence_unavailable":  # no bytes to compare yet: its address tells it
+        view["physical_source_identity"] = redacted.value.get("physical_source_identity")
     view_sha = hashlib.sha256(json.dumps(view, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     if unpublished is not None and unpublished.get("view_sha256") != view_sha:
         return copy.deepcopy(unpublished)  # Its exact inputs are no longer available.
