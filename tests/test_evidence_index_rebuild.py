@@ -206,27 +206,37 @@ def _killed_before_checkpoint(index, wal, write):
     wal.write_bytes(log)
 
 
-def test_an_interrupted_publication_leaves_the_index_missing_never_the_old_file_without_its_wal(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cut", ["rename", "shared-memory"])
+def test_an_interrupted_publication_leaves_the_index_missing_never_the_old_file_without_its_wal(tmp_path, monkeypatch, cut):
     """A generation committed only in the old file's WAL (its writer killed before the checkpoint), and a rebuild the
-    pass ordered on its own failure to open the file (no mark): a publication interrupted at the rename must never
-    leave the old file without its WAL, which looks usable and answers that generation absent. The old file goes
-    first, then its journals, then the rename: interrupted, the index is missing and owed, a read by sha is unknown
+    pass ordered on its own failure to open the file (no mark): an interrupted publication must never leave the old
+    file without its WAL, which looks usable and answers that generation absent. The old file goes first, then its
+    journals, then the rename: interrupted at the rename, or earlier where the old file's shared memory cannot be
+    removed once its WAL is gone (another program holds it), the index is missing and owed, a read by sha is unknown
     now (never absent), and the next pass publishes every generation."""
     import pathlib
 
     index, wal, ref, raw, (pack, sidecar) = _wal_index_with_b(tmp_path, monkeypatch)
     _killed_before_checkpoint(index, wal, lambda conn: packs._index_rows(conn, pack, sidecar))
-    valid, replace = packs._index_valid, packs.replace_atomic
+    valid, replace, unlink = packs._index_valid, packs.replace_atomic, pathlib.Path.unlink
 
     def stop(src, dst, *args, **kwargs):
         if pathlib.Path(dst) == index:
-            raise KeyboardInterrupt("publication interrupted at the rename")
+            raise KeyboardInterrupt("publication interrupted")
         return replace(src, dst, *args, **kwargs)
+
+    def held(self, *args, **kwargs):
+        if self.name == index.name + "-shm":
+            raise KeyboardInterrupt("publication interrupted")
+        return unlink(self, *args, **kwargs)
 
     with monkeypatch.context() as patch:  # only the pass's own checks fail: no reader marked anything
         patch.setattr(packs, "_index_valid", lambda *args, reader=False, **kwargs: reader and valid(*args, reader=True, **kwargs))
-        patch.setattr(packs, "replace_atomic", stop)
-        with pytest.raises(KeyboardInterrupt, match="interrupted at the rename"):
+        if cut == "rename":
+            patch.setattr(packs, "replace_atomic", stop)
+        else:
+            patch.setattr(pathlib.Path, "unlink", held)
+        with pytest.raises(KeyboardInterrupt, match="publication interrupted"):
             packs.ensure_index(tmp_path)
     with pytest.raises(packs.EvidenceUnavailable):  # unknown now, never absent
         packs.blob_bytes(tmp_path, ref)
