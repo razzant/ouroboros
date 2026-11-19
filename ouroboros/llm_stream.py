@@ -64,7 +64,7 @@ class ProviderStreamError(IncompleteProviderStream):
 
     code = ""
 
-    def __init__(self, body: dict, *, usage: Any = None):
+    def __init__(self, body: dict, *, usage: Any = None, prior_usage: list[dict] | None = None):
         self.body = copy.deepcopy(body)
         error = body.get("error")
         error = error if isinstance(error, dict) else {}
@@ -86,6 +86,9 @@ class ProviderStreamError(IncompleteProviderStream):
         receipt = body.get("openrouter_metadata")
         self.openrouter_metadata = copy.deepcopy(receipt) if isinstance(receipt, dict) else None
         self.stream_usage = copy.deepcopy(usage) if isinstance(usage, dict) and usage else None
+        # The terminal body, earlier reports, and the legacy cumulative usage
+        # view are different sources. Only an explicit Chat error carries these reports.
+        self.stream_prior_usage = prior_usage
         # Keep producer facts in body/private evidence. Text-only pre-routing
         # classifiers must not turn an HTTP-200 SSE failure into a free rejection.
         super().__init__("Provider reported an SSE error after stream dispatch")
@@ -294,6 +297,7 @@ class ChatAccumulator(_Accumulator):
         self.choices: dict[int, dict] = {}
         self.expected_choices = expected_choices
         self.on_generation_id = on_generation_id
+        self.usage_reports: list[dict] = []
 
     def accept(self, event: str, data: str) -> None:
         if self.done:
@@ -315,8 +319,16 @@ class ChatAccumulator(_Accumulator):
         if isinstance(chunk.get("error"), dict):
             _snapshot(self.body, {key: value for key, value in chunk.items()
                                   if key not in {"choices", "usage", "object"}})
-            raise ProviderStreamError(chunk, usage=chunk.get("usage") or self.body.get("usage"))
+            raise ProviderStreamError(chunk, usage=chunk.get("usage") or self.body.get("usage"),
+                                      prior_usage=self.usage_reports)
+        report = {key: chunk[key] for key in ("usage", "total_cost_usd", "openrouter_metadata")
+                  if chunk.get(key) is not None}
+        if report:
+            self.usage_reports.append(report)
         for key, value in chunk.items():
+            if key == "service_tier":
+                self.body[key] = value  # A later explicit null withdraws an earlier tier.
+                continue
             if key in {"choices", "object", "obfuscation"} or value is None:
                 continue
             if key in {"id", "model"} and self.body.get(key) not in (None, value):
@@ -755,6 +767,11 @@ class _StreamAssembly:
                  "anomalies": self.accumulator.anomaly_facts()}
         if error is not None:  # a failed reply's typed shape, never its text
             facts["model_output_received"] = self.accumulator.output_received()
+            if isinstance(error, ProviderStreamError) and error.stream_prior_usage is not None:
+                from ouroboros._usage_response import refusal_body_conflicts
+
+                # Keep non-usage work proof distinct from the text fact used by transport timeouts.
+                facts["refusal_prior_work"] = refusal_body_conflicts({"choices": list(self.accumulator.choices.values())})
         if self.generation_conflict:
             facts["generation_conflict"] = True
             facts["conflicting_generation_id"] = self.conflicting_generation_id

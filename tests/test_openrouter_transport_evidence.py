@@ -348,10 +348,12 @@ def test_valid_alternate_price_outranks_invalid_cost(isolated, monkeypatch, pric
 
 
 def test_absent_price_still_permits_tariff_estimate(isolated, monkeypatch):
+    from ouroboros.llm_routing import OPENROUTER_BASE_URL
+
     body = {"choices": [{"message": {"content": "usable"}}],
             "usage": {"prompt_tokens": 10, "cost": None, "cost_invalid": True}}
     monkeypatch.setattr("ouroboros.pricing.estimate_cost_optional", lambda *a, **kw: 0.75)
-    _, usage = LLMClient()._normalize_remote_response(body, target())
+    _, usage = LLMClient()._normalize_remote_response(body, {**target(), "base_url": OPENROUTER_BASE_URL})
     normalized, cost, final = ua.usage_from_response(body)
     assert usage["cost"] == 0.75 and usage["cost_estimated"] is True and usage["cost_final"] is False
     assert cost is None and final is False

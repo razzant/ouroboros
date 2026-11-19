@@ -166,7 +166,7 @@ def admit(task_id: str, body: dict, *, source: str = "owner") -> tuple[dict, dic
             metadata = {**(row.get("metadata") or {}), **({"lead": carrier} if carrier else {})}
             if action == "follow":
                 metadata["model_role"] = "main"
-            projected = project_lead(fact, {"metadata": metadata, "owner_model": {"request_id": request_id}}, queued=not running)
+            projected = project_lead(fact, {"metadata": metadata, "owner_model": {"request_id": request_id, "action": action}}, queued=not running)
             if not projected:
                 projected = project_lead(task={"metadata": metadata}, queued=True)
             receipt = {"ok": True, "task_id": task_id, "applied": "next_step" if running else "at_start",

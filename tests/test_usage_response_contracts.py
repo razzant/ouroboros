@@ -26,9 +26,10 @@ BYOK_BIG = {"prompt_tokens": 911973, "completion_tokens": 4, "total_tokens": 911
 def _loop_usage(usage):
     """The loop-side projection of the same raw reply (``_normalize_remote_response``)."""
     from ouroboros.llm import LLMClient
+    from ouroboros.llm_routing import OPENROUTER_BASE_URL
 
     target = {"provider": "openrouter", "resolved_model": "anthropic/claude-opus-5.5",
-              "usage_model": "anthropic/claude-opus-5.5"}
+              "usage_model": "anthropic/claude-opus-5.5", "base_url": OPENROUTER_BASE_URL}
     body = {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": copy.deepcopy(usage)}
     return LLMClient()._normalize_remote_response(body, target, skip_cost_fetch=True)[1]
 
@@ -93,6 +94,22 @@ def test_api_token_normalization_preserves_missing_zero_and_body_error_contracts
         assert rejected_cache["completion_tokens"] is None
         assert rejected_cache[field]
         assert cost is None and final is False
+
+
+@pytest.mark.parametrize("details,expected_cost", [
+    ({"completion_tokens_details": {"audio_tokens": 3}}, None),
+    ({"output_tokens_details": {"reasoning_tokens": "unreadable"}}, None),
+    ({"server_tool_use": {"web_search_requests": False}}, None),
+    ({"completion_tokens_details": {"audio_tokens": None, "accepted_prediction_tokens": 0},
+      "_reported_token_usage": {"audio_tokens": 2}, "private_extension": {"counter": 7},
+      "cache_write_tokens_by_ttl": {"5m": 7}}, 0.0),
+])
+def test_free_body_error_requires_empty_raw_usage(details, expected_cost):
+    body = {"error": {"code": 429}, "usage": {"prompt_tokens": 0, "completion_tokens": 0, **details}}
+    normalized, cost, final = ua.usage_from_response(body)
+    assert (cost, final) == (expected_cost, expected_cost is not None)
+    if "output_tokens_details" in details:
+        assert normalized["_reported_token_usage"]["output_tokens_details"] == details["output_tokens_details"]
 
 
 def test_api_cost_extraction_rejects_untrustworthy_provider_amounts():

@@ -5,8 +5,10 @@ from __future__ import annotations
 import copy
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from decimal import Decimal
+from typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
 _UNREAD_PAYLOAD = object()
 
@@ -78,6 +80,47 @@ def reported_price(usage: Dict[str, Any], *fallbacks: Any) -> Tuple[Optional[flo
     cost = next((number for value in candidates if (number := provider_cost_value(value)) is not None), None)
     byok = usage.get("is_byok") is True and cost is not None and provider_cost_value(consumed) is not None
     return cost, cost is None and any(value is not None for value in candidates), BYOK_COST_BASIS if byok else ""
+
+
+class _RefusalPrice(NamedTuple):
+    total: Optional[float]
+    byok_parts: tuple[Optional[float], Optional[float]]  # gateway, upstream
+    unlabelled_min: float
+    disagreement: bool
+    malformed: bool
+
+    @property
+    def basis(self) -> str:
+        return BYOK_COST_BASIS if None not in self.byok_parts else ""
+
+
+def _byok_subtotal(parts: tuple[Optional[float], Optional[float]]) -> float:
+    return float(sum(Decimal(str(part)) for part in parts if part is not None))
+
+
+def _refusal_price(usage: Any, *fallbacks: Any, byok_known: bool = False) -> _RefusalPrice:
+    """Read independently reported totals and the BYOK components that constrain them."""
+    usage = usage if isinstance(usage, dict) else {}
+    charge = usage.get("cost")
+    parts, unlabelled_min, malformed = (None, None), 0.0, False
+    if usage.get("is_byok") is True:
+        details = usage.get("cost_details")
+        upstream = details.get("upstream_inference_cost") if isinstance(details, dict) else None
+        parts = provider_cost_value(charge), provider_cost_value(upstream)
+        malformed = any(raw is not None and parsed is None for raw, parsed in zip((charge, upstream), parts))
+        charge = _byok_subtotal(parts) if None not in parts else None
+    elif byok_known:
+        # With no matching label this could repeat the gateway fee or the whole bill.
+        # It constrains a total but is neither a second wallet nor a final total.
+        parsed = provider_cost_value(charge)
+        malformed = charge is not None and parsed is None
+        unlabelled_min, charge = parsed or 0.0, None
+    prices = [provider_cost_value(raw) for raw in (charge, usage.get("total_cost"), *fallbacks) if raw is not None]
+    malformed |= None in prices
+    totals = {amount for amount in prices if amount is not None}
+    total = next(iter(totals)) if len(totals) == 1 else None
+    disagreement = len(totals) > 1 or (total is not None and total < _byok_subtotal(parts))
+    return _RefusalPrice(total if not disagreement else None, parts, unlabelled_min, disagreement, malformed)
 
 
 # Finish reasons that mean a reply reached its output allowance: OpenAI-family ``length``, Anthropic
@@ -158,15 +201,21 @@ def response_finish_reason(usage: Any, msg: Any) -> Tuple[bool, Optional[str]]:
     return False, None
 
 
+_OUTPUT_TOKEN_DETAIL_FIELDS = {
+    "completion_tokens_details": ("reasoning_tokens", "accepted_prediction_tokens", "rejected_prediction_tokens"),
+    "output_tokens_details": ("reasoning_tokens",),
+}
+
+
 def reported_reasoning_tokens(usage: Any) -> Optional[int]:
     """Reasoning tokens a provider reported for one reply: top level (the Claudexor
     mapping) or inside its completion/output token details (OpenAI-family shapes);
     ``None`` when none was reported, never a guessed zero."""
-    usage = usage if isinstance(usage, dict) else {}
-    for source in (usage, usage.get("completion_tokens_details"), usage.get("output_tokens_details")):
-        value = source.get("reasoning_tokens") if isinstance(source, dict) else None
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-            return value
+    if isinstance(usage, dict):
+        for source in (usage, *(usage.get(key) for key in _OUTPUT_TOKEN_DETAIL_FIELDS)):
+            value = source.get("reasoning_tokens") if isinstance(source, dict) else None
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
     return None
 
 
@@ -186,18 +235,19 @@ def processing_receipt(provider: str, usage: Dict[str, Any], *, requested: str =
     """Keep native observations separate from captured intent on the shared receipt."""
     import copy
 
-    if isinstance(usage.get("processing"), dict):
+    if provider not in {"openai", "openrouter", "anthropic"} and isinstance(usage.get("processing"), dict):
         return copy.deepcopy(usage["processing"])
     if provider in {"openai", "openrouter"}:
         observed_native = usage.get("service_tier")
-        modes = {"default": "standard", "priority": "fast", "fast": "fast", "flex": "economy"}
+        modes = {"default": "standard", "priority": "fast", "fast": "fast", "flex": "economy", "ultrafast": "ultrafast"}
     elif provider == "anthropic":
         observed_native = usage.get("speed")
         modes = {"standard": "standard", "fast": "fast"}
     else:
         observed_native, modes = None, {}
     observed_native = observed_native if isinstance(observed_native, str) and observed_native else None
-    if not requested and not submitted_native and not observed_native:
+    reported_tier = provider in {"openai", "openrouter"} and "service_tier" in usage
+    if not requested and not submitted_native and not observed_native and not reported_tier:
         return None
     submitted, observed = modes.get(submitted_native), modes.get(observed_native, "unknown")
     if reason is None:
@@ -210,7 +260,7 @@ def processing_receipt(provider: str, usage: Dict[str, Any], *, requested: str =
     return {"requested": requested or None, "submitted": submitted,
             "submittedNative": submitted_native or None, "observed": observed,
             "observedNative": [observed_native] if observed_native else [], "reason": reason,
-            "source": "provider_response" if observed_native else "host_request"}
+            "source": "provider_response" if observed_native or reported_tier else "host_request"}
 
 
 def _reported_token_count(usage: Dict[str, Any], *keys: str) -> Optional[int]:
@@ -224,14 +274,27 @@ def _reported_token_count(usage: Dict[str, Any], *keys: str) -> Optional[int]:
     return None
 
 
+def has_reported_service_tier(response: Any, body: dict) -> bool:
+    """An SDK dump can synthesize a null for an omitted field. Keep only a provider's own field."""
+    fields = getattr(response, "model_fields_set", None)
+    return "service_tier" in body and (not isinstance(fields, set) or "service_tier" in fields)
+
+
 def observed_processing_mode(provider: str, usage: Dict[str, Any]) -> str:
     """A pricing qualifier from observation; absent explicit-mode proof stays unknown."""
     receipt = usage.get("processing")
     if isinstance(receipt, dict):
         modes = receipt.get("observedNative")
-        return (str(modes[0]) if receipt.get("observed") not in {"unknown", "mixed"}
-                and isinstance(modes, list) and len(modes) == 1 else "unknown")
-    value = usage.get("speed") if provider == "anthropic" else usage.get("service_tier")
+        if receipt.get("observed") in {"unknown", "mixed"} or not isinstance(modes, list) or len(modes) != 1:
+            return "unknown"
+        value = modes[0]
+    else:
+        field = "speed" if provider == "anthropic" else "service_tier"
+        value = usage.get(field)
+        if field in usage and value is None:
+            return "unknown"
+    if value == "ordinary":  # Host-only price of an unspecified pool, never a served tier.
+        return "unknown"
     return value if isinstance(value, str) else ""
 
 
@@ -252,7 +315,67 @@ def _normalized_input_token_usage(raw: Any) -> Optional[Dict[str, Any]]:
     return normalized
 
 
-def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict[str, Any], Optional[float], bool]:
+_TOKEN_DETAIL_FIELDS = {
+    "prompt_tokens_details": ("cached_tokens", "cache_write_tokens", "cache_creation_tokens", "cache_creation_input_tokens"),
+    "input_tokens_details": ("cached_tokens", "cache_write_tokens", "cache_creation_tokens", "cache_creation_input_tokens"),
+    **_OUTPUT_TOKEN_DETAIL_FIELDS,
+    "cache_creation": ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"),
+}
+
+
+def _reported_token_usage(usage: Dict[str, Any]) -> Dict[str, Any]:
+    """Only known wire counters, before any alias selection or int/clamp projection."""
+    reported = {key: usage[key] for key in (
+        "prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "total_tokens",
+        "input_tokens", "output_tokens", "cached_tokens", "precached_prompt_tokens", "cache_read_input_tokens",
+        "cache_write_tokens", "cache_creation_input_tokens", "reasoning_tokens") if key in usage}
+    reported.update({key: {field: usage[key][field] for field in fields if field in usage[key]}
+                     for key, fields in _TOKEN_DETAIL_FIELDS.items() if isinstance(usage.get(key), dict)})
+    return reported
+
+
+_MEDIA_DETAIL_FIELDS = frozenset(_TOKEN_DETAIL_FIELDS) | {
+    "input_token_details", "output_token_details", "cached_tokens_details",
+    "promptTokensDetails", "responseTokensDetails", "response_tokens_details", "cacheTokensDetails", "cache_tokens_details",
+}
+
+
+def nontext_counts(usage: Any, *, wire_only: bool = False) -> Iterator[Any]:
+    """Read media units in native usage details, or anywhere in the settlement projection.
+
+    A named non-text modality with an absent count is itself evidence. On the wire an
+    extension or a provider-supplied copy of a host field is not a usage detail.
+    """
+    if isinstance(usage, Mapping):
+        if "modality" in usage and str(usage["modality"]).upper() != "TEXT":
+            yield usage.get("tokenCount", usage.get("token_count"))
+            return
+        for key, value in usage.items():
+            if key in {"audio_input_tokens", "audio_output_tokens", "image_input_tokens", "image_output_tokens",
+                       "audio_tokens", "image_tokens", "video_tokens", "input_audio_tokens", "output_audio_tokens",
+                       "input_image_tokens", "output_image_tokens", "cached_audio_input_tokens",
+                       "cached_image_input_tokens", "video_input_tokens", "thinking_tokens", "connected_seconds"}:
+                if value is not None:
+                    yield value
+            elif not wire_only or key in _MEDIA_DETAIL_FIELDS:
+                yield from nontext_counts(value, wire_only=wire_only)
+    elif isinstance(usage, (list, tuple)):
+        for item in usage:
+            yield from nontext_counts(item, wire_only=wire_only)
+
+
+def _reported_usage_empty(raw: dict, reported: dict) -> bool:
+    """Only absent or explicitly zero work counters can support a pre-generation rejection."""
+    counts = [count for key, value in reported.items()
+              for count in (value.values() if key in _TOKEN_DETAIL_FIELDS else (value,))]
+    if isinstance(tools := raw.get("server_tool_use"), dict):
+        counts.append(tools.get("web_search_requests"))
+    return (all(count is None or (type(count) is int and count == 0) for count in counts)
+            and all(type(count) in (int, float) and count == 0 for count in nontext_counts(raw, wire_only=True)))
+
+
+def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD, provider: str = "",
+                        provider_reported_cost_only: bool = False) -> Tuple[Dict[str, Any], Optional[float], bool]:
     """Extract common usage/cost facts without retaining response text."""
     if payload is _UNREAD_PAYLOAD:
         payload = _plain(response)
@@ -297,34 +420,26 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
     }
     # Tariff validation needs the reported counts, not the ledger's historical int/clamp projection.
     # Keep only token fields; never accept a provider-supplied witness under this internal key.
-    reported = {key: usage[key] for key in (
-        "prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "total_tokens",
-        "input_tokens", "output_tokens", "cached_tokens", "precached_prompt_tokens", "cache_read_input_tokens",
-        "cache_write_tokens", "cache_creation_input_tokens") if key in usage}
-    nested_keys = {
-        "prompt_tokens_details": ("cached_tokens", "cache_write_tokens", "cache_creation_tokens", "cache_creation_input_tokens"),
-        "input_tokens_details": ("cached_tokens", "cache_write_tokens", "cache_creation_tokens", "cache_creation_input_tokens"),
-        "completion_tokens_details": ("reasoning_tokens",),
-        "cache_creation": ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"),
-    }
-    reported.update({key: {field: usage[key][field] for field in fields if field in usage[key]}
-                     for key, fields in nested_keys.items() if isinstance(usage.get(key), dict)})
+    reported = _reported_token_usage(usage)
     normalized["_reported_token_usage"] = copy.deepcopy(reported)
     # Candidate facts and validated engine reports come from their host owners,
     # never arbitrary extensions inside a provider's token-usage block.
     normalized.pop("effort", None)
     normalized.pop("effort_resolution", None)
     normalized.pop("response_provider", None)  # the response's own outer label below, never a nested claim
+    normalized.pop("processing", None)  # Native session receipts enter through model_operation_usage.
+    normalized.pop("provider_reported_cost_only", None)
+    # Messages reports capacity in usage and speed separately. Chat/Responses report tier on the envelope.
+    if provider != "anthropic":
+        normalized.pop("service_tier", None)
     if isinstance(payload, dict):
         from ouroboros.llm_openai_compatible import _bounded_response_metadata_label
 
         upstream = _bounded_response_metadata_label(payload.get("provider"))
         if upstream is not None:  # the upstream that served the call; the accounting provider stays the route's
             normalized["response_provider"] = upstream
-        if "service_tier" in payload:
+        if has_reported_service_tier(response, payload):
             normalized["service_tier"] = payload["service_tier"]
-        if isinstance(payload.get("processing"), dict):
-            normalized["processing"] = dict(payload["processing"])
     creation = usage.get("cache_creation")
     if isinstance(creation, dict):
         split = {
@@ -347,19 +462,13 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
     if cost is not None:
         return normalized, cost, True
     completion = normalized["completion_tokens"]
-    split = normalized.get("cache_write_tokens_by_ttl")
-    cache_usage_reported = bool(cache_read or cache_write or (
-        any(split.values()) if isinstance(split, dict) else split))
     if (
-        isinstance(payload, dict)
+        not provider_reported_cost_only and isinstance(payload, dict)
         and isinstance(payload.get("error"), dict)
         and prompt == 0
         and completion == 0
-        and all(value is None or (type(value) is int and value == 0)
-                for source in ({key: value for key, value in reported.items() if key not in nested_keys},
-                               *(reported.get(key, {}) for key in nested_keys)) for value in source.values())
+        and _reported_usage_empty(usage, reported)
         and not invalid  # no amount was reported at all
-        and not cache_usage_reported
     ):
         normalized.update(prompt_tokens=0, completion_tokens=0, cached_tokens=0, cache_write_tokens=0)
         return normalized, 0.0, True
@@ -532,6 +641,252 @@ def provider_answer(source: Any) -> ProviderAnswer:
     return ProviderAnswer(status, tuple(dict.fromkeys(said)), tuple(dict.fromkeys(codes)), tuple(objects))
 
 
+def refusal_failure_payload(error: BaseException) -> Any:
+    """Keep the full received provider error for accounting when the SDK exposes only its inner error."""
+    response = getattr(error, "response", None)
+    if response is None:
+        return provider_failure_payload(error)
+    body = _plain(getattr(error, "body", None))
+    envelope = _plain(response)
+    if envelope is response and not isinstance(envelope, dict) and not callable(getattr(response, "json", None)):
+        return body
+    if not isinstance(envelope, dict):
+        error.refusal_envelope_conflict = True
+        return body
+    if isinstance(body, dict) and "error" not in envelope and "usage" in envelope and "code" not in envelope:
+        envelope = {"error": body.get("error", body), **envelope}
+    if body and body != envelope and body != envelope.get("error") and not (
+            isinstance(body, dict) and all(k in envelope and envelope[k] == v for k, v in body.items())):
+        error.refusal_envelope_conflict = True
+        if isinstance(body, dict) and _reply_shows_work(body):
+            error.refusal_alternate_payload = envelope
+            return body
+        error.refusal_alternate_payload = body
+    error.body = envelope
+    return envelope
+
+
+def priced_failure_usage(error: BaseException, payload: Any, provider: str):
+    """Read a failed send's own prices, without deriving a free rejection from zero token counts."""
+    from ouroboros.transport_custody import is_processing_refusal
+
+    stream = {"usage": getattr(error, "stream_usage", None)}
+    if not is_processing_refusal(error):
+        for body in (stream, payload):
+            usage, cost, final = usage_from_response(body, payload=body, provider=provider, provider_reported_cost_only=True)
+            if final and cost is not None:
+                return usage, cost
+        return None
+
+    response = getattr(error, "response", None)
+    body = payload if isinstance(payload, dict) else {}
+    alternate = getattr(error, "refusal_alternate_payload", None)
+    frames = [(body, response), (body.get("error"), None)]
+    if isinstance(alternate, dict):
+        frames.extend(((alternate, None), (alternate.get("error"), None)))
+    prior = getattr(error, "stream_prior_usage", None)
+    # The legacy merged view is not another report on this wire.
+    frames.extend((frame, None) for frame in (reversed(prior) if prior is not None else (stream,)))
+    reports = [(body, carrier, _plain(body.get("usage"))) for body, carrier in frames if isinstance(body, dict)]
+    has_byok = any(isinstance(raw, dict) and raw.get("is_byok") is True for _, _, raw in reports)
+    chosen = None
+    basis = ""
+    gateway_min = upstream_min = unlabelled_min = 0.0
+    malformed = False
+    prior_count = len(prior) if prior is not None else 1
+    terminal_count = len(reports) - prior_count
+    for index, (body, carrier, raw) in enumerate(reports):
+        price = _refusal_price(
+            raw, body.get("total_cost_usd"), getattr(carrier, "total_cost_usd", None), byok_known=has_byok)
+        if price.disagreement:
+            return None
+        malformed |= price.malformed
+        gateway, upstream = price.byok_parts
+        gateway_min, upstream_min = max(gateway_min, gateway or 0.0), max(upstream_min, upstream or 0.0)
+        unlabelled_min = max(unlabelled_min, price.unlabelled_min)
+        if price.total is None:
+            continue
+        if chosen is None:
+            chosen = (price.total, body, carrier)
+        elif price.total != chosen[0]:
+            if index >= terminal_count and price.total < chosen[0]:
+                continue  # A later report can include work after this snapshot.
+            return None
+        basis = price.basis or basis
+    # Maxima per wallet, not a sum of duplicated frames. Bounds never mint a total.
+    if chosen is None:
+        return None
+    cost, body, carrier = chosen
+    if cost < max(unlabelled_min, _byok_subtotal((gateway_min, upstream_min))) or (
+            cost == 0 and (malformed or refusal_conflicts(error, check_stream_framing=False))):
+        return None
+    usage, _, _ = usage_from_response(carrier, payload=body, provider=provider, provider_reported_cost_only=True)
+    for report, other, raw in reports:
+        if report is not body and isinstance(raw, dict) and raw:
+            counts, _, _ = usage_from_response(other, payload=report, provider=provider, provider_reported_cost_only=True)
+            for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens"):
+                if usage.get(key) is None:
+                    usage[key] = counts.get(key)
+    usage.pop("cost_basis", None)  # Only the matching, complete wallet report supplies this basis.
+    if basis:
+        usage.update(cost=cost, cost_basis=basis)
+    return usage, cost
+
+
+def typed_search_refusal(status, code, error_type) -> bool:
+    """A provider rejection that precedes work, subject to this send's other evidence."""
+    kinds = (code, error_type)
+    if status == 429:
+        return any(kind in ("rate_limit_exceeded", "rate_limit_error", "insufficient_quota") for kind in kinds)
+    if status in (503, 529):
+        return "overloaded_error" in kinds
+    return status in (400, 401, 402, 403, 404, 422) and any(kind in (
+        "invalid_request_error", "authentication_error", "invalid_api_key", "permission_error",
+        "billing_error", "model_not_found", "not_found_error") for kind in kinds)
+
+
+def _reply_shows_work(body: dict) -> bool:
+    routing = body.get("openrouter_metadata")
+    if isinstance(routing, dict) and (routing.get("attempts") or routing.get("attempt")):
+        return True  # The router reports upstream attempts, with only their HTTP statuses.
+    error = body.get("error", body)
+    metadata = error.get("metadata") if isinstance(error, dict) else None
+    if (body.get("output") or body.get("content") or body.get("status") in ("in_progress", "completed", "incomplete")
+            or body.get("stop_reason") in ("end_turn", "stop_sequence", "pause_turn", "max_tokens", "tool_use", "refusal")
+            or (isinstance(metadata, dict) and metadata.get("error_type") == "timeout")):
+        return True
+    choices = body.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if isinstance(choice, dict):
+                finish = choice.get("finish_reason")
+                if isinstance(finish, str) and (finish == "stop" or finish in (
+                        OUTPUT_LIMIT_FINISH_REASONS | CONTENT_REFUSAL_FINISH_REASONS | TOOL_CALL_FINISH_REASONS
+                        | INTERMEDIATE_FINISH_REASONS)):
+                    return True
+                message = choice.get("message") or choice.get("delta")
+                if isinstance(message, dict) and any(value for key, value in message.items() if key != "role"):
+                    return True
+    raw = _plain(body.get("usage"))
+    price = _refusal_price(raw, body.get("total_cost_usd"))
+    if price.disagreement or price.malformed:
+        return True  # An unreadable or inconsistent charge leaves open whether work occurred.
+    if price.total or any(price.byok_parts):
+        return True
+    if not isinstance(raw, dict):
+        return False
+    return not _reported_usage_empty(raw, _reported_token_usage(raw))
+
+
+def refusal_body_conflicts(body: Any, status: Optional[int] = None) -> bool:
+    if not isinstance(body, dict):
+        return False
+    if _reply_shows_work(body):
+        return True
+    error = body.get("error", body)
+    if isinstance(error, dict) and error is not body and _reply_shows_work(error):
+        return True
+    body_status = error.get("status_code") if isinstance(error, dict) else None
+    if body_status in (408, 504) or (status is not None and body_status is not None and status != body_status):
+        return True
+    metadata = error.get("metadata") if isinstance(error, dict) else None
+    if not isinstance(metadata, dict) or not metadata.get("raw"):
+        return False
+    # A gateway can quote upstream replies as JSON or SSE. Each reply needs its own typed rejection before work.
+    outer_status = status or error.get("status_code", error.get("code"))
+    rejected = False
+    for obj in provider_answer({"raw": metadata["raw"]}).objects:
+        if _reply_shows_work(obj.value):
+            return True
+        native = obj.value.get("error")
+        if not isinstance(native, dict):
+            continue
+        code = native.get("code")
+        inner_status = native.get("status_code", code if type(code) is int else outer_status)
+        if not typed_search_refusal(inner_status, code, native.get("type")):
+            return True
+        rejected = True
+    return not rejected
+
+
+def refusal_conflicts(source: Any, *, reported_cost: Optional[float] = None, check_stream_framing: bool = True) -> bool:
+    """Contrary evidence on the same physical send, including the SDK envelope and explicit causes."""
+    if reported_cost is not None and reported_cost > 0:
+        return True
+    if not isinstance(source, BaseException):
+        return refusal_body_conflicts(source)
+    import httpx
+    from ouroboros.transport_custody import is_pre_dispatch_transport_failure
+
+    seen = set()
+    current = source
+    status_seen = None
+    while isinstance(current, BaseException) and id(current) not in seen:
+        seen.add(id(current))
+        body = refusal_failure_payload(current)
+        response = getattr(current, "response", None)
+        native_cost = getattr(response, "total_cost_usd", None)
+        if native_cost is not None and provider_cost_value(native_cost) != 0:
+            return True
+        status = getattr(current, "status_code", None)
+        wire_status = getattr(response, "status_code", None)
+        if getattr(current, "response_body_error", False) and type(wire_status) is int and 200 <= wire_status < 300:
+            wire_status = None  # The HTTP success envelope does not override its body's error status.
+        prior = getattr(current, "stream_prior_usage", None)
+        receipt = getattr(current, "stream_receipt", None)
+        receipt = receipt if isinstance(receipt, dict) else {}
+        # An explicit Chat error can report zero even when its framing cannot
+        # prove no generation. Only billing may inspect that narrower question.
+        check_stream = check_stream_framing or prior is None or receipt.get("refusal_prior_work") is not False
+        if (getattr(current, "refusal_envelope_conflict", False)
+                or (check_stream and getattr(current, "processing_refusal_conflict", False))
+                or (status is not None and wire_status is not None and status != wire_status)):
+            return True
+        capture = getattr(current, "physical_attempt_capture", None)
+        state = getattr(capture, "state", None)
+        capture_status = getattr(capture, "provider_status_code", None)
+        if state == "dispatched" or (state in ("settled", "unresolved") and not typed_search_refusal(
+                capture_status, getattr(capture, "provider_code", None), getattr(capture, "provider_error_type", None))):
+            return True
+        status = status or wire_status or capture_status
+        if status is not None:
+            if status in (408, 504) or (status_seen is not None and status != status_seen):
+                return True
+            status_seen = status
+        if (receipt.get("model_output_received") or receipt.get("refusal_prior_work") or receipt.get("generation_conflict")
+                or (check_stream and getattr(current, "stream_incomplete", False))
+                or getattr(current, "receiver_abandoned", False)
+                or getattr(current, "explicit_timeout", False) or getattr(current, "code", "") == "model_outcome_unknown"
+                or (isinstance(current, (httpx.TransportError, TimeoutError)) and not is_pre_dispatch_transport_failure(current))):
+            return True
+        if refusal_body_conflicts(body, status) or _reply_shows_work({
+            "openrouter_metadata": getattr(current, "openrouter_metadata", None),
+        }) or any(_reply_shows_work(frame) for frame in (prior if prior is not None else (
+                {"usage": getattr(current, "stream_usage", None)},))):
+            return True
+        current = current.__cause__
+    return False
+
+
+def processing_refusal_reason(provider, mode, status, body: Any) -> str:
+    """The submitted tier and the provider's documented error identify a refusal, independently of cost."""
+    native_error = body.get("error", body) if isinstance(body, dict) else None
+    if not isinstance(native_error, dict):
+        return ""
+    if (provider == "anthropic" and mode == "fast" and status == 429
+            and native_error.get("type") == "rate_limit_error"):
+        return "capacity"
+    elif provider in {"openai", "openrouter"} and mode in {"priority", "fast", "flex", "ultrafast"}:
+        code = native_error.get("code")
+        if mode == "flex" and status in {400, 429, 503} and code in ("resource_unavailable", "unsupported_service_tier"):
+            return "capacity"
+        elif status == 400:
+            tier_param = native_error.get("param") == "service_tier"
+            if code == "unsupported_service_tier" or (tier_param and code in ("unsupported_parameter", "unsupported_value")):
+                return "unsupported"
+    return ""
+
+
 def typed_values(exc: Any, answer: ProviderAnswer) -> List[str]:
     """Every typed value on a failure's current path, first seen first: the exception's ``code``/``type``, each
     party's codes outermost first, then its capture's. An engine-typed problem speaks through the first alone."""
@@ -585,15 +940,22 @@ def physical_failure_evidence(root, attempt_id: str, *, payload, exc=None, respo
         getattr(response, "status_code", None), error.get("code"), error.get("type"), "")
     # Provider strings can contain echoed prompt text or secrets. The complete
     # private source is the diagnostic authority; the row contains no free text.
-    facts = {"stage": "raised_exception" if exc is not None else "response_body_error",
+    body_error = exc is None or getattr(exc, "response_body_error", False)
+    facts = {"stage": "response_body_error" if body_error else "raised_exception",
              "exception_type": type(exc).__name__ if exc is not None else None,
              "provider_status_code": status if isinstance(status, int) else None,
              "provider_code": int(code) if str(code).isascii() and str(code).isdigit() and len(str(code)) < 10 else None,
              "transport_cause_type": attempt_custody_event_fields(exc).get("transport_cause_type") if exc is not None else None}
+    sdk_total = getattr(getattr(exc, "response", None), "total_cost_usd", None)
+    alternate = getattr(exc, "refusal_alternate_payload", None)
+    prior = getattr(exc, "stream_prior_usage", None)
     try:
         facts["evidence_ref"] = write_blob(root, {"attempt_id": attempt_id, "body": payload,
             "exception_type": facts["exception_type"], "message": str(exc) if exc is not None else None,
             "provider_code": code, "provider_error_type": error_type,
+            **({"reported_total_cost_usd": sdk_total} if sdk_total is not None else {}),
+            **({"alternate_body": alternate} if alternate is not None else {}),
+            **({"stream_prior_usage": prior} if prior is not None else {}),
             "stream_usage": getattr(exc, "stream_usage", None),
             "stream_receipt": getattr(exc, "stream_receipt", None),
             "stream_evidence": getattr(exc, "stream_evidence", None)})

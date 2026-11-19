@@ -59,7 +59,7 @@ export function modelSearchField(doc, listId) {
  * `{ paint, destroy }`.
  */
 export function createModelList({ el, input, id, store, main, current, recents, follows = () => false, mainRow = 'follow',
-    mainFacts = null, tierOf = () => '', onRoute, onPin = () => {}, onSettings = () => {}, onLeave = () => {},
+    mainFacts = null, tierOf = () => undefined, onRoute, onPin = () => {}, onSettings = () => {}, onLeave = () => {},
     onPaint = () => {} }) {
     // `key` is the active row's model (its data-row), `nav` whether the arrows made it active, `shown` the row and cell
     // last scrolled into view.

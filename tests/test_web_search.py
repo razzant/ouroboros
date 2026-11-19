@@ -141,7 +141,8 @@ def test_responses_flex_refusal_reprices_standard_and_keeps_original_intent(ctx,
     with ua._locked(holds[0].drive_root):
         records = ledger_rows(holds[0].drive_root)
     matching = [row for row in records if row.get("candidate_raw_sha256") == prepared[0].candidate_raw_sha256]
-    assert matching[-1]["state"] == "released"
+    assert (matching[-1]["state"], matching[-1]["settle_reason"]) == ("settled", "processing_not_started")
+    assert (matching[-1]["cost_usd"], matching[-1]["cost_final"]) == (None, False)
     for request in prepared:
         assert request.effort == {
             "requested": "high", "sent": {"reasoning": {"effort": "high"}},
@@ -199,12 +200,12 @@ def test_web_search_uses_official_openai_responses(monkeypatch):
     assert {key: result[key] for key in ("answer", "answer_type", "sources", "backend")} == {"answer": "fresh answer", "answer_type": "summary", "sources": [], "backend": "openai_responses"}
     assert result["legs_tried"][0]["model"] == "gpt-5.2"
     assert calls["api_key"] == "openai-key"
-    assert calls["base_url"] is None
+    assert calls["base_url"] == "https://api.openai.com/v1"
     assert calls["kwargs"]["model"] == "gpt-5.2"
     assert calls["kwargs"]["stream"] is True
     assert calls["kwargs"]["tools"][0]["type"] == "web_search"
     assert request_ctx.pending_events[0]["provider"] == "openai"
-    assert request_ctx.pending_events[0]["model"] == "gpt-5.2"
+    assert request_ctx.pending_events[0]["model"] == "openai/gpt-5.2"
 
 
 def test_web_search_falls_back_to_openrouter_server_tool(monkeypatch):
@@ -724,7 +725,7 @@ def test_web_search_rechecks_owner_deadline_after_client_preparation(
     assert calls == []
 
 
-def _captured_provider_error(*, provider="openrouter", status=None):
+def _captured_provider_error(*, provider="openrouter", status=None, error_type=""):
     from ouroboros.usage_accounting import PhysicalAttemptCapture
 
     exc = RuntimeError("provider transport ended")
@@ -735,11 +736,13 @@ def _captured_provider_error(*, provider="openrouter", status=None):
         state="unresolved",
         candidate_measurement_kind="opaque",
         provider_status_code=status,
+        provider_error_type=error_type,
     )
     return exc
 
 
-def test_openrouter_ambiguous_outcome_stops_cross_provider_cascade(ctx, monkeypatch):
+@pytest.mark.parametrize("status", [None, 503])
+def test_openrouter_ambiguous_outcome_stops_cross_provider_cascade(ctx, monkeypatch, status):
     from ouroboros import llm
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -748,7 +751,7 @@ def test_openrouter_ambiguous_outcome_stops_cross_provider_cascade(ctx, monkeypa
     monkeypatch.delenv("OUROBOROS_WEBSEARCH_BACKEND", raising=False)
     monkeypatch.setattr(
         llm, "openrouter_web_search_server_tool",
-        lambda **_kwargs: (_ for _ in ()).throw(_captured_provider_error()),
+        lambda **_kwargs: (_ for _ in ()).throw(_captured_provider_error(status=status)),
     )
     monkeypatch.setattr(
         search_module, "_web_search_anthropic",
@@ -809,7 +812,7 @@ def test_terminal_openrouter_status_allows_next_backend(ctx, monkeypatch):
     monkeypatch.setattr(
         llm, "openrouter_web_search_server_tool",
         lambda **_kwargs: (_ for _ in ()).throw(
-            _captured_provider_error(status=503)
+            _captured_provider_error(status=503, error_type="overloaded_error")
         ),
     )
     monkeypatch.setattr(
@@ -825,18 +828,46 @@ def test_terminal_openrouter_status_allows_next_backend(ctx, monkeypatch):
     assert [leg["outcome"] for leg in result["legs_tried"]] == ["failed", "succeeded"]
 
 
-def test_explicit_web_503_allows_one_safe_retry(ctx, patch_env, monkeypatch):
+@pytest.mark.parametrize("status,body", [
+    (408, None), (429, "gateway unavailable"), (503, {"error": {"code": 503}}),
+    (502, {"error": {"type": "server_error"}}),
+])
+def test_opaque_http_failure_after_dispatch_holds_one_search(ctx, patch_env, mock_openai, monkeypatch, tmp_path,
+                                                            status, body):
+    ctx.task_metadata["budget_drive_root"] = str(tmp_path)
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_BACKEND", "auto")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-fallback")
+    monkeypatch.setattr(search_module, "_web_search_openrouter", lambda *a, **k: pytest.fail("duplicate search"))
+    error = RuntimeError("indeterminate upstream reply")
+    error.status_code, error.body = status, body
+    mock_openai.responses.create.side_effect = error
+    result = json.loads(_web_search(ctx, "query"))
+    mock_openai.responses.create.assert_called_once()
+    [row] = ledger_rows(tmp_path)
+    [leg] = result["legs_tried"]
+    assert row["state"] == "unresolved" and leg["ledger_attempt_ids"] == [row["attempt_id"]]
+    assert leg["outcome"] == result["reason_code"] == "provider_outcome_unknown"
+
+
+@pytest.mark.parametrize("connect_timeout", [False, True], ids=["typed-rate-limit", "unsent-timeout"])
+def test_known_search_outcome_allows_one_safe_retry(ctx, patch_env, monkeypatch, tmp_path, connect_timeout):
+    import httpx
+
+    ctx.task_metadata["budget_drive_root"] = str(tmp_path)
     calls = 0
 
-    class _Terminal503(Exception):
-        status_code = 503
+    class _RateLimited(Exception):
+        status_code = 429
+        body = {"error": {"code": "rate_limit_exceeded"}, "usage": {"cost": 0, "output_tokens": 0}}
 
     class _Responses:
         def create(self, **_kwargs):
             nonlocal calls
             calls += 1
             if calls == 1:
-                raise _Terminal503("service unavailable")
+                if connect_timeout:
+                    raise httpx.ConnectTimeout("no connection")
+                raise _RateLimited("rate limit")
             return _FakeStream([
                 _make_event("response.output_text.delta", delta="recovered"),
                 _make_completed_event(),
@@ -851,9 +882,14 @@ def test_explicit_web_503_allows_one_safe_retry(ctx, patch_env, monkeypatch):
 
     assert calls == 2
     assert result["answer"] == "recovered"
+    rows = ledger_rows(tmp_path)
+    assert [row["state"] for row in rows] == ["released" if connect_timeout else "settled", "settled"]
+    if not connect_timeout:
+        assert (rows[0]["cost_usd"], rows[0]["cost_final"]) == (0, True)
+    assert result["legs_tried"][0]["ledger_attempt_ids"] == [row["attempt_id"] for row in rows]
 
 
-def test_streamed_web_503_preserves_status_for_one_safe_retry(ctx, patch_env, monkeypatch):
+def test_streamed_typed_overload_before_work_allows_one_retry(ctx, patch_env, monkeypatch):
     calls = 0
 
     class _Responses:
@@ -864,7 +900,8 @@ def test_streamed_web_503_preserves_status_for_one_safe_retry(ctx, patch_env, mo
                 return _FakeStream([
                     _make_event(
                         "response.failed",
-                        error=types.SimpleNamespace(message="service unavailable", status_code=503),
+                        response=types.SimpleNamespace(error=types.SimpleNamespace(
+                            message="service unavailable", status_code=503, type="overloaded_error")),
                     )
                 ])
             return _FakeStream([
@@ -899,21 +936,33 @@ def test_streaming_no_progress_without_search_events(ctx, patch_env, mock_openai
     assert data["answer"] == "Direct answer"
 
 
-def test_streaming_empty_text_engages_cascade(ctx, patch_env, mock_openai):
-    """NW-11: an empty OpenAI result (no text AND no sources) is a soft failure,
-    not a successful "(no answer)" — it must fall through to the provider
-    cascade so a working fallback backend is not shadowed. With no fallback
-    backend configured here, the cascade is exhausted and an error is returned
-    (NOT a fake "(no answer)" success)."""
+@pytest.mark.parametrize("has_fallback", [False, True])
+def test_streaming_empty_text_engages_cascade(ctx, patch_env, mock_openai, monkeypatch, has_fallback):
+    """NW-11: a confirmed empty completion is a soft failure, not a fabricated answer or a same-leg repeat."""
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_BACKEND", "auto")
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_MODEL", "")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    fallback = MagicMock(return_value=json.dumps({"answer": "another source"}))
+    monkeypatch.setattr(search_module, "_web_search_openrouter", fallback)
+    if has_fallback:
+        monkeypatch.setenv("OPENROUTER_API_KEY", "fallback")
+    else:
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     events = [_make_completed_event(10, 0)]
     mock_openai.responses.create.return_value = _FakeStream(events)
 
-    result = _web_search(ctx, "empty query")
-
-    data = json.loads(result)
-    assert "answer" not in data
-    assert "error" in data
+    data = json.loads(_web_search(ctx, "empty query"))
+    mock_openai.responses.create.assert_called_once()
     assert any("no answer and no sources" in e for e in data.get("backend_errors", []))
+    if has_fallback:
+        fallback.assert_called_once()
+        assert data["answer"] == "another source"
+        assert [(leg["source"], leg["outcome"]) for leg in data["legs_tried"]] == [
+            ("openai", "failed"), ("openrouter", "succeeded")]
+    else:
+        fallback.assert_not_called()
+        assert "error" in data and "answer" not in data
+        assert len(data["legs_tried"]) == 1
 
 
 def test_streaming_progress_fires_only_once(ctx, patch_env, mock_openai):

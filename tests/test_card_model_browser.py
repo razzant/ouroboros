@@ -172,6 +172,13 @@ def _serve(page, stand: Stand) -> None:
     page.route("**/api/tasks/*/model", task)
     page.route("**/api/owner/chat-model", lambda route: route.fulfill(json=stand.chat_model(json.loads(route.request.post_data or "{}"))))
 
+    def settings(route):  # the real document and its tokens, Main as this stand has it: a change of Main is read on it
+        if route.request.method != "GET":
+            return route.continue_()
+        route.fulfill(json={**route.fetch().json(), "OUROBOROS_MODEL": stand.main["model"], "USE_LOCAL_MAIN": False})
+
+    page.route(re.compile(r"/api/settings$"), settings)
+
 
 _CARDS = """() => {
     const attached = (part, fact) => {
@@ -355,7 +362,7 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
     assert [row[0] for row in pop["rows"][1:3]] == [f"route|{GLM}", f"route|{KIMI}"] and pop["sections"][0] == "Recent", pop
     assert pop["rows"][2][1] == "true", "the work's own model is the chosen row"
     assert pop["field"] and pop["inside"], pop
-    assert pop["scope"] == f"Default · Standard · {WORK_SCOPE}", ("its tier applies from its next call", pop)
+    assert pop["scope"] == f"Default · {WORK_SCOPE}", ("its tier applies from its next call", pop)
     # Safari's Tab reaches only fields unless "Press Tab to highlight each item" is on; Option+Tab reaches every control.
     keys = ("Alt+Tab", "Alt+Shift+Tab") if tag.startswith("webkit") else ("Tab", "Shift+Tab")
     stack, coarse = page.evaluate("() => [document.documentElement.dataset.layout === 'stack', document.documentElement.dataset.pointer === 'coarse']")
@@ -392,7 +399,7 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
     page.wait_for_timeout(350)
     pop = page.evaluate(_POPOVER)
     assert pop["acts"] == [] and pop["title"] == "Model for this work · follows Main", pop
-    assert pop["scope"] == f"Default · Standard · {QUEUED_SCOPE}", ("a queued work's tier applies when it starts", pop)
+    assert pop["scope"] == f"Default · {QUEUED_SCOPE}", ("a queued work's tier applies when it starts", pop)
     assert pop["rows"][0][1] == "true" and pop["inside"], pop
     shoot("3-queued")
     page.click(f'.ui-popup.model-sheet .chat-model-row[data-row="route|{GLM}"] .chat-model-cell')
@@ -452,6 +459,9 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
     sent = len(stand.writes)
     page.click(".confirm-dialog [data-confirm-ok]")
     page.wait_for_function("() => document.querySelector('.confirm-dialog h3')?.innerText === 'Main changed'", timeout=10_000)
+    main_write = stand.writes[sent][2]
+    assert set(main_write.pop("if_unchanged")) == {"OUROBOROS_MODEL", "USE_LOCAL_MAIN", "OUROBOROS_MODEL_ACCOUNTS",
+                                                  "OUROBOROS_MODEL_PROCESSING_PREFERENCES"}, "Main is written on the binding read"
     assert stand.writes[sent:] == [("main", "", {"kind": "model", "model": GLM, "use_local": False}),
                                    ("task", "t-fallback", {"action": "follow"}), ("room", "p7", {"kind": "main"})], stand.writes
     moves = page.evaluate(_SHEET)

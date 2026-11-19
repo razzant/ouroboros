@@ -66,7 +66,9 @@ export function catalogReadState(data = {}) {
     return Array.isArray(data.items) ? 'ok' : 'not_read';
 }
 
-/** Enrich the existing editor state; a read gap cannot erase last-known choices. */
+/** Enrich the existing editor state; a read gap cannot erase last-known choices. `current` is the answer this read
+ *  itself gave (null when it listed nothing): what a gap keeps from an earlier read is shown and proves nothing of
+ *  what an account or a transport serves now (chat_model_routes.js `tiers`). */
 export function mergeModelCatalog(previous = {}, incoming = {}) {
     const read_state = catalogReadState(incoming);
     const retain = read_state !== 'ok';
@@ -88,6 +90,7 @@ export function mergeModelCatalog(previous = {}, incoming = {}) {
         errors: incoming.errors || (incoming.error ? [{ error: incoming.error }] : []),
         items: merge('items', (item) => JSON.stringify([item.value || item.id, item.credential_profile_id || ''])),
         model_sources: merge('model_sources', (source) => source.id),
+        current: 'current' in incoming ? incoming.current : Array.isArray(incoming.items) ? incoming : null,
     };
 }
 
@@ -216,6 +219,12 @@ function fillCatalogDatalist(data) {
         }
     }
     broadcastCatalog(data);
+}
+
+/** A connection changed: a catalog read already out answers for the earlier source, so it is not broadcast (nor
+ *  adopted by any reader); the next refresh is this source's. */
+export function invalidateModelCatalogReads() {
+    catalogRefreshSeq += 1;
 }
 
 export async function refreshModelCatalog({ button } = {}) {

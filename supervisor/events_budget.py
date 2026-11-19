@@ -40,6 +40,10 @@ from supervisor.log_addressing import address_task_event as _address_task_event
 def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     usage_raw = evt.get("usage")
     usage: Dict[str, Any] = usage_raw if isinstance(usage_raw, dict) else {}
+    # Earlier search emitters kept the raw BYOK fee in usage, beside the normalized total (possibly null).
+    if (evt.get("source") == "web_search" and evt.get("provider") == "openrouter"
+            and "cost_final" in evt and "cost" in evt):
+        usage = {**usage, "cost": evt["cost"], "cost_final": evt["cost_final"], "cost_estimated": False}
 
     # Real-progress signal (activity model): a completed LLM round is genuine work,
     # not just process liveness. Stamp last_progress_at so the timeout enforcer keeps

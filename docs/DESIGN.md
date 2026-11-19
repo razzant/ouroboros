@@ -520,18 +520,24 @@ The catalog suggests and never admits: any id can be used as typed. It is read w
 Under a finger opening raises no keyboard: the field takes focus on its own press. Escape clears the field, then
 closes. A room's pick posts at once and closes; Send waits for it, Panic never does.
 
-**The tier strip** stands at the sheet's foot: `Flex · Standard · Fast` (Flex is the stored `economy`), `Ultrafast` too
-where the route's source and model both list it and never for Main, the scope's own choice filled, `Default` beside
-it while there is one to leave. Default takes Main's tier while the scope follows Main, else the default one, and that
-tier wears a ring; an explicit Standard is a choice, never Default. Under it what the choice applies to and now is
-(`Default · Standard as Main · for new work here and its new subagents without a tier of their own; running work keeps
-its own`; in the Main chat `for Main, 3 running works that follow it and their new subagents`, counting only works on
-Main without a tier of their own; on a card `for this work from its next call and its new subagents …`, its last call's
-deviation in the sheet's head) and, under the mouse or focus before any press (a finger only taps), in a line as tall
-as its tallest, what that tier means on this route: listed, `Not confirmed for <model> here: a provider may serve it
-as Standard`, or `<source> does not list <tier> for <model>: its calls go as Standard`. No tier is refused or waited
-for; a proven refusal before generation continues as Standard, its receipt keeping the tier asked, which the card
-then says. Each work captures its room's tier once at admission; a press writes at once and leaves the sheet open.
+**The tier strip** at the Model sheet's foot offers Flex (`economy`), Standard, Fast and Ultrafast for the current
+model, transport and account: a follower reads Main's pin or Auto on opening, unknown until confirmed; an own model uses Auto.
+Partial evidence reads “some accounts” or “not confirmed”, dotted; a tier the host transport cannot carry, “not sent”.
+Offer new Ultrafast only on a transport known to carry it. Keep saved choices and distinct inherited tiers. Hide
+Standard alone only when inherited processing already means Standard. An own choice is filled, with Default beside
+it; an inherited one wears a ring. With no tier requested the route decides (OpenRouter: its workspace default).
+
+Below, say who takes the choice: a room's new work at admission, Main and work inheriting its tier (even on a
+fallback), a card's work from its next call, and new subagents without their own tier. Hover or focus
+previews in space kept for the longest explanation. A key's rate or range needs a complete priced endpoint list for
+that model and tier, else “Price unknown”. A press saves in place; a proven refusal before generation can continue on
+Standard, and the card shows the receipt.
+
+**Ultrafast for Main asks first** when enabled or moved. Show model, account, known price or uncertainty, and
+scope: Main, inheriting work and fallbacks, new helpers, direct Main review and Safety falling back to Main without an override.
+Before rollback choose Standard or Default. A changed route, pin, account or key invalidates the answer. Auto follows
+its pool. Confirm in Models or switch the waiting task. A role hides redundant Standard-only processing, not a saved
+override or distinct inherited default. An empty Supervisor names its inherited route, account and tier.
 
 Each is a neutral **capsule** of the pills' height — glyph, name, value: `Main gpt-6-astra`, `Subagents Auto`,
 `Context Max`, `Effort X-High`; the name in secondary ink at 500, the value in meta ink at 600,
@@ -2505,19 +2511,18 @@ the label they pressed. This includes the primary's citation while the work runs
 identifies a primary awaiting application. Authored text keeps its exact case and whitespace and is never translated.
 CSS alone clips a long quotation, the shared `Show all` / `Show less` control exposes the complete published span
 by press or tap, and an excerpt marked by the server is labelled as an excerpt. When the next step will run on another route the
-fact shows both, `gpt-6-astra → glm-5.3 at the next step` (`when it starts` for a queued work), so a change of
-Main never looks failed while a call in flight finishes. Where the server offers the work's `model` control the
-fact is a quiet capsule in the line's own ink (stronger for a model of the work's own) that opens the Model sheet
-anchored to it, so nothing in the transcript moves: whose model this is first, then the field, the list and this
-work's own tier. The list's Main row is the one way to follow Main, and its facts say so (`this work will follow
-Main`; `this work follows Main` on a follower). A pick or a tier is one act, and its answer says when it applies:
+fact shows both, `gpt-6-astra → glm-5.3 at the next step` (`when it starts` for a queued work). Where offered,
+the model capsule opens the anchored sheet without moving the transcript: acting model first, then the field,
+list and tier for the next route and its account, if known. Only the Main row follows Main (`this work will follow Main`;
+`this work follows Main` on a follower). A pick or a tier is one act, and its answer says when it applies:
 `Switches at the next step; the running call finishes.` or, for a queued work, `Applies when it starts.`; a tier
 act moves nothing else (its fallback, wait, account and window stay); new subagents without a tier of their own take
 the tier the work runs on, Main's included, started ones keep theirs.
-After the model the line names a tier other than Standard and, when its newest call was served otherwise, that too
-(`Fast · Fast asked · served Standard`). A refused act is said in the popover in the owner's
-words, by the server's reason; when the server saved the decision and only its delivery failed, `Retry` sends
-the same request again. Without the offered control the fact is plain text: a control is the
+After the model the line names a tier other than Standard and what its newest call came to when that differs:
+`Ultrafast asked · served Fast` (the provider's word), `Fast asked · sent as Standard` (a native setting or the host's
+continuation), `· sent with no tier`, `· served mixed tiers`, `· provider said auto` (no tier's word), `· not
+confirmed` (no field). A refused act is said in the popover by the server's reason; when only its delivery failed,
+`Retry` sends the same request. Without the offered control the fact is plain text: a control is the
 server's decision and is never guessed. A card whose work publishes no such fact (an older record, a child, a
 portal) keeps the line below. On a narrow card the source gives way before the model's name.
 An owner move on a wait card uses ordinary ink, names the unchanged primary it left, and offers the ordinary model

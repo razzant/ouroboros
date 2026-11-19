@@ -323,3 +323,14 @@ test('a vendor message that ends in a period does not produce a double stop', ()
     assert.match(note, /proton4: The selected managed Codex account requires sign-in\. 1 API model loaded\./);
     assert.doesNotMatch(note, /sign-in(\.\.|\.;|;)/);
 });
+
+test('a merge marks what this read itself said: what a gap keeps for the list is not that read\'s word', () => {
+    const merged = mergeModelCatalog({}, first);
+    assert.equal(merged.current, first, 'a whole read is its own word');
+    const partial = { items: [{ value: 'openai::new' }], model_sources: [], errors: [{ error: 'daemon unreachable' }] };
+    const kept = mergeModelCatalog(merged, partial);
+    assert.deepEqual([kept.items.length, kept.current], [first.items.length + 1, partial], 'the earlier rows stay listed; only the new answer is this read\'s');
+    const offline = mergeModelCatalog(kept, { read_state: 'transport', errors: [{ error: 'network offline' }] });
+    assert.deepEqual([offline.items.length, offline.current], [kept.items.length, null], 'a read that listed nothing said nothing');
+    assert.equal(mergeModelCatalog({}, kept).current, partial, 'a catalog merged before keeps the mark it has');
+});

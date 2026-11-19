@@ -148,13 +148,14 @@ def _check_budget_limits(
             global_remaining is not None or (cost_ceiling.root_cap_usd is not None and deciding is not None)):
         finish_reason = task_pacing.wrapup_last_fit_text(deciding, cost_ceiling, global_remaining)
         forced_prompt = f"[BUDGET LIMIT] {finish_reason} {_loop()._FORCED_BEST_EFFORT_TAIL}"
-        request_args = dict(model=ctx.active_model, prompt_tokens=prompt_estimate,
-                            use_local=ctx.active_use_local)
+        request_args = dict(model=ctx.active_model, llm=ctx.llm, prompt_tokens=prompt_estimate,
+                            use_local=ctx.active_use_local, screen=True,
+                            processing_preference=task_pacing.wrapup_model_options(ctx)["processing_preference"])
         balances = dict(root_cap_usd=cost_ceiling.root_cap_usd, deciding_usd=deciding,
                         global_remaining_usd=global_remaining)
         wrapup_args = dict(**request_args, **balances)
         wrapup_fits = task_pacing.wrapup_reservation_fits(**wrapup_args)
-        two_fit = _second_reservation_fits(ctx, wrapup_args, wrapup_fits, relaxed=last_fit_relaxed)
+        two_fit = _second_reservation_fits(ctx, wrapup_args, wrapup_fits, relaxed=False)
         server_web = _loop()._server_web_allowed_by_task(getattr(getattr(ctx, "tools", None), "_ctx", None))
         if wrapup_fits is False or two_fit is False or (
             wrapup_fits is True and messages_carry_native_images(ctx.messages)
@@ -283,8 +284,9 @@ def _exact_reservations(ctx: "_RoundLimitContext", probe_messages: list, balance
             llm=ctx.llm, messages=probe_messages, model=ctx.active_model,
             reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
             allow_server_web_search=server_web, prompt_tokens=prompt_estimate,
+            **task_pacing.wrapup_model_options(ctx),
         )
-    wrapup_args = dict(request=probe, **balances)
+    wrapup_args = dict(request=probe, **balances, allow_ordinary_lookup=True)
     fits = task_pacing.wrapup_reservation_fits(**wrapup_args)
     return fits, _second_reservation_fits(ctx, wrapup_args, fits, relaxed=relaxed)
 
@@ -422,7 +424,7 @@ def _soft_land_exhausted_ceiling(
     admission = dict(root_cap_usd=cost_ceiling.root_cap_usd, deciding_usd=deciding or 0.0,
                      global_remaining_usd=_wrapup_global_remaining() if not limit_ctx.active_use_local else None,
                      use_local=limit_ctx.active_use_local)
-    if task_pacing.wrapup_reservation_fits(request=request, **admission) is False:
+    if task_pacing.wrapup_reservation_fits(request=request, **admission, allow_ordinary_lookup=True) is False:
         limit_ctx.accumulated_usage["cost_stop_rail"] = "wrapup_reservation_last_fit"
         return _loop()._forced_fallback_result(
             limit_ctx, trace, soft_land_reason, "budget_exhausted",

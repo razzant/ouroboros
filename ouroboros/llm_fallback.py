@@ -20,6 +20,7 @@ import time
 from dataclasses import replace
 from typing import Any, Dict, Optional
 
+from ouroboros._usage_response import _plain, refusal_failure_payload
 from ouroboros.model_concurrency import limit_physical_send
 
 from ouroboros.llm_attempt import (
@@ -32,6 +33,7 @@ from ouroboros.llm_attempt import (
     _is_provider_policy_refusal,
     is_size_refusal,
     preserve_prior_dispatch,
+    ProcessingNotStarted,
     strongest_dispatch_capture,
     processing_refusal,
     reasoning_strip_retry_allowed,
@@ -42,7 +44,7 @@ from ouroboros.pricing_catalog import pin_tariff
 from ouroboros.llm_stream import consume_stream, consume_stream_async
 from ouroboros.openai_responses import responses_route
 from ouroboros.provider_models import OPENAI_API_SURFACES
-from ouroboros.transport_custody import ProviderNotDispatched
+from ouroboros.transport_custody import ProviderNotDispatched, is_processing_refusal
 from ouroboros.reasoning_artifacts import (
     note_replay_omission,
     pop_reasoning_pin_note,
@@ -76,6 +78,23 @@ def _response_body_error(client: Any, response: Any) -> Optional[Dict[str, Any]]
         return None
 
 
+def _check_received_tier_error(client, response, request, target, candidate):
+    """Adapt a returned body error to the same physical failure as an SDK exception."""
+    if request.submitted_processing_mode not in {"priority", "flex", "fast", "ultrafast"}:
+        return
+    body = _plain(response)
+    native = client._provider_body_error(body)
+    if native:
+        error = RuntimeError(str(native.get("message") or "Provider refused the submitted processing tier"))
+        error.status_code, error.body = native.get("status_code", native.get("code")), body
+        error.response, error.response_body_error = response, True
+        refusal = processing_refusal(target, candidate, error)
+        if refusal is not error:
+            raise refusal from error
+        if is_processing_refusal(error):
+            raise error
+
+
 def _with_tariff(request, target: Dict[str, Any], candidate: Dict[str, Any]):
     """The request with the selected key's price evidence pinned before reservation (DeepSeek only; else no I/O),
     merged into what it already carries. The input kind is a fact of the final candidate, never its content: text
@@ -101,7 +120,7 @@ class _RecoveryLadderMixin:
         exc: BaseException,
     ) -> Optional[Dict[str, Any]]:
         """Remove only an explicitly rejected cache control or affinity once."""
-        if getattr(exc, "stream_incomplete", False):
+        if getattr(exc, "stream_incomplete", False) or is_processing_refusal(exc):
             return None
         if is_size_refusal(exc) or _is_provider_policy_refusal(exc):
             return None
@@ -198,7 +217,7 @@ class _RecoveryLadderMixin:
                 return None
             status, receipt = error.get("code"), body.get("openrouter_metadata")
         else:
-            if _is_provider_policy_refusal(failure) or isinstance(failure, ProviderNotDispatched):
+            if _is_provider_policy_refusal(failure) or isinstance(failure, ProviderNotDispatched) or is_processing_refusal(failure):
                 return None
             streamed = getattr(failure, "stream_receipt", None)
             if getattr(failure, "stream_incomplete", False) and not (
@@ -440,6 +459,8 @@ class _RecoveryLadderMixin:
         create_fn: Any,
         kwargs: Dict[str, Any],
         target: Dict[str, Any],
+        *,
+        search_server_tool: bool = False,
     ) -> Any:
         # Discard a prior aborted ladder's pin note and omission fact.
         pop_reasoning_pin_note()
@@ -457,13 +478,17 @@ class _RecoveryLadderMixin:
                 timeout = physical_dispatch_timeout(transport_timeout)
                 try:
                     response = create_fn(**candidate, **({"timeout": timeout} if timeout is not None else {}))
+                    if candidate.get("stream"):
+                        response = consume_stream(response, expected_choices=candidate.get("n", 1), responses=responses_route(target))
                 except Exception as error:
+                    if search_server_tool:
+                        refusal_failure_payload(error)  # Retain charges on non-tier search failures too.
                     refusal = processing_refusal(target, candidate, error)
                     if refusal is error:
                         raise
                     raise refusal from error
-                return consume_stream(response, expected_choices=candidate.get("n", 1),
-                                      responses=responses_route(target)) if candidate.get("stream") else response
+                _check_received_tier_error(self, response, request, target, candidate)
+                return response
 
             try:
                 result = _execute_candidate(
@@ -471,7 +496,7 @@ class _RecoveryLadderMixin:
                     limit_physical_send(target, dispatch),
                     _candidate_before_dispatch(candidate, request),
                 )
-                note_wire_send_succeeded(last_physical_attempt_capture())
+                note_wire_send_succeeded(last_physical_attempt_capture(), target, unpriced_add_on=request.unpriced_add_on)
                 prior_capture = strongest_dispatch_capture(prior_capture, last_physical_attempt_capture())
                 self._stage_reasoning_pin_disclosure(candidate)
                 # Only a generated answer means the model read this send; a body error read nothing.
@@ -544,9 +569,18 @@ class _RecoveryLadderMixin:
                 self._pop_effort_clamp_disclosure()
                 raise
 
-        if single_physical_send_active():
+        if single_physical_send_active() or search_server_tool:
             try:
-                return _send(kwargs)  # preserve the repeat's error/body; no repair or affinity mutation
+                try:
+                    return _send(kwargs)
+                except ProcessingNotStarted as exc:
+                    if single_physical_send_active():
+                        raise
+                    # Only a refusal before generation bound to this candidate permits a Standard retry.
+                    standard = plan_next_wire_retry(kwargs, error=exc, target=target, processing_only=True)
+                    if standard is None:
+                        raise
+                return _send(standard)
             except Exception:
                 self._pop_effort_clamp_disclosure()
                 raise
@@ -590,7 +624,7 @@ class _RecoveryLadderMixin:
             except UsageAccountingError:
                 raise
             except Exception as exc:
-                if _is_provider_policy_refusal(exc):
+                if _is_provider_policy_refusal(exc) or is_processing_refusal(exc):
                     # A refused call is not a provider answer to fall back FROM.
                     self._pop_effort_clamp_disclosure()
                     raise
@@ -607,7 +641,7 @@ class _RecoveryLadderMixin:
             except UsageAccountingError:
                 raise
             except Exception as exc:
-                if _is_provider_policy_refusal(exc):
+                if _is_provider_policy_refusal(exc) or is_processing_refusal(exc):
                     self._pop_effort_clamp_disclosure()
                     raise
                 return resp
@@ -638,13 +672,15 @@ class _RecoveryLadderMixin:
                 timeout = physical_dispatch_timeout(transport_timeout)
                 try:
                     response = await create_fn(**candidate, **({"timeout": timeout} if timeout is not None else {}))
+                    if candidate.get("stream"):
+                        response = await consume_stream_async(response, expected_choices=candidate.get("n", 1), responses=responses_route(target))
                 except Exception as error:
                     refusal = processing_refusal(target, candidate, error)
                     if refusal is error:
                         raise
                     raise refusal from error
-                return await consume_stream_async(response, expected_choices=candidate.get("n", 1),
-                                                  responses=responses_route(target)) if candidate.get("stream") else response
+                _check_received_tier_error(self, response, request, target, candidate)
+                return response
 
             try:
                 result = await _execute_candidate_async(
@@ -652,7 +688,7 @@ class _RecoveryLadderMixin:
                     limit_physical_send(target, dispatch),
                     _candidate_before_dispatch(candidate, request),
                 )
-                note_wire_send_succeeded(last_physical_attempt_capture())
+                note_wire_send_succeeded(last_physical_attempt_capture(), target, unpriced_add_on=request.unpriced_add_on)
                 prior_capture = strongest_dispatch_capture(prior_capture, last_physical_attempt_capture())
                 self._stage_reasoning_pin_disclosure(candidate)
                 # Only a generated answer means the model read this send; a body error read nothing.
@@ -767,7 +803,7 @@ class _RecoveryLadderMixin:
             except UsageAccountingError:
                 raise
             except Exception as exc:
-                if _is_provider_policy_refusal(exc):
+                if _is_provider_policy_refusal(exc) or is_processing_refusal(exc):
                     # A refused call is not a provider answer to fall back FROM.
                     self._pop_effort_clamp_disclosure()
                     raise
@@ -784,7 +820,7 @@ class _RecoveryLadderMixin:
             except UsageAccountingError:
                 raise
             except Exception as exc:
-                if _is_provider_policy_refusal(exc):
+                if _is_provider_policy_refusal(exc) or is_processing_refusal(exc):
                     self._pop_effort_clamp_disclosure()
                     raise
                 return resp

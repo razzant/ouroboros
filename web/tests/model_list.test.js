@@ -262,7 +262,7 @@ test('a catalog price is said only where the row\'s context pays the catalog\'s 
             tierOf: (seen, options) => { asked.push([seen.model, options]); return tierOf(seen, options); } });
         return { facts: Object.fromEntries(l.rows().map((entry) => [entry.key, entry.facts])), asked };
     };
-    const standard = facts(() => '');
+    const standard = facts(() => 'standard');
     assert.deepEqual(standard.facts, { main: 'OpenRouter · $4 in / $20 out', 'route|openai/gpt-6': 'OpenRouter · $1.25 in / $10 out',
         'route|z-ai/glm-5.3': 'OpenRouter · paid by key' });
     assert.deepEqual(standard.asked.find(([model]) => model === OPUS.value), [OPUS.value, { main: true }],
@@ -271,7 +271,7 @@ test('a catalog price is said only where the row\'s context pays the catalog\'s 
     for (const tier of ['fast', 'economy', 'ultrafast']) {
         assert.deepEqual(Object.values(facts(() => tier).facts), Array(3).fill('OpenRouter · paid by key'), `${tier} names no catalog price`);
     }
-    assert.deepEqual(facts(() => 'standard').facts, standard.facts, 'an explicit Standard pays it');
+    assert.equal(facts(() => '').facts.main, 'OpenRouter · Catalog rate · $4 in / $20 out');
     // Each row in its own context: Main on Fast, a lead on Standard.
     assert.deepEqual(facts((_seen, { main = false } = {}) => (main ? 'fast' : 'standard')).facts, { ...standard.facts, main: 'OpenRouter · paid by key' });
     assert.equal(routeFacts(describeRoute(store.index(), opus)), 'OpenRouter · $4 in / $20 out');

@@ -60,11 +60,27 @@ def report_attempt_end(capture: Any, error: Any) -> None:
 
 
 class ProviderNotDispatched(RuntimeError):
-    """A transport owner's positive receipt that generation never started.
+    """A transport owner's positive receipt that no provider request was dispatched.
 
     A local control-plane HTTP failure cannot mint this fact: an accepted
     remote operation may already have sent its provider request.
     """
+
+
+class ProcessingNotStarted(RuntimeError):
+    """The provider received this request and refused its tier before generation."""
+
+    def __init__(self, error: BaseException, *, reason: str):
+        super().__init__(str(error))
+        self.processing_reason = reason
+        for name in ("body", "code", "type", "status_code", "response", "stream_usage", "response_body_error"):
+            if hasattr(error, name):
+                setattr(self, name, getattr(error, name))
+
+
+def is_processing_refusal(error: Any) -> bool:
+    """Only the tier retry may handle these refusals, and only with proof of no work."""
+    return isinstance(error, ProcessingNotStarted) or getattr(error, "processing_refusal_conflict", False)
 
 
 def is_loopback_base_url(base_url: Any) -> bool:
@@ -105,6 +121,8 @@ def is_loopback_base_url(base_url: Any) -> bool:
 
 def is_pre_dispatch_transport_failure(exc: BaseException) -> bool:
     """Return true only for exceptions raised before request bytes can be sent."""
+    if is_processing_refusal(exc):
+        return False
     if isinstance(exc, ProviderNotDispatched):
         return True
     try:
@@ -122,6 +140,8 @@ def is_pre_dispatch_transport_failure(exc: BaseException) -> bool:
     current: BaseException | None = exc
     while isinstance(current, BaseException) and id(current) not in seen:
         seen.add(id(current))
+        if is_processing_refusal(current):
+            return False
         if isinstance(current, safe_types):
             return True
         # Only an explicit ``raise ... from ...`` chain carries transport
