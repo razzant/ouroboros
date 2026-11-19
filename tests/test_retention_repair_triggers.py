@@ -494,3 +494,41 @@ def test_a_transient_failure_of_the_same_source_stays_retryable(tmp_path, monkey
     # Transient I/O is walked again; the real refusal behind it is then remembered.
     assert observability.retry_pending_child_ref_promotions(parent)["retried"] == [task]
     assert observability.retry_pending_child_ref_promotions(parent)["unchanged"] == [task]
+
+
+def test_a_source_whose_place_cannot_be_learned_now_stays_owed_and_is_retried(tmp_path, monkeypatch):
+    """``EvidenceUnavailable`` (where the bytes lie cannot be learned now: the packs catalog is busy or awaits its
+    rebuild) is neither a missing nor a damaged source. The walk keeps the reference owed at its address
+    (``pending_refs`` with its child path, the child drive retained), records no unavailable source and remembers
+    nothing, so the next retry reads it again and promotes the exact bytes once they can be located. A source truly
+    missing keeps its own remembered gap (``test_unchanged_missing_inventory_waits_for_real_repair...``)."""
+    from ouroboros import evidence_packs as packs
+
+    parent, task = tmp_path / "canonical", "unknown-place"
+    child = headless.prepare_task_drive(parent, task, "empty")
+    call = observability.persist_call(child, task_id=task, call_id="call", call_type="tool_call",
+                                      payload={"tool": "read_file", "result": "exact bytes behind a busy catalog"})
+    payload = json.loads(Path(call["manifest_ref"]["path"]).read_text(encoding="utf-8"))["full_payload_ref"]
+    exact, real = packs.read_loose_gzip(Path(payload["path"])), packs.blob_bytes
+
+    def unlocatable(root, ref, **kwargs):
+        if ref.get("sha256") == payload["sha256"]:
+            raise packs.EvidenceUnavailable("evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, ref, **kwargs)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(packs, "blob_bytes", unlocatable)
+        write_task_result(child, task, "completed", result="answer", artifact_status="ready")
+        headless.copy_child_task_result(parent, {"id": task, "drive_root": str(child)})
+        assert observability.retry_pending_child_ref_promotions(parent)["pending"] == [task]  # the deferred walk
+        state = load_task_result(parent, task)["child_ref_promotion"]
+        assert state["status"] == "incomplete" and not state["unavailable_refs"], json.dumps(state)
+        owed = [row for row in state["pending_refs"] if row.get("sha256") == payload["sha256"]]
+        assert owed and owed[0]["path"] == payload["path"] and "EvidenceUnavailable" in owed[0]["reason"], json.dumps(state)
+        assert task_custody.settle_child_drive(parent, task, child, live=lambda _: False)["status"] == "retained"
+        report = observability.retry_pending_child_ref_promotions(parent)
+        assert report["retried"] == [task] and not report["unchanged"], report  # nothing remembered: read again
+        assert task not in (maintenance_jobs.job(parent, source_retention.MEMO_JOB) or {}).get("observed", {})
+    assert observability.retry_pending_child_ref_promotions(parent)["completed"] == [task]
+    assert packs.blob_bytes(parent, {**payload, "path": ""}) == exact
+    assert task_custody.settle_child_drive(parent, task, child, live=lambda _: False)["status"] == "removed"

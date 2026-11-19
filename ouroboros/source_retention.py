@@ -759,6 +759,24 @@ class RetentionWalk:
         with packs.part_cache_scope(packed_only=True):  # bounded: later views reuse the parts the sweep decoded
             self._drain()
 
+    def _owe(self, node, exc):
+        """Keep ``node`` owed at its address: a ``pending_refs`` fact (a source's at its child path), an incomplete walk,
+        its own ref as the result. A later walk reads it again; only a deterministic refusal is remembered."""
+        from ouroboros import observability as obs
+
+        pending_ref = node["ref"]
+        if node["kind"] == "source":
+            pending_ref = {**pending_ref, "path": str(self.child / "task_results" / "artifacts" /
+                                                       node["task_id"] / pending_ref["path"])}
+        fact = obs._promotion_fact(pending_ref, f"{type(exc).__name__}: {exc}")
+        if isinstance(exc, InvalidRetainedSource):
+            # Deterministic: remembered by basis until a watched file changes.
+            fact.update(failure_kind="invalid_source", watched_paths=sorted(set(exc.paths)))
+        obs._append_promotion_fact(self.state["pending_refs"], fact)
+        self.state["status"] = "incomplete"
+        node["result"] = dict(node["ref"])
+        node["failure"] = "pending"
+
     def _drain(self):
         from ouroboros import observability as obs
         from ouroboros.task_custody import PublicationClosed
@@ -777,6 +795,9 @@ class RetentionWalk:
                     if node["kind"] == "blob" and node["carrier"] == "response_ref" and node["ref"]["kind"] == "json":
                         # Under the root that physically held these bytes (``_read_source`` names the root it tried).
                         packs.remember_part(pathlib.Path(*data[1].parts[:-3]), node["ref"]["sha256"], data[0])
+            except packs.EvidenceUnavailable as exc:
+                self._owe(node, exc)  # where the bytes lie cannot be learned now: never an unavailable source
+                continue
             except (OSError, ValueError, TypeError, KeyError, EOFError, zlib.error) as exc:
                 reason = obs._task_source_failure_reason(exc) if node["kind"] == "source" else obs._promotion_source_error(exc).reason
                 obs._append_promotion_fact(self.state["unavailable_refs"],
@@ -791,18 +812,7 @@ class RetentionWalk:
             except PublicationClosed:
                 raise
             except Exception as exc:
-                pending_ref = node["ref"]
-                if node["kind"] == "source":
-                    pending_ref = {**pending_ref, "path": str(self.child / "task_results" / "artifacts" /
-                                                               node["task_id"] / pending_ref["path"])}
-                fact = obs._promotion_fact(pending_ref, f"{type(exc).__name__}: {exc}")
-                if isinstance(exc, InvalidRetainedSource):
-                    # Deterministic: remembered by basis until a watched file changes.
-                    fact.update(failure_kind="invalid_source", watched_paths=sorted(set(exc.paths)))
-                obs._append_promotion_fact(self.state["pending_refs"], fact)
-                self.state["status"] = "incomplete"
-                node["result"] = dict(node["ref"])
-                node["failure"] = "pending"
+                self._owe(node, exc)
             finally:
                 self.current_node = None
                 del data  # beyond the scope's bounded parts and one adjacent member, no raw/decoded payload cache
