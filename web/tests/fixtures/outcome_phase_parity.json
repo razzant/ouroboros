@@ -1214,6 +1214,24 @@
       "acceptance_clause": "A tool step failed."
     },
     {
+      "name": "a non-error completion refused further work stays a policy denial: no failed tool step is named",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [], "cosmetic_tool_errors": [], "policy_denials": [{"tool": "ext_9_r_stopper_send", "status": "blocked", "exit_code": null, "signal": null, "result": ""}]}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "", "exact_clause": true
+    },
+    {
+      "name": "an extension failure remains visible beside the host refusal",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "ext_9_r_stopper_send", "status": "extension_error", "tool_result_meta": {"refused_step": true, "control_reason": "cancelled"}}], "cosmetic_tool_errors": [], "policy_denials": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A tool step failed.", "exact_clause": true
+    },
+    {
+      "name": "an extension timeout remains visible beside the host refusal",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "ext_9_r_stopper_send", "status": "timeout", "tool_result_meta": {"refused_step": true, "control_reason": "cancelled"}}], "cosmetic_tool_errors": [], "policy_denials": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A tool step timed out.", "exact_clause": true
+    },
+    {
       "name": "an invalid call names what was called",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "finish_task", "status": "argument_error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",

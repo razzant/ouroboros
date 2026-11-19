@@ -816,9 +816,18 @@ html[data-layout="stack"] .resize-handle { display: none; }
     mask-image: linear-gradient(180deg, black 60%, transparent 100%);
 }
 .chat-bubble.project-answer > :is(.system-message-actions, .msg-time) { position: relative; z-index: 1; }
+/* Reply, actions and Copy stand above both, so a finger's whole reach around each stays the control's. */
+.chat-bubble.project-answer > .chat-message-actions { z-index: 2; }
 .chat-bubble.project-answer > .message > :first-child { margin-top: 0; }
 .chat-bubble.project-answer > .system-message-actions,
 .chat-bubble.assistant > .system-message-actions { padding-block: var(--space-2) var(--space-1); }
+/* Keep the Project capsule full-width when it needs the space. Under a finger, the clearance below it
+   pays for both hit extensions: the wider reach of the 24px action icons also covers the capsule's overshoot. */
+@media (pointer: coarse) {
+    .chat-bubble.project-answer.has-copy > .system-message-actions {
+        padding-block-end: calc(var(--space-1) + var(--touch-target-min) - var(--space-5));
+    }
+}
 .project-answer-limitation { color: var(--text-meta); white-space: normal; overflow-wrap: anywhere; }
 /* A Project ending with no authored answer (project_answer.js paintEnding): the work's name and true outcome, then its
    cause, recorded details and labelled preserved output, in the System voice at reading size; the Project's name is the
@@ -2124,7 +2133,8 @@ html[data-layout="stack"] .chat-find {
     padding-bottom: 0;
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    --chat-feed-gap: 14px;
+    gap: var(--chat-feed-gap);
     /* Container for the late live-card width override. A narrow project panel
        must respond to this column's width, not to the outer viewport. */
     container-type: inline-size;
@@ -8918,8 +8928,7 @@ figure.widget-media {
 
 }
 
-/* The stack layout's composer (Main; the Project panel keeps its own rules below) and the keyboard-in-flow layout
-   app.js enters only there (`keyboard-open`, from the same switch: layout.js). */
+/* Main's stack composer. The Project panel sets its own reading insets below. */
 html[data-layout="stack"] #chat-input-area {
     /* iOS safe-area inset. */
     padding-bottom: max(16px, var(--inset-bottom));
@@ -9006,10 +9015,10 @@ html[data-layout="stack"] #chat-messages::after {
     flex-basis: calc(var(--chat-input-reserve, 108px) + var(--inset-bottom) - 8px);
 }
 
-/* Keyboard-open layout: the room is one column within the visual viewport (app.js --vvh): its bar (with Main's note or a
-   Project's status bar), #chat-messages, the only part that scrolls, and the composer. The message field takes what the
+/* The keyboard room fits the measured viewport (keyboard_viewport.js --vvh). Telegram retains the reading overlays;
+   other hosts put the bar, feed and composer in a column. The message field takes what the
    room leaves after its measured chrome (chat.js --chat-keyboard-chrome; until it is read, the quarter alone) and
-   60px of feed (a message's last line and its foot), at most a quarter of the viewport (app.js), never under one line
+   60px of feed (a message's last line and its foot), at most a quarter of the viewport, never under one line
    (1.45em + 10px: its line-height and padding). A room whose height under the top inset cannot hold its bar, the
    composer with that line and those 60px at their usual air (220px; Telegram's fullscreen band takes 93px of it on a
    phone) is short: its bar and composer drop their air, the capsule row folds (composer_fold.js reads the step; owner
@@ -9017,10 +9026,14 @@ html[data-layout="stack"] #chat-messages::after {
    0px, or 1px in a short room (×1000 crosses it within a pixel), so each air below reads
    `max(short, usual - short × 1000)`. */
 @property --keyboard-short { syntax: '<length>'; inherits: true; initial-value: 0px; }
-body.keyboard-open {
+body:is(.keyboard-open, .keyboard-closing) {
     --keyboard-short: clamp(0px, calc((220px + var(--inset-top) - var(--vvh)) * 1000), 1px);
 }
-body.keyboard-open :is(#chat-input-area, .chat-input-area) {
+/* Telegram's floating field follows measured shrink before the keyboard's input lock; tight-room fit still wins. */
+:where(html[data-telegram-fullscreen][data-layout="stack"]) :is(#chat-input-area, .chat-input-area) {
+    --message-field-max-height: var(--chat-viewport-input-cap, 140px);
+}
+body:is(.keyboard-open, .keyboard-closing) :is(#chat-input-area, .chat-input-area) {
     --message-field-max-height: clamp(calc(1.45em + 10px),
         calc(var(--vvh) - var(--chat-keyboard-chrome, 0px) - 60px - var(--keyboard-short) * 100000),
         var(--chat-viewport-input-cap, 140px));
@@ -9062,60 +9075,44 @@ body.keyboard-open #page-chat.active {
     overscroll-behavior: none;
 }
 
-body.keyboard-open #page-chat.active .chat-page-header,
-body.keyboard-open #page-chat.active .chat-page-note,
-body.keyboard-open .project-panel .project-panel-bar {
+/* Outside Telegram, keyboard chrome takes its place in the column and the feed scrolls between it. */
+html:not([data-telegram-fullscreen]) body.keyboard-open #page-chat.active :is(.chat-page-header, .chat-page-note),
+html:not([data-telegram-fullscreen]) body.keyboard-open .project-panel .project-panel-bar {
     flex-shrink: 0;
     position: relative;
     top: auto;
 }
-/* A short room's bar stands right under the top inset (Telegram's band keeps its own air around its controls). Every
-   keyboard room's bar stands a step above the composer (both --z-page-header) on its room's own ground: an open
-   capsule's hint rising to it passes under it, so Panic and a Project's × stay in reach. */
-body.keyboard-open #page-chat.active .chat-page-header,
-body.keyboard-open .project-panel .project-panel-bar {
+html:not([data-telegram-fullscreen]) body.keyboard-open :is(.chat-page-header, .project-panel-bar) {
     padding-top: calc(max(0px, var(--chrome-inset) - var(--keyboard-short) * 1000) + var(--inset-top));
     padding-bottom: max(0px, var(--chrome-inset) - var(--keyboard-short) * 1000);
-    z-index: calc(var(--z-page-header) + 1);
-    background: transparent;
 }
-body.keyboard-open .project-panel .project-panel-bar { background: transparent; }
-
-body.keyboard-open #page-chat.active #chat-messages,
-body.keyboard-open .chat-instance-panel .chat-messages {
-    flex: 1;
-    min-height: 0;
+html:not([data-telegram-fullscreen]) body.keyboard-open :is(#chat-messages, .chat-messages) {
     position: relative;
-    height: auto;
-    max-height: none;
     padding-top: var(--chat-find-reserve, 0px);
-    padding-bottom: 0;
-    overflow-y: auto;
+}
+body.keyboard-open :is(#chat-messages, .chat-messages) {
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
 }
-
-/* The composer is in flow: remove the item, including its column gap. */
-body.keyboard-open #page-chat.active #chat-messages::after,
-body.keyboard-open .chat-instance-panel .chat-messages::after {
-    content: none;
-}
-
-body.keyboard-open #page-chat.active #chat-input-area,
-body.keyboard-open .chat-instance-panel .chat-input-area {
+html:not([data-telegram-fullscreen]) body.keyboard-open :is(#chat-messages, .chat-messages)::after { content: none; }
+html:not([data-telegram-fullscreen]) body.keyboard-open :is(#chat-input-area, .chat-input-area) {
     flex-shrink: 0;
     position: relative;
     bottom: auto;
-    padding-top: max(var(--space-1), 8px - var(--keyboard-short) * 1000);
-    padding-bottom: max(var(--space-1), 8px - var(--keyboard-short) * 1000);
+    padding-block: max(var(--space-1), 8px - var(--keyboard-short) * 1000);
+}
+/* Capsule hints pass below Panic. The note and search sheet still float over the bar's material. */
+body.keyboard-open :is(.chat-page-header, .project-panel-bar),
+html[data-telegram-fullscreen] body.keyboard-open :is(.chat-page-note, .chat-find) {
+    z-index: calc(var(--z-page-header) + 1);
 }
 /* A short room's composer keeps --space-1 between its rows (a folded row takes it along) and inside the field (one
    line there: its corner stays a capsule's, the sheet radius clamped to half its height). */
-body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-input-wrap {
+body:is(.keyboard-open, .keyboard-closing) :is(#chat-input-area, .chat-input-area) .chat-input-wrap {
     --composer-wrap-gap: max(var(--space-1), var(--space-2) - var(--keyboard-short) * 1000);
     gap: var(--composer-wrap-gap);
 }
-body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
+body:is(.keyboard-open, .keyboard-closing) :is(#chat-input-area, .chat-input-area) .chat-text-row {
     padding-block: max(var(--space-1), var(--space-2) - var(--keyboard-short) * 1000);
 }
 
@@ -9890,10 +9887,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 .project-panel .chat-panel-statusbar:not(:empty) ~ .chat-messages {
     --chat-feed-reserve: 8px;
 }
-body.keyboard-open .project-panel .chat-panel-statusbar { padding-top: 8px; }
-body.keyboard-open .project-panel .chat-instance-panel .chat-messages {
-    padding-top: var(--chat-find-reserve, 0px);
-}
+html:not([data-telegram-fullscreen]) body.keyboard-open .project-panel .chat-panel-statusbar { padding-top: 8px; }
 
 /* The Project composer already includes its safe-area inset in the measured
    reserve; preserve the panel's own reserve on narrow screens as well. */
@@ -11852,14 +11846,17 @@ html[data-layout="stack"] .project-panel {
     bottom: var(--space-2);
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    gap: var(--chat-message-actions-gap);
 }
 /* In the row the copy control is a flex item: the corner offsets above must not move it (relative keeps its hit area). */
 .chat-message-actions > .chat-message-copy { position: relative; inset: auto; }
 /* Under a finger the 24px Reply and Copy keep their look and gain the shared hit area (ui.css .ui-hit-area); the pair
-   parts by the hit area's overshoot so the two targets never overlap. */
+   parts by the hit area's overshoot so the two targets never overlap. The time's gutter below reads the same gap. */
+.chat-bubble {
+    --chat-message-actions-gap: var(--space-2);
+}
 @media (pointer: coarse) {
-    .chat-message-actions { gap: calc(var(--touch-target-min) - var(--space-5)); }
+    .chat-bubble { --chat-message-actions-gap: calc(var(--touch-target-min) - var(--space-5)); }
 }
 
 .chat-message-action:hover,
@@ -11883,10 +11880,11 @@ html[data-layout="stack"] .project-panel {
 
 /* Reserve a gutter so the timestamp never sits under the always-visible controls (Copy ends 32px from the
    bubble's edge, Reply and Copy 64px, each registered action one more square and gap; the bubble's own inset is
-   --space-4, the gap to the time --space-2). */
+   --space-4, the gap to the time --space-2); the squares part by the row's own gap, wider under a finger. */
 .chat-bubble.has-copy .msg-time { margin-right: var(--space-5); }
 .chat-bubble.has-reply .msg-time {
-    margin-right: calc((var(--space-5) + var(--space-2)) * (2 + var(--chat-message-extra-actions, 0)) - var(--space-2));
+    margin-right: calc((var(--space-5) + var(--chat-message-actions-gap)) * (2 + var(--chat-message-extra-actions, 0))
+        - var(--chat-message-actions-gap));
 }
 
 /* The message a quote points at: a calm ring for a moment, a keyboard ring while it holds focus. */
@@ -12380,6 +12378,9 @@ html[data-telegram-fullscreen][data-layout="docked"] .app-page-header[data-lead]
 html[data-telegram-fullscreen][data-layout="docked"] .project-panel-bar { padding-top: calc(10px + var(--inset-top)); }
 html[data-telegram-fullscreen][data-layout="docked"] .sidebar-head { padding-top: calc(var(--space-4) + var(--inset-top)); }
 
+@property --edge-reach { syntax: '<length>'; inherits: true; initial-value: 0px; }
+@property --chat-input-reserve { syntax: '<length>'; inherits: true; initial-value: 108px; }
+
 /* ---- A room's edges and Telegram's shared row (DESIGN: A room's edges) ----
    Keep scrolling card actions from reading as header controls. Only the edge material is masked; the transcript
    stays sharp outside it. Layout and read tracking use the same reach. Both layers taper gently to transparent. */
@@ -12392,16 +12393,21 @@ html[data-telegram-fullscreen][data-layout="docked"] .sidebar-head { padding-top
 }
 /* What floats right under the bar lies over its edge, as its capsules do: Main's history note and a room's search sheet
    come after the bar at its own level, so they paint over it, never blurred. A Project's status note stands in its flow
-   below the edge (its top reserve counts the edge, --chat-top-reserve below). With the keyboard up the bar stands in the page's flow
-   and nothing passes under it: the edge ends with the bar, so a short keyboard room's newest line, a note or Search
-   under the bar keep their words sharp. */
-body.keyboard-open :is(#page-chat.active, .project-panel) {
+   below the edge (its top reserve counts the edge, --chat-top-reserve below). Outside Telegram the keyboard puts both bars in flow. */
+:where(html:not([data-telegram-fullscreen])) body.keyboard-open :is(#page-chat.active, .project-panel) {
     --edge-reach: 0px;
+}
+/* A low typing viewport gives the reading band priority over the extension. */
+html[data-telegram-fullscreen] body:is(.keyboard-open, .keyboard-closing) :is(#page-chat.active, .project-panel) {
+    --edge-reach: clamp(0px, var(--vvh) - var(--inset-top) - 250px, 32px);
 }
 /* The transcript's first row and a Project's status note stand below the bar and its edge, and below Main's note, which
    floats over that edge: the room's measured reserve (the bar and the note, chat.js) or the bar and its edge, whichever
-   ends lower. */
+   ends lower. Before chat.js first measures the bar a 56 px bar stands in, so a room's first row clears the edge of a
+   bar that tall from the first frame (Telegram's taller row is reserved once measured); a room mounted without a bar has
+   no edge (room_work.js), and its measured reserve stands alone. */
 :is(#page-chat, .chat-instance-panel) {
+    --chat-input-reserve: max(92px, var(--chat-composer-height, 92px) + 16px);
     --chat-top-reserve: max(var(--chat-header-reserve, 56px), var(--chat-header-bar, 56px) + var(--edge-reach, 0px));
 }
 /* The bar's ::after remains available to the native title-band hit target. */
@@ -12424,7 +12430,8 @@ body.keyboard-open :is(#page-chat.active, .project-panel) {
     -webkit-mask-image: linear-gradient(180deg, var(--edge-mask));
     mask-image: linear-gradient(180deg, var(--edge-mask));
 }
-/* With the keyboard up the composer stands in flow; there is no transcript behind it to blur. */
+/* Both reading and typing in Telegram use the same composer glass. */
+html[data-telegram-fullscreen] :is(#chat-input-area, .chat-input-area)::before,
 body:not(.keyboard-open) :is(#chat-input-area, .chat-input-area)::before {
     content: "";
     position: absolute;
@@ -12499,11 +12506,19 @@ html[data-telegram-fullscreen="active"][data-layout="stack"] .drawer-head {
     padding: var(--inset-top) 0 var(--space-2);
 }
 html[data-telegram-fullscreen="active"][data-layout="stack"] .nav-drawer-close { display: none; }
-/* With the keyboard up the bar stays Telegram's row, in the page's flow as every keyboard room's bar is (a note keeps its
-   place under it, the composer's room is measured with it), and like every keyboard room's bar it draws no edge. */
-html[data-telegram-fullscreen="active"][data-layout="stack"] body.keyboard-open #page-chat.active .chat-page-header,
-html[data-telegram-fullscreen="active"][data-layout="stack"] body.keyboard-open .project-panel .project-panel-bar {
-    padding-top: var(--tg-row-top); padding-bottom: 0;
+/* As the keyboard takes space, consume the reading margins before taking room from the conversation.
+   At the live end the final flex gap and spacer then equal the measured composer, including a folded draft. */
+html[data-telegram-fullscreen][data-layout="stack"] :is(#chat-input-area, .chat-input-area) {
+    --typing-pad: max(var(--space-1), 8px - var(--keyboard-short) * 1000);
+    padding-top: max(var(--typing-pad), 24px - var(--chat-keyboard-overlap, 0px));
+    padding-bottom: max(var(--typing-pad), max(16px, var(--inset-bottom)) - var(--chat-keyboard-overlap, 0px));
+}
+html[data-telegram-fullscreen][data-layout="stack"] #chat-messages {
+    --reading-bottom-inset: var(--inset-bottom);
+}
+html[data-telegram-fullscreen][data-layout="stack"] :is(#chat-messages, .chat-messages)::after {
+    flex-basis: max(var(--chat-composer-height, 92px) - var(--chat-feed-gap),
+        var(--chat-input-reserve) + var(--reading-bottom-inset, 0px) - 8px - var(--chat-keyboard-overlap, 0px));
 }
 /* The work list and the consciousness sheet opened from its row hang under Telegram's row at the page's width, as the
    list hangs under the page's own bar on a phone (consciousness.css would end the sheet under Panic). */

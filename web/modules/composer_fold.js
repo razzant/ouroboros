@@ -70,7 +70,8 @@ export function createComposerFold({ feed, wrap, row, win = globalThis.window, d
         return { away, height: feed.scrollHeight };
     }
     const atLatest = () => feed.scrollHeight - feed.clientHeight - feed.scrollTop < FOLD.latest;
-    const keyboard = () => Boolean(doc?.body?.classList?.contains?.('keyboard-open'));
+    const keyboard = () => doc?.body?.classList?.contains?.('keyboard-open')
+        || doc?.body?.classList?.contains?.('keyboard-closing');
     // A capsule is worked: open (Model's sheet too), focused or with the line alone. ☰ stays in sight folded, so its focus (the drawer gives
     // it back on closing) keeps nothing.
     const working = () => {
@@ -79,7 +80,7 @@ export function createComposerFold({ feed, wrap, row, win = globalThis.window, d
         return Boolean(focused && row.contains?.(focused) && !menu?.contains?.(focused))
             || Boolean(row.dataset?.ownerSolo) || Boolean(row.dataset?.ownerSheet) || Boolean(row.querySelector?.('[data-open="true"]'));
     };
-    // While the owner writes or works a capsule the row stays: the keyboard is up (app.js's keyboard-open), the field
+    // While the owner writes or works a capsule the row stays: the keyboard still occupies the viewport, the field
     // holds the focus (with or without a keyboard), or a capsule is worked.
     const busy = () => keyboard() || Boolean(field && doc?.activeElement === field) || working();
     // But a short room with the keyboard up has no line of a message to spare for the row (owner 9.11).

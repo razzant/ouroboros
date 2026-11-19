@@ -14,7 +14,8 @@ function fixture(t, exact = true, restoreTo = 80) {
         return { listeners, addEventListener: (type, fn) => listeners.set(type, fn), removeEventListener: type => listeners.delete(type) }; };
     const ownerDocument = { ...target(), body: {}, documentElement: {} };
     const feed = { scrollTop: 0, scrollHeight: 300, clientHeight: 500, clientWidth: 400, ownerDocument, ...target(),
-        contains: node => node === feed || Boolean(node?.inFeed) };
+        contains: node => node === feed || Boolean(node?.inFeed), get offsetHeight() { return this.clientHeight; },
+        getBoundingClientRect() { return { top: 0, height: this.clientHeight }; } };
     const dispatch = event => {
         if (feed.contains(event.target)) feed.listeners.get(event.type)?.(event);
         ownerDocument.listeners.get(event.type)?.(event);
@@ -151,7 +152,8 @@ test('a bounded box that can still move absorbs wheel, touch and keys: no follow
     f.feed.ownerDocument.defaultView = { getComputedStyle: node => ({ overflowY: node.overflowY || 'visible' }) };
     // An overflowing but unscrollable card, a bounded full body, the text read in it.
     const card = { inFeed: true, parentElement: f.feed, scrollTop: 0, scrollHeight: 900, clientHeight: 600 };
-    const body = { inFeed: true, parentElement: card, overflowY: 'auto', scrollTop: 200, scrollHeight: 1000, clientHeight: 400 };
+    const body = { inFeed: true, parentElement: card, overflowY: 'auto', scrollTop: 200, scrollHeight: 1000, clientHeight: 400,
+        getBoundingClientRect: () => ({ top: 20 }) };
     const text = { inFeed: true, parentElement: body };
     f.reading.bindGestures(direction => navigation.push(direction));
     Object.assign(f.feed, { scrollHeight: 1000, scrollTop: 560, clientHeight: 400 }); // 40px above the end
@@ -233,6 +235,77 @@ test('a wheel burst or touch stays with the box it began on, even at that box ed
     f.gesture({ type: 'wheel', deltaY: -1, target: text, timeStamp: 3500 }); f.frame();
     assert.deepEqual(navigation, [-1, -1, -1, -1], 'an older box scroll proves nothing about a new burst');
 });
+
+for (const input of ['wheel', 'touch']) {
+    test(`successive ${input} gestures inside a box keep their own movement through resizes`, t => {
+        const previous = globalThis.requestAnimationFrame, frames = [];
+        globalThis.requestAnimationFrame = callback => frames.push(callback);
+        t.after(() => { globalThis.requestAnimationFrame = previous; });
+        const listeners = new Map(), navigation = [];
+        const doc = { addEventListener() {}, defaultView: { getComputedStyle: () => ({ overflowY: 'auto' }) } };
+        const feed = { ownerDocument: doc, clientWidth: 390, offsetWidth: 390, clientHeight: 400, scrollHeight: 1000,
+            scrollTop: 600, get offsetHeight() { return this.clientHeight; },
+            getBoundingClientRect() { return { top: 0, height: this.clientHeight }; },
+            contains: node => node === box && box.isConnected,
+            addEventListener: (type, fn) => listeners.set(type, fn) };
+        let boxY = 680, lineY = 140, captures = 0, boxReads = 0;
+        const restored = [];
+        const box = { parentElement: feed, isConnected: true, clientHeight: 200, scrollHeight: 500, scrollTop: 100,
+            getBoundingClientRect() { boxReads++; return { top: boxY - feed.scrollTop }; } };
+        const line = { parentElement: box, getBoundingClientRect: () => ({ top: boxY - feed.scrollTop + lineY - box.scrollTop }) };
+        const anchors = {
+            capture() { captures++; return { node: line, offset: line.getBoundingClientRect().top }; },
+            restore(anchor) {
+                if (!anchor) return false;
+                restored.push(anchor.node);
+                feed.scrollTop += anchor.node.getBoundingClientRect().top - anchor.offset;
+                return true;
+            },
+        };
+        const reading = createChatReadingPosition({ feed, visible: () => true, alive: () => true, ready: () => true,
+            anchors, changed() {}, afterWrite() {}, activity() {}, updateButton() {} });
+        reading.bindGestures(direction => navigation.push(direction));
+        reading.reflow(() => {}); // pinned height-only fast path, no bookmark or transcript scan
+        assert.equal(captures, 0);
+        const generation = reading.generation;
+        const emit = (type, extra) => listeners.get(type)({ type, target: line, ...extra });
+        const readBox = (start, steps) => {
+            if (input === 'touch') emit('touchstart', { touches: [{ clientX: 150, clientY: 100 }] });
+            for (let i = 0; i < steps; i++) {
+                const at = start + i * 16;
+                if (input === 'touch') emit('touchmove', { timeStamp: at, touches: [{ clientX: 150, clientY: 124 + i * 24 }] });
+                else emit('wheel', { timeStamp: at, deltaY: -24 });
+                box.scrollTop -= 24; // browser default runs AFTER the event reaches the reading owner
+                listeners.get('scroll')({ target: box, timeStamp: at + 1 });
+            }
+            frames.splice(0).forEach(callback => callback());
+        };
+        readBox(1000, 2);
+        assert.deepEqual([reading.stick, reading.generation, feed.scrollTop, navigation], [false, generation, 600, []]);
+        const at = line.getBoundingClientRect().top;
+        reading.reflow(() => { feed.clientHeight -= 75; boxY -= 24; });
+        assert.equal(line.getBoundingClientRect().top, at, 'the same line stays put after the box moves');
+        assert.equal(box.scrollTop, 52, 'the gesture still moved the inner box; the outer feed did not undo it');
+        reading.scroll();    // the app's first placement arrives as a feed scroll
+        reading.reflow();    // a follow-up measurement must not select an inner line
+        readBox(1400, 1);
+        assert.deepEqual([feed.scrollTop, box.scrollTop, line.getBoundingClientRect().top], [576, 28, at + 24]);
+        if (input === 'touch') {
+            // A room grows: its clamp may notify before the ResizeObserver's placement.
+            Object.assign(feed, { clientHeight: 435, scrollTop: 565 });
+            reading.scroll();
+        }
+        reading.reflow(() => { if (input === 'wheel') feed.clientHeight -= 23; boxY -= 30; });
+        assert.deepEqual([feed.scrollTop, box.scrollTop, line.getBoundingClientRect().top], [546, 28, at + 24],
+            'the next resize compensates only the box geometry, not the second inner move');
+        assert.deepEqual([boxReads, captures, reading.generation, navigation], [4, 0, generation, []],
+            'geometry needs one box read per restoration, neither a viewport scan nor a capture per gesture event');
+
+        reading.mutate(() => { lineY += 18; return true; });
+        assert.equal(restored.at(-1), line, 'a true content write still captures and restores the exact visible line');
+        assert.deepEqual([feed.scrollTop, box.scrollTop, line.getBoundingClientRect().top], [564, 28, at + 24]);
+    });
+}
 
 test('a feed scrollbar drag follows where it leaves the feed and pages nothing', t => {
     const f = fixture(t), navigation = [];
@@ -600,7 +673,8 @@ test('reading inside a box ends what an earlier feed gesture still owes, not a s
 test('a box gesture supersedes a ↓ still awaiting history; with nothing pending it cancels nothing', t => {
     const f = fixture(t);
     f.feed.ownerDocument.defaultView = { getComputedStyle: node => ({ overflowY: node.overflowY || 'visible' }) };
-    const body = { inFeed: true, parentElement: f.feed, overflowY: 'auto', scrollTop: 200, scrollHeight: 1000, clientHeight: 400 };
+    const body = { inFeed: true, parentElement: f.feed, overflowY: 'auto', scrollTop: 200, scrollHeight: 1000, clientHeight: 400,
+        getBoundingClientRect: () => ({ top: 20 }) };
     const text = { inFeed: true, parentElement: body };
     f.reading.bindGestures(() => {});
     f.reading.cancel();

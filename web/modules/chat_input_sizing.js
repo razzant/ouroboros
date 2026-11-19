@@ -38,7 +38,61 @@ export function chatInputSizingMode(css = globalThis.CSS, doc = globalThis.docum
 
 const px = (value) => parseFloat(value) || 0;
 
-export function attachChatInputSizing(input) {
+function caretViewport(input) {
+    const { ownerDocument, value, selectionStart, selectionEnd } = input;
+    if (ownerDocument?.activeElement !== input || !value || selectionStart !== selectionEnd || !input.clientWidth) return null;
+    const used = px(getComputedStyle(input).width);
+    // clientWidth excludes the scrollbar; recover the fractional part of the used width for wrapping.
+    return { value, at: selectionEnd, width: input.clientWidth + used - Math.round(used), height: input.clientHeight,
+        top: input.scrollTop, scrollHeight: input.scrollHeight };
+}
+
+const samePlace = (before, now) => before && now && before.value === now.value && before.at === now.at
+    && Math.abs(now.top - before.top) <= 1;
+
+// A textarea exposes selection offsets, not their line boxes. Lay out just text, only for a middle caret on a shrink;
+// the tail has its offset in scrollHeight. Copy wrap metrics, not the field, its styling machinery or its listeners.
+function caretLineTop(input, at, width, style, line) {
+    const doc = input.ownerDocument;
+    const probe = doc.createElement('div');
+    probe.style.cssText = 'position:fixed;top:0;left:0;visibility:hidden;pointer-events:none;box-sizing:content-box;';
+    probe.style.width = `${width - px(style.paddingLeft) - px(style.paddingRight)}px`;
+    for (const key of ['direction', 'fontFamily', 'fontSize', 'fontStyle', 'fontWeight', 'letterSpacing', 'lineHeight',
+        'overflowWrap', 'tabSize', 'textIndent', 'whiteSpace', 'wordBreak', 'wordSpacing']) probe.style[key] = style[key];
+    const text = doc.createTextNode(input.value);
+    probe.append(text);
+    doc.body.append(probe);
+    try {
+        const range = doc.createRange();
+        range.setStart(text, at);
+        range.collapse(true);
+        const y = range.getBoundingClientRect().top - probe.getBoundingClientRect().top;
+        return px(style.paddingTop) + Math.round(y / line) * line;
+    } finally {
+        probe.remove();
+    }
+}
+
+function keepVisibleCaret(input, before, now) {
+    if (!samePlace(before, now)) return;
+    const { height, width, top, scrollHeight } = now;
+    if (!height || (height >= before.height && width >= before.width && scrollHeight <= before.scrollHeight)) return;
+    const style = getComputedStyle(input), pad = px(style.paddingBottom);
+    if (before.at === input.value.length) {
+        // Pin the tail only if it was visible; reading higher in a long draft leaves the same caret offset.
+        if (before.scrollHeight - before.top - before.height <= pad + 1
+            && scrollHeight - top - height > pad + 1) input.scrollTop = scrollHeight;
+        return;
+    }
+    const line = px(style.lineHeight);
+    const y = caretLineTop(input, before.at, width, style, line);
+    const oldY = width === before.width ? y : caretLineTop(input, before.at, before.width, style, line);
+    if (oldY < before.top - 1 || oldY + line > before.top + before.height + 1) return;
+    if (y < top - 1) input.scrollTop = y - px(style.paddingTop);
+    else if (y + line > top + height + 1) input.scrollTop = Math.ceil(y + line + pad - height);
+}
+
+export function attachChatInputSizing(input, { followCaret = false } = {}) {
     const mode = chatInputSizingMode();
     const measured = mode !== 'content';
     let disposed = false;
@@ -47,10 +101,13 @@ export function attachChatInputSizing(input) {
     let width = 0;
     // Something other than the width changed the wrapping: a loaded font, a placeholder.
     let stale = false;
-    // The max-height the last measurement capped at: a phone keyboard moves it (app.js `--chat-viewport-input-cap`).
+    // The max-height the last measurement capped at: a phone keyboard moves it (`keyboard_viewport.js`, `--chat-viewport-input-cap`).
     let capAt = '';
     let queued = false;
     let frame = 0;
+    // The last field geometry, after any correction. A later CSS wrap can hide the same caret without shrinking the box.
+    let caretLayout = null;
+    const readCaret = () => followCaret ? caretViewport(input) : null;
     input.dataset.sizing = measured ? 'fit' : 'content';
 
     // Where an edit leaves the text: a caret at the end keeps the last line in view, an
@@ -73,7 +130,7 @@ export function attachChatInputSizing(input) {
         const scrollTop = input.scrollTop;
         // Measured at its natural one-row height without a scrollbar, which would
         // narrow the text it measures. The row around it keeps its height meanwhile:
-        // where the composer is in flow (the phone's keyboard is up) a one-row field
+        // where the composer is in flow (keyboard up outside Telegram), a one-row field
         // for that instant would lengthen the feed, and WebKit clamps the feed's
         // scroll to that length, leaving the newest message under the field.
         const holder = input.parentElement;
@@ -103,8 +160,13 @@ export function attachChatInputSizing(input) {
         queued = true;
         frame = requestAnimationFrame(() => {
             queued = false;
-            const style = disposed ? null : getComputedStyle(input);
+            if (disposed) return;
+            const style = measured ? getComputedStyle(input) : null;
             if (style && (stale || px(style.width) !== width || style.maxHeight !== capAt)) measure(false);
+            const now = readCaret();
+            keepVisibleCaret(input, caretLayout, now);
+            if (now) now.top = input.scrollTop;
+            caretLayout = now;
         });
     };
     const markStale = () => {
@@ -119,7 +181,7 @@ export function attachChatInputSizing(input) {
     let observer = null;
     let placeholder = null;
     let keyboard = null;
-    if (measured && typeof ResizeObserver === 'function') {
+    if ((measured || followCaret) && typeof ResizeObserver === 'function') {
         observer = new ResizeObserver(remeasure);
         observer.observe(input);
     }
@@ -127,8 +189,8 @@ export function attachChatInputSizing(input) {
     if (measured && typeof MutationObserver === 'function') {
         placeholder = new MutationObserver(markStale);
         placeholder.observe(input, { attributes: true, attributeFilter: ['placeholder'] });
-        // app.js drops body.keyboard-open (and with it the keyboard's cap, style.css) in a dismissal's own frame,
-        // with no resize: a capped draft's written height is no size change a ResizeObserver could report.
+        // A class change can restore the resting cap without resizing the field. Telegram keeps its typing cap
+        // through keyboard-closing; a capped draft's written height will not itself notify the ResizeObserver.
         const body = input.ownerDocument?.body || globalThis.document?.body;
         if (body) {
             keyboard = new MutationObserver(remeasure);
@@ -154,14 +216,25 @@ export function attachChatInputSizing(input) {
 
     return {
         mode,
+        // Rebase on a changed editing place, not on a box the fold has already started to narrow.
+        remeasureViewport(write) {
+            if (!disposed) {
+                const now = readCaret();
+                if (!samePlace(caretLayout, now)) caretLayout = now;
+            }
+            write();
+            if (!disposed && (measured || caretLayout)) remeasure();
+        },
         // After a value change: typing, paste, a restored draft, a recalled or sent message.
         sync() {
             if (disposed) return;
             if (measured) measure(true);
             else input.scrollTop = scrollAfterEdit(input.scrollTop);
+            caretLayout = readCaret();
         },
         dispose() {
             disposed = true;
+            caretLayout = null;
             observer?.disconnect();
             observer = null;
             placeholder?.disconnect();

@@ -521,8 +521,8 @@ test('a viewport resize that moves the cap re-measures the same width in a frame
 });
 
 test('the keyboard going away without a resize gives a capped draft its resting cap back in a frame', (t) => {
-    // app.js drops body.keyboard-open in the focusout's own frame and the cap (style.css, a quarter of the keyboard's
-    // viewport) returns to 140px with no resize: the written 62px changes no size a ResizeObserver could report.
+    // When the keyboard layout releases its cap the CSS limit returns to 140px with no resize. This owner's
+    // written 62px does not itself notify a ResizeObserver; the viewport owner decides when to release the cap.
     for (const fieldSizing of [false, true]) {
         const engine = installEngine({ fieldSizing });
         t.after(engine.restore);

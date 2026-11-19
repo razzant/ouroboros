@@ -177,6 +177,18 @@ test('thinking runs from the owner\'s final words to the first heard answer, on 
     const empty = createTalkFacts();
     empty.caption({ speaker: 'owner', text: '  ', final: true });
     assert.equal(empty.facts.thinking, false);
+    // An older recognition that failed (an empty final) asks and answers nothing: a question still awaiting stands.
+    const failed = createTalkFacts();
+    failed.caption({ speaker: 'owner', text: 'What time is it?', final: true });
+    failed.caption({ speaker: 'owner', text: '', final: true });
+    assert.equal(failed.facts.thinking, true);
+    // The words being said end "speaking" with their own empty final; another item's empty final leaves it.
+    const said = createTalkFacts();
+    said.caption({ speaker: 'owner', item_id: 'now', text: 'What', final: false });
+    said.caption({ speaker: 'owner', item_id: 'older', text: '', final: true });
+    assert.equal(said.facts.ownerSpeaking, true);
+    said.caption({ speaker: 'owner', item_id: 'now', text: '', final: true });
+    assert.equal(said.facts.ownerSpeaking, false);
     // An answer that was never heard (text only) still ends thinking when it is complete.
     const silent = createTalkFacts();
     silent.caption({ speaker: 'owner', text: 'Hi', final: true });

@@ -12,7 +12,7 @@ const MOVE_FRAMES = 3, WIDTH_HELD_FRAMES = 12;
 export function createChatReadingPosition({ visible, alive, ready, feed, anchors, changed, afterWrite, activity, updateButton }) {
     let generation = 0, scheduled = false;
     let mutationDepth = 0;
-    let viewportAnchor = null, width = feed.clientWidth;
+    let viewportAnchor = null, viewportTop = null, width = feed.clientWidth;
     // Every room first opens following its newest message (owner decision 2026-10-05).
     let intent = null;
     // dragging: 'held'/'released' feed scrollbar, or 'owed' to a downward gesture's animation.
@@ -66,6 +66,16 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
         }
         rowsWidth = now;
     };
+    // Only a mounted, ordinary row still at its saved offset can be kept without a fresh visible-row search.
+    // A nested/card bookmark, a missing row, or a clamp that moves it yields to the normal anchor owner.
+    const rowStillPlaced = (anchor) => {
+        const node = anchor?.node;
+        if (!node?.isConnected || node.parentElement !== feed || !anchor.historyId || anchor.cardChain?.length) return false;
+        const rect = node.getBoundingClientRect(), box = feed.getBoundingClientRect();
+        const scale = box.height / feed.offsetHeight || 1;
+        return rect.width > 0 && rect.height > 0 && rect.bottom > box.top && rect.top < box.bottom
+            && Math.abs((rect.top - box.top) / scale - anchor.offset) <= 0.5;
+    };
     const state = {
         top: 0,
         stick: true,
@@ -79,11 +89,23 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
         get pending() { return Boolean(intent); },
         get target() { return intent; },
         get approximate() { return approximate; },
-        remember(force = false) {
+        remember(force = false, box = null) {
+            viewportTop = null;
             if (intent || !visible() || (!force && width !== feed.clientWidth)) return;
-            width = feed.clientWidth; viewportAnchor = anchors.capture();
+            width = feed.clientWidth;
+            if (box) {
+                const rect = feed.getBoundingClientRect(), scale = rect.height / feed.offsetHeight || 1;
+                viewportAnchor = { node: box, offset: (box.getBoundingClientRect().top - rect.top) / scale, nested: true };
+            } else viewportAnchor = anchors.capture();
         },
-        reflow() {
+        reflow(writeGeometry) {
+            const previousRowsWidth = rowsWidth;
+            // The resize already changed layout. Apply reserves and any resulting composer remeasure before the one
+            // restoration, not as a second capture/rebase over the same feed. This callback writes geometry only.
+            if (writeGeometry) {
+                mutationDepth++;
+                try { writeGeometry(); } finally { mutationDepth--; }
+            }
             noteWidth();
             // The animation a downward gesture still owes scrolls to is the reader's:
             // a resize neither writes under it (a write stops it short) nor ends it,
@@ -93,9 +115,21 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             if (dragging === 'released') dragging = ''; // a resize is no part of a released drag
             if (intent) { if (visible()) settledBox = feedBox(); state.position(); return; }
             if (!visible()) return;
-            if (state.stick) feed.scrollTop = feed.scrollHeight;
-            else anchors.restore(viewportAnchor);
-            settledBox = feedBox(); state.top = feed.scrollTop; state.remember(true); updateButton();
+            const heightOnly = writeGeometry && previousRowsWidth === rowsWidth && width === feed.clientWidth && !lazy && !dragging;
+            const kept = heightOnly && !state.stick && rowStillPlaced(viewportAnchor);
+            let keptNested = false;
+            if (state.stick) {
+                if (!heightOnly || !state.nearBottom(0)) feed.scrollTop = feed.scrollHeight;
+            } else if (!kept) keptNested = anchors.restore(viewportAnchor) && viewportAnchor?.nested === true;
+            settledBox = feedBox(); state.top = feed.scrollTop;
+            // A later reflow still belongs to the box edge, not a line the reader can move inside it.
+            // A box that is gone or hidden fails restore and is reselected by the ordinary anchor owner.
+            if (keptNested || (heightOnly && (state.stick || kept || rowStillPlaced(viewportAnchor)))) {
+                if (keptNested) width = feed.clientWidth;
+                if (state.stick) viewportAnchor = null; // an edge follower has no reading row to reselect
+                viewportTop = state.top;
+            } else state.remember(true);
+            updateButton();
         },
         scroll() {
             scrolls++;
@@ -110,8 +144,12 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                 if (dragging && !(dragging === 'released' && feed.scrollTop === placed)) {
                     state.stick = feed.scrollHeight > feed.clientHeight && state.nearBottom();
                 }
-                state.top = feed.scrollTop;
-                state.remember(relayout); // a resize waiting on these scrolls keeps where they end
+                const top = feed.scrollTop;
+                // A resize clamp may notify before its reflow; it doesn't replace the box the reader chose.
+                const nestedGeometry = viewportAnchor?.nested && (top === state.top || settledBox !== feedBox());
+                state.top = top;
+                if (!nestedGeometry && (dragging || viewportTop !== top || settledBox !== feedBox())) state.remember(relayout);
+                else viewportTop = null;
             }
             updateButton();
         },
@@ -182,11 +220,11 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                 : (target === doc.body || target === doc.documentElement ? pressed : null);
             // A bounded box (full output, Review detail, card timeline) that can
             // still move absorbs the gesture; only at its edge does the feed move.
-            const nestedMoves = (node, direction) => {
+            const nestedScroller = (node, direction) => {
                 for (let box = node; box && box !== feed; box = box.parentElement) {
                     if (!(box.scrollHeight > box.clientHeight + 1)
                         || !/auto|scroll|overlay/.test(doc.defaultView?.getComputedStyle?.(box)?.overflowY || '')) continue;
-                    if (direction < 0 ? box.scrollTop > 0 : box.scrollTop + box.clientHeight < box.scrollHeight - 1) return true;
+                    if (direction < 0 ? box.scrollTop > 0 : box.scrollTop + box.clientHeight < box.scrollHeight - 1) return box;
                 }
                 return false;
             };
@@ -244,7 +282,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                 const continuing = latched !== null && (event.type === 'touchmove'
                     || (event.type === 'wheel' && event.timeStamp - wheelAt < 200));
                 if (event.type === 'wheel') wheelAt = event.timeStamp;
-                const nested = continuing ? latched : nestedMoves(origin, direction);
+                const nested = continuing ? latched : nestedScroller(origin, direction);
                 latched = event.type === 'keydown' ? null : nested;
                 // The reader's own box scrolling supersedes a pending place or a ↓
                 // still awaiting history, which must not override it later; other
@@ -252,14 +290,20 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                 // end: turning back or reading away from the live edge.
                 // Cancelling a pending ↓ also ends its follow, including a shared read's later row updates.
                 const follow = state.stick && !state.returning;
-                const absorb = () => { state.stick = follow && direction > 0 && state.nearBottom(); };
+                const absorb = box => {
+                    state.stick = follow && direction > 0 && state.nearBottom();
+                    // The outer feed may never send a scroll. Hand off to this scroller's edge once,
+                    // even when already away from the live edge; its inner lines can still move.
+                    if (!state.stick && !(viewportAnchor?.nested && viewportAnchor.node === box)
+                            && box.isConnected && feed.contains(box)) state.remember(true, box);
+                };
                 if (nested) {
                     // Box scrolling also ends an earlier feed gesture's queued frame and
                     // the scrolls it still owes, though not a scrollbar drag still held,
                     // and an unread opening still owed after its claim reached the present.
                     gestures++; if (dragging !== 'held') dragging = '';
                     if (intent || approximate || state.returning || claimed === generation || arriving === generation) state.cancel();
-                    absorb();
+                    absorb(nested);
                     return;
                 }
                 state.cancel(); state.stick = false; state.ownMove = true;
@@ -269,7 +313,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                     // A browser may move the box before it reports the gesture: when the
                     // box under it scrolled, the gesture was that box's after all.
                     for (let box = origin; boxScrolled?.at >= since - 50 && box && box !== feed; box = box.parentElement) {
-                        if (box === boxScrolled.box) { latched = true; absorb(); return; }
+                        if (box === boxScrolled.box) { latched = box; absorb(box); return; }
                     }
                     state.stick = direction > 0 && feed.scrollHeight > feed.clientHeight && state.nearBottom();
                     // A key, wheel or swipe the engine animates may still be moving the feed:

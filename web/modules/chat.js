@@ -765,7 +765,7 @@ export function createChatInstance({
                 const summary = noteToolHostMetrics(record, { calls, errors, routing, completion, counts: metrics.tool_call_counts, evidence: metrics.tool_evidence });
                 if (summary.calls > 0 || record.toolCalls != null) record.toolCalls = summary.calls;
                 record.toolErrors = summary.errors;
-                changed = placeReplayedEvidence(record, summary, metrics.tool_evidence, rawTs, normalizeLogTs)
+                changed = placeReplayedEvidence(record, summary, metrics.tool_evidence, rawTs, normalizeLogTs, summarizeChatLiveEvent)
                     && renderLiveCardTimeline(record);
             }
             updateLiveCardCount(record);
@@ -1628,7 +1628,7 @@ export function createChatInstance({
         if (closedPhase && !initialContent) {
             if (foldView) {
                 upsertToolFoldRow(record, foldView, ts, rawTs);
-                if (summary.dedupeKey?.endsWith(':check')) placeCheckRow(record, summary, ts, rawTs);
+                if (summary.dedupeKey?.endsWith(':check') || summary.hostRefusedStep) placeCheckRow(record, summary, ts, rawTs);
                 renderLiveCardTimeline(record);
                 updateLiveCardCount(record);
             }
@@ -2737,43 +2737,50 @@ export function createChatInstance({
         // A room not displayed (Main behind a page) measures its bars as 0: it keeps the reserves it was laid out
         // with, or it would come back with its newest message under the composer.
         if (leaving || !page.getClientRects().length) return false;
-        // The room's measured layout variables, each written only when it changes (true then).
-        const layout = { setProperty: (name, value) => page.style.getPropertyValue(name) !== value
-            && (page.style.setProperty(name, value), true) };
+        // Stage only changed CSS properties; then apply the measurements in one timeline transaction.
+        const changes = [];
+        const setProperty = (name, value) => page.style.getPropertyValue(name) !== value && (changes.push([name, value]), true);
         let chromeMoved = false;
-        const mutate = () => {
-            let changed = false;
-            if (pageHeader && messagesDiv) {
-                // The bar's own height places the note under it; the transcript clears both.
-                const bar = Math.ceil(pageHeader.offsetHeight || 0);
-                const note = pageNote?.offsetParent ? Math.ceil(pageNote.offsetHeight || 0) : 0;
-                changed = layout.setProperty('--chat-header-bar', `${bar}px`);
-                changed = layout.setProperty('--chat-header-reserve', `${Math.max(56, bar + note)}px`) || changed;
+        if (pageHeader && messagesDiv) {
+            // The bar's own height places the note under it; the transcript clears both.
+            const bar = Math.ceil(pageHeader.offsetHeight || 0);
+            const note = pageNote?.offsetParent ? Math.ceil(pageNote.offsetHeight || 0) : 0;
+            setProperty('--chat-header-bar', `${bar}px`);
+            setProperty('--chat-header-reserve', `${Math.max(56, bar + note)}px`);
+        }
+        if (inputArea && messagesDiv) {
+            setProperty('--chat-composer-height', `${Math.ceil(composerHeightAtRest())}px`);
+            // Keyboard up: all but feed and field text is chrome (style.css), read at rest.
+            const box = el => el.getBoundingClientRect();
+            if (document.body.matches('.keyboard-open, .keyboard-closing') && !inputArea.querySelector('[data-motion]')) {
+                const top = Math.max(readBand(messagesDiv, pageHeader, null).top,
+                    pageNote?.offsetHeight ? box(pageNote).bottom : 0);
+                chromeMoved = setProperty('--chat-keyboard-chrome', `${Math.round(top - box(pageHeader || page).top
+                    + box(inputArea).height - box(input).height)}px`);
             }
-            if (inputArea && messagesDiv) {
-                const reserve = Math.max(92, Math.ceil(composerHeightAtRest()) + 16);
-                changed = layout.setProperty('--chat-input-reserve', `${reserve}px`) || changed;
-                // Keyboard up: all but feed and field text is chrome (style.css), read at rest.
-                const box = el => el.getBoundingClientRect();
-                if (pageHeader && document.body.classList.contains('keyboard-open')
-                        && !inputArea.querySelector('[data-motion]')) {
-                    chromeMoved = layout.setProperty('--chat-keyboard-chrome', `${Math.round(box(messagesDiv).top
-                        - box(pageHeader).top + box(inputArea).height - box(input).height)}px`);
-                }
-            }
-            return changed || chromeMoved;
-        };
-        const changed = preserveStickiness ? withStableViewport(mutate) : mutate();
-        if (chromeMoved) composer?.resize();  // a grown cap sends no resize
+        }
+        if (changes.length) {
+            const write = () => { for (const [name, value] of changes) page.style.setProperty(name, value); };
+            const apply = () => preserveStickiness ? withStableViewport(write) : write();
+            if (chromeMoved && composer) composer.remeasureInput(apply);
+            else apply();
+        }
         // The scrollbar this feed draws (none where scrollbars overlay the page): a Project's focus corners keep off it.
-        if (asPanel) layout.setProperty('--chat-feed-lane', `${messagesDiv.offsetWidth - messagesDiv.clientWidth}px`);
+        if (asPanel) {
+            const lane = `${messagesDiv.offsetWidth - messagesDiv.clientWidth}px`;
+            if (lane !== page.style.getPropertyValue('--chat-feed-lane')) page.style.setProperty('--chat-feed-lane', lane);
+        }
         updateScrollButton();
-        return changed;
     }
 
     // Kept on the instance so destroy() can disconnect it (the observer was
     // previously an unreachable closure — the P3 lifecycle leak).
     let chatResizeObserver = null;
+
+    function reflowViewport() {
+        if (destroyed || leaving) return;
+        reading.reflow(updateMessagesPadding);
+    }
 
     function installChatResizeObservers() {
         if (typeof ResizeObserver !== 'function') return;
@@ -2783,9 +2790,7 @@ export function createChatInstance({
             queued = true;
             requestAnimationFrame(() => {
                 queued = false;
-                if (destroyed || leaving) return;
-                reading.reflow();
-                updateMessagesPadding();
+                reflowViewport();
             });
         };
         chatResizeObserver = new ResizeObserver(schedule);
@@ -3503,6 +3508,7 @@ export function createChatInstance({
         showLatest,
         resume,
         ws,
+        reflowViewport,
         captureReading: () => reading.capture(),
         showHistoryNotice: () => { if (!destroyed) historyControls.showNotice(); },
         refreshHistory: readReceipt.refresh,

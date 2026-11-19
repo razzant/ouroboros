@@ -147,6 +147,9 @@ export function createRoomWork({
     // One bar per room: the Project panel bar, or Main's header. The status follows the room's own title in the
     // bar's title row, so a changing word takes the title's room and never moves a neighbour.
     const bar = panel?.querySelector?.('.project-panel-bar') || (asPanel ? null : page.querySelector('.chat-page-header'));
+    // A room mounted without a bar (a bare instance in a panel of its own) has no frosted edge, so its first row's reserve
+    // is the measured one alone (style.css --chat-top-reserve).
+    if (!bar) page.style?.setProperty?.('--edge-reach', '0px');
     trigger.append(statusBadge, mark, waitNote, caret);
     const titleRow = bar?.querySelector('.app-page-title-row');
     if (titleRow) titleRow.appendChild(trigger);

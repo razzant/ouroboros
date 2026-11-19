@@ -605,3 +605,103 @@ test('a recorded child start outranks an earlier inert history carrier', async (
         assert.equal(f.checks(CHILD).length, 1);
     } finally { f.close(); }
 });
+
+// ---------------------------------------------------------------------------
+// A refused step replays its row too: the same invocation key, the same words
+// as the live frame, and an independent error beside the refusal stays red.
+// ---------------------------------------------------------------------------
+
+const REFUSED_PREVIEW = 'part one sent.\n\n⚠️ OWNER_OPERATION_REFUSED: the host refused this call a further action: stopping (cancelled). It confirms only that refusal; the report above is the extension\'s own account of what ran.';
+const REFUSED_TITLE = 'A further step was refused by Stop · ext_stopper_send';
+const refusedMeta = { refused_step: true, control_reason: 'cancelled' };
+const refusedObs = (id, patch = {}) => [
+    { key: KEY(id), tool: 'ext_stopper_send', receipt: false, live: false, fact: 'started', status: 'unknown',
+        hostError: false, ts: T('00:05') },
+    { key: KEY(id), tool: 'ext_stopper_send', receipt: false, live: false, fact: 'settled', status: 'held', recorded_status: 'blocked',
+        hostError: false, ts: T('00:20'), tool_result_meta: refusedMeta, result_preview: REFUSED_PREVIEW, ...patch }];
+const rowTitled = (f, title) => f.rows().filter((row) => (row.innerHTML.match(/chat-live-line-title[^>]*>([^<]*)</) || [])[1] === title);
+
+test('reload draws the refused-step row under its live key, and a late live frame stays one row', async () => {
+    const f = fixture([carrier(refusedObs('inv-1'))]);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        f.open();
+        assert.equal(rowTitled(f, REFUSED_TITLE).length, 1);
+        assert.match(rowTitled(f, REFUSED_TITLE)[0].className, /\binfo\b/);
+        assert.match(rowTitled(f, REFUSED_TITLE)[0].innerHTML, /part one sent\./);
+        assert.doesNotMatch(f.text() + f.meta(), /One of the steps failed|error/);
+        f.log({ type: 'tool_call_finished', task_id: TASK, tool: 'ext_stopper_send', invocation_id: 'inv-1',
+            is_error: true, status: 'blocked', tool_result_meta: refusedMeta, result_preview: REFUSED_PREVIEW });
+        await f.instance.refreshHistory({ revision: 2 });
+        assert.equal(rowTitled(f, REFUSED_TITLE).length, 1, 'live, replay and a second replay share the invocation key');
+    } finally { f.close(); }
+});
+
+test('a refusal settling after the terminal keeps its own row, without reopening the task', () => {
+    const f = fixture();
+    try {
+        f.emit('chat', { task_id: TASK, role: 'assistant', is_progress: true, narration: true, content: 'Finishing', ts: T('00:00') });
+        f.log({ type: 'tool_call_started', task_id: TASK, tool: 'ext_stopper_send', invocation_id: 'inv-1', _live_tool_frame: true, ts: T('00:05') });
+        f.log({ ...done, type: 'task_done', status: 'completed', tool_calls: 1, tool_errors: 0, _is_direct_chat: true, ts: T('01:00') });
+        // The Stop outran the tool telemetry: both settlement frames land on a closed card.
+        for (const type of ['tool_call', 'tool_call_finished']) {
+            f.log({ type, task_id: TASK, tool: 'ext_stopper_send', invocation_id: 'inv-1', is_error: true,
+                status: 'blocked', tool_result_code: 'OWNER_OPERATION_REFUSED', tool_result_meta: refusedMeta,
+                result_preview: REFUSED_PREVIEW, ts: T('01:30') });
+        }
+        f.open();
+        assert.equal(rowTitled(f, REFUSED_TITLE).length, 1, 'both late frames share the invocation key');
+        assert.match(rowTitled(f, REFUSED_TITLE)[0].className, /\binfo\b/);
+        assert.match(rowTitled(f, REFUSED_TITLE)[0].innerHTML, /part one sent\./);
+        assert.equal(f.phase(), 'Done', 'a late refusal never reopens the task');
+        assert.doesNotMatch(f.text() + f.meta(), /One of the steps failed|error/);
+        assert.match(f.meta(), /1 tool call/);
+    } finally { f.close(); }
+});
+
+test('an independent failure settling after the terminal keeps its red row, refusal in its body', () => {
+    const f = fixture();
+    try {
+        f.emit('chat', { task_id: TASK, role: 'assistant', is_progress: true, narration: true, content: 'Finishing', ts: T('00:00') });
+        f.log({ ...done, type: 'task_done', status: 'completed', tool_calls: 1, tool_errors: 1, _is_direct_chat: true, ts: T('01:00') });
+        f.log({ type: 'tool_call_finished', task_id: TASK, tool: 'ext_stopper_send', invocation_id: 'inv-1', is_error: true,
+            status: 'error', tool_result_code: 'EXTENSION_ERROR', tool_result_meta: refusedMeta, result_preview: 'Original failure', ts: T('01:30') });
+        f.open();
+        const failed = rowTitled(f, 'One of the steps failed · ext_stopper_send');
+        assert.equal(failed.length, 1);
+        assert.match(failed[0].className, /\berror\b/);
+        assert.match(failed[0].innerHTML, /A further step was refused by Stop/);
+        assert.equal(rowTitled(f, REFUSED_TITLE).length, 0, 'the refusal rides the failure row; no second row grows');
+        assert.equal(f.phase(), 'Done');
+        assert.equal(rowTitled(f, '1 tool call · 1 error').length, 1);
+    } finally { f.close(); }
+});
+
+test('a plain late failure without the host mark keeps folding, with no row of its own', () => {
+    const f = fixture();
+    try {
+        f.emit('chat', { task_id: TASK, role: 'assistant', is_progress: true, narration: true, content: 'Finishing', ts: T('00:00') });
+        f.log({ ...done, type: 'task_done', status: 'completed', tool_calls: 1, tool_errors: 1, _is_direct_chat: true, ts: T('01:00') });
+        f.log({ type: 'tool_call_finished', task_id: TASK, tool: 'read_file', invocation_id: 'inv-1', is_error: true,
+            status: 'error', result_preview: 'boom', ts: T('01:30') });
+        f.open();
+        assert.equal(rowTitled(f, 'One of the steps failed · read_file').length, 0,
+            'an ordinary error is not a host refusal: the fold keeps it, no late row appears');
+        assert.equal(f.phase(), 'Done');
+        assert.equal(rowTitled(f, '1 tool call · 1 error').length, 1);
+    } finally { f.close(); }
+});
+
+test('an independent error beside the refusal stays red on reload, with the refusal in its body', async () => {
+    const f = fixture([carrier(refusedObs('inv-1', { status: 'error', recorded_status: 'error' }), { tool_errors: 1 })]);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        f.open();
+        assert.equal(rowTitled(f, REFUSED_TITLE).length, 0);
+        const failed = rowTitled(f, 'One of the steps failed · ext_stopper_send');
+        assert.equal(failed.length, 1);
+        assert.match(failed[0].className, /\berror\b/);
+        assert.match(failed[0].innerHTML, /A further step was refused by Stop/);
+        assert.equal(rowTitled(f, '1 tool call · 1 error').length, 1);
+    } finally { f.close(); }
+});
