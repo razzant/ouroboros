@@ -514,7 +514,8 @@ def _link_lines(result: knowledge_store.KnowledgeWriteResult, holding: dict[str,
             before = None
             lines.append(f"What this head carried before the write is unknown: {exc}.")
     if before is not None and (newly := [name for name in after if name not in before]):
-        lines.append(f"Newly carried by this head: {listed(after, newly)}, standing where this note stands: {present(own)}.")
+        lines.append(f"Newly carried by this head: {listed(after, newly)}, standing where this note's own names hold it: "
+                     f"{present(own)}.")  # one hop: where a link holds this note, its links hold nothing
     if before is not None and (released := [name for name in before if name not in after]):
         lines.append("Released by this head: " + listed(before, released, lambda name: "; now held: " + present(
             [held for names in holding.get(name, {}).values() for held in names])) + ".")

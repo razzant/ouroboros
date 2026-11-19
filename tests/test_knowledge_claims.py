@@ -549,7 +549,7 @@ def test_a_write_names_the_heads_a_held_head_newly_carries_or_releases_and_where
     assert said(_write(registry, nova, _markdown(["room:1"], links))) == [
         "Present situations holding this note: room:1 holds 3 heads, 33 tokens",
         f"Newly carried by this head: people/sasha ({len(head)} characters), tools (17 characters; no `## ` line: the "
-        f"whole body); {len(head) + 17} characters in all, standing where this note stands: room:1.",
+        f"whole body); {len(head) + 17} characters in all, standing where this note's own names hold it: room:1.",
         "Linked from this head, not held: memory/knowledge/gone.md (no such note).",
         f"Held head: {len(links)} characters, 20 tokens: this note has no `## ` line, so its whole body is the head.",
         HELD_HEAD]
@@ -607,9 +607,9 @@ def test_one_present_line_names_why_a_note_stands_in_each_situation_and_the_shel
         reads.clear()
         return said, count
 
-    sasha, tools, nova, aika, far, lena, plain = (
+    sasha, tools, nova, aika, far, lena, plain, ivan = (
         knowledge.resolve_knowledge_address(tmp_path, topic, "global")
-        for topic in ("people/sasha", "tools", "work/nova", "work/aika", "far", "people/lena", "plain"))
+        for topic in ("people/sasha", "tools", "work/nova", "work/aika", "far", "people/lena", "plain", "people/ivan"))
     head, all_head = "How to work with Sasha.\n\n", "this note has no `## ` line, so its whole body is the head."
     # Before any claim was recorded on the shelf: nothing is read and nothing is said.
     assert write(sasha, "---\ntype: note\n---\n" + head + "## History\n\nOlder words.\n") == ([], 0)
@@ -620,7 +620,7 @@ def test_one_present_line_names_why_a_note_stands_in_each_situation_and_the_shel
     assert write(nova, _markdown(rooms, "Nova. [Sasha](../people/sasha.md) [Tools](../tools.md)\n")) == ([
         f"Present situations holding this note: {both} each hold 3 heads, 28 tokens",
         f"Newly carried by this head: people/sasha (25 characters), tools (17 characters; no `## ` line: the whole "
-        f"body); 42 characters in all, standing where this note stands: {both}.",
+        f"body); 42 characters in all, standing where this note's own names hold it: {both}.",
         f"Held head: 55 characters, 15 tokens: {all_head}", HELD_HEAD], 1)
     assert write(aika, _markdown(rooms, "Aika. [Sasha](../people/sasha.md)\n"))[0][0] == (
         f"Present situations holding this note: {both} each hold 4 heads, 38 tokens")
@@ -637,13 +637,19 @@ def test_one_present_line_names_why_a_note_stands_in_each_situation_and_the_shel
     assert write(tools, _markdown(["room:1"], "The instruments.\n")) == ([
         "Present situations holding this note: room:1 holds 4 heads, 40 tokens (also carried by work/nova); "
         f"{rooms[1]} holds 4 heads, 40 tokens (carried by work/nova)", REMOVED, tools_head, MIXED_HEAD], 1)
+    # The heads its own head links stand only where its own names hold it, not where a link holds it (one hop).
+    assert write(ivan, "---\ntype: note\n---\nIvan.\n") == ([], 1)
+    linking = write(tools, _markdown(["room:1"], "The instruments. [Ivan](people/ivan.md)\n"))[0]
+    assert rooms[1] in linking[0] and linking[1] == (
+        "Newly carried by this head: people/ivan (6 characters; no `## ` line: the whole body); 6 characters in all, "
+        "standing where this note's own names hold it: room:1.")
 
     # A carrier whose names match no present situation: none, with its carrier named, and no size.
     assert write(lena, "---\ntype: note\n---\nLena.\n") == ([], 1)
     assert write(far, _markdown(["room:99999"], "Far. [Lena](people/lena.md)\n")) == ([
         "Claims with no matching situation found: 'room:99999'", "Present situations holding this note: none",
         "Newly carried by this head: people/lena (6 characters; no `## ` line: the whole body); 6 characters in all, "
-        "standing where this note stands: none."], 1)
+        "standing where this note's own names hold it: none."], 1)
     assert write(lena, "---\ntype: note\n---\nLena, again.\n") == (
         ["Present situations holding this note: none (carried by far)"], 1)
     assert write(plain, "---\ntype: note\n---\nNeither claimed nor carried.\n") == ([], 1)
