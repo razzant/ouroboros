@@ -127,7 +127,10 @@ def test_place_transport_stays_out_of_safety_and_continue_bytes_but_reaches_succ
         return task, sources
 
     before = check_prompt(base)
-    assert check_prompt(metadata) == check_prompt(retained) == before
+    assert check_prompt(metadata) == before
+    evidence = json.loads(before.decode().split("Host evidence (provenance is not consent):\n", 1)[1]
+                          .split("\nProposed tool call:", 1)[0])
+    assert evidence["occasion"]["focus"] == metadata["focus"]
     assert b'"display_name":"Sam"' in before or b'"display_name": "Sam"' in before
     base_task, base_sources = successor(base)
     carried, _ = successor(metadata)
