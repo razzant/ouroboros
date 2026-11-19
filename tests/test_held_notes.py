@@ -72,18 +72,18 @@ def _route(window, **_kwargs):
     return {"provider": "test", "model": "fixture"}, evidence
 
 
-def _plan(world, window=0, *, mode="max", task=TASK, ctx=None, core=None, resolver=None):
+def _plan(world, window=0, *, mode="max", task=TASK, ctx=None, core=None, resolver=None, tool_schemas=None):
     return context_fit.build_context_fit_plan(
         world[0], core if core is not None else _core(world, task, ctx), task, preferred_mode=mode,
-        route_resolver=resolver or (lambda *_a, **_kw: _route(window)))
+        route_resolver=resolver or (lambda *_a, **_kw: _route(window)), tool_schemas=tool_schemas)
 
 
-def _rebind(monkeypatch, ctx, plan, messages, window):
+def _rebind(monkeypatch, ctx, plan, messages, window, *, tool_schemas=()):
     from ouroboros.loop_model_call import _rebind_context_fit_plan
 
     monkeypatch.setattr(context, "_context_fit_route", lambda *_a, **_kw: _route(window))
     rebound, mode = _rebind_context_fit_plan(plan, SimpleNamespace(_ctx=ctx), messages, model="fixture", use_local=False,
-        start_mode=plan.initial_mode, tool_schemas=[], preferred_mode=plan.preferred_mode)
+        start_mode=plan.initial_mode, tool_schemas=list(tool_schemas), preferred_mode=plan.preferred_mode)
     assert rebound.initial_mode == mode
     return rebound
 
@@ -811,6 +811,72 @@ def test_a_saved_form_replays_only_at_the_same_density_and_request_cost(world, m
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     recalibrated = _plan(world, window, mode="low", core=resumed)
     assert not _cuts(recalibrated) and _held(recalibrated) == _held(recomputed)
+
+
+def test_cold_replay_prices_the_restored_tail_and_resident_schemas(world, monkeypatch):
+    from ouroboros.owner_wait import rebind_restored_route
+
+    head = "Facts kept through a wait. " * 1_900
+    _write(world, "resumed", head, summary="An authored summary.")
+    ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
+    resident = [{"type": "function", "function": {"name": "read_loaded_source", "description": "source " * 120}}]
+    opening = _plan(world, 48_000, mode="low", ctx=ctx)
+    assert not _cuts(opening) and head in _held(opening)
+    later = {"role": "user", "content": "These are the owner's later words. " * 180}
+    messages = [*opening.messages_for("low"), later]
+    tight = _rebind(monkeypatch, ctx, opening, messages, 12_000, tool_schemas=resident)
+    assert _cuts(tight) == [("resumed", "summary")] and messages[-1] == later
+
+    def saved():
+        return json.loads(json.dumps(continuation_state(ctx, messages, {}, {}, 2, resident, set())))
+
+    def replay(state, window):
+        core = replace(opening.core, held_note_resume=held_notes.restored_capture(state))
+        return _plan(world, window, mode="low", core=core, tool_schemas=[])
+
+    def fresh(state, window):
+        core = replace(opening.core, supplementary_messages_json=json.dumps(state["messages"][2:]))
+        return _plan(world, window, mode="low", core=core, tool_schemas=state["tool_schemas"])
+
+    small = saved()
+    assert _cuts(replay(small, 12_000)) == _cuts(fresh(small, 12_000)) == _cuts(tight)
+    carried = _rebind(monkeypatch, ctx, tight, messages, 48_000, tool_schemas=resident)
+    before = saved()[held_notes.CAPTURE_KEY]["frame"][-1]
+    messages[-1] = {**later, "content": later["content"] + "Another word. " * 200}
+    grown = _rebind(monkeypatch, ctx, carried, messages, 48_000, tool_schemas=resident)
+    state = saved()
+    assert state[held_notes.CAPTURE_KEY]["frame"][-1] == before + 700
+    same = replay(state, 48_000)
+    assert _cuts(same) == _cuts(grown) == _cuts(tight)
+    assert _held(same) == _held(grown) and same.messages_for("low")[1:] == state["messages"][1:]
+
+    changed_tail = {**state, "messages": [*state["messages"], {"role": "user", "content": "Keep going."}]}
+    changed_schemas = {**state, "tool_schemas": []}
+    for changed in (changed_tail, changed_schemas):
+        repriced, fitted = replay(changed, 48_000), fresh(changed, 48_000)
+        assert not _cuts(repriced) and _held(repriced) == _held(fitted) and head in _held(repriced)
+
+    monkeypatch.setattr("ouroboros.loop.get_context_mode", lambda: "low")
+    monkeypatch.setattr("ouroboros.owner_wait._continuation_fit_route", lambda *_a: ({
+        "model": "fixture", "use_local_model": False, "model_role": "main", "model_route": {},
+        "credential_profile_id": None,
+    }, ""))
+    ctx._actor_loaded_tool_names = set()
+    ctx.active_model, ctx.active_use_local = "fixture", False
+    updated = [{"type": "function", "function": {"name": "read_loaded_source", "description": "Read source."}}]
+    for schemas in (resident, updated):
+        restored = json.loads(json.dumps(state))
+        ctx.context_fit_plan = replay(restored, 48_000)
+        registry = SimpleNamespace(_ctx=ctx, schemas=lambda: schemas)
+        rebuilt = list(restored["messages"])
+        plan, mode = rebind_restored_route(registry, restored, rebuilt)
+        assert mode == "low" and rebuilt[-2 if schemas == updated else -1] == messages[-1]
+        assert restored["tool_schemas"] == schemas
+        if schemas == updated:
+            fitted = fresh({**restored, "messages": rebuilt}, 48_000)
+            assert not _cuts(plan) and _held(plan) == _held(fitted) and head in _held(plan)
+        else:
+            assert _cuts(plan) == _cuts(grown) and _held(plan) == _held(grown)
 
 
 @pytest.mark.parametrize("outlined", [False, True], ids=["whole-index", "outlined-index"])

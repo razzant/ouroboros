@@ -117,7 +117,10 @@ def can_replay_frame(core: Any, saved: list, current: list, receipts: Mapping) -
 
 
 def restored_capture(state: Mapping) -> dict:
-    return state.get(CAPTURE_KEY) or {"entries": state.get("held_note_sections", [])}
+    capture = state.get(CAPTURE_KEY) or {"entries": state.get("held_note_sections", [])}
+    if capture["entries"]:
+        return {**capture, "messages": state.get("messages"), "tool_schemas": state.get("tool_schemas")}
+    return capture
 
 
 def continuation_capture(plan: Any, mode: str | None) -> dict:
