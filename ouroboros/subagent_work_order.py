@@ -563,7 +563,8 @@ def session_memory_references(ctx: Any) -> str:
     the notes that claim the situation names a helper of this work carries (``held_notes``, each whole, its reader
     named unavailable; a declared task names their omission instead) as text in a session's start request: what a
     native helper's view holds, pinned outside the canonical work order and its fingerprint, so a session task
-    scheduled before the update starts with them too. The stores are read once as they stand, through the memory
+    scheduled before the update starts with the marks and the outline too (it carries no situation names, so no
+    heads). The stores are read once as they stand, through the memory
     view's own capture and render (``memory_view._capture_marks``, ``render_room`` over a marks-only snapshot), the
     helper's outline (``context_sections.helper_navigation_sections``) and the heads resolved now, never the
     launcher's own capture. ``ctx._session_held_heads`` keeps the heads sent, by address and revision, for the start's
