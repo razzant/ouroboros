@@ -250,7 +250,8 @@ def _packing_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any],
     it unusable), or when loose evidence exists and the
     terminal rows moved since the last pass, or the last pass unlinked (one more look is owed: it
     records the moved directories' stamps), or it left candidates unfinished (``pending``: deferred
-    by a held custody lock, busy files, faults) and the store has been written since that pass began
+    by a held custody lock, busy files, faults, a manifest a candidate wrote after the census) and the
+    store has been written since that pass began
     (the contender that held the lock or the file writes its receipt, during the pass or after it;
     nothing but a write re-arms it, so a persistent fault costs one pass per store change, never a
     tight loop); in the child the unfinished work runs whenever the child runs for another reason."""
@@ -269,7 +270,8 @@ def _packing_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[st
     HEAD booted on the store since, a counter that went back). The inputs are read before the pass and
     recorded after it, so a task closing during the
     pass makes the next look differ. A pass that unlinked records ``quiet: False``; one that left
-    candidates deferred, busy or faulted records their ids as ``pending`` with the store revision
+    candidates deferred, busy, faulted or written a manifest after the census records their ids as
+    ``pending`` with the store revision
     it has seen: the one its own record leaves when nothing else wrote during the pass, else the
     one the pass began at, since a write during the pass (the contender's receipt, committed after
     the deferral and before this record) is one the pass has not seen, and recording the later

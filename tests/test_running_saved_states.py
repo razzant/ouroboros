@@ -483,9 +483,10 @@ def test_a_partial_pack_listing_holds_a_running_works_states_and_a_whole_one_nam
     _first, first = _park(root, attempt=1)
     with monkeypatch.context() as older_body:  # a body before #3789 packed every handle, one generation a pass
         older_body.setattr(saved_state_retirement, "worked_copy", lambda folder, name: None)
-        evidence_packs.pack_task(root, TASK, keep_shas=set())
+        older_body.setattr(evidence_packs, "task_packable", lambda txn, task_id: True)  # and unlinked a live row's too
+        evidence_packs.pack_task(root, TASK)
         _park(root, attempt=1)
-        evidence_packs.pack_task(root, TASK, keep_shas=set())
+        evidence_packs.pack_task(root, TASK)
     rel = f"source_handles/context_checkpoints/{first.name}"
     assert evidence_packs.materialize_handle(root, TASK, rel) and first.exists()
     write_task_result(root, TASK, "running", task_attempt=2)
@@ -508,7 +509,8 @@ def test_a_tasks_only_unreadable_pack_sidecar_holds_its_states_and_the_pass_keep
     _first, first = _park(root, attempt=1)
     with monkeypatch.context() as older_body:  # a body before #3789 packed every handle
         older_body.setattr(saved_state_retirement, "worked_copy", lambda folder, name: None)
-        evidence_packs.pack_task(root, TASK, keep_shas=set())
+        older_body.setattr(evidence_packs, "task_packable", lambda txn, task_id: True)  # and unlinked a live row's too
+        evidence_packs.pack_task(root, TASK)
     assert evidence_packs.materialize_handle(root, TASK, f"source_handles/context_checkpoints/{first.name}")
     write_task_result(root, TASK, "running", task_attempt=2)
     sidecar = evidence_packs.packs_dir(root) / evidence_packs.sidecar_name(TASK, 1)
