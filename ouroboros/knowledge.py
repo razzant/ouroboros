@@ -769,6 +769,11 @@ class KnowledgeWriteResult:
     claims: knowledge_versions.ClaimWrite | None = None
 
 
+def _body_text(note: KnowledgeNote) -> str:
+    """The stored body ``body_chars`` counts: the text after the parsed frontmatter, the whole text without one."""
+    return note.source.text_at(note.source.body_span) if note.source else note.text
+
+
 def overview_residency(note: KnowledgeNote) -> str:
     """A revision-stable cost line, independent of route, clock or accepted session."""
     chars = body_chars(note)
@@ -902,6 +907,12 @@ def write_knowledge_note(
         except (ValueError, yaml.YAMLError) as exc:
             return KnowledgeWriteResult(False, f"invalid_note: {exc}", current, revision)
         updated = _note(address, raw)
+        if (mode == "overwrite" and writer == "turn" and explicit_claims and current is not None
+                and _body_text(current).strip() and not _body_text(updated).strip()):
+            # Adding a name is an overwrite, and an overwrite replaces the whole note: claims sent alone would erase it.
+            return KnowledgeWriteResult(False, "invalid_note: this overwrite sets claims and carries no body, so it would "
+                                        f"erase the note's body ({body_chars(current)} characters); an overwrite replaces the "
+                                        "whole note: send its whole text with the claims list in its YAML", current, revision)
         old_archive = {"archive": current.metadata["archive"]} if current and "archive" in current.metadata else {}
         new_archive = {"archive": updated.metadata["archive"]} if "archive" in updated.metadata else {}
         if not lifecycle and yaml_form(old_archive) != yaml_form(new_archive):

@@ -412,6 +412,49 @@ def test_claim_receipt_reports_unmatched_names_and_nonstrings_and_project_claims
     assert "Claims with no matching" not in cleared and knowledge.active_claims(tmp_path) == {}
 
 
+def test_a_claims_overwrite_that_carries_no_body_is_refused_and_writes_nothing(tmp_path):
+    """Adding a name is an overwrite, and an overwrite replaces the whole note. Claims sent alone would save the note
+    without its body, so that one write is refused; every other write is what it was."""
+    registry = _registry(tmp_path)
+    target = knowledge.resolve_knowledge_address(tmp_path, "nova", "global")
+    body = "What is true of Nova now.\n\n## History\n\nOlder facts.\n"
+    assert _write(registry, target, _markdown(["room:1"], body)).startswith("✅")
+    journal = knowledge_versions.journal_path(target)
+    record = knowledge_versions.claim_record_path(target.shelf, target.topic)
+    before = knowledge.read_knowledge_note(target)
+    stored = target.path.read_bytes(), journal.read_bytes(), record.read_bytes()
+    said = ("⚠️ TOOL_ERROR: Knowledge write not completed: invalid_note: this overwrite sets claims and carries no body, so it "
+            f"would erase the note's body ({len(body)} characters); an overwrite replaces the whole note: send its whole text "
+            "with the claims list in its YAML.")
+    alone = "---\nclaims: ['room:1', 'room:2']\n---"
+    for content in (alone, alone + "\n", alone + "\n\n  \n", "---\nclaims: []\n---\n"):
+        refused = _write(registry, target, content, expected_revision=before.revision)
+        assert refused.startswith(said) and refused.endswith(body)  # the reply carries the text to send back
+        assert (target.path.read_bytes(), journal.read_bytes(), record.read_bytes()) == stored
+    assert knowledge.active_claims(tmp_path) == {"room:1": [target]}
+
+    # The same names with the whole text are saved, and the new name holds.
+    saved = _write(registry, target, _markdown(["room:1", "room:2"], body), expected_revision=before.revision)
+    assert saved.startswith("✅") and target.path.read_bytes().endswith(body.encode("utf-8"))
+    assert knowledge.active_claims(tmp_path) == {"room:1": [target], "room:2": [target]}
+
+    # An overwrite whose YAML sets no claims is untouched: its fields merge and the body it carries, none, is the note's.
+    plain = knowledge.resolve_knowledge_address(tmp_path, "plain", "global")
+    assert _write(registry, plain, "---\ntype: note\n---\nA body.\n").startswith("✅")
+    fields = _write(registry, plain, "---\nsummary: Only fields.\n---",
+                    expected_revision=knowledge.read_knowledge_note(plain).revision)
+    assert fields.startswith("✅") and plain.path.read_bytes() == b"---\ntype: note\nsummary: Only fields.\n---\n"
+    held = knowledge.read_knowledge_note(target)  # the same on a note that holds names, while its YAML sends none
+    kept = _write(registry, target, "---\nsummary: Only fields.\n---", expected_revision=held.revision)
+    assert kept.startswith("✅") and knowledge_versions.body_chars(knowledge.read_knowledge_note(target)) == 0
+    assert knowledge.active_claims(tmp_path) == {"room:1": [target], "room:2": [target]}
+
+    # A new note may be created with claims and no body.
+    fresh = knowledge.resolve_knowledge_address(tmp_path, "fresh", "global")
+    assert _write(registry, fresh, "---\nclaims: ['room:3']\n---").startswith("✅")
+    assert knowledge.active_claims(tmp_path)["room:3"] == [fresh]
+
+
 def test_history_readers_skip_only_claim_commits_and_keep_the_index_backup_row(tmp_path, monkeypatch):
     from ouroboros import return_facts
     from ouroboros.projects_registry import create_project
