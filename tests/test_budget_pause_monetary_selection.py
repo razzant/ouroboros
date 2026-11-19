@@ -634,6 +634,52 @@ def test_a_newer_root_latch_refuses_the_consumed_sleepers_older_selection(tmp_pa
     assert evidence["latch_g"]["fence_id"] != fence_f and evidence["after_g"] == FENCED, evidence
 
 
+@pytest.mark.parametrize("order", ["event_first", "shutdown_first"])
+def test_an_owner_restart_hold_outlasts_the_deferred_child_revocation(tmp_path, monkeypatch, order):
+    """The owner Resumes the sleeping child, the root pauses again and the owner restarts. Whichever of the root's
+    park event and the stop raises the new latch first, the child's unused grant is revoked outside Q and the stop's
+    hold, set while that revocation waited, stays in the queue and the snapshot: the child's own sleep deadline
+    wakes nothing after the root's Resume."""
+    import datetime
+
+    from ouroboros import budget_pause, deadline_utils
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    queue, workers, sup, _child, _fence_f, sent = _sleeper_under_latch(tmp_path, monkeypatch, wake_after_sec=3600)
+    root_ctx, root_limit = _member_ctx(tmp_path, ROOT, ROOT)
+    _install(sup, ROOT, _refused_dispatch_park(tmp_path, root_limit, ROOT))
+    assert queue.resume_budget_paused_task(ROOT)["ok"]
+    workers.assign_tasks()
+    assert [task["id"] for task in sent] == [ROOT]
+    _consume(monkeypatch, root_ctx, root_limit, sent[0]["_budget_pause_resume"])
+    granted = queue.resume_budget_paused_task(CHILD)
+    assert granted["ok"] is True, granted
+    root_pause = _planning_park(root_limit)
+    if order == "event_first":
+        _install(sup, ROOT, root_pause)
+    budget_pause.end_dispatch_fence(ROOT)
+    workers.WORKERS.clear()
+    assert workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Owner restart",
+                                retain_saved_work=True, preserve_pending=True, stop_source="owner_restart")
+    child, row = _pending(workers, CHILD), budget_pause.budget_pause_row(tmp_path, CHILD)
+    evidence = {"hold": (child.get("_budget_pause_hold") or {}).get("reason"),
+                "saved_hold": (_snapshot_task(tmp_path, "pending", CHILD).get("_budget_pause_hold") or {}).get("reason"),
+                "grant": {key: (row.get("grant") or {}).get(key) for key in ("grant_id", "revoke_reason")},
+                "marker_names_row": child["_budget_pause"]["checkpoint"]["pause_id"] == row["pause_id"],
+                "handoff": "_budget_pause_resume" in child}
+    assert queue.resume_budget_paused_task(ROOT)["ok"]
+    later = deadline_utils.utc_now() + datetime.timedelta(hours=2)
+    monkeypatch.setattr(deadline_utils, "utc_now", lambda: later)
+    wake = wake_ready_sleepers(queue, only=CHILD)
+    evidence.update(wake=[outcome.get("veto") or outcome.get("ok") for outcome in wake],
+                    state=budget_pause.budget_pause_row(tmp_path, CHILD)["state"])
+    _record(f"owner_restart_hold_after_deferred_revocation[{order}]", evidence)
+    assert evidence["grant"] == {"grant_id": granted["grant_id"], "revoke_reason": "new_root_budget_fence"}, evidence
+    assert evidence["marker_names_row"] and not evidence["handoff"], evidence
+    assert evidence["hold"] == evidence["saved_hold"] == "owner_restart_hold", evidence
+    assert not any(outcome.get("ok") for outcome in wake) and evidence["state"] == budget_pause.STATE_PAUSED, evidence
+
+
 def _handoff(**overrides):
     return {"pause_id": "p1", "grant_id": "g1", "authority": "explicit_resume", "root_fence_id": "F",
             "selected_by": "owner", "root_grant_id": "", "root_resume_generation": 0, **overrides}

@@ -186,10 +186,13 @@ def _parking_lock():
             yield revoked
     finally:
         for member, copy_row, marker in revoked:
+            seen = {key: copy_row.get(key) for key in (BUDGET_HOLD_KEY, SELECTION_KEY)}
             revoke_exact_budget_resume(copy_row, "new_root_budget_fence")
             with q._queue_lock:
                 if member.get("_budget_pause") is marker and "_budget_pause_resume" not in member:
                     for key in ("_budget_pause_resume", "_budget_pause", BUDGET_HOLD_KEY, SELECTION_KEY):
+                        if key in seen and member.get(key) is not seen[key]:
+                            continue  # set after the copy (a stop's hold): the newer decision stays
                         if key in copy_row:
                             member[key] = copy_row[key]
                         else:
