@@ -22,6 +22,10 @@ test('every row is found by its name, an old name and its key; every home row by
     for (const row of HOME_ROWS) {
         for (const words of [row.name, ...row.aliases]) assert.ok(ids(words, entries).includes(row.id), `${row.id} by "${words}"`);
     }
+    // The review cap answers to the name Ouroboros's own messages give it and to the name it carried on this page before.
+    for (const words of ['Max Review Cycles', 'Paid review rounds for one change']) {
+        assert.ok(ids(words, entries).includes('OUROBOROS_REVIEW_MAX_CYCLES'), words);
+    }
     assert.deepEqual(ids('', entries), [], 'no words, no results');
     assert.deepEqual(ids('zzz-no-setting-has-this', entries), []);
 });

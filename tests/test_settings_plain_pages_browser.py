@@ -150,13 +150,21 @@ def _settled(page, path):
 @pytest.mark.parametrize("width,height", SIZES)
 @pytest.mark.parametrize("theme", ["dark", "light"])
 def test_every_plain_page_fits_its_window_without_sideways_scroll(subscription_ui, width, height, theme):
-    page, _server = _page(subscription_ui, width, height, theme, OUROBOROS_RUNTIME_MODE="cyber_pro")
+    # A stored review cap its strip does not offer: the strip then holds six options, its widest, and must still fit.
+    page, _server = _page(subscription_ui, width, height, theme, OUROBOROS_RUNTIME_MODE="cyber_pro", OUROBOROS_REVIEW_MAX_CYCLES="40")
     for path in PAGES:
         open_settings(page, path)
         level = _settled(page, path)
         if path == "permissions":  # a restart waits: the Access row says both values
             page.wait_for_function("() => /Running: Pro/.test(document.querySelector("
                                    "'[data-setting-row=\"OUROBOROS_RUNTIME_MODE\"] [data-setting-meta]')?.textContent || '')")
+            # The review cap stands in the card of what it limits, in sight, with the stored number as the chosen option.
+            cap = setting_row(page, "OUROBOROS_REVIEW_MAX_CYCLES")
+            cap.locator('[data-setting-value="40"][aria-pressed="true"]').wait_for(state="visible")
+            assert cap.locator("[data-setting-value]").evaluate_all("nodes => nodes.map((node) => node.dataset.settingValue)") == [
+                "1", "2", "3", "5", "40", "unlimited"]
+            assert cap.evaluate("row => [row.closest('.settings-card').querySelector('.settings-card-title').textContent,"
+                                " Boolean(row.closest('details'))]") == ["Who checks its results", False]
         fits = level.evaluate("""level => {
             const wide = (el) => el.scrollWidth - el.clientWidth;
             const out = [...level.querySelectorAll('.ui-segment-group, .settings-choices, .settings-slider, .ui-row-actions')]
@@ -169,7 +177,7 @@ def test_every_plain_page_fits_its_window_without_sideways_scroll(subscription_u
         assert fits == {"page": 0, "doc": 0, "out": []}, f"{path} at {width}x{height} {theme}: {fits}"
         setup_browser.capture(page, f"c2-{path.replace('/', '-')}-{width}x{height}-{theme}")
         if path == "permissions":
-            level.locator("details[data-settings-fold] > summary").click()
+            assert level.locator("details[data-settings-fold]").count() == 0, "this page folds nothing away"
             level.evaluate("level => { level.scrollTop = level.scrollHeight; }")
             setup_browser.capture(page, f"c2-permissions-end-{width}x{height}-{theme}")
 
