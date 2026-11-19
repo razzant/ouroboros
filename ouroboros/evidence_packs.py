@@ -70,6 +70,15 @@ class SidecarCorrupt(OSError):
     """Unreadable pack authority; restore and its preflight must refuse."""
 
 
+class EvidenceUnavailable(OSError):
+    """``evidence_unavailable``: where the bytes lie cannot be learned NOW (``reason``: ``busy``,
+    ``damaged``); the address stays good for a later read. Never absence, never corruption."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 
 def packs_dir(root: Any) -> pathlib.Path:
     return pathlib.Path(root) / PACKS_REL
@@ -637,7 +646,7 @@ def _shared_whole(root: pathlib.Path, sha256: str, size: int, max_bytes: Optiona
 
 
 def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_bytes: Optional[int] = None,
-               admit: Optional[Callable[[pathlib.Path], None]] = None) -> bytes:
+               admit: Optional[Callable[[pathlib.Path], None]] = None, task_id: Optional[str] = None) -> bytes:
     """Verified loose bytes, then a view's skeleton placement spliced with its parts, then every
     pack placement, then admissible retained roots.
 
