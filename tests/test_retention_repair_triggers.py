@@ -584,6 +584,8 @@ def test_a_source_only_the_catalog_can_place_stays_owed_until_it_answers(tmp_pat
         if holder.is_alive():
             holder.join(10)
     if catalog == "damaged":
-        packs.ensure_index(child)  # the packing pass's one builder
+        # The one builder, called here by hand: no packing pass runs over a child root today, so in the product
+        # this source stays owed (and the child's drive retained) until that root's index answers.
+        packs.ensure_index(child)
     assert observability.retry_pending_child_ref_promotions(parent)["completed"] == [task]
     assert packs.blob_bytes(parent, {**payload, "path": ""}) == exact
