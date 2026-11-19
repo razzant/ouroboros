@@ -70,6 +70,8 @@ def test_a_held_head_changes_c_before_the_assignment_and_keeps_a_prime_d_and_b(t
     monkeypatch.setattr(context, "build_health_invariants", lambda *_a, **_kw: "")
     monkeypatch.setattr(context, "_record_memory_view", lambda *_a, **_kw: {})
     monkeypatch.setattr("ouroboros.context_runtime_facts.disk_view", lambda *_a, **_kw: {})
+    # The queue's dated observation is process-wide: its age must not differ between the two builds compared here.
+    monkeypatch.setattr(context, "_queue_context_fact", lambda _task: {"note": "Queue observation unavailable."})
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
     evidence = SimpleNamespace(route_fp="held-cache", status="asserted", stale=False, window_tokens=1_000_000)
     task = {"id": "cache-held", "type": "task", "chat_id": 1, "text": "Newest owner words for the cache test."}

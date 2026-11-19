@@ -25,6 +25,7 @@ from tests import _memory_view_synthetic as synthetic
 from tests._live_world import host_world as host_world
 
 HEADING = "## Held knowledge notes"
+QUEUE_FACT = {"note": "Queue observation unavailable; current capacity is unknown."}
 TASK = {"id": "held-note-turn", "chat_id": 1, "type": "task", "text": "Newest owner assignment."}
 RESERVE = 4096
 
@@ -43,12 +44,14 @@ def world(tmp_path, monkeypatch):
     for path, text in files.items():
         file = repo / path
         file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_text(text, encoding="utf-8")
+        file.write_bytes(text.encode("utf-8"))
     memory = Memory(drive_root=data, repo_dir=repo)
     memory.ensure_files()
     monkeypatch.setattr(context, "utc_now_iso", lambda: "2026-11-18T20:00:00Z")
     monkeypatch.setattr(context, "build_health_invariants", lambda *_a, **_kw: "")
     monkeypatch.setattr("ouroboros.context_runtime_facts.disk_view", lambda *_a, **_kw: {})
+    # The queue's dated observation is process-wide: another test's snapshot must not put its age into a request.
+    monkeypatch.setattr(context, "_queue_context_fact", lambda _task: QUEUE_FACT)
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     monkeypatch.setattr(context_fit, "main_output_reserve_tokens", lambda **_kw: RESERVE)
     return Env(repo_dir=repo, drive_root=data), memory
@@ -119,7 +122,7 @@ def test_default_request_is_byte_identical_and_only_recorded_claims_add_a_sectio
 
     note = _write(world, "carried", "Adopted head.", claims=())
     authored = "---\ntype: note\nclaims: ['room:1']\n---\nAdopted head."
-    note.address.path.write_text(authored, encoding="utf-8")
+    note.address.path.write_bytes(authored.encode("utf-8"))
     assert not _held(_plan(world))  # a field authored outside the note writer has no adoption
     live = knowledge.read_knowledge_note(note.address)
     adopted = knowledge.write_knowledge_note(note.address, authored, writer="turn", expected_revision=live.revision)
@@ -190,7 +193,7 @@ def test_overview_is_only_a_reference_and_inactive_or_malformed_notes_hold_nothi
                                             expected_revision=archived.revision)
     assert result.ok
     malformed = _write(world, "malformed", "Syntactically valid a moment ago.")
-    malformed.address.path.write_text("---\nclaims: [\n---\nMalformed body.", encoding="utf-8")
+    malformed.address.path.write_bytes(b"---\nclaims: [\n---\nMalformed body.")
     project = create_project(world[0].drive_root, "private", name="Private")
     _write(world, "separate", "Project shelf body.", scope=f"project:{project['id']}")
     _write(world, "active", "Head without a heading.")
@@ -804,7 +807,11 @@ def test_a_saved_form_replays_only_at_the_same_density_and_request_cost(world, m
     _write(world, "saved", head, summary="An authored summary.")
     ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.6)
-    tight = _plan(world, 12_000, mode="low", ctx=ctx)
+    # The tight window comes from the measured request, not from a literal beside the edge: half of the request that
+    # holds the head whole (the head is most of it), plus the reply reserve. The summary fits there with room.
+    whole = _plan(world, 60_000, mode="low", ctx=ctx)
+    assert not _cuts(whole) and head in _held(whole)
+    tight = _plan(world, whole.projected_tokens_with_tools("low", []) // 2 + RESERVE, mode="low", ctx=ctx)
     assert _cuts(tight) == [("saved", "summary")]
     window = 48_000
     carried = _rebind(monkeypatch, ctx, tight, tight.messages_for("low"), window)
