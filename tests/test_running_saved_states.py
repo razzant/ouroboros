@@ -561,3 +561,25 @@ def test_the_passs_own_read_of_a_wait_head_is_no_change_and_a_new_write_is(root,
     report = _later(root)
     assert not read.exists() and report["removed"] == 1, report
     assert report["held"] == {"changed": 1} and written.exists()
+
+
+def test_a_saved_state_written_back_while_the_work_runs_is_not_dated_as_settled(root):
+    """Carbon m1: a reader wrote a packed saved state back while the work ran; its later settled write without a
+    recorded end (a recovered crash) must start the owner's days then, not at the write-back."""
+    from ouroboros import store
+    from ouroboros.saved_state_retirement import WORKED_COPIES, owe_written_back
+
+    def row(task_id):
+        with store.open_store(root, write=False) as txn:
+            return txn.get_row(WORKED_COPIES, task_id) or {}
+
+    _running(root, attempt=1)
+    _park(root, attempt=1, state="waiting")
+    owe_written_back(root, TASK)
+    assert row(TASK).get("written_back") and "settled_at" not in row(TASK)
+    settled = time.time()
+    write_task_result(root, TASK, "failed", reason_code="worker_crash_owner_wait")  # recovered: no recorded end
+    assert row(TASK)["settled_at"] >= settled, "its days run from the settled write"
+    write_task_result(root, "done", "completed")
+    owe_written_back(root, "done")
+    assert row("done").get("settled_at"), "a finished work's write-back is dated, as before"

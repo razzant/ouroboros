@@ -242,11 +242,15 @@ def _work_end(document: dict):
 
 def owe_written_back(root: Any, task_id: str) -> None:
     """A saved state written back from its pack (``evidence_packs.materialize_handle``) is owed again: best effort,
-    never a wait (a missed one waits for the next walk after another body boots)."""
+    never a wait (a missed one waits for the next walk after another body boots). Only a settled task's row is dated
+    as settled: a running work's first settled write dates its own."""
+    from ouroboros.task_status import SETTLED_STATUSES
+
     try:
         with store.acquisition_budget(0), store.open_store(pathlib.Path(root), write=True) as txn:
             row = txn.get_row(WORKED_COPIES, str(task_id)) or {}
-            txn.put_row(WORKED_COPIES, str(task_id), {**row, "written_back": time.time(), "settled_at": row.get("settled_at") or time.time()})
+            settled = {"settled_at": row.get("settled_at") or time.time()} if txn.row(str(task_id), "status") in SETTLED_STATUSES else {}
+            txn.put_row(WORKED_COPIES, str(task_id), {**row, "written_back": time.time(), **settled})
             schedule_in(txn, time.time())
     except Exception:
         log.debug("A written-back saved state of %s waits for the next walk", task_id, exc_info=True)
