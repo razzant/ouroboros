@@ -496,7 +496,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
     def _apply_working_view(self, messages: list, schemas: list, round_idx: int) -> bool:
         from ouroboros.context_budget import ContextReclaimRequest, authored_view_fields
         from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256
-        from ouroboros.tools.compact_context import residue_by_kind
+        from ouroboros.tools.compact_context import FOLD_FACT_KEYS, fold_receipt_facts, residue_by_kind
 
         pending = getattr(self._inspection_ctx, "_pending_compaction", None)
         if pending is None:
@@ -521,10 +521,10 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                     "output_reserve_tokens": int(self.assignment.request.max_tokens or self.assignment.slot.max_tokens),
                     "measurement_basis": "canonical_serialized_characters", "strict_bound_proven": False}
         candidate, receipt = compact_tool_history_llm(
-            messages, request=request, observed_messages=observed["messages"],
-            observed_tool_schemas=observed["tool_schemas"], tool_schemas=schemas,
-            fit_candidate=fit, drive_root=root, task_id=self.assignment.request.task_id or "review")
-        self._view_receipt = asdict(receipt)
+            messages, request=request, observed_messages=observed["messages"], tool_schemas=schemas, fit_candidate=fit,
+            observed_tool_schemas=observed["tool_schemas"], written_at=pending.get("written_at"),
+            drive_root=root, task_id=self.assignment.request.task_id or "review")
+        self._view_receipt = (view := asdict(receipt)) | fold_receipt_facts(observed["messages"], candidate, view)
         ref = self._store_source(f"view-{round_idx}", self._view_receipt)
         if receipt.status == "applied":
             from ouroboros.transcript_prefix import sanction_rewrite
@@ -535,7 +535,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
             notice = {"role": "user", "content": json.dumps({"context_view_status": receipt.status,
                        "receipt_source": ref, "reclaimed_tokens": receipt.reclaimed_tokens,
                        **({"residue": residue_by_kind(messages), "basis": "host estimates"} if receipt.status == "applied" else {}),
-                       **({"replaced_notes": receipt.replaced_notes} if receipt.replaced_notes else {})},
+                       **{key: self._view_receipt[key] for key in FOLD_FACT_KEYS if self._view_receipt.get(key)}},
                        ensure_ascii=False)}
             messages.append(notice)
         return receipt.status == "applied"

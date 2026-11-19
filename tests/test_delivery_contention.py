@@ -1,4 +1,5 @@
 """Required sends retain exact debt and physical ownership across short store waits."""
+import hashlib
 import threading
 from contextlib import contextmanager
 import time
@@ -45,10 +46,11 @@ def owed(root, text="answer", tid="turn"):
 
 
 def consume(ctx, bus, monkeypatch):
+    clock = server_liveness.time.monotonic
     controls = []
-    monkeypatch.setitem(events.EVENT_HANDLERS, "control_probe", lambda *_: controls.append(time.monotonic()))
+    monkeypatch.setitem(events.EVENT_HANDLERS, "control_probe", lambda *_: controls.append(clock()))
     bus.put({"type": "control_probe"})
-    start = time.monotonic()
+    start = clock()
     server_liveness.drain_worker_events(bus, ctx, [start, {}, time.thread_time(), None], on_restart=lambda *_: None)
     assert controls and bus.empty(), "unrelated control remains in the same bounded pass"
     return controls[0] - start
@@ -107,32 +109,57 @@ def test_registry_lock_keeps_sent_debt_and_replay_only_registers_receipt(tmp_pat
 
 
 def test_capture_wait_uses_the_slice_and_a_restart_replays_only_its_receipt(tmp_path, monkeypatch, sender):
+    from ouroboros import platform_layer
+
     seed(tmp_path, monkeypatch)
     ctx, frames, bus = sender
     event = owed(tmp_path)
     bus.put(event)
     capture = td._capture_emitted_answer
-    budgets = []
+    waited = 0.0
+    timeouts = []
+
+    def poll(seconds):
+        nonlocal waited
+        waited += seconds
+        if waited > .25:
+            pytest.fail(f"capture requested {waited}s of lock waits before returning to control")
+        time.sleep(seconds)
+
+    # The live consumer and the contested lock share just the time spent polling.
+    # Scheduling delays and unrelated routing/receipt I/O cannot expire either clock.
+    clock = SimpleNamespace(monotonic=lambda: waited, sleep=poll, time=time.time, time_ns=time.time_ns)
 
     def budgeted_capture(*args, **kwargs):
-        # Lane E owns the evidence index lock's budget consumption. Exercise C's
-        # scope with an actual held lock using that same acquisition contract.
+        # Capture must inherit the consumer's allowance while the index is held.
         budget = store._WAIT_BUDGET.get()
-        budgets.append(budget)
-        with store.name_lock(tmp_path, "packs_index.lock", timeout_sec=budget):
-            return capture(*args, **kwargs)
+        assert budget == .25
+        with monkeypatch.context() as lock:
+            lock.setattr(platform_layer, "time", clock)
+            try:
+                with store.name_lock(tmp_path, "packs_index.lock", timeout_sec=budget):
+                    return capture(*args, **kwargs)
+            except store.StoreBusy as exc:
+                timeouts.append(exc.reason)
+                raise
 
-    monkeypatch.setattr(td, "_capture_emitted_answer", budgeted_capture)
     with store.name_lock(tmp_path, "packs_index.lock", timeout_sec=0):
-        assert consume(ctx, bus, monkeypatch) < 1.25
-    assert budgets == [.25] and len(frames) == 1
+        with monkeypatch.context() as live:
+            live.setattr(td, "_capture_emitted_answer", budgeted_capture)
+            live.setattr(server_liveness, "time", clock)
+            assert consume(ctx, bus, live) == .25
+        assert timeouts == ["contention"] and len(frames) == 1
     sent = td.pending_deliveries(tmp_path)[0]["emitted"]
     assert sent["text"] == "answer"
     delivery._DELIVERED_MESSAGE_IDS.clear()
     delivery._DEFERRED_DELIVERIES.clear()
     assert td.replay_pending_deliveries(tmp_path, event_queue=bus) == [event["delivery_id"]]
+    assert td.replay_pending_deliveries(tmp_path, event_queue=bus) == []
     assert len(frames) == 1 and td.pending_deliveries(tmp_path) == []
-    assert td.terminal_answer_receipts(tmp_path, "turn")["delivered"][0]["sent_at"] == sent["sent_at"]
+    receipt, = td.terminal_answer_receipts(tmp_path, "turn")["delivered"]
+    assert receipt["delivery_id"] == event["delivery_id"] and receipt["sent_at"] == sent["sent_at"]
+    assert receipt["text_sha256"] == hashlib.sha256(sent["text"].encode()).hexdigest()
+    assert sum(row.get("delivery_id") == event["delivery_id"] for row in chat_rows(tmp_path)) == 1
 
 
 def test_inflight_physical_send_cannot_be_duplicated_by_replay_or_handler(tmp_path, monkeypatch, sender):

@@ -20,7 +20,7 @@ def settings_client(install, monkeypatch):
     from ouroboros import config
     from ouroboros.gateway import safety_settings, settings
 
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv(config.BOOT_RUNTIME_MODE_ENV_KEY, "light")
     monkeypatch.setattr(settings, "_apply_settings_save_side_effects", lambda *a, **kw: None)
     monkeypatch.setattr(settings, "_start_supervisor_if_needed_for_request", lambda *a, **kw: False)
     install.write_text(json.dumps({"OPENROUTER_API_KEY": "fixture-router", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full"}))
@@ -44,7 +44,7 @@ def test_provider_switch_reproposes_checker_but_explicit_edit_is_refused(setting
     # A key new to this install is saved on Responses and proposes that profile; a chosen Chat keeps the Chat table.
     profile = {"responses": OPENAI_RESPONSES_DIRECT_DEFAULTS, "chat_completions": OPENAI_DIRECT_DEFAULTS}[surface]
     client, path = settings_client
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: mode)
+    monkeypatch.setenv(config.BOOT_RUNTIME_MODE_ENV_KEY, mode)
     body = config.load_settings() if resend_shown else {}
     body.update(OPENROUTER_API_KEY="", OPENAI_API_KEY="fixture-openai", **chosen)
     before = path.read_bytes()

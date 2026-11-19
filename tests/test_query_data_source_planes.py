@@ -100,7 +100,7 @@ def _pack(root, task_id, raw):
 
 @pytest.mark.parametrize("mode", ["light", "advanced", "cyber_pro"])
 def test_canonical_queue_reads_follow_the_same_actors_read_file_admission(planes, monkeypatch, mode):
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: mode)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     target = planes["canonical"] / "state/queue_snapshot.json"
     observed = {}
     for name, ctx in _contexts(planes).items():
@@ -124,7 +124,7 @@ def test_presence_ceiling_narrows_the_canonical_plane_like_read_file(planes, mon
                                                  PresenceSelection, PresenceToolTarget)
     from tests.frozen_presence_runtime import ResolvedPresenceRuntime
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     canonical = planes["canonical"]
     target = canonical / "state/queue_snapshot.json"
     for granted, expected in ((target.relative_to(planes["home"]).parent.as_posix(), "ok"), ("Desktop", "blocked")):
@@ -183,7 +183,7 @@ def test_storage_uses_the_installation_or_native_pin_with_existing_read_authorit
 
 
 def test_explicit_child_queue_logs_and_sql_keep_their_local_planes(planes, monkeypatch):
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     contexts = _contexts(planes)
     root = _registry(contexts["root"])
     status, child = _query(root, op="json", kind="queue_snapshot", child_task_id="helper")
@@ -206,7 +206,7 @@ def test_explicit_child_queue_logs_and_sql_keep_their_local_planes(planes, monke
 
 
 def test_blobs_fall_back_to_the_owner_only_after_a_proven_local_miss(planes, monkeypatch):
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     contexts = _contexts(planes)
     helper, forked = _registry(contexts["helper"]), _registry(contexts["forked_root"])
     owner_raw = b'{"owner": "canonical bytes"}'
@@ -277,7 +277,7 @@ def test_packed_blobs_need_the_actors_read_of_the_pack_file_itself(planes, monke
     opens is admitted like read_file of that file, so a protected pack refuses the blob too."""
     from ouroboros import evidence_packs as packs
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     canonical = planes["canonical"]
     raw = b'{"packed": "protected owner pack"}'
     digest, pack_path = _pack(canonical, "packed-task", raw)
@@ -322,7 +322,7 @@ def test_a_selected_owned_child_is_a_local_blob_plane(planes, monkeypatch, mode)
     admission its logs and queue already use. The canonical read alias also admits read_file,
     but does not select a child's plane. Owner fallback checks each exact file, and an explicit
     child selector outside the lineage stays refused despite the broader read alias."""
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: mode)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     canonical, own = planes["canonical"], planes["forked"]
     store.update_task(canonical, "forked", lambda _: {"status": "running", "root_task_id": "forked"})
     store.update_task(canonical, "forked-child", lambda _: {"status": "running", "parent_task_id": "forked",
@@ -362,7 +362,7 @@ def test_a_selected_owned_child_is_a_local_blob_plane(planes, monkeypatch, mode)
 
 def test_query_data_resource_admission_does_not_require_the_read_file_tool(planes, monkeypatch):
     """A withheld tool name is not a revoked resource: query_data has its own tool admission."""
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     ctx = _contexts(planes)["helper"]
     ctx.task_contract = {"disabled_tools": ["read_file"]}
     registry = _registry(ctx)
@@ -376,7 +376,7 @@ def test_native_reviewers_stay_on_their_pinned_plane(planes, monkeypatch):
     from ouroboros.review_native_episode import inspection_registry
     from ouroboros.usage_accounting import UsageScope, usage_scope
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     canonical, pin = planes["canonical"], planes["pin"]
     digest, _ = _blob(canonical, b'{"live": "only"}')
     pinned_loose, _ = _blob(pin, b'{"pin": "loose"}')
@@ -403,7 +403,7 @@ def test_logs_read_the_installations_journal_only_when_asked_and_admitted(planes
     archive with the actor's existing read of each file; nothing falls back either way."""
     from supervisor.state import rotate_jsonl_log_if_needed
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     canonical, pin = planes["canonical"], planes["pin"]
     live = canonical / "logs/store_sites.jsonl"
     live.parent.mkdir(exist_ok=True)
@@ -456,7 +456,7 @@ def test_a_selected_shared_queue_through_the_registry_reads_past_its_whole_expan
     from ouroboros import query_data_sql
     from ouroboros.shared_values import SHARED_KEY, token
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     digest = hashlib.sha256(b"shared").hexdigest()
     document = {"worker_pool": {"total": 40}, SHARED_KEY: {digest: "v" * 400},
                 "running": [{"task": {"objective": token(digest)}} for _ in range(8)]}

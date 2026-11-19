@@ -10,13 +10,13 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 |---|---|---:|---:|
 | D01 | Agent core & main loop | 68 | 0 |
 | D02 | LLM client, routing & providers | 52 | 0 |
-| D03 | Context assembly, fit & compaction | 43 | 0 |
+| D03 | Context assembly, fit & compaction | 44 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 58 | 0 |
 | D06 | Review stack | 101 | 0 |
 | D07 | Delegation, subagents & Claudexor | 113 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 80 | 0 |
-| D09 | Cancellation, owner control & process custody | 28 | 0 |
+| D09 | Cancellation, owner control & process custody | 29 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
 | D11 | Gateway, server & Web UI | 122 | 0 |
 | D12 | Settings & configuration | 28 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 27 | 0 |
-| **total** | | **1062** | **0** |
+| **total** | | **1064** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -334,6 +334,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 
 ### D03 — Context assembly, fit & compaction
 
+- `ouroboros/arrival_notes.py`
 - `ouroboros/capability_evidence.py`
 - `ouroboros/chronicle_lead.py`
 - `ouroboros/context.py`
@@ -771,6 +772,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 
 ### D09 — Cancellation, owner control & process custody
 
+- `ouroboros/answer_facts.py`
 - `ouroboros/cancel_intents.py`
 - `ouroboros/custody_owed.py`
 - `ouroboros/launch_custody.py`

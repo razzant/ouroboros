@@ -808,8 +808,9 @@ def test_owner_keep_checker_role_persists_and_resumes_but_nonowner_cannot(live_w
     path = root / "settings.json"
     monkeypatch.setattr(config, "SETTINGS_PATH", path)
     monkeypatch.setattr(config, "DATA_DIR", root)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
-    path.write_text(json.dumps({"OUROBOROS_MODEL": "original/main", "OUROBOROS_MODEL_LIGHT": "" if role == "main" else "original/light",
+    config.initialize_runtime_mode_baseline("light")
+    path.write_text(json.dumps({"OUROBOROS_RUNTIME_MODE": "light",
+                               "OUROBOROS_MODEL": "original/main", "OUROBOROS_MODEL_LIGHT": "" if role == "main" else "original/light",
                                "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full"}))
     before = path.read_bytes()
     with pytest.raises(PermissionError, match="owner-controlled"):

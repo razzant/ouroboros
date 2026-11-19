@@ -762,7 +762,7 @@ def complete_pause_from_working(root: Any, task_id: str, row: Dict[str, Any], at
     completed = {**row, "source_ref": ref, "resume_point": point, "external_runs": external,
                  "local_producers": local, "paused_at": _time.time(), "execution_drive_root": str(root),
                  "cost_ceiling": state.get("cost_ceiling"), "physical_calls": None, "exact_continuation": True,
-                 "replay_safe": False, "auto_resume": False, "resume_policy": RESUME_POLICY,
+                 "replay_safe": False, "auto_resume": row.get("auto_resume", False), "resume_policy": row.get("resume_policy") or RESUME_POLICY,
                  "started_at": started, "paused_duration_sec": budget_paused_seconds(model_state),
                  "model_wait_quota_clock": model_state.get("quota_clock", {}),
                  # The seed keeps no list: stops its dead worker issued may have settled unseen (partial).

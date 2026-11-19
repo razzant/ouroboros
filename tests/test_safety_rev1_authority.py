@@ -71,7 +71,7 @@ def test_real_schedule_restore_is_checked_at_the_callers_kind(supervisor):
 def test_browser_owner_controls_use_the_work_cap_on_cyber(monkeypatch, endpoint):
     from ouroboros import browser_policy
     from ouroboros.tools.browser import _runtime_mode_for_browser
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     monkeypatch.setattr(browser_policy, "runtime_service_kind", lambda *_a: "main")
     request = SimpleNamespace(url=f"http://127.0.0.1/api/owner/{endpoint}", method="POST", post_data='{}')
     for cap, blocked in [("light", True), ("", False)]:

@@ -63,11 +63,11 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tupl
 
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.chronicle_import import LEGACY_ROOM_ID, row_lineage
-from ouroboros.chronicle_quotes import SPEAKERS
+from ouroboros.chronicle_quotes import QuoteResolver, QuoteSource, SPEAKERS
 from ouroboros.chronicle_lead import LEAD_RULE
 from ouroboros.chronicle_store import (DELEGATED_FOCUS_ROLES, STORY_KINDS, ChronicleStore, PublishResult, capture,
                                        source_time_span, verify_quotes)
-from ouroboros.dialogue_provenance import (memory_row_header, quote_words, recorded_finality, render_row_text,
+from ouroboros.dialogue_provenance import (memory_row_header, quote_parts, quote_words, recorded_finality, render_row_text,
                                           row_author, stamp_summary, wordless_reaction)
 from ouroboros.knowledge import focus_signature
 from ouroboros.mark_anchors import anchor_problem, describe as describe_anchor
@@ -381,10 +381,10 @@ def host_stamp(root: Any, task_ids: Iterable[Any], *, rows: Iterable[Any] = ()) 
 
 
 def _quote_resolver(root: Path, lineage: Dict[str, Any],
-                    positions: Optional[Dict[str, int]] = None) -> Callable[[Any], Optional[Tuple[str, str]]]:
+                    positions: Optional[Dict[str, int]] = None) -> QuoteResolver:
     """``address -> (the row's quotable words, author kind)`` for ``verify_quotes``; reads chat, takes no lock.
     The words are ``quote_words``: never a host label rendered beside a typed reaction carrier's own text."""
-    def resolve(address: Any) -> Optional[Tuple[str, str]]:
+    def resolve(address: Any) -> Optional[Tuple[QuoteSource, str]]:
         try:
             row, found = chat_chain.resolve_row(root, address)
         except ValueError:
@@ -400,7 +400,7 @@ def _quote_resolver(root: Path, lineage: Dict[str, Any],
             if pos is None:
                 return None
             author = _author_of(row, pos, lineage)
-        return quote_words(row), author["kind"]
+        return quote_parts(row, root), author["kind"]
     return resolve
 
 
@@ -1392,7 +1392,7 @@ def _task_final_text(root: Path, task_id: str) -> str:
     for _address, row, _pos in chat_chain.iter_rows(root):
         if (str(row.get("task_id") or "") == task_id and str(row.get("direction") or "") in ("out", "outgoing")
                 and not wordless_reaction(row)):
-            final = quote_words(row)
+            final = quote_words(row, root)
     return final
 
 
@@ -1408,7 +1408,7 @@ def _mark_target(ctx: Any, root: Path, store: ChronicleStore, a: Dict[str, Any])
         row, found = chat_chain.resolve_row(root, a["address"])
         if row is None:
             return None, None, str(found.get("status") or "row_missing")
-        if quote and quote not in quote_words(row):
+        if quote and not any(quote in part for part in quote_parts(row, root)):
             return None, None, "quote_mismatch"
         return found["address"], None, ""
     if a["task_id"]:

@@ -15,7 +15,7 @@ CONTENT = b"-----BEGIN PRIVATE KEY-----\nExample fixture, not a credential\n----
 def test_a_private_copy_holds_the_pem_file_and_the_capture_keeps_the_original_finding(tmp_path, monkeypatch, mode):
     """A private copy is the source's current tree in every mode (no copy-in veto); the
     project capture still reports the PEM observation the way its mode decides."""
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: mode)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     root = tmp_path / "project"
     root.mkdir()
     subprocess.run(["git", "init", "-q", str(root)], check=True)
@@ -34,7 +34,7 @@ def test_a_private_copy_holds_the_pem_file_and_the_capture_keeps_the_original_fi
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
 def test_explicit_attach_snapshot_reports_advisory_without_changing_bytes(tmp_path, monkeypatch, mode):
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: mode)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     root = tmp_path / "project"
     root.mkdir()
     (root / "notes.txt").write_bytes(CONTENT)
@@ -50,7 +50,7 @@ def test_explicit_attach_snapshot_reports_advisory_without_changing_bytes(tmp_pa
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
 def test_cooperative_checkpoint_keeps_advisory_pem_fact(tmp_path, monkeypatch, mode):
     from ouroboros import coop_checkpoint
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: mode)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     root = tmp_path / "project"
     root.mkdir()
     subprocess.run(["git", "init", "-q", str(root)], check=True)

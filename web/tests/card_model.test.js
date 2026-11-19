@@ -115,6 +115,7 @@ test('the words of a fact follow its basis; a follower says nothing beside its m
     assert.equal(words('room'), 'this room\'s model');
     assert.equal(words('owner'), 'you chose it');
     assert.equal(words('owner_words'), 'you asked for it');
+    assert.equal(words('owner_press'), 'you pressed this option');
     assert.equal(words('mind'), 'Ouroboros switched to it');
     assert.equal(words('light'), 'follows Light', 'any other basis is the role the work follows');
     assert.equal(words('circle'), 'its circle\'s model');

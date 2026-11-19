@@ -13,29 +13,8 @@ from __future__ import annotations
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._owner_continue_helpers import NONCE, _interrupted
 from tests._store_shared import delete_result, seed_result
-
-NONCE = "press-0001-abcdef"
-
-
-def _interrupted(tmp_path, task_id="pred-1", *, origin=None, reason_code="", **extra):
-    from ouroboros.task_results import STATUS_CANCELLED, STATUS_RUNNING, write_task_result
-
-    from ouroboros.usage_admission import original_group_limit
-    prior = original_group_limit(tmp_path, task_id)
-    initial = {} if prior["source"] == "ledger_first_row" else {"billing_group": {
-        "billing_group_id": task_id, "billing_group_limit_usd": 20.0,
-        "billing_group_limit_source": "initial_task_admission", "billing_group_limit_revision": "admission-1"}}
-    write_task_result(tmp_path, task_id, STATUS_RUNNING, chat_id=7, project_id="", **initial,
-                      origin_message_text="Write the Friday report",
-                      origin_message_ref={"chat_id": 7, "client_message_id": "m-1"},
-                      root_task_id=task_id, title="Friday report", deadline_at="2099-01-01T00:00:00+00:00")
-    fields = {"cancel_origin": origin if origin is not None else {"source": "snapshot_restore",
-                                                                   "reason": "server_shutdown"}}
-    if reason_code:
-        fields = {"reason_code": reason_code}
-    write_task_result(tmp_path, task_id, STATUS_CANCELLED if not reason_code else "failed",
-                      result="interrupted", **fields, **extra)
 
 
 def _owner_mail(tmp_path, task_id="pred-1"):
@@ -432,6 +411,11 @@ def _settled_with_corpus(tmp_path, *rows, unavailable=(), late=False):
     _interrupted(tmp_path, root_phase_checkpoint={}, child_ref_promotion={})
     _owner_mail(tmp_path)
     if late:
+        from ouroboros.owner_quiz import record_answered, record_asked
+
+        record_asked(tmp_path, "asker-1", quiz_id="q-1", question="Which sheet?", options=["Sheet B"])
+        record_answered(tmp_path, "asker-1", quiz_id="q-1", option_index=0, comment="Option B, please",
+                        request_id="sheet-answer")
         write_owner_message(tmp_path, "Option B, please", "pred-1", msg_id="late-1",
                             late_answer={"task_id": "asker-1", "quiz_id": "q-1"})
     assert settle_task_mailbox(tmp_path, "pred-1", tmp_path)
@@ -1194,3 +1178,237 @@ def test_an_owner_stop_after_a_size_refusal_still_refuses():
     child = continuation_eligibility({"status": "failed", "reason_code": "context_overflow",
                                       "parent_task_id": "root", "root_task_id": "root"}, "child")
     assert child["refusal"] == "not_a_root_task"
+
+
+@pytest.mark.parametrize("comment", ["", "  only the blue tiles  "])
+def test_opening_answer_keeps_its_authorship_in_continue_and_start(tmp_path, monkeypatch, comment):
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.owner_words import carried_owner_corpus, owner_words_contain
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    label, asker, qid = "Turn the tiles", "tile-setter", "tile-order"
+    shown = comment or "1. " + label
+    ref = build_owner_message_ref(chat_id=7, client_message_id="tile-answer", ts="2040-01-01T00:00:00Z", text=shown)
+    block = {"state": "answered", "quiz_id": qid, "question": "Which side?", "options": [label],
+             "answered_index": 0, "comment": comment, "answered_after_terminal": True}
+    metadata = {"origin_message_text": shown, "origin_message_ref": ref,
+                "late_answer": {"task_id": asker, "quiz_id": qid, "answer_snapshot": {"task_id": asker, "quiz": block}}}
+    def opened(task_metadata, text):
+        ctx = SimpleNamespace(task_metadata=task_metadata, drive_root=tmp_path)
+        _initialize_owner_directives(ctx, [{"role": "user", "content": text}])
+        return ctx
+    head = opened(metadata, shown)
+    _interrupted(tmp_path, origin_message_text=shown, origin_message_ref=ref, metadata=metadata,
+                 owner_mailbox={"read_complete": True, "rows": []}, review_evidence=_corpus(*head._owner_directives))
+    before_capture = load_task_result(tmp_path, "pred-1")
+    before_capture.pop("review_evidence")
+    opening = owner_sources(tmp_path, before_capture, "pred-1")["original"]
+    assert opening["reply_to"]["text"].startswith("Which side?")
+    assert (opening.get("input_source") == "owner_press") == (not comment)
+    ack = admit_continuation("pred-1", action_nonce=NONCE)
+    assert ack.get("ok"), ack
+    [successor] = workers.PENDING
+    drafted = {"objective_author": {"kind": "task"}, "owner_corpus": carried_owner_corpus(head, shown)}
+    for ctx in (head, opened(successor["metadata"], successor["text"]), opened(drafted, "Draft the work")):
+        [opening] = ctx._owner_directives
+        assert opening["reply_to"]["text"].startswith("Which side?")
+        assert owner_words_contain(ctx, label) is False
+        assert opening["content"] == shown
+        if comment:
+            assert owner_words_contain(ctx, comment)
+        else:
+            assert opening["source"] == "owner_press"
+    if not comment:
+        assert "Owner's original instruction (verbatim):" not in successor["text"]
+        assert label in successor["text"] and "pressed" in successor["text"]
+    chained = load_task_result(tmp_path, successor["id"])
+    chained["owner_mailbox"] = {"read_complete": True, "rows": []}
+    assert not owner_sources(tmp_path, chained, successor["id"])["gaps"]
+
+
+@pytest.mark.parametrize("kind", ["press", "comment", "message"])
+def test_cold_opening_keeps_its_identity_through_a_routed_start(tmp_path, monkeypatch, kind):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_words import owner_words_contain
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.tools import control_routing
+    from ouroboros.tools.registry import ToolContext
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    label, stamp = "Choose the blue tiles", "2040-01-01T00:00:00Z"
+    words = "  send a sample  " if kind == "comment" else label if kind == "message" else "1. " + label
+    ref = build_owner_message_ref(chat_id=7, client_message_id="cold-tiles", ts=stamp, text=words)
+    meta = {"origin_message_ref": ref, "origin_message_text": words}
+    if kind != "message":
+        block = {"state": "answered", "quiz_id": "tiles", "question": "Which tiles?", "options": [label],
+                 "answered_index": 0, "comment": words if kind == "comment" else "", "answered_after_terminal": True}
+        meta["late_answer"] = {"task_id": "tile-desk", "quiz_id": "tiles",
+                               "answer_snapshot": {"task_id": "tile-desk", "quiz": block}}
+    _interrupted(tmp_path, metadata=meta, origin_message_ref=ref, origin_message_text=words, owner_mailbox={"read_complete": True, "rows": []})
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    [successor] = workers.PENDING
+    ctx = ToolContext(repo_dir=Path.cwd(), drive_root=tmp_path, task_metadata=successor["metadata"])
+    ctx.current_chat_id, ctx.task_id = 7, successor["id"]
+    _initialize_owner_directives(ctx, [{"role": "user", "content": successor["text"]}])
+    events = []
+    monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing",
+                        lambda _ctx, event: (events.append(event) or "live", {"status": "scheduled"}))
+    monkeypatch.setattr(control_routing, "_promotion_pool_disabled_from_snapshot", lambda _ctx: "")
+    control_routing._start_task(ctx, "Read the building notes", title="Read notes")
+    [event] = events
+    routed = SimpleNamespace(task_metadata={"objective_author": event["objective_author"], "owner_corpus": event["owner_corpus"]})
+    _initialize_owner_directives(routed, [{"role": "user", "content": "Read the building notes"}])
+    for focus in (ctx, routed):
+        [row] = focus._owner_directives
+        assert row["content"] == words
+        assert (row["chat_id"], row["client_message_id"], row["ts"]) == ("7", "cold-tiles", stamp)
+        assert owner_words_contain(focus, words) is (kind != "press")
+        assert owner_words_contain(focus, label) is (kind == "message")
+
+
+
+@pytest.mark.parametrize("kind", ["press", "comment", "unavailable"])
+def test_a_reference_only_late_answer_keeps_its_type_on_every_opening(tmp_path, monkeypatch, kind):
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision, owner_reply_owed
+    from ouroboros.owner_quiz import late_answer_model_text, record_answered, record_asked
+    from ouroboros.owner_words import carried_owner_corpus, cited_owner_basis, owner_words_contain
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    asker, quiz, label = "fern-desk", "fern-card", "Use the fern chart"
+    comment = "  after moonrise  " if kind == "comment" else ""
+    bubble = comment or "1. " + label
+    reference = {"task_id": asker, "quiz_id": quiz}
+    if kind != "unavailable":
+        record_asked(tmp_path, asker, quiz_id=quiz, question="Which chart?", options=[label])
+        record_answered(tmp_path, asker, quiz_id=quiz, option_index=0, comment=comment, request_id="fern-choice")
+    ref = build_owner_message_ref(chat_id=7, client_message_id="fern-late", ts="2040-01-01T00:00:00Z", text=bubble)
+    meta = {"origin_message_text": bubble, "origin_message_ref": ref, "late_answer": reference}
+
+    def opened(metadata, frame):
+        ctx = SimpleNamespace(task_metadata=metadata, drive_root=tmp_path)
+        _initialize_owner_directives(ctx, [{"role": "user", "content": frame}])
+        return ctx
+
+    head = opened(meta, late_answer_model_text(tmp_path, reference, bubble))
+    assert owner_input_revision(head) == 1 and owner_reply_owed(head)
+    start = opened({"objective_author": {"kind": "task"}, "owner_corpus": carried_owner_corpus(head, bubble)}, "Read notes")
+    _interrupted(tmp_path, metadata=meta, origin_message_ref=ref, origin_message_text=bubble,
+                 owner_mailbox={"read_complete": True, "rows": []})
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    [successor] = workers.PENDING
+    for focus in (head, start, opened(successor["metadata"], successor["text"])):
+        [row] = focus._owner_directives
+        assert not owner_words_contain(focus, label)
+        if kind == "unavailable":
+            assert row["source"] == "owner_card_input" and not cited_owner_basis(focus, label)[0]
+        else:
+            assert row["content"] == bubble and "Which chart?" in row["reply_to"]["text"]
+            if comment:
+                assert owner_words_contain(focus, comment)
+            else:
+                assert cited_owner_basis(focus, label)[0]["source"] == "owner_press"
+
+
+def test_continue_labels_a_later_unavailable_answer_and_preserves_the_words_around_it(tmp_path, monkeypatch):
+    from ouroboros.owner_mailbox import write_owner_message
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path)
+    notice = "Quiz answer received. Its accepted answer is unavailable."
+    after = "  keep the elm dates  "
+    assert write_owner_message(tmp_path, notice, "pred-1", msg_id="elm-copy")
+    assert write_owner_message(tmp_path, "1. Elm chart", "pred-1", msg_id="elm-late",
+                               late_answer={"task_id": "elm-desk", "quiz_id": "elm-chart"})
+    assert write_owner_message(tmp_path, after, "pred-1", msg_id="elm-after")
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    [successor] = workers.PENDING
+    rows = successor["metadata"]["owner_corpus"]
+    assert [(row["msg_id"], row["source"], row["content"]) for row in rows if row.get("msg_id")] == [
+        ("elm-copy", "owner_mailbox", notice), ("elm-late", "owner_card_input", notice),
+        ("elm-after", "owner_mailbox", after)]
+    order = successor["text"]
+    assert "Other owner words in that task's record (verbatim, in order):" not in order
+    assert order.count(notice) == 2 and order.count(after) == 1
+    assert order.index("Owner words (verbatim): " + notice) < order.index("Host record: " + notice) < order.index(after)
+
+
+@pytest.mark.parametrize("conflict", [None, "selection", "quiz_id", "comment"],
+                         ids=["released", "changed-option", "other-card", "trimmed-comment"])
+def test_continue_retypes_the_previous_releases_later_quiz_answers(tmp_path, monkeypatch, conflict):
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.owner_words import cited_owner_basis, owner_words_contain
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    asker, label, comment = "larch-desk", "Violet ledger", "  after the print proof  "
+    _interrupted(tmp_path, task_id=asker)
+    for quiz_id, question, options, typed in (
+        ("ledger", "Which ledger?", ["Amber ledger", label], ""),
+        ("print", "When?", ["Now", "Later"], comment),
+    ):
+        card = {"state": "answered", "quiz_id": quiz_id, "question": question, "options": options,
+                "answered_index": 1, **({"comment": typed} if typed else {})}
+        assert write_owner_message(tmp_path, typed or "2. " + label, asker, kind="quiz_answer",
+                                   msg_id=f"quiz_answer:{asker}:{quiz_id}", quiz_delivery={
+                                       "task_id": asker, "quiz_id": quiz_id, "answer_snapshot": card})
+
+    # The previous Continue wrote both accepted cards and their corpus copies under owner_quiz_answer.
+    with monkeypatch.context() as previous:
+        previous.setattr("ouroboros.owner_continue.row_source", lambda entry, words_source: words_source)
+        first = admit_continuation(asker, action_nonce=NONCE)
+    assert first["ok"], first
+    predecessor = first["successor_task_id"]
+    assert not workers.WORKERS
+    assert workers.kill_workers(terminal_status="cancelled", result_reason="server shutdown", stop_source="server_shutdown")
+    record = load_task_result(tmp_path, predecessor)
+    press, words = record["metadata"]["continuation"]["owner_sources"]["later"]
+    assert press["source"] == words["source"] == "owner_quiz_answer"
+    assert press["content"] == "2. " + label and words["content"] == words["card"]["comment"] == comment
+    if conflict:
+        if conflict == "selection":
+            press["card"]["answered_index"] = 0
+        elif conflict == "quiz_id":
+            press["card"]["quiz_id"] = words["quiz_id"]
+        else:
+            words["card"]["comment"] = comment.strip()
+        seed_result(tmp_path, predecessor, record)
+        refused = admit_continuation(predecessor, action_nonce=NONCE)
+        assert refused == {"ok": False, "error": "owner_source_missing", "gaps": ["chained_owner_source_malformed"]}
+        assert not workers.PENDING and "continued_by" not in load_task_result(tmp_path, predecessor)
+        return
+
+    second = admit_continuation(predecessor, action_nonce=NONCE)
+    assert second["ok"], second
+    [successor] = workers.PENDING
+    meta = successor["metadata"]
+    focus = SimpleNamespace(task_metadata=meta)
+    _initialize_owner_directives(focus, [{"role": "user", "content": successor["text"]}])
+    assert not owner_words_contain(focus, label) and not owner_words_contain(focus, "ledger")
+    assert cited_owner_basis(focus, "ledger")[0] is None
+    whole = cited_owner_basis(focus, label)[0]
+    assert (whole["source"], whole["msg_id"], whole["cited"]) == ("owner_press", press["msg_id"], label)
+    assert owner_words_contain(focus, comment)
+    worded = cited_owner_basis(focus, "print proof")[0]
+    assert (worded["source"], worded["msg_id"], worded["content"]) == ("owner_quiz_answer", words["msg_id"], comment)
+    assert [(row["msg_id"], row["source"]) for row in meta["owner_corpus"] if row.get("quiz_id")] == [
+        (press["msg_id"], "owner_press"), (words["msg_id"], "owner_quiz_answer")]
+    assert meta["continuation"]["owner_sources"]["later"] == [{**press, "source": "owner_press"}, words]

@@ -11,7 +11,7 @@ from ouroboros.review_substrate import run_review_request
 from tests.test_native_tool_round_executor import _assignment, _ScriptedLLM, _tool_call, subject_repo as subject_repo
 
 
-@pytest.mark.parametrize("cause", ["dispatch_publication_unconfirmed", "dispatch_document_unreadable"])
+@pytest.mark.parametrize("cause", ["dispatch_fence_invalid", "dispatch_document_unreadable"])
 def test_control_refusal_reaches_the_real_slot_as_not_dispatched(subject_repo, tmp_path, monkeypatch, cause):
     calls = []
 
@@ -102,7 +102,7 @@ def test_control_refusal_cannot_erase_earlier_paid_or_unknown_history(prior, cur
 def test_native_control_refusal_preserves_only_an_available_report_draft(subject_repo, tmp_path, shape, paid_round):
     draft = "# Paid draft\n\nThe greeting file says hello.\n"
     admissions = []
-    error = ua.ControlAuthorityUnavailable("dispatch publication unconfirmed", cause="dispatch_publication_unconfirmed")
+    error = ua.ControlAuthorityUnavailable("invalid dispatch fence", cause="dispatch_fence_invalid")
 
     class RefusesAfterDraft(_ScriptedLLM):
         def chat(self, **kwargs):
@@ -126,7 +126,7 @@ def test_native_control_refusal_preserves_only_an_available_report_draft(subject
     else:
         with pytest.raises(ua.ControlAuthorityUnavailable) as raised:
             executor.execute()
-        assert raised.value is error and raised.value.cause == "dispatch_publication_unconfirmed"
+        assert raised.value is error and raised.value.cause == "dispatch_fence_invalid"
     custody = executor.failure_custody()
     assert custody["native_end_reason"] == "control_authority_unavailable"
     assert custody["native_rounds"] == int(paid_round)

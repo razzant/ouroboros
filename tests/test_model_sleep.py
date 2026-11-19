@@ -277,7 +277,7 @@ def test_a_cold_sleep_is_refused_over_its_own_live_writers(tmp_path, monkeypatch
     assert armed["reason"] == "sleep_armed" and ctx._model_sleep["mode"] == "cold"
 
 
-def _cold_park(tmp_path, monkeypatch, workers, task_id="sleeper", arm=None, **selected):
+def _cold_park(tmp_path, monkeypatch, workers, task_id="sleeper", arm=None, barrier=None, **selected):
     """``arm(ctx)`` arms the sleep through the tool instead of these ``selected`` sources."""
     from ouroboros import budget_pause, model_sleep
     from supervisor.events_budget import install_exact_budget_pause
@@ -299,7 +299,7 @@ def _cold_park(tmp_path, monkeypatch, workers, task_id="sleeper", arm=None, **se
                                 "worker_id": 0, "attempt": 1}
     sup = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING,
                           WORKERS=workers.WORKERS, sort_pending=lambda: None,
-                          persist_queue_snapshot=lambda reason="": True, bridge=None)
+                          persist_queue_snapshot=barrier or (lambda reason="": True), bridge=None)
     install_exact_budget_pause(sup, task_id, budget_pause.exact_pause_marker(row)["checkpoint"])
     return row
 
@@ -594,3 +594,84 @@ def test_busy_sleep_poll_logs_one_traceback_then_counts_and_resets(tmp_path, mon
     checkpoint = {**checkpoint, "wait_id": "two"}
     assert owner_wait._sleep_wake(ctx, checkpoint) == ""
     assert caplog.records[-1].exc_info and caplog.records[-1].args[-1] == 1
+
+
+def test_wake_grant_has_no_durable_permission_until_its_snapshot(tmp_path, monkeypatch):
+    from ouroboros.budget_pause import budget_pause_row
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    q, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 5.0)
+    _result(tmp_path, "peer")
+    original = _cold_park(tmp_path, monkeypatch, workers, senders=["peer"], barrier=q.publish_queue_snapshot)
+    _mail(tmp_path, "sleeper", "ready", sender="peer")
+    before = q.QUEUE_SNAPSHOT_PATH.read_bytes()
+
+    class Crash(BaseException):
+        pass
+
+    def crash(reason):
+        assert reason == "budget_exact_resume_granted"
+        assert not q._queue_lock._is_owned()
+        assert budget_pause_row(tmp_path, "sleeper")["state"] == "paused"
+        raise Crash()
+
+    with monkeypatch.context() as fault, pytest.raises(Crash):
+        fault.setattr(q, "publish_queue_snapshot", crash)
+        wake_ready_sleepers(q)
+    assert q.QUEUE_SNAPSHOT_PATH.read_bytes() == before
+    workers.PENDING.clear()
+    assert q.restore_pending_from_snapshot() == 1
+    assert workers.PENDING[0]["_budget_pause"]["checkpoint"]["source_ref"] == original["source_ref"]
+    assert wake_ready_sleepers(q)[0]["ok"]
+    assert wake_ready_sleepers(q) == []
+
+
+def test_one_publication_for_all_ready_pauses_and_none_for_unready(tmp_path, monkeypatch):
+    from ouroboros import budget_pause as bp
+    from ouroboros.utils import atomic_write_json
+    from supervisor.sleep_wake import wake_ready_sleepers
+    from tests._budget_pause_exact_helpers import _install_queue, _parked
+
+    q, state, _ = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+    for i in range(3):
+        task, row = _parked(tmp_path, monkeypatch, task_id=f"tech-{i}")
+        bp.end_dispatch_fence(task["id"])
+        row.update(
+            reason="authority", rail=bp.RAIL_CONTROL_AUTHORITY, cause="dispatch_fence_unreadable", state="paused"
+        )
+        bp.set_budget_pause(tmp_path, task["id"], row)
+        task["_budget_pause"] = bp.exact_pause_marker(row)
+    atomic_write_json(
+        tmp_path / "state/queue_dispatch.json", {"generation": "g", "budget_root_fences": [], "members": {}}
+    )
+    barriers, writes = [], []
+    publish, write = q.publish_queue_snapshot, q.atomic_write_text
+
+    def counted(reason=""):
+        barriers.append(reason)
+        return publish(reason=reason)
+
+    def counted_write(path, data):
+        writes.append((path.name, len(data)))
+        return write(path, data)
+
+    monkeypatch.setattr(q, "publish_queue_snapshot", counted)
+    monkeypatch.setattr(q, "atomic_write_text", counted_write)
+    with monkeypatch.context() as blocked:
+        def refuse(reason):
+            barriers.append(reason)
+            return False
+        blocked.setattr(q, "publish_queue_snapshot", refuse)
+        refused = wake_ready_sleepers(q)
+    assert len(barriers) == 1 and len(refused) == 3
+    assert all(reply["error"] == "snapshot_not_persisted" for reply in refused)
+    assert all("_budget_pause_resume" not in t and bp.budget_pause_row(tmp_path, t["id"])["state"] == "paused"
+               for t in q.PENDING)
+    barriers.clear()
+    outcomes = wake_ready_sleepers(q)
+    woken = [o for o in outcomes if o.get("ok")]
+    snapshot_writes = [w for w in writes if w[0] == "queue_snapshot.json"]
+    assert len(woken) == 3 and len(snapshot_writes) == len(barriers) == 1
+    assert not wake_ready_sleepers(q) and len(barriers) == 1

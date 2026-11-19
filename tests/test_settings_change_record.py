@@ -37,7 +37,7 @@ def client(install, monkeypatch):
     rows = []
     monkeypatch.setattr(bus, "send_with_budget", lambda *args, **kwargs: rows.append((args, kwargs)))
     monkeypatch.setattr(state, "load_state", lambda: {"owner_chat_id": 77})
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
+    config.initialize_runtime_mode_baseline("light")
     monkeypatch.setattr(settings, "_apply_settings_save_side_effects", lambda *a, **kw: None)
     monkeypatch.setattr(settings, "_start_supervisor_if_needed_for_request", lambda *a, **kw: False)
     install.write_text(json.dumps({"OPENROUTER_API_KEY": "fixture-router", ALLOWANCE: 20,

@@ -46,8 +46,9 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.owner_words import (OWNER_SOURCES, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card, answered_card_reply,
-                                   carded, reply_target, scheduled_text_items)
+from ouroboros.answer_facts import card_input, forwarded_bubble_matches, option_answer, press_record, row_source
+from ouroboros.owner_words import (OWNER_CARD_INPUT, OWNER_PRESS, OWNER_SOURCES, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card,
+                                   answered_card_reply, carded, reply_target, scheduled_text_items)
 from ouroboros.review_evidence_sections import renders_exactly
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
@@ -109,6 +110,7 @@ OWNER_SOURCE_KINDS = frozenset({"owner_text", "quiz_answer", "quiz_closed", "car
 # label is none of these is not promoted to owner text. The door's labels in words carried by value (a follow-up's, a
 # drafted start's ``owner_corpus``) are my human's.
 CORPUS_INITIAL_SOURCES = frozenset({"origin_message", "initial_user", "initial_text", "initial_text_transcript"})
+CARD_ANSWER_SOURCES = frozenset({"owner_quiz_answer", OWNER_PRESS})  # an answer to a card: words, or a press (an act)
 CORPUS_OWNER_SOURCES = OWNER_SOURCES - CORPUS_INITIAL_SOURCES
 CARRIED_DOOR_SOURCES = frozenset({"origin_message", "initial_user"})
 CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message"})
@@ -120,7 +122,7 @@ CORPUS_SCHEDULE_SOURCES = frozenset({SCHEDULE_TEXT})
 # relaying sibling, an owner answer's card, the chat row it is and that id's room, a place message's provider
 # identity (``owner_words.place_row_facts``); its ``reply_to`` rides beside them.
 PLACE_ROW_IDS = ("conversation_id", "message_id")  # a confirmed place row's provider identity, read again at a cite
-ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id", *PLACE_ROW_IDS)
+ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id", "relay_source_root", *PLACE_ROW_IDS)
 
 
 def row_identity(row: Dict[str, Any]) -> str:
@@ -266,6 +268,121 @@ def _mail_rows(drive_root: pathlib.Path, task_id: str) -> Tuple[List[Dict[str, A
     return rows, whole and (not content or content.endswith("\n")), True
 
 
+def _retained_start_quote(root: pathlib.Path, drafter: str, address: str) -> Optional[dict]:
+    """A drafter's exact addressed relay can outlive the room row, including a quote made from a carried field."""
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from ouroboros.owner_relay import KIND_RELAY, owner_row_address
+    from ouroboros.task_custody import own_child_drives
+    from ouroboros.task_store import read_document
+
+    held = ((read_document(root, drafter) or {}).get("held_owner_messages") or {}).get(address)
+    if isinstance(held, dict) and owner_row_address(held) == address:
+        return held
+    for drive in [root, *own_child_drives(root, drafter)]:
+        for entry in drain_owner_entries(drive, drafter, include_acknowledged=True, kinds={KIND_RELAY}):
+            if not entry.get("host_carried"):
+                for quoted in entry.get("owner_rows") or []:
+                    if isinstance(quoted, dict) and owner_row_address(quoted) == address:
+                        return quoted
+    return None
+
+
+def _start_answer_source(card: dict, row: dict) -> Optional[str]:
+    """The type the accepted answer proves, including any citation carried on the answer."""
+    from ouroboros.answer_facts import answer_source
+    from ouroboros.chronicle_quotes import quote_in
+    from ouroboros.owner_quiz import late_answer_owner_text
+
+    words = row["content"]
+    if late_answer_owner_text(card) != words:
+        return None
+    source = answer_source(card)
+    if "cited" in row or row.get("basis") == "cited":
+        cite = row.get("cited")
+        if not isinstance(cite, str) or not cite.strip() or row.get("basis") != "cited":
+            return None
+        if source == OWNER_PRESS:
+            if cite.strip() != str(card["options"][card["answered_index"]]).strip():
+                return None
+        elif not quote_in(cite, words):
+            return None
+    return source
+
+
+def _start_answer(root: pathlib.Path, task_id: str, row: dict, drafter: str) -> Optional[dict]:
+    """Read a relay by its exact chat address, or a direct answer by its asker's delivery."""
+    from ouroboros.answer_facts import answer_source
+    from ouroboros.chat_chain import resolve_row
+    from ouroboros.owner_relay import quotable_owner_row
+    from ouroboros.owner_source import answered_quiz_block
+    from ouroboros.owner_words import answered_card_source
+    from ouroboros.question_answers import answer_message_id
+    from ouroboros.store import StoreError
+
+    asker, quiz_id, words, msg_id = (row.get(key) for key in ("source_task_id", "quiz_id", "content", "msg_id"))
+    if not isinstance(msg_id, str) or not isinstance(words, str):
+        return None
+    if msg_id.startswith("row:"):
+        source_root = row.get("relay_source_root") or root
+        try:
+            quoted, _ = resolve_row(source_root, msg_id)
+            quoted = quoted or _retained_start_quote(root, drafter, msg_id)
+        except (StoreError, OSError, ValueError, TypeError):
+            return None
+        if not quoted or not quotable_owner_row(quoted, source_root) or row_source(quoted, "owner_mailbox", source_root) != row["source"]:
+            return None
+        block, asker = answered_card_source(quoted, source_root)
+        quiz_id = (block or {}).get("quiz_id")
+        if not block and isinstance(carried := quoted.get("corpus_answer"), dict):
+            asker, quiz_id = carried.get("source_task_id"), carried.get("quiz_id")
+            block = answered_quiz_block(source_root, asker, quiz_id) if asker and quiz_id else {}
+            if (not block or answer_source(block) != row["source"]
+                    or answered_card_reply(block, asker) != carried.get("reply_to")):
+                return None
+    else:
+        if not all(isinstance(x, str) and x.strip() for x in (asker, quiz_id, msg_id)) or asker == task_id:
+            return None
+        block = answered_quiz_block(root, asker, quiz_id)
+        if msg_id not in (answer_message_id(asker, quiz_id), (block.get("delivery") or {}).get("msg_id")):
+            return None
+    card = answered_card(block, words)
+    if (not card or not asker or not quiz_id or row.get("source_task_id", asker) != asker
+            or row.get("quiz_id", quiz_id) != quiz_id
+            or "reply_to" in row and row["reply_to"] != answered_card_reply(block, asker)):
+        return None
+    source = _start_answer_source(card, row)
+    if source is None:
+        return None
+    return {"source": source, "content": words, "msg_id": msg_id, "source_task_id": asker,
+            **{key: row[key] for key in ("basis", "cited") if row.get(key)},
+            "quiz_id": quiz_id, "card": card, **({"request_id": block["request_id"]} if block.get("request_id") else {}),
+            **({"relay_source_root": row["relay_source_root"]} if row.get("relay_source_root") else {})}
+
+
+def _start_citations(rows: list) -> tuple[list, dict]:
+    """Fold an older citation's display address into the unique native quiz row it names.
+    The native row still has to prove its delivery or relay in _start_answer."""
+    from ouroboros.chronicle_quotes import quote_in
+    from ouroboros.owner_words import row_ref
+
+    rows = [dict(row) if isinstance(row, dict) else row for row in rows]
+    native = [row for row in rows if isinstance(row, dict) and row.get("source") == "owner_quiz_answer"
+              and row.get("source_task_id") and row.get("quiz_id") and isinstance(row.get("msg_id"), str)]
+    kept, aliases = [], {}
+    for row in rows:
+        if (isinstance(row, dict) and row.get("source") == "owner_quiz_answer" and row.get("basis") == "cited"
+                and row.get("carried") is True and isinstance(row.get("cited"), str) and row["cited"].strip()
+                and isinstance(row.get("content"), str) and quote_in(row["cited"], row["content"])
+                and set(row) <= {"source", "content", "msg_id", "cited", "basis", "carried"}):
+            matches = [item for item in native if row_ref(item) == row.get("msg_id")]
+            if len(matches) == 1 and matches[0].get("content") == row["content"]:
+                matches[0].update(basis="cited", cited=row["cited"])
+                aliases[row["msg_id"]] = (row["content"], True)
+                continue
+        kept.append(row)
+    return kept, aliases
+
+
 def _drafted_start(root: pathlib.Path, result: Dict[str, Any], task_id: str, metadata: Dict[str, Any],
                    gaps: List[str]) -> Optional[Dict[str, Any]]:
     """The start ``start_task`` recorded without an owner message (``origin_message_absent``).
@@ -276,9 +393,6 @@ def _drafted_start(root: pathlib.Path, result: Dict[str, Any], task_id: str, met
     re-route, or the delivery the card records); otherwise the answer is a named gap. A drafted start without an
     answered card opens on its drafted objective alone (#1376): the drafting task's words, never owner words.
     """
-    from ouroboros.owner_source import answered_quiz_block
-    from ouroboros.question_answers import answer_message_id
-
     author, objective = metadata.get("objective_author"), result.get("objective") or result.get("description")
     if not (isinstance(author, dict) and author.get("kind") == "task" and isinstance(author.get("task_id"), str)
             and author["task_id"].strip() and isinstance(objective, str) and objective.strip()):
@@ -286,19 +400,17 @@ def _drafted_start(root: pathlib.Path, result: Dict[str, Any], task_id: str, met
         return None
     answers: List[Dict[str, Any]] = []
     for row in metadata.get("owner_corpus") if isinstance(metadata.get("owner_corpus"), list) else []:
-        if not isinstance(row, dict) or row.get("source") != "owner_quiz_answer":
+        if not isinstance(row, dict) or row.get("source") not in CARD_ANSWER_SOURCES:
             continue  # the corpus pass names a malformed row; other owner words stay later sources
-        asker, quiz_id, words, msg_id = (row.get(key) for key in ("source_task_id", "quiz_id", "content", "msg_id"))
-        typed = all(isinstance(value, str) and value.strip() for value in (asker, quiz_id, words, msg_id))
-        block = answered_quiz_block(root, asker, quiz_id) if typed and asker != task_id else {}
-        delivered = typed and (msg_id == answer_message_id(asker, quiz_id)
-                               or (block.get("delivery") or {}).get("msg_id") == msg_id)
-        card = answered_card(block, words) if delivered else None
-        if card is None:
+        reply = row.get("reply_to") or {}
+        if (isinstance(reply, dict) and reply.get("card_id") and reply.get("pressed_label") == row.get("content")
+                and not row.get("quiz_id") and not str(row.get("msg_id") or "").startswith("quiz_answer:")):
+            continue  # a living-card submission rides by value in the corpus, outside the local quiz protocol
+        answer = _start_answer(root, task_id, row, author["task_id"])
+        if answer is None:
             gaps.append("start_quiz_answer_unresolved")
-            continue
-        answers.append({"source": "owner_quiz_answer", "content": words, "msg_id": msg_id, "source_task_id": asker,
-                        "quiz_id": quiz_id, "request_id": block["request_id"], "card": card})
+        elif answer not in answers:
+            answers.append(answer)
     expected = result.get("expected_output")
     return {"source": "drafted_start", "task_id": task_id, "objective": objective,
             **({"expected_output": expected} if isinstance(expected, str) and expected.strip() else {}),
@@ -312,9 +424,25 @@ def valid_start(start: Any) -> bool:
             and all(isinstance(start.get(key), str) and start[key].strip() for key in ("task_id", "objective"))
             and isinstance(start.get("author"), dict) and start["author"].get("kind") == "task"
             and isinstance(answers, list)
-            and all(isinstance(row, dict) and row.get("source") == "owner_quiz_answer" and isinstance(row.get("card"), dict)
-                    and all(isinstance(row.get(key), str) and row[key].strip()
+            and all(isinstance(row, dict) and row.get("source") in CARD_ANSWER_SOURCES
+                    and isinstance(row.get("card"), dict) and all(isinstance(row.get(key), str) and row[key].strip()
                             for key in ("content", "msg_id", "source_task_id", "quiz_id")) for row in answers))
+
+
+def _retained_start(start: Any, gaps: List[str]) -> Optional[Dict[str, Any]]:
+    """Read a chained start, recovering each answer's source from its saved card."""
+    if not valid_start(start):
+        gaps.append("start_source_malformed")
+        return None
+    answers = []
+    for row in start["answers"]:
+        card = row["card"]
+        source = _start_answer_source(card, row)
+        if source is None or card.get("quiz_id") != row["quiz_id"]:
+            gaps.append("start_quiz_answer_unresolved")
+        else:
+            answers.append({**row, "source": source})
+    return {**start, "answers": answers}
 
 
 def _wake_opening(metadata: Dict[str, Any], task_id: str, gaps: List[str]) -> Optional[Dict[str, Any]]:
@@ -443,6 +571,30 @@ def occurrence_schedule_text(result: Dict[str, Any], task_id: str) -> List[Dict[
     return kept
 
 
+def _chained_row(row: Any, text_key: str, source_key: str, sources: Optional[frozenset[str]], *,
+                 later: bool) -> Tuple[Optional[dict], str]:
+    """Copy a retained row, checking a later quiz answer against the accepted card saved with it."""
+    if not (isinstance(row, dict) and isinstance(row.get(text_key), str)
+            and all(isinstance(row.get(field, ""), str) for field in (source_key, "words", *ROW_IDS))):
+        return None, "chained_owner_source_malformed"
+    source = row.get(source_key, "")
+    if sources is not None and source not in sources:
+        return None, "owner_source_provenance_unknown"
+    kept = dict(row)
+    if later and "card" in row:
+        card = row["card"]
+        if (not isinstance(card, dict) or not row["content"].strip()
+                or not row.get("quiz_id") or card.get("quiz_id") != row["quiz_id"]):
+            return None, "chained_owner_source_malformed"
+        proven = _start_answer_source(card, row)
+        if proven is None:
+            return None, "chained_owner_source_malformed"
+        # A verified comment already typed as words keeps its recorded source.
+        if proven == OWNER_PRESS or source == OWNER_PRESS:
+            kept["source"] = proven
+    return kept, ""
+
+
 def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict[str, Any]:
     """The predecessor's owner sources, authored note pointer and peer context, apart.
 
@@ -477,11 +629,14 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     original: Optional[Dict[str, Any]] = None
     if "owner_sources" in continuation and not ((schedule or any(opening is not None for opening in (
             chained_start, chained_wake, chained_api))) and chained.get("original") is None):
-        original = container(chained, "original", dict, "chained_owner_source_malformed")
+        original = dict(container(chained, "original", dict, "chained_owner_source_malformed"))
     elif result.get("origin_message_ref") or result.get("origin_message_text"):
-        original = {"source": "origin_message", "content": result.get("origin_message_text"),
-                    "origin_message_ref": result.get("origin_message_ref")}
+        original = _opening_message(root, result, metadata)
     absent = metadata.get("origin_message_absent") is True
+    aliases = {}
+    if absent and isinstance(metadata.get("owner_corpus"), list):
+        corpus, aliases = _start_citations(metadata["owner_corpus"])
+        metadata = {**metadata, "owner_corpus": corpus}
     if absent and (result.get("origin_message_ref") or result.get("origin_message_text")
                    or metadata.get("origin_suppressed")):
         gaps.append("opening_owner_message_conflict")  # the producer never writes both
@@ -491,9 +646,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     if (original is None or not isinstance(original.get("content"), str) or not original["content"].strip()) \
             and not schedule:
         if chained_start is not None:  # a Continue of a Continue keeps the start it was admitted on
-            start = chained_start if valid_start(chained_start) else None
-            if start is None:
-                gaps.append("start_source_malformed")
+            start = _retained_start(chained_start, gaps)
         elif chained_wake is not None:  # ...and the wake and API openings likewise
             wake = chained_wake if valid_wake(chained_wake) else None
             if wake is None:
@@ -511,7 +664,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             api = _api_opening(result, metadata, task_id, gaps)
         else:
             gaps.append("original_owner_message_text")
-    if original and (original.get("source") != "origin_message" or
+    if original and (original.get("source") != "origin_message" or original.get("input_source") not in (None, OWNER_PRESS, OWNER_CARD_INPUT, "owner_mailbox") or
                      not isinstance(original.get("origin_message_ref", {}), dict)):
         gaps.append("original_owner_source_malformed")
     later: List[Dict[str, Any]] = []
@@ -519,6 +672,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     attached, quoted = [], []  # an owner message's staged files; the chat uploads a relay quoted
     # The start's answers keep their one identity: a corpus copy is the same message.
     seen: Dict[str, Tuple[str, bool]] = {row["msg_id"]: (row["content"], True) for row in (start or {}).get("answers") or []}
+    seen.update(aliases)
     exact: Dict[str, str] = {}  # this task's own exact rows by msg_id: the mailbox pass fills it after reading drives
 
     schedule_text = occurrence_schedule_text(result, task_id)  # then the chained corpus's: one per schedule/field/words
@@ -533,9 +687,12 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         if seen[identity] == (words, owner):
             return True
         twin = json.loads(exact[identity]) if corpus is not None and identity in exact else {}
-        if twin and seen[identity][1] == owner and (isinstance(twin.get("late_answer"), dict) or "words" not in corpus
-                                                   and renders_exactly(twin, corpus["content"], drives, task_id)):
-            return True
+        if twin and seen[identity][1] == owner:
+            if isinstance(twin.get("late_answer"), dict) or ("words" not in corpus
+                    and (renders_exactly(twin, corpus["content"], drives, task_id)
+                         or twin.get("kind") == "card_input" and twin.get("text") == corpus["content"]
+                         or forwarded_bubble_matches(twin, corpus["content"], root))):
+                return True
         gaps.append("owner_message_identity_conflict")
         return False
 
@@ -549,15 +706,12 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     ):
         for row in container(continuation if key == "peer_context" else chained, key, list,
                              "chained_owner_source_malformed"):
-            if not (isinstance(row, dict) and isinstance(row.get(text_key), str)
-                    and all(isinstance(row.get(field, ""), str) for field in (source_key, "words", *ROW_IDS))):
-                gaps.append("chained_owner_source_malformed")
-                continue
-            if sources is not None and row.get(source_key, "") not in sources:
-                gaps.append("owner_source_provenance_unknown")
+            row, gap = _chained_row(row, text_key, source_key, sources, later=target is later)
+            if gap:
+                gaps.append(gap)
                 continue
             if named(row_identity(row), row.get("words", row[text_key]), target is later) is None:
-                target.append(dict(row))
+                target.append(row)
     quizzes = result.get("owner_quiz") if isinstance(result.get("owner_quiz"), dict) else {}
 
     def corpus_pass(rows: List[Any], malformed: str, *, carried: bool = False) -> None:
@@ -597,9 +751,13 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             if door and original is not None:  # a carried copy of the original's own message is that message
                 door = not (client_identity == origin_identity if client_identity and origin_identity
                             else words == original.get("content"))
-            if source in CORPUS_INITIAL_SOURCES and not door:  # the run's first text: the original's own projection
+            card_input = isinstance(row.get("reply_to"), dict) and row["reply_to"].get("card_id")
+            opening = (source in (OWNER_PRESS, OWNER_CARD_INPUT) or card_input) and client_identity == origin_identity != ""
+            if source in CORPUS_INITIAL_SOURCES and not door or opening:  # its first text: the original's projection
                 if original is not None and isinstance(row.get("reply_to"), dict):
-                    original.setdefault("reply_to", row["reply_to"])  # and the message it replies to
+                    original.setdefault("reply_to", row["reply_to"])
+                if opening and original is not None:
+                    original.update(input_source=source, words=words, **{key: row[key] for key in ROW_IDS if row.get(key)})
                 continue
             owner = source in CORPUS_OWNER_SOURCES or door
             if named(identity, words, owner, row) is not None or not identity and words in texts[owner]:
@@ -609,7 +767,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                 ids = {key: row[key] for key in (*ROW_IDS[1:], "reply_to") if row.get(key)}
                 # An answer to the predecessor's own card reads that card from its own record.
                 card = (answered_card(quizzes.get(ids.get("quiz_id", "")), text)
-                        if source == "owner_quiz_answer" and ids.get("source_task_id") == task_id else None)
+                        if source in CARD_ANSWER_SOURCES and ids.get("source_task_id") == task_id else None)
                 later.append({"source": source, "content": text, "msg_id": msg_id, **ids,
                               **({"card": card} if card else {}), **({"words": words} if "words" in row else {})})
             elif source in CORPUS_PLACE_SOURCES:  # carried whole, with its ids, provider identity and reply target
@@ -675,6 +833,9 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             continue  # form outcomes remain recoverable task evidence, never fabricated owner words
         if kind == "quiz_answer" and (entry.get("quiz_delivery") or {}).get("answer_snapshot"):
             entry = {**entry, "text": late_answer_owner_text(entry["quiz_delivery"]["answer_snapshot"])}
+        living = card_input(entry, root)
+        if living:
+            entry = {**entry, "text": living["content"]}
         files = kind in OWNER_SOURCE_KINDS and (entry.get("attachment_manifest") or "attachment_manifest_ref" in entry)
         if (same := named(msg_id, str(entry.get("text") or ""), kind in OWNER_SOURCE_KINDS)) is not None:
             if same and files and msg_id not in exact:  # a message an earlier source carried: its files are still ours
@@ -684,34 +845,21 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         if msg_id:
             exact[msg_id] = entry["_exact_row"]  # a late answer's frame, or an earlier rendering, is proven against it
         if kind in OWNER_SOURCE_KINDS:
-            row = {"source": "owner_quiz_answer" if kind == "quiz_answer" else "owner_mailbox",
+            row = {"source": row_source(entry, "owner_quiz_answer" if kind == "quiz_answer" else "owner_mailbox"),
                    "content": str(entry.get("text") or ""), "msg_id": msg_id,
                    "ts": str(entry.get("ts") or ""), "exact_row": entry["_exact_row"]}
-            if target := reply_target(root, entry.get("reply_reference")):  # the message these words reply to
+            if living:
+                row.update(living)
+            if target := row.get("reply_to") or reply_target(root, entry.get("reply_reference")):  # the message these words reply to
                 row["reply_to"] = target
-            later.append(carded(row, entry))  # a live delivery's card, or a late answer's snapshot, beside the words
+            later.append(carded(row, entry, root))  # a live delivery's card, or a late answer's snapshot, beside the words
             if files:
                 attached.append(entry)  # the files that message attached, staged in this task's own store
         elif kind == "relay_entry" and not entry.get("host_carried"):  # a carried row is the tree's, not this corpus
-            from ouroboros.owner_relay import owner_row_address, owner_text, quotable_owner_row
-            from ouroboros.owner_words import owner_place_accounts
-            fallback_root = entry.get("relay_canonical_root") or root
-            accounts_by_root = {}
-            for row in entry.get("owner_rows") or []:
-                source_root = row.get("_owner_source_root") or fallback_root
-                key = str(source_root)
-                if key not in accounts_by_root:
-                    accounts_by_root[key] = owner_place_accounts(source_root)
-                if not quotable_owner_row(row, source_root, accounts=accounts_by_root[key]):
-                    continue
-                address = owner_row_address(row)
-                if address not in seen:
-                    target = reply_target(source_root, row.get("reply_to")) if isinstance(row.get("reply_to"), dict) else {}
-                    later.append(carded({"source": "owner_mailbox", "content": owner_text(row), "msg_id": address,
-                                         **({"reply_to": target} if target else {})}, row))
-                    seen[address] = (owner_text(row), True)
-                    quoted += [{**ref, "_owner_source_root": str(source_root)}
-                               for ref in row.get("attachments") or [] if isinstance(ref, dict)]
+            for item, files in _relay_owner_inputs(root, entry, seen):
+                later.append(item)
+                seen[item["msg_id"]] = (item["content"], True)
+                quoted.extend(files)
         if kind in {"relay_entry", "task_message"} and not entry.get("host_carried"):  # a note and a task's words: peers
             peers.append({"msg_id": msg_id, "ts": str(entry.get("ts") or ""),
                           "source_task_id": str(entry.get("source_task_id") or ""),
@@ -742,6 +890,43 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             "readable": ", ".join(str(path) for path in readable if path.is_dir()),
             "predecessor_note": {"task_id": task_id, "reader": "get_task_result",
                                  "kind": "predecessor_authored_note"}}
+
+
+def _opening_message(root, result: dict, metadata: dict) -> dict:
+    """Rebuild the opening from its own producer facts, including a submitted form or an answered quiz."""
+    original = {"source": "origin_message", "content": result.get("origin_message_text"),
+                "origin_message_ref": result.get("origin_message_ref")}
+    if submitted := card_input(metadata, root, "origin_message"):
+        if submitted["source"] != "origin_message":
+            original["input_source"] = submitted["source"]
+        original.update(words=submitted["content"], **{k: submitted[k] for k in ("reply_to", "source_task_id", "quiz_id") if k in submitted})
+    return original
+
+
+def _relay_owner_inputs(root, entry: dict, seen: dict):
+    """Yield the new owner inputs and their uploads from an explicit relay, verified against each source store."""
+    from ouroboros.owner_relay import owner_row_address, owner_text, quotable_owner_row
+    from ouroboros.owner_words import owner_place_accounts
+
+    accounts_by_root = {}
+    for row in entry.get("owner_rows") or []:
+        source_root = row.get("_owner_source_root") or entry.get("relay_canonical_root") or root
+        key = str(source_root)
+        if key not in accounts_by_root:
+            accounts_by_root[key] = owner_place_accounts(source_root)
+        address = owner_row_address(row)
+        if address in seen or not quotable_owner_row(row, source_root, accounts=accounts_by_root[key]):
+            continue
+        item = card_input(row, source_root)
+        if not item:
+            carried = row.get("corpus_answer") or {}
+            target = carried.get("reply_to") or reply_target(source_root, row.get("reply_to"))
+            item = {"source": row_source(row, "owner_mailbox"), "content": owner_text(row),
+                    **{k: carried[k] for k in ("source_task_id", "quiz_id") if carried.get(k)},
+                    **({"reply_to": target} if target else {})}
+        files = [{**ref, "_owner_source_root": str(source_root)}
+                 for ref in row.get("attachments") or [] if isinstance(ref, dict)]
+        yield carded({**item, "msg_id": address}, row, source_root), files
 
 
 def continuation_room(drive_root: Any, predecessor_task_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -781,11 +966,16 @@ def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     original = sources.get("original") if isinstance(sources.get("original"), dict) else {}
     start = sources.get("start") if isinstance(sources.get("start"), dict) else {}
-    for row in [{**original, "source": "origin_message"}, *(start.get("answers") or []), *(sources.get("later") or [])]:
+    ref = original.get("origin_message_ref") or {}
+    opening = {**{key: str(ref[key]) for key in ("chat_id", "client_message_id", "ts") if ref.get(key)},
+               **original, "content": original.get("words", original.get("content")),
+               "source": original.get("input_source", "origin_message")}
+    for row in [opening, *(start.get("answers") or []), *(sources.get("later") or [])]:
         if isinstance(row, dict) and str(row.get("content") or "").strip():
             card = answered_card_reply(row.get("card"), row.get("source_task_id"))
             rows.append({"source": row.get("source") or "owner_mailbox", "content": row["content"],  # a card wins
-                         **{key: row[key] for key in (*ROW_IDS, "reply_to") if row.get(key)}, **({"reply_to": card} if card else {}),
+                         **{key: row[key] for key in (*ROW_IDS, "reply_to", "basis", "cited") if row.get(key)}, **({"reply_to": card} if card else {}),
+                         **({"ts": row["ts"]} if row is opening and row.get("ts") else {}),
                          **{key: row[key] for key in ("words",) if key in row}})  # exact, even empty
     for row in sources.get("schedule_text") or []:  # a schedule's text under its supplier, by value, never owner words
         if isinstance(row, dict) and str(row.get("content") or "").strip():
@@ -799,17 +989,18 @@ def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _card_lines(row: Dict[str, Any]) -> List[str]:
-    """One answered card for the successor: the asking task's question, then the owner's answer."""
+    """One answered card for the successor: the asking task's question, then the owner's answer, a press as their
+    act on that task's label (``answer_facts.option_answer``)."""
     card = row.get("card") if isinstance(row.get("card"), dict) else {}
     options = card.get("options") if isinstance(card.get("options"), list) else []
     index, comment = card.get("answered_index"), str(card.get("comment") or "")
-    answer = [f"chose option {index + 1}: {options[index]}"] if type(index) is int and 0 <= index < len(options) else []
-    answer += [f"wrote (verbatim): {comment}"] if comment.strip() else []
+    answer = (option_answer(card, index, comment, asker=row.get("source_task_id")) if type(index) is int
+              else f"The owner wrote (verbatim): {comment}" if comment.strip()
+              else f"The owner answered (verbatim): {row.get('content') or ''}")
     return [f"- Card {card.get('quiz_id') or row.get('quiz_id')} of task {row.get('source_task_id')}, "
             f"asked {card.get('asked_at') or 'at an unrecorded time'}: {card.get('question')}",
             f"  Options: {'; '.join(f'{n}. {label}' for n, label in enumerate(options, 1)) or 'none recorded'}",
-            f"  The owner {'; '.join(answer) or 'answered (verbatim): ' + str(row.get('content') or '')}"
-            f" (answered {card.get('answered_at') or 'at an unrecorded time'})."]
+            f"  {answer} (answered {card.get('answered_at') or 'at an unrecorded time'})."]
 
 
 def recorded_system_checkout(result: Dict[str, Any]) -> Dict[str, str]:
@@ -913,7 +1104,14 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
                   json.dumps(sources["schedule"], ensure_ascii=False)]
     original = sources.get("original") if isinstance(sources.get("original"), dict) else None
     if original and str(original.get("content") or "").strip():
-        lines += ["", "Owner's original instruction (verbatim):", str(original["content"])]
+        if original.get("input_source") == OWNER_PRESS:
+            lines += ["", press_record(original.get("words", original["content"]), original.get("source_task_id"), who="the owner")]
+            if target := original.get("reply_to"):
+                lines.append(str(target.get("text") or target.get("address") or ""))
+        elif original.get("input_source") == OWNER_CARD_INPUT:
+            lines += ["", original["words"]]
+        else:
+            lines += ["", "Owner's original instruction (verbatim):", str(original.get("words", original["content"]))]
     start = sources.get("start") if isinstance(sources.get("start"), dict) else None
     if start:
         drafter = (start.get("author") or {}).get("task_id") or "unknown"
@@ -956,10 +1154,21 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         lines += [f"{label}: {api[key]}" for key, label in (("context", "Context"), ("expected_output", "Expected output"),
                                                             ("constraints", "Constraints")) if api.get(key)]
     if later:
-        lines += ["", "Other owner words in that task's record (verbatim, in order):"]
+        has_notice = any(row.get("source") == OWNER_CARD_INPUT for row in later)
+        lines += ["", "Later inputs in that task's record (in order):" if has_notice else
+                      "Other owner words in that task's record (verbatim, in order):"]
         for row in later:
-            lines += (_card_lines(row) if isinstance(row.get("card"), dict)
-                      else [f"- {row.get('ts') or ''} {row['content']}"])
+            text = row["content"]
+            if row.get("source") == OWNER_CARD_INPUT:
+                text = "Host record: " + text
+            elif isinstance(row.get("card"), dict):
+                lines.extend(_card_lines(row))
+                continue
+            elif row.get("source") == OWNER_PRESS:
+                text = press_record(text, who="the owner")
+            elif has_notice:
+                text = "Owner words (verbatim): " + text
+            lines.append(f"- {row.get('ts') or ''} {text}")
     confirmed = [row for row in sources.get("confirmed_place") or [] if isinstance(row, dict) and row.get("content")]
     if confirmed:  # my human's words are never shortened to a count or a pointer
         lines += ["", "Words from your human's confirmed account in that place (their words there, by provenance; an order "

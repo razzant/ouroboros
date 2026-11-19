@@ -2681,9 +2681,28 @@ jobs:
           subject-path: ${{ steps.linux_packages.outputs.rpm_red80 }}
           sbom-path: dist/sbom-linux-rpm-red80-x86_64.cdx.json
 
-      # Upload the archive and its exact proof companions. The .deb/.rpm lines
-      # match nothing on macOS and Windows, which is fine — `error` fires only
-      # when the whole path set is empty.
+      # Each vendor runner downloads just its package. Release already merges
+      # ouroboros-* artifacts, including these two, into one directory.
+      - name: Upload the Astra Linux package
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ouroboros-package-astra
+          path: ${{ steps.linux_packages.outputs.deb }}
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the RED OS package
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ouroboros-package-redos
+          path: ${{ steps.linux_packages.outputs.rpm_red80 }}
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload build artifact
         if: matrix.os != 'windows-latest'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -2699,9 +2718,7 @@ jobs:
             dist/native-sources-linux-*.tar.gz.sha256
             dist/release-smoke-linux-appimage-x86_64.json
             dist/sbom-linux-appimage-x86_64.cdx.json
-            dist/ouroboros_*_amd64.deb
             dist/ouroboros-*-1.x86_64.rpm
-            dist/ouroboros-*-1.red80.x86_64.rpm
             dist/release-smoke-linux-deb-amd64.json
             dist/release-smoke-linux-rpm-x86_64.json
             dist/release-smoke-linux-rpm-red80-x86_64.json
@@ -2933,33 +2950,50 @@ jobs:
   # Gating a tagged release on that would trade a real publication failure for
   # someone else's outage, so the job runs alongside `release` rather than
   # ahead of it, and `continue-on-error` keeps a red result informational.
+  # Each OS is its own leg, so one registry's outage never hides the other.
   # ──────────────────────────────────────────────────────────────────
   vendor-package-smoke:
+    name: vendor-package-smoke (${{ matrix.leg }})
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     continue-on-error: true
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: astra
+            os: Astra Linux 1.8
+            package: 'ouroboros_{version}_amd64.deb'
+          - leg: redos
+            os: RED OS 8
+            package: 'ouroboros-{version}-1.red80.x86_64.rpm'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - name: Download Linux build artifact
+      - name: Download the package for this vendor
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ouroboros-ubuntu-latest
+          name: ouroboros-package-${{ matrix.leg }}
           path: linux-artifacts/
 
-      - name: Smoke packages on Astra Linux and RED OS
+      - name: Smoke the package on ${{ matrix.os }}
         id: vendor_smoke
         shell: bash
+        env:
+          LEG: ${{ matrix.leg }}
+          PACKAGE: ${{ matrix.package }}
         run: |
           set -euo pipefail
           VERSION="$(tr -d '[:space:]' < VERSION)"
-          bash scripts/smoke_linux_packages.sh vendor \
-            "linux-artifacts/ouroboros_${VERSION}_amd64.deb" \
-            "linux-artifacts/ouroboros-${VERSION}-1.x86_64.rpm" \
-            "linux-artifacts/ouroboros-${VERSION}-1.red80.x86_64.rpm"
+          package=${PACKAGE/'{version}'/"$VERSION"}
+          if [[ "$LEG" == redos ]]; then LEG=redos-ci; fi
+          bash scripts/smoke_linux_packages.sh "$LEG" "linux-artifacts/$package"
 
       # Without this, a non-blocking failure is easy to miss in the run list.
       - name: Report vendor smoke outcome
@@ -2967,14 +3001,14 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.vendor_smoke.outcome }}" = "success" ]; then
-            echo "Vendor package smoke passed on Astra Linux 1.8 and RED OS 8." >> "$GITHUB_STEP_SUMMARY"
+            echo "Vendor package smoke passed on ${{ matrix.os }}." >> "$GITHUB_STEP_SUMMARY"
           else
             {
-              echo "Vendor package smoke did not pass on Astra Linux 1.8 / RED OS 8."
+              echo "Vendor package smoke did not pass on ${{ matrix.os }}."
               echo ""
               echo "This lane is informational and does not block the release."
-              echo "Check whether registry.astralinux.ru and registry.red-soft.ru were"
-              echo "reachable before treating this as a packaging defect."
+              echo "Check whether the vendor's registry was reachable before"
+              echo "treating this as a packaging defect."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
