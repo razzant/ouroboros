@@ -506,7 +506,61 @@ def test_a_write_of_a_held_note_says_how_large_its_head_is(tmp_path):
     assert cleared.startswith("✅") and REMOVED in cleared and not said(cleared)
 
 
+def test_a_write_names_the_heads_a_held_head_newly_carries_or_releases_and_where_a_carried_note_stands(tmp_path,
+                                                                                                    monkeypatch):
+    """A held note's head links bring the heads they link: its write lists each one newly carried or released with
+    its head size, the total and where they stand, and the links that hold nothing. A carried note's own write says
+    where it stands and by which carrier, and how large its head is. A note neither claimed nor carried hears none."""
+    registry = _registry(tmp_path)
+    prefixes = ("Newly carried", "Released", "Linked from this head", "Present situations", "Held head")
+
+    def said(receipt):
+        assert receipt.startswith("✅"), receipt
+        return [line for line in receipt.splitlines() if line.startswith(prefixes)]
+
+    def write(address, content, **kwargs):
+        revision = knowledge.read_knowledge_note(address).revision
+        return registry.execute("knowledge_write", {"topic": address.topic, "scope": address.scope, "mode": "overwrite",
+                                                    "content": content, "expected_revision": revision, **kwargs})
+
+    sasha, tools, nova, plain = (knowledge.resolve_knowledge_address(tmp_path, topic, "global")
+                                 for topic in ("people/sasha", "tools", "work/nova", "plain"))
+    head = "How to work with Sasha.\n\n"
+    assert not said(_write(registry, sasha, "---\ntype: note\n---\n" + head + "## History\n\nOlder words.\n"))
+    assert not said(_write(registry, tools, "---\ntype: note\n---\nThe instruments.\n"))
+    links = "Nova. [Sasha](../people/sasha.md) [Tools](../tools.md) [gone](../gone.md)\n"
+    assert said(_write(registry, nova, _markdown(["room:1"], links))) == [
+        "Present situations holding this note: room:1",
+        f"Newly carried by this head: people/sasha ({len(head)} characters), tools (17 characters; no `## ` line: the "
+        f"whole body); {len(head) + 17} characters in all, standing where this note stands: room:1.",
+        "Linked from this head, not held: memory/knowledge/gone.md (no such note).",
+        f"Held head: {len(links)} characters: this note has no `## ` line, so its whole body is the head."]
+
+    edited = write(sasha, "---\ntype: note\n---\n" + head + "More.\n\n## History\n\nOlder words.\n")
+    assert said(edited) == ["Present situations holding this note: room:1 (carried by work/nova)",
+                            f"Held head: {len(head) + 7} characters, the body above the first `## ` line."]
+    claimed = write(tools, _markdown(["room:1"], "The instruments.\n"))
+    assert said(claimed)[0] == "Present situations holding this note: room:1; room:1 (carried by work/nova)"
+    assert not said(_write(registry, plain, "---\ntype: note\n---\nNeither claimed nor carried.\n"))
+
+    dropped = write(nova, _markdown(["room:1"], "Nova. [Tools](../tools.md)\n"))
+    assert said(dropped) == ["Present situations holding this note: room:1",
+                             f"Released by this head: people/sasha ({len(head) + 7} characters; now held: none); "
+                             f"{len(head) + 7} characters in all.",
+                             "Held head: 27 characters: this note has no `## ` line, so its whole body is the head."]
+    assert not said(write(sasha, "---\ntype: note\n---\nNo longer carried.\n"))
+
+    def unreadable(*_args, **_kwargs):  # the journal cannot give the version the write replaced
+        raise knowledge_versions.VersionUnavailable("no row holds it")
+
+    monkeypatch.setattr(knowledge_versions, "find_version", unreadable)
+    unknown = write(nova, _markdown(["room:1"], "Nova. [Sasha](../people/sasha.md)\n"))
+    assert "What this head carried before the write is unknown: no row holds it." in unknown
+    assert not any(line.startswith(("Newly carried", "Released")) for line in said(unknown))
+
+
 def test_history_readers_skip_only_claim_commits_and_keep_the_index_backup_row(tmp_path, monkeypatch):
+
     from ouroboros import return_facts
     from ouroboros.projects_registry import create_project
 

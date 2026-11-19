@@ -343,3 +343,21 @@ def _with_links(held: list, rows: Mapping, navigation: Mapping, ctx: Any) -> lis
         entries.append(entry.with_index(rows.get(topic, {}), navigation))
     return entries
 
+
+def standing(root: Path) -> dict[str, dict[str, list[str]]]:
+    """Every global note held somewhere, to what holds it: under ``""`` its own recorded claims, under each carrier's
+    topic the claims of that active held note whose head links it (``linked_heads``). Reads the shelf as it stands."""
+    claimed: dict[knowledge.KnowledgeAddress, list[str]] = {}
+    for name, addresses in knowledge.active_claims(root).items():
+        for address in addresses:
+            claimed.setdefault(address, []).append(name)
+    held = {address.topic: {"": names} for address, names in claimed.items()}
+    for address, names in claimed.items():
+        try:
+            carrier = knowledge.read_knowledge_note(address)
+        except (OSError, ValueError):
+            continue
+        if carrier.source is not None and carrier.state == "active" and address.topic != knowledge.OVERVIEW_TOPIC:
+            for topic in linked_heads(carrier)[0]:
+                held.setdefault(topic, {})[address.topic] = names
+    return held
