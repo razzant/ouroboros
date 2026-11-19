@@ -231,6 +231,15 @@ def test_a_place_is_named_by_its_scalar_name_only(tmp_path, place):
     _rows(tmp_path, _owner("A.", T0, cmid="a"), odd, _owner("B.", T0 + 9, cmid="b"))
     full = rf.render(rf.facts(tmp_path, _word(tmp_path, "b"), rf.Own(room=1)))[0]
     assert "#garden" in full and "$shared" not in full and "[{" not in full
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    bare = _arrival(place, "ann", "Seeds again.", T0 + 15)
+    bare["chat_id"] = presence_chat_id(conversation_key("chat", "qa", "design"))  # a room keyed by its conversation
+    bare["transport"]["conversation"] = {"full_name": [{"text": "Garden"}]}  # no string name at all (Grok, Astra r13)
+    _rows(tmp_path, bare, _owner("C.", T0 + 19, cmid="c"))
+    later = rf.render(rf.facts(tmp_path, _word(tmp_path, "c"), rf.Own(room=1)))[0]
+    assert "«Seeds again.»" in later and "$shared" not in later and "{'" not in later
 
 
 def test_several_people_in_one_place_each_keep_their_newest_words_and_their_own_reader(tmp_path, place):
