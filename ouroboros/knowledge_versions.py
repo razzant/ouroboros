@@ -426,7 +426,7 @@ def held_write(address: Any, history: Mapping[str, Any]) -> None:
                 other.unlink()
                 other.with_suffix(".checked").unlink(missing_ok=True)
     except OSError:
-        pass  # a file left behind is a copy the journal backs; a later write of the note removes it
+        pass  # a file left behind is a copy the journal backs: a later write removes a proof, no write a body
 
 
 def inventory_claim_names(shelf: Path, rows: Iterator[dict[str, Any]]) -> Iterator[tuple[str, list[str]]]:
