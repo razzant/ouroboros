@@ -259,18 +259,27 @@ def _ordered_world(world):
 def test_window_takes_maps_then_the_index_outline_then_heads_one_at_a_time_and_a_head_without_a_summary_stays(world, monkeypatch):
     captured = _ordered_world(world)
     # At 170k, summarizing two heads in the whole-book frame could keep Max. Map the books first.
-    roomy, maps, outlined, one, two = (
-        _plan(world, window, core=captured) for window in (200_000, 170_000, 80_000, 44_000, 30_000))
+    roomy, maps, band, outlined, one, two = (
+        _plan(world, window, core=captured) for window in (200_000, 170_000, 90_000, 60_000, 44_000, 30_000))
     assert roomy.initial_mode == "max" and "Book text. Book text." in _blocks(roomy)[0]["text"]
-    assert all(plan.initial_mode == "low" for plan in (maps, outlined, one, two))
+    assert all(plan.initial_mode == "low" for plan in (maps, band, outlined, one, two))
     assert "Book text. Book text." not in _blocks(maps)[0]["text"] and "Full mechanism" in _blocks(maps)[0]["text"]
     assert _index(roomy) == _index(maps) == "whole" and _cuts(roomy) == _cuts(maps) == []
-    # One bound for the outline and the heads. At 80k the physical window would still hold the whole index beside the
-    # heads; this start's own bound does not, so the outline pays first, and it is enough: every head stands whole.
-    assert maps.projected_tokens_with_tools("low", []) + RESERVE <= 80_000
+    # The band. At 90k this start misses its own bound (the window less the reply reserve and the two eighths a root
+    # keeps for work) while the physical window still holds the request with the whole index. Neither yields: only
+    # the physical window outlines an index, and a head waits for the outlines. The start has less work room.
+    request = band.projected_tokens_with_tools("low", [])
+    assert request + RESERVE <= 90_000 < request + RESERVE + 2 * (90_000 // 8)
+    assert _index(band) == "whole" and _cuts(band) == []
+    assert all(f"Head {topic}. " * 5_000 in _held(band) for topic in "abc")
+    # Where the physical window no longer holds the whole index, the outline comes first, as the window's step and
+    # never the start room's, and it is enough: every head stands whole.
+    assert request + RESERVE > 60_000
     assert _index(outlined) == "outline" and _cuts(outlined) == []
     assert all(f"Head {topic}. " * 5_000 in _held(outlined) for topic in "abc")
-    assert "omitted for this start's room, not for the physical window" in _blocks(outlined)[-1]["text"]
+    [index_row] = [row for row in outlined.low_projection.memory_facts["host_sections_addressed"]
+                   if row["section_id"] == "knowledge_index"]
+    assert "start_room" not in index_row
     assert [_index(plan) for plan in (one, two)] == ["outline", "outline"]
     assert _cuts(one) == [("a", "summary")]
     assert _cuts(two) == [("a", "summary"), ("c", "summary")]
@@ -281,7 +290,7 @@ def test_window_takes_maps_then_the_index_outline_then_heads_one_at_a_time_and_a
     assert _blocks(one)[-1]["text"].count("Authored telling of a.") == 1
     assert "Authored telling of a." in _held(one)  # the outline no longer shows it
 
-    # A frame that holds no head keeps its index for the physical window alone: the same notes, never adopted.
+    # A frame that holds no head is the target's: the same notes, never adopted, outline for the physical window.
     with monkeypatch.context() as patch:
         patch.setattr(held_notes, "turn_sections", lambda *_a, **_kw: [])
         unheld = _core(world)
@@ -316,10 +325,11 @@ def test_window_takes_maps_then_the_index_outline_then_heads_one_at_a_time_and_a
 
 def test_a_smaller_window_never_shows_more_of_a_head_and_no_head_yields_beside_a_whole_index(world):
     """Down one descending sweep of windows, from whole books through the map frame to the emergency floor: the set
-    of whole heads never grows, a whole-book frame shortens none, and wherever a head has yielded the index stands as
-    its outline. (This frame sends no tool schemas, so Nano prices like the map frame it follows.)"""
+    of whole heads never grows, a whole-book frame shortens none, wherever a head has yielded the index stands as
+    its outline, and in the map frames the index never comes back once outlined. (A whole-book frame's own index step
+    is the target's and is not judged here; this frame sends no tool schemas, so Nano prices like the map frame.)"""
     captured = _ordered_world(world)
-    whole, forms = {"a", "b", "c"}, []
+    whole, forms, outlined = {"a", "b", "c"}, [], False
     for window in range(196_000, 8_000, -4_000):
         plan = _plan(world, window, core=captured)
         shown = {topic for topic in "abc" if f"Head {topic}. " * 5_000 in _held(plan)}
@@ -328,8 +338,11 @@ def test_a_smaller_window_never_shows_more_of_a_head_and_no_head_yields_beside_a
         assert not _cuts(plan) or (plan.initial_mode != "max" and _index(plan) == "outline"), window
         whole = shown
         form = (plan.initial_mode, _index(plan), tuple(_cuts(plan)))
-        if plan.initial_mode != "max" and form not in forms:
-            forms.append(form)
+        if plan.initial_mode != "max":
+            assert not (outlined and _index(plan) == "whole"), window
+            outlined = outlined or _index(plan) == "outline"
+            if form not in forms:
+                forms.append(form)
     # The map frames crossed every step in order: the whole index, its outline, each head by address, the emergency.
     assert forms == [("low", "whole", ()), ("low", "outline", ()), ("low", "outline", (("a", "summary"),)),
                      ("low", "outline", (("a", "summary"), ("c", "summary"))),
@@ -337,9 +350,11 @@ def test_a_smaller_window_never_shows_more_of_a_head_and_no_head_yields_beside_a
 
 
 def test_no_head_yields_while_an_index_or_the_registry_can_still_take_its_outline(world):
-    """One bound for the outlines and the heads. Down a sweep of windows in a project room the project's index, the
-    global index and the registry each take their outline before any head steps; a head steps only once the outline
-    walk has nothing left to take and the request still exceeds the window's bound."""
+    """Outlines answer to the physical window alone, and a head waits for them. Down a sweep of windows in a project
+    room the project's index, the global index and the registry each take their outline for the physical window, in
+    their order, before any head steps; none is ever a start-room choice. In the band where this start misses its
+    own bound while the physical window still holds everything, nothing yields. A head steps only once the walk has
+    no outline left to take and the request still exceeds the head's bound."""
     env, _memory = world
     project = create_project(env.drive_root, "nova", name="Nova")
     task = {**TASK, "project_id": project["id"], "chat_id": project["chat_id"]}
@@ -353,11 +368,17 @@ def test_no_head_yields_while_an_index_or_the_registry_can_still_take_its_outlin
     captured = _core(world, task)
     steps = set(memory_floor.WHOLE_OR_OUTLINE_STEPS)
     assert _untaken_outlines(_plan(world, 250_000, core=captured, task=task)) == steps  # all three can be taken here
+    band = _plan(world, 120_000, core=captured, task=task)
+    request = band.projected_tokens_with_tools("low", [])
+    assert request + RESERVE <= 120_000 < request + RESERVE + 2 * (120_000 // 8)  # its own bound missed, the window holds
+    assert band.initial_mode == "low" and _untaken_outlines(band) == steps and not _cuts(band)
     crossed = []
-    for window in range(224_000, 8_000, -6_000):
+    for window in range(224_000, 8_000, -2_000):
         plan = _plan(world, window, core=captured, task=task)
         untaken, cuts = _untaken_outlines(plan), _cuts(plan)
         assert not cuts or not untaken, (window, cuts, sorted(untaken))
+        assert not any(row.get("start_room") for row in plan.projection(plan.initial_mode).memory_facts.get(
+            "host_sections_addressed", ()) if row["section_id"] in steps), window
         if (state := (len(steps) - len(untaken), len(cuts))) not in crossed:
             crossed.append(state)
     # (outlines taken, heads stepped): each outline in its turn, then each head, then the emergency floor's third.
@@ -687,12 +708,12 @@ def test_a_start_shaped_like_the_owners_keeps_all_six_heads_whole_while_memory_g
         return running.reproject_for_route(window_tokens=window, known_window=True, ratio=1, output_reserve=RESERVE,
             tool_schemas=[], start_mode="max", current_messages=messages, admitted=True)
 
-    mapped, folded, taken = rebind(130_000), rebind(30_000), rebind(20_500)
+    mapped, folded, taken = rebind(130_000), rebind(30_000), rebind(22_750)
     assert mapped.initial_mode == "low" and not mapped.low_projection.memory_facts["floor"]["steps"]
     assert not _cuts(mapped) and whole(mapped) == list(heads) and _index(mapped) == "whole"
     assert folded.initial_mode == "low" and not _cuts(folded) and whole(folded) == list(heads)
     assert _index(folded) == "outline" and "F5l" in folded.low_projection.memory_facts["floor"]["steps"]
-    assert _cuts(taken) == [("joi", "summary"), ("nina", "summary")] and taken.messages_for("low")[1:] == messages[1:]
+    assert _cuts(taken) == [("joi", "summary")] and taken.messages_for("low")[1:] == messages[1:]
 
 
 def test_only_an_admitted_call_for_the_complete_bound_revision_can_shorten_a_head(world, monkeypatch):
