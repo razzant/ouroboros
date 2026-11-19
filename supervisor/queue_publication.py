@@ -262,7 +262,7 @@ def publish_queue_changes() -> Optional[bool]:
     if not _queue().INITIALIZED:
         return None
     if not retry_pausing_envelopes(_queue()):
-        return False
+        return None
     with _queue()._queue_lock:
         if _kept_by_memo():
             return None  # the saved queue is still kept: decided once, not copied or counted again
