@@ -46,14 +46,18 @@ class _HookedUnlinks:
         os.unlink(path, *args, **kwargs)
 
 
-class _HookedSleeps:
-    """``evidence_packs.time`` with ``on_sleep(seconds)`` run instead of each sleep; the rest is ``time``."""
+class _ScriptedTime:
+    """``evidence_packs.time`` whose ``monotonic()`` reads a clock only the test moves (``now``) and whose
+    ``sleep(seconds)`` runs ``on_sleep(seconds)`` instead; the rest is ``time``."""
 
     def __init__(self, on_sleep):
-        self.on_sleep = on_sleep
+        self.now, self.on_sleep = 100.0, on_sleep
 
     def __getattr__(self, name):
         return getattr(time, name)
+
+    def monotonic(self):
+        return self.now
 
     def sleep(self, seconds):
         self.on_sleep(seconds)
@@ -159,17 +163,24 @@ def test_a_long_deletion_holds_no_store_lock_over_its_blobs(root, monkeypatch):
 
 def test_each_handle_unlinks_inside_its_barrier_and_the_pass_then_yields_as_long_as_it_held_it(root, monkeypatch):
     """A writer that will not wait is refused while a handle unlinks (its barrier holds the store's write lock) and
-    commits in the yield after it: before the next handle's barrier the pass leaves the lock free as long as it held
-    it, at any disk speed, and no yield follows the last handle."""
+    commits in the yield after it. Before the next handle's barrier the pass leaves the lock free exactly as long as
+    the last barrier held it, at any disk speed: read on a clock only the handles' unlinks move, a different hold for
+    each handle. No yield follows the last handle."""
     _, first = _task(root, "big", blobs=2)
     handles = [first, *_handles(root, "big", 3)]
-    inside, yields = [], []
-    monkeypatch.setattr(packs, "os", _HookedUnlinks(
-        lambda path: inside.append(_zero_wait_write(root)) if "context_checkpoints" in str(path) else None))
-    monkeypatch.setattr(packs, "time", _HookedSleeps(lambda _seconds: yields.append(_zero_wait_write(root))))
+    holds, inside, yields = iter([3.0, 5.0, 7.0, 11.0]), [], []
+    clock = _ScriptedTime(lambda seconds: yields.append((seconds, _zero_wait_write(root))))
+
+    def unlink(path):
+        if "context_checkpoints" in str(path):
+            inside.append(_zero_wait_write(root))
+            clock.now += next(holds)  # this handle's unlink holds its barrier that long
+
+    monkeypatch.setattr(packs, "os", _HookedUnlinks(unlink))
+    monkeypatch.setattr(packs, "time", clock)
     report = packer.run_pass(root)
     assert report["faults"] == 0 and report["unlinked"] == 2 + 4 and not _present(root, "big", handles)
-    assert inside == ["busy"] * 4 and yields == ["committed"] * 3
+    assert inside == ["busy"] * 4 and yields == [(3.0, "committed"), (5.0, "committed"), (7.0, "committed")]
 
 
 @pytest.mark.parametrize("reader", ["review", "resumed"])
