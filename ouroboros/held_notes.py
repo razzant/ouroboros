@@ -219,12 +219,14 @@ def note_head(source: MarkdownSource) -> str:
 def linked_heads(note: knowledge.KnowledgeNote) -> tuple[dict[str, knowledge.KnowledgeNote], list[str]]:
     """The active global notes this note's head links, by topic, and its head's other links to a knowledge address,
     each named with why it holds nothing. The head is ``note_head``'s: a link below its first `## ` line, in a fenced
-    block or in a code span is not in it (``MarkdownSource.links``); a link to the note itself is neither."""
+    block or in a code span is not in it (``MarkdownSource.links``); a link to the note itself, or to the overview,
+    which stands in its own place, is neither."""
     end = note.source.body_span.start_byte + len(note_head(note.source).encode("utf-8"))
     carried, unheld = {}, {}
     for link in knowledge.knowledge_links(note, before_byte=end):
         where = link.get("address")
-        if where is None or (where["scope"], where["topic"]) == (note.address.scope, note.address.topic):
+        if where is None or (where["scope"], where["topic"]) in {(note.address.scope, note.address.topic),
+                                                                  ("global", knowledge.OVERVIEW_TOPIC)}:
             continue
         if where["scope"] != "global":
             why = "project shelf"

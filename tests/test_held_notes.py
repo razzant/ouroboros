@@ -415,7 +415,8 @@ def test_a_link_in_a_claimed_head_brings_that_head_whole_under_max_and_a_selecte
 def test_only_a_claimed_heads_own_links_carry_one_hop_and_what_holds_nothing_is_named_under_it(world):
     """Nothing carries from below the first `## ` line, a fenced block, a code span or an indented code block, from a
     linked head (a second hop) or from the overview; a link to a missing, archived or project-shelf note is named in
-    one line under the head that links it, and a link to that head itself is neither."""
+    one line under the head that links it, and a link to that head itself, or to the overview, which stands in its
+    own place, is neither: an unclaimed overview gets no entry, a claimed one no link reason."""
     project = create_project(world[0].drive_root, "nova", name="Nova")
     _write(world, "shelf-note", "A project note.", claims=(), scope=f"project:{project['id']}")
     old = _write(world, "old", "An archived page.", claims=())
@@ -425,12 +426,16 @@ def test_only_a_claimed_heads_own_links_carry_one_hop_and_what_holds_nothing_is_
     for topic in ("far", "fenced", "spanned", "indented", "below", "from-overview"):
         _write(world, topic, f"Only linked as {topic}.", claims=())
     _write(world, "hub", "Hub head: [near](near.md), [gone](gone.md), [old](old.md), [self](hub.md), "
-           f"[shelf](../../projects/{project['id']}/knowledge/shelf-note.md).\n`[spanned](spanned.md)`\n\n"
+           f"[shared](overview.md), [shelf](../../projects/{project['id']}/knowledge/shelf-note.md).\n"
+           "`[spanned](spanned.md)`\n\n"
            "```\n[fenced](fenced.md)\n## inside the fence\n```\n\n    [indented](indented.md)\n\n"
            "## History\n\n[below](below.md)\n", title="Hub")
-    _write(world, "overview", "Shared head: [from-overview](from-overview.md).")
+    overview = _write(world, "overview", "Shared head: [from-overview](from-overview.md).", claims=())
+    assert re.findall(r"^Global note: memory/knowledge/(.+)\.md$", _held(_plan(world)), re.M) == ["hub", "near"]
+    _write(world, "overview", "Shared head: [from-overview](from-overview.md).", revision=overview.revision)
     held = _held(_plan(world))
     assert re.findall(r"^Global note: memory/knowledge/(.+)\.md$", held, re.M) == ["hub", "overview", "near"]
+    assert held.count("Linked from the head of Hub") == 1 and "Linked from the head of Hub" in held.split("### near")[1]
     assert held.count("Linked from this head, not held: ") == 1
     assert ("Matched claims: 'room:1'\nLinked from this head, not held: memory/knowledge/gone.md (no such note), "
             f"memory/knowledge/old.md (archived), projects/{project['id']}/knowledge/shelf-note.md (project shelf)\n"
