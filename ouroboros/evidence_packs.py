@@ -59,7 +59,6 @@ _PART_CACHE: contextvars.ContextVar = contextvars.ContextVar("evidence_part_cach
 _READERS: Dict[str, "_PackReader"] = {}
 _READERS_LOCK = threading.Lock()
 _READERS_MAX = 4
-_VALIDATED: Dict[str, tuple] = {}
 
 
 class EvidenceCorrupt(ValueError):
@@ -274,28 +273,13 @@ def index_tier(root: pathlib.Path) -> str:
     return store.TIER_ENFORCED if kernel_file_locks_enforced(root / "state" / store.LOCK_NAME) else store.TIER_NAME
 
 
-def _index_stamp(path: pathlib.Path) -> Optional[tuple]:
-    identity = store.file_identity(path)
-    if identity is None:
-        return None
-    try:
-        info = os.stat(path)
-    except OSError:
-        return None
-    return (*identity, info.st_size, info.st_mtime_ns)
-
-
 def _index_valid(path: pathlib.Path, tier: str, *, wait_sec: float = INDEX_WAIT_SEC) -> bool:
-    stamp = _index_stamp(path)
-    if stamp is None:
-        return False
-    if _VALIDATED.get(str(path)) == stamp:
-        return True
+    """The cache's O(1) facts: its header names ``tier`` and its meta row this schema version. Nothing
+    reads the whole live file: a damaged page surfaces as the SQLite error of the read that meets it."""
     if store.header_tier(path, _APPLICATION_ID) != tier:
         return False
     try:
         with contextlib.closing(store.connect(path, tier, wait_sec=wait_sec)) as conn:
-            ok = conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
             version = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
     except sqlite3.OperationalError as exc:
         if store.busy(exc):
@@ -303,10 +287,7 @@ def _index_valid(path: pathlib.Path, tier: str, *, wait_sec: float = INDEX_WAIT_
         return False
     except sqlite3.Error:
         return False
-    valid = ok and version is not None and version[0] == str(INDEX_SCHEMA_VERSION)
-    if valid:
-        _VALIDATED[str(path)] = stamp
-    return valid
+    return version is not None and version[0] == str(INDEX_SCHEMA_VERSION)
 
 
 def _index_rows(conn: sqlite3.Connection, pack_path: pathlib.Path, sidecar: Dict[str, Any]) -> None:
@@ -381,11 +362,10 @@ def _rebuild_index(root: pathlib.Path, path: pathlib.Path, tier: str, *, wait_se
 @contextlib.contextmanager
 def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_SEC,
                rebuild: bool = True) -> Iterator[sqlite3.Connection]:
-    """One transaction under the name lock, narrowed by the caller's acquisition budget.
-
-    Missing, damaged or other-version caches rebuild outside the lock. ``rebuild=False``
-    is advisory discovery: unavailable cache raises instead of walking all sidecars.
-    ``store.StoreBusy`` on contention.
+    """One transaction under the name lock, narrowed by the caller's acquisition budget; the cache is
+    usable by its O(1) facts (``_index_valid``). Missing, foreign or other-version caches rebuild outside
+    the lock; ``rebuild=False`` (every reader, advisory discovery) raises ``sqlite3.DatabaseError``
+    instead. ``store.StoreBusy`` on contention.
     """
     root = pathlib.Path(root)
     path, tier = packs_dir(root) / INDEX_NAME, index_tier(root)

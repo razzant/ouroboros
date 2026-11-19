@@ -577,7 +577,6 @@ def test_a_candidate_beside_its_homonym_takes_the_next_free_generation_and_keeps
     assert [sidecar["generation"] for sidecar in packs.published_generations(root, "a")] == [1, 3]
     assert [sidecar["generation"] for sidecar in packs.published_generations(root, "a.2")] == [1]
     assert not _handle_path(root, "a", later).exists()  # its own pack holds it now
-    packs._VALIDATED.clear()  # the sidecars answer, not a cache this process validated
     assert packs.handle_bytes(root, "a", later["path"]) == b"# later focus\n"
     for task, handle in handles.items():
         assert packs.handle_bytes(root, task, handle["path"]) == f"# focus {task}\n".encode()

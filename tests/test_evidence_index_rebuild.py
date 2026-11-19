@@ -213,6 +213,32 @@ def test_sidecar_publication_obeys_index_lock_and_retries_a_new_generation(root)
     assert _tasks(root) == {"first"}
 
 
+def test_index_access_checks_o1_facts_never_the_whole_file(root, monkeypatch):
+    """Writing the cache and reading it after another writer's commit run no whole-file check (each
+    ran one ``PRAGMA quick_check`` before: the bytes this process had validated changed) and build
+    nothing: the header names the tier, the meta row the schema, a damaged page its own SQLite error."""
+    first_path, first = _publish(root, "first")
+    packs.index_upsert(root, first_path, first)  # the packer's first write of a pass leaves a cache
+    index = packs.packs_dir(root) / packs.INDEX_NAME
+    built, statements, connect = store.file_identity(index), [], store.connect
+
+    def traced(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(store, "connect", traced)
+    late_path, late = _publish(root, "late")
+    packs.index_upsert(root, late_path, late)
+    with contextlib.closing(store.connect(index, packs.index_tier(root))) as other:  # another process's commit
+        with store.transaction(other, write=True):
+            other.execute("INSERT OR REPLACE INTO swept VALUES ('elsewhere', '[]')")
+    assert _tasks(root) == {"first", "late"}
+    checks = [sql for sql in statements if sql.upper().startswith(("PRAGMA QUICK_CHECK", "PRAGMA INTEGRITY_CHECK"))]
+    assert statements and not checks, checks
+    assert store.file_identity(index) == built
+
+
 def test_valid_cache_avoids_sidecar_reads_and_advisory_open_never_rebuilds(root, monkeypatch):
     _publish(root, "first")
     assert _tasks(root) == {"first"}

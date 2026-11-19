@@ -323,7 +323,6 @@ def test_index_is_a_cache_rebuilt_from_sidecars(root):
     # a stale index schema is rebuilt by the pass without changing the sidecar format
     with contextlib.closing(sqlite3.connect(index)) as conn, conn:
         conn.execute("UPDATE meta SET value='0' WHERE key='schema_version'")
-    packs._VALIDATED.clear()
     with pytest.raises(packs.EvidenceUnavailable):
         obs.read_blob_ref(root, refs[1])
     _run(root)

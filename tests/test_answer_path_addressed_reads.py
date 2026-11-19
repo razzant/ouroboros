@@ -132,17 +132,17 @@ def test_send_message_receipt_capture_is_flat_across_evidence_packs(tmp_path, mo
     found by their names: the packs directory is never listed (one listing returns every pack's
     names), and the names the capture probes are counted and compared at both sizes.
 
-    ``validated``: a whole-pack reader of this process checked the index the packer left (the
-    quiet case even before the fix: the index answers); ``stale``: the packer wrote the index
-    since (re-validation is a whole-index ``quick_check``); ``contended``: the packer holds the
-    index lock past the send's acquisition slice (the 22.10 stalls: every sidecar opened and
-    parsed); ``damaged``: the cache must be rebuilt from every sidecar. The answer still reaches
-    the chat and keeps its retained receipt on both sizes.
+    ``validated``: a reader of this process opened the index the packer left (the quiet case even
+    before the fix: the index answered); ``stale``: the packer wrote the index since (it once cost
+    every process a whole-index ``quick_check``); ``contended``: the packer holds the index lock
+    past the send's acquisition slice (the 22.10 stalls: every sidecar opened and parsed);
+    ``damaged``: the cache awaits a rebuild from every sidecar. The answer still reaches the chat
+    and keeps its retained receipt on both sizes.
 
     ``journal`` is chosen before the first store exists and read back from each store's header:
     the store's own choice (WAL only on a fixed SQLite and a proven local filesystem) would give
     each host just one of the two."""
-    from ouroboros import dialogue_store, evidence_packs, store
+    from ouroboros import dialogue_store, evidence_packer, evidence_packs, store
     from supervisor import events_chat_delivery
 
     monkeypatch.setattr(store, "_journal_mode", lambda *_: journal)
@@ -158,12 +158,11 @@ def test_send_message_receipt_capture_is_flat_across_evidence_packs(tmp_path, mo
         holder = None
         if index == "validated":
             with evidence_packs.open_index(root):
-                pass  # a whole-pack reader of this process checked the bytes the packer left
+                pass  # a reader of this process opened the bytes the packer left
         elif index == "stale":
-            evidence_packs._VALIDATED.clear()
+            evidence_packer.record_swept(root, "elsewhere", "[]")  # the packer's write of another task's sweep
         elif index == "damaged":
             (evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME).write_bytes(b"not a database")
-            evidence_packs._VALIDATED.clear()
         elif index == "contended":
             held, release = threading.Event(), threading.Event()
 
@@ -474,7 +473,6 @@ def test_a_task_handle_is_answered_by_its_own_sidecars_only(tmp_path, monkeypatc
                for task in ("a", "a.2", "b")}
     assert evidence_packer.run_pass(tmp_path)["faults"] == 0
     (packs.packs_dir(tmp_path) / "b.members.json").write_text("{", encoding="utf-8")
-    packs._VALIDATED.clear()  # nothing validated the cache in this process
     decoded = _spy_sidecars(monkeypatch)
     assert packs.handle_bytes(tmp_path, "a", handles["a"]["path"]) == b"# focus a\n"
     assert packs.handle_info(tmp_path, "a", handles["a"]["path"].replace("focus_source", "absent")) is None
@@ -504,22 +502,20 @@ def test_a_torn_generation_does_not_hide_the_next_one(tmp_path, monkeypatch):
     assert evidence_packer.run_pass(tmp_path)["packed"] == 1
     assert not (task_artifact_dir_path(tmp_path, "torn") / later["path"]).exists()  # only its pack holds it now
     assert packs._task_sidecar_names(tmp_path, "torn") == {"torn.members.json", "torn.3.members.json"}
-    packs._VALIDATED.clear()  # nothing validated the cache in this process: the sidecars answer
     assert packs.handle_bytes(tmp_path, "torn", later["path"]) == b"# later focus\n"
     assert packs.packed_handle_names(tmp_path, "torn") == sorted(ref["path"].rsplit("/", 1)[-1] for ref in (first, later))
 
 
 @pytest.mark.parametrize("index", ["valid", "absent"])
 def test_a_valid_index_keeps_a_placement_whose_own_sidecar_was_damaged(tmp_path, monkeypatch, index):
-    """The packer's index outlives a damaged sidecar even when this process never validated it: only
-    then is the existing cache checked (never rebuilt). Without a cache the damage stays explicit."""
+    """The packer's index outlives a damaged sidecar: only then is the existing cache asked (never
+    rebuilt). Without a cache the damage stays explicit."""
     from ouroboros import evidence_packer, evidence_packs as packs
     from tests.test_evidence_packs import _task
 
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     _refs, handle = _task(tmp_path, "kept", blobs=1)
     assert evidence_packer.run_pass(tmp_path)["faults"] == 0
-    packs._VALIDATED.clear()
     (packs.packs_dir(tmp_path) / "kept.members.json").write_text("{", encoding="utf-8")
     if index == "absent":
         (packs.packs_dir(tmp_path) / packs.INDEX_NAME).unlink()

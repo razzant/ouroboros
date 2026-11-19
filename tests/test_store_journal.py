@@ -781,7 +781,6 @@ def test_a_wal_evidence_index_another_runtime_built_is_rebuilt_not_converted(tmp
     store.close_connections()
     assert store.wal_file(index)
     monkeypatch.setattr(store, "_journal_mode", lambda *_: "PERSIST")
-    monkeypatch.setattr(packs, "_VALIDATED", {})
     assert _tasks(tmp_path) == {"t1"}
     store.close_connections()
     assert not store.wal_file(index)

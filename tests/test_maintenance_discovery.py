@@ -131,18 +131,13 @@ def test_real_contention_never_waits_and_discovery_defers_without_recording(root
     _task(root, "candidate", blobs=1)
     with packs.open_index(root):
         pass
-    if busy == "packs_sql_cached":
-        with packs.open_index(root):
-            pass
-        assert str(packs.packs_dir(root) / packs.INDEX_NAME) in packs._VALIDATED
     spawns = []
     monkeypatch.setattr(maintenance, "spawn_maintenance_job", lambda *a: spawns.append(a) or _FakeChild(_QUIET))
     unit = maintenance.MaintenanceChild()
 
     def held():
-        if busy in {"facts", "packs_sql", "packs_sql_cached"}:
-            path = {"facts": root / "state/current.sqlite",
-                    "packs_sql": packs.packs_dir(root) / packs.INDEX_NAME}[busy.removesuffix("_cached")]
+        if busy in {"facts", "packs_sql"}:
+            path = {"facts": root / "state/current.sqlite", "packs_sql": packs.packs_dir(root) / packs.INDEX_NAME}[busy]
             return exclusive_hold(path)  # reads busy too, under WAL as under the rollback journal
         return None
 
