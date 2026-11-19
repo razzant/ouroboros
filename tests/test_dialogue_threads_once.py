@@ -336,6 +336,7 @@ _CONVERSATION_READERS = {
     "ouroboros/dialogue_store.py::_thread": "the store's own reference walk",
     "ouroboros/place_intake.py::_captured_arrival": "expands: the rebuilt event reaches the model",
     "ouroboros/place_arrivals.py::_room_details": "stored row, scalar title/name only",
+    "ouroboros/return_facts.py::_sort": "stored row, scalar full name/name/title only, for a place's label",
     "ouroboros/place_guard.py::_reply_touches": "validated reply_targets: literal conversation ids, never stored rows",
     "ouroboros/presence_events.py::parse_presence_event": "the connector's request payload, every live door",
     "ouroboros/presence_events.py::reply_targets": "the connector's message.reply_targets: literal address ids",

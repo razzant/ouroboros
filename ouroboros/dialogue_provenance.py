@@ -1257,7 +1257,8 @@ class RoomLabelResolver:
             _text(facts.get(key)) for key in ("provider", "account_id", "conversation_id", "thread_id"))
         scalars = _mapping(facts.get("conversation"))
         clean = lambda value: " ".join(str(value).replace("[", " ").replace("]", " ").split())  # noqa: E731
-        name = next((clean(scalars[key]) for key in ("title", "name", "full_name", "username") if _text(scalars.get(key))), "")
+        name = next((clean(scalars[key]) for key in ("title", "name", "full_name", "username")
+                     if isinstance(scalars.get(key), str) and scalars[key].strip()), "")  # a list or a reference is no name
         place = next((p for p in self._places if p.place_id == place_id), None) or next(
             (p for p in sorted(self._places, key=lambda p: not p.conversation_id) if p.provider == provider
              and p.conversation_id in ("", conversation) and p.account_id in ("", account)), None)

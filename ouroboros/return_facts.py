@@ -310,8 +310,9 @@ def _sort(found: Dict[str, Any], entry: ds.Row, transports: Mapping[int, Any], a
             return  # a place turn's terminal: its reply, if any, is among my replies
         conversation = transport.get("conversation") if isinstance(transport.get("conversation"), dict) else {}
         key = (provider, str(transport.get("account_id") or ""), str(transport.get("conversation_id") or chat))
-        place = found["places"].setdefault(key, _Place(_words(conversation.get("full_name") or conversation.get("name")
-                                                              or conversation.get("title")) or found["labels"].label(row), key[1]))
+        name = next((value for value in (conversation.get(field) for field in ("full_name", "name", "title"))
+                     if isinstance(value, str) and value.strip()), "")  # scalar names only, as ``_room_details``
+        place = found["places"].setdefault(key, _Place(_words(name) or found["labels"].label(row), key[1]))
         place.first, place.last = place.first or str(row.get("ts") or ""), str(row.get("ts") or "")
         actor = transport.get("actor") if isinstance(transport.get("actor"), dict) else {}
         mine = row.get("direction") == "out" or author.get("kind") == "ouroboros" or author.get("via") == "own_account"
