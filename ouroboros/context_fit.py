@@ -1022,30 +1022,29 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             output_reserve_tokens=reserve, non_memory_tokens=0, target_tokens=target if kept is None else None,
             calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)
         held = [None]  # the frame's one shortest level: a host step's receipt re-prices it, a miss walks again
+        sent_view = {} if kept is None else {"kept": kept.get(start or preferred)}  # a view already sent walks on from its level
         def shortest(forms, physical):  # what a start sends once its own walk took each form before uncovered owner rows
-            shown = held[0] and view(selected, sent, forms, window, boundary, level=held[0])
+            shown = held[0] and view(selected, sent, forms, window, boundary, level=held[0], **sent_view)
             price = shown and measure(selected, sent, forms, shown.story_chars, shown.room_chars)
             if price is None or price > physical:  # no walk yet, or its level no longer fits beside these host forms
-                shown = view(selected, sent, forms, window, boundary, shortest=True)
+                shown = view(selected, sent, forms, window, boundary, shortest=True, **sent_view)
                 held[0], price = floor.kept_level(snapshot, shown.facts), measure(selected, sent, forms, shown.story_chars, shown.room_chars)
             return price
         def told(forms):  # ``max_room_lost``'s own test beside these host forms: memory at my shortest telling, the
             return telling_fits(selected, sent, forms, window, boundary, reserve, start_room=kept is None)
-        def held_told(forms):  # voice setup is a start even when it carries a prepared view
-            return telling_fits(selected, sent, forms, window, boundary, reserve, start_room=kept is None or start_work)
         receipts, _ = floor._host_steps(available, prior,  # every frame starts from what was shown
             measure=lambda addressed: measure(selected, sent, addressed, story_before, room_before),
             shortest=shortest if snapshot and kept is None else None,  # a held view was sent: it keeps its steps
             told=told if snapshot and known_window else None,
-            held_telling_fits=held_told if held_heads and snapshot and known_window and form[selected] == "low"
-            and not replay else None,
+            # Held heads yield last, to the window alone (voice setup is a start even with a prepared view).
+            held_least=shortest if held_heads and snapshot and known_window and form[selected] == "low" and not replay else None,
+            held_bound=host_allowances["window" if kept is None or start_work else "physical"],
             window=window if known_window else None, reserve=reserve, ratio=ratio, slack=slack,
             saving=owed(measure(selected, sent, section_views(sections[selected], prior)), reserve) if asked else 0,
             root=core.section_root, task_id=core.section_task_id, bare=lambda forms: measure(selected, sent, forms),
             allowance=host_allowances["margin" if kept is None or start_work else "physical"],
             budget_mode=selected if kept is None and target and target < window else None,
-            window_bound=floor.floor_allowances(window_tokens=window if known_window else None, output_reserve_tokens=reserve,
-                non_memory_tokens=0, calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)["margin"],
+            window_bound=host_allowances["window"],  # the window's own start bound, whatever target frames the start
             **({"retain": retain} if retain is not None else {}))
         fixed = measure(selected, sent, section_views(sections[selected], receipts))
         allowances = floor.floor_allowances(window_tokens=window if known_window else None,

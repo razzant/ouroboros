@@ -858,10 +858,11 @@ TELLING_SPARED = ("return_facts", "return_facts_words")
 
 
 def _held_note_steps(sections, receipts, fits, *, form="summary"):
-    """Before memory can go below a telling, walk the captured entries in address order.
+    """The last host forms to yield: the captured heads in address order, one at a time until ``fits``.
 
-    The map frame supplies the window predicate. At the emergency floor only the
-    exact reader remains.
+    In a map frame each steps to its authored summary beside its exact reader, once memory is priced at its shortest
+    forms and no index or registry is left to outline (``_host_steps``); a head without a summary stays whole. At the
+    emergency floor only the exact reader remains.
     """
     from ouroboros.held_notes import HeldNoteSection
 
@@ -894,7 +895,7 @@ def _held_note_steps(sections, receipts, fits, *, form="summary"):
 
 def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, root, task_id, allowance=None,
                 shortest=None, budget_mode=None, slack=0, bare=None, retain=None, window_bound=None, told=None,
-                held_telling_fits=None):
+                held_least=None, held_bound=None):
     """First steps of mode_views, using the same physical allowance as memory.
 
     Producers own meaning; this walk selects only explicit smaller views. Retained
@@ -925,15 +926,25 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     ``window_bound``, the window's own start bound: neither an owner's target nor the start's own room shortens it.
     A ``TELLING_SPARED`` section steps only while the window cannot hold the request with memory at my shortest telling
     and the books as the frame holds them (``told``: ``max_room_lost``'s own test), so before the books or a telling.
-    Held heads use their own late step, after ordinary host forms. A map frame supplies their physical predicate.
+    Held heads yield last (``_held_note_steps``). A map frame that holds them passes ``held_least(addressed,
+    physical)``, the request beside these host forms with memory at its shortest forms (``shortest``'s measure, for a
+    view already sent too), and ``held_bound``, the window's own bound for it: a start's keeps its work room, a view
+    already sent has the window less its reply reserve. That frame judges its indexes and registry by the same measure
+    and bound, so each outline it can take comes before any head; a head steps only while the request still exceeds
+    the bound after them, one at a time. A target, a soft frame or a requested saving shortens none. A frame that
+    holds no head keeps its outlines for the physical window alone.
     """
     from ouroboros.held_notes import HeldNoteSection
 
     receipts = list(previous)
+    physical = floor_allowances(window_tokens=window or None, output_reserve_tokens=reserve,
+                                non_memory_tokens=0, calibration_ratio=ratio)["physical"]
+
     def finish(remaining):
-        if held_telling_fits is not None:
-            # Since to openings → held heads → Since to counts (the two Since steps belong here).
-            remaining = max(0, remaining - _held_note_steps(sections, receipts, held_telling_fits))
+        if held_least is not None and physical is not None:
+            def fits(forms):  # as the request stands first: memory is priced at its shortest forms only past the bound
+                return (measure is not None and measure(forms) <= held_bound) or held_least(forms, physical) <= held_bound
+            remaining = max(0, remaining - _held_note_steps(sections, receipts, fits))
         return receipts, remaining
 
     if measure is None or not window or not root or not task_id:
@@ -945,8 +956,6 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
                   and len(part.operative_view) < len(part.full_text)]
     if not candidates:
         return finish(saving)
-    physical = floor_allowances(window_tokens=window, output_reserve_tokens=reserve,
-                                non_memory_tokens=0, calibration_ratio=ratio)["physical"]
     # No step reaches a shorter form (a pointer follows the operative view) and memory only adds to a request.
     least = bare({**addressed, **{part.section_id: min((part.full_text, part.operative_view), key=view_tokens)
                                   for part in candidates}}) if bare else None
@@ -955,7 +964,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     initial = current = measure(addressed)
     bound = allowance if allowance is not None else physical
     if (bound is None or current <= bound) and saving == 0:
-        return finish(0)
+        return receipts, 0  # this frame's allowance holds the request as it stands: nothing yields, a head least
     soft = bound is not None and bound < physical
     excess = max(0, saving - slack)  # what a window or a refusal measured; slack never outlines
     fits = None  # what this start can send, uncovered owner words whole: priced when a step needs it
@@ -968,10 +977,14 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
             break
         if fits is None:
             sent_least = shortest(addressed, physical) if shortest else current  # memory at its shortest forms
-            fits = sent_least <= physical
-        if part.section_id in WHOLE_OR_OUTLINE_STEPS and fits and (soft or initial - current >= excess):
-            continue  # an outline is a physical step, never a start-room or slack choice
-        spared = part.section_id in WINDOW_ONLY or part.section_id in TELLING_SPARED
+            fits, held = sent_least <= physical, None
+        if part.section_id in WHOLE_OR_OUTLINE_STEPS:
+            if held is None:  # a frame that holds heads: by their measure, at their bound (one bound for both)
+                held = fits if held_least is None else (
+                    sent_least if shortest else held_least(addressed, physical)) <= held_bound
+            if held and (soft or initial - current >= excess):
+                continue  # an outline is the window's step, never a target's, a soft frame's or slack's
+        spared = part.section_id in (*WINDOW_ONLY, *TELLING_SPARED, *WHOLE_OR_OUTLINE_STEPS)
         if part.section_id in WINDOW_ONLY and window_bound is not None and sent_least <= window_bound:
             continue  # the window's start bound holds it beside memory's shortest forms: no soft frame shortens it
         if part.section_id in TELLING_SPARED and (told(addressed) if told else window_bound is None or current <= window_bound):

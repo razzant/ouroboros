@@ -11,7 +11,8 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from ouroboros import context, context_budget, context_fit, held_notes, knowledge, knowledge_versions, memory_floor, memory_view
+from ouroboros import (context, context_budget, context_fit, context_view_facts, held_notes, knowledge, knowledge_versions,
+                       memory_floor, memory_view)
 from ouroboros.agent import Env, _restore_saved_clocks
 from ouroboros.memory import Memory
 from ouroboros.owner_wait import checkpoint_owner_wait, continuation_state, load_owner_wait, set_owner_wait
@@ -116,6 +117,8 @@ def test_default_request_is_byte_identical_and_only_recorded_claims_add_a_sectio
     for mode in ("max", "low", "nano"):
         assert json.dumps(quiet.messages_for(mode)) == json.dumps(baseline.messages_for(mode))
         assert not _held(quiet, mode)
+        line = context_view_facts.memory_facts(quiet, mode)
+        assert line == context_view_facts.memory_facts(baseline, mode) and "held note heads" not in line
     assert quiet.core_sha256 == baseline.core_sha256
     assert all(not (world[0].drive_root / "memory" / folder).exists()
                for folder in ("knowledge_note_records", "knowledge_held_versions"))
@@ -230,16 +233,45 @@ def test_claims_and_lifecycle_are_checked_on_the_bytes_that_supply_the_head(worl
     assert "Former " not in held
 
 
-def test_window_steps_heads_one_at_a_time_after_maps_and_leaves_a_head_without_a_summary(world):
+def _index(plan, mode=None):
+    """The form of the global knowledge index in this request: ``whole``, or the ``outline`` the window chose."""
+    text = _blocks(plan, mode)[-1]["text"]
+    return "outline" if "Outline: every active note" in text else "whole"
+
+
+def _untaken_outlines(plan, mode=None):
+    """The indexes and the registry of this frame that stand whole though the window could take their outline."""
+    taken = {row["section_id"] for row in plan.projection(mode or plan.initial_mode).memory_facts.get("host_sections_addressed", ())}
+    core = plan.core
+    return {part.section_id for part in (*core.semi_stable_sections, *core.dynamic_sections, *core.dynamic_head_sections)
+            if part.section_id in memory_floor.WHOLE_OR_OUTLINE_STEPS and part.section_id not in taken
+            and part.operative_view is not None and len(part.operative_view) < len(part.full_text)}
+
+
+def _ordered_world(world):
+    """Three claimed heads (``b`` without an authored summary) beside an index that an unclaimed note makes long."""
     for topic in ("c", "b", "a"):
         _write(world, topic, f"Head {topic}. " * 5_000, **({"summary": f"Authored telling of {topic}."} if topic != "b" else {}))
-    captured = _core(world)
-    # At 120k, summarizing a head in the whole-book frame could keep Max. Map the books first.
-    roomy, maps, one, two = (_plan(world, window, core=captured) for window in (150_000, 120_000, 43_000, 28_000))
+    _write(world, "ordinary", "An unclaimed note.", claims=(), summary="Whole index only. " * 8_000)
+    return _core(world)
+
+
+def test_window_takes_maps_then_the_index_outline_then_heads_one_at_a_time_and_a_head_without_a_summary_stays(world, monkeypatch):
+    captured = _ordered_world(world)
+    # At 170k, summarizing two heads in the whole-book frame could keep Max. Map the books first.
+    roomy, maps, outlined, one, two = (
+        _plan(world, window, core=captured) for window in (200_000, 170_000, 80_000, 44_000, 30_000))
     assert roomy.initial_mode == "max" and "Book text. Book text." in _blocks(roomy)[0]["text"]
-    assert maps.initial_mode == one.initial_mode == two.initial_mode == "low"
+    assert all(plan.initial_mode == "low" for plan in (maps, outlined, one, two))
     assert "Book text. Book text." not in _blocks(maps)[0]["text"] and "Full mechanism" in _blocks(maps)[0]["text"]
-    assert _cuts(roomy) == _cuts(maps) == []
+    assert _index(roomy) == _index(maps) == "whole" and _cuts(roomy) == _cuts(maps) == []
+    # One bound for the outline and the heads. At 80k the physical window would still hold the whole index beside the
+    # heads; this start's own bound does not, so the outline pays first, and it is enough: every head stands whole.
+    assert maps.projected_tokens_with_tools("low", []) + RESERVE <= 80_000
+    assert _index(outlined) == "outline" and _cuts(outlined) == []
+    assert all(f"Head {topic}. " * 5_000 in _held(outlined) for topic in "abc")
+    assert "omitted for this start's room, not for the physical window" in _blocks(outlined)[-1]["text"]
+    assert [_index(plan) for plan in (one, two)] == ["outline", "outline"]
     assert _cuts(one) == [("a", "summary")]
     assert _cuts(two) == [("a", "summary"), ("c", "summary")]
     assert "Head b. " * 5_000 in _held(two)
@@ -247,25 +279,103 @@ def test_window_steps_heads_one_at_a_time_after_maps_and_leaves_a_head_without_a
     assert ("Head a. " * 5_000 in _held(one, "max")) and not _cuts(one, "max")
     assert "Head shortened to its authored summary for the physical window." in _held(one)
     assert _blocks(one)[-1]["text"].count("Authored telling of a.") == 1
-    assert "Authored telling of a." not in _held(one)  # the whole index already shows it
+    assert "Authored telling of a." in _held(one)  # the outline no longer shows it
+
+    # A frame that holds no head keeps its index for the physical window alone: the same notes, never adopted.
+    with monkeypatch.context() as patch:
+        patch.setattr(held_notes, "turn_sections", lambda *_a, **_kw: [])
+        unheld = _core(world)
+    held_window = _plan(world, 120_000, core=unheld).projected_tokens_with_tools("low", []) + RESERVE  # as it stands
+    short_room, physical = (_plan(world, held_window + spare, core=unheld) for spare in (2_000, -3_000))
+    assert any(row.get("start_room") for row in short_room.low_projection.memory_facts["host_sections_addressed"])
+    assert [_index(short_room), _index(physical)] == ["whole", "outline"] and not _held(short_room)
 
     messages = [*roomy.messages_for("max"), {"role": "user", "content": "Owner's words during work."}]
-    def rebind(window):
-        return roomy.reproject_for_route(window_tokens=window, known_window=True, ratio=1, output_reserve=RESERVE,
-            tool_schemas=[], start_mode="max", current_messages=messages, admitted=True)
+    def rebind(plan, window, mode="max"):
+        return plan.reproject_for_route(window_tokens=window, known_window=True, ratio=1, output_reserve=RESERVE,
+            tool_schemas=[], start_mode=mode, current_messages=messages, admitted=True)
 
-    still_max = rebind(150_000)
-    assert still_max.initial_mode == "max" and not _cuts(still_max)
-    rebound = rebind(31_000)
-    assert rebound.initial_mode == "low" and _cuts(rebound) == [("a", "summary")]
+    still_max = rebind(roomy, 150_000)
+    assert still_max.initial_mode == "max" and not _cuts(still_max) and _index(still_max) == "whole"
+    # A view already sent keeps no new work room: the outline first, then one head pays what the window still lacks.
+    sent_outline, rebound = rebind(roomy, 60_000), rebind(roomy, 31_000)
+    assert sent_outline.initial_mode == "low" and _index(sent_outline) == "outline" and not _cuts(sent_outline)
+    assert rebound.initial_mode == "low" and _index(rebound) == "outline" and _cuts(rebound) == [("a", "summary")]
     assert rebound.messages_for("low")[1:] == messages[1:]
+    # The form a head was sent in stays on its receipt: a narrower frame of the same work never shows it whole again.
+    narrower = rebind(rebound, 25_000, "low")
+    assert _cuts(narrower) == [("a", "summary"), ("c", "summary")] and "Head a. " * 5_000 not in _held(narrower)
 
     emergency = _plan(world, 12_000, core=captured)
     assert emergency.initial_mode == "nano"
-    assert _cuts(emergency) == [("a", "summary"), ("c", "summary"), ("b", "reader")]
-    assert all(_blocks(emergency)[-1]["text"].count(f"Authored telling of {topic}.") == 1 for topic in ("a", "c"))
+    assert _cuts(emergency) == [("a", "reader"), ("c", "summary"), ("b", "reader")]
+    assert "Authored telling of c." in _held(emergency) and "Authored telling of a." not in _blocks(emergency)[-1]["text"]
     assert "Head b. " * 5_000 not in _held(emergency)
     assert "knowledge_read(topic='b', scope='global', version=" in _held(emergency)
+
+
+def test_a_smaller_window_never_shows_more_of_a_head_and_no_head_yields_beside_a_whole_index(world):
+    """Down one descending sweep of windows, from whole books through the map frame to the emergency floor: the set
+    of whole heads never grows, a whole-book frame shortens none, and wherever a head has yielded the index stands as
+    its outline. (This frame sends no tool schemas, so Nano prices like the map frame it follows.)"""
+    captured = _ordered_world(world)
+    whole, forms = {"a", "b", "c"}, []
+    for window in range(196_000, 8_000, -4_000):
+        plan = _plan(world, window, core=captured)
+        shown = {topic for topic in "abc" if f"Head {topic}. " * 5_000 in _held(plan)}
+        assert shown <= whole, (window, sorted(shown), sorted(whole))
+        assert shown == {"a", "b", "c"} - {topic for topic, _form in _cuts(plan)}
+        assert not _cuts(plan) or (plan.initial_mode != "max" and _index(plan) == "outline"), window
+        whole = shown
+        form = (plan.initial_mode, _index(plan), tuple(_cuts(plan)))
+        if plan.initial_mode != "max" and form not in forms:
+            forms.append(form)
+    # The map frames crossed every step in order: the whole index, its outline, each head by address, the emergency.
+    assert forms == [("low", "whole", ()), ("low", "outline", ()), ("low", "outline", (("a", "summary"),)),
+                     ("low", "outline", (("a", "summary"), ("c", "summary"))),
+                     ("nano", "outline", (("a", "reader"), ("c", "summary"), ("b", "reader")))]
+
+
+def test_no_head_yields_while_an_index_or_the_registry_can_still_take_its_outline(world):
+    """One bound for the outlines and the heads. Down a sweep of windows in a project room the project's index, the
+    global index and the registry each take their outline before any head steps; a head steps only once the outline
+    walk has nothing left to take and the request still exceeds the window's bound."""
+    env, _memory = world
+    project = create_project(env.drive_root, "nova", name="Nova")
+    task = {**TASK, "project_id": project["id"], "chat_id": project["chat_id"]}
+    for topic in ("c", "b", "a"):
+        _write(world, topic, f"Head {topic}. " * 5_000, claims=(f"room:{project['chat_id']}",),
+               **({"summary": f"Authored telling of {topic}."} if topic != "b" else {}))
+    _write(world, "ordinary", "An unclaimed note.", claims=(), summary="Whole index only. " * 4_000)
+    _write(world, "local", "A project note.", claims=(), scope="project:nova", summary="Whole project index only. " * 4_000)
+    registry = "".join(f"## Source {number}\n\n" + "Registry line. " * 600 + "\n\n" for number in range(8))
+    (env.drive_root / "memory" / "registry.md").write_bytes(registry.encode("utf-8"))
+    captured = _core(world, task)
+    steps = set(memory_floor.WHOLE_OR_OUTLINE_STEPS)
+    assert _untaken_outlines(_plan(world, 250_000, core=captured, task=task)) == steps  # all three can be taken here
+    crossed = []
+    for window in range(224_000, 8_000, -6_000):
+        plan = _plan(world, window, core=captured, task=task)
+        untaken, cuts = _untaken_outlines(plan), _cuts(plan)
+        assert not cuts or not untaken, (window, cuts, sorted(untaken))
+        if (state := (len(steps) - len(untaken), len(cuts))) not in crossed:
+            crossed.append(state)
+    # (outlines taken, heads stepped): each outline in its turn, then each head, then the emergency floor's third.
+    assert crossed == [(0, 0), (1, 0), (2, 0), (3, 0), (3, 1), (3, 2), (3, 3)]
+
+
+def test_nano_prices_its_own_frame_and_carries_no_cut_from_the_map_frame_before_it(world):
+    """Across the map frame and Nano a smaller window can buy room back: Nano unloads the tool schemas, so it prices
+    its own request and shortens only what that request still lacks. Within one frame the order holds as ever."""
+    captured = _ordered_world(world)
+    tools = [{"type": "function", "function": {"name": f"fixture_tool_{number}", "description": "schema detail " * 2_000,
+                                                "parameters": {"type": "object", "properties": {}}}} for number in range(4)]
+    maps, nano, tighter = (_plan(world, window, core=captured, tool_schemas=tools) for window in (60_000, 42_000, 30_000))
+    assert maps.initial_mode == "low" and _cuts(maps) == [("a", "summary"), ("c", "summary")]
+    assert [nano.initial_mode, tighter.initial_mode] == ["nano", "nano"]
+    assert _cuts(nano) == [("a", "summary")] and "Head c. " * 5_000 in _held(nano)  # it fits whole there: no stale cut
+    assert _cuts(tighter) == [("a", "summary"), ("c", "summary")] and "Head b. " * 5_000 in _held(tighter)
+    assert _index(nano) == _index(tighter) == "outline" and not (_untaken_outlines(nano) | _untaken_outlines(tighter))
 
 
 def test_a_heads_label_is_its_title_or_an_h1_of_the_head_and_never_a_heading_below_it(world):
@@ -486,20 +596,77 @@ def test_required_handbook_joins_after_the_ordinary_map_frame_has_fit(world):
     assert refusal.value.required_book_tokens > 0
 
 
-def test_a_shortest_telling_gets_its_room_before_any_emergency_memory_form(world):
-    head = "A claimed fact. " * 3_500
-    _write(world, "global-topic", head, summary="The authored summary.")
-    captured = _core(world)
-    memory = synthetic.snapshot(role="integrator", story=synthetic.pages(1, 80_000))
-    captured = replace(captured, memory_view_json=memory_view.snapshot_json(memory))
-    full = _plan(world, 55_000, mode="low", core=captured)
-    tight = _plan(world, 38_000, mode="low", core=captured)
-    assert not _cuts(full) and head in _held(full)
-    assert _cuts(tight) == [("global-topic", "summary")] and head not in _held(tight)
-    assert "Page 0. " + synthetic.prose(80_000) in _blocks(tight)[-2]["text"]
+def test_a_start_shaped_like_the_owners_keeps_all_six_heads_whole_while_memory_goes_below_a_telling(world, monkeypatch):
+    """The owner's Nova rooms of 18-19 Nov: his Max with the books at chapter maps, my shortest telling tens of
+    thousands of tokens past the start bound, memory's shorter forms inside it. Memory walks down its ladder and all
+    six heads stand whole beside the whole index. A head yields only where the window cannot hold the request with
+    memory at its shortest forms either, after the index outline, in address order. The fact the mind gets about what
+    memory yielded to the window names the heads that stand whole."""
+    heads = {"nova": "What is true of Nova now. ", "joi": "What Joi is and who runs it. ",
+             "sasha": "How to work with Sasha. ", "nina": "How to work with Nina. ",
+             "people-others": "The other people around Nova. ", "tools": "The instruments and the data. "}
+    for topic, words in heads.items():
+        _write(world, topic, words * 400, summary=f"Authored summary of {topic}.",
+               **({"type": "person"} if topic in ("sasha", "nina") else {}))
+    _write(world, "library", "An unclaimed note.", claims=(), summary="A long index summary. " * 4_000)
+    memory = synthetic.snapshot(role="integrator", story=synthetic.pages(3, 80_000))
+    memory = replace(memory, spec=replace(memory.spec, work_room_levels=2))  # a root's start keeps two eighths for work
+    captured = replace(_core(world), memory_view_json=memory_view.snapshot_json(memory))
+    telling = memory_floor.tokens_of(memory_view.story_chars(memory, memory_floor.telling_level(memory)))
+
+    def facts(plan):  # the owner's Max, rendered at chapter maps
+        assert plan.preferred_mode == "max" and plan.initial_mode == "low"
+        assert "Book text. Book text." not in _blocks(plan)[0]["text"]
+        return plan.low_projection.memory_facts
+
+    def whole(plan):
+        return [topic for topic, words in heads.items() if words * 400 in _held(plan)]
+
+    roomy, shaped, tight = (_plan(world, window, core=captured) for window in (150_000, 100_000, 24_000))
+    assert not facts(roomy)["floor"]["steps"] and not _cuts(roomy)
+    request, story = shaped.projected_tokens_with_tools("low", []), facts(shaped)["blocks"]["story_tokens"]
+    work_room = 100_000 // 8 * 2
+    assert request - story + telling + RESERVE + work_room > 100_000 + 20_000  # my telling misses by tens of thousands
+    assert request + RESERVE + work_room <= 100_000 and story < telling  # memory below a telling fits
+    assert "F5l" in facts(shaped)["floor"]["steps"] and "Page 0. " + synthetic.prose(80_000) not in _blocks(shaped)[-2]["text"]
+    assert not _cuts(shaped) and whole(shaped) == list(heads) and _index(shaped) == "whole"
+    # Only where memory's shortest forms and the index outline still leave the window short do heads yield, by address.
+    assert _cuts(tight) == [("joi", "summary"), ("nina", "summary"), ("nova", "summary")] and _index(tight) == "outline"
+    assert whole(tight) == ["sasha", "people-others", "tools"] and "F5l" in facts(tight)["floor"]["steps"]
+
+    held = sum(memory_floor.view_tokens(part.full_text) for part in captured.dynamic_sections
+               if isinstance(part, held_notes.HeldNoteSection))
+    cut = memory_floor.addressed_text(facts(shaped)["floor"]["steps"])
+    line = context_view_facts.memory_facts(shaped, "low")
+    assert f"; shown only by address: {cut}; held note heads: {held:,} tokens stand whole; marks in view 0" in line
+    # Where the window took nothing from memory, or without held heads, the line is what it was.
+    assert "held note heads" not in context_view_facts.memory_facts(roomy, "low")
+    with monkeypatch.context() as patch:
+        patch.setattr(held_notes, "turn_sections", lambda *_a, **_kw: [])
+        unheld = replace(_core(world), memory_view_json=captured.memory_view_json)
+    plain = _plan(world, 60_000, core=unheld)
+    assert facts(plain)["floor"]["steps"] and not _held(plain)
+    assert context_view_facts.memory_facts(plain, "low").endswith(
+        f"; shown only by address: {memory_floor.addressed_text(facts(plain)['floor']['steps'])}; marks in view 0")
+
+    # A work already running in whole books: where my telling no longer fits beside them the books go to their maps,
+    # and that drop shortens nothing; memory then folds and the index outlines before the window takes a head.
+    running = _plan(world, 400_000, core=captured)
+    assert running.initial_mode == "max"
+    messages = [*running.messages_for("max"), {"role": "user", "content": "Owner's words during work."}]
+    def rebind(window):
+        return running.reproject_for_route(window_tokens=window, known_window=True, ratio=1, output_reserve=RESERVE,
+            tool_schemas=[], start_mode="max", current_messages=messages, admitted=True)
+
+    mapped, folded, taken = rebind(130_000), rebind(30_000), rebind(20_500)
+    assert mapped.initial_mode == "low" and not mapped.low_projection.memory_facts["floor"]["steps"]
+    assert not _cuts(mapped) and whole(mapped) == list(heads) and _index(mapped) == "whole"
+    assert folded.initial_mode == "low" and not _cuts(folded) and whole(folded) == list(heads)
+    assert _index(folded) == "outline" and "F5l" in folded.low_projection.memory_facts["floor"]["steps"]
+    assert _cuts(taken) == [("joi", "summary"), ("nina", "summary")] and taken.messages_for("low")[1:] == messages[1:]
 
 
-def test_only_an_admitted_call_for_the_complete_bound_revision_can_shorten_a_head(world):
+def test_only_an_admitted_call_for_the_complete_bound_revision_can_shorten_a_head(world, monkeypatch):
     from ouroboros.presence_authority import (PresenceArgumentBinding, PresenceCapabilityCeiling, PresenceToolGrant,
                                              presence_ceiling_payload)
 
@@ -523,7 +690,10 @@ def test_only_an_admitted_call_for_the_complete_bound_revision_can_shorten_a_hea
 
     def fit(contract, *, restriction="", result_check):
         ctx.task_contract = contract
-        plan = _plan(world, 30_000, mode="low", ctx=ctx)
+        roomy = _plan(world, 130_000, mode="low", ctx=ctx)
+        assert not _cuts(roomy) and head in _held(roomy)
+        # The window can no longer hold the whole head: only a head with an admitted reader may step.
+        plan = _rebind(monkeypatch, ctx, roomy, roomy.messages_for("low"), 18_000)
         actual = registry.execute_result("knowledge_read", args)
         assert result_check(actual), actual.code
         if restriction:
