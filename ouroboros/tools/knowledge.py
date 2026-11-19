@@ -112,6 +112,8 @@ def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = N
             status = link["status"]
             if status == "external":
                 links[status] = links.get(status, 0) + 1
+            elif status == "unavailable":
+                links.setdefault(status, link["error"])
             else:
                 target = link.get("address", note.address.as_dict() if status == "same_source" else {})
                 links.setdefault(status, []).append(

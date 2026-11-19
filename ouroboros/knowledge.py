@@ -633,22 +633,32 @@ def rebuild_knowledge_index(address: KnowledgeAddress) -> None:
         write_bytes_atomic(path, view)
 
 
-def knowledge_links(note: KnowledgeNote) -> tuple[dict[str, Any], ...]:
+def knowledge_links(note: KnowledgeNote, *, before_byte: int | None = None) -> tuple[dict[str, Any], ...]:
     """Resolve authored links from their physical source; missing notes are gaps."""
     if note.source is None:
         return ()
     rows = []
     for link in note.source.links:
-        url = urlsplit(link.destination)
+        if before_byte is not None and link.span.end_byte > before_byte:
+            continue
         row: dict[str, Any] = {"label": link.label, "target": link.destination,
                                "start_byte": link.span.start_byte, "end_byte": link.span.end_byte}
+        try:
+            url = urlsplit(link.destination)
+        except ValueError as exc:
+            rows.append({**row, "status": "unavailable", "error": type(exc).__name__})
+            continue
         if url.scheme or url.netloc:
             row["status"] = "external"
         elif not url.path:
             row.update(status="same_source", path=str(note.address.path))
         else:
-            target = (note.address.path.parent / unquote(url.path)).resolve()
-            row.update(path=str(target), status="present" if target.is_file() else "unwritten")
+            try:
+                target = (note.address.path.parent / unquote(url.path)).resolve()
+                row.update(path=str(target), status="present" if target.is_file() else "unwritten")
+            except (OSError, ValueError, RuntimeError) as exc:
+                rows.append({**row, "status": "unavailable", "error": type(exc).__name__})
+                continue
             try:
                 parts = target.relative_to(note.address.canonical_root).parts
                 if parts[:2] == ("memory", "knowledge"):
@@ -659,11 +669,13 @@ def knowledge_links(note: KnowledgeNote) -> tuple[dict[str, Any], ...]:
                     scope, topic = "", ""
                 if topic.endswith(".md"):
                     address = resolve_knowledge_address(note.address.canonical_root, topic[:-3], scope)
+                    if scope == "global" and row["status"] == "present":
+                        address = shelf_spelling(address)
                     row["address"] = address.as_dict()
                     row["read"] = {"tool": "knowledge_read", "arguments": {
                         "topic": address.topic, "scope": address.scope,
                     }}
-            except ValueError:
+            except (OSError, ValueError, RuntimeError):
                 pass  # An ordinary source link need not be a KB address.
         rows.append(row)
     return tuple(rows)
