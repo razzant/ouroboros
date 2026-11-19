@@ -436,8 +436,10 @@ def _placements(root: pathlib.Path, *, sha256: str = "", kind: str = "", task_id
     return found
 
 
-def _task_handles(root: pathlib.Path, task_id: str, rel_path: str = "") -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
-    """This task's packed checkpoint handles (``rel_path``: that one), read as an addressed fact.
+def _task_handles(root: pathlib.Path, task_id: str, rel_path: str = "", *,
+                  unread: Optional[list] = None) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
+    """This task's packed checkpoint handles (``rel_path``: that one), read as an addressed fact; ``unread`` collects
+    the task's unreadable sidecars behind a listing they may have left partial.
 
     A handle is named by its task and the task's own sidecars are its authority, so no other
     task's pack is read: the index answers while this process has validated its current bytes and
@@ -461,6 +463,8 @@ def _task_handles(root: pathlib.Path, task_id: str, rel_path: str = "") -> List[
         if kept:
             return kept
         raise errors[0]
+    if unread is not None:
+        unread.extend(errors)
     return found
 
 
@@ -469,11 +473,12 @@ _HANDLES_SQL = ("SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind, h.re
                 "JOIN packs p ON p.task_id=h.task_id AND p.generation=h.generation WHERE h.task_id=? AND m.kind=?")
 
 
-def _indexed_handles(root: pathlib.Path, task_id: str, rel_path: str, *,
-                     validated: bool) -> Optional[List[Tuple[pathlib.Path, Dict[str, Any]]]]:
+def _indexed_handles(root: pathlib.Path, task_id: str, rel_path: str, *, validated: bool,
+                     whole: bool = False) -> Optional[List[Tuple[pathlib.Path, Dict[str, Any]]]]:
     """The index's rows for this task's handles, or ``None`` when it cannot answer. ``validated``
     reads only bytes this process already validated and never waits for the lock; otherwise
-    ``open_index`` checks the existing index under the caller's budget, never rebuilding it."""
+    ``open_index`` checks the existing index under the caller's budget, never rebuilding it.
+    ``whole``: ``None`` too when the index recorded unreadable sidecars, as its rows may not be all."""
     path = packs_dir(root) / INDEX_NAME
     try:
         with contextlib.ExitStack() as held:
@@ -488,7 +493,7 @@ def _indexed_handles(root: pathlib.Path, task_id: str, rel_path: str, *,
             rows = conn.execute(_HANDLES_SQL + (" AND h.rel_path=?" if rel_path else ""),
                                 (task_id, CHECKPOINT, *((rel_path,) if rel_path else ()))).fetchall()
             recorded = conn.execute("SELECT value FROM meta WHERE key='sidecar_errors'").fetchone()
-            if not rows and recorded and json.loads(recorded[0]):
+            if recorded and json.loads(recorded[0]) and (whole or not rows):
                 return None  # an unreadable sidecar may be this task's: the index proves no absence
     except (store.StoreError, sqlite3.Error, OSError, ValueError):
         return None
@@ -854,12 +859,18 @@ def packed_handle_names(root: Any, task_id: str) -> List[str]:
     return sorted(packed_handle_packs(root, task_id))
 
 
-def packed_handle_packs(root: Any, task_id: str) -> Dict[str, str]:
-    """Each packed checkpoint handle's name, with the data-root address of the pack generation that holds it."""
+def packed_handle_packs(root: Any, task_id: str, *, complete: bool = False) -> Optional[Dict[str, str]]:
+    """Each packed checkpoint handle's name, with the data-root address of the pack generation that holds it.
+    ``complete``: when unreadable sidecars of this task may have left the listing partial, the checked index answers
+    if it recorded none, else ``None`` (a name such a listing misses may still be packed: unknown, not absent)."""
     if not packs_dir(root).is_dir():
         return {}
-    return {pathlib.PurePosixPath(member["path"]).name: f"observability/packs/{pack.name}"
-            for pack, member in _task_handles(pathlib.Path(root), str(task_id))}
+    unread: list = []
+    handles = _task_handles(pathlib.Path(root), str(task_id), unread=unread)
+    if complete and unread and (handles := _indexed_handles(pathlib.Path(root), str(task_id), "",
+                                                             validated=False, whole=True)) is None:
+        return None
+    return {pathlib.PurePosixPath(member["path"]).name: f"observability/packs/{pack.name}" for pack, member in handles}
 
 
 def _checkpoint_path(path: pathlib.Path) -> Optional[tuple]:

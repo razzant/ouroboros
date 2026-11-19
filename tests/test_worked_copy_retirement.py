@@ -784,6 +784,43 @@ def test_a_retired_line_names_the_pack_generation_that_holds_the_bytes(root, mon
     assert line["packed"] == ["observability/packs/multigen.2.xz"], "the generation that holds these bytes"
 
 
+def test_a_partial_pack_listing_holds_the_saved_states_and_a_whole_one_names_the_generation(root, monkeypatch):
+    """One generation's sidecar is unreadable while the pack index is busy: the listing then misses that generation,
+    and a line saying "its exact bytes are not kept" would be false (``handle_bytes`` still returns them)."""
+    import hashlib
+
+    from ouroboros import evidence_packs, saved_state_retirement, store
+
+    handles = _task(root, "partial")
+
+    def addressed(text, wait):
+        return handles / "context_checkpoints" / f"owner-wait-{wait * 32}-{hashlib.sha256(text.encode()).hexdigest()}.json"
+
+    with monkeypatch.context() as older_body:  # a body before #3789 packed every handle, one generation a pass
+        older_body.setattr(saved_state_retirement, "worked_copy", lambda folder, name: None)
+        first = _file(addressed("first generation", "8"), "first generation")
+        evidence_packs.pack_task(root, "partial", keep_shas=set())
+        _file(addressed("second generation", "9"), "second generation")
+        evidence_packs.pack_task(root, "partial", keep_shas=set())
+    rel = f"source_handles/context_checkpoints/{first.name}"
+    assert evidence_packs.materialize_handle(root, "partial", rel) and first.exists()
+    (evidence_packs.packs_dir(root) / evidence_packs.sidecar_name("partial", 1)).write_text("{", encoding="utf-8")
+    with store.name_lock(root, evidence_packs.INDEX_LOCK_NAME, timeout_sec=0), store.acquisition_budget(0):
+        report = _prune(root)
+    assert report["held"] == {"packs_unknown": 1} and report["removed"] == 0, report
+    assert first.exists() and not _ledger(handles), "an unknown pack is never written down as bytes not kept"
+    with evidence_packs.open_index(root, write=True) as conn:  # an index rebuilt while a sidecar was unreadable says so
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('sidecar_errors', ?)", (json.dumps(["unreadable sidecar"]),))
+    assert _prune(root)["held"] == {"packs_unknown": 1} and first.exists(), "its rows may miss that generation"
+    with evidence_packs.open_index(root, write=True) as conn:
+        conn.execute("DELETE FROM meta WHERE key='sidecar_errors'")
+    again = _prune(root)  # a checked index that recorded no unreadable sidecar makes the listing whole
+    assert again["removed"] == 1 and not first.exists(), again["held"]
+    line = next(line for line in _ledger(handles) if line["name"] == first.name)
+    assert line["packed"] == ["observability/packs/partial.xz"], "the generation that holds these bytes"
+    assert evidence_packs.handle_bytes(root, "partial", rel) == b"first generation"
+
+
 
 def test_a_recovered_crash_with_no_recorded_end_goes_its_days_after_it_was_written_settled(root):
     from ouroboros.saved_state_retirement import prune_worked_copies

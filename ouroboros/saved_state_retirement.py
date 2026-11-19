@@ -470,7 +470,10 @@ def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
                 continue
             from ouroboros.evidence_packs import packed_handle_packs
 
-            packed = packed_handle_packs(root, task_id)  # a loose copy of packed bytes: its line names that generation
+            packed = packed_handle_packs(root, task_id, complete=True)  # a loose copy of packed bytes: its line names that generation
+            if packed is None:  # a listing an unreadable sidecar left partial: "not kept" would be unproven
+                hold("packs_unknown", len(found))
+                continue
             recorded_lines = {(line.get("name"), line.get("bytes"), line.get("saved_ns")) for line in retired_lines(root, task_id)}
             left = 0
             with gate(root, task_id, timeout_sec=0) as why:
@@ -575,7 +578,10 @@ def _prune_running(root, task_id, found, row, promoting, *, days, stamp, cutoff,
         hold("no_call_records", len(free))
     if not sources:
         return facts()
-    packed = packed_handle_packs(root, task_id)
+    packed = packed_handle_packs(root, task_id, complete=True)
+    if packed is None:  # a pack listing an unreadable sidecar left partial: "not kept" would be unproven
+        hold("packs_unknown", len(free))
+        return facts()
     recorded = {(line.get("name"), line.get("bytes"), line.get("saved_ns")) for line in retired_lines(root, task_id)}
     with gate(root, task_id, timeout_sec=0) as why:
         if not why:  # the row, its promotion and the queue as of now: every rule again
