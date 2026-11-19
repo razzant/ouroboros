@@ -126,8 +126,8 @@ def test_a_quiet_joined_peer_wakes_the_door_only_for_its_messages_and_the_end_of
     core for the whole call (#3796): after hello only the peer's message or the call's end may wake the door."""
 
     class SilentCloseSocket(PeerSocket):
-        """A server close that hands no disconnect back (wsproto's waits for the peer's echo): only the sender's end
-        can wake the door when the call closes."""
+        """A close that hands no disconnect back to the door: the call's end must reach it through the sender's
+        end, not through a transport that happens to answer every close."""
 
         async def close(self, **reason):
             self.closed.append(reason)
