@@ -131,32 +131,43 @@ def ingress_reply(root, metadata: dict, *, route_work: bool = False) -> dict:
     return {**ref, "work_task_id": work} if work is not None else ref
 
 
-def _reply_work(root, row: dict, *, inherit: bool = True) -> str | None:
-    """Use host-stamped relationships, never a quote's wording or a task's title."""
+def _reply_work(root, row: dict) -> str | None:
+    """Use only stamped work relationships and exact stored legacy web Reply links."""
+    # Resolving old dialogue must stay bounded on the ingress path. An incomplete
+    # chain is not the same fact as reaching an ordinary row with no work target.
+    seen = set()
+    while row.get("direction") == "in":
+        quote = row.get("reply_to")
+        if not isinstance(quote, dict):
+            return None
+        if "work_task_id" in quote:
+            return str(quote["work_task_id"] or "")
+        if row.get("source") != "web":
+            return None
+        address = quote.get("address")
+        if not isinstance(address, str) or quote.get("unresolved"):
+            return ""
+        if quote.get("kind") == "work_card" and address == f"task:{quote.get('task_id') or ''}":
+            return str(quote.get("task_id") or "")
+        if not address.startswith("row:") or address in seen or len(seen) >= _MAX_LEGACY_REPLY_HOPS:
+            return ""
+        seen.add(address)
+        parent, _ = resolve_history_row(root, address)
+        if parent is None:
+            return ""
+        row = parent
+    return _outgoing_reply_work(root, row)
+
+
+_MAX_LEGACY_REPLY_HOPS = 16
+
+
+def _outgoing_reply_work(root, row: dict) -> str | None:
     from ouroboros.dialogue_provenance import row_provenance
     from ouroboros.presence_owner_contact import private_main_row
     from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES
     from ouroboros.task_results import load_task_result
 
-    if row.get("direction") == "in":
-        quote = row.get("reply_to")
-        if not isinstance(quote, dict):
-            return None
-        if "work_task_id" in quote:
-            return quote["work_task_id"]
-        # Before work stamps, an actual web Reply still kept the host's exact quote.
-        # Recover only that immediate relationship, never traverse a chain of old owner rows.
-        if not inherit or row.get("source") != "web":
-            return None
-        address = quote.get("address")
-        if not isinstance(address, str) or quote.get("unresolved"):
-            return None
-        if quote.get("kind") == "work_card" and address == f"task:{quote.get('task_id') or ''}":
-            return str(quote.get("task_id") or "")
-        if address.startswith("row:") and quote.get("task_id"):
-            older, _ = resolve_history_row(root, address)
-            return _reply_work(root, older, inherit=False) if older is not None else ""
-        return None
     kind = row.get("type") or row.get("system_type") or ""
     task_id = str(row.get("task_id") or "")
     if (private_main_row(row) or row_provenance(row) == "place"

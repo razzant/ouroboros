@@ -70,7 +70,8 @@ class ToolCallOnlyModel(ScriptedStubModel):
         return kind, ({**message, "content": None} if message.get("tool_calls") else message)
 
 
-def test_reply_to_finished_launcher_reaches_only_its_live_work(tmp_path):
+@pytest.mark.parametrize("destination", ["main", "project"])
+def test_reply_to_finished_launcher_reaches_only_its_live_work(tmp_path, destination):
     """Real composer -> host ingress -> two independent readers -> next model wire -> replay."""
     from playwright.sync_api import expect, sync_playwright
     from tests.candidate_checkout import candidate_checkout
@@ -80,6 +81,7 @@ def test_reply_to_finished_launcher_reaches_only_its_live_work(tmp_path):
         f"{label}_{nonce}" for label in ("LAUNCH", "WORK", "NEIGHBOR", "EXPLICIT", "PLAIN", "HANDOFF")]
     actors = {marker: [] for marker in (work, neighbor, launch)}
     target = {}
+    project = {}
 
     def user_rows(body):
         return [message_text(row) for row in body.get("messages", []) if row.get("role") == "user"]
@@ -97,7 +99,8 @@ def test_reply_to_finished_launcher_reaches_only_its_live_work(tmp_path):
         if actor == launch:
             if first:
                 return {"tool": "start_task", "arguments": {"workspace": "none", "objective": work,
-                                                                  "title": "Exact Reply target"}}
+                                                                  "title": "Exact Reply target",
+                                                                  **({"project_id": project["id"]} if project else {})}}
             for row in reversed(body["messages"]):
                 if row.get("role") == "tool" and (hit := re.search(
                         r"finish_task\(about_work=['\"]([a-zA-Z0-9_-]+)", message_text(row))):
@@ -133,6 +136,11 @@ def test_reply_to_finished_launcher_reaches_only_its_live_work(tmp_path):
                     feed = page.locator("#chat-messages[data-history-hydrated=true]")
                     feed.wait_for(state="attached", timeout=30000)
                     print("REPLY_WITNESS_BROWSER_READY", flush=True)
+                    if destination == "project":
+                        created = page.request.post(server.base_url + "/api/projects",
+                                                    data={"name": "Project Reply target", "no_folder": True})
+                        assert created.ok, created.text()
+                        project.update(created.json()["project"])
                     send(page, launch)
                     source = feed.locator("[data-row-address]").filter(has=page.get_by_text(final, exact=True)).last
                     expect(source).to_be_visible(timeout=90000)
@@ -142,6 +150,9 @@ def test_reply_to_finished_launcher_reaches_only_its_live_work(tmp_path):
                     assert launch_id and wait_durable_result(oracle, launch_id, timeout=45)["status"] == "completed"
                     assert launch_id != target["id"]
                     assert work_gate.arrived.wait(90), "scheduled work never entered its actual first request"
+                    if project:
+                        child = next(r["task"] for r in oracle.events("task_received") if r["task"]["id"] == target["id"])
+                        assert child["chat_id"] == project["chat_id"] and child["project_id"] == project["id"]
                     send(page, neighbor)
                     assert neighbor_gate.arrived.wait(90), "other Main turn never entered its actual first request"
                     source.click(button="right")
@@ -178,13 +189,21 @@ def test_reply_to_finished_launcher_reaches_only_its_live_work(tmp_path):
                         words = "\n".join(user_rows(actors[actor][1]))
                         assert f"[Message from my human]: {wanted}" in words
                         assert f"[Message from my human]: {forbidden}" not in words
+                    project_feed = f'[id="pchat-{project["id"]}-messages"][data-history-hydrated=true]' if project else None
                     for replay in (False, True):
                         if replay:
                             page.reload(wait_until="domcontentloaded", timeout=20000)
                             feed.wait_for(state="attached", timeout=30000)
-                        card = feed.locator(f'.chat-live-card[data-task-id="{target["id"]}"]')
+                        if project_feed:
+                            pane = page.locator(project_feed)
+                            if not pane.is_visible():
+                                page.locator(f'.nav-project-row[data-project-id="{project["id"]}"]').click(timeout=20000)
+                            pane.wait_for(state="visible", timeout=30000)
+                        else:
+                            pane = feed
+                        card = pane.locator(f'.chat-live-card[data-task-id="{target["id"]}"]')
                         line = card.locator("[data-live-work-replies] .chat-bubble.user").filter(has_text=explicit)
-                        expect(feed.get_by_text(explicit, exact=True)).to_have_count(1, timeout=20000)
+                        expect(pane.get_by_text(explicit, exact=True)).to_have_count(1, timeout=20000)
                         expect(line).to_have_count(1)
                         if not line.is_visible():
                             card.locator(":scope > [data-live-summary-button] [data-live-disclosure]").click()

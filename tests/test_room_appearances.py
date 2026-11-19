@@ -297,7 +297,7 @@ class TestOwnerReplyLink:
         return types.SimpleNamespace(root=tmp_path, nova=nova, notice=notice, host=host,
                                      bridge=message_bus.get_bridge())
 
-    @pytest.mark.parametrize("source", ["work_card", "notice", "handoff", "nested", "child", "detached"])
+    @pytest.mark.parametrize("source", ["work_card", "notice", "handoff", "nested", "legacy_depth_two", "child", "detached"])
     def test_explicit_work_wins_over_the_live_room_reader_and_replay_is_once(self, room, source, monkeypatch):
         from ouroboros import server_owner_routing as router
         from ouroboros.owner_mailbox import _mailbox_path
@@ -338,6 +338,16 @@ class TestOwnerReplyLink:
         elif source == "nested":
             earlier, _ = _owner(room.bridge, room.root, "My first reply", address, message_id="earlier")
             address = format_address(row_address(earlier))
+        elif source == "legacy_depth_two":
+            # Both ancestors were written before work_task_id existed. The second
+            # quote is a user row with no task_id; only its canonical link finds the card.
+            quote = {"address": f"task:{target}", "kind": "work_card", "task_id": target}
+            for depth in range(2):
+                saved = ds.append(room.root, "chat", {"ts": f"2026-11-18T22:02:0{depth}Z", "direction": "in",
+                                  "source": "web", "chat_id": 1, "client_message_id": f"old-{depth}",
+                                  "text": f"Legacy reply {depth}", "reply_to": quote}).row
+                address = format_address(row_address(saved))
+                quote = {"address": address, "kind": "message", "role": "user"}
         elif source == "detached":
             target = "detached-turn"
             write_task_result(room.root, target, "running", chat_id=1, _is_direct_chat=True,
