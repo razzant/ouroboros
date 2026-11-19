@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 import contextvars
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 import gzip
 import hashlib
 import logging
@@ -963,9 +963,9 @@ def write_call_manifest(
     call_id: str,
     manifest: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Write the small per-call manifest with refs into the private ledger. In a measured window the wait for the
-    publication lock and the write under it are the sections ``<call type>.lock_wait`` and ``.manifest_write``."""
-    from ouroboros import evidence_packs, store
+    """Write the small per-call manifest with refs into the private ledger: one atomic replace that waits on no
+    lock (the evidence packer keeps every ref a manifest names readable, loose or packed: docs/PERSISTENCE.md,
+    evidence pack row). In a measured window the write is the section ``<call type>.manifest_write``."""
     from ouroboros.context_timing import timed
 
     path = call_manifest_path(drive_root, task_id, call_id or new_call_id("call"))
@@ -981,18 +981,8 @@ def write_call_manifest(
         "call_id": safe_call,
         **dict(manifest or {}),
     }
-    # The packer's deletion sections and other manifests hold this lock briefly; a model call
-    # waits for them rather than failing its task (issue #1754).
     kind = str(payload.get("call_type") or "manifest")
-
-    def publish() -> None:
-        evidence_packs.note_manifest_publication(drive_root, payload)
-        atomic_write_json(path, payload, trailing_newline=True)
-
-    with ExitStack() as held:
-        timed(f"{kind}.lock_wait", held.enter_context, store.name_lock(
-            pathlib.Path(drive_root), evidence_packs.PUBLICATION_LOCK_NAME, timeout_sec=evidence_packs.PUBLICATION_WAIT_SEC))
-        timed(f"{kind}.manifest_write", publish)
+    timed(f"{kind}.manifest_write", atomic_write_json, path, payload, trailing_newline=True)
     _chmod_private(path)
     try:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()

@@ -117,9 +117,9 @@ def test_measure_backfill_then_rest(root, n):
 def test_no_global_scan_or_foreign_stamp_inside_unlink_locks(root, monkeypatch):
     for number in range(12):
         _task(root, f"settled-{number}", blobs=1)
-    active = {"writer": False, "publication": False, "task": None}
+    active = {"writer": False, "task": None}
     scans = []
-    open_store, name_lock = store.open_store, store.name_lock
+    open_store = store.open_store
     loose_ids, stamps, unlink = packer._loose_task_ids, packer.task_stamps, packs.unlink_loose
 
     @contextlib.contextmanager
@@ -132,22 +132,12 @@ def test_no_global_scan_or_foreign_stamp_inside_unlink_locks(root, monkeypatch):
             finally:
                 active["writer"] = before
 
-    @contextlib.contextmanager
-    def locked(root, name, **kwargs):
-        with name_lock(root, name, **kwargs):
-            before = active["publication"]
-            active["publication"] |= name == packs.PUBLICATION_LOCK_NAME
-            try:
-                yield
-            finally:
-                active["publication"] = before
-
     def ids(*args):
-        scans.append((active["writer"], active["publication"]))
+        scans.append(active["writer"])
         return loose_ids(*args)
 
     def observed_stamps(root, task, **kwargs):
-        if active["writer"] or active["publication"]:
+        if active["writer"]:
             assert task == active["task"], "foreign task evaluated during candidate unlink"
         return stamps(root, task, **kwargs)
 
@@ -159,24 +149,23 @@ def test_no_global_scan_or_foreign_stamp_inside_unlink_locks(root, monkeypatch):
             active["task"] = None
 
     monkeypatch.setattr(store, "open_store", opened)
-    monkeypatch.setattr(store, "name_lock", locked)
     monkeypatch.setattr(packer, "_loose_task_ids", ids)
     monkeypatch.setattr(packer, "task_stamps", observed_stamps)
     monkeypatch.setattr(packs, "unlink_loose", remove)
     report = packer.run_pass(root)
     assert report["faults"] == 0 and report["unlinked"] == 24
-    assert scans and not any(writer or publication for writer, publication in scans)
+    assert scans and not any(scans)
 
 
-@pytest.mark.parametrize("rewrite", [False, True])
-def test_manifest_published_after_keep_snapshot_protects_blob(root, monkeypatch, rewrite):
-    refs, _ = _task(root, "packing", blobs=1)
+def test_a_blob_named_before_the_census_stays_loose_and_one_named_after_it_reads_from_the_pack(root, monkeypatch):
+    """The keep-set is the pass's one census of live sharers, taken before its first unlink and never refreshed
+    (``PackSweep``): a blob a live task's manifest named before it stays loose until that task's own pass; one a
+    live task's manifest names after it leaves with the packed task, and its bytes read from that task's verified
+    pack, so every ref a manifest names stays readable."""
+    (early, late), _ = _task(root, "packing", blobs=2)
     _task(root, "live", status="running", blobs=1)
-    if rewrite:
-        observability.write_call_manifest(root, task_id="live", call_id="late", manifest={})
-    write = packs.write_pack
-    manifests = []
-    read = packs.manifest_blob_refs
+    observability.write_call_manifest(root, task_id="live", call_id="early", manifest={"ref": early})
+    write, read, manifests = packs.write_pack, packs.manifest_blob_refs, []
 
     def read_refs(root, task):
         manifests.append(task)
@@ -184,20 +173,21 @@ def test_manifest_published_after_keep_snapshot_protects_blob(root, monkeypatch,
 
     def publish(*args, **kwargs):
         result = write(*args, **kwargs)
-        assert "live" in manifests, "no keep-set snapshot was taken before compression"
-        observability.write_call_manifest(root, task_id="live", call_id="late", manifest={"ref": refs[0]})
+        assert "live" in manifests, "no keep-set census was taken before compression"
+        observability.write_call_manifest(root, task_id="live", call_id="late", manifest={"ref": late})
         return result
 
     with monkeypatch.context() as edits:
         edits.setattr(packs, "manifest_blob_refs", read_refs)
         edits.setattr(packs, "write_pack", publish)
         report = packer.run_pass(root)
-    assert report["faults"] == 0 and report["kept"] == report["unlinked"] == 1
-    assert len([task for task in manifests if task == "live"]) == 1
-    assert packs.blob_bytes(root, refs[0])
+    assert report["faults"] == 0 and (report["kept"], report["unlinked"]) == (1, 2)  # unlinked: `late` and the handle
+    assert len([task for task in manifests if task == "live"]) == 1  # one census
+    assert pathlib.Path(early["path"]).exists() and not pathlib.Path(late["path"]).exists()
+    assert packs.blob_bytes(root, early) and packs.blob_bytes(root, late)
     _result(root, "live")
     assert packer.run_pass(root)["faults"] == 0
-    assert not pathlib.Path(refs[0]["path"]).exists()
+    assert not pathlib.Path(early["path"]).exists() and packs.blob_bytes(root, early)
 
 
 def test_unrelated_activity_during_a_pass_does_not_stop_the_backfill(root, monkeypatch):
@@ -251,15 +241,26 @@ def test_a_sharer_resumed_after_the_census_reads_its_shared_blob_from_the_pack(r
     assert not _handle_path(root, "other", other_handle).exists() and packs.blob_bytes(root, other[0]) == raw
 
 
-def test_publication_journal_exists_only_for_a_sweep_and_discards_crash_residue(root):
+def test_a_pass_keeps_no_publication_journal_and_removes_the_one_an_older_body_left(root, monkeypatch):
+    """No pass creates ``observability/packs/.publications``, the per-pass journal older bodies kept, during or after
+    itself; the first pass removes one an older body or a killed pass left, unread, and a manifest written beside it
+    never appends to it."""
     refs, _ = _task(root, "packing", blobs=1)
-    journal = packs.packs_dir(root) / packs.PUBLICATIONS_NAME
-    observability.write_call_manifest(root, task_id="packing", call_id="extra", manifest={"ref": refs[0]})
-    assert not journal.exists()
+    journal = packs.packs_dir(root) / ".publications"
     journal.parent.mkdir(parents=True, exist_ok=True)
     journal.write_bytes(b"incomplete old pass")
-    assert packer.run_pass(root)["unlinked"] == 2
-    assert not journal.exists()
+    observability.write_call_manifest(root, task_id="packing", call_id="extra", manifest={"ref": refs[0]})
+    assert journal.read_bytes() == b"incomplete old pass"
+    write, during = packs.write_pack, []
+
+    def publish(*args, **kwargs):
+        during.append(journal.exists())
+        return write(*args, **kwargs)
+
+    with monkeypatch.context() as edits:
+        edits.setattr(packs, "write_pack", publish)
+        assert packer.run_pass(root)["unlinked"] == 2
+    assert during == [False] and not journal.exists()
 
 
 def _former_blocker(root, index, task):

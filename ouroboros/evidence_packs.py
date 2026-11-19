@@ -24,13 +24,10 @@ from ouroboros.utils import _atomic_overwrite, atomic_write_json, replace_atomic
 PACKS_REL = pathlib.Path("observability/packs")
 INDEX_NAME = "index.sqlite"
 INDEX_LOCK_NAME = "packs_index.lock"  # the name lock under state/ around every index access
-PUBLICATION_LOCK_NAME = "packs_publication.lock"  # manifest publication vs reference census + unlink
-PUBLICATIONS_NAME = ".publications"  # pass-local refs appended before manifest publication, under the same lock
 DAMAGED_MARK = ".index.sqlite.damaged"  # left by a read that met the live index unusable or damaged; its rebuild removes it
 INDEX_WAIT_SEC = 5.0
-UNLINK_SECTION_SEC = 0.5  # one deletion section's budget under the store write lock, publication lock included
+UNLINK_SECTION_SEC = 0.5  # one deletion section's budget under the store write lock
 UNLINK_SECTION_GAP_SEC = 0.15  # between sections: longer than a waiting writer's SQLite busy poll (100 ms)
-PUBLICATION_WAIT_SEC = 90.0  # a manifest's contention budget for the publication lock (not a stale-owner bound)
 FORMAT_VERSION = 1
 INDEX_SCHEMA_VERSION = 2
 CODEC, PRESET = "xz", 1
@@ -1082,19 +1079,6 @@ def _walk_blob_refs(value: Any, out: List[Tuple[str, str, int]], seen: set) -> N
             _walk_blob_refs(item, out, seen)
 
 
-def note_manifest_publication(root: Any, manifest: dict) -> None:
-    """Called under the publication lock BEFORE the manifest write. Track new refs only
-    while a sweep owns the scratch file; a stale file is reset at the next sweep."""
-    try:
-        fd = os.open(packs_dir(root) / PUBLICATIONS_NAME, os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0))
-    except FileNotFoundError:
-        return
-    with os.fdopen(fd, "ab") as journal:
-        refs: list = []
-        _walk_blob_refs(manifest, refs, set())
-        journal.write("".join(sha + "\n" for _, sha, _ in refs).encode("ascii"))
-
-
 def manifest_blob_refs(root: Any, task_id: str) -> List[Tuple[str, str, int]]:
     """``(kind, sha256, size)`` of every blob the task's call manifests reference, first appearance first."""
     from ouroboros.deadline_utils import parse_deadline_ts
@@ -1254,7 +1238,7 @@ def _unlink_phase(root: Any) -> Iterator[tuple]:
 def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, keep_shas: set, revision: str,
                  sweep, members: list) -> Dict[str, int]:
     """Remove loose files whose bytes a VERIFIED pack (``sidecars``) holds; a blob a live task's
-    manifests still reference (``keep_shas`` and the sweep's keep-set) stays loose. A busy file is
+    manifests referenced at the pass's census (``keep_shas`` and the sweep's keep-set) stays loose. A busy file is
     retried next pass."""
     from ouroboros.evidence_packer import task_stamps
     from ouroboros.task_custody import task_custody_lock
@@ -1264,21 +1248,20 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
     report = {"unlinked": 0, "kept": 0, "busy": 0, "deferred": 1}
 
     def remove(txn, todo: list, until: float) -> Optional[list]:
-        """One section under both locks: this task's own recheck (its row is still terminal and its
-        evidence directories are as the census saw them: the stamp carries both) and the journal
-        suffix, then unlinks until ``until``; the members left, or ``None`` when the candidate went stale."""
+        """One section under the store write lock: this task's own recheck (its row is still terminal and its
+        evidence directories are as the census saw them: the stamp carries both), then unlinks until ``until``;
+        the members left, or ``None`` when the candidate went stale."""
         nonlocal revision
         if task_stamps(root, task_id, txn=txn) != revision:
             return None
-        keep = sweep.refresh_keep()
         for index, member in enumerate(todo):
             if index and time.monotonic() >= until:
-                # Still under the locks: this section's own unlinks are the only change to the stamps.
+                # Still under the lock: this section's own unlinks are the only change to the stamps.
                 revision = task_stamps(root, task_id, txn=txn)
                 return todo[index:]
             if not member["source"].is_file():
                 continue
-            if member["kind"] != CHECKPOINT and (member["sha256"] in keep or member["sha256"] in keep_shas):
+            if member["kind"] != CHECKPOINT and (member["sha256"] in sweep.keep or member["sha256"] in keep_shas):
                 report["kept"] += 1
                 continue
             try:
@@ -1290,10 +1273,9 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
                 report["busy"] += 1
         return []
 
-    # Compression precedes custody -> store write -> manifest publication locks. A section holds
-    # the store write lock (a rollback barrier) and the publication lock for one UNLINK_SECTION_SEC
-    # budget; model calls and every store writer wait on them. Inside, only this task's recheck;
-    # between sections a waiting writer gets a poll-length gap. A stale check defers the candidate.
+    # Compression precedes custody -> store write locks. A section holds the store write lock (a rollback
+    # barrier) for one UNLINK_SECTION_SEC budget; every store writer waits on it. Inside, only this task's
+    # recheck; between sections a waiting writer gets a poll-length gap. A stale check defers the candidate.
     todo: Optional[list] = [m for m in members if _member_key(m) in packed]
     with task_custody_lock(root, task_id) as acquired:
         while acquired and todo:
@@ -1301,14 +1283,7 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
             with _unlink_phase(root) as (allowed, txn):
                 until = time.monotonic() + UNLINK_SECTION_SEC
                 if allowed:
-                    with contextlib.ExitStack() as held:
-                        try:
-                            held.enter_context(store.name_lock(root, PUBLICATION_LOCK_NAME,
-                                                               timeout_sec=max(0.0, until - time.monotonic())))
-                        except store.StoreBusy:
-                            pass  # busy for the whole section budget: the next pass retries the candidate
-                        else:
-                            left = remove(txn, todo, until)
+                    left = remove(txn, todo, until)
             todo = left
             if todo:
                 time.sleep(UNLINK_SECTION_GAP_SEC)
