@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+import yaml
+
 
 def mode_received(mode: Any, null: str = "missing or null") -> str:
     """A ``mode`` that is not exactly an operation, as a refusal names it: as received, never trimmed, case-folded or
@@ -225,3 +227,74 @@ def compile_edit_items(raw: bytes, body_start: int, items: list[tuple[str, str]]
         out += [body[at:start], new]
         at = end
     return b"".join(out + [body[at:]])
+
+
+def yaml_form(metadata: Mapping[str, Any]) -> str:
+    """Compare loaded YAML by type and value, including recursive aliases."""
+    return yaml.safe_dump(metadata, allow_unicode=True, sort_keys=True)
+
+
+class HostClaimPending(ValueError):
+    """The host could not add a name while keeping the note's source."""
+
+
+def _flow_insertion(front: str, node: yaml.Node, content: str) -> tuple[int, str]:
+    end = node.end_mark.index - 1  # the closing bracket or brace
+    # Tokens retain a trailing comma even if comments follow it.
+    last = next((token for token in reversed(list(yaml.scan(front))) if token.end_mark.index <= end), None)
+    separator = "" if not node.value else " " if isinstance(last, yaml.FlowEntryToken) else ", "
+    return end, separator + content
+
+
+def _claim_insertion(front: str, field: str, scalar: str, newline: str, present: bool) -> tuple[int, str]:
+    root = yaml.compose(front, Loader=yaml.SafeLoader)
+    if root is not None and not isinstance(root, yaml.MappingNode):
+        raise HostClaimPending("a host claim requires a frontmatter mapping")
+    if not present:
+        if root is not None and root.flow_style:
+            return _flow_insertion(front, root, field)
+        indent = next((token.start_mark.column for token in yaml.scan(front)
+                       if isinstance(token, yaml.BlockMappingStartToken)), 0)
+        return len(front), " " * indent + field + newline
+
+    fields = [(key, node) for key, node in root.value if isinstance(key, yaml.ScalarNode) and key.value == "claims"]
+    if fields:
+        key, sequence = fields[-1]
+        if isinstance(sequence, yaml.SequenceNode) and sequence.start_mark.index >= key.end_mark.index:
+            if sequence.flow_style:
+                return _flow_insertion(front, sequence, scalar)
+            indent = next(token.start_mark.column for token in yaml.scan(front)
+                          if isinstance(token, yaml.BlockEntryToken) and token.start_mark.index >= sequence.start_mark.index)
+            end = sequence.end_mark
+            return end.index - end.column, " " * indent + "- " + scalar + newline
+    raise HostClaimPending("the claims list has no editable source sequence")
+
+
+def with_host_claim(note: Any, claim: str) -> bytes:
+    """Insert one scalar without reserializing authored frontmatter or body bytes."""
+    if note.parse_error:
+        raise HostClaimPending("a host claim requires readable frontmatter")
+    held = note.metadata.get("claims", [])
+    if not isinstance(held, list):
+        raise HostClaimPending("a host claim requires a list or an absent claims field")
+    if claim in held:
+        return note.raw
+    # A quoted YAML scalar keeps whitespace and punctuation literal, even inside a flow list.
+    scalar = yaml.safe_dump(claim, default_style='"', width=float("inf")).rstrip("\n")
+    field = f"claims: [{scalar}]"
+    first_line = note.raw.partition(b"\n")[0]
+    newline = "\r\n" if first_line.endswith(b"\r") else "\n"
+    if note.source.frontmatter_span is None:
+        return newline.join(("---", field, "---", "")).encode("utf-8") + note.raw
+    start = len(first_line) + 1
+    end = note.raw.rfind(b"\n", 0, note.source.body_span.start_byte - 1) + 1
+    front = note.raw[start:end].decode("utf-8")
+    try:
+        at, insertion = _claim_insertion(front, field, scalar, newline, "claims" in note.metadata)
+        updated = front[:at] + insertion + front[at:]
+        # Extending an anchor may also change an aliased field elsewhere in the YAML.
+        if yaml_form(yaml.safe_load(updated)) != yaml_form({**note.metadata, "claims": [*held, claim]}):
+            raise HostClaimPending("adding the claim would change existing metadata")
+    except yaml.YAMLError as exc:
+        raise HostClaimPending("the claims list cannot be extended in its source form") from exc
+    return note.raw[:start] + updated.encode("utf-8") + note.raw[end:]
