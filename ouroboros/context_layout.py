@@ -4,8 +4,9 @@ Main Max keeps the full Architecture capability/WHY map for every task class;
 its Development handbook remains tied to the active self-body binding. Low and
 Nano carry both books' authored chapter introductions and physical pointers.
 Children use that compact orientation; their memory view (``memory_view.ROLE_DEFAULTS``)
-decides what of my story and room they carry, and parent-selected details arrive
-through ordinary source reads and working views.
+decides what of my story and room they carry, the heads of the notes that claim their room
+stand beside it (``held_notes``), and parent-selected details arrive through ordinary source
+reads and working views.
 
 Source bytes belong to ReferenceBook; this module only renders the selected
 view. Stable full prefixes contain no cwd, task identity or revision counters.

@@ -4,7 +4,26 @@ from __future__ import annotations
 
 import copy
 import pathlib
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
+
+# A held head an external session received, as its stored request names it (``stored_request``).
+_HELD_HEAD = re.compile("\x00held head [^\x00]* sha256=([0-9a-f]{64}) size=([0-9]+)\x00")
+
+
+def stored_request(drive_root: Any, body: Dict[str, Any], heads: Any) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """``(the envelope as custody stores it, the heads' facts)``: each held head the start sends
+    (``held_notes.sent_heads``) is one content-addressed blob of its text, shared by every start that sends
+    it, and the stored instructions name it by address, revision and digest; ``request_body`` puts it back."""
+    from ouroboros.observability import write_blob
+
+    instructions, facts = str(body.get("instructions") or ""), []
+    for head in heads or ():
+        ref = write_blob(pathlib.Path(drive_root), head["text"], kind="txt")
+        token = f"\x00held head {head['topic']}@{head['revision']} sha256={ref['sha256']} size={ref['size']}\x00"
+        instructions = instructions.replace(head["text"], token, 1)
+        facts.append({key: head[key] for key in ("topic", "revision", "chars")})
+    return ({**body, "instructions": instructions} if facts else body), facts
 
 
 def request_shape(body):
@@ -224,11 +243,13 @@ def request_body(drive_root: Any, row: Dict[str, Any], *,
     """Resolve the canonical replay envelope, legacy inline first, then raw CAS.
 
     The raw CAS blob holds the full unredacted envelope, stored before the
-    start-requested row. Unreadable references leave the request unknown for
-    the caller's existing refusal paths; never rebuild a paid invocation from
-    current settings. A body whose bytes cannot be located now is unknown too,
-    never unrecorded: ``raise_unavailable`` hands its ``EvidenceUnavailable`` to a
-    caller that would otherwise record the request as unrecorded.
+    start-requested row, its held heads by reference (``stored_request``).
+    Unreadable references leave the request unknown for the caller's existing
+    refusal paths; never rebuild a paid invocation from current settings. A body
+    whose bytes cannot be located now (the envelope or a held head's text) is
+    unknown too, never unrecorded: ``raise_unavailable`` hands its
+    ``EvidenceUnavailable`` to a caller that would otherwise record the request as
+    unrecorded.
     """
     inline = row.get("request")
     if isinstance(inline, dict) and inline:
@@ -240,8 +261,12 @@ def request_body(drive_root: Any, row: Dict[str, Any], *,
     from ouroboros.observability import read_blob_ref
 
     try:
-        body = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="json",
-                             task_id=str(row.get("task_id") or "") or None)
+        task_id = str(row.get("task_id") or "") or None
+        body = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="json", task_id=task_id)
+        if isinstance(body, dict) and _HELD_HEAD.search(str(body.get("instructions") or "")):
+            body = {**body, "instructions": _HELD_HEAD.sub(lambda found: read_blob_ref(pathlib.Path(drive_root), {
+                "sha256": found[1], "kind": "txt", "encoding": "gzip", "size": int(found[2])}, expected_kind="txt",
+                task_id=task_id), body["instructions"])}
     except EvidenceUnavailable:
         if raise_unavailable:
             raise
