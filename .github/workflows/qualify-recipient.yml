@@ -1,0 +1,201 @@
+name: Check the Telegram recipient across the host and connector
+on:
+  push:
+    branches: ['qa/telegram-recipient-3122-7820-4613']
+permissions:
+  contents: read
+jobs:
+  recipient:
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    defaults:
+      run:
+        shell: bash
+    env:
+      CORE_BASE: '4312f0a72b92f06e35f20cf6f9eb4229306c829b'
+      CORE: '6a17d01c7ae50168f7eefa3d890edecde620c6e1'
+      CORE_TREE: '78205360694cceb64db422373ac259f896c3de0f'
+      HUB: 'fb229d8e2d98b74f66e896f13f6b6a34f66c5ea7'
+      HUB_TREE: '461323f71079122765545f203440152d7124309e'
+      OLD_HUB: '689a5c30cfe700b7da1602f585a097e0b6befc9d'
+      TEST_SHA: 'dee256182d53cd3172b75c66597a3104c7bddfbb44333c5a407e36d8ebfab673'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind both product trees and the synthetic scenario
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "$CORE"
+          test "$(git diff --name-only HEAD^ HEAD)" = "$(printf '%s\n' '.github/qa/test_telegram_owner_recipient.py' '.github/workflows/qualify-recipient.yml')"
+          test "$(git rev-parse "$CORE^")" = "$CORE_BASE"
+          test "$(git rev-parse "$CORE^{tree}")" = "$CORE_TREE"
+          mkdir "$RUNNER_TEMP/scenario"
+          cp .github/qa/test_telegram_owner_recipient.py "$RUNNER_TEMP/scenario/"
+          printf '%s  %s\n' "$TEST_SHA" "$RUNNER_TEMP/scenario/test_telegram_owner_recipient.py" | sha256sum -c -
+          git switch --detach "$CORE"
+          git diff --check "$CORE_BASE" "$CORE"
+          git worktree add --quiet --detach "$RUNNER_TEMP/core-before" "$CORE_BASE"
+          test "$(git -C "$RUNNER_TEMP/core-before" rev-parse HEAD)" = "$CORE_BASE"
+          hub="$RUNNER_TEMP/recipient-connector"
+          git init -q "$hub"
+          git -C "$hub" -c credential.helper= fetch --no-tags --depth=1 https://github.com/razzant/OuroborosHub.git "$HUB" "$OLD_HUB"
+          git -C "$hub" checkout -q --detach "$HUB"
+          test "$(git -C "$hub" rev-parse HEAD^{tree})" = "$HUB_TREE"
+          # The legacy payload, independently bound apart from the proposed release.
+          test "$(git -C "$hub" rev-parse "$OLD_HUB:skills/telegram-bot")" = 367bfa9753df4da612347c69202e7ba63d35b184
+          mkdir "$RUNNER_TEMP/connector-0121"
+          git -C "$hub" archive "$OLD_HUB:skills/telegram-bot" | tar -x -C "$RUNNER_TEMP/connector-0121"
+          printf '%s\n' "OUROBOROS_CORE_QA=$GITHUB_WORKSPACE" "OUROBOROS_PRESENCE_CORE_ROOT=$GITHUB_WORKSPACE" "OUROBOROS_HUB_QA=$hub" "TELEGRAM_BOT_0121_ROOT=$RUNNER_TEMP/connector-0121" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Install the two additional dependencies of the Hub voice consumer
+        id: env_ready
+        run: uv pip install --python "$VIRTUAL_ENV/bin/python" 'telethon>=1.45,<2' 'PySocks>=1.7.1'
+      - name: Ordinary send, automatic reply, account switch, revocation, outbound disconnect and the previous host reader
+        run: |
+          set -euo pipefail
+          python -I -S scripts/safe_test.py -- env OUROBOROS_CORE_QA="$GITHUB_WORKSPACE" OUROBOROS_CORE_PREVIOUS_QA="$RUNNER_TEMP/core-before" OUROBOROS_HUB_QA="$OUROBOROS_HUB_QA" "$VIRTUAL_ENV/bin/python" -m pytest -p no:cacheprovider -o addopts='' -q --junitxml="$RUNNER_TEMP/paired.xml" "$RUNNER_TEMP/scenario/test_telegram_owner_recipient.py"
+          python -c 'import sys,xml.etree.ElementTree as E; c=E.parse(sys.argv[1]).findall(".//testcase"); n={x.get("name") for x in c}; assert {"test_private_recipient","test_disconnected_outbound_place_ends_only_its_unsent_parts"} <= n, sorted(map(str, n)); assert all(not any(x.find(t) is not None for t in ("failure","error","skipped")) for x in c)' "$RUNNER_TEMP/paired.xml"
+      - name: Connector suite including rollback to the previous connector
+        if: ${{ !cancelled() && steps.env_ready.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cd "$OUROBOROS_HUB_QA"
+          PYTHONPATH="$GITHUB_WORKSPACE" "$VIRTUAL_ENV/bin/python" -B -m pytest -p no:cacheprovider -o addopts='' -q -rs skills/telegram-bot/tests --junitxml="$RUNNER_TEMP/connector.xml"
+          python - "$RUNNER_TEMP/connector.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          all_cases = list(ET.parse(sys.argv[1]).iter('testcase'))
+          cases = [c for c in all_cases if 'test_direct_recipient' in c.get('classname','').split('.')]
+          reports = {c.get('name') for c in all_cases if 'test_delivery_reports' in c.get('classname','').split('.') and not any(c.find(t) is not None for t in ('skipped','failure','error'))}
+          assert {'test_migration_does_not_import_terminal_legacy_receipts', 'test_operation_report_matches_host_validator_and_keeps_source_in_message', 'test_registered_operation_runtime_report_is_host_valid_and_original_is_unchanged'} <= reports
+          words = [c for c in all_cases if 'test_words' in c.get('classname','').split('.') and c.get('name','').startswith('test_word_fact_through_silent_place_intake[')]
+          assert len({c.get('name') for c in words}) == 7 and all(c.find(t) is None for c in words for t in ('failure','error','skipped'))
+          assert cases and all(c.find(t) is None for c in cases for t in ('failure', 'error', 'skipped'))
+          required = {f'test_address_bound_queue_survives_a_0_12_1_rollback[{case}-{p}]'
+                      for case in ('queued', 'file', 'partial', 'unanswered') for p in ('False', 'True')}
+          required.update({
+              'test_disconnected_outbound_place_releases_fifo_with_confirmed_parts',
+              'test_pinned_send_recovers_after_six_transient_getchat_failures[accepted-first-post]',
+              'test_pinned_send_recovers_after_six_transient_getchat_failures[refused-first-post]',
+              'test_pinned_send_keeps_the_attempt_limit_for_getchat_refusals[bot-refusal]',
+              'test_pinned_send_keeps_the_attempt_limit_for_getchat_refusals[http-only-refusal]',
+          })
+          missing = required - {c.get('name') for c in cases}
+          assert not missing, sorted(missing)
+          PY
+      - name: Known consumers across the two checkouts
+        if: ${{ !cancelled() && steps.env_ready.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cd "$OUROBOROS_HUB_QA"
+          "$VIRTUAL_ENV/bin/python" -B -m pytest -p no:cacheprovider -o addopts='' -q -rs \
+            tests/test_reaction_core_consumer.py tests/test_gesture_core_consumer.py tests/test_voice_attachment_core_consumer.py tests/test_telegram_bot_media_core_consumer.py tests/test_telegram_bot_typing_core_consumer.py --junitxml="$RUNNER_TEMP/consumers.xml"
+          python - "$RUNNER_TEMP/consumers.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          cases = list(ET.parse(sys.argv[1]).iter('testcase'))
+          assert cases and all(c.find(t) is None for c in cases for t in ('failure', 'error', 'skipped'))
+          required = {'test_reaction_core_consumer', 'test_gesture_core_consumer', 'test_voice_attachment_core_consumer',
+                      'test_telegram_bot_media_core_consumer', 'test_telegram_bot_typing_core_consumer'}
+          seen = {part for c in cases for part in c.get('classname', '').split('.')}
+          assert required <= seen, sorted(required - seen)
+          PY
+      - name: Cross-check release identity and connector declarations before endorsement
+        if: ${{ !cancelled() && steps.env_ready.outcome == 'success' }}
+        working-directory: ${{ runner.temp }}/recipient-connector
+        env:
+          OUROBOROS_IDENTITY_CORE_ROOT: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          "$VIRTUAL_ENV/bin/python" -B -m pytest -p no:cacheprovider -o addopts='' -q tests/test_index.py -k 'test_all_hosted_releases_match_core_read_only or test_every_exported_tool_has_an_effect_and_destination or test_place_contribution_meets_the_core_contract or test_connectors_pass_the_core_validators_when_a_checkout_is_configured' --junitxml="$RUNNER_TEMP/contracts.xml"
+          python - "$RUNNER_TEMP/contracts.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          cases = list(ET.parse(sys.argv[1]).iter('testcase'))
+          required = {'test_all_hosted_releases_match_core_read_only', 'test_every_exported_tool_has_an_effect_and_destination[telegram-bot]',
+                      'test_place_contribution_meets_the_core_contract[telegram-bot]',
+                      'test_connectors_pass_the_core_validators_when_a_checkout_is_configured'}
+          passed = {c.get('name','') for c in cases if not any(c.find(t) is not None for t in ('failure','error','skipped'))}
+          assert required <= passed, sorted(required - passed)
+          PY
+      - name: Host contracts and publication checks
+        if: ${{ !cancelled() && steps.env_ready.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python -I -S scripts/safe_test.py -- "$VIRTUAL_ENV/bin/python" -m pytest -q tests/test_places.py tests/test_place_guard.py tests/test_place_outbox_binding.py tests/test_conversation_lane_presence.py tests/test_place_focus.py tests/test_safety_place_evidence.py tests/test_safety_policy.py tests/test_presence_admission.py tests/test_domain_manifest.py tests/test_generated_inventories.py tests/test_docs_sync.py \
+            tests/test_architecture_facts.py tests/test_domain_report.py tests/test_tool_effects.py \
+            tests/test_presence_runner.py tests/test_presence_recovery_facts.py tests/test_host_service_api.py \
+            tests/test_place_reply_revision.py tests/test_presence_final_audience.py tests/test_presence_identity.py \
+            tests/test_place_conversation_work.py tests/test_presence_bindings.py tests/test_safety_focus_bundle.py \
+            tests/test_safety_hold.py tests/test_presence_continuation.py tests/test_presence_continuation_bootstrap.py \
+            tests/test_presence_continuation_host.py tests/test_presence_continuation_policy.py tests/test_presence_continuation_process.py \
+            tests/test_presence_continuation_recovery.py tests/test_presence_continuation_seams.py tests/test_extension_dispatch_provenance.py \
+            tests/test_extension_dispatch_threaded.py tests/test_extension_process_runner.py tests/test_recovery_registered_answer.py tests/test_place_arrivals.py tests/test_place_arrival_wake.py --junitxml="$RUNNER_TEMP/core-contracts.xml"
+      - name: Connector-shaped wire builders through both ingress doors
+        if: ${{ !cancelled() && steps.env_ready.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python -I -S scripts/safe_test.py -- "$VIRTUAL_ENV/bin/python" -m pytest -q tests/test_place_own_account.py tests/test_place_reactions.py tests/test_place_reaction_readers.py tests/test_place_word_signals.py \
+            tests/test_presence_connector_contract.py tests/test_presence_message_facts.py tests/test_presence_message_wire.py tests/test_presence_call_door.py --junitxml="$RUNNER_TEMP/wire-builders.xml"
+          python - "$RUNNER_TEMP/wire-builders.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          cases = list(ET.parse(sys.argv[1]).iter('testcase'))
+          assert cases and all(c.find(t) is None for c in cases for t in ('failure', 'error', 'skipped'))
+          modules = {'test_place_own_account', 'test_place_reactions', 'test_place_reaction_readers', 'test_place_word_signals',
+                     'test_presence_connector_contract', 'test_presence_message_facts', 'test_presence_message_wire',
+                     'test_presence_call_door'}
+          seen = {part for c in cases for part in c.get('classname', '').split('.')}
+          assert modules <= seen, sorted(modules - seen)
+          assert 'test_both_connector_doors_parse_one_event_with_one_set_of_answers' in {c.get('name') for c in cases}
+          PY
+      - name: Module-map test on the previous base (control, exact outcome)
+        if: ${{ !cancelled() && steps.env_ready.outcome == 'success' }}
+        working-directory: ${{ runner.temp }}/core-before
+        run: |
+          set -euo pipefail
+          python -I -S scripts/safe_test.py -- "$VIRTUAL_ENV/bin/python" -m pytest -q 'tests/test_docs_sync.py::test_architecture_component_map_covers_every_live_runtime_module' --junitxml="$RUNNER_TEMP/map-base.xml"
+      - name: Static checks and size against the selected base
+        if: ${{ !cancelled() && steps.env_ready.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python -m ruff check --select F .
+          python -I -S scripts/safe_test.py -- env -u GITHUB_EVENT_NAME OURO_SIZE_RATCHET_BASE_REF="$CORE_BASE" "$VIRTUAL_ENV/bin/python" -m pytest -o addopts='' -m size_ratchet -q tests/ --junitxml="$RUNNER_TEMP/size.xml"
+      - name: Report the checked revisions
+        run: |
+          printf 'Core `%s` (`%s`), Telegram connector `%s` (`%s`), previous-release checkout `%s`, scenario `%s`.\n' "$CORE" "$CORE_TREE" "$HUB" "$HUB_TREE" "$OLD_HUB" "$TEST_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain only test counts and the identities of the qualification cases
+        if: ${{ !cancelled() }}
+        run: |
+          python - <<'PY'
+          import collections, json, os, xml.etree.ElementTree as ET
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          result = {k: os.environ.get(k) for k in ('CORE', 'CORE_TREE', 'HUB', 'HUB_TREE', 'OLD_HUB', 'TEST_SHA', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')}
+          for label in ('paired', 'connector', 'consumers', 'contracts', 'core-contracts', 'wire-builders', 'map-base', 'size'):
+              xml = root / f'{label}.xml'
+              try:
+                  cases = list(ET.parse(xml).iter('testcase'))
+              except (OSError, ET.ParseError) as exc:
+                  result[label] = {'unavailable': type(exc).__name__}
+                  continue
+              counts, required = collections.Counter(), []
+              for case in cases:
+                  name = case.get('name', '')
+                  outcome = next((t for t in ('error', 'failure', 'skipped') if case.find(t) is not None), 'passed')
+                  counts[outcome] += 1
+                  if label in ('paired', 'map-base') or (label == 'connector' and ('test_direct_recipient' in case.get('classname', '').split('.') or name.startswith(('test_migration_does_not_import_terminal_legacy_receipts','test_word_fact_through_silent_place_intake[','test_registered_operation_runtime_report_is_host_valid','test_operation_report_matches_host_validator')))) or (label == 'core-contracts' and name.startswith(('test_new_host_payload_captures_before_attention[','test_off_retry_keeps_unknown_attempt_custody','test_ingress_keeps_optional_identity_and_authentication[','test_ingress_refuses_bad_identity_before_capture[','test_ingress_refuses_bad_actor[','test_architecture_component_map_covers_every_live_runtime_module'))) or (label == 'wire-builders' and (outcome != 'passed' or name == 'test_both_connector_doors_parse_one_event_with_one_set_of_answers')):
+                      required.append([name, outcome])
+              result[label] = {'counts': dict(counts), 'qualification_cases': required}
+          (root / 'recipient-outcomes.json').write_text(json.dumps(result, ensure_ascii=True, indent=2) + '\n', encoding='utf-8')
+          PY
+      - name: Upload the bounded qualification record (no raw test output)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: recipient-outcomes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/recipient-outcomes.json
+          if-no-files-found: error
+          retention-days: 7
