@@ -15,7 +15,7 @@ refused as received (``mode_received``), never taken as a default; each field ke
 ``content``/``new_str`` deletes, a whitespace ``old_str`` is an exact anchor, an empty
 ``expected_revision`` is create-only and is the caller's). The note writer's summary, archive and
 lifecycle rules stay its own: a caller names its modes, the modes that take no content, the modes
-that require a reason and what an edit may revise beside the text (``alone``).
+that require a reason and what an edit may revise beside the text (``alone``, ``fields``).
 """
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ def normalize_arguments(mode: Any, version: Any, expected_revision: Any, edits: 
 def check_arguments(mode: Any, content: Any, old_str: Any, new_str: Any, edits: Any, version: Any, reason: Any,
                     notes: list[str], *, modes: tuple[str, ...], no_content: tuple[str, ...] = ("revert",),
                     reason_required: tuple[str, ...] = (), alone: str = "", alone_given: bool = False,
-                    version_reader: str = "") -> tuple[Any, Any, Any]:
+                    fields: bool | None = None, version_reader: str = "") -> tuple[Any, Any, Any]:
     """``(content, old_str, edits)`` after the shared rules, or ``ValueError`` naming the field and the repair.
 
     Run after ``normalize_arguments``. ``new_str`` is ``content``'s alias for one ``old_str``; an
@@ -78,7 +78,10 @@ def check_arguments(mode: Any, content: Any, old_str: Any, new_str: Any, edits: 
     ``mode=revert`` requires ``version`` and takes no content; a mode outside ``no_content`` requires
     ``content``. ``alone`` names what an edit may revise without ``old_str`` or ``edits`` (the
     note's summary) and ``alone_given`` says the call carries it; otherwise an edit requires one of
-    them. ``version_reader`` is the read a refusal of a stray ``version`` names."""
+    them. ``fields`` is for a writer whose edit also takes a content that is only a YAML block, which
+    sets its fields and keeps the body (the note writer): ``True`` says this content is one, ``False``
+    that it is not; ``None``, a writer without that edit. ``version_reader`` is the read a refusal of a
+    stray ``version`` names."""
     from ouroboros.tools.arg_feedback import ignored_argument_note
 
     if not isinstance(mode, str) or mode not in modes:  # each refusal names the one argument that is wrong
@@ -127,13 +130,16 @@ def check_arguments(mode: Any, content: Any, old_str: Any, new_str: Any, edits: 
         if old_str not in (None, "") or content:
             raise ValueError("edits carries its own replacements: pass edits without old_str and content")
         content, old_str = "", None
+    elif mode == "edit" and fields and old_str in (None, ""):  # a YAML block alone: its fields, never body text
+        old_str = None
     elif mode == "edit" and alone_given and old_str in (None, ""):  # "" asks for nothing
         if content:
             raise ValueError(f"content ({len(content)} chars) has no old_str to replace; pass old_str "
                              f"for a body edit, or omit content to revise only the {alone}")
         content, old_str = "", None
     elif mode == "edit" and (not isinstance(old_str, str) or not old_str):
-        raise ValueError("mode=edit requires edits, or a non-empty old_str" + (f", or a {alone}" if alone else ""))
+        raise ValueError("mode=edit requires edits, or a non-empty old_str" + (f", or a {alone}" if alone else "")
+                         + ("" if fields is None else ", or YAML-only content"))
     elif mode == "edit" and content is None:
         raise ValueError("mode=edit with old_str requires content, its replacement "
                          "(empty text deletes the old_str span)")
@@ -232,69 +238,3 @@ def compile_edit_items(raw: bytes, body_start: int, items: list[tuple[str, str]]
 def yaml_form(metadata: Mapping[str, Any]) -> str:
     """Compare loaded YAML by type and value, including recursive aliases."""
     return yaml.safe_dump(metadata, allow_unicode=True, sort_keys=True)
-
-
-class HostClaimPending(ValueError):
-    """The host could not add a name while keeping the note's source."""
-
-
-def _flow_insertion(front: str, node: yaml.Node, content: str) -> tuple[int, str]:
-    end = node.end_mark.index - 1  # the closing bracket or brace
-    # Tokens retain a trailing comma even if comments follow it.
-    last = next((token for token in reversed(list(yaml.scan(front))) if token.end_mark.index <= end), None)
-    separator = "" if not node.value else " " if isinstance(last, yaml.FlowEntryToken) else ", "
-    return end, separator + content
-
-
-def _claim_insertion(front: str, field: str, scalar: str, newline: str, present: bool) -> tuple[int, str]:
-    root = yaml.compose(front, Loader=yaml.SafeLoader)
-    if root is not None and not isinstance(root, yaml.MappingNode):
-        raise HostClaimPending("a host claim requires a frontmatter mapping")
-    if not present:
-        if root is not None and root.flow_style:
-            return _flow_insertion(front, root, field)
-        indent = next((token.start_mark.column for token in yaml.scan(front)
-                       if isinstance(token, yaml.BlockMappingStartToken)), 0)
-        return len(front), " " * indent + field + newline
-
-    fields = [(key, node) for key, node in root.value if isinstance(key, yaml.ScalarNode) and key.value == "claims"]
-    if fields:
-        key, sequence = fields[-1]
-        if isinstance(sequence, yaml.SequenceNode) and sequence.start_mark.index >= key.end_mark.index:
-            if sequence.flow_style:
-                return _flow_insertion(front, sequence, scalar)
-            indent = next(token.start_mark.column for token in yaml.scan(front)
-                          if isinstance(token, yaml.BlockEntryToken) and token.start_mark.index >= sequence.start_mark.index)
-            end = sequence.end_mark
-            return end.index - end.column, " " * indent + "- " + scalar + newline
-    raise HostClaimPending("the claims list has no editable source sequence")
-
-
-def with_host_claim(note: Any, claim: str) -> bytes:
-    """Insert one scalar without reserializing authored frontmatter or body bytes."""
-    if note.parse_error:
-        raise HostClaimPending("a host claim requires readable frontmatter")
-    held = note.metadata.get("claims", [])
-    if not isinstance(held, list):
-        raise HostClaimPending("a host claim requires a list or an absent claims field")
-    if claim in held:
-        return note.raw
-    # A quoted YAML scalar keeps whitespace and punctuation literal, even inside a flow list.
-    scalar = yaml.safe_dump(claim, default_style='"', width=float("inf")).rstrip("\n")
-    field = f"claims: [{scalar}]"
-    first_line = note.raw.partition(b"\n")[0]
-    newline = "\r\n" if first_line.endswith(b"\r") else "\n"
-    if note.source.frontmatter_span is None:
-        return newline.join(("---", field, "---", "")).encode("utf-8") + note.raw
-    start = len(first_line) + 1
-    end = note.raw.rfind(b"\n", 0, note.source.body_span.start_byte - 1) + 1
-    front = note.raw[start:end].decode("utf-8")
-    try:
-        at, insertion = _claim_insertion(front, field, scalar, newline, "claims" in note.metadata)
-        updated = front[:at] + insertion + front[at:]
-        # Extending an anchor may also change an aliased field elsewhere in the YAML.
-        if yaml_form(yaml.safe_load(updated)) != yaml_form({**note.metadata, "claims": [*held, claim]}):
-            raise HostClaimPending("adding the claim would change existing metadata")
-    except yaml.YAMLError as exc:
-        raise HostClaimPending("the claims list cannot be extended in its source form") from exc
-    return note.raw[:start] + updated.encode("utf-8") + note.raw[end:]
