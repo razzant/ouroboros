@@ -676,41 +676,44 @@ def test_a_digest_many_packs_hold_is_read_from_one_copy_and_a_bad_copy_yields_th
         packs.blob_bytes(roots[K_LARGE], refs[K_LARGE])
 
 
-def test_a_task_s_own_sidecars_are_parsed_once_per_file_and_only_a_few_are_kept(tmp_path, monkeypatch):
-    """Reassembling one view reads hundreds of its parts from one owner, whose sidecar can hold tens of
-    thousands of members: each sidecar is parsed once per file, never once per lookup; a new generation is
-    read when it appears, a replaced file is read again (never answered from the old one), and only a few
-    parsed sidecars are kept per process."""
+def test_a_task_s_own_sidecars_are_parsed_once_per_file_state_and_only_the_task_read_last_is_kept(tmp_path, monkeypatch):
+    """Reassembling one view reads hundreds of its parts from one owner, whose sidecars can hold tens of
+    thousands of members: a process keeps the parsed sidecars of the task it read last, every generation of it
+    however many, each parsed once per file state; a replaced file is read again (never answered from the old
+    one), a read of another task replaces them, and a read naming a task without sidecars leaves them alone."""
+    import pathlib
+
     from ouroboros import evidence_packer, evidence_packs as packs
     from tests.test_evidence_packs import _blob, _result, _task
 
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
-    refs = {task: _task(tmp_path, task, blobs=3)[0] for task in ("a", "b", "c", "d", "e")}
+    refs = {task: _task(tmp_path, task, blobs=3)[0] for task in ("a", "b")}
     assert evidence_packer.run_pass(tmp_path)["faults"] == 0
+    for generation in range(2, 6):  # written terminal again with new evidence: its generations 2 to 5
+        refs["a"].append(_blob(tmp_path, json.dumps({"message": {"content": f"answer {generation}"}}).encode()))
+        (tmp_path / "observability" / "calls" / "a" / f"llm_{generation}9_response.json").write_text(
+            json.dumps({"call_id": f"llm_{generation}9", "full_payload_ref": refs["a"][-1]}), encoding="utf-8")
+        _result(tmp_path, "a", "completed")
+        assert evidence_packer.run_pass(tmp_path)["packed"] == 1
+    names = sorted(packs._task_sidecar_names(tmp_path, "a"))
     decoded = _spy_sidecars(monkeypatch)
     first = [packs.blob_bytes(tmp_path, ref, task_id="a") for ref in refs["a"]]
     for _ in range(20):
         assert [packs.blob_bytes(tmp_path, ref, task_id="a") for ref in refs["a"]] == first
-    assert decoded == ["a.members.json"]
-    raw = json.dumps({"message": {"content": "late answer"}}).encode()
-    late = _blob(tmp_path, raw)
-    (tmp_path / "observability" / "calls" / "a" / "llm_9_response.json").write_text(
-        json.dumps({"call_id": "llm_9", "full_payload_ref": late}), encoding="utf-8")
-    _result(tmp_path, "a", "completed")  # written terminal again: its next generation
-    assert evidence_packer.run_pass(tmp_path)["packed"] == 1
+    assert len(names) == 5 and sorted(decoded) == names  # each generation once, whatever the number of reads
     decoded.clear()
-    assert packs.blob_bytes(tmp_path, late, task_id="a") == raw and packs.blob_bytes(tmp_path, refs["a"][0], task_id="a") == first[0]
-    assert decoded == ["a.2.members.json"]
+    assert packs.blob_bytes(tmp_path, refs["b"][0], task_id="nobody")  # a task without sidecars: nothing parsed
+    assert [packs.blob_bytes(tmp_path, ref, task_id="a") for ref in refs["a"]] == first and decoded == []
+    assert packs.blob_bytes(tmp_path, refs["b"][0], task_id="b") and decoded == ["b.members.json"]
+    assert {pathlib.Path(key[0]).name for key in packs._KEPT[1]} == {"b.members.json"}  # a's are no longer held
+    decoded.clear()
+    assert packs.blob_bytes(tmp_path, refs["a"][0], task_id="a") == first[0] and sorted(decoded) == names
     (packs.packs_dir(tmp_path) / packs.INDEX_NAME).unlink()  # no cache could vouch for the replaced file
     (packs.packs_dir(tmp_path) / "a.members.json").write_text("{", encoding="utf-8")
     decoded.clear()
     with pytest.raises(packs.EvidenceUnavailable):  # its own sidecar unreadable and no cache to say more now
         packs.blob_bytes(tmp_path, refs["a"][0], task_id="a")
     assert decoded == ["a.members.json"]  # read again, never answered from the old parse
-    for task in ("b", "c", "d", "e"):
-        assert packs.blob_bytes(tmp_path, refs[task][0], task_id=task)
-    kept = packs._brief.cache_info()
-    assert kept.currsize <= kept.maxsize < 5  # a few parsed sidecars, never one per task read
 
 
 # ---- the Host Service operation read: one accepted message over k-scaled room, routing and task history

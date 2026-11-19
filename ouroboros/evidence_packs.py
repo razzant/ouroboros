@@ -4,7 +4,6 @@ from __future__ import annotations
 import collections
 import contextlib
 import contextvars
-import functools
 import gzip
 import hashlib
 import json
@@ -61,6 +60,7 @@ _PART_CACHE: contextvars.ContextVar = contextvars.ContextVar("evidence_part_cach
 _READERS: Dict[str, "_PackReader"] = {}
 _READERS_LOCK = threading.Lock()
 _READERS_MAX = 4
+_KEPT: Tuple[str, Dict[tuple, tuple]] = ("", {})  # the task read last: its sidecars' briefs by (path, file state)
 
 
 class EvidenceCorrupt(ValueError):
@@ -407,21 +407,27 @@ def index_upsert(root: Any, pack_path: pathlib.Path, sidecar: Dict[str, Any]) ->
         _index_rows(conn, pack_path, sidecar)
 
 
-def _own_members(path: pathlib.Path) -> tuple:
-    """One sidecar in brief, parsed once per file state (size, mtime, inode): a published sidecar never
-    changes, so another state is another file (``_brief``). ``SidecarCorrupt`` as ``read_sidecar``."""
+def _own_members(path: pathlib.Path, task_id: str) -> tuple:
+    """One sidecar of ``task_id`` in brief (``_brief``), parsed once per file state (size, mtime, inode: a published
+    sidecar never changes, so another state is another file). A process keeps the briefs of the task it read last,
+    all its generations in every root, until it reads another task's. ``SidecarCorrupt`` as ``read_sidecar``."""
+    global _KEPT
     try:
         info = path.stat()
     except OSError:
-        return _brief.__wrapped__(str(path), None)  # never kept: ``read_sidecar`` names the fault
-    return _brief(str(path), (info.st_size, info.st_mtime_ns, info.st_ino))
+        return _brief(path)  # never kept: ``read_sidecar`` names the fault
+    if _KEPT[0] != task_id:
+        _KEPT = (task_id, {})
+    briefs, key = _KEPT[1], (str(path), info.st_size, info.st_mtime_ns, info.st_ino)
+    if key not in briefs:
+        briefs[key] = _brief(path)
+    return briefs[key]
 
 
-@functools.lru_cache(maxsize=3)  # the parsed sidecars a process keeps: the memory a giant owner's view lends its reads
-def _brief(path: str, _state: Optional[tuple]) -> tuple:
+def _brief(path: pathlib.Path) -> tuple:
     """``(task_id, generation, blobs, handles)``: ``(sha256, kind) -> (offset, size)`` and, for its checkpoint
     handles, ``path -> (sha256, offset, size)``, without the rest of the sidecar's JSON."""
-    sidecar = read_sidecar(pathlib.Path(path))
+    sidecar = read_sidecar(path)
     members = sidecar["members"]
     return (sidecar["task_id"], sidecar["generation"], {(m["sha256"], m["kind"]): (m["offset"], m["size"]) for m in members},
             {m["path"]: (m["sha256"], m["offset"], m["size"]) for m in members if m["kind"] == CHECKPOINT and m.get("path")})
@@ -435,7 +441,7 @@ def _own_placements(root: pathlib.Path, task_id: str, *, key: Optional[tuple] = 
     directory, found, errors = packs_dir(root), [], []
     for name in sorted(_task_sidecar_names(root, task_id)):
         try:
-            owner, generation, blobs, handles = _own_members(directory / name)
+            owner, generation, blobs, handles = _own_members(directory / name, task_id)
         except SidecarCorrupt as exc:
             errors.append(exc)
             continue
