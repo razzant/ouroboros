@@ -193,6 +193,11 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
                                       root / "task_results" / "artifacts" / task_id / WIRE_JOURNAL) if os.path.lexists(path)]
     unknown: List[str] = []
     pins: Dict[str, str] = {}
+    try:  # the saved states for exact return ``maintenance_retirement.prune_worked_copies`` would retire
+        from ouroboros.maintenance_retirement import _worked_copies
+        places += [str(path) for path, _kind, _info in _worked_copies(root / "task_results" / "artifacts" / task_id)]
+    except OSError:
+        unknown.append("saved_states")
     read = read_records(root)
     if read.unlistable or read.unreadable or read.import_pending:
         unknown.append("private_copies")
@@ -357,5 +362,8 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
             patch_document(base, task_id, lambda current: {**current, OWNER_KEEP: fact})
         elif not keep and stands:
             patch_document(base, task_id, lambda current: {k: v for k, v in current.items() if k != OWNER_KEEP})
-    status = ("release_unconfirmed" if releasing else "partly_retired" if retired else "kept") if keep else "released"
+    if not keep and stands:  # what the keep held may now go: the retirement step is owed, not left to another wake
+        from ouroboros.maintenance_retirement import artifact_changed
+        artifact_changed(base, immediate=True)
+    status =("release_unconfirmed" if releasing else "partly_retired" if retired else "kept") if keep else "released"
     return answer(status, keep, retained=retained, retired=retired, unknown=unknown, releases=releases)

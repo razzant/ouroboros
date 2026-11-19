@@ -22,12 +22,15 @@ followed, which Storage and the mind's ``storage`` fact read; an open gate leave
 from __future__ import annotations
 
 import errno
+import json
 import logging
 import os
 import pathlib
+import re
 import stat
 import sys
 import uuid
+from typing import Any
 
 from ouroboros import maintenance_jobs, store
 from ouroboros.record_compression import WIRE_JOURNAL
@@ -147,6 +150,13 @@ def task_written(txn, task_id, columns):
         except (OSError, TypeError, ValueError):
             continue
         deadlines.append(stamp + get_gc_retention_days() * 86400)
+    if any((txn.root / f"task_results/artifacts/{task_id}/source_handles" / name).is_dir()
+           for name in ("context_checkpoints", "working")):  # saved states may wait for ``prune_worked_copies``
+        txn.put_row(WORKED_COPIES, task_id, {})
+        try:
+            deadlines.append(float(columns["drive_retention_at"]) + get_gc_retention_days() * 86400)
+        except (KeyError, TypeError, ValueError):
+            deadlines.append(time.time())  # no projected date: the pass reads the body's end itself
     if deadlines:
         schedule_in(txn, min(deadlines))
 
@@ -215,7 +225,8 @@ def run(root, should_stop):
         steps = [("delegate_state", sweep_settled_delegate_state),
                  ("skill_state", sweep_uninstalled_skill_state), ("code_intel", prune_stale_code_intel_roots),
                  ("failed_reconcile", prune_failed_reconcile_markers), ("agent_media", prune_agent_media_uploads),
-                 ("call_wire", prune_call_wire_journals), *steps, ("bytecode", prune_stale_bytecode)]
+                 ("call_wire", prune_call_wire_journals), ("worked_copies", prune_worked_copies), *steps,
+                 ("bytecode", prune_stale_bytecode)]
         # Read the durable gate again immediately before source retirement. A fresh child
         # must never substitute its empty memory for the server's recovery result.
         with store.open_store(root, write=False) as txn:
@@ -374,6 +385,340 @@ def prune_call_wire_journals(root, retention_days=None, *, now=None) -> dict:
             continue
         except OSError:
             report["errors"] += 1
+    return report
+
+
+RETIRED_COPIES = "retired_copies.jsonl"  # in a task's source_handles/: one line per retired saved state
+SAVED_STATES_JOB = "saved_states"  # its pass row: what it released and what it holds, on Storage → Task results
+WORKED_COPIES = "worked_copies"  # obligation rows: finished tasks whose folder may still hold saved states
+_SEEDED = "worked_copies_seeded"  # this job row's fact: the one walk that put the history's rows ran
+_OWNER_WAIT = re.compile(r"owner-wait-[0-9a-f]{32}-[0-9a-f]{64}\.json")
+_BUDGET_PAUSE = re.compile(r"budget-pause-(?:sleep-|owner-pause-)?[0-9a-f]{32}-[0-9a-f]{64}\.json")
+_FROZEN_WORKING = re.compile(r"working-a\d+-s\d+-[0-9a-f]{64}\.json")
+_ROLLING_WORKING = re.compile(r"working_checkpoint-a\d+\.json")
+_SHA_TAIL = re.compile(r"-([0-9a-f]{64})\.json")
+_FINISH_FIELDS = ("artifact_finalized_at", "completed_at", "finished_at")  # explicit ends; a creation ``ts`` is none
+_REBUILD = ("A saved state for an exact return of this work. The work is over, so nothing resumes from it. "
+            "The requests it sent and the answers and tool results it held are in this work's model-call records "
+            "(call_records); people's words are in the dialogue. The exact bytes and the loop's own bookkeeping "
+            "(cursors, delivery flags) are not kept.")
+
+
+def worked_copy(folder: str, name: str):
+    """The kind of a saved state only an exact return reads, else None: the whole names its writers mint, never a
+    prefix (``owner-wait-<wait>-<sha256>.json``: ``owner_wait.store_continuation_source``;
+    ``budget-pause-[sleep-|owner-pause-]<id>-<sha256>.json``: ``budget_pause._exact_continuation_row`` and the restart
+    and rolling conversions; ``working-a<N>-s<seq>-<sha256>.json``: ``working_checkpoint.prepare_recovery``; the rolling
+    ``working_checkpoint-a<N>.json``). Every other file in these folders is a source (cuts, room views, working notes,
+    reviews, plans, focus and presence sources) and never matches."""
+    if folder == "context_checkpoints":
+        if _OWNER_WAIT.fullmatch(name):
+            return "owner_wait"
+        if _BUDGET_PAUSE.fullmatch(name):
+            return "budget_pause"
+        if _FROZEN_WORKING.fullmatch(name):
+            return "working_frozen"
+    elif folder == "working" and _ROLLING_WORKING.fullmatch(name):
+        return "working_rolling"
+    return None
+
+
+def _worked_copies(folder: pathlib.Path) -> list:
+    """``[(path, kind, lstat)]`` of the regular files ``worked_copy`` names in one task's two folders."""
+    found = []
+    for name in ("context_checkpoints", "working"):
+        try:
+            with os.scandir(folder / "source_handles" / name) as listing:
+                for entry in listing:
+                    kind = worked_copy(name, entry.name)
+                    if kind is None:
+                        continue
+                    info = os.lstat(entry.path)
+                    if stat.S_ISREG(info.st_mode):
+                        found.append((pathlib.Path(entry.path), kind, info))
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+    return found
+
+
+def _call_records(root: pathlib.Path, task_id: str) -> list:
+    """The addresses that hold the task's model calls, as checked now: its call folder with at least one record, and
+    its first evidence pack (``evidence_packs`` names generation 1 ``<task>.xz``; later generations sit beside it)."""
+    found = []
+    try:
+        with os.scandir(root / "observability" / "calls" / task_id) as listing:
+            if next(listing, None) is not None:
+                found.append(f"observability/calls/{task_id}")
+    except OSError:
+        pass
+    if (root / "observability" / "packs" / f"{task_id}.xz").is_file():
+        found.append(f"observability/packs/{task_id}.xz")
+    return found
+
+
+def _lent_sources(root: pathlib.Path):
+    """The tasks whose saved states a queued or running task may still load: ``working_checkpoint.load_recovery``
+    reads the file of the task its handoff names (``source_task_id``, a relay's ``continued_from_task_id``), and a
+    retry reads its predecessors' sources (``source_retention._source_locations``). ``None`` without a readable
+    published queue: then every task holds."""
+    from ouroboros.queue_observation import load_queue_document
+
+    try:
+        snapshot = load_queue_document(root)
+    except (OSError, ValueError):  # a malformed document or a hole in its shared table
+        return None
+    if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
+        return None
+    lent = set()
+    for entry in [*(snapshot.get("pending") or ()), *(snapshot.get("running") or ())]:
+        task = entry.get("task") if isinstance(entry, dict) else None
+        if not isinstance(task, dict):
+            continue
+        lent.update(str(task[key]) for key in ("timeout_retry_from", "original_task_id") if task.get(key))
+        for field in ("_working_recovery", "_owner_wait_resume", "_budget_pause", "_budget_pause_resume"):
+            carrier = task.get(field)
+            if isinstance(carrier, dict):
+                lent.update(str(carrier[key]) for key in ("source_task_id", "continued_from_task_id") if carrier.get(key))
+    return lent
+
+
+def _work_end(document: dict):
+    """When the work ended: the latest of the host's attempt-bound ``terminal_time`` and the result's explicit end
+    fields, never a creation ``ts``; ``None`` when none is known (its saved states then stay)."""
+    from datetime import datetime, timezone
+
+    from ouroboros.terminal_time import terminal_time_fact
+
+    stamps = []
+    for raw in (terminal_time_fact(document).get("occurred_at"), *(document.get(key) for key in _FINISH_FIELDS)):
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        stamps.append((parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp())
+    return max(stamps) if stamps else None
+
+
+def _ledger(root: pathlib.Path, task_id: str) -> pathlib.Path:
+    return root / "task_results" / "artifacts" / task_id / "source_handles" / RETIRED_COPIES
+
+
+def retired_lines(root: pathlib.Path, task_id: str) -> list:
+    """The task's record lines, oldest first (a torn or unreadable line is skipped; none when there is no file)."""
+    lines = []
+    try:
+        text = _ledger(pathlib.Path(root), task_id).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return lines
+    for raw in text.splitlines():
+        try:
+            line = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(line, dict) and line.get("name"):
+            lines.append(line)
+    return lines
+
+
+def retired_message(root: Any, task_id: str, name: str) -> str:
+    """What a reader that missed ``name`` of this task's saved states can say: when it was retired, what it was and
+    where what it held is recorded; ``""`` when no line names it."""
+    line = next((line for line in reversed(retired_lines(pathlib.Path(root), task_id)) if line.get("name") == name), None)
+    if line is None:
+        return ""
+    return (f"{name} was retired at {line.get('retired_at')} ({line.get('kind')}, {line.get('bytes')} bytes) after its "
+            f"work ended; what it held is in {', '.join(line.get('call_records') or []) or 'no recorded place'}")
+
+
+def _append_line(ledger: pathlib.Path, line: dict) -> None:
+    """One durable line: a torn tail left by a crash gets its newline first, the file and, when it was just created,
+    its folder entry are synced before the caller removes anything."""
+    created = not ledger.exists()
+    with open(ledger, "ab+") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell():
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b"\n":
+                handle.write(b"\n")
+        handle.write((json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
+        handle.flush()
+        os.fsync(handle.fileno())
+    if created and os.name != "nt":
+        folder = os.open(ledger.parent, os.O_RDONLY)
+        try:
+            os.fsync(folder)
+        finally:
+            os.close(folder)
+
+
+def _retire(root: pathlib.Path, path: pathlib.Path, kind: str, info, *, task_id: str, status: str, finished: float,
+            days: int, sources: list, recorded: set) -> None:
+    """Write the line that says what this was, then remove it. The line of a pass that crashed before the removal is
+    not written again: one generation is its name, size and modification time (the rolling file reuses its name)."""
+    from datetime import datetime, timezone
+
+    def iso(stamp):
+        return datetime.fromtimestamp(float(stamp), timezone.utc).isoformat()
+
+    saved_at = iso(info.st_mtime)
+    if (path.name, info.st_size, saved_at) not in recorded:
+        sha = _SHA_TAIL.search(path.name)
+        _append_line(_ledger(root, task_id), {
+            "name": path.name, "folder": path.parent.name, "kind": kind, "bytes": info.st_size,
+            "sha256": sha.group(1) if sha else None,  # the digest the name carries; never re-hashed
+            "saved_at": saved_at, "status": status, "finished_at": iso(finished), "retired_at": iso(time.time()),
+            "window_days": days, "call_records": sources, "rebuild": _REBUILD})
+        recorded.add((path.name, info.st_size, saved_at))
+    path.unlink()
+
+
+def _seed(root: pathlib.Path) -> None:
+    """Once per store: put a row for every finished task whose folder already holds saved states (the history
+    before ``task_written`` put them), then record that the walk ran."""
+    from ouroboros.task_status import SETTLED_STATUSES
+
+    base = root / "task_results" / "artifacts"
+    holding = []
+    try:
+        if all(stat.S_ISDIR(path.lstat().st_mode) for path in (base.parent, base)):
+            with os.scandir(base) as listing:
+                holding = sorted(entry.name for entry in listing
+                                 if _plain_directory(entry) and _worked_copies(pathlib.Path(entry.path)))
+    except FileNotFoundError:
+        pass
+    with store.open_store(root, write=True) as txn:
+        for start in range(0, len(holding), 400):
+            chunk = holding[start:start + 400]
+            for task_id, status in txn.conn.execute(
+                    "SELECT task_id, status FROM tasks WHERE task_id IN (SELECT value FROM json_each(?))", (json.dumps(chunk),)):
+                if status in SETTLED_STATUSES:
+                    txn.put_row(WORKED_COPIES, task_id, {})
+        from ouroboros.utils import utc_now_iso
+
+        maintenance_jobs.record_in(txn, JOB, **{_SEEDED: utc_now_iso()})
+
+
+def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
+    """Retire a finished work's saved states for exact return once the owner's window has passed (#2712).
+
+    A wait, a pause or a dead attempt saves its loop's whole state so the same work can return exactly. Every loader
+    of these files refuses a terminal row, so once the work is over nothing of it reads them; what they held is in the
+    work's model-call records. The work list is the ``worked_copies`` obligation rows (a terminal write puts one,
+    ``_seed`` once the history's), so a pass costs the owed tasks, never a walk of every folder. A file goes when its
+    task's row is settled, no child result is still being promoted into it, the owner's retention days have passed
+    since the work ended (``_work_end``; the row's ``drive_retention_at`` only lets a pass skip a task still inside
+    them), no queued or running task may still load it (``_lent_sources``), the task is proven over, its call records
+    exist (else the record would name an address that is not there) and the owner did not keep it
+    (``owner_keep.gate``). A line in ``source_handles/retired_copies.jsonl`` says what it was first. A row goes once its
+    folder holds no saved state, or once its task is no longer settled (its next terminal write puts it back)."""
+    from ouroboros.owner_keep import gate
+    from ouroboros.retention import age_cutoff, keep_until
+    from ouroboros.subagent_worktrees import _task_proven_over
+    from ouroboros.task_results import load_task_result
+    from ouroboros.task_status import SETTLED_STATUSES, task_has_live_queue_ownership
+
+    root = pathlib.Path(root)
+    days = get_gc_retention_days() if retention_days is None else retention_days
+    cutoff = age_cutoff(days, now)
+    report = {"removed": 0, "removed_bytes": 0, "kept": 0, "errors": 0, "held": {}}
+    examples: dict = {}
+    task_id = ""
+
+    def hold(reason, count):
+        report["kept"] += count
+        report["held"][reason] = report["held"].get(reason, 0) + count
+        examples.setdefault(reason, task_id)
+
+    with store.open_store(root, write=False) as txn:
+        seeded = (txn.meta(maintenance_jobs.PREFIX + JOB) or {}).get(_SEEDED)
+    if not seeded:
+        _seed(root)
+    with store.open_store(root, write=False) as txn:
+        owed = list(txn.set_rows(WORKED_COPIES))
+        rows = {}
+        for start in range(0, len(owed), 400):
+            rows.update({record[0]: tuple(record[1:]) for record in txn.conn.execute(
+                "SELECT task_id, status, drive_retention_at, has_pending_promotion FROM tasks "
+                "WHERE task_id IN (SELECT value FROM json_each(?))", (json.dumps(owed[start:start + 400]),))})
+    base = root / "task_results" / "artifacts"
+    done, lent = [], None
+    for task_id in owed:
+        try:
+            folder = base / task_id
+            found = _worked_copies(folder) if folder.is_dir() and not folder.is_symlink() else []
+            status, recorded, promoting = rows.get(task_id, (None, None, None))
+            if not found or status not in SETTLED_STATUSES:
+                done.append(task_id)
+                continue
+            if promoting == 1:
+                hold("child_refs_pending", len(found))
+                continue
+            try:  # a projection of the body's date, maybe its creation: it can only prove the window still open
+                if float(recorded) >= cutoff:
+                    keep_until(report, float(recorded), days)
+                    hold("younger_than_retention", len(found))
+                    continue
+            except (TypeError, ValueError):
+                pass
+            try:
+                finished = _work_end(load_task_result(root, task_id, strict=True) or {})
+            except Exception:
+                hold("task_result_unreadable", len(found))
+                continue
+            if finished is None:
+                hold("finish_time_unknown", len(found))
+                continue
+            if finished >= cutoff:
+                keep_until(report, finished, days)
+                hold("younger_than_retention", len(found))
+                continue
+            if lent is None:
+                lent = _lent_sources(root)
+            if lent is None or task_id in lent:
+                hold("lent_to_receiver", len(found))
+                continue
+            if not _task_proven_over(task_id, root, lambda task: task_has_live_queue_ownership(root, task)):
+                hold("not_proven_over", len(found))
+                continue
+            sources = _call_records(root, task_id)
+            if not sources:
+                hold("no_call_records", len(found))
+                continue
+            recorded_lines = {(line.get("name"), line.get("bytes"), line.get("saved_at")) for line in retired_lines(root, task_id)}
+            left = 0
+            with gate(root, task_id, timeout_sec=0) as why:
+                if why:
+                    hold(why, len(found))
+                    continue
+                for path, kind, info in found:
+                    try:
+                        if os.lstat(path) != info:  # written or replaced while the facts were read
+                            hold("changed", 1)
+                            left += 1
+                            continue
+                        _retire(root, path, kind, info, task_id=task_id, status=str(status), finished=finished,
+                                days=days, sources=sources, recorded=recorded_lines)
+                    except FileNotFoundError:
+                        continue
+                    except OSError:  # a Windows sharing violation, a refused unlink: the next pass tries again
+                        report["errors"] += 1
+                        hold("removal_failed", 1)
+                        left += 1
+                        continue
+                    report["removed"] += 1
+                    report["removed_bytes"] += getattr(info, "st_blocks", 0) * 512 or info.st_size
+            if not left:
+                done.append(task_id)
+        except OSError:
+            report["errors"] += 1
+    if done:
+        with store.open_store(root, write=True) as txn:
+            for task_id in done:
+                txn.delete_row(WORKED_COPIES, task_id)
+    maintenance_jobs.record_pass(root, SAVED_STATES_JOB, {
+        "released": report["removed"], "errors": ["OSError"] * report["errors"],
+        "holds": [{"class": reason, "count": count, "example": examples.get(reason, "")}
+                  for reason, count in sorted(report["held"].items())]})  # the window's copies too: what waits its days
     return report
 
 

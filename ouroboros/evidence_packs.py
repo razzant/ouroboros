@@ -901,8 +901,18 @@ def materialize_handle(root: Any, task_id: str, rel_path: str) -> Optional[pathl
 
 
 def materialize_path(path: pathlib.Path) -> Optional[pathlib.Path]:
+    """A missed checkpoint handle written back from its pack; a saved state retired after its work ended raises with
+    its record line instead (``maintenance_retirement.retired_message``)."""
     parsed = _checkpoint_path(path)
-    return materialize_handle(*parsed[:2], pathlib.PurePosixPath(*parsed[2]).as_posix()) if parsed and len(parsed[2]) == 3 else None
+    if not parsed or len(parsed[2]) != 3:
+        return None
+    restored = materialize_handle(*parsed[:2], pathlib.PurePosixPath(*parsed[2]).as_posix())
+    if restored is None:
+        from ouroboros.maintenance_retirement import retired_message
+        note = retired_message(parsed[0], parsed[1], parsed[2][2])
+        if note:
+            raise FileNotFoundError(note)
+    return restored
 
 
 def materialize_tree(path: pathlib.Path) -> None:
@@ -1039,6 +1049,7 @@ def loose_members(root: Any, task_id: str, *, missing: Optional[list] = None) ->
     blobs that are loose or already held by some pack on this root), each with its loose source path;
     a referenced blob that is neither is appended to ``missing`` as ``(kind, sha256, size)``."""
     from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.maintenance_retirement import worked_copy  # saved states wait loose for their retirer, never packed
 
     root = pathlib.Path(root)
     members: List[Dict[str, Any]] = []
@@ -1046,7 +1057,8 @@ def loose_members(root: Any, task_id: str, *, missing: Optional[list] = None) ->
     with contextlib.suppress(OSError):
         for entry in sorted(os.scandir(store_dir), key=lambda e: e.name):
             stem = entry.name.rsplit("-", 1)[-1].split(".", 1)[0]
-            if entry.is_file(follow_symlinks=False) and len(stem) == 64 and not stem.strip("0123456789abcdef"):
+            if entry.is_file(follow_symlinks=False) and len(stem) == 64 and not stem.strip("0123456789abcdef") \
+                    and worked_copy(CHECKPOINTS_REL.name, entry.name) is None:
                 members.append({"sha256": stem, "kind": CHECKPOINT, "size": entry.stat(follow_symlinks=False).st_size,
                                 "path": (CHECKPOINTS_REL / entry.name).as_posix(), "source": pathlib.Path(entry.path)})
     for kind, sha256, size in manifest_blob_refs(root, task_id):

@@ -104,12 +104,20 @@ def retained_task_roots(canonical: pathlib.Path, task_id: str) -> list[pathlib.P
 def read_retained_task_source(root, task_id, ref, *, anchor=None):
     """Resolve retained execution or retry-predecessor bytes with the same verifier."""
     from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.maintenance_retirement import retired_message
 
+    tried = []
     for source_root, owner in _source_locations(root, task_id, anchor=anchor):
+        tried.append((source_root, owner))
         try:  # loose or packed at this placement; damage is explicit, absence tries the next one
             return read_actor_source_bytes(source_root, owner, ref, retained=False, anchor=anchor)
         except FileNotFoundError:
             continue
+    name = pathlib.PurePosixPath(str(ref["path"])).name
+    for source_root, owner in tried:  # a saved state retired after its work ended says so and where its content is
+        note = retired_message(source_root, owner, name)
+        if note:
+            raise FileNotFoundError(f"actor source unavailable: {note}")
     raise FileNotFoundError(f"actor source unavailable: {ref['path']}")
 
 
