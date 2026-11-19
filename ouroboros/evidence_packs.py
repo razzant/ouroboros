@@ -481,16 +481,16 @@ _HANDLES_SQL = ("SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind, h.re
                 "JOIN packs p ON p.task_id=h.task_id AND p.generation=h.generation WHERE h.task_id=? AND m.kind=?")
 
 
-def _indexed_placements(root: pathlib.Path, query: str, params: tuple,
-                        first: bool = True) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
+def _indexed_placements(root: pathlib.Path, query: str, params: tuple, first: bool = True,
+                        whole: bool = False) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
     """The shared index's rows for one lookup, read under its lock within the caller's wait. An index that
     cannot answer now (held, missing or damaged: never rebuilt or walked around here) is ``EvidenceUnavailable``;
     no row on a lookup's ``first`` question (past a copy, the copies only end) beside a sidecar it recorded as
-    unreadable is that sidecar's ``SidecarCorrupt``."""
+    unreadable is that sidecar's ``SidecarCorrupt``, and with ``whole`` so are rows (they may lack its generation)."""
     try:
         with open_index(root) as conn:
             rows = conn.execute(query, params).fetchall()
-            recorded = None if rows or not first else conn.execute(
+            recorded = None if (rows and not whole) or not first else conn.execute(
                 "SELECT value FROM meta WHERE key='sidecar_errors'").fetchone()
             unreadable = json.loads(recorded[0]) if recorded else []
     except (store.StoreError, sqlite3.Error, OSError, ValueError) as exc:
@@ -915,12 +915,27 @@ def packed_handle_names(root: Any, task_id: str) -> List[str]:
     return sorted(packed_handle_packs(root, task_id))
 
 
-def packed_handle_packs(root: Any, task_id: str) -> Dict[str, str]:
-    """Each packed checkpoint handle's name, with the data-root address of the pack generation that holds it."""
+def packed_handle_packs(root: Any, task_id: str, *, complete: bool = False) -> Optional[Dict[str, str]]:
+    """Each packed checkpoint handle's name, with the data-root address of the pack generation that holds it.
+    ``complete``: ``None`` unless the listing is whole: the task's own sidecars all read, or else the index holds this
+    task's rows and recorded no unreadable sidecar (a name such a listing misses may still be packed: unknown, not
+    absent)."""
     if not packs_dir(root).is_dir():
         return {}
-    return {pathlib.PurePosixPath(member["path"]).name: f"observability/packs/{pack.name}"
-            for pack, member in _task_handles(pathlib.Path(root), str(task_id))}
+    if not complete:
+        return {pathlib.PurePosixPath(member["path"]).name: f"observability/packs/{pack.name}"
+                for pack, member in _task_handles(pathlib.Path(root), str(task_id))}
+    pairs, errors = _own_placements(pathlib.Path(root), str(task_id))
+    if errors:
+        try:
+            rows = _indexed_placements(pathlib.Path(root), _HANDLES_SQL, (str(task_id), CHECKPOINT), whole=True)
+        except (EvidenceUnavailable, SidecarCorrupt):
+            return None
+        if not rows:
+            return None  # an index without this task's rows proves no absence
+        known = {(pack, member.get("path")) for pack, member in pairs}
+        pairs += [row for row in rows if (row[0], row[1].get("path")) not in known]
+    return {pathlib.PurePosixPath(member["path"]).name: f"observability/packs/{pack.name}" for pack, member in pairs}
 
 
 def _checkpoint_path(path: pathlib.Path) -> Optional[tuple]:
@@ -962,7 +977,7 @@ def materialize_handle(root: Any, task_id: str, rel_path: str) -> Optional[pathl
     located = _locate(pathlib.Path(root), task_id=str(task_id), rel_path=rel.as_posix())
     if located is None:
         return None
-    from ouroboros.maintenance_retirement import owe_written_back, worked_copy
+    from ouroboros.saved_state_retirement import owe_written_back, worked_copy
 
     if _restore_handle(target, member_bytes(*located), located[1]["sha256"]) and worked_copy(rel.parts[1], rel.name):
         owe_written_back(root, task_id)  # a saved state back on disk is its retirer's again
@@ -970,8 +985,9 @@ def materialize_handle(root: Any, task_id: str, rel_path: str) -> Optional[pathl
 
 
 def materialize_path(path: pathlib.Path, *, explain: bool = False) -> Optional[pathlib.Path]:
-    """A missed checkpoint handle written back from its pack, else None; with ``explain`` (``read_file``) a saved
-    state retired after its work ended raises with its record line (``maintenance_retirement.retired_message``)."""
+    """A missed checkpoint handle written back from its pack, else None; with ``explain`` (``read_file``) a retired
+    saved state raises with its record line, which says when it went and that its work ended or moved on
+    (``saved_state_retirement.retired_message``)."""
     parsed = _checkpoint_path(path)
     if not parsed or len(parsed[2]) != 3:
         if explain:  # a rolling working file has no pack, only its record
@@ -984,7 +1000,7 @@ def materialize_path(path: pathlib.Path, *, explain: bool = False) -> Optional[p
 
 
 def _explain_retired(path: Any) -> None:
-    from ouroboros.maintenance_retirement import SavedStateRetired, retired_note_for
+    from ouroboros.saved_state_retirement import SavedStateRetired, retired_note_for
 
     note = retired_note_for(path)
     if note:
@@ -1124,9 +1140,9 @@ def loose_members(root: Any, task_id: str, *, missing: Optional[list] = None, sa
     """The task's members whose bytes are at hand (loose checkpoint handles first, then the manifest
     blobs that are loose or already held by some pack on this root), each with its loose source path;
     a referenced blob that is neither is appended to ``missing`` as ``(kind, sha256, size)``. Saved states for
-    exact return (``maintenance_retirement.worked_copy``) are never new members; ``saved_states`` lists them alone."""
+    exact return (``saved_state_retirement.worked_copy``) are never new members; ``saved_states`` lists them alone."""
     from ouroboros.artifacts import task_artifact_dir_path
-    from ouroboros.maintenance_retirement import worked_copy  # saved states wait loose for their retirer, never packed
+    from ouroboros.saved_state_retirement import worked_copy  # saved states wait loose for their retirer, never packed
 
     root = pathlib.Path(root)
     members: List[Dict[str, Any]] = []

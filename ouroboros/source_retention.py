@@ -104,7 +104,7 @@ def retained_task_roots(canonical: pathlib.Path, task_id: str) -> list[pathlib.P
 def read_retained_task_source(root, task_id, ref, *, anchor=None):
     """Resolve retained execution or retry-predecessor bytes with the same verifier."""
     from ouroboros.artifacts import read_actor_source_bytes
-    from ouroboros.maintenance_retirement import retired_message
+    from ouroboros.saved_state_retirement import retired_message
 
     tried = []
     for source_root, owner in _source_locations(root, task_id, anchor=anchor):
@@ -114,7 +114,7 @@ def read_retained_task_source(root, task_id, ref, *, anchor=None):
         except FileNotFoundError:
             continue
     name = pathlib.PurePosixPath(str(ref["path"])).name
-    for source_root, owner in tried:  # a saved state retired after its work ended says so and where its content is
+    for source_root, owner in tried:  # a retired saved state's record says when and why it went (its work ended or moved on) and where its content is
         note = retired_message(source_root, owner, name)
         if note:
             raise FileNotFoundError(f"actor source unavailable: {note}")
@@ -166,7 +166,7 @@ def retained_actor_source_read_target(root, task_id, relative):
     """Placement alias for an advertised immutable source read, not write authority. A name gone everywhere that one
     location's record says was retired answers with that location, so the miss there names the record."""
     from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
-    from ouroboros.maintenance_retirement import retired_message
+    from ouroboros.saved_state_retirement import retired_message
 
     digest = source_handle_digest(relative)
     if not digest:
