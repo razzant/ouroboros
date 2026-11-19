@@ -286,7 +286,10 @@ def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *, pa
             pause = retain_owner_pause_park(result_root, task_id, attempt)
         else:
             pause = budget_pause_row(result_root, task_id)
-    except Exception:
+    except Exception as exc:
+        from ouroboros.store import StoreBusy
+        if strict and isinstance(exc, StoreBusy):
+            raise  # as in pause_retention: the late pass reads this row again at its next publication
         log.warning("Saved sleep retention could not be published for %s", task_id, exc_info=True)
         # Keep the validated locator for a later stop/restore retry. Never
         # terminalize a checkpoint merely because its conversion write failed.

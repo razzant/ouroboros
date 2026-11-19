@@ -2,6 +2,7 @@
 
 import errno
 import json
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -418,10 +419,12 @@ def test_envelope_discovery_obeys_the_same_boot_decisions(tmp_path, monkeypatch,
         assert any(item.get("ok") for item in wake_ready_sleepers(q, only=tid)) == (decision == "ready")
 
 
-def test_a_busy_pause_read_leaves_the_late_decision_to_the_next_publication(tmp_path, monkeypatch):
+@pytest.mark.parametrize("busy_read", ["every", "final"])
+def test_a_busy_pause_read_leaves_the_late_decision_to_the_next_publication(tmp_path, monkeypatch, busy_read):
     """The late pass reads each saved envelope's pause row. While a writer holds the store that read decides
-    nothing: the saved queue stays and the next publication restores the pause, which then resumes. A readable
-    row whose cancel is confirmed is still not restored."""
+    nothing, whether it is the classifying read or the park's own read after it: the saved queue stays and the
+    next publication restores the pause, which then resumes. A readable row whose cancel is confirmed is still
+    not restored."""
     from ouroboros import budget_pause as bp, store, store_hot_facts
     from ouroboros.cancel_intents import has_active_intent, request_cancel
     from supervisor.restart_retention import publish_pending_parks
@@ -446,7 +449,9 @@ def test_a_busy_pause_read_leaves_the_late_decision_to_the_next_publication(tmp_
     read, writer = bp.budget_pause_row, {"holds": True}
 
     def contended(root, task_id):
-        if task_id == "direct" and writer["holds"]:
+        # "final": the classifying read gets through and the park's own read of the row meets the writer.
+        caller = sys._getframe(1).f_code.co_name
+        if task_id == "direct" and writer["holds"] and (busy_read == "every" or caller == "park_saved_pause"):
             raise store.StoreBusy("a writer holds the store for this publication")
         return read(root, task_id)
 
