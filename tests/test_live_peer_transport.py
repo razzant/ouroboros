@@ -123,11 +123,18 @@ def test_a_peers_control_stays_bounded_in_utf8_bytes_at_the_socket_door(over):
 def test_a_quiet_joined_peer_wakes_the_door_only_for_its_messages_and_the_end_of_the_call(monkeypatch):
     """Beside the sender's 10 ms poll a receive timeout held Windows' loop (a 15.6 ms monotonic clock) at a full
     core for the whole call (#3796): after hello only the peer's message or the call's end may wake the door."""
-    real_wait, timeouts = asyncio.wait, []
+    real_wait, waits = asyncio.wait, []
 
     async def observed_wait(fs, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
-        timeouts.append(timeout)
+        waits.append(timeout)
         return await real_wait(fs, timeout=timeout, return_when=return_when)
+
+    class SilentCloseSocket(PeerSocket):
+        """A server close that hands no disconnect back (wsproto's waits for the peer's echo): only the sender's end
+        can wake the door when the call closes."""
+
+        async def close(self, **reason):
+            self.closed.append(reason)
 
     async def next_control(hub):
         while not isinstance(event := hub.next_event(0), cp.PeerControl):
@@ -136,12 +143,12 @@ def test_a_quiet_joined_peer_wakes_the_door_only_for_its_messages_and_the_end_of
 
     async def scenario():
         hub = LiveCallHub(cp.CallSpec("synthetic-quiet-peer", 1, "synthetic", "synthetic"))
-        socket = PeerSocket(hello())
+        socket = SilentCloseSocket(hello())
         door = asyncio.create_task(serve_peer(socket, hub, role="owner"))
         await asyncio.wait_for(_joined(hub), 5)
-        joined = len(timeouts)
+        joined = len(waits)  # the door entered its post-hello wait in the step that joined the peer
         await asyncio.sleep(.2)  # twenty receive timeouts before #3796
-        quiet = timeouts[joined:]
+        quiet = waits[joined:]
         socket.incoming.put_nowait({"type": "websocket.receive", "text": json.dumps({"type": "mute", "muted": True})})
         control = await asyncio.wait_for(next_control(hub), 5)
         hub.close("finished")
@@ -150,9 +157,10 @@ def test_a_quiet_joined_peer_wakes_the_door_only_for_its_messages_and_the_end_of
 
     monkeypatch.setattr(asyncio, "wait", observed_wait)
     quiet, control, socket = asyncio.run(scenario())
-    assert [timeout for timeout in quiet if timeout is not None] == [], "a quiet joined peer's door woke on a timer"
+    assert quiet == [], "a quiet joined peer's door woke without a message"
     assert control.message == {"type": "mute", "muted": True}, "the door still reads a joined peer's messages"
-    assert socket.sent[-1]["type"] == "state" and socket.sent[-1]["state"] == cp.STATE_CLOSED, "and ends with the call"
+    assert socket.sent[-1]["type"] == "state" and socket.sent[-1]["state"] == cp.STATE_CLOSED
+    assert socket.closed and all(reason == {"code": 1000} for reason in socket.closed), "the sender's end ends the door"
 
 
 def test_bounded_codec_keeps_reading_server_controls(subtests):
