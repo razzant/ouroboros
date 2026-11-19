@@ -141,3 +141,56 @@ def test_reply_hold_retains_complete_text_before_safety(focus, monkeypatch, stat
                                   else "Reply held: autonomy is Advises")
     else:
         assert rows == []
+
+
+def test_conditioned_reply_reaches_current_consumers_without_ordinary_speech(tmp_path, monkeypatch):
+    from ouroboros.place_reply import freeze_reply
+    from ouroboros.presence_bindings import conversation_key
+
+    place = places.connect_place(tmp_path, connector="telegram-bot", provider="telegram",
+                                 account_id="9", conversation_id="55")
+    places.edit_place(tmp_path, place.place_id, "confirm_owner_account", author="owner", platform_actor_id="55")
+    key = conversation_key("telegram", "9", "55", "")
+    destination = {"transport": "telegram", "account_id": "9", "conversation_id": "55", "thread_id": ""}
+    event = runner.PresenceTurnEvent("fixture-event", "telegram", "9", "55", "", key, {}, {},
+                                    {"reply_targets": []}, "Fixture input")
+    identity, task_id = "fixture-identity", "fixture-turn"
+    metadata = {"presence_event_identity": identity, "presence": {
+        "binding_id": place.place_id, "place_id": place.place_id, "transport_skill": "telegram-bot",
+        "direct_reply_key": key, "direct_reply_version": 2,
+        "event": {"provider": "telegram", "account_id": "9", "conversation_id": "55", "thread_id": "",
+                  "conversation_key": key, "destination": destination, "source_event_id": event.source_event_id,
+                  "message": dict(event.message)}}}
+    task = {"id": task_id, "chat_id": runner.presence_chat_id(key), "metadata": metadata}
+    ctx = SimpleNamespace(task_metadata=metadata, task_id=task_id, drive_root=tmp_path)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
+    words = "Fixture reply"
+    row = runner.build_presence_result_event(task, words, ctx, terminal_origin="model_final")
+    frozen = row["conditional_reply"]
+    condition = frozen["owner_confirmation"]
+    assert (row["outcome"], row["text"], row["message"]) == ("silent", "", "")
+    assert frozen == {"outcome": "message", "text": words, "owner_confirmation": condition}
+    assert condition["place_id"] == condition["delivery_place"]["place_id"] == place.place_id
+    assert metadata["presence_conditional_reply"] == frozen and "presence_owner_confirmation" not in metadata
+    stored = write_task_result(tmp_path, task_id, "completed", metadata=metadata, result=words,
+                               terminal_origin="model_final", chat_id=task["chat_id"])
+    assert (stored["result"], stored["metadata"]["presence_result_text"]) == (words, "")
+    result = runner.finish_turn(tmp_path, task, task_id, identity, event, [row], own_start=0)
+    assert result == runner.presence_result_from_stored(stored, task_id, tmp_path)
+    assert (result.outcome, result.text, result.owner_confirmation) == ("message", words, condition)
+    without_policy = runner.presence_result_from_stored(stored, task_id)
+    assert (without_policy.outcome, without_policy.text) == ("silent", "")
+    assert runner._read_previous_turn(tmp_path, key)["message"] == ""
+    assert not [entry for entry in dialogue_store.iter_rows(tmp_path, "chat") if entry.row.get("direction") == "out"]
+
+    initial = {**freeze_reply("deferred", words, condition), "output_ref": "fixture-output", "work_ref": "child"}
+    # The current early producer writes empty text; this is the reader's retained-output shape.
+    record = {"event_identity": identity, "initial": initial, "outputs": [initial]}
+    stored = write_task_result(tmp_path, task_id, "completed", presence_continuation=record)
+    replayed = replay_envelope(tmp_path, task_id, identity)
+    assert (replayed.outcome, replayed.text, replayed.owner_confirmation) == ("deferred", words, condition)
+    status, view = work_view(stored, task_id, tmp_path)
+    output, = view["outputs"]
+    assert status == 200 and output == {"outcome": "deferred", "text": words, "owner_confirmation": condition,
+                                        "output_ref": "fixture-output", "work_ref": "child"}
+    assert load_task_result(tmp_path, task_id)["presence_continuation"] == record

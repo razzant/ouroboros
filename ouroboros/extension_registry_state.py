@@ -412,6 +412,44 @@ def reviewed_declaration_locked(name: str, bundle: Optional[_ExtensionRegistrati
             "plugin_api": api_generation(manifest) if manifest is not None else ""}
 
 
+def direct_reply_version(connector: str, content_hash: str, provider: str) -> int:
+    """Authenticated reply capability: 1 pins the event's route, 2 also enforces a host owner confirmation."""
+    with _lock:
+        bundle = _extensions.get(connector)
+        if not content_hash or not bundle or bundle.content_hash != content_hash or connector in _unloading:
+            return 0
+        manifest = getattr(getattr(bundle, "loaded_skill", None), "manifest", None)
+        extra = getattr(manifest, "raw_extra", None)
+        if not isinstance(extra, dict) or not any(isinstance(row, dict) and row.get("provides") == "place"
+                                                  for row in bundle.contributions):
+            return 0
+        reply = extra.get("place_reply")
+        if provider == "telegram" and reply == {"direct_recipient": {"provider": provider, "confirmation": "owner_confirmation"}}:
+            return 2
+        return int(reply == {"direct_recipient": {"provider": provider}})
+
+
+def supports_owner_confirmation(connector, content_hash, binding) -> bool:
+    """This authenticated publication still has the door that accepted the conditional speech."""
+    from ouroboros.tool_effects import bound_declaration, direct_send_selectors
+
+    if not isinstance(binding, dict) or binding.get("connector") != connector or binding.get("provider") != "telegram":
+        return False
+    name = binding.get("tool")
+    if not isinstance(name, str) or not name:
+        return False
+    if name == "place_reply":
+        return direct_reply_version(connector, content_hash, "telegram") == 2
+    with _lock:
+        bundle = _extensions.get(connector)
+        if not content_hash or not bundle or bundle.content_hash != content_hash or connector in _unloading:
+            return False
+        tool = get_tool_stamped(name)
+        selectors = direct_send_selectors(name, tool)
+        return bool(selectors and tool["skill"] == connector and selectors[0] == "telegram"
+                    and bound_declaration(tool)["tool"]["direct_recipient"].get("confirmation") == "owner_confirmation")
+
+
 def get_tool_with_generation(name: str) -> tuple[Optional[Dict[str, Any]], str]:
     """Detached tool descriptor plus the generation digest it dispatches
     against, read under ONE ``_lock`` hold (ABI-9).

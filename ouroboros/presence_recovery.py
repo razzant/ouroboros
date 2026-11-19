@@ -264,7 +264,7 @@ def retained_work_view(stored: Mapping[str, Any], reference: str,
         result = presence_result_from_stored(stored, reference, drive_root)
         return 200, {"ok": True, "status": status, "outcome": result.outcome, "text": result.text,
                      "work_ref": reference, "task_id": result.task_id, "output_ref": result.output_ref,
-                     "child_work_ref": result.work_ref,
+                     "child_work_ref": result.work_ref, **result.delivery_condition(),
                      "delivery_reporting_version": result.delivery_reporting_version}
     if not attempt_ended(stored, drive_root):
         if continued is None:

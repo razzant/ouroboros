@@ -229,9 +229,9 @@ def _valid_choice(row: Any) -> bool:
             and (not row.get("description") or row.get("description_author") in AUTHORS))
 
 
-def _read(drive_root: Any) -> dict:
+def _read(drive_root: Any, *, require_existing: bool = False) -> dict:
     path = places_path(drive_root)
-    if not path.exists():
+    if not require_existing and not path.exists():
         return _document(None)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -344,10 +344,12 @@ def _records(document: dict) -> PlaceRecords:
     return PlaceRecords(document["revision"], rows, tuple(document.get("circles", ())), choices)
 
 
-def place_records(drive_root: Any) -> PlaceRecords:
-    """The places, circles and choices from one read (the legacy import runs first, as ``load_places``)."""
-    current = _read(drive_root)
-    if not current.get("migration", {}).get("presence_bindings_v1"):
+def place_records(drive_root: Any, *, minimum_revision: int | None = None) -> PlaceRecords:
+    """Read places, circles and choices together; a retained minimum requires an existing store, never migration."""
+    current = _read(drive_root, require_existing=minimum_revision is not None)
+    if minimum_revision is not None and current["revision"] < minimum_revision:
+        raise PlaceError("places_unreadable", "revision", "The Places snapshot predates the recorded check.")
+    if minimum_revision is None and not current.get("migration", {}).get("presence_bindings_v1"):
         current = migrate_places(drive_root)
     return _records(current)
 
@@ -367,9 +369,8 @@ def place_room_index(drive_root: Any, place_id: str, *, details: bool = False) -
 
 
 def get_place(drive_root: Any, place_id: str) -> Place:
-    for place in load_places(drive_root):
-        if place.place_id == place_id:
-            return place
+    if (place := place_records(drive_root).places.get(place_id)) is not None:
+        return place
     raise PlaceError("place_not_found", "place_id")
 
 
@@ -575,8 +576,7 @@ def confirmed_elsewhere(places: Iterable[Place], place: Place) -> list[tuple[Pla
 
 
 def place_rows(drive_root: Any) -> dict[str, Place]:
-    """Every place as stored now, by id: one read, never a migration (``load_places`` may write). An
-    unreadable document raises ``PlaceError``: unknown, never "no place"."""
+    """Read the stored place rows without migration."""
     current = _read(drive_root)
     connections = current.get("connections", {})
     return {key: _decode(value, connections.get(key)) for key, value in current["places"].items()}

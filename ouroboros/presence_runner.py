@@ -51,6 +51,10 @@ class PresenceTurnResult:
     continuation_version: int = 0
     # Version 2: ``{source_event_id, message}`` of the last input this output covers.
     reply_anchor: Mapping[str, Any] | None = None
+    owner_confirmation: Mapping[str, Any] | None = None
+
+    def delivery_condition(self) -> dict:
+        return {"owner_confirmation": self.owner_confirmation} if self.text and self.owner_confirmation is not None else {}
 
 
 def _presence_delivery(outcome: str, text: str, terminal_origin: str, *, legacy: bool = False) -> tuple[str, str]:
@@ -69,14 +73,22 @@ def _presence_delivery(outcome: str, text: str, terminal_origin: str, *, legacy:
     return outcome, text
 
 
+def _stored_reply(metadata, fallback=None):
+    return {"outcome": metadata.get("presence_outcome"), "text": metadata.get("presence_result_text", fallback),
+            **{key: metadata[saved] for key, saved in (("conditional_reply", "presence_conditional_reply"),
+                                                       ("owner_confirmation", "presence_owner_confirmation"))
+               if saved in metadata}}
+
+
 def presence_result_from_stored(stored: Mapping[str, Any], task_id: str, drive_root=None) -> PresenceTurnResult:
     """One replay projection for cached turns and completed delegated work."""
+    from ouroboros.place_reply import project_reply, read_frozen_reply
     from ouroboros.task_finalization import TERMINAL_ORIGIN_MODEL_FINAL, provider_terminal_body, terminal_notice_text
 
     metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
-    text = metadata["presence_result_text"] if "presence_result_text" in metadata else stored.get("result")
+    outcome, text, confirmation = read_frozen_reply(_stored_reply(metadata, stored.get("result")))
     origin = str(stored.get("terminal_origin") or "")
-    if origin == TERMINAL_ORIGIN_MODEL_FINAL and text and "result" in stored:
+    if confirmation is None and origin == TERMINAL_ORIGIN_MODEL_FINAL and text and "result" in stored:
         raw = str(stored["result"] or "")
         # Undo only the recorded host composition, in either custody rendering. Older explicit reply
         # bodies could differ from the raw final; neither they nor deliberate emptiness are guessed away.
@@ -85,29 +97,27 @@ def presence_result_from_stored(stored: Mapping[str, Any], task_id: str, drive_r
             text = raw
     # Unknown-origin compatibility covers completed rows only: a failed row may
     # carry host text (an orphan reconcile or exception notice), never a reply.
-    outcome, text = _presence_delivery(
-        str(metadata.get("presence_outcome") or "message"), str(text or ""), origin,
-        legacy=str(stored.get("status") or "") == "completed",
-    )
+    outcome, text = _presence_delivery(outcome, text, origin, legacy=str(stored.get("status") or "") == "completed")
     if _terminal_refusal(stored):
         # A refused or unproven attempt has no reply to deliver: the forced rail may
         # still stamp model_final over a round-one draft it salvaged before the quota
         # refusal, and the deferred-work view must not hand that draft to the correspondent.
         outcome, text = "silent", ""
     presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
-    from ouroboros.place_reply import project_reply
     return project_reply(drive_root, metadata, PresenceTurnResult(
         outcome=outcome, text=text, task_id=task_id,
         work_ref=str(metadata.get("presence_work_ref") or ""),
         delivery_reporting_version=int(presence.get("delivery_reporting_version") == 1),
         output_ref=str(metadata.get("presence_output_ref") or "") if text else "",
         reply_anchor=metadata.get("presence_reply_anchor"),
+        owner_confirmation=confirmation if text else None,
     ))
 
 
 # The conversation's own delivery facts a Presence result stamps on its task's metadata, below.
-PRESENCE_DELIVERY_KEYS = ("presence_outcome", "presence_result_text", "presence_output_ref", "presence_work_ref",
-                          "presence_reply_anchor", "presence_declaration")
+PRESENCE_REPLY_KEYS = ("presence_outcome", "presence_result_text", "presence_output_ref", "presence_reply_anchor",
+                       "presence_conditional_reply")
+PRESENCE_DELIVERY_KEYS = (*PRESENCE_REPLY_KEYS, "presence_work_ref", "presence_declaration")
 
 
 def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, terminal_origin: str = "",
@@ -119,7 +129,7 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
     from ouroboros.presence_continuation import _handoff_ref, terminal_output
     from ouroboros.task_finalization import HOST_AUTHORED_TERMINAL_ORIGINS
 
-    from ouroboros.place_reply import prepare_focus_reply, reply_carrier
+    from ouroboros.place_reply import freeze_reply, prepare_focus_reply, reply_carrier
     carrier = reply_carrier(task.get("metadata") or {})
     if carrier:
         # Ordinary exits have already returned flags to the mind. Forced exits cannot buy a
@@ -161,9 +171,13 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
     outcome, result_text = _presence_delivery(outcome, str(text or ""), terminal_origin)
     # An output this author already released at a review wait is never spoken twice.
     outcome, result_text, output_ref = terminal_output(ctx, outcome, result_text)
+    frozen = freeze_reply(outcome, result_text, completion.get("owner_confirmation"))
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-    metadata["presence_outcome"] = outcome
-    metadata["presence_result_text"] = result_text
+    for key in (*PRESENCE_REPLY_KEYS, "presence_owner_confirmation"):
+        metadata.pop(key, None)
+    metadata.update(presence_outcome=frozen["outcome"], presence_result_text=frozen["text"])
+    if "conditional_reply" in frozen:
+        metadata["presence_conditional_reply"] = frozen["conditional_reply"]
     if output_ref:
         metadata["presence_output_ref"] = output_ref
     if work_ref:
@@ -177,11 +191,10 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
     return {
         "type": "presence_result",
         "task_id": str(task.get("id") or ""),
-        "outcome": outcome,
-        "text": result_text,
+        **frozen,
         # Speech and the internal finish note stay separate even when owed work
         # changes tool_delivered into deferred for the polling contract.
-        "message": result_text,
+        "message": frozen["text"],
         **({"finish_note": note} if note else {}),
         "work_ref": work_ref,
         "output_ref": output_ref,
@@ -653,6 +666,9 @@ def _previous_turn_source_view(drive_root: Path, pointer: dict[str, Any]) -> dic
         return pointer
     row = load_task_result(drive_root, str(pointer.get("task_id") or "")) or {}
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    from ouroboros.place_reply import has_reply_condition
+    if has_reply_condition(_stored_reply(metadata)):
+        return {**pointer, "message": "", "previous_text_unverified": True}
     observed = metadata.get("presence_result_text")
     if metadata.get("presence_outcome") == "deferred" and isinstance(observed, str):
         if observed == pointer["message"]:
@@ -721,11 +737,12 @@ def record_continuing_turn(drive_root: Path, conversation_key: str, task_id: str
 def _pointer_speech(stored: Mapping[str, Any], outcome: str, message: str) -> tuple[str, str]:
     """A terminal that re-selected an output it released at a review wait says nothing new;
     its pointer still names that released speech (``presence_continuation``)."""
+    from ouroboros.place_reply import last_ordinary_reply
     continued = stored.get("presence_continuation") if isinstance(stored.get("presence_continuation"), dict) else {}
-    spoken = [item for item in continued.get("outputs") or [] if isinstance(item, dict) and item.get("text")]
+    spoken = last_ordinary_reply(continued.get("outputs") or [])
     if message or not spoken:
         return outcome, message
-    return str(spoken[-1].get("outcome") or outcome), str(spoken[-1]["text"])
+    return str(spoken.get("outcome") or outcome), str(spoken["text"])
 
 
 def _repair_pointer(drive_root: Path, conversation_key: str, physical_id: str) -> None:
@@ -740,7 +757,7 @@ def _repair_pointer(drive_root: Path, conversation_key: str, physical_id: str) -
     settled = presence_result_from_stored(stored, physical_id)
     rows = _live_task_rows(Path(drive_root), physical_id, conversation_key) if settled.delivery_reporting_version else []
     sends = _turn_sends(rows)[0] if settled.delivery_reporting_version else []
-    outcome, message = _pointer_speech(stored, settled.outcome, settled.text)
+    outcome, message = _pointer_speech(stored, settled.outcome, "" if settled.owner_confirmation is not None else settled.text)
     _write_previous_turn(Path(drive_root), conversation_key, physical_id, outcome=outcome, message=message,
                          sends=sends or [], actions=_turn_actions(rows), work_ref=settled.work_ref,
                          finished_at=str(stored.get("ts") or ""),
@@ -918,12 +935,17 @@ def current_previous_turn(drive_root: Path, conversation_key: str, *,
             previous_turn = {**previous_turn, "continuing": False, "author_status": status}
     previous_turn = _previous_turn_source_view(drive_root, previous_turn)
     if previous_turn.get("work_ref"):   # the deferred child's fate is read from its canonical row, never stored
+        from ouroboros.place_reply import has_reply_condition
         work_ref = str(previous_turn["work_ref"])
         child = load_task_result(drive_root, work_ref) or {}
         status = str(child.get("status") or "")
-        answered = presence_result_from_stored(child, work_ref).text if status == STATUS_COMPLETED else ""
-        record = str(child.get("result") or "") if status == STATUS_COMPLETED and not answered else ""
+        metadata = child.get("metadata") if isinstance(child.get("metadata"), dict) else {}
+        conditioned = has_reply_condition(_stored_reply(metadata))
+        show = status == STATUS_COMPLETED and not conditioned
+        answered = presence_result_from_stored(child, work_ref).text if show else ""
+        record = str(child.get("result") or "") if show and not answered else ""
         previous_turn = {**previous_turn, "work_status": status or "absent", "work_result": answered,
+                         **({"work_reply_conditional": True} if conditioned else {}),
                          "work_record": record[:300] + (" …(truncated)" if len(record) > 300 else "")}
     return previous_turn, open_turns
 
@@ -940,8 +962,7 @@ def _build_task(
     task_id = physical_task_id or _task_id(admission, event)
     chat_id = presence_chat_id(event.conversation_key)
     actor_id = _stable_numeric_id(
-        "presence-actor",
-        f"{event.provider}:{event.account_id}:{event.actor.get('platform_actor_id') or event.actor.get('id') or ''}",
+        "presence-actor", f"{event.provider}:{event.account_id}:{event.actor.get('platform_actor_id') or event.actor.get('id') or ''}",
     )
     presence_context = {
         "binding_id": admission.binding_id,
@@ -951,6 +972,8 @@ def _build_task(
         "instructions": admission.instructions,
         "context_topics": list(admission.context_topics),
         "observed_text": str(event.text or ""),
+        **({"direct_reply_key": event.direct_reply_key, "direct_reply_version": event.direct_reply_version}
+           if event.direct_reply_key else {}),
         "delivery_reporting_version": event.delivery_reporting_version,
         "event": {
             "source_event_id": event.source_event_id,
@@ -1108,10 +1131,12 @@ def finish_turn(drive_root: Path, task: Mapping[str, Any], task_id: str, identit
                             identity=identity, work_ref=work_ref)
     if not isinstance(row, dict):
         raise PresenceTurnError("presence_result_missing", "presence_result")
+    from ouroboros.place_reply import has_reply_condition, project_reply, read_frozen_reply
     continued = terminal.get("presence_continuation") if isinstance(terminal.get("presence_continuation"), dict) else {}
+    outcome, text, confirmation = read_frozen_reply(row)
     result = PresenceTurnResult(
-        outcome=str(row.get("outcome") or "message"),
-        text=str(row.get("text") or ""),
+        outcome=outcome,
+        text=text,
         task_id=task_id,
         work_ref=str(row.get("work_ref") or ""),
         delivery_reporting_version=event.delivery_reporting_version,
@@ -1119,10 +1144,11 @@ def finish_turn(drive_root: Path, task: Mapping[str, Any], task_id: str, identit
         output_ref=str(row.get("output_ref") or ""),
         continuation_version=event.continuation_version,
         reply_anchor=row.get("reply_anchor"),
+        owner_confirmation=confirmation,
     )
-    from ouroboros.place_reply import project_reply
     result = project_reply(drive_root, task["metadata"], result)
-    if result.outcome in {"message", "deferred"} and result.text and not result.delivery_reporting_version:
+    if (result.outcome in {"message", "deferred"} and result.text
+            and not result.delivery_reporting_version and confirmation is None):
         log_dialogue(direction="out", user_id=0, text=result.text)
     # Still under the conversation lock. A replay writes only through the cached-replay repair, under
     # this same lock, and it leaves a pointer that names a newer turn alone.
@@ -1132,7 +1158,8 @@ def finish_turn(drive_root: Path, task: Mapping[str, Any], task_id: str, identit
         rows = _live_task_rows(Path(drive_root), task_id, event.conversation_key)
         sends = _turn_sends(rows, own_start, same_generation=True)[0]  # the store holds every row this execution wrote
         actions = _turn_actions(rows, own_start, same_generation=True)
-    outcome, message = _pointer_speech(terminal, result.outcome, str(row.get("message") or result.text))
+    ordinary_message = "" if has_reply_condition(row) else str(row.get("message") or result.text)
+    outcome, message = _pointer_speech(terminal, result.outcome, ordinary_message)
     _write_previous_turn(Path(drive_root), event.conversation_key, task_id, outcome=outcome, message=message,
                          sends=sends or [], actions=actions, work_ref=result.work_ref, finished_at=utc_now_iso(),
                          delivery=_delivery_state(event.delivery_reporting_version, sends, result.text or message, outcome),

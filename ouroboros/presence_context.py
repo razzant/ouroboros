@@ -103,7 +103,9 @@ def _previous_turn_line(previous: Mapping[str, Any]) -> str:
     if previous.get("work_ref"):
         status, ref = str(previous.get("work_status") or "absent"), previous.get("work_ref")
         result, record = (str(previous.get(key) or "").strip() for key in ("work_result", "work_record"))
-        if status == "completed" and result:
+        if status == "completed" and previous.get("work_reply_conditional"):
+            work = f" Its deferred work (task {ref}) completed; its destination-conditioned reply is not shown here."
+        elif status == "completed" and result:
             work = f" Its deferred work (task {ref}) completed and answered: {json.dumps(result, ensure_ascii=False)}."
         elif status == "completed":  # a host-authored terminal is never spoken; the model may still read it
             work = f" Its deferred work (task {ref}) completed silently" + (

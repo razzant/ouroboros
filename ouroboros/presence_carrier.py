@@ -83,7 +83,7 @@ class FrameExecution:
             self.initial.set_result(value)
         if first or return_capacity:
             self._sink.put({"type": "presence_turn_initial", "turn_id": self.turn_id, "task_id": self.turn_id,
-                            "result": _result_payload(value), "return_capacity": bool(return_capacity)})
+                            **_result_payload(value), "return_capacity": bool(return_capacity)})
         return first
 
     def return_capacity(self, fallback: Any = None) -> None:
@@ -91,14 +91,30 @@ class FrameExecution:
 
 
 def _result_payload(result: Any) -> dict[str, Any]:
-    """The result by value: every field of ``PresenceTurnResult``; a runner that states fewer (a double)
-    leaves the dataclass's defaults for the rest."""
+    """Frame fields by value. The legacy result is safe to decode with the old dataclass."""
+    if result is None:
+        return {"result": None}
+    from ouroboros.place_reply import freeze_reply
+
     defaults = PresenceTurnResult(**{key: getattr(result, key) for key in ("outcome", "text", "task_id")
                                      if hasattr(result, key)})
     payload = {key: getattr(result, key, getattr(defaults, key)) for key in PresenceTurnResult.__dataclass_fields__}
     if payload.get("reply_anchor") is not None:
         payload["reply_anchor"] = dict(payload["reply_anchor"])
-    return payload
+    frozen = freeze_reply(payload["outcome"], payload["text"], payload.pop("owner_confirmation"))
+    conditional = frozen.pop("conditional_reply", None)
+    return {"result": {**payload, **frozen}, **({"conditional_reply": conditional} if conditional is not None else {})}
+
+
+def _result_from_frame(frame: Mapping[str, Any]) -> PresenceTurnResult:
+    from ouroboros.place_reply import read_frozen_reply
+
+    row = dict(frame["result"])
+    if "conditional_reply" in frame:
+        row["conditional_reply"] = frame["conditional_reply"]
+    outcome, text, confirmation = read_frozen_reply(row)
+    row.pop("conditional_reply", None)
+    return PresenceTurnResult(**{**row, "outcome": outcome, "text": text, "owner_confirmation": confirmation})
 
 
 def _error_payload(exc: BaseException) -> dict[str, Any]:
@@ -157,10 +173,11 @@ def presence_seed_task(*, admission: PresenceAdmission, event: PresenceTurnEvent
         PRESENCE_RUN_KEY: {
             "skill_name": str(skill_name), "binding_id": admission.binding_id, "event": payload,
             "identity": dict(event.identity) if isinstance(event.identity, Mapping) else None,
+            **({"direct_reply_key": event.direct_reply_key, "direct_reply_version": event.direct_reply_version}
+               if event.direct_reply_key else {}),
             "staged_files": [str(path) for path in staged_files],
             "vouched_facts": list(event.facts or ()),  # the Host admitted these facts (its declared signals too)
-            # The words the Host read for its connector's kinds, whole and by value: attention also matches kinds the
-            # event never names (``from_bot`` from its author, ``any_message``), and the focus names those it matched.
+            # Names from the Host include kinds attention derives, such as from_bot and any_message.
             "fact_labels": dict(admission.fact_labels or {}),
             "delivery_reporting_version": int(event.delivery_reporting_version or 0),
             "continuation_version": int(event.continuation_version or 0),
@@ -266,8 +283,9 @@ def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_r
                                     reporting_version=int(facts.get("delivery_reporting_version") or 0),
                                     continuing=int(facts.get("continuation_version") or 0),
                                     vouched_facts=facts.get("vouched_facts") or ())
-        if facts.get("identity") is not None:
-            event = replace(event, identity=dict(facts["identity"]))
+        event = replace(event, direct_reply_key=facts.get("direct_reply_key", ""),
+                        direct_reply_version=facts.get("direct_reply_version", 0),
+                        identity=dict(facts["identity"]) if facts.get("identity") is not None else event.identity)
         gate = _configured_gate(root)
         if facts.get("gate_wait", True):
             from ouroboros.cancel_intents import has_active_intent
@@ -321,8 +339,7 @@ def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_r
         try:
             out_q.put({"type": "presence_turn_settled", "turn_id": turn_id, "task_id": turn_id,
                        "physical_id": physical_id,
-                       "result": _result_payload(result) if result is not None else None,
-                       "error": _error_payload(error) if error is not None else None,
+                       **_result_payload(result), "error": _error_payload(error) if error is not None else None,
                        **_frame_identity(task, worker_id, error)})
         except Exception:
             log.warning("presence turn %s could not report its settlement", turn_id, exc_info=True)
@@ -343,7 +360,7 @@ def handle_presence_turn_initial(evt: dict[str, Any], ctx: Any) -> None:
     _registry, execution = _find_execution(str(evt.get("turn_id") or ""))
     if execution is None or not isinstance(evt.get("result"), dict):
         return
-    execution.publish_initial(PresenceTurnResult(**evt["result"]), return_capacity=bool(evt.get("return_capacity", True)))
+    execution.publish_initial(_result_from_frame(evt), return_capacity=bool(evt.get("return_capacity", True)))
 
 
 def handle_presence_turn_settled(evt: dict[str, Any], ctx: Any) -> None:
@@ -365,7 +382,7 @@ def handle_presence_turn_settled(evt: dict[str, Any], ctx: Any) -> None:
         if isinstance(error_payload, dict):
             registry.settle_from_frame(execution, error=_error_from_payload(error_payload))
         elif isinstance(evt.get("result"), dict):
-            registry.settle_from_frame(execution, result=PresenceTurnResult(**evt["result"]))
+            registry.settle_from_frame(execution, result=_result_from_frame(evt))
         else:
             registry.settle_from_frame(execution, error=PresenceTurnNotStarted("presence turn settled without a result"))
     named = "worker_id" in evt
@@ -691,13 +708,11 @@ def answer_parked_turn(drive_root: Any, task_id: str) -> None:
         record = stored.get("presence_continuation") if isinstance(stored.get("presence_continuation"), dict) else {}
         initial = record.get("initial") if isinstance(record.get("initial"), dict) else None
         if initial is not None:
+            from ouroboros.presence_continuation import initial_result
             presence = (stored.get("metadata") or {}).get("presence") or {}
-            execution.publish_initial(PresenceTurnResult(
-                outcome=str(initial.get("outcome") or "deferred"), text=str(initial.get("text") or ""),
-                task_id=str(task_id), work_ref=str(initial.get("work_ref") or ""),
-                delivery_reporting_version=int(presence.get("delivery_reporting_version") == 1), status="continuing",
-                continuation_ref=str(task_id), output_ref=str(initial.get("output_ref") or ""),
-                continuation_version=int(record.get("continuation_version") or 1)), return_capacity=False)
+            execution.publish_initial(initial_result(initial, str(task_id),
+                int(presence.get("delivery_reporting_version") == 1), int(record.get("continuation_version") or 1)),
+                return_capacity=False)
         execution.publish_retained(custody_refusal(stored, str(task_id), CUSTODY_QUEUED))
     except Exception:
         log.warning("Parked Presence turn %s: its waiting transport was not answered early", task_id, exc_info=True)
@@ -706,13 +721,14 @@ def answer_parked_turn(drive_root: Any, task_id: str) -> None:
 def _record_yield(root: Path, task: Mapping[str, Any], ctx: Any, lease: Any, event: Any, identity: str) -> None:
     """The yield every continuing author records (``presence_continuation``): its open turn on the conversation
     pointer, its write-once initial envelope and the chat cursor its continuation reads facts from."""
+    from ouroboros.place_reply import last_ordinary_reply
     from ouroboros.presence_continuation import ReviewWaitBinding, _chat_cursor, _handoff_ref, _persist, _released
     from ouroboros.presence_runner import record_continuing_turn
     from ouroboros.utils import utc_now_iso
 
     task_id, lent_at = str(task["id"]), utc_now_iso()
     work_ref = _handoff_ref(ctx) if ctx is not None else ""
-    spoken = next((row for row in reversed(_released(ctx)) if row.get("text")), {}) if ctx is not None else {}
+    spoken = last_ordinary_reply(_released(ctx))
     try:
         cursor = _chat_cursor(root)
         record_continuing_turn(root, str(event.conversation_key), task_id, outcome=str(spoken.get("outcome") or "deferred"),
