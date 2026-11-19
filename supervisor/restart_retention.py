@@ -311,7 +311,9 @@ def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *,
     parked["_budget_pause"] = exact_pause_marker(pause, default_root=str(task.get("root_task_id") or task_id))
     from ouroboros.model_detach import detached_fields
     parked.update(detached_fields(parked, pause))  # a detach a lane carrier saved rides the durable pause row
-    if retention == RETAIN_SLEEP or (pause.get("reason") == "authority" and sleep_hold_reason in {"owner_restart_hold", "panic_hold"}):
+    from ouroboros.work_stop import reason_policy
+    # A technical pause, like a cold sleep, keeps the owner's Restart or a Panic: the stop table says which doors replace.
+    if retention == RETAIN_SLEEP or (pause.get("reason") == "authority" and reason_policy(sleep_hold_reason).get("replaces_door", True)):
         hold_after_stop(parked, result_root, sleep_hold_reason)
     if held_reason:
         hold_budget_row(

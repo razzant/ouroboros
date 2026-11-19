@@ -105,6 +105,11 @@ class SecretScan:
         self.found = False
         self.size = 0
 
+    @property
+    def name(self):
+        """The wrapped destination's name: code that reads the copy's target sees the real file."""
+        return getattr(self.sink, "name", "")
+
     def write(self, data):
         self.size += len(data)
         if self.values and not self.found:

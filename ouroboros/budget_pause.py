@@ -1371,9 +1371,9 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
     from ouroboros.owner_wait import owner_pause_resume_notice
     if row.get("retained_owner_wait_id") and state.get("owner_pause"):
         messages.append(owner_pause_resume_notice(ctx, state, "owner_input", cold=True))
-    resumed_by = {"authority_readable": "the saved check succeeded", "sleep_readiness": "its wake condition was met",
-                  "explicit_resume": model_sleep.resumer_words(grant.get("by")) or "an explicit Resume"}.get(
-                      grant.get("authority"), "its saved grant")
+    # Only an automatic return has its own words; a grant saved before grants named their authority was a Resume.
+    resumed_by = {"authority_readable": "the saved check succeeded", "sleep_readiness": "its wake condition was met"}.get(
+        grant.get("authority"), model_sleep.resumer_words(grant.get("by")) or "an explicit Resume")
     messages.append({"role": "user", "content": (
         f"[SYSTEM NOTICE]\nThis task continued from its {kind} after {resumed_by} "
         f"(paused {ctx._budget_paused_sec:.0f}s; rail: {row.get('rail')}; planning threshold "
