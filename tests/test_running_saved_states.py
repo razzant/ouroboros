@@ -497,3 +497,38 @@ def test_a_partial_pack_listing_holds_a_running_works_states_and_a_whole_one_nam
     assert _later(root)["removed"] == 1 and not first.exists()
     [line] = _ledger(handles)
     assert line["packed"] == [f"observability/packs/{TASK}.xz"] and "went on from a newer one" in line["rebuild"]
+
+
+def test_a_tasks_only_unreadable_pack_sidecar_holds_its_states_and_the_pass_keeps_its_dates(root, monkeypatch):
+    """One pack generation, its sidecar unreadable and no row of it in the index: unknown, never an error that ends
+    the pass before it writes the dates it proved."""
+    from ouroboros import evidence_packs, saved_state_retirement, store
+
+    handles = _running(root, attempt=1)
+    _first, first = _park(root, attempt=1)
+    with monkeypatch.context() as older_body:  # a body before #3789 packed every handle
+        older_body.setattr(saved_state_retirement, "worked_copy", lambda folder, name: None)
+        evidence_packs.pack_task(root, TASK, keep_shas=set())
+    assert evidence_packs.materialize_handle(root, TASK, f"source_handles/context_checkpoints/{first.name}")
+    write_task_result(root, TASK, "running", task_attempt=2)
+    sidecar = evidence_packs.packs_dir(root) / evidence_packs.sidecar_name(TASK, 1)
+    intact, index = sidecar.read_bytes(), evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME
+    sidecar.write_text("{", encoding="utf-8")
+    index.unlink()
+    with evidence_packs.open_index(root):  # rebuilt while that sidecar cannot be read: no row of this task
+        pass
+    _pass(root)
+    stale = _file(handles / "working" / "working_checkpoint-a1.json", "attempt 1")  # first proven by the next pass
+    report = _later(root)
+    assert report["held"] == {"packs_unknown": 1} and report["errors"] == 0 and first.exists(), report
+    with store.open_store(root, write=False) as txn:
+        assert stale.name in txn.get_row(saved_state_retirement.WORKED_COPIES, TASK)["proven"], "the pass kept its dates"
+    with evidence_packs.open_index(root, write=True) as conn:  # an index that never indexed this task, and says no fault
+        for table in ("packs", "members", "handles"):
+            conn.execute(f"DELETE FROM {table} WHERE task_id=?", (TASK,))
+        conn.execute("DELETE FROM meta WHERE key='sidecar_errors'")
+    assert _later(root)["held"] == {"packs_unknown": 1} and first.exists(), "an index without its rows proves no absence"
+    sidecar.write_bytes(intact)
+    index.unlink()
+    assert _later(root)["removed"] == 1 and not first.exists()
+    assert _ledger(handles)[0]["packed"] == [f"observability/packs/{TASK}.xz"]

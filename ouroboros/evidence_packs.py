@@ -463,8 +463,9 @@ def _task_handles(root: pathlib.Path, task_id: str, rel_path: str = "", *, unrea
         kept = _indexed_handles(root, task_id, rel_path, validated=False)
         if kept:
             return kept
-        raise errors[0]
-    if unread is not None:
+        if unread is None:
+            raise errors[0]
+    if unread is not None:  # the caller judges what an unreadable sidecar leaves unknown
         unread.extend(errors)
     return found
 
@@ -862,14 +863,14 @@ def packed_handle_names(root: Any, task_id: str) -> List[str]:
 
 def packed_handle_packs(root: Any, task_id: str, *, complete: bool = False) -> Optional[Dict[str, str]]:
     """Each packed checkpoint handle's name, with the data-root address of the pack generation that holds it.
-    ``complete``: when unreadable sidecars of this task may have left the listing partial, the checked index answers
-    if it recorded none, else ``None`` (a name such a listing misses may still be packed: unknown, not absent)."""
+    ``complete``: when unreadable sidecars of this task may have left the listing partial or empty, only a checked index
+    that recorded none and holds this task's rows answers, else ``None`` (a name such a listing misses may still be
+    packed: unknown, not absent)."""
     if not packs_dir(root).is_dir():
         return {}
     unread: list = []
-    handles = _task_handles(pathlib.Path(root), str(task_id), unread=unread, whole=complete)
-    if complete and unread and (handles := _indexed_handles(pathlib.Path(root), str(task_id), "",
-                                                             validated=False, whole=True)) is None:
+    handles = _task_handles(pathlib.Path(root), str(task_id), unread=unread if complete else None, whole=complete)
+    if unread and not (handles := _indexed_handles(pathlib.Path(root), str(task_id), "", validated=False, whole=True)):
         return None
     return {pathlib.PurePosixPath(member["path"]).name: f"observability/packs/{pack.name}" for pack, member in handles}
 
