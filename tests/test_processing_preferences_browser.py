@@ -80,7 +80,7 @@ def test_onboarding_processing_draft_returns_and_reaches_finish(subscription_ui)
     page.wait_for_selector('[data-global-processing]')
     assert page.locator('[data-global-processing]').input_value() == 'fast'
     assert page.locator('[data-model-role="main"] [data-model-role-processing]').input_value() == 'standard'
-    for _ in range(3):
+    for _ in range(4):  # Models → Access → Consciousness → Budget → Summary
         page.locator('#next-btn').click()
     page.wait_for_selector('.summary-card')
     assert 'Processing: Standard (override)' in page.locator('.summary-card').text_content()

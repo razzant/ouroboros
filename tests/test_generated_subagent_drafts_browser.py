@@ -79,6 +79,8 @@ def test_wizard_same_preview_keeps_live_row_handler_and_finish_payload(subscript
     page.click("#next-btn")
     page.wait_for_selector("[data-reviewers-note]", state="attached")
     page.click("#next-btn")
+    page.wait_for_selector("[data-consciousness-step]")
+    page.click("#next-btn")
     page.wait_for_selector('[data-collapse="api-budget"]')
     page.click("#next-btn")
     page.wait_for_selector(".summary-card")
@@ -123,7 +125,7 @@ def test_session_access_is_visible_and_preserved_by_the_real_editor(subscription
         assert page.locator('[data-subagent-field="access"]').first.input_value() == "workspace_write"
         path = "/api/owner/safety-model"
     else:
-        for selector in ("[data-reviewers-note]", '[data-collapse="api-budget"]', ".summary-card"):
+        for selector in ("[data-reviewers-note]", "[data-consciousness-step]", '[data-collapse="api-budget"]', ".summary-card"):
             page.click("#next-btn")
             page.wait_for_selector(selector, state="attached")
         with page.expect_response("**/api/onboarding/complete"):

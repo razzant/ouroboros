@@ -23,7 +23,7 @@ import { mergeModelCatalog, catalogReadState, readDraftCatalog, summarizeReadErr
 import { accountRows } from './claudexor_status_store.js';
 import { accountRowFacts } from './harness_accounts.js';
 import { createStarterSkillsRow } from './onboarding_starter_skills.js';
-import { createConsciousnessOffer } from './onboarding_consciousness.js';
+import { createConsciousnessStep } from './onboarding_consciousness.js';
 import { createConnectionsEditor } from './settings_connections.js';
 import { PROVIDER_CARDS, createFlatKeyChoices, providerSettingsCard } from './settings_provider_cards.js';
 import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
@@ -122,7 +122,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     let compatibleCatalogs = {};
     const compatibleCard = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
     const starterSkills = createStarterSkillsRow(); // the Summary's Starter skills row keeps its ticks across renders
-    const consciousness = createConsciousnessOffer(bootstrap.consciousnessOffer, { onChange: () => render() }); // its one Start waits for the confirmed save
+    const consciousness = createConsciousnessStep(bootstrap.consciousnessOffer); // its position rides the one completion request
     const modelRoles = createModelRolesEditor({ hostId: 'onboarding-model-roles', onChange: (settings, { slot } = {}) => {
         delete proposedModels[MODEL_SLOTS.find((entry) => entry.slot === slot)?.stateKey];  // edited: the owner's now
         adoptModelSettings(settings);
@@ -480,12 +480,13 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         if (agentsStep) void agentsStep.refreshSubagentsPreview({ force: true });
         const index = STEP_ORDER.indexOf(state.currentStep);
         if (index >= 0 && index < STEP_ORDER.length - 1) {
-            navigateStep(STEP_ORDER[index + 1]);
+            navigateStep(state.quickStarted && state.currentStep === 'consciousness' ? 'summary' : STEP_ORDER[index + 1]);
         }
     }
 
     function previousStep() {
         const index = STEP_ORDER.indexOf(state.currentStep);
+        state.quickStarted = false;  // walking back returns to the ordinary order
         if (index > 0) navigateStep(STEP_ORDER[index - 1], { restorePosition: true });
     }
 
@@ -591,7 +592,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             ...((hasApiAccess() || !hasModelSubscription()) ? [['Total API budget', formatUsd(state.totalBudget)],
                 ['Per-task API cap', formatUsd(state.perTaskCostUsd)]] : []),
             ...(MODEL_SLOTS.some((slot) => trim(state[slot.stateKey]).split(',').some((value) => parseModelSource(value.trim()).source.startsWith('subscription:'))) ? [['When quota runs out', trim(state.fallbackModel) ? 'Tries the Fallback, then waits for the reset' : 'Waits for the reset, then continues']] : []),  // a subscription serves a slot
-            // The Consciousness offer above already uses that word alone (#1603); its model row says what it is.
+            ...consciousness.summaryRows(),  // the step's choice; the model row below says what it is
             ...MODEL_SLOTS.map((slot) => [slot.slot === 'consciousness' ? 'Consciousness model' : slot.label.replace(/ Model$/, ''), modelSummary(slot)]),
         ];
         const compatible = compatibleEndpoint(draftSettings());
@@ -644,6 +645,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             OUROBOROS_SUBAGENTS: catalogDraft(),
             ...(agentsStep?.allowEmptyReviewPool ? { [ALLOW_EMPTY_REVIEW_POOL]: true } : {}),
             ...starterSkills.payload(),
+            ...consciousness.payload(),
         };
     }
 
@@ -813,7 +815,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             state.error = agentsStep.previewError || 'Setup suggestions could not be prepared. Try again or choose your models manually.';
             syncCurrentStepActionState(); return;
         }
-        navigateStep('summary');
+        navigateStep((state.quickStarted = STEP_ORDER.includes('consciousness')) ? 'consciousness' : 'summary');  // its Continue goes to Summary
     }
 
     function subscriptionQuotaHtml() {
@@ -964,7 +966,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                     <p class="step-copy">${escapeHtml(STEP_META.summary.copy)}</p>
                 </div>
             </div>
-            <div class="summary-card"><div data-starter-skills></div><div data-consciousness-offer></div><div class="summary-card-rows">${summaryRowsHtml()}</div></div>
+            <div class="summary-card"><div data-starter-skills></div><div class="summary-card-rows">${summaryRowsHtml()}</div></div>
             ${packetOnlyReviewPool(catalogDraft())
                 ? `<div class="wizard-inline-note" data-tone="warn" data-review-pool-warning>${escapeHtml(PACKET_ONLY_POOL_WARNING)}</div>` : ''}
             ${languageBlockHtml({ onboarding: true })}
@@ -991,9 +993,9 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     }
 
     function renderStepContent() {
-        if (consciousness.running()) return consciousness.screenHtml();
         if (state.currentStep === 'accounts') return renderAccountsStep();
         if (state.completedRestartMode) return renderRestartRequiredScreen();
+        if (state.currentStep === 'consciousness') return consciousness.html({ title: STEP_META.consciousness.title, subscriptionOnly: hasModelSubscription() && !hasApiAccess() });
         if (state.currentStep === 'models') return renderModelsStep();
         if (state.currentStep === 'review_mode') return renderReviewModeStep();
         if (state.currentStep === 'budget') return renderBudgetStep();
@@ -1034,7 +1036,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                 <div class="wizard-steps" role="group" aria-label="Step ${index + 1} of ${STEP_ORDER.length}">${stepCards()}</div>
                 <div class="wizard-content">
                     ${renderStepContent()}
-                    ${state.completedRestartMode || consciousness.running() ? '' : `
+                    ${state.completedRestartMode ? '' : `
                     <div class="wizard-footer">
                         <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
                         <div class="footer-copy${saveUnknown ? ' footer-warning' : ''}">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
@@ -1056,9 +1058,8 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         `;
         bindEvents();
         starterSkills.mount(root.querySelector('[data-starter-skills]'));
-        consciousness.mount(root.querySelector('[data-consciousness-offer]'));
         disposeLanguage?.();   // the Language block lives on the summary step only; its binder owns its listeners
-        disposeLanguage = state.currentStep === 'summary' && !state.completedRestartMode && !consciousness.running() ? bindLanguageSettings(root, { staged: state.languageChoice, stage: (value) => { state.languageChoice = value; } }) : null;
+        disposeLanguage = state.currentStep === 'summary' && !state.completedRestartMode ? bindLanguageSettings(root, { staged: state.languageChoice, stage: (value) => { state.languageChoice = value; } }) : null;
         renderLocalStatus();
         observeFooter();
         revealCurrentStep();
@@ -1422,7 +1423,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         state.saveAttempt = '';
         await agentsStep?.disposeForCompletion();
         agentsStep = null;
-        if (!disposed) await consciousness.afterSave({ isDisposed: () => disposed, announce: () => announceCompletion(outcome.receipt) });
+        if (!disposed) announceCompletion(outcome.receipt);
     }
 
     async function completeOnboardingAtomically(payload) {
@@ -1450,13 +1451,11 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     }
 
     async function saveWizardPayload(payload) {
-        await consciousness.beforeSave();
-        if (disposed) return 'cancelled';
         const result = await completeOnboardingAtomically(payload);
         await applyStagedLanguage();
         await agentsStep?.disposeForCompletion();
         agentsStep = null;
-        await consciousness.afterSave({ isDisposed: () => disposed, announce: () => announceCompletion(result) });
+        announceCompletion(result);
         return 'ok';
     }
 
@@ -1530,7 +1529,6 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     }
 
     function bindEvents() {
-        if (consciousness.running()) return consciousness.bindScreen(root);
         if (state.completedRestartMode) {
             document.getElementById('open-app-btn')?.addEventListener('click', () => {
                 window.location.replace('/');
@@ -1565,6 +1563,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         if (state.currentStep === 'accounts') { bindProvidersStep(); bindAgentsStep(); }
         if (state.currentStep === 'models') bindModelsStep();
         if (state.currentStep === 'review_mode') bindReviewModeStep();
+        if (state.currentStep === 'consciousness') consciousness.bind(root);
         if (state.currentStep === 'budget') bindBudgetStep();
         syncCurrentStepActionState();
     }
@@ -1573,10 +1572,8 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     root.addEventListener('focusin', clearFooterOnFocus);
     window.addEventListener('ouro:language-changed', paintGaps);
     window.addEventListener('pagehide', (event) => {
-        consciousness.leave();  // every departure retires a Start not sent yet; the form itself survives the back/forward cache
         if (event.persisted) return;
         disposed = true;
-        consciousness.dispose();
         root.removeEventListener('focusin', clearFooterOnFocus);
         window.removeEventListener('ouro:language-changed', paintGaps);
         disposeLanguage?.();

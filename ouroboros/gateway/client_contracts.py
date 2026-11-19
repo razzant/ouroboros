@@ -157,10 +157,10 @@ class SetupInitialState(TypedDict):
 
 
 class SetupConsciousnessOffer(TypedDict):
-    """``settings_setup_contract.consciousness_offer``: the Summary's optional, unticked Consciousness row."""
+    """``settings_setup_contract.consciousness_offer``: the setup's Consciousness step (its words: ``first_run_words``)."""
 
-    offered: bool  # setup has never completed on this install; a completed setup shows no row
-    enabled: Optional[bool]  # the control as the state shows it; null = unknown
+    offered: bool  # setup never completed here and the state is not unreadable; else no step (``stepOrder`` omits it)
+    enabled: Optional[bool]  # the control as the state shows it; null = no state yet, the switch starts on
     autonomy: Literal["observe", "act", "full"]
     dailyUsd: float  # rolling-24h recorded-spend allowance; subscription quota is separate
     maxTasks: int  # how many of its own tasks may run at once; 0 = it starts none
@@ -179,7 +179,7 @@ class SetupBootstrap(TypedDict):
     secretPlaceholder: str  # a prefilled credential that is configured holds this marker
     contract: SetupContract
     initialState: SetupInitialState
-    consciousnessOffer: SetupConsciousnessOffer  # display; a ticked row sends the ordinary Start after the save
+    consciousnessOffer: SetupConsciousnessOffer  # display; the switch's position rides the completion request
     deployment: Optional["SettingsDeploymentPolicy"]  # Settings' ``_meta.policy_state.deployment``; null unmanaged
 
 

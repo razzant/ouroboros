@@ -37,8 +37,10 @@ def _saved_attempt(data_dir: pathlib.Path) -> str:
 
 def _to_summary(page, *, pro: bool) -> None:
     page.wait_for_selector(".wizard-step", timeout=60_000)
-    assert page.locator(".wizard-step").count() == 5
-    for _ in range(4):  # Accounts → Models → Review → Budget → Summary
+    steps = page.locator(".wizard-step").count()
+    # Accounts → Models → Review → (Consciousness, offered until the first completion) → Budget → Summary
+    assert steps == (6 if page.locator(".wizard-step-title", has_text="Consciousness").count() else 5)
+    for _ in range(steps - 1):
         title = page.locator(".step-title").inner_text()
         if pro and page.locator('[data-runtime-mode="pro"]').count():
             page.locator('[data-runtime-mode="pro"]').click()

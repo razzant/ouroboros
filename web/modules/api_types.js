@@ -163,9 +163,8 @@
  * @property {boolean=} automatic The read's own unsaved catalog, following Main and access.
  */
 /**
- * The wizard payload plus two DECLARATIONS about the onboarding run. Settings
- * keys ride through unchanged (open shape); neither flag is authority — the
- * server re-proves fresh-install status and re-reads the live account state.
+ * The wizard payload plus two DECLARATIONS about the onboarding run. Settings keys ride through unchanged (open
+ * shape); neither flag is authority — the server re-proves fresh-install status and re-reads the live account state.
  * @typedef {Object} OnboardingCompleteRequest
  * @property {boolean=} subscriptionsConnected
  * @property {boolean=} skipSubscriptionPresets
@@ -174,6 +173,7 @@
  * @property {string[]=} starter_skills  // catalog ids installed once after completion; absent: the default list
  * @property {Object<string, string>=} skill_source_trust  // {hub row id: trusted|review}; marks them confirmed
  * @property {string=} attempt_id  // client-made per save; GET /api/onboarding/complete?attempt= reads it back
+ * @property {boolean=} consciousness  // setup's Consciousness switch: true turns it on; false and absent change nothing
  */
 /**
  * POST /api/onboarding/subagents/preview accepts the same open provider/local draft and subscription

@@ -147,6 +147,7 @@ _STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
     ("accounts", "Connect your accounts", "Subscriptions + API", "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.", "Add more subscriptions or API access later in Settings → Accounts and keys."),
     ("models", "Choose models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider."),
     ("review_mode", "Choose access", "Reach", "Choose how much access Ouroboros gets.", ""),
+    ("consciousness", "Consciousness", "When it acts", "", ""),
     ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
     ("summary", "Review before launch", "Final check", "Check the final provider, model, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
 ))
@@ -289,6 +290,10 @@ ONBOARDING_COMPLETED_KEY = "OUROBOROS_ONBOARDING_COMPLETED_AT"
 # still ask about its own save when the answer is lost. The same write carries it.
 ONBOARDING_ATTEMPT_KEY = "OUROBOROS_ONBOARDING_ATTEMPT_ID"
 ATTEMPT_ID_FIELD = "attempt_id"
+# The setup's Consciousness switch (owner decision 2026-11-20): the optional completion field, and the completion fact
+# that carries "on" into the first state a mint creates (``state_initialization.first_state``). Off writes nothing.
+CONSCIOUSNESS_CHOICE_FIELD = "consciousness"
+ONBOARDING_CONSCIOUSNESS_KEY = "OUROBOROS_ONBOARDING_CONSCIOUSNESS"
 _ATTEMPT_ID = re.compile(r"[A-Za-z0-9_-]{16,128}")
 
 _SUBSCRIPTION_FIELDS = _rows(("id", "payloadKey", "label", "note"), (
@@ -452,6 +457,16 @@ def parse_completion_attempt(data: Any) -> Tuple[str, str]:
     return "", "attempt_id must be 16-128 letters, digits, '-' or '_'."
 
 
+def completion_facts(data: dict, attempt_id: str) -> dict:
+    """The onboarding completion facts one completion writes in its single settings write: when, which client attempt,
+    and the setup's Consciousness switch when the owner left it on (``true``; ``false`` and absence add nothing)."""
+    from ouroboros.utils import utc_now_iso
+
+    on = data.get(CONSCIOUSNESS_CHOICE_FIELD) is True
+    return {ONBOARDING_COMPLETED_KEY: utc_now_iso(), ONBOARDING_ATTEMPT_KEY: attempt_id,
+            **({ONBOARDING_CONSCIOUSNESS_KEY: "on"} if on else {})}
+
+
 def build_initial_setup_state(settings: dict, host_mode: str = "desktop", document: Optional[dict] = None) -> dict:
     profile = derive_provider_profile(settings)
     defaults = model_defaults_for_profile(profile)
@@ -525,36 +540,38 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop", docume
     return state
 
 
-def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None) -> dict:
-    """The Summary's optional Consciousness row. It is offered while setup has never completed here
-    (an unticked choice the owner makes now; a completed setup neither shows nor repeats one), with
-    the limits consciousness runs under now, as the runtime's own readers report them. ``enabled``
-    is the control as the state shows it (``None``: unknown). Nothing here is saved or started:
-    a ticked row sends the ordinary Start after the save, from the wizard."""
+def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None, readable: bool = True) -> dict:
+    """The setup's Consciousness step. It is offered while setup has never completed here and the control is not
+    unreadable; a completed setup neither shows nor repeats it. ``enabled`` is the control as the state shows it:
+    ``None`` with ``readable`` means no state yet (the first state is minted after this setup, and the switch starts
+    on); ``readable=False`` is a state that exists but cannot be read. The limits are the ones consciousness runs
+    under now, as the runtime's own readers report them; the words are the host's (``first_run_words``)."""
     from ouroboros.runtime_limits import (
         get_consciousness_autonomy, get_consciousness_daily_usd, get_consciousness_max_tasks,
     )
 
     from ouroboros.consciousness_view import first_run_words
 
-    return {"offered": not _string(settings.get(ONBOARDING_COMPLETED_KEY)),
+    return {"offered": readable and not _string(settings.get(ONBOARDING_COMPLETED_KEY)),
             "enabled": enabled if isinstance(enabled, bool) else None,
             "autonomy": get_consciousness_autonomy(), "dailyUsd": get_consciousness_daily_usd(),
             "maxTasks": get_consciousness_max_tasks(), "words": first_run_words(get_consciousness_autonomy())}
 
 
 def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False,
-                          consciousness_enabled: Optional[bool] = None, document: Optional[dict] = None) -> dict:
+                          consciousness_enabled: Optional[bool] = None, consciousness_readable: bool = True,
+                          document: Optional[dict] = None) -> dict:
     from ouroboros.deployment_policy import policy_state
 
     normalized_host = "web" if host_mode == "web" else "desktop"
+    offer = consciousness_offer(settings, enabled=consciousness_enabled, readable=consciousness_readable)
     return {
         "hostMode": normalized_host,
         # Display provenance only; completion re-proves install eligibility.
         # Unknown/legacy callers preserve existing model choices conservatively.
         "freshInstall": fresh_install,
         "supportsLocalRuntimeControls": normalized_host == "web",
-        "stepOrder": list(_STEP_ORDER),
+        "stepOrder": [step for step in _STEP_ORDER if step != "consciousness" or offer["offered"]],
         "modelDefaults": {key: dict(value) for key, value in _MODEL_DEFAULTS.items()},
         "localPresets": {key: dict(value) for key, value in _LOCAL_PRESETS.items()},
         "modelSuggestions": list(_MODEL_SUGGESTIONS),
@@ -563,7 +580,7 @@ def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_i
         "secretPlaceholder": CONFIGURED_SECRET_PLACEHOLDER,
         "contract": build_setup_contract(normalized_host),
         "initialState": build_initial_setup_state(settings, normalized_host, document),
-        "consciousnessOffer": consciousness_offer(settings, enabled=consciousness_enabled),
+        "consciousnessOffer": offer,
         "deployment": policy_state(),
     }
 
@@ -642,6 +659,8 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     so an unchanged short stored value cannot discard the whole form."""
     subscriptions_connected, skip_presets = parse_subscription_intent(data)
     pending_subscription = subscriptions_connected and not skip_presets
+    if not isinstance(data.get(CONSCIOUSNESS_CHOICE_FIELD, False), bool):
+        return {}, "consciousness must be true or false."
     selected_subscription = provider_for_model(_string(data.get("OUROBOROS_MODEL"))) == "claudexor"
     if selected_subscription:
         try:

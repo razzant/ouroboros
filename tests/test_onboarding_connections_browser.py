@@ -174,6 +174,7 @@ def test_first_run_named_servers_keep_routes_and_credentials_in_settings(direct_
         page.set_viewport_size({'width': 1360, 'height': 900})
         page.click('#next-btn')  # Review
         page.locator('[data-runtime-mode="light"]').click()
+        page.click('#next-btn')  # Consciousness
         page.click('#next-btn')  # Budget
         page.click('#next-btn')  # Summary
         # Disable optional starter installation: this test makes no public network requests.

@@ -2952,7 +2952,7 @@ preserve the edited value, caret, focus, selection and scroll position, assignin
 reviewer's previous source restores that source's model/account draft; a new
 source starts without another source's pin.
 
-The five wizard steps are Accounts, Models, Review and access, Budget, Summary. Codex is the
+The six wizard steps are Accounts, Models, Review and access, Consciousness, Budget, Summary. Codex is the
 recommended start without an API key; other connections name their capability.
 Signed in reports authentication, not execution, independently of model-source and suggestion reads. Accounts names pending, failed or partial reads and offers a
 contextual Retry that keeps the fields. Connected accounts the engine names as agents only read
@@ -2977,19 +2977,17 @@ optional API spending fields collapsed. "No API key" never claims unlimited free
 work or that paid provider credits were enabled. When a subscription serves a model, Summary says
 what an exhausted quota does: a set Fallback is tried first, then the work waits for the reset.
 
-Before the first completion, Summary offers Consciousness as an unchecked choice. Its
-row names the autonomy, daily allowance and own-task limit consciousness runs under
-now, and where to change or stop it (owner decision 2026-11-04: a visible, unchecked
-offer in the wizard; a conversation can personalize it later). A consciousness already
-on reads On already, with nothing to tick; a completed setup shows no row. The choice
-is never saved. Only a tick and a confirmed save send one ordinary Start, and the
-screen after the save keeps saved, accepted and observed on apart. A Start that was
-not sent, was refused or is not confirmed says so and is never sent again, also when
-the page was left and shown again. Summary labels the model row Consciousness model,
-so it does not read as this offer.
+Before the first completion, Consciousness is its own step (owner decision 2026-11-20, replacing the unchecked
+Summary offer of 2026-11-04): one large switch of the wizard's two choices, its positions in Dashboard ›
+Consciousness words, on where no state exists yet. A state that says off shows off and stays off unless the owner
+turns it; one already on reads On already; the wizard never turns it off, and clicking through lifts no owner or
+Panic stop. Beneath: what the positions mean, the autonomy, allowance and own-task limit it runs under now, on a
+subscription alone that its wakes use the quota, and where to change it later. Review & start lands on it; its
+Continue goes to Summary, one row there. The choice rides the one save: no command, no row in Main. Summary labels
+the model row Consciousness model, so it does not read as this choice.
 
 The first-run wizard is compact; the step rail alone says which step this is. An
-ordinary Accounts state, blank or connected, fits a 980×752 client viewport
+ordinary Accounts state, blank or connected, and the Consciousness step fit a 980×752 client viewport
 with every row, the limits warning and Continue in view: subscriptions
 are equal rows, two columns where they fit, the warning under them in every state,
 before any connection. A narrow or short window, expanded keys, a sign-in or a long

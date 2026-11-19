@@ -272,7 +272,9 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
         const access = doc.getElementById('root').innerHTML;  // the access step in a person's words
         assert.match(access, /How far Ouroboros reaches into its own code and this computer\./);
         assert.match(access, /Folder of your own skills \(optional\)/);
-        doc.getElementById('next-btn').fire('click');   // Access → budget.
+        doc.getElementById('next-btn').fire('click');   // Access → Consciousness: the switch starts on (no state yet).
+        assert.match(doc.getElementById('root').innerHTML, /data-consciousness-choice="on" aria-pressed="true"/);
+        doc.getElementById('next-btn').fire('click');   // Consciousness → budget.
         for (const [id, value] of [['total-budget', '15.5'], ['per-task-budget', '5.25']]) {
             const input = doc.getElementById(id);
             input.value = value;
@@ -300,6 +302,7 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
             OUROBOROS_RUNTIME_MODE: 'advanced',
             subscriptionsConnected: false,
             skipSubscriptionPresets: false,
+            consciousness: true,  // the step's position rides the one completion request (owner decision 2026-11-20)
         };
         for (const [key, value] of Object.entries(expected)) assert.equal(requests[0].body[key], value, key);
         assert.equal('OUROBOROS_REVIEW_ENFORCEMENT' in requests[0].body, false, 'the retired setting is never written');
@@ -700,8 +703,7 @@ test('the summary step stages the language and applies it only after the complet
     assert.match(source, /stage: \(value\) => \{ state\.languageChoice = value; \} \}\)/);
     const complete = source.indexOf('const result = await completeOnboardingAtomically(payload);');
     const apply = source.indexOf('await applyStagedLanguage();', complete);
-    // The hand-off runs through the Consciousness row's afterSave (#1603), which announces last.
-    const announce = source.indexOf('announce: () => announceCompletion(result)', complete);
+    const announce = source.indexOf('announceCompletion(result);', complete);
     assert.ok(complete > 0 && apply > complete && announce > apply, 'complete → apply the staged language → announce');
     assert.match(source, /await saveLanguageChoice\(choice\)/, 'the shared writer, not a second path');
     // The other verified-success path — an unknown save whose own receipt the attempt read-back returned —
@@ -824,18 +826,19 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
     // Walk from Accounts (where the connected subscription is observed) to Summary.
     const summary = async (query, fallbackModel, mainModel = 'claudexor::codex=gpt-test', openrouterKey = '') => {
-        let html = '', budget = '';
+        let html = '', budget = '', mind = '';
         const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, openrouterKey, mainModel, fallbackModel, automaticModels: [] } };
         await withWizard(bootstrap, query, async ({ doc }) => {
             await settle();
-            for (let step = 0; step < 4; step += 1) {
+            for (let step = 0; step < 5; step += 1) {
                 doc.getElementById('next-btn').fire('click');
                 await settle();
-                if (step === 2) budget = doc.getElementById('root').innerHTML;  // the Budget step's quota card
+                if (step === 2) mind = doc.getElementById('root').innerHTML;  // the Consciousness step
+                if (step === 3) budget = doc.getElementById('root').innerHTML;  // the Budget step's quota card
             }
             html = doc.getElementById('root').innerHTML;
         }, { fetch });
-        return { html, budget };
+        return { html, budget, mind };
     };
     const waits = await summary('quota-without-fallback', '');
     assert.match(waits.html, /When quota runs out[\s\S]*?Waits for the reset, then continues/);
@@ -850,6 +853,11 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const api = await summary('quota-api-main', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
     assert.match(api.html, /Total API budget/, 'the walk reached Summary');
     assert.doesNotMatch(api.html, /When quota runs out/);
+    // The Consciousness step names the subscription's quota only where a subscription alone pays for its wakes.
+    const quota = BOOTSTRAP.consciousnessOffer.words.subscriptionCost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(waits.mind, new RegExp(quota.replace(/'/g, '&#39;')));
+    assert.doesNotMatch(api.mind, /subscription&#39;s quota/);
+    assert.match(api.mind, /data-consciousness-step/, 'the walk passed the Consciousness step');
     // The limits step says what its limits cannot count, as the preview of this draft names it (Dashboard › Costs'
     // line); with nothing named the line is hidden.
     assert.match(api.budget, /id="budget-gaps"[^>]* hidden><\/div>/);
@@ -914,7 +922,8 @@ test('a replaced key\'s catalog never lands late, the key asked again stays the 
         await click('next-btn');                                        // Models again, same key: still the list read whole
         assert.deepEqual(reads, ['first', 'second'], 'the late answer did not become the list read whole');
         await click('next-btn');                                        // Models → Access
-        await click('next-btn');                                        // Access → limits: the answered preview's line
+        await click('next-btn');                                        // Access → Consciousness
+        await click('next-btn');                                        // Consciousness → limits: the answered preview's line
         assert.match(doc.getElementById('root').innerHTML, /id="budget-gaps"[^>]*>Not counted: Light \(price unknown\)\.</);
         // Its words are composed (data-i18n-fmt, which the page walker skips): a language change says them again.
         const { applyPayload } = await import('../modules/i18n.js');
@@ -1146,8 +1155,10 @@ async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, 
             type(revisitInputs);
             routeLocal(revisitLocalMode);
             await click(shortcut ? 'quick-start-btn' : 'next-btn');
+            // Review & start lands on the Consciousness step, and its Continue goes to Summary.
+            if (shortcut) assert.match(doc.getElementById('root').innerHTML, /data-consciousness-step/);
         }
-        for (let step = 0; step < (shortcut ? 1 : 4); step += 1) await click('next-btn');   // … → Start Ouroboros.
+        for (let step = 0; step < (shortcut ? 2 : 5); step += 1) await click('next-btn');   // … Consciousness … → Start Ouroboros.
     }, { fetch, location });
     assert.equal(posted.length, 1, 'the walk reached the completion POST');
     return posted[0];

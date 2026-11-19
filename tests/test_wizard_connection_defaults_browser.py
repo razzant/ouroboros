@@ -76,7 +76,7 @@ def _row(page, slot):
 
 
 def _finish(ui, page):
-    for _ in range(3):
+    for _ in range(4):  # Models → Access → Consciousness → Budget → Summary
         page.click("#next-btn")
     page.wait_for_selector(".summary-card")
     page.click("#next-btn")
@@ -275,6 +275,8 @@ def _quick_finish(ui, page, label):
     page.wait_for_selector("#quick-start-btn:not([hidden])")
     page.wait_for_function("() => !document.querySelector('#onboarding-access-retry')?.disabled")
     page.click("#quick-start-btn")
+    page.wait_for_selector("[data-consciousness-step]")
+    page.click("#next-btn")  # Review & start lands on Consciousness; its Continue goes to Summary
     page.wait_for_selector(".summary-card")
     return _quick_finish_from_summary(ui, page, label)
 
@@ -313,11 +315,11 @@ def test_a_connected_subscription_keeps_the_saved_catalog_through_preview_and_fi
         # Rows and no reviewer: the wizard asks the owner to confirm the empty pool, and posts nothing until then.
         assert body is None and error.startswith("No row is marked Reviewer."), error
         assert onboarding.saved()["OUROBOROS_SUBAGENTS"] == json.dumps(saved)
-        for _ in range(3):
+        for _ in range(4):  # Summary → Budget → Consciousness → Access → Models
             page.click("#back-btn")
         page.click('details[data-collapse="subagents"] > summary')
         page.check("[data-review-pool-allow-empty]")
-        for _ in range(3):
+        for _ in range(4):
             page.click("#next-btn")
         page.wait_for_selector(".summary-card")
         body, error = _quick_finish_from_summary(ui, page, f"{label}-confirmed")

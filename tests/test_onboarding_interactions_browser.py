@@ -21,7 +21,7 @@ def _open_wizard(ui):
     page = ui["page"]
     page.goto(ui["url"] + "/onboarding")
     page.wait_for_selector("#quick-start-btn:not([hidden])")
-    assert page.locator(".wizard-step").count() == 5
+    assert page.locator(".wizard-step").count() == 6
     return page
 
 
@@ -77,6 +77,8 @@ def test_wizard_summary_refresh_keeps_focused_action_and_position(subscription_u
     page = _open_wizard(ui)
     page.set_viewport_size({"width": 390, "height": 600})
     page.click("#quick-start-btn")
+    page.wait_for_selector("[data-consciousness-step]")
+    page.click("#next-btn")  # Review & start lands on Consciousness; its Continue goes to Summary
     page.wait_for_selector(".summary-card")
     assert page.evaluate("document.activeElement.matches('.step-title') && window.scrollY === 0")
     page.locator("#next-btn").focus()
@@ -222,7 +224,7 @@ def test_wizard_fields_have_explicit_names_help_and_shared_family(subscription_u
     assert routing.locator('[aria-pressed="true"]').count() == 1
     routing.locator('[data-local-mode="fallback"]').click()
     assert routing.locator('[data-local-mode="fallback"]').get_attribute("aria-pressed") == "true"
-    for _ in range(3):
+    for _ in range(4):  # Accounts → Models → Access → Consciousness → Budget
         page.click("#next-btn")
     page.locator('[data-collapse="api-budget"] > summary').click()
     for name in ("Total Budget (USD)", "Per-task Cost Cap (USD)"):

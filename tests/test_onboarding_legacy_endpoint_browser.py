@@ -223,6 +223,7 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
         report["frames"]["models"] = _frame(page, evidence, "models-980x780", page.locator('#compatible-model-loader'))
 
         page.click('#next-btn')  # Review
+        page.click('#next-btn')  # Consciousness
         page.click('#next-btn')  # Budget
         page.click('#next-btn')  # Summary
         summary = _summary(page)
@@ -449,7 +450,7 @@ def test_both_pairs_test_and_discovery_follow_the_cleared_dedicated_address(dire
 
         # Finish from the cleared draft saves the pair Test probed: the legacy pair untouched, the dedicated address
         # blank, and no key moved or copied between pairs.
-        for _ in range(4):
+        for _ in range(5):  # Accounts → Models → Access → Consciousness → Budget → Summary
             page.click('#next-btn')
         page.locator('[data-starter-toggle]').click()  # no public starter install from this isolated root
         page.locator('[data-starter-all="0"]').click()

@@ -142,13 +142,13 @@ textarea::placeholder {
 .wizard-steps {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-columns: minmax(min-content, 1fr); /* a one-word title (Consciousness) never runs into its neighbour */
   gap: 10px;
 }
 
 /* The step rail: trays, the current step a chosen card in the soft crimson, a done step's chip in green. */
 .wizard-step {
-  min-width: 0;
+  min-width: min-content;
   padding: 10px 12px;
   border-radius: var(--radius-inner);
   border: 1px solid transparent;
@@ -465,7 +465,8 @@ textarea::placeholder {
 
 /* Choice-card chip: neutral by default, so no chip renders as bare white text. A setting's value is never
    amber, so Advisory keeps the neutral chip; only Blocking declares a pair. */
-.wizard-choice .tone {
+.wizard-choice .tone,
+.consciousness-step-on .tone {
   display: inline-flex;
   margin-bottom: 10px;
   padding: 4px 8px;
@@ -478,7 +479,8 @@ textarea::placeholder {
   letter-spacing: 0.02em;
 }
 
-.wizard-choice.blocking .tone {
+.wizard-choice.blocking .tone,
+.consciousness-step-on .tone {
   background: var(--status-ok-bg);
   color: var(--status-ok-fg);
 }
@@ -1366,7 +1368,7 @@ textarea::placeholder {
   }
 }
 
-/* A short window: each pill as wide as its own title, so five titles stay on one line where they fit. */
+/* A short window: each pill as wide as its own title, so six titles stay on one line where they fit. */
 @media (max-height: 820px) {
   .wizard-steps {
     display: flex;
@@ -1428,7 +1430,7 @@ textarea::placeholder {
   }
 }
 
-/* A rail too narrow for five titles scrolls sideways, keeping its pills' numbers (onboarding_wizard.js::revealCurrentStep). */
+/* A rail too narrow for six titles scrolls sideways, keeping its pills' numbers (onboarding_wizard.js::revealCurrentStep). */
 @media (max-width: 720px) {
   .wizard-steps {
     display: flex;
@@ -1481,11 +1483,13 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
    depend on style.css. */
 .summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
 /* The Consciousness row (#1603) beside it shares the value and note ink; its label holds the one checkbox. */
-.skills-starter-summary, .consciousness-offer { display: grid; gap: 2px; min-width: 0; }
-.skills-starter-value, .consciousness-offer-value, .consciousness-offer-choice { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-.skills-starter-sub, .consciousness-offer-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.consciousness-offer-choice { display: inline-flex; align-items: center; gap: var(--space-2); justify-self: start; cursor: pointer; }
-[data-consciousness-offer]:empty { display: none; } /* no row offered: no extra gap in the card */
+.skills-starter-summary { display: grid; gap: 2px; min-width: 0; }
+.skills-starter-value { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+.skills-starter-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* The Consciousness step: the switch as the wizard's two choices, then what they mean, its limits and its door. */
+.consciousness-step { display: grid; gap: var(--space-2); }
+.consciousness-step .wizard-choice-grid { margin-bottom: var(--space-1); }
+.consciousness-step-on { padding: 14px; border-radius: var(--radius-inner); background: var(--surface-tray); }
 .skills-starter-change,
 .skills-starter-bulk button {
   padding: 0;

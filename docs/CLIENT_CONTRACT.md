@@ -151,17 +151,18 @@ Nobody tells an unmarked page to reload. A new choice reaches it when someone ne
   A credential that is already configured reads as `secretPlaceholder`, never the secret itself.
 - **`modelDefaults`** per provider profile, `modelSuggestions` and `localPresets`.
 - **`freshInstall`**, display only; completion checks it again.
-- **`consciousnessOffer`**, display only: the Summary's optional Consciousness row.
-  - `offered`: setup has never completed on this install. A completed setup offers nothing, so an old choice is never repeated.
-  - `enabled`: the consciousness control as the state shows it now, `null` when it cannot be read. When it is already on, the row says so and offers no Start.
-  - `autonomy`, `dailyUsd` and `maxTasks`: the limits consciousness runs under now.
+- **`stepOrder`** may contain `consciousness` (between `review_mode` and `budget`): present only while `consciousnessOffer.offered`.
+- **`consciousnessOffer`**, display only: the Consciousness step.
+  - `offered`: setup has never completed on this install and the state is not unreadable. Otherwise there is no step, so an old choice is never repeated.
+  - `enabled`: the consciousness control as the state shows it now; `null` means no state yet (the first state is minted after setup), and the switch then starts on. `false` shows off; `true` reads On already, with nothing to send.
+  - `autonomy`, `dailyUsd` and `maxTasks`: the limits consciousness runs under now; `words`: the host's words for the step.
 
-  The row is unchecked by default, and its choice is never saved or sent with the completion. When it is ticked, Finish reads `boot.since` from `GET /api/health` before saving. After a confirmed save, once that same server reports `dialogue_ready`, the page sends one `/bg start` with `if_boot` (§15), then reads `GET /api/state` until `bg_consciousness_enabled` is true; queue acceptance (`200`) and the observed state stay distinct. A Start that was refused, unanswered or not confirmed is reported as such and never resent. A Start still pending when the page is closed, reloaded or left is never sent later, also when the browser shows the page again from its back/forward cache.
+  The switch's position rides the completion as `consciousness` (below). A page that ignores the step sends no field, which changes nothing.
 
 Setup can also check, without saving: `POST /api/providers/test` probes one provider (a failed probe is `200`, `ok: false`), `POST /api/openai-compatible/models` lists a compatible endpoint's models, `GET /api/model-catalog` lists selectable models and the local-model routes start and test a local model (both §14). The first two refuse a kept key for another endpoint (scheme, host, port or path) or, in the test, a weakened TLS check with `400` `masked_key_endpoint_changed`. For the built-in endpoint they name the key setting of the pair the draft reaches (`api_key_setting`; listing: `apiKeySetting`); the test then probes that pair alone and takes its fields as overrides. Unnamed, its blank dedicated address blanks the legacy one too.
 
 To finish setup, send `POST /api/onboarding/complete`:
-- **The body:** the settings to save, keyed by each row's `settingKey`. Add `subscriptionsConnected` and `skipSubscriptionPresets` as needed, and optionally `OUROBOROS_SUBAGENTS` and `allow_empty_review_pool`. A credential field left as `secretPlaceholder` keeps the stored value. Give each save its own `attempt_id` (16–128 letters, digits, `-` or `_`), made before you send it: it names this save later.
+- **The body:** the settings to save, keyed by each row's `settingKey`. Add `subscriptionsConnected` and `skipSubscriptionPresets` as needed, and optionally `OUROBOROS_SUBAGENTS`, `allow_empty_review_pool` and `consciousness`: `true` turns consciousness on (the first state is born on, or the owner's start is saved where a state exists, with no command and no chat row; a pending Panic holds); `false` or absence changes nothing. A credential field left as `secretPlaceholder` keeps the stored value. Give each save its own `attempt_id` (16–128 letters, digits, `-` or `_`), made before you send it: it names this save later.
 - **What it does:** this is the only setup writer. Settings, the next-start access mode and the completion record are saved together, or not at all.
 - **On success:** `200 OnboardingCompleteResponse`. `restart_required` says whether access settings apply only after a restart.
 - **If agent accounts can't be checked:** `503` with `can_skip: true`: nothing was saved. Resend with `skipSubscriptionPresets: true` to finish without agent defaults.

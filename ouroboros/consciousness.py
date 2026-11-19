@@ -143,7 +143,7 @@ def panic_blocks_wake(drive_root: Any) -> bool:
 
 
 # Who turned consciousness off, saved in the same state write as ``bg_consciousness_enabled`` (owner 11.11, 5A; the
-# twin of /evolve off's provenance): the owner's doors (/bg from the app, Telegram or onboarding) and Panic leave a stop
+# twin of /evolve off's provenance): the owner's doors (/bg from the app or Telegram, setup's switch) and Panic leave a stop
 # only the owner's start lifts, in every mode (P0: the owner's decision binds in Cyber Pro too); toggle_consciousness lifts only
 # a stop it placed. A stop with no saved source (placed before this key, a recovered state) is unknown: owner's.
 STOP_SOURCE_KEY = "bg_consciousness_stop_source"
@@ -189,6 +189,23 @@ def _persist_start(source: str) -> Tuple[str, str]:
         return (f"Background consciousness stayed off: runtime state is unavailable ({exc.reason}); "
                 "nothing was started."), ""
     return "", ""
+
+
+def setup_start(drive_root: Any) -> None:
+    """Setup's switch left on where a state already exists (owner decision 2026-11-20): the owner's start, the locked
+    write ``/bg start`` saves, sent by no command and leaving no chat row. With no state yet nothing is written: the
+    first state is born with the setup's choice (``state_initialization.first_state``). A pending Panic or a write that
+    did not land raises, and completion reports it at its commit boundary. A running clock reads the saved switch at
+    its next tick; a later boot grants it."""
+    from supervisor.state_initialization import first_state_pending
+
+    if panic_blocks_wake(drive_root):
+        raise RuntimeError("consciousness was not started: Panic controls await persistence")
+    if first_state_pending(drive_root):
+        return
+    refusal, _note = _persist_start(OWNER_STOP)
+    if refusal:
+        raise RuntimeError(refusal)
 
 
 def _persist_stop(source: str) -> str:

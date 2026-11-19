@@ -7,8 +7,12 @@
     "offered": true,
     "words": {
       "choice": "Also on its own and in places",
+      "door": "Change it later in Dashboard \u203a Consciousness; the allowance is in Dashboard \u203a Costs.",
       "gloss": "When Ouroboros acts.",
-      "meaning": "Off: it works only when you write to it, and places you connect are heard, not answered. On: it also wakes between your messages and answers in places you make Active."
+      "meaning": "Off: it works only when you write to it, and places you connect are heard, not answered. On: it also wakes between your messages and answers in places you make Active.",
+      "off": "Only when you write to it",
+      "on": "Also on its own",
+      "subscriptionCost": "On a subscription alone its wakes use the subscription's quota between your messages; the daily allowance bounds API spending only."
     }
   },
   "contract": {
@@ -417,6 +421,13 @@
         "title": "Choose access"
       },
       {
+        "copy": "",
+        "footer": "",
+        "id": "consciousness",
+        "railCopy": "When it acts",
+        "title": "Consciousness"
+      },
+      {
         "copy": "Review subscription quotas and optional API spending limits.",
         "footer": "",
         "id": "budget",
@@ -664,6 +675,7 @@
     "accounts",
     "models",
     "review_mode",
+    "consciousness",
     "budget",
     "summary"
   ],

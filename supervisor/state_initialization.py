@@ -31,7 +31,8 @@ A root whose every trace was deleted is indistinguishable from a new one: that
 is a disclosed residual, not proof of historylessness.
 
 What a created first state is born with is ``first_state`` (a re-mint after loss
-and an owner Reset included): today the update notices a fresh install owes nothing.
+and an owner Reset included): update notices a fresh install owes nothing, and the
+consciousness switch its setup left on.
 """
 
 from __future__ import annotations
@@ -84,11 +85,8 @@ def supervisor_evidence(drive_root: Any) -> Tuple[str, str]:
                             store_errors=(ds.StoreError,))
 
 
-def initialization_decision(drive_root: Any, *, origin: str = "first_boot") -> Dict[str, Any]:
-    """Both state copies are positively absent: may a FIRST state be created?
-
-    On yes, the witness is ``pending`` with the returned id before the caller
-    writes the state; the caller completes it (``complete``) after."""
+def _decide(drive_root: Any) -> Dict[str, Any]:
+    """``initialization_decision`` without its witness write: a create on a root with no witness has no id yet."""
     status, witness = read_witness(drive_root)
     if status in {"invalid", "unreadable"}:
         return {"create": False, "reason": "initialization_witness_unreadable", "detail": status}
@@ -102,13 +100,34 @@ def initialization_decision(drive_root: Any, *, origin: str = "first_boot") -> D
         return {"create": False, "reason": "initialization_evidence_unknown", "detail": where}
     if evidence == "present" and not explicit_reset:
         return {"create": False, "reason": "prior_history_without_state", "detail": where}
-    if status == "ok":
-        return {"create": True, "initialization_id": str(witness["initialization_id"])}
+    return {"create": True, **({"initialization_id": str(witness["initialization_id"])} if status == "ok" else {})}
+
+
+def initialization_decision(drive_root: Any, *, origin: str = "first_boot") -> Dict[str, Any]:
+    """Both state copies are positively absent: may a FIRST state be created?
+
+    On yes, the witness is ``pending`` with the returned id before the caller
+    writes the state; the caller completes it (``complete``) after."""
+    decision = _decide(drive_root)
+    if not decision["create"] or decision.get("initialization_id"):
+        return decision
     initialization_id = uuid.uuid4().hex  # a genuinely new root: its work roots follow APP_ROOT
     _write(drive_root, {"initialization_id": initialization_id, "phase": "pending",
                         "origin": str(origin or "first_boot"), "created_at": utc_now_iso(),
                         BASIS_KEY: APP_ROOT_BASIS})
     return {"create": True, "initialization_id": initialization_id}
+
+
+def first_state_pending(drive_root: Any) -> bool:
+    """Would the next ``init_state`` CREATE a first state here? Both copies positively absent and the decision above,
+    read without writing anything (the setup bootstrap and completion ask it). A completed witness whose copies are
+    lost, or a copy that cannot be read, is not a first state: no."""
+    from supervisor.state import read_state_copy
+
+    root = pathlib.Path(drive_root)
+    if any(read_state_copy(root / "state" / name)[0] != "missing" for name in ("state.json", "state.last_good.json")):
+        return False
+    return bool(_decide(root)["create"])
 
 
 def first_state(drive_root: Any, initialization_id: str) -> Dict[str, Any]:
@@ -117,10 +136,33 @@ def first_state(drive_root: Any, initialization_id: str) -> Dict[str, Any]:
     Runs under STATE_LOCK: nothing here calls ``update_state`` (the lock is not re-entrant) or
     takes a settings lock. A fresh install never ran an earlier release, so the notices
     ``upgrade_notices.BORN_SETTLED_NOTICE_KEYS`` names are born marked; that stamp is not a
-    delivery (no chat receipt exists for it), and the notices judged by facts stay owed."""
+    delivery (no chat receipt exists for it), and the notices judged by facts stay owed.
+    Consciousness is born on when this root's setup left its switch on (``setup_left_consciousness_on``)."""
     from ouroboros.upgrade_notices import BORN_SETTLED_NOTICE_KEYS  # D08 -> D11 is allowed only lazily
 
-    return {"initialization_id": initialization_id, **dict.fromkeys(BORN_SETTLED_NOTICE_KEYS, utc_now_iso())}
+    return {"initialization_id": initialization_id, **dict.fromkeys(BORN_SETTLED_NOTICE_KEYS, utc_now_iso()),
+            **({"bg_consciousness_enabled": True} if setup_left_consciousness_on(drive_root) else {})}
+
+
+def setup_left_consciousness_on(drive_root: Any) -> bool:
+    """The setup choice the settings document of ``drive_root`` records (owner decision 2026-11-20): the configured
+    document when that root is the configured data root, else ``<root>/settings.json``. Read lock-free and verified
+    under STATE_LOCK, so it takes no settings lock; an unreadable document is no choice, and a pending installation
+    Panic withholds it (Panic's own controls write keeps it off)."""
+    from ouroboros import config
+    from ouroboros.installation_stop import installation_panic
+    from ouroboros.settings_integrity import read_settings_json_verified
+    from ouroboros.settings_setup_contract import ONBOARDING_CONSCIOUSNESS_KEY
+
+    root = pathlib.Path(drive_root)
+    try:
+        configured = root.resolve() == pathlib.Path(config.DATA_DIR).resolve()
+        document = read_settings_json_verified(config.SETTINGS_PATH if configured else root / "settings.json")
+        chosen = isinstance(document, dict) and document.get(ONBOARDING_CONSCIOUSNESS_KEY) == "on"
+        return chosen and not installation_panic(root)
+    except Exception:
+        log.warning("the setup's consciousness choice could not be read; the first state is born off", exc_info=True)
+        return False
 
 
 def authority_reason(drive_root: Any, initialization_id: str) -> str:

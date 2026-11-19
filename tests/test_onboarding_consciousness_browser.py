@@ -1,12 +1,12 @@
-"""The first-run Consciousness offer on a real server, through the real wizard (#1603).
+"""The first-run Consciousness step on a real server, through the real wizard (owner decision 2026-11-20).
 
-A contained candidate checkout serves each case over its own data root, with the scripted loopback model as
-its only provider and a skill-source list naming only the built-in source, so no hub is fetched. Every claim
-is read back from the server: the setup save, the one `/bg start` the page sends through the ordinary
-command queue, and the control `/api/state` shows afterwards. A later ordinary Stop goes through the same
-queue, a restart resumes nothing, and an unticked Finish, a completed setup, a Panic during the wait and a page
-left during the wait and shown again from the browser's back/forward cache send nothing. Screenshots go to
-``OUROBOROS_UI_EVIDENCE_DIR`` when a launcher names one, else to the test's own temporary directory.
+A contained candidate checkout serves each case over its own data root, with the scripted loopback model as its only
+provider and a skill-source list naming only the built-in source, so no hub is fetched. Every claim is read back from
+the server: the completion request carries the switch's position, the page sends no command, the first state is born
+with consciousness on, and Main holds no System row after a first message and a restart; a later Stop wins across a
+restart. An older install whose state says off shows the switch off and stays off when clicked through, and a completed
+setup shows no step. Screenshots go to ``OUROBOROS_UI_EVIDENCE_DIR`` when a launcher names one, else to the test's own
+temporary directory.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ from tests.candidate_checkout import case_checkout, require_candidate_interprete
 from tests.fixtures_mock_llm import MockLLMServer
 from tests.test_onboarding_attempt_browser import _to_summary
 from tests.test_ui_smoke_playwright import (
-    REPO_ROOT, _assert_served_candidate, _browser_missing, _fixture_interpreter, _fixture_python, _free_port,
-    _wait_health, _wait_supervisor_ready,
+    REPO_ROOT, _assert_served_candidate, _fixture_interpreter, _fixture_python, _free_port, _wait_health,
+    _wait_supervisor_ready,
 )
 from tests.ui_console_errors import PageErrors
 from ouroboros.test_environment import isolated_environment, owned_process_temp
@@ -45,17 +45,13 @@ OFFLINE = {
     "OUROBOROS_MAX_WORKERS": 1, "OUROBOROS_RUNTIME_MODE": "light",
 }
 MOCK_MODEL = "openai-compatible::mock-model"
-ROW = '[data-consciousness-offer] .consciousness-offer-row'
-# The /bg start receipt's head (consciousness_view.on_sentence), the same on every surface.
-STARTED = "Consciousness on: Ouroboros also acts on its own"
-# The switch's first-run words are the host's (consciousness_view.FIRST_RUN, owner 15.11, 5A).
-SWITCH_WORDS = f"{FIRST_RUN['gloss']} {FIRST_RUN['choice']} {FIRST_RUN['meaning']}"
-_ADVISES = first_run_words("observe")  # Advises answers nowhere: its first-run words say so (review r3)
-ADVISES_WORDS = f"{_ADVISES['gloss']} {_ADVISES['choice']} {_ADVISES['meaning']}"
-WHERE = "Change the allowance in Dashboard › Costs. Its other settings, and its switch, are in Dashboard › Consciousness."
-DEFAULT_ROW = (f"Consciousness {SWITCH_WORDS} Autonomy: Acts. Also acts on its own: starts work, runs commands, speaks and "
-               "acts in places. It does not change itself. Up to $20.00 a day in recorded spending. Subscription quota is "
-               f"separate. At most 2 of its own tasks at once. {WHERE}")
+STEP = "[data-consciousness-step]"
+LIMITS = ("Autonomy: Acts. Also acts on its own: starts work, runs commands, speaks and acts in places. It does not "
+          "change itself. Up to $20.00 a day in recorded spending. Subscription quota is separate. At most 2 of its own "
+          "tasks at once.")
+# The step's words are the host's (consciousness_view.first_run_words, owner 15.11, 5A).
+STEP_TEXT = (f"Off {FIRST_RUN['off']} On {FIRST_RUN['on']} {FIRST_RUN['meaning']} {LIMITS} {FIRST_RUN['door']}")
+_ADVISES = first_run_words("observe")
 
 
 def _provider(llm_url: str) -> dict:
@@ -169,13 +165,21 @@ def _wait_control(url: str, expected, timeout: float = 90.0):
 def _shots(tmp_path: pathlib.Path) -> pathlib.Path:
     """The launcher's evidence directory when it names one, else this test's own: never the current directory."""
     named = os.environ.get("OUROBOROS_UI_EVIDENCE_DIR")
-    out = (pathlib.Path(named) if named else tmp_path / "ui-evidence") / "1603"
+    out = (pathlib.Path(named) if named else tmp_path / "ui-evidence") / "consciousness-step"
     out.mkdir(parents=True, exist_ok=True)
     return out
 
 
 def _text(page, selector: str) -> str:
     return " ".join(page.locator(selector).inner_text().split())
+
+
+def _system_rows(url: str) -> list:
+    """Main's System rows as ``(system_type, text)``: what the owner reads as the host speaking. Rows a work card
+    draws (web/modules/chat_preview.js ``CARD_ROWS``: a task's summary and evidence, a quiz, a card) are not one."""
+    return [(row.get("system_type"), row.get("text", "")) for row in _get(url, "/api/chat/history?limit=100")["messages"]
+            if (row.get("role") == "system" or row.get("system_type"))
+            and row.get("system_type") not in {"task_evidence", "task_summary", "quiz", "card"}]
 
 
 def _record(page) -> dict:
@@ -192,7 +196,8 @@ def _record(page) -> dict:
 
 
 def _fresh_accounts_and_models(page, llm_url: str) -> None:
-    """Accounts → Models on a providerless first setup: the compatible endpoint, Main and Light on its model."""
+    """Accounts → Models on a providerless first setup: the compatible endpoint, Main and Light on its model; then
+    Access, and the Consciousness step."""
     from playwright.sync_api import expect
 
     page.locator('details[data-collapse="api-access"] > summary').click()
@@ -209,11 +214,15 @@ def _fresh_accounts_and_models(page, llm_url: str) -> None:
         slot = page.locator(f'[data-model-role="{role}"]')
         slot.locator("[data-model-role-source]").select_option("api:openai-compatible")
         slot.locator("[data-model-role-model]").fill("mock-model")
-    for _ in range(3):  # Models → Review → Budget → Summary
+    _next(page, 2)  # Models → Access → Consciousness
+    page.wait_for_selector(STEP, timeout=30_000)
+
+
+def _next(page, steps: int) -> None:
+    for _ in range(steps):
         title = page.locator(".step-title").inner_text()
         page.locator("#next-btn:not([disabled])").click(timeout=60_000)
         page.wait_for_function("t => document.querySelector('.step-title')?.textContent !== t", arg=title, timeout=30_000)
-    page.wait_for_selector(".summary-card", timeout=30_000)
 
 
 def _finish(page) -> None:
@@ -233,85 +242,81 @@ def _browser(pw, engine="webkit", theme="light", size=(980, 752)):
     return browser, context.new_page()
 
 
-def test_first_setup_ticked_starts_once_through_the_queue_and_a_later_stop_wins(setup_server, tmp_path):
-    """A first setup without a provider: the save starts the supervisor, its state is initialized, the page sends
-    `/bg start` once and calls it on only when the state shows it. A later ordinary Stop, and a Start and Stop sent
-    back to back through the same queue, end off; a restart resumes nothing."""
+def test_a_first_setup_is_born_on_with_no_command_and_main_holds_no_system_row(setup_server, tmp_path):
+    """A first setup without a provider: the step starts on, the completion carries it, the page sends no command and
+    the supervisor the save starts mints a state born on. After a first message and a restart Main holds no System
+    row and the state still shows on; a later ordinary Stop wins and survives a restart."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
-    from playwright.sync_api import expect, sync_playwright
+    from playwright.sync_api import sync_playwright
 
     srv, out = setup_server, _shots(tmp_path)
-    srv.seed(OFFLINE)  # settings present, setup never completed, no provider
+    # Settings present (the offline skill sources), setup never completed, no provider, no state. A document that
+    # predates setup reads the optional task bounds as their legacy finite values and is told so once
+    # (upgrade_notices.optional_bound_facts); a fresh install writes no document before setup, so its bounds are
+    # seeded as the unlimited a fresh install ships with.
+    srv.seed({**OFFLINE, "OUROBOROS_MAX_ROUNDS": "unlimited", "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"})
     srv.start(supervisor=False)
-    assert urllib.request.urlopen(srv.url + "/api/onboarding", timeout=5).status == 200, "providerless before setup"
     assert not (srv.data_dir / "state" / "state.json").exists(), "no state before the setup save"
-    # Before setup there is no command queue: an ordinary Stop is refused, never held for later.
-    assert _command(srv.url, "/bg stop") == 409
     with sync_playwright() as pw:
         browser, page = _browser(pw)
         try:
             seen = _record(page)
             page.goto(srv.url + "/onboarding", wait_until="networkidle", timeout=60_000)
             _fresh_accounts_and_models(page, srv.llm_url)
-            expect(page.locator(ROW)).to_be_visible()
-            assert _text(page, ROW) == DEFAULT_ROW
-            box = page.locator("[data-consciousness-start]")
-            assert not box.is_checked(), "the offer starts unticked"
-            page.screenshot(path=str(out / "first-setup-summary-unticked-webkit-light.png"), full_page=True)
-            box.check()
-            page.locator(ROW).screenshot(path=str(out / "first-setup-row-ticked-webkit-light.png"))
-            seen["errors"].watch(page)  # Finish hands off to the app: leaving may cut off the page's own reads (tests/ui_console_errors.py)
+            assert page.locator(".step-title").inner_text() == "Consciousness"
+            assert _text(page, STEP) == STEP_TEXT
+            assert page.locator('[data-consciousness-choice="on"]').get_attribute("aria-pressed") == "true"
+            page.screenshot(path=str(out / "first-setup-consciousness-step-webkit-light.png"), full_page=True)
+            _next(page, 2)  # Consciousness → Budget → Summary
+            row = page.locator(".summary-kv").filter(has=page.get_by_text("Consciousness", exact=True))
+            assert " ".join(row.inner_text().split()) == f"Consciousness On · {FIRST_RUN['on']}"
+            seen["errors"].watch(page)  # Finish hands off to the app: leaving may cut off the page's own reads
             _finish(page)
-            page.wait_for_selector("[data-consciousness-run]", timeout=60_000)
-            page.screenshot(path=str(out / "first-setup-after-save-webkit-light.png"))
             page.wait_for_url(srv.url + "/", timeout=240_000)
-            page.wait_for_timeout(1500)
-            # The press is the owner's act, its command the host's words (#2778): Main shows the one System
-            # receipt, never a "You · /bg start" bubble, on the live page and in the history a reload reads.
-            receipt = page.locator("#chat-messages .chat-bubble").filter(has_text=STARTED)
-            receipt.first.wait_for(state="visible", timeout=60_000)
-            page.screenshot(path=str(out / "first-setup-main-after-handoff-webkit-light.png"))
-            assert page.locator("#chat-messages .chat-bubble.user").count() == 0, "a press writes no owner bubble"
-            history = _get(srv.url, "/api/chat/history?limit=50")["messages"]
-            assert [row["text"] for row in history if row.get("role") == "user"] == [], history
-            assert [row["system_type"] for row in history if STARTED in row.get("text", "")] == ["command_reply"]
-            page.reload(wait_until="networkidle")
-            page.locator("#chat-messages .chat-bubble").filter(has_text=STARTED).first.wait_for(
-                state="visible", timeout=60_000)
-            assert page.locator("#chat-messages .chat-bubble.user").count() == 0, "nor after a reload"
-            page.screenshot(path=str(out / "first-setup-main-after-reload-webkit-light.png"))
-            assert seen["commands"] == [{"cmd": "/bg start", "if_boot": _get(srv.url, "/api/health")["boot"]["since"],
-                                         "ui_control": {"name": "setup_consciousness"}}], seen["commands"]
-            assert len(seen["completions"]) == 1
-            assert not any("onscious" in key for key in seen["completions"][0]), "nothing rides the save"
+            assert seen["commands"] == [], "the builtin page sends no /bg"
+            assert len(seen["completions"]) == 1 and seen["completions"][0]["consciousness"] is True
             assert not seen["errors"].unexpected(), seen["errors"].report()
+            _wait_control(srv.url, True)
+            page.fill("#chat-input", "Respond with exactly OK")  # the owner's first message binds the owner
+            page.click("#chat-send")
+            page.locator("#chat-messages .chat-bubble.assistant:not(.typing-bubble)").first.wait_for(timeout=120_000)
         finally:
             browser.close()
-    assert _control(srv.url) is True, "observed on through the real state"
-    srv.prove()  # the supervisor the save started serves this candidate
     saved = json.loads((srv.data_dir / "settings.json").read_text(encoding="utf-8"))
-    assert saved.get("OUROBOROS_ONBOARDING_COMPLETED_AT")
-    assert not [key for key in saved if "CONSCIOUS" in key and any(word in key for word in ("START", "CONSENT", "OPT", "PENDING"))]
-
-    # A later ordinary Stop through the same queue wins over the setup's Start.
-    assert _command(srv.url, "/bg stop") == 200
-    _wait_control(srv.url, False)
-    # Start then Stop, back to back: the queue keeps their order and the Stop is the last word.
-    assert _command(srv.url, "/bg start") == 200 and _command(srv.url, "/bg stop") == 200
-    time.sleep(6)
-    assert _control(srv.url) is False
-    # Nothing durable re-arms the setup's Start: a restart keeps it off.
+    assert saved.get("OUROBOROS_ONBOARDING_COMPLETED_AT") and saved.get("OUROBOROS_ONBOARDING_CONSCIOUSNESS") == "on"
     srv.stop()
     srv.start(supervisor=True)
-    time.sleep(5)
+    assert _control(srv.url) is True, "born on, and still on after a restart"
+    assert _system_rows(srv.url) == [], "no System row in Main after setup, a first message and a restart"
+    with sync_playwright() as pw:
+        browser, page = _browser(pw)
+        try:
+            page.goto(srv.url + "/", wait_until="networkidle", timeout=60_000)
+            page.locator("#chat-messages .chat-bubble.assistant:not(.typing-bubble)").first.wait_for(timeout=60_000)
+            page.screenshot(path=str(out / "first-setup-main-after-restart-webkit-light.png"))
+            assert page.locator("#chat-messages .chat-bubble.system").count() == 0
+        finally:
+            browser.close()
+    assert _system_rows(srv.url) == [], "nor once the restarted page has read its history"
+    # A later ordinary Stop wins and a restart keeps it; its reply is the System row the setup no longer writes.
+    assert _command(srv.url, "/bg stop") == 200
+    _wait_control(srv.url, False)
+    deadline = time.time() + 30
+    while not _system_rows(srv.url) and time.time() < deadline:
+        time.sleep(0.5)
+    assert _system_rows(srv.url), "the same reader sees a command's System row"
+    srv.stop()
+    srv.start(supervisor=True)
+    time.sleep(3)
     assert _control(srv.url) is False
 
 
-def test_markerless_install_offers_its_own_limits_and_an_unticked_finish_sends_nothing(setup_server, tmp_path):
-    """Settings present, a provider ready, setup never completed (a markerless older install): the unticked offer
-    shows this install's limits; Finish without the tick sends nothing; the completed setup shows no row."""
+def test_an_older_install_shows_the_switch_off_and_stays_off_when_clicked_through(setup_server, tmp_path):
+    """Settings present, a provider ready, setup never completed (a markerless older install whose state says off):
+    the step shows off with this install's limits; Finish sends `consciousness: false` and no command, and it stays
+    off; the completed setup shows no step."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
-    from playwright.sync_api import expect, sync_playwright
+    from playwright.sync_api import sync_playwright
 
     srv, out = setup_server, _shots(tmp_path)
     srv.seed({**OFFLINE, **_provider(srv.llm_url), "OUROBOROS_CONSCIOUSNESS_AUTONOMY": "observe",
@@ -319,169 +324,31 @@ def test_markerless_install_offers_its_own_limits_and_an_unticked_finish_sends_n
     srv.start(supervisor=True)
     assert _control(srv.url) is False
     with sync_playwright() as pw:
-        for engine, theme in (("webkit", "dark"), ("chromium", "light"), ("chromium", "dark")):
-            browser, page = _browser(pw, engine, theme)
-            try:
-                page.goto(srv.url + "/onboarding?builtin=1", wait_until="networkidle", timeout=60_000)
-                _to_summary(page, pro=False)
-                expect(page.locator(ROW)).to_be_visible()
-                assert _text(page, ROW) == (
-                    f"Consciousness {ADVISES_WORDS} Autonomy: Advises. On its own it studies, keeps its memory and tells you; "
-                    "it changes nothing outside. Up to $5.00 a day in recorded spending. Subscription quota is separate. At "
-                    f"most 1 of its own tasks at once. {WHERE}")
-                page.screenshot(path=str(out / f"markerless-summary-{engine}-{theme}.png"), full_page=True)
-                page.locator(".summary-card").screenshot(path=str(out / f"markerless-summary-card-{engine}-{theme}.png"))
-                overflow = page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
-                assert overflow <= 1, overflow
-            finally:
-                browser.close()
-        browser, page = _browser(pw, "webkit", "light", (390, 844))
-        try:
-            page.goto(srv.url + "/onboarding?builtin=1", wait_until="networkidle", timeout=60_000)
-            _to_summary(page, pro=False)
-            page.locator(ROW).scroll_into_view_if_needed()
-            page.screenshot(path=str(out / "markerless-summary-webkit-light-390.png"))
-            assert page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth") <= 1
-        finally:
-            browser.close()
         browser, page = _browser(pw)
         try:
             seen = _record(page)
             page.goto(srv.url + "/onboarding?builtin=1", wait_until="networkidle", timeout=60_000)
-            _to_summary(page, pro=False)
-            assert not page.locator("[data-consciousness-start]").is_checked()
-            seen["errors"].watch(page)  # Finish hands off to the app: leaving may cut off the page's own reads (tests/ui_console_errors.py)
+            page.wait_for_selector(".wizard-step", timeout=60_000)
+            _next(page, 3)  # Accounts → Models → Access → Consciousness
+            page.wait_for_selector(STEP)
+            assert page.locator('[data-consciousness-choice="off"]').get_attribute("aria-pressed") == "true"
+            assert _text(page, STEP) == (
+                f"Off {_ADVISES['off']} On {_ADVISES['on']} {_ADVISES['meaning']} Autonomy: Advises. On its own it studies, "
+                "keeps its memory and tells you; it changes nothing outside. Up to $5.00 a day in recorded spending. "
+                f"Subscription quota is separate. At most 1 of its own tasks at once. {_ADVISES['door']}")
+            page.screenshot(path=str(out / "older-install-consciousness-off-webkit-light.png"), full_page=True)
+            _next(page, 2)
+            seen["errors"].watch(page)
             _finish(page)
             page.wait_for_url(srv.url + "/", timeout=120_000)
-            assert seen["commands"] == [], "an unticked Finish sends no Start"
-            assert len(seen["completions"]) == 1 and not any("onscious" in key for key in seen["completions"][0])
+            assert seen["commands"] == [], "nothing is sent"
+            assert len(seen["completions"]) == 1 and seen["completions"][0]["consciousness"] is False
             time.sleep(3)
             assert _control(srv.url) is False
-            # The completed setup re-entering the wizard: no row, so no old choice can be repeated.
+            # The completed setup re-entering the wizard: no step, so no old choice can be repeated.
             page.goto(srv.url + "/onboarding?builtin=1", wait_until="networkidle", timeout=60_000)
             _to_summary(page, pro=False)
-            assert page.locator(ROW).count() == 0
-            page.screenshot(path=str(out / "completed-setup-summary-no-row-webkit-light.png"), full_page=True)
+            assert page.locator(".wizard-step").count() == 5 and page.locator(STEP).count() == 0
             assert not seen["errors"].unexpected(), seen["errors"].report()
         finally:
             browser.close()
-
-
-def test_panic_while_the_page_waits_sends_nothing_and_says_so(setup_server, tmp_path):
-    """The page waits for this server's chat queue; a Panic during that wait ends the server, the page says the
-    Start was not sent and sends nothing, and the restarted install keeps consciousness off."""
-    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
-    from playwright.sync_api import expect, sync_playwright
-
-    srv, out = setup_server, _shots(tmp_path)
-    srv.seed(OFFLINE)
-    srv.start(supervisor=False)
-    since = _get(srv.url, "/api/health")["boot"]["since"]
-    held = json.dumps({"status": "ok", "boot": {"phase": "ready", "since": since, "dialogue_ready": False}})
-    with sync_playwright() as pw:
-        browser, page = _browser(pw)
-        try:
-            seen = _record(page)
-            page.goto(srv.url + "/onboarding", wait_until="networkidle", timeout=60_000)
-            _fresh_accounts_and_models(page, srv.llm_url)
-            page.locator("[data-consciousness-start]").check()
-            # Only the page's readiness read is held "not ready"; the save and everything else are real.
-            page.route("**/api/health", lambda route: route.fulfill(status=200, content_type="application/json", body=held))
-            _finish(page)
-            expect(page.locator('[data-consciousness-run="waiting"]')).to_be_visible(timeout=60_000)
-            _wait_supervisor_ready(srv.url, timeout_sec=120)  # the save started the supervisor; its state exists
-            page.screenshot(path=str(out / "panic-wait-screen-webkit-light.png"))
-            assert _command(srv.url, "/panic") == 200
-            deadline = time.time() + 30
-            while time.time() < deadline and srv.live.proc.poll() is None:
-                time.sleep(0.2)
-            assert srv.live.proc.poll() is not None, "Panic ended the server"
-            page.unroute("**/api/health")
-            expect(page.locator('[data-consciousness-run="not_started"]')).to_be_visible(timeout=30_000)
-            assert _text(page, '[data-consciousness-run="not_started"]') == (
-                "Consciousness was not started Ouroboros stopped answering before the Start could be sent, so nothing "
-                "was sent. Dashboard › Consciousness shows whether it is on; its switch is there. Open Ouroboros")
-            page.screenshot(path=str(out / "panic-not-started-screen-webkit-light.png"))
-            assert seen["commands"] == [], "nothing was sent"
-            assert not seen["errors"], seen["errors"]
-        finally:
-            browser.close()
-    srv.stop()
-    srv.start(supervisor=True)
-    time.sleep(3)
-    assert _control(srv.url) is False, "the restarted install keeps consciousness off"
-
-
-# Records each pageshow/pagehide with its `persisted` flag before the wizard's own listeners exist.
-LIFECYCLE = ("window.__lifecycle = []; for (const type of ['pageshow', 'pagehide']) "
-             "addEventListener(type, (event) => window.__lifecycle.push(`${type}:${event.persisted}`));")
-
-
-def _cached_chromium(pw):
-    """Chromium that keeps a left page in its back/forward cache, as people's browsers do. Playwright launches it
-    with `--disable-back-forward-cache`, and its headless shell reloads instead of restoring."""
-    browser = pw.chromium.launch(headless=True, channel="chromium", ignore_default_args=["--disable-back-forward-cache"])
-    context = browser.new_context(viewport={"width": 980, "height": 752}, color_scheme="light", device_scale_factor=2)
-    return browser, context.new_page()
-
-
-def test_a_page_left_during_the_wait_and_shown_again_from_the_cache_sends_nothing(setup_server, tmp_path):
-    """Tick, a confirmed save, the page waits for readiness; the owner opens another page and comes Back. The
-    browser shows the very same page again from its back/forward cache (pagehide and pageshow persisted), its
-    timers resumed, and the server is ready by then. The page sends nothing, says it was left, and hands off
-    only on Open Ouroboros; consciousness stays off."""
-    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
-    from playwright.sync_api import Error as PlaywrightError
-    from playwright.sync_api import expect, sync_playwright
-
-    srv, out = setup_server, _shots(tmp_path)
-    srv.seed(OFFLINE)
-    srv.start(supervisor=False)
-    since = _get(srv.url, "/api/health")["boot"]["since"]
-    held = json.dumps({"status": "ok", "boot": {"phase": "ready", "since": since, "dialogue_ready": False}})
-    hold = {"on": True}
-
-    def health(route):  # only the page's readiness read is held "not ready" while the owner is on the page
-        if hold["on"]:
-            route.fulfill(status=200, content_type="application/json", body=held)
-        else:
-            route.continue_()
-
-    with sync_playwright() as pw:
-        try:
-            browser, page = _cached_chromium(pw)
-        except PlaywrightError as exc:
-            if _browser_missing(exc):
-                pytest.skip(str(exc))
-            raise
-        try:
-            seen = _record(page)
-            page.add_init_script(LIFECYCLE)
-            page.goto(srv.url + "/onboarding", wait_until="networkidle", timeout=60_000)
-            _fresh_accounts_and_models(page, srv.llm_url)
-            page.locator("[data-consciousness-start]").check()
-            page.route("**/api/health", health)
-            _finish(page)
-            expect(page.locator('[data-consciousness-run="waiting"]')).to_be_visible(timeout=60_000)
-            _wait_supervisor_ready(srv.url, timeout_sec=120)  # ready for real: a resumed old wait would send now
-            page.goto(srv.url + "/static/candidate-sentinel.txt", timeout=60_000)  # the owner opens another page
-            hold["on"] = False
-            page.go_back(wait_until="commit", timeout=60_000)  # a restore fires no load event
-            page.wait_for_function("() => (window.__lifecycle || []).includes('pageshow:true')", timeout=30_000)
-            assert page.evaluate("window.__lifecycle") == ["pageshow:false", "pagehide:true", "pageshow:true"], (
-                "the browser reloaded instead of restoring the page, so this case proves nothing")
-            expect(page.locator('[data-consciousness-run="not_started"]')).to_be_visible(timeout=30_000)
-            page.wait_for_timeout(3_000)  # three of the wait's polls: an old wait resumed here would send
-            assert seen["commands"] == [], "no Start after the page was left"
-            assert _text(page, '[data-consciousness-run="not_started"]') == (
-                "Consciousness was not started You left this page before the Start could be sent, so nothing was "
-                "sent. Dashboard › Consciousness shows whether it is on; its switch is there. Open Ouroboros")
-            page.screenshot(path=str(out / "left-and-back-not-started-chromium-light.png"))
-            page.locator("#consciousness-open-btn").click()
-            page.wait_for_url(srv.url + "/", timeout=120_000)
-            assert seen["commands"] == [], "nor on the hand-off"
-            assert len(seen["completions"]) == 1
-            assert not seen["errors"], seen["errors"]
-        finally:
-            browser.close()
-    assert _control(srv.url) is False, "consciousness stays off"

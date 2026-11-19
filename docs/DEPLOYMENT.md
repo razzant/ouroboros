@@ -64,7 +64,7 @@ keeps its factory value:
 | Safety coverage | `full`: commands are read first too | `light`: outgoing actions are read first (background consciousness keeps `full`) |
 | Access level | `advanced` | the level chosen |
 | Limits | $200 in total, $50 for one task and its helpers, of known spend | the limits entered |
-| Consciousness | off; $20 over 24 hours once started | off unless ticked |
+| Consciousness | off; $20 over 24 hours once started | on unless switched off; without the wizard, on only when the settings document carries that setup choice |
 
 Reviewers and helpers are proposed from the reachable Main at each read (none while
 the keys present do not settle which provider serves Main) until they are edited on
