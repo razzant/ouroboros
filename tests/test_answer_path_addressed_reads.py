@@ -646,6 +646,7 @@ def test_a_digest_many_packs_hold_is_read_from_one_copy_and_a_bad_copy_yields_th
     import sqlite3
 
     from ouroboros import evidence_packs as packs, store
+    from tests._packed_read_probe import release_pack_readers
     from tests.test_evidence_packs import _blob
 
     raw, copies, roots, refs, connect = json.dumps({"result": "common"}).encode(), [], {}, {}, store.connect
@@ -670,6 +671,8 @@ def test_a_digest_many_packs_hold_is_read_from_one_copy_and_a_bad_copy_yields_th
         copies.append(0)
         assert packs.blob_bytes(root, ref) == raw
     assert copies == [1, 1], copies
+    for root in roots.values():  # the reads above hold their packs open: Windows refuses to unlink such a file
+        release_pack_readers(root)
     (packs.packs_dir(roots[K_LARGE]) / "task-00.xz").unlink()  # the first copy's pack gone
     (packs.packs_dir(roots[K_LARGE]) / "task-01.xz").write_bytes(b"damaged")  # the second copy's damaged
     assert packs.blob_bytes(roots[K_LARGE], refs[K_LARGE]) == raw  # the third answers
