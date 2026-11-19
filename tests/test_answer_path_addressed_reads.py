@@ -694,23 +694,24 @@ def test_a_digest_many_packs_hold_is_read_from_one_copy_and_a_bad_copy_yields_th
         packs.blob_bytes(roots[K_LARGE], refs[K_LARGE])
 
 
-def test_a_verdict_on_the_blob_itself_ends_its_copies_after_one_question(tmp_path, monkeypatch):
-    """Over the caller's byte limit (a ref that carries no size), or verified bytes of a size the ref does not
-    have, is the blob's own verdict, alike in every copy: one question to the index however many packs hold it,
-    and the same error as before; a copy's own failure still asks for the next one
-    (``test_a_digest_many_packs_hold_is_read_from_one_copy_and_a_bad_copy_yields_the_next``)."""
+def test_a_verdict_on_the_blob_ends_its_copies_and_a_copy_s_wrong_record_yields_the_next(tmp_path, monkeypatch):
+    """Verified bytes of a size the ref does not have are the blob's own verdict, alike in every copy: one question
+    to the index however many packs hold it; a ref whose own size is over the caller's limit is refused before any
+    question. A copy's record is that copy's claim: one whose recorded size is wrong and over the limit yields to
+    the next copy, which answers, for a ref with its size and one without (a copy's own failure, as in
+    ``test_a_digest_many_packs_hold_is_read_from_one_copy_and_a_bad_copy_yields_the_next``)."""
     import pathlib
 
     from ouroboros import evidence_packs as packs
     from tests.test_evidence_packs import _blob
 
-    raw, refs, questions, real = json.dumps({"result": "common"}).encode(), {}, [], packs._indexed_placements
+    raw, roots, refs, questions, real = json.dumps({"result": "common"}).encode(), {}, {}, [], packs._indexed_placements
     for k in (K_SMALL, K_LARGE):
-        refs[k] = _blob(tmp_path / f"k{k:03d}", raw)
+        roots[k] = tmp_path / f"k{k:03d}"
+        refs[k] = _blob(roots[k], raw)
         for n in range(k):
-            packs.write_pack(tmp_path / f"k{k:03d}", f"task-{n:02d}", 1,
-                             [{key: refs[k][key] for key in ("sha256", "kind", "size")}])
-        packs.ensure_index(tmp_path / f"k{k:03d}")
+            packs.write_pack(roots[k], f"task-{n:02d}", 1, [{key: refs[k][key] for key in ("sha256", "kind", "size")}])
+        packs.ensure_index(roots[k])
         pathlib.Path(refs[k]["path"]).unlink()  # only the packs hold it now
 
     def asked(*args, **kwargs):
@@ -720,13 +721,17 @@ def test_a_verdict_on_the_blob_itself_ends_its_copies_after_one_question(tmp_pat
     monkeypatch.setattr(packs, "_indexed_placements", asked)
     outcomes = []
     for k in (K_SMALL, K_LARGE):
-        for ref, limit in (({**refs[k], "size": None}, len(raw) - 1), ({**refs[k], "size": len(raw) + 1}, None)):
+        for ref, limit in (({**refs[k], "size": len(raw) + 1}, None), (refs[k], len(raw) - 1)):
             questions.append(0)
             with pytest.raises(ValueError) as verdict:
-                packs.blob_bytes(tmp_path / f"k{k:03d}", ref, max_bytes=limit)
+                packs.blob_bytes(roots[k], ref, max_bytes=limit)
             outcomes.append((questions[-1], type(verdict.value).__name__, str(verdict.value)))
     assert outcomes[:2] == outcomes[2:] and [outcome[:2] for outcome in outcomes[:2]] == [
-        (1, "ValueError"), (1, "EvidenceCorrupt")] and "size differs from its ref" in outcomes[1][2], outcomes
+        (1, "EvidenceCorrupt"), (0, "ValueError")] and "size differs from its ref" in outcomes[0][2], outcomes
+    with packs.open_index(roots[K_LARGE], write=True) as conn:  # the first copy's record claims a size over the limit
+        conn.execute("UPDATE members SET size = size + 1000 WHERE task_id = 'task-00'")
+    for ref in (refs[K_LARGE], {**refs[K_LARGE], "size": None}):
+        assert packs.blob_bytes(roots[K_LARGE], ref, max_bytes=len(raw)) == raw
 
 
 def test_a_task_s_own_sidecars_are_parsed_once_per_file_state_and_only_the_task_read_last_is_kept(tmp_path, monkeypatch):

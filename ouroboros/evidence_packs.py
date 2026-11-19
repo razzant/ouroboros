@@ -744,10 +744,9 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
                 for located in placements:
                     if admit is not None:
                         admit(located[0])
-                    try:  # the blob's own verdicts (over the caller's limit, a size its ref lacks) end its copies here
+                    try:  # verified bytes of a size the ref lacks: the blob's own verdict, which ends its copies here
                         if max_bytes is not None and int(located[1]["size"]) > max_bytes:
-                            failure, located = ValueError("blob exceeds byte limit"), None
-                            break
+                            raise ValueError("blob exceeds byte limit")  # this copy's record: the next copy may answer
                         raw = member_bytes(*located)
                         if size not in (-1, len(raw)):
                             failure, located = EvidenceCorrupt(f"evidence_corrupt: packed blob {sha256[:12]} size differs from its ref"), None
