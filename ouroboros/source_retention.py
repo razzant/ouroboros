@@ -104,12 +104,20 @@ def retained_task_roots(canonical: pathlib.Path, task_id: str) -> list[pathlib.P
 def read_retained_task_source(root, task_id, ref, *, anchor=None):
     """Resolve retained execution or retry-predecessor bytes with the same verifier."""
     from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.maintenance_retirement import retired_message
 
+    tried = []
     for source_root, owner in _source_locations(root, task_id, anchor=anchor):
+        tried.append((source_root, owner))
         try:  # loose or packed at this placement; damage is explicit, absence tries the next one
             return read_actor_source_bytes(source_root, owner, ref, retained=False, anchor=anchor)
         except FileNotFoundError:
             continue
+    name = pathlib.PurePosixPath(str(ref["path"])).name
+    for source_root, owner in tried:  # a saved state retired after its work ended says so and where its content is
+        note = retired_message(source_root, owner, name)
+        if note:
+            raise FileNotFoundError(f"actor source unavailable: {note}")
     raise FileNotFoundError(f"actor source unavailable: {ref['path']}")
 
 
@@ -155,21 +163,25 @@ def source_handle_digest(relative) -> str:
 
 
 def retained_actor_source_read_target(root, task_id, relative):
-    """Placement alias for an advertised immutable source read, not write authority."""
+    """Placement alias for an advertised immutable source read, not write authority. A name gone everywhere that one
+    location's record says was retired answers with that location, so the miss there names the record."""
     from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
+    from ouroboros.maintenance_retirement import retired_message
 
     digest = source_handle_digest(relative)
     if not digest:
         return None
+    retired = None
     for source_root, owner in _source_locations(root, task_id):
         path = task_artifact_dir_path(source_root, owner, create=False) / relative
         if not (path.exists() or path.is_symlink()) and packs.materialize_handle(source_root, owner, relative) is None:
+            retired = retired or (path if retired_message(source_root, owner, pathlib.PurePosixPath(relative).name) else None)
             continue  # a packed handle is written back beside its name first
         ref = {"kind": "task_source", "root": "artifact_store", "path": relative,
                "size": path.stat().st_size, "sha256": digest}
         read_actor_source_bytes(source_root, owner, ref)
         return path.resolve(strict=True)
-    return None
+    return retired
 
 
 def manifest_version_ref(root: pathlib.Path, digest: str) -> dict:

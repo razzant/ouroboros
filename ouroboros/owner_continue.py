@@ -74,8 +74,9 @@ TECHNICAL_REASON_CODES = frozenset({
     "task_exception", "workers_unavailable", "worker_pool_unavailable", "finalization_grace",
     "idle_timeout", "worker_crash_signal", "worker_crash_retry_exhausted",
     # A worker that died after an owner wait or with budget-continuation evidence
-    # is not retried automatically (replaying would repeat effects), and its saved
-    # source is retained: an explicit Continue is exactly its manual path (#1543).
+    # is not retried automatically (replaying would repeat effects): an explicit
+    # Continue is exactly its manual path (#1543), a new root from this one's notes,
+    # never its saved state, which retires with the work (prune_worked_copies).
     "worker_crash_owner_wait", "worker_crash_budget_pausing",
     # A positively reconciled orphan is a technical interruption, not an
     # unrecorded cause. Continue still rechecks owner sources and live custody.

@@ -1008,7 +1008,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # ``task_results/artifacts/*/source_handles/context_checkpoints/ordinary-memory-*.json``
 # (``ouroboros/tools/compact_context.py``, ``_ordinary_memory``); its own row beside the other context checkpoints.
 # The owner-wait and exact-pause writers name their checkpoint prefix at the shared serializer.
-EXPECTED_SCAN_PATHS = 476
+# 476 -> 478: the retirer of saved states writes ``source_handles/retired_copies.jsonl`` (its own row) and its
+# scheduling looks at ``source_handles/working`` (``ouroboros/maintenance_retirement.py``).
+EXPECTED_SCAN_PATHS = 478
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1588,11 +1590,12 @@ def test_wait_and_pause_source_prefixes_have_lifetime_rows():
                     and isinstance(node.func, ast.Name) and node.func.id == "store_continuation_source"]
         assert prefixes
         for prefix in prefixes:
-            assert any("/context_checkpoints/" + prefix in line.split("|")[1] and "[record]" in line
+            assert any("/context_checkpoints/" + prefix in line.split("|")[1]
+                       and "[disposable: ouroboros.maintenance_retirement.prune_worked_copies]" in line
                        for line in DOC.read_text(encoding="utf-8").splitlines() if line.startswith("|"))
 
     for term in ("park_task", "cause", "auto_resume", "resume_policy", "authority_notice_registered", "selection_door"):
         assert f"`{term}`" in next(line for line in DOC.read_text(encoding="utf-8").splitlines() if line.startswith("| task documents:"))
     for line in DOC.read_text(encoding="utf-8").splitlines():
         if "/context_checkpoints/" in line and ("owner-wait-" in line or "budget-pause-" in line):
-            assert "indefinite" in line and "no independent remover" in line
+            assert "prune_worked_copies" in line, "a saved state's row names the step that retires it"
