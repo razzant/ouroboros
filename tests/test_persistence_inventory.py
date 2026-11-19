@@ -1240,8 +1240,8 @@ STALE_ROW_EXEMPTIONS = frozenset({
     # Live writers the scan cannot root: ``knowledge_versions.claim_record_path`` and ``_held_version_path`` build
     # ``shelf.parent / "knowledge_note_records" | "knowledge_held_versions"`` from the shelf they are handed. Every
     # writing call site hands them the global shelf: ``prepare_claim_write`` takes a record path only for
-    # ``address.scope == "global"`` (a project note's claims hold nowhere), ``ClaimWrite.publish`` retires held
-    # bodies only with that path, and ``held_notes._entry`` retains versions of global notes alone.
+    # ``address.scope == "global"`` (a project note's claims hold nowhere), ``held_notes._entry`` retains versions
+    # of global notes alone, and ``held_write`` writes only into a folder that retention already made.
     "memory/knowledge_note_records/*.json",
     "memory/knowledge_held_versions/*",
 })

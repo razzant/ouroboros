@@ -1009,6 +1009,7 @@ def write_knowledge_note(
             rebuild_knowledge_index(address)
             if claims is not None:
                 claims.publish(address, history, updated.revision)
+            knowledge_versions.held_write(address, history)
         except (OSError, UnicodeDecodeError):
             try:
                 observed = read_knowledge_note(address)

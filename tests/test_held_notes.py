@@ -1059,9 +1059,11 @@ def test_journal_proof_keeps_readers_without_copies_and_retires_an_outside_edit(
     observed = knowledge.read_knowledge_note(note.address)
     body = knowledge_versions._held_version_path(note.address, observed.revision)
     assert observed.revision in _held(_plan(world)) and body.read_bytes() == outside
-    _write(world, note.address.topic, "Later writer puts the outside bytes on the journal's old side.", revision=observed.revision)
-    assert 0 < body.stat().st_size <= 32 and body.read_bytes() != outside
-    assert not body.with_suffix(".checked").exists()
+    later = _write(world, note.address.topic, "Later writer puts the outside bytes on the journal's old side.",
+                   revision=observed.revision)
+    # That write's row rebuilds the outside bytes, so their copy leaves with every other proof; the new revision's stands.
+    assert not body.exists() and not body.with_suffix(".checked").exists() and not retained.exists()
+    assert 0 < knowledge_versions._held_version_path(note.address, later.revision).stat().st_size <= 32
 
     note.address.path.unlink()
     ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
@@ -1078,6 +1080,41 @@ def test_journal_proof_keeps_readers_without_copies_and_retires_an_outside_edit(
     assert new.revision in _held(_plan(world)) and new_copy.read_bytes() == new.raw
     new.address.path.unlink()
     assert _knowledge_read(ctx, new.address.topic, scope="global", version=new.revision).endswith(new.text)
+
+
+def test_a_linked_notes_revisions_leave_one_proof_and_never_a_file_per_revision(world, monkeypatch):
+    """A note only a link holds has no claim record: its first capture proves its revision from the journal once, and
+    from then on each write puts the writer's proof of its new revision in place of the one before, so a capture reads
+    no journal and the folder keeps one file. An outside edit is held from its exact bytes until the next write."""
+    target = _write(world, "people/sasha", "Sasha's head.", claims=())
+    _write(world, "work/nova", "Nova links [Sasha](../people/sasha.md).")
+    folder = knowledge_versions._held_version_path(target.address, target.revision).parent
+    scans, original = [], knowledge_versions.NoteHistory.__iter__
+
+    def counted(self):
+        scans.append(self.address.topic)
+        return original(self)
+
+    monkeypatch.setattr(knowledge_versions.NoteHistory, "__iter__", counted)
+    assert target.revision in _held(_plan(world)) and scans == [target.address.topic]
+    assert [path.name for path in folder.iterdir()] == [f"{target.revision}.md"]
+    for number in range(3):
+        target = _write(world, "people/sasha", f"Sasha's head, version {number}.", claims=(), revision=target.revision)
+        scans.clear()
+        assert target.revision in _held(_plan(world)) and not scans
+        assert [path.name for path in folder.iterdir()] == [f"{target.revision}.md"]
+        assert 0 < (folder / f"{target.revision}.md").stat().st_size <= 32
+    outside = target.raw.replace(b"version 2", b"an outside edit")
+    target.address.path.write_bytes(outside)
+    observed = knowledge.read_knowledge_note(target.address)
+    assert observed.revision in _held(_plan(world)) and (folder / f"{observed.revision}.md").read_bytes() == outside
+    later = _write(world, "people/sasha", "Sasha's head after it.", claims=(), revision=observed.revision)
+    assert [path.name for path in folder.iterdir()] == [f"{later.revision}.md"]
+    ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
+    assert _knowledge_read(ctx, "people/sasha", scope="global", version=observed.revision).endswith(observed.text)
+    never = _write(world, "people/nina", "Held nowhere.", claims=())
+    _write(world, "people/nina", "Still held nowhere.", claims=(), revision=never.revision)
+    assert not knowledge_versions._held_version_path(never.address, never.revision).parent.exists()
 
 
 def test_a_read_denied_journal_cannot_back_a_held_reader(world, monkeypatch):
