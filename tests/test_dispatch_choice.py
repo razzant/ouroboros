@@ -283,7 +283,7 @@ def test_the_c2_identity_covers_every_queue_fact_c2_reads():
     store_source = (REPO / "ouroboros" / "store.py").read_text(encoding="utf-8")
     writers = re.findall(r"(INSERT OR REPLACE INTO tasks|INSERT INTO tasks|UPDATE tasks SET [a-z_]+)", store_source)
     assert writers == ["INSERT OR REPLACE INTO tasks", "UPDATE tasks SET write_seq"], writers
-    assert "task_written(self, task_id, columns)" in store_source
+    assert "task_written(self, task_id, columns, current=current, document=document)" in store_source
     obligations = (REPO / "ouroboros" / "obligations.py").read_text(encoding="utf-8")
     assert "note_written(columns)" in obligations
 

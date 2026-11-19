@@ -89,3 +89,42 @@ def test_a_work_room_only_shortfall_starts_with_the_existing_notice(tmp_path, mo
     margin = 92_000 - 10_000 - shown.calibrated_tokens
     assert 0 <= margin < 92_000 // 8, f'physical margin={margin}; requested work room={92_000 // 8}'
     assert 'Start room is smaller than requested' in shown.system_content_json
+
+
+def test_a_child_whose_start_cannot_fit_ends_as_context_capacity_and_its_parent_is_told(tmp_path, monkeypatch):
+    """A child whose window cannot hold its start (its held heads included) ends with the named outcome
+    ``context_capacity``, never ``task_exception``, and the parent's ``[SUBTASK_OUTCOME]`` carries it. A nanny takes
+    the same branch of ``_handle_task_scoped`` (every pooled start); its leaf, started before its own context, keeps
+    its custody, so it is not driven here (that path reaches an engine)."""
+    from ouroboros import agent as agent_module
+    from ouroboros.agent import Env, OuroborosAgent
+    from ouroboros.subagent_runtime import select_subagent_snapshot
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tools.control_task_results import _subtask_outcome_summary
+    from tests.test_available_subagents_runtime import _api_row, _settings
+
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build_minimum_view(tmp_path, monkeypatch, "fixed")
+    repo, drive = tmp_path / "repo", tmp_path / "drive"
+    repo.mkdir()
+    drive.mkdir()
+    row = _api_row()
+    snapshot = select_subagent_snapshot(_settings(row), subagent_id=row["subagent_id"])[0]
+    monkeypatch.setattr("ouroboros.provider_models.model_has_credentials", lambda _model: True)
+    monkeypatch.setattr(OuroborosAgent, "_log_worker_boot_once", lambda self: None)
+    monkeypatch.setattr(OuroborosAgent, "_run_delegate_preflight", lambda self, _logs, _task, dispatch: (dispatch, False))
+
+    def unfit(**_kwargs):
+        raise raised.value
+
+    monkeypatch.setattr(agent_module, "build_llm_messages", unfit)
+    monkeypatch.setattr(agent_module, "run_llm_loop", lambda **_kw: pytest.fail("no model round may run"))
+    agent = OuroborosAgent(Env(repo_dir=repo, drive_root=drive))
+    agent._handle_task_scoped({"id": "helper", "type": "task", "chat_id": 1, "text": "Collect the figures",
+                               "delegation_role": "subagent", "configured_subagent": snapshot, "task_constraint": {},
+                               "parent_task_id": "root", "root_task_id": "root", "drive_root": str(drive),
+                               "budget_drive_root": str(drive)})
+    result = load_task_result(drive, "helper")
+    assert result["reason_code"] == "context_capacity" != "task_exception"
+    outcome = json.loads(_subtask_outcome_summary(result, task_id="helper"))
+    assert "context_capacity" in json.dumps(outcome["outcome_axes"])

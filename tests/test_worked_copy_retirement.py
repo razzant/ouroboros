@@ -82,7 +82,7 @@ def _ledger(handles):
 
 def _prune(root):
     """One pass, the test's published queue stamped again first: a slow runner must not see it go stale."""
-    from ouroboros.maintenance_retirement import prune_worked_copies
+    from ouroboros.saved_state_retirement import prune_worked_copies
     from ouroboros.utils import atomic_write_json
     try:
         document = json.loads((root / "state/queue_snapshot.json").read_text(encoding="utf-8"))
@@ -110,10 +110,14 @@ def test_only_saved_states_of_a_finished_work_leave_and_each_leaves_its_line(roo
     assert rolling["sha256"] is None and rolling["folder"] == "working"
 
 
-def test_a_running_work_keeps_its_saved_states_until_it_is_over(root):
+def test_a_running_works_first_pass_only_dates_and_its_end_lets_every_saved_state_go(root):
+    """While the work runs, a pass removes nothing the same day: the two pause copies its row never named are proven
+    and wait the owner's days, the rest is not proven (its rules: ``test_running_saved_states``). Once the work has
+    ended longer ago than those days, every saved state of it goes, whatever the running dates said."""
     handles = _task(root, "live", status="running")
     copies = _copies(handles)
-    assert _prune(root)["removed"] == 0 and all(path.exists() for path in copies), "a running work owes nothing yet"
+    report = _prune(root)
+    assert report["removed"] == 0 and report["waiting"] == 2 and all(path.exists() for path in copies), report
     write_task_result(root, "live", "failed", completed_at=_iso(time.time() - (DAYS + 1) * 86400))
     assert _prune(root)["removed"] == len(copies)
 
@@ -285,7 +289,7 @@ def test_an_unreadable_or_missing_queue_lends_everything(root):
     assert _prune(root)["held"] == {"lent_to_receiver": len(copies)}
     (root / "state/queue_snapshot.json").unlink()  # no published queue: nothing proves no receiver will load it
     assert _prune(root)["held"] == {"lent_to_receiver": len(copies)}
-    from ouroboros.maintenance_retirement import prune_worked_copies
+    from ouroboros.saved_state_retirement import prune_worked_copies
     from ouroboros.utils import atomic_write_json
     old = {"generation": "copies-test", "ts": _iso(time.time() - 3600)}  # a queue that stopped publishing an hour ago
     atomic_write_json(root / "state/queue_snapshot.json", {**old, "running": []})
@@ -353,7 +357,7 @@ def test_storage_shows_what_the_pass_released_and_what_it_keeps_never_the_window
 
 def test_a_finished_write_puts_its_row_and_the_pass_drops_it_once_nothing_is_left(root):
     from ouroboros import maintenance_jobs, store
-    from ouroboros.maintenance_retirement import WORKED_COPIES
+    from ouroboros.saved_state_retirement import WORKED_COPIES
 
     _prune(root)  # the one seeding walk of an empty history
     assert maintenance_jobs.job(root, "runtime_retirement").get("worked_copies_seeded", {}).get("at")
@@ -408,7 +412,7 @@ def test_a_creation_time_is_no_end(root):
     copies = _copies(root / "task_results" / "artifacts" / "undated" / "source_handles")
     report = _prune(root)  # its window runs from when the host first saw it settled (the walk), never from ``ts``
     assert report["waiting"] == len(copies) and report["held"] == {} and all(path.exists() for path in copies)
-    from ouroboros.maintenance_retirement import prune_worked_copies
+    from ouroboros.saved_state_retirement import prune_worked_copies
     assert prune_worked_copies(root, now=time.time() + (DAYS + 1) * 86400)["removed"] == len(copies)
 
 
@@ -476,7 +480,7 @@ def test_only_read_file_asks_for_the_record_of_a_missed_name(root):
 
 
 def test_a_saved_state_an_earlier_pack_holds_is_the_packers_to_unlink(root, monkeypatch):
-    from ouroboros import evidence_packs, maintenance_retirement
+    from ouroboros import evidence_packs, saved_state_retirement
 
     import hashlib
 
@@ -486,11 +490,11 @@ def test_a_saved_state_an_earlier_pack_holds_is_the_packers_to_unlink(root, monk
     handles = _task(root, "prepacked")
     packed = _file(addressed("packed before", "6"), "packed before")
     with monkeypatch.context() as older_body:  # a body before this change packed every handle
-        older_body.setattr(maintenance_retirement, "worked_copy", lambda folder, name: None)
+        older_body.setattr(saved_state_retirement, "worked_copy", lambda folder, name: None)
         evidence_packs.pack_task(root, "prepacked")
     assert not packed.exists()
     from ouroboros import store
-    from ouroboros.maintenance_retirement import WORKED_COPIES
+    from ouroboros.saved_state_retirement import WORKED_COPIES
 
     _prune(root)  # the folder holds no loose saved state: its row goes
     assert evidence_packs.materialize_handle(root, "prepacked", f"source_handles/context_checkpoints/{packed.name}")
@@ -504,7 +508,7 @@ def test_a_saved_state_an_earlier_pack_holds_is_the_packers_to_unlink(root, monk
     lines = {line["name"]: line for line in _ledger(handles)}
     assert lines[packed.name]["packed"] == ["observability/packs/prepacked.xz"] and "stay there" in lines[packed.name]["rebuild"]
     assert "packed" not in lines[fresh.name] and "are not kept" in lines[fresh.name]["rebuild"]
-    said = maintenance_retirement.retired_message
+    said = saved_state_retirement.retired_message
     assert said(root, "prepacked", packed.name).endswith("its exact bytes stay in observability/packs/prepacked.xz")
     assert said(root, "prepacked", fresh.name).endswith("its exact bytes are not kept")
 
@@ -526,11 +530,11 @@ def test_read_file_of_a_retired_saved_state_says_what_became_of_it(root):
 
 
 def test_a_receiver_published_during_the_pass_is_seen_before_the_next_task(root):
-    from ouroboros import maintenance_retirement
+    from ouroboros import saved_state_retirement
     from ouroboros.utils import atomic_write_json
 
     first, second = _copies(_task(root, "a-first")), _copies(_task(root, "b-second"))
-    real = maintenance_retirement._retire
+    real = saved_state_retirement._retire
     published = []
 
     def publish_after_first(*args, **kwargs):
@@ -542,33 +546,33 @@ def test_a_receiver_published_during_the_pass_is_seen_before_the_next_task(root)
             atomic_write_json(root / "state/queue.alive", stamp)
             published.append(True)
 
-    maintenance_retirement._retire = publish_after_first
+    saved_state_retirement._retire = publish_after_first
     try:
         report = _prune(root)
     finally:
-        maintenance_retirement._retire = real
+        saved_state_retirement._retire = real
     assert not any(path.exists() for path in first) and all(path.exists() for path in second)
     assert report["held"] == {"lent_to_receiver": len(second)}
 
 
 def test_a_row_put_again_during_the_pass_stays_owed(root):
-    from ouroboros import maintenance_retirement, store
-    from ouroboros.maintenance_retirement import WORKED_COPIES
+    from ouroboros import saved_state_retirement, store
+    from ouroboros.saved_state_retirement import WORKED_COPIES
 
     handles = _task(root, "again")
     _copies(handles)
-    real = maintenance_retirement._retire
+    real = saved_state_retirement._retire
 
     def a_new_terminal_write(*args, **kwargs):
         real(*args, **kwargs)
         with store.open_store(root, write=True) as txn:
             txn.put_row(WORKED_COPIES, "again", {"write_seq": 999})
 
-    maintenance_retirement._retire = a_new_terminal_write
+    saved_state_retirement._retire = a_new_terminal_write
     try:
         _prune(root)
     finally:
-        maintenance_retirement._retire = real
+        saved_state_retirement._retire = real
     with store.open_store(root, write=False) as txn:
         assert txn.get_row(WORKED_COPIES, "again") == {"write_seq": 999}
 
@@ -584,7 +588,7 @@ def test_a_write_of_an_old_finished_work_makes_no_run_of_its_own(root):
     due = maintenance_jobs.job(root, "runtime_retirement").get("next_due")
     assert due == before or due > time.time(), "a past end is the next pass's, never a run of its own"
     from ouroboros import store
-    from ouroboros.maintenance_retirement import WORKED_COPIES
+    from ouroboros.saved_state_retirement import WORKED_COPIES
     with store.open_store(root, write=False) as txn:
         assert txn.get_row(WORKED_COPIES, "old") is None, "a folder of sources only owes the retirer nothing"
     fresh = _task(root, "fresh", ended_days_ago=0)  # the same write of a work that just ended schedules its window
@@ -596,7 +600,7 @@ def test_a_write_of_an_old_finished_work_makes_no_run_of_its_own(root):
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX folder permissions")
 def test_one_unreadable_folder_is_owed_and_the_others_go_in_the_same_pass(root):
     from ouroboros import store
-    from ouroboros.maintenance_retirement import WORKED_COPIES
+    from ouroboros.saved_state_retirement import WORKED_COPIES
 
     readable = _copies(_task(root, "readable"))
     locked = _task(root, "locked")
@@ -616,7 +620,7 @@ def test_one_unreadable_folder_is_owed_and_the_others_go_in_the_same_pass(root):
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX folder permissions")
 def test_a_terminal_write_beside_an_unreadable_folder_lands_and_stays_owed(root):
     from ouroboros import store
-    from ouroboros.maintenance_retirement import WORKED_COPIES
+    from ouroboros.saved_state_retirement import WORKED_COPIES
     from ouroboros.task_results import load_task_result
 
     handles = root / "task_results" / "artifacts" / "shut" / "source_handles"
@@ -675,32 +679,51 @@ def test_a_retry_walk_that_cannot_finish_lends_everything(root, monkeypatch):
 
 
 def test_a_task_written_after_the_pass_read_it_waits_for_the_next_pass(root, monkeypatch):
-    from ouroboros import maintenance_retirement
+    from ouroboros import saved_state_retirement
 
     copies = _copies(_task(root, "finalized"))
-    real = maintenance_retirement._call_records
+    real = saved_state_retirement._call_records
 
     def finalize_meanwhile(root_, task_id):  # its artifacts are published after the pass read the row: the end moves
         write_task_result(root_, task_id, "completed", completed_at=_iso(time.time() - (DAYS + 1) * 86400),
                           artifact_finalized_at=_iso(time.time()))
         return real(root_, task_id)
 
-    monkeypatch.setattr(maintenance_retirement, "_call_records", finalize_meanwhile)
+    monkeypatch.setattr(saved_state_retirement, "_call_records", finalize_meanwhile)
     report = _prune(root)
     assert report["removed"] == 0 and report["held"] == {"changed": len(copies)} and all(path.exists() for path in copies)
-    monkeypatch.setattr(maintenance_retirement, "_call_records", real)
+    monkeypatch.setattr(saved_state_retirement, "_call_records", real)
     report = _prune(root)
     assert report["removed"] == 0 and report["waiting"] == len(copies), "the new end starts the owner's days again"
+
+
+def test_a_read_that_moves_only_the_access_time_is_no_change_and_a_new_write_is(root, monkeypatch):
+    from ouroboros import saved_state_retirement
+
+    read, rewritten = _copies(_task(root, "read")), _copies(_task(root, "rewritten"))
+    real = saved_state_retirement._call_records
+
+    def meanwhile(root_, task_id):  # after the listing: one task's files are read (Linux relatime), the other's written
+        for path in read if task_id == "read" else rewritten:
+            info = os.stat(path)
+            moved = (info.st_atime_ns + 10**12, info.st_mtime_ns) if task_id == "read" else (info.st_atime_ns, info.st_mtime_ns + 10**9)
+            os.utime(path, ns=moved)
+        return real(root_, task_id)
+
+    monkeypatch.setattr(saved_state_retirement, "_call_records", meanwhile)
+    report = _prune(root)
+    assert report["removed"] == len(read) and not any(path.exists() for path in read), report
+    assert report["held"] == {"changed": len(rewritten)} and all(path.exists() for path in rewritten)
 
 
 def test_every_removal_follows_a_folder_sync_of_its_record(root, monkeypatch):
     import errno
 
-    from ouroboros import maintenance_retirement
+    from ouroboros import saved_state_retirement
 
     copies = _copies(_task(root, "synced"))
     synced = []
-    real = maintenance_retirement.fsync_folder
+    real = saved_state_retirement.fsync_folder
 
     def first_fails(folder):
         if not synced:
@@ -709,7 +732,7 @@ def test_every_removal_follows_a_folder_sync_of_its_record(root, monkeypatch):
         real(folder)
         synced.append(True)
 
-    monkeypatch.setattr(maintenance_retirement, "fsync_folder", first_fails)
+    monkeypatch.setattr(saved_state_retirement, "fsync_folder", first_fails)
     report = _prune(root)
     assert synced[0] is False and report["removed"] >= 1
     assert synced.count(True) >= report["removed"], "no file goes before its record's folder entry is synced"
@@ -717,22 +740,22 @@ def test_every_removal_follows_a_folder_sync_of_its_record(root, monkeypatch):
 
 
 def test_the_queue_is_read_once_per_publication_or_certificate(root, monkeypatch):
-    from ouroboros import maintenance_retirement
-    from ouroboros.maintenance_retirement import prune_worked_copies
+    from ouroboros import saved_state_retirement
+    from ouroboros.saved_state_retirement import prune_worked_copies
     from ouroboros.utils import atomic_write_json
 
     for name in ("q-a", "q-b", "q-c"):
         _copies(_task(root, name))
     (root / "state/queue_snapshot.json").unlink()
     parsed = []
-    real = maintenance_retirement._published_lent
-    monkeypatch.setattr(maintenance_retirement, "_published_lent", lambda root_: parsed.append(1) or real(root_))
+    real = saved_state_retirement._published_lent
+    monkeypatch.setattr(saved_state_retirement, "_published_lent", lambda root_: parsed.append(1) or real(root_))
     assert _prune(root)["held"] == {"lent_to_receiver": 15} and len(parsed) == 1, "a missing queue is read once a pass"
     old = {"generation": "copies-test", "ts": _iso(time.time() - 3600)}
     atomic_write_json(root / "state/queue_snapshot.json", {**old, "running": []})
     atomic_write_json(root / "state/queue.alive", old)
     ends = []
-    real_end = maintenance_retirement._work_end
+    real_end = saved_state_retirement._work_end
 
     def renewed_after_the_first(document):  # the publisher renews the same generation's certificate between two tasks
         ends.append(1)
@@ -740,7 +763,7 @@ def test_the_queue_is_read_once_per_publication_or_certificate(root, monkeypatch
             atomic_write_json(root / "state/queue.alive", {"generation": "copies-test", "ts": _iso(time.time())})
         return real_end(document)
 
-    monkeypatch.setattr(maintenance_retirement, "_work_end", renewed_after_the_first)
+    monkeypatch.setattr(saved_state_retirement, "_work_end", renewed_after_the_first)
     report = prune_worked_copies(root)
     assert report["held"] == {"lent_to_receiver": 5} and report["removed"] == 10, "a renewed certificate is read at once"
     for name in ("q-d", "q-e", "q-f"):  # finished after the walk: their own terminal writes put their rows
@@ -756,7 +779,7 @@ def test_the_queue_is_read_once_per_publication_or_certificate(root, monkeypatch
         atomic_write_json(root / "state/queue.alive", {"generation": "copies-test", "ts": _iso(time.time())})
         return real_end(document)
 
-    monkeypatch.setattr(maintenance_retirement, "_work_end", renewed_each_task)
+    monkeypatch.setattr(saved_state_retirement, "_work_end", renewed_each_task)
     report = prune_worked_copies(root)
     assert report["removed"] == 15 + 5 and len(parsed) == 1, "a fresh answer stands while only the certificate moves"
 
@@ -764,7 +787,7 @@ def test_the_queue_is_read_once_per_publication_or_certificate(root, monkeypatch
 def test_a_retired_line_names_the_pack_generation_that_holds_the_bytes(root, monkeypatch):
     import hashlib
 
-    from ouroboros import evidence_packs, maintenance_retirement
+    from ouroboros import evidence_packs, saved_state_retirement
 
     handles = _task(root, "multigen")
 
@@ -772,7 +795,7 @@ def test_a_retired_line_names_the_pack_generation_that_holds_the_bytes(root, mon
         return handles / "context_checkpoints" / f"owner-wait-{wait * 32}-{hashlib.sha256(text.encode()).hexdigest()}.json"
 
     with monkeypatch.context() as older_body:  # a body before this change packed every handle, one generation a pass
-        older_body.setattr(maintenance_retirement, "worked_copy", lambda folder, name: None)
+        older_body.setattr(saved_state_retirement, "worked_copy", lambda folder, name: None)
         _file(addressed("first generation", "8"), "first generation")
         evidence_packs.pack_task(root, "multigen")
         second = _file(addressed("second generation", "9"), "second generation")
@@ -784,9 +807,92 @@ def test_a_retired_line_names_the_pack_generation_that_holds_the_bytes(root, mon
     assert line["packed"] == ["observability/packs/multigen.2.xz"], "the generation that holds these bytes"
 
 
+def test_a_partial_pack_listing_holds_the_saved_states_and_a_whole_one_names_the_generation(root, monkeypatch):
+    """One generation's sidecar is unreadable while the pack index is busy: the listing then misses that generation,
+    and a line saying "its exact bytes are not kept" would be false (``handle_bytes`` still returns them)."""
+    import hashlib
+
+    from ouroboros import evidence_packs, saved_state_retirement, store
+
+    handles = _task(root, "partial")
+
+    def addressed(text, wait):
+        return handles / "context_checkpoints" / f"owner-wait-{wait * 32}-{hashlib.sha256(text.encode()).hexdigest()}.json"
+
+    with monkeypatch.context() as older_body:  # a body before #3789 packed every handle, one generation a pass
+        older_body.setattr(saved_state_retirement, "worked_copy", lambda folder, name: None)
+        first = _file(addressed("first generation", "8"), "first generation")
+        evidence_packs.pack_task(root, "partial", keep_shas=set())
+        _file(addressed("second generation", "9"), "second generation")
+        evidence_packs.pack_task(root, "partial", keep_shas=set())
+    rel = f"source_handles/context_checkpoints/{first.name}"
+    assert evidence_packs.materialize_handle(root, "partial", rel) and first.exists()
+    sidecars = [evidence_packs.packs_dir(root) / evidence_packs.sidecar_name("partial", generation) for generation in (1, 2)]
+    intact, index = [path.read_bytes() for path in sidecars], evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME
+    sidecars[0].write_text("{", encoding="utf-8")
+    with store.name_lock(root, evidence_packs.INDEX_LOCK_NAME, timeout_sec=0), store.acquisition_budget(0):
+        report = _prune(root)
+    assert report["held"] == {"packs_unknown": 1} and report["removed"] == 0, report
+    assert first.exists() and not _ledger(handles), "an unknown pack is never written down as bytes not kept"
+    with evidence_packs.open_index(root, write=True) as conn:  # an index rebuilt while a sidecar was unreadable says so
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('sidecar_errors', ?)", (json.dumps(["unreadable sidecar"]),))
+    assert _prune(root)["held"] == {"packs_unknown": 1} and first.exists(), "its rows may miss that generation"
+    index.unlink()
+    evidence_packs.ensure_index(root)  # rebuilt while generation 1's sidecar is unreadable: generation 2's rows only
+    sidecars[1].write_text("{", encoding="utf-8")  # then generation 2's sidecar fails too: no sidecar of it reads
+    assert _prune(root)["held"] == {"packs_unknown": 1} and first.exists() and not _ledger(handles), \
+        "a faulted index's rows are not the whole listing"
+    for path, data in zip(sidecars, intact):
+        path.write_bytes(data)
+    index.unlink()
+    evidence_packs.ensure_index(root)  # rebuilt from readable sidecars: every generation, no fault recorded
+    sidecars[0].write_text("{", encoding="utf-8")
+    again = _prune(root)  # an index that recorded no unreadable sidecar makes the listing whole
+    assert again["removed"] == 1 and not first.exists(), again["held"]
+    line = next(line for line in _ledger(handles) if line["name"] == first.name)
+    assert line["packed"] == ["observability/packs/partial.xz"], "the generation that holds these bytes"
+    assert evidence_packs.handle_bytes(root, "partial", rel) == b"first generation"
+
+
+def test_an_index_that_recorded_an_unreadable_sidecar_answers_no_whole_listing_though_it_holds_rows(root, monkeypatch):
+    """An index rebuilt while generation 1's sidecar was unreadable records that fault and holds only generation 2's
+    rows: while the sidecar stays unreadable those rows are not the whole listing (``whole``); once it reads, the
+    task's own sidecars are."""
+    import hashlib
+
+    from ouroboros import evidence_packs, saved_state_retirement
+
+    handles = _task(root, "validated")
+    text = "packed by an older body"
+    first = handles / "context_checkpoints" / f"owner-wait-{'8' * 32}-{hashlib.sha256(text.encode()).hexdigest()}.json"
+    with monkeypatch.context() as older_body:  # a body before #3789 packed every handle
+        older_body.setattr(saved_state_retirement, "worked_copy", lambda folder, name: None)
+        _file(first, text)
+        evidence_packs.pack_task(root, "validated", keep_shas=set())
+    notes = hashlib.sha256(b"notes").hexdigest()
+    _file(handles / "context_checkpoints" / f"working-notes-{notes}.json", "notes")  # a source: generation 2
+    evidence_packs.pack_task(root, "validated", keep_shas=set())
+    assert evidence_packs.materialize_handle(root, "validated", f"source_handles/context_checkpoints/{first.name}")
+    sidecar = evidence_packs.packs_dir(root) / evidence_packs.sidecar_name("validated", 1)
+    intact = sidecar.read_bytes()
+
+    def rebuilt():
+        (evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME).unlink()
+        evidence_packs.ensure_index(root)  # the packing pass's rebuild, from the sidecars as they read now
+
+    sidecar.write_text("{", encoding="utf-8")
+    rebuilt()
+    report = _prune(root)
+    assert report["held"] == {"packs_unknown": 1} and first.exists() and not _ledger(handles), report
+    sidecar.write_bytes(intact)
+    rebuilt()
+    assert _prune(root)["removed"] == 1 and not first.exists()
+    assert _ledger(handles)[0]["packed"] == ["observability/packs/validated.xz"]
+
+
 
 def test_a_recovered_crash_with_no_recorded_end_goes_its_days_after_it_was_written_settled(root):
-    from ouroboros.maintenance_retirement import prune_worked_copies
+    from ouroboros.saved_state_retirement import prune_worked_copies
 
     handles = root / "task_results" / "artifacts" / "crashed" / "source_handles"
     copies = _copies(handles)
@@ -820,17 +926,17 @@ def test_a_new_obligation_is_owed_now_and_a_later_write_only_by_an_end_ahead(roo
 
 
 def test_a_promotion_published_after_the_first_read_holds_under_the_lock(root, monkeypatch):
-    from ouroboros import maintenance_retirement, store
+    from ouroboros import saved_state_retirement, store
 
     copies = _copies(_task(root, "late-child"))
-    real = maintenance_retirement._call_records
+    real = saved_state_retirement._call_records
 
     def promotion_meanwhile(root_, task_id):
         with store.open_store(root_, write=True) as txn:
             txn.conn.execute("UPDATE tasks SET has_pending_promotion=1 WHERE task_id=?", (task_id,))
         return real(root_, task_id)
 
-    monkeypatch.setattr(maintenance_retirement, "_call_records", promotion_meanwhile)
+    monkeypatch.setattr(saved_state_retirement, "_call_records", promotion_meanwhile)
     assert _prune(root)["held"] == {"child_refs_pending": len(copies)} and all(path.exists() for path in copies)
 
 
@@ -854,7 +960,7 @@ def test_a_pooled_retry_reading_its_predecessors_retired_state_is_told_what_beca
 
 def test_a_new_walk_keeps_when_the_host_first_saw_a_work_settled(root):
     from ouroboros import store
-    from ouroboros.maintenance_retirement import WORKED_COPIES, prune_worked_copies
+    from ouroboros.saved_state_retirement import WORKED_COPIES, prune_worked_copies
 
     write_task_result(root, "nodate", "completed", ts=_iso(time.time() - 30 * 86400))  # no recorded end
     _file(root / "observability" / "calls" / "nodate" / "llm-1.json", "{}")

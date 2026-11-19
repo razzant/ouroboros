@@ -190,8 +190,38 @@ def _place_name(place_id: str) -> str:
     return f"place:{_encode_component(place_id)}"
 
 
+CARRIED_NAMES = "situation_names"  # a helper's situation names, written by value by the work that scheduled it
+
+
+def carried_names(task: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """The situation names a helper carries (``CARRIED_NAMES``, under ``metadata`` or at the top level), else ``None``."""
+    value = _mapping(task.get("metadata")).get(CARRIED_NAMES, task.get(CARRIED_NAMES))
+    return tuple(name for name in value if isinstance(name, str)) if isinstance(value, list) else None
+
+
+def carried_room(task: Mapping[str, Any]) -> str | None:
+    """The room a helper's carried names name, which its memory view reads; ``None`` when it carries none."""
+    return next((name.removeprefix("room:") for name in carried_names(task) or () if name.startswith("room:")), None)
+
+
+def helper_names(ctx: Any, root: Path) -> tuple[str, ...]:
+    """The names a helper this work starts carries: the ones this work holds heads by (its room as the memory view
+    resolves it for its role); a helper passes on its carried names unchanged, and one that carries none passes none."""
+    from ouroboros.memory_inventory import membership_facts
+    from ouroboros.memory_view import view_role, view_room_id
+
+    task = {"metadata": _mapping(getattr(ctx, "task_metadata", None)), "task_contract": getattr(ctx, "task_contract", None)}
+    role = view_role(task)
+    if role in DELEGATED_FOCUS_ROLES or carried_names(task) is not None:
+        return carried_names(task) or ()
+    room = view_room_id(task, ctx, root, project_chat_ids=membership_facts(root).project_chat_ids, presence=role == "presence")
+    return situation_names(task, room)
+
+
 def situation_names(task: Mapping[str, Any], room_id: str) -> tuple[str, ...]:
-    """The names from host facts, given the room already resolved by the memory view."""
+    """The names from host facts, given the room already resolved by the memory view; a helper's are those it carries."""
+    if (carried := carried_names(task)) is not None:
+        return carried
     place_id, route = _place_facts(task)
     names = (f"room:{room_id}",)
     if place_id:
