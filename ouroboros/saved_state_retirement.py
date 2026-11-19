@@ -459,20 +459,64 @@ def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
     return report
 
 
-def task_written(txn, task_id, columns):
-    """A finished task whose folder holds a saved state is owed to ``prune_worked_copies``: its row (``settled_at``:
-    when the host first wrote it settled, kept after) and the pass at its window's end (``maintenance_retirement``'s
-    ``task_written`` calls this in the task writer's transaction)."""
+def task_written(txn, task_id, columns, current=None, document=None):
+    """The saved states' half of a task write, in the writer's transaction (``maintenance_retirement.task_written``).
+    A finished task whose folder holds a saved state is owed to ``prune_worked_copies``: its row (``settled_at``: when
+    the host first wrote it settled, kept after; a running work's row has none, so its first settled write is a new
+    obligation) and the pass at its window's end. An unfinished write is read for what it moved past (``_moved_on``)."""
     from ouroboros.task_status import SETTLED_STATUSES
-    if txn.root is None or columns.get("status") not in SETTLED_STATUSES:
+    if txn.root is None:
+        return
+    if columns.get("status") not in SETTLED_STATUSES:
+        _moved_on(txn, task_id, current, document)
         return
     if not holds_worked_copy(txn.root / "task_results" / "artifacts" / task_id):
         return
-    row = txn.get_row(WORKED_COPIES, task_id)
-    txn.put_row(WORKED_COPIES, task_id, {"write_seq": columns.get("write_seq"), "settled_at": (row or {}).get("settled_at") or time.time()})
+    settled = (txn.get_row(WORKED_COPIES, task_id) or {}).get("settled_at")
+    txn.put_row(WORKED_COPIES, task_id, {"write_seq": columns.get("write_seq"), "settled_at": settled or time.time()})
     try:  # a new obligation is owed at least now; a later write of an old work only by an end still ahead
         deadline = float(columns["drive_retention_at"]) + get_gc_retention_days() * 86400
     except (KeyError, TypeError, ValueError):
         deadline = 0.0
-    if row is None or deadline > time.time():
+    if not settled or deadline > time.time():
         schedule_in(txn, max(deadline, time.time()))
+
+
+def _moved_on(txn, task_id, current, document) -> None:
+    """An unfinished work's write that moved past a saved state, seen with the store's pristine ``current`` beside the
+    new ``document``: a new wait or pause replaced the one whose file the row named (``owner_wait.wait_id`` or
+    ``budget_pause.pause_id`` changed), so that file's name and the time go into the task's row (``superseded``, the
+    first time kept) and the pass is owed when the owner's days end; a new attempt began, so the row is put and the pass
+    owed now to date the earlier attempt's files. A state change of the same wait or pause (resumed, retained, a warm
+    grant rolled back to waiting) moves past nothing, and a write that moved nothing reads and writes nothing."""
+    if not isinstance(current, dict) or not isinstance(document, dict):
+        return  # a direct upsert (an import) has no pristine document: nothing was replaced by a writer
+    names = [_ref_name(old.get("source_ref")) for old, new, key in (
+        (_facts(current, "owner_wait"), _facts(document, "owner_wait"), "wait_id"),
+        (_facts(current, "budget_pause"), _facts(document, "budget_pause"), "pause_id")) if old.get(key) != new.get(key)]
+    names = [name for name in names if name]
+    visit = _number(document.get("task_attempt")) > _number(current.get("task_attempt"))
+    if not names and not (visit and holds_worked_copy(txn.root / "task_results" / "artifacts" / task_id)):
+        return
+    now, row = time.time(), txn.get_row(WORKED_COPIES, task_id) or {}
+    superseded = {**{name: now for name in names}, **_facts(row, "superseded")}
+    txn.put_row(WORKED_COPIES, task_id, {**row, **({"superseded": superseded} if superseded else {})})
+    schedule_in(txn, now if visit else now + get_gc_retention_days() * 86400)
+
+
+def _facts(document: Any, key: str) -> dict:
+    value = document.get(key) if isinstance(document, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def _number(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ref_name(ref: Any) -> str:
+    """The file name a saved state's ``source_ref`` names (``artifacts.actor_source_reference``), ``""`` for none."""
+    path = ref.get("path") if isinstance(ref, dict) else None
+    return pathlib.PurePosixPath(str(path)).name if path else ""

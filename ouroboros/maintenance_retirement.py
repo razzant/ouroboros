@@ -126,14 +126,16 @@ def release_opened(txn, *, restored_tasks=()):
         maintenance_jobs.record_in(txn, JOB, **{JOB_FIELD: {**state, "floor": position}})
 
 
-def task_written(txn, task_id, columns):
+def task_written(txn, task_id, columns, *, current=None, document=None):
     """A task can wake retirement only for its own physical inputs or managed import obligations; its saved states
-    for exact return are ``saved_state_retirement``'s to owe."""
+    for exact return are ``saved_state_retirement``'s to owe, a running work's too (``current``, ``document``)."""
     from ouroboros.saved_state_retirement import task_written as saved_states_written
     from ouroboros.task_status import SETTLED_STATUSES
-    if txn.root is None or columns.get("status") not in SETTLED_STATUSES:
+    if txn.root is None:
         return
-    saved_states_written(txn, task_id, columns)
+    saved_states_written(txn, task_id, columns, current, document)
+    if columns.get("status") not in SETTLED_STATUSES:
+        return
     if (txn.get_row("custody_marks", task_id) or {}).get("managed_imports"):
         # An import can end before START and leave no filesystem retirement input. Its terminal
         # write still owes this pass, including one racing the first activation's cursor read.
