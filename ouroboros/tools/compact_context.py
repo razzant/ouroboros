@@ -72,7 +72,7 @@ def record_context_view(ctx, messages, tool_schemas, *, physical_capture=_CANONI
                 exposed = exposed_context_units_from_atoms(observed, atoms)
                 basis = str(manifest.get("exposure_atoms_basis") or "prepared_atoms")
             else:
-                payload = read_blob_ref(Path(root), manifest["full_payload_ref"])
+                payload = read_blob_ref(Path(root), manifest["full_payload_ref"], task_id=ctx.task_id)
                 physical_messages = payload.get("messages")
                 if not isinstance(physical_messages, list):
                     continue
