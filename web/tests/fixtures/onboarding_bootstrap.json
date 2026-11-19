@@ -88,7 +88,7 @@
         "inputId": "light-model",
         "label": "Light Model",
         "managed": false,
-        "note": "Fast summaries, lightweight internal work and the default Fast scout. Empty uses Main.",
+        "note": "Memory consolidation, Light subagents, review verdicts, duplicate checks, names and translation; Safety when it inherits. Empty uses Main.",
         "settingKey": "OUROBOROS_MODEL_LIGHT",
         "settingsInputId": "s-model-light",
         "settingsToggleId": "s-local-light",

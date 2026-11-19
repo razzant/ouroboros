@@ -894,10 +894,10 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
         install_preset_applied = True
         # R8: provider normalization already ran over `current`; the preset keys land on top of it.
         current.update(preset.settings_keys())
-        # Only omitted fields (or an empty Main awaiting its first proposal) are authored here: a
-        # visible draft value, even one equal to a shipped default, is explicit owner intent.
-        current.update({key: value for key, value in preset.model_settings.items()
-                        if key not in body or (key == "OUROBOROS_MODEL" and not body[key])})
+        # Only omitted fields (or an empty Main, and Light beside it, awaiting proposals) are authored here:
+        # a visible draft value, even one equal to a shipped default, is explicit owner intent.
+        current.update({key: value for key, value in preset.model_settings.items() if key not in body or (
+            key in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT") and not body[key] and not body.get("OUROBOROS_MODEL"))})
 
     if not has_startup_ready_provider(current):
         return unsaved_error("The connected accounts do not provide a Main model. Connect Codex, an API provider, or a local model.",
