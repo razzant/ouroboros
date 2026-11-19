@@ -733,12 +733,14 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
                 for located in placements:
                     if admit is not None:
                         admit(located[0])
-                    try:
+                    try:  # the blob's own verdicts (over the caller's limit, a size its ref lacks) end its copies here
                         if max_bytes is not None and int(located[1]["size"]) > max_bytes:
-                            raise ValueError("blob exceeds byte limit")
+                            failure, located = ValueError("blob exceeds byte limit"), None
+                            break
                         raw = member_bytes(*located)
                         if size not in (-1, len(raw)):
-                            raise EvidenceCorrupt(f"evidence_corrupt: packed blob {sha256[:12]} size differs from its ref")
+                            failure, located = EvidenceCorrupt(f"evidence_corrupt: packed blob {sha256[:12]} size differs from its ref"), None
+                            break
                         return raw
                     except FileNotFoundError as exc:
                         failure = failure or exc
@@ -746,7 +748,7 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
                         failure = exc
                     except OSError:
                         failure = EvidenceCorrupt(f"evidence_corrupt: unreadable pack {located[0].name}")
-                after = (placements[-1][1]["task_id"], placements[-1][1]["generation"]) if indexed and placements else ()
+                after = (located[1]["task_id"], located[1]["generation"]) if indexed and placements and located else ()
         raise unknown or failure or FileNotFoundError(str(root / "observability" / "blobs" / f"{sha256}.{kind}.gz"))
     finally:
         # The kept error's traceback holds this frame: kept past an exit, it is a cycle retaining the callers'
