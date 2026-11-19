@@ -136,16 +136,16 @@ def _exposure_atoms_manifest(candidate: Dict[str, Any]) -> Dict[str, Any]:
     return {"exposure_atoms": atoms, "exposure_atoms_basis": EXPOSURE_ATOMS_BASIS}
 
 
-def _file_trace(candidate: Dict[str, Any], facts: Dict[str, Any]) -> Dict[str, Any]:
+def _file_trace(candidate: Dict[str, Any], source: Any) -> Dict[str, Any]:
     """Bind the captured SYSTEM file to the actual leading system part only.
 
-    Scope is intentionally narrow. A different wire shape, repriced fallback
-    or recovered transcript that cannot prove this prefix simply gets no trace.
+    ``source`` is the capture's witness as its sender carried it (``PhysicalAttemptContext.base_prompt_source``):
+    unverified, and never written as it is. Scope is intentionally narrow. A different wire shape, repriced
+    fallback or recovered transcript that cannot prove this prefix simply gets no trace.
     No offsets are asserted in the redacted body.
     """
-    source = (facts.get("physical_context") or {}).get("base_prompt_source")
     messages = candidate.get("messages")
-    if not source or not isinstance(messages, list) or not messages:
+    if not isinstance(source, (tuple, list)) or len(source) != 4 or not isinstance(messages, list) or not messages:
         return {}
     leading = messages[0]
     if not isinstance(leading, dict) or leading.get("role") != "system":
@@ -154,7 +154,7 @@ def _file_trace(candidate: Dict[str, Any], facts: Dict[str, Any]) -> Dict[str, A
     if isinstance(content, list) and content and isinstance(content[0], dict) and content[0].get("type") == "text":
         content = content[0].get("text")
     path, digest, chars, text_sha = source
-    if (not isinstance(content, str) or len(content) < chars
+    if (not isinstance(content, str) or type(chars) is not int or len(content) < chars
             or len(content) > chars and not content.startswith("\n\n## BIBLE.md\n\n", chars)
             or hashlib.sha256(content[:chars].encode("utf-8")).hexdigest() != text_sha):
         return {}
@@ -174,7 +174,9 @@ def persist_physical_candidate(
 
     ``candidate_facts`` describe the pre-redaction canonical object. The normal
     ``persist_call`` refs describe the redacted-by-default CAS blob; the two
-    digest domains are deliberately labelled rather than equated.
+    digest domains are deliberately labelled rather than equated. Its optional
+    ``file_witness`` (the capture's prompt-file version) is consumed here, never
+    stored: the manifest keeps the verified ``file_trace`` alone.
 
     The manifest carries the ``model_send_seal`` block (additive key under
     the existing SCHEMA_VERSION object; readers ignore unknown keys), and the
@@ -193,6 +195,8 @@ def persist_physical_candidate(
     from ouroboros.observability import persist_call
     from ouroboros.chronicle_lead import delivered_lead_rule
 
+    facts = dict(candidate_facts)
+    witness = facts.pop("file_witness", None)  # only what ``_file_trace`` proves of it reaches the manifest
     lead_rule = delivered_lead_rule(candidate)
     projected = physical_custody_projection(candidate)
     custody_projected = projected != candidate
@@ -210,15 +214,15 @@ def persist_physical_candidate(
             "redacted_projection_digest_basis": "observability_json_v1_post_default_redaction_cas",
             "anthropic_native_custody_projected": custody_projected,
             **_exposure_atoms_manifest(candidate),
-            **dict(candidate_facts),
-            **_file_trace(candidate, candidate_facts),
+            **facts,
+            **_file_trace(candidate, witness),
         },
         finalize_manifest=lambda redacted: {
             "model_send_seal": build_model_send_seal(
                 attempt_id=attempt_id,
                 candidate=candidate,
                 projected=projected,
-                candidate_facts=dict(candidate_facts),
+                candidate_facts=facts,
                 redaction=redacted,
                 custody_projected=custody_projected,
             ),

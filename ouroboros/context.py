@@ -807,7 +807,8 @@ def _capture_context_core(
             base_prompt_source = (base_prompt_path, hashlib.sha256(raw_prompt).hexdigest(),
                                   len(base_prompt), hashlib.sha256(base_prompt.encode("utf-8")).hexdigest())
     except (OSError, UnicodeError) as exc:
-        log.debug("Base prompt unavailable at capture: %s", type(exc).__name__)
+        if not isinstance(exc, FileNotFoundError):  # a missing prompt stays quiet, as ``safe_read`` left it
+            log.warning("Base prompt %s could not be read (%s); using fallback", base_prompt_path, type(exc).__name__)
         base_prompt = "You are Ouroboros. Your base prompt could not be loaded."
     bible_md = safe_read(env.repo_path("BIBLE.md"))
     from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book

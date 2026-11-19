@@ -67,8 +67,8 @@ _OPEN_STATES = ("reserved", "dispatched", "unresolved")
 _OPEN_PREDICATE = ("(state IN ('reserved','dispatched','unresolved') "
                    "OR (state='settled' AND settle_reason='abandoned'))")
 # ``Txn.task_attempt_page``: newest first by the immutable, unique ``seq_first`` (``seq`` moves on every write).
-_TASK_PAGE_SQL = ("SELECT attempt_id, state, settle_reason, model, provider, ts_reserved, ts_dispatched, "
-                  "ts_final, ts_last FROM attempts INDEXED BY attempts_task "
+_LIFECYCLE_COLUMNS = "attempt_id, state, settle_reason, model, provider, ts_reserved, ts_dispatched, ts_final, ts_last"
+_TASK_PAGE_SQL = (f"SELECT {_LIFECYCLE_COLUMNS} FROM attempts INDEXED BY attempts_task "
                   "WHERE task_id=? AND category=? AND seq_first<? ORDER BY seq_first DESC LIMIT ?")
 _TASK_CURSOR_SQL = "SELECT seq_first FROM attempts WHERE attempt_id=? AND task_id=? AND category=?"
 # A period's model calls by position (``Txn.period_bounds``) and reservation time: the ledger's own calls, never
@@ -450,6 +450,12 @@ class Txn:
                 return None
             before = cursor["seq_first"]
         return [dict(record) for record in self.conn.execute(page_sql, (*scope, before, int(limit)))]
+
+    def attempt_lifecycle(self, attempt_id: str) -> Optional[Dict[str, Any]]:
+        """One attempt's ``task_attempt_page`` row: lifecycle facts, no money, usage or payload fields."""
+        record = self.conn.execute(f"SELECT {_LIFECYCLE_COLUMNS} FROM attempts WHERE attempt_id=?",
+                                   (str(attempt_id),)).fetchone()
+        return None if record is None else dict(record)
 
     def review_seat_costs(self, category: str, *, limit: int) -> List[Dict[str, Any]]:
         """What one reviewer seat cost in one wave: per (wave, row), the summed cost of every

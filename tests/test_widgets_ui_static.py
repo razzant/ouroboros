@@ -51,6 +51,26 @@ def test_widgets_use_design_radius_tokens():
     assert "border-radius: 9px;" not in block
 
 
+def test_context_report_page_is_admitted_by_its_own_csp_hashes():
+    """Beautiful Context is one self-contained document: its policy admits its inline style and script by hash.
+
+    An edit that keeps an old hash ships a page whose style or script the browser refuses, and only the opt-in
+    browser lane opens that page (``tests/test_widgets_ui_browser.py``).
+    """
+    import base64
+    import hashlib
+    import re
+
+    page = _read("web/context-report.html")
+    policy = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', page).group(1)
+    directives = dict(part.strip().split(" ", 1) for part in policy.split(";"))
+    assert directives["default-src"] == "'none'"
+    for tag, directive in (("style", "style-src"), ("script", "script-src")):
+        (inline,) = re.findall(rf"<{tag}\b[^>]*>(.*?)</{tag}>", page, re.S)
+        digest = base64.b64encode(hashlib.sha256(inline.encode("utf-8")).digest()).decode("ascii")
+        assert directives[directive] == f"'sha256-{digest}'", directive
+
+
 def test_widgets_schema_v1_composition_uses_stable_tree_keys():
     source = _widgets_js()
     renderer = _render_js()

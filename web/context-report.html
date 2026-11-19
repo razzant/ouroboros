@@ -1,27 +1,87 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-qFYFtNaywMLxFv/MFWklin3oxCjNgG44/qq/FpEBEJg='; style-src 'sha256-BndEYCQrWUMNsWyi3ZU8ZNr8mOJYwh9t/JpxBXYn2J0='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-2jna4zdTxfJZQIr3Q/e2icXkxo6A2pC7Yajg5HQ80Mc='; style-src 'sha256-f/pvUT3AyGTaU1UNYOl8WzyOV3eeglhoA+StwvJw6NI='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
-:root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; }
-body { margin: 0; padding: 1rem; background: Canvas; color: CanvasText; overflow-wrap: anywhere; }
-h1 { font-size: 1.25rem; margin: 0; }
-p { margin: .4rem 0 1rem; }
-input { max-width: 100%; }
-dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .3rem .8rem; }
-dt { font-weight: 600; } dd { margin: 0; min-width: 0; }
-summary { cursor: pointer; padding: .5rem 0; font-weight: 600; }
-pre { white-space: pre-wrap; overflow-wrap: anywhere; border-inline-start: 2px solid GrayText; padding-inline-start: .75rem; }
+/* An opaque frame inherits no host tokens: system colours follow the scheme the host names in the frame's
+   name (ouro-theme:light or ouro-theme:dark), else the device's. Sizes, radii and spacing are the design book's. */
+:root { color-scheme: light dark; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  --warn: #805000; --bad: #b52b3b; --focus: #bf2f40; }
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; --warn: #f7cb58; --bad: #fe9498; --focus: #fe7d85; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) { --warn: #f7cb58; --bad: #fe9498; --focus: #fe7d85; }
+}
+body { margin: 0; padding: 16px; color: CanvasText; overflow-wrap: anywhere;
+  --meta: color-mix(in srgb, CanvasText 70%, Canvas); --tray: color-mix(in srgb, CanvasText 6%, transparent); }
+h1, h2, p, ol, dl, pre { margin: 0; }
+h1, h2 { font-size: 16px; line-height: 1.3; font-weight: 600; }
+h2 { margin-block: 24px 8px; }
+h2 small, .meta, dt, #report-help, .note { font-size: 12px; line-height: 1.35; font-weight: 400; color: var(--meta); }
+#lead { margin-block: 4px 12px; color: var(--meta); }
+.open { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.pick { position: relative; display: inline-flex; }
+.button { padding: 6px 16px; border-radius: 999px; background: var(--tray); font-weight: 600; }
+.pick:hover .button { background: color-mix(in srgb, CanvasText 11%, transparent); }
+#report-file { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; opacity: 0; cursor: pointer; }
+#report-file:focus-visible + .button, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+#report-status[data-tone="bad"] { color: var(--bad); }
+#report-help { margin-block-start: 12px; }
+#report-help ol { padding-inline-start: 20px; }
+#report-help li { margin-block-start: 4px; }
+code, pre { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+summary { cursor: pointer; border-radius: 12px; }
+#report-result { margin-block-start: 24px; }
+#explain { margin-block: 4px 12px; }
+dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; }
+dd { margin: 0; min-width: 0; }
+.callout { margin-block-start: 12px; padding: 12px 16px; border-radius: 12px; background: var(--tray); }
+.callout strong { font-weight: 600; color: var(--warn); }
+.rows { display: grid; gap: 4px; }
+.row { border-radius: 12px; background: var(--tray); }
+.row > summary { display: grid; grid-template-columns: 0.75rem 1.5rem 5.5rem minmax(0, 1fr) max-content; gap: 8px;
+  align-items: baseline; padding: 8px 12px; list-style: none; }
+.rows[data-kind="tools"] > .row > summary, .rows[data-kind="functions"] > .row > summary {
+  grid-template-columns: 0.75rem 1.5rem minmax(0, 14rem) minmax(0, 1fr) max-content; }
+.row > summary::-webkit-details-marker { display: none; }
+.row > summary::before { content: "\203A"; color: var(--meta); }
+.row[open] > summary::before { transform: rotate(90deg); }
+.row > summary .what { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.row[open] > summary .what { color: var(--meta); }
+.role { min-width: 0; font-weight: 600; }
+.part { padding: 0 12px 12px; }
+.part > .meta { display: block; margin-block-end: 4px; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.part > .said { font: inherit; }
+.more { margin-block-start: 8px; }
+.more > summary { padding-block: 8px; font-weight: 600; }
+.more > pre, .more > dl, .more > .note { padding-block-end: 8px; }
+@media (max-width: 34rem) {
+  .row > summary, .rows[data-kind] > .row > summary { grid-template-columns: 0.75rem 1.5rem minmax(0, 1fr) max-content; }
+  .row > summary .what { grid-area: 2 / 1 / 3 / -1; }
+  .row > summary .how { grid-area: 1 / 4; }
+}
 </style></head>
 <body><main><h1>Beautiful Context</h1>
-<p>Open a report produced by the local request reader. The file stays in this frame.</p>
-<label for="report-file">Open local report</label>
-<input type="file" id="report-file" accept=".json,application/json">
-<p id="report-status" role="status"></p>
-<section id="report-result" hidden><dl id="attempt-facts"></dl>
-<details><summary>Stored JSON</summary><pre id="stored-body"></pre></details>
-<details><summary>Recorded source versions</summary><pre id="source-versions"></pre></details>
+<p id="lead">Read one model request the way this computer recorded it. The file you open stays in this frame: nothing is uploaded or kept.</p>
+<div class="open"><span class="pick"><input type="file" id="report-file" accept=".json,application/json"><label class="button" for="report-file">Open local report</label></span>
+<span id="report-status" role="status"></span></div>
+<details id="report-help"><summary>How to make a report</summary><ol>
+<li>Take the full ID of the task itself. A Context Lens chart is named by a hash; that hash is not a task ID.</li>
+<li>In a terminal, from a separate source checkout of this version (never the running one), list that task's attempts, newest first: <code>python -m ouroboros.context_attempt_reader --data-root DATA TASK_ID</code>, where DATA is this installation's data folder.</li>
+<li>Write one attempt's report into a private folder that is not synced: <code>python -m ouroboros.context_attempt_reader --data-root DATA TASK_ID --attempt ATTEMPT_ID --report &gt; report.json</code></li>
+<li>Open that file here. Each attempt has its own report, also when two attempts sent the same request.</li>
+</ol></details>
+<section id="report-result" hidden>
+<h2 id="headline"></h2>
+<p id="explain"></p>
+<dl id="attempt-facts"></dl>
+<p class="callout" id="privacy"><strong>Private text can remain.</strong> Only known secret patterns are masked, so names, messages and file paths stay readable. Keep this file on this computer; it is not meant to be forwarded automatically.</p>
+<div id="request"></div>
+<details class="more"><summary>Stored JSON</summary><p class="note" id="stored-note"></p><pre id="stored-body"></pre></details>
+<details class="more"><summary>Recorded source versions</summary><pre id="source-versions"></pre></details>
+<details class="more" id="record"><summary>All recorded facts of this attempt</summary><pre id="record-body"></pre></details>
 </section></main><script>
 'use strict';
 const byId = (id) => document.getElementById(id);
@@ -29,68 +89,257 @@ const input = byId('report-file');
 const status = byId('report-status');
 const result = byId('report-result');
 const fields = byId('attempt-facts');
+const request = byId('request');
 const stored = byId('stored-body');
-const sources = byId('source-versions');
-const bodyDisclosure = stored.closest('details');
-const sourceDisclosure = sources.closest('details');
 const maxBytes = 48 * 1024 * 1024;
-const text = (value) => typeof value === 'string' && value ? value : 'Not recorded';
-const words = new Map([
+const theme = /^ouro-theme:(light|dark)$/.exec(window.name);
+if (theme) document.documentElement.dataset.theme = theme[1];
+
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const text = (value) => (typeof value === 'string' && value ? value : 'Not recorded');
+const count = (number) => number.toLocaleString('en-US');
+const size = (chars) => (chars < 1000 ? `${chars} chars` : `${count(Math.round(chars / 100) / 10)}k chars`);
+const bytes = (number) => (number < 1024 ? `${number} byte${number === 1 ? '' : 's'}`
+  : number < 1024 * 1024 ? `${count(Math.ceil(number / 1024))} KiB` : `${count(Math.ceil(number / 1024 / 102.4) / 10)} MiB`);
+const pretty = (value) => JSON.stringify(value, null, 2);
+function element(tag, className, content) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (content !== undefined) node.textContent = content;
+  return node;
+}
+function when(value) {
+  const date = new Date(typeof value === 'string' ? value : NaN);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'long' });
+}
+
+// The words of a report: what the host ledger recorded, never a claim about the provider's copy.
+const ABSENT = new Map([
+  ['not_linked', ['No request was recorded for this attempt',
+    'Its ledger row links no saved request. Preparation may have ended before that link was written; a copy left on disk without it is not read.']],
+  ['not_recorded', ['This attempt has no readable request record',
+    'It was saved without a sealed redacted copy this reader understands, as attempts of older versions were.']],
+  ['unavailable', ['The saved request is no longer on disk',
+    'The attempt links a record whose file was not found in the data folder the reader was given. Retention may have removed it.']],
+]);
+const STATES = new Map([
+  ['reserved', 'Reserved — money was set aside; no dispatch is recorded'],
+  ['released', 'Released — the host withdrew this attempt and returned its reservation'],
+  ['dispatched', 'Dispatched — handed to the transport; no outcome is recorded yet'],
+  ['settled', 'Settled — the charge is final in the host ledger'],
+  ['unresolved', 'Unresolved — the host does not know how this send ended'],
+]);
+const TRANSPORT = new Map([
   ['not_started', 'Not started at the last recorded state'],
   ['ledger_released', 'Released in the host ledger; transport receipt not confirmed'],
   ['ledger_dispatch_mark', 'Marked dispatched in the host ledger; transport receipt not confirmed'],
   ['error_reply_recorded', 'Transport returned an error reply'],
 ]);
-let generation = 0;
+function failureWords(failure) {
+  if (!isRecord(failure)) return '';
+  const http = Number.isInteger(failure.provider_status_code) ? `HTTP ${failure.provider_status_code}` : '';
+  const kind = failure.stage === 'response_body_error' ? 'The reply carried an error'
+    : failure.stage === 'raised_exception' ? `The send raised ${text(failure.exception_type)}` : `Failure at ${text(failure.stage)}`;
+  return [kind, http, typeof failure.transport_cause_type === 'string' ? failure.transport_cause_type : '']
+    .filter(Boolean).join(' · ');
+}
+
+// Readable parts of one stored value, each a title (empty for plain text) and its whole text.
+function parts(content, out = [], under = '') {
+  const push = (title, value) => out.push([[under, title].filter(Boolean).join(' · '), value]);
+  if (typeof content === 'string') { if (content) push('', content); return out; }
+  if (content === null || content === undefined) return out;
+  if (!Array.isArray(content)) { push('Content', pretty(content)); return out; }
+  for (const part of content) {
+    if (typeof part === 'string') push('', part);
+    else if (!isRecord(part)) push('Part', pretty(part));
+    else if (part.type === 'tool_use') push(['Tool call', part.name, part.id].filter(Boolean).join(' · '), pretty(part.input ?? {}));
+    else if (part.type === 'tool_result') parts(part.content, out, ['Tool result', part.tool_use_id].filter(Boolean).join(' · '));
+    else if (/image/.test(String(part.type))) push('Image', `${size(JSON.stringify(part).length)} of image data, kept in the stored JSON.`);
+    else if (typeof part.text === 'string') push(/^(input_|output_)?text$/.test(String(part.type)) ? '' : text(part.type), part.text);
+    else push(text(part.type), pretty(part));
+  }
+  return out;
+}
+function argumentsText(value) {
+  if (typeof value !== 'string') return pretty(value ?? {});
+  try { const parsed = JSON.parse(value); return parsed !== null && typeof parsed === 'object' ? pretty(parsed) : value; } catch { return value; }
+}
+// A message, an input item or a tool, whole: what no rule names is shown as indented JSON under "Other fields".
+function readable(item, key) {
+  if (!isRecord(item)) return parts(item);
+  const used = new Set(['role', 'tool_call_id', 'call_id']);
+  const out = [];
+  if (key === 'tools' || key === 'functions') {
+    const { description, ...definition } = isRecord(item.function) ? item.function : item;
+    if (typeof description === 'string' && description) out.push(['', description]);
+    out.push(['Definition', pretty(definition)]);
+    for (const name of isRecord(item.function) ? ['function', 'type'] : Object.keys(item)) used.add(name);
+  } else if (item.type === 'function_call') {
+    out.push([['Tool call', item.name, item.call_id].filter(Boolean).join(' · '), argumentsText(item.arguments)]);
+    for (const name of ['type', 'name', 'arguments']) used.add(name);
+  } else if (item.type === 'function_call_output') {
+    parts(item.output, out);
+    used.add('type').add('output');
+  } else if (item.content === undefined && typeof item.text === 'string') {
+    parts([item], out);
+    used.add('type').add('text');
+  } else {
+    parts(item.content, out);
+    for (const call of Array.isArray(item.tool_calls) ? item.tool_calls : []) {
+      const fn = isRecord(call) && isRecord(call.function) ? call.function : call;
+      out.push([['Tool call', fn && fn.name, call && call.id].filter(Boolean).join(' · '), argumentsText(fn && fn.arguments)]);
+    }
+    used.add('content').add('tool_calls');
+  }
+  const rest = Object.fromEntries(Object.entries(item).filter(([name]) => !used.has(name)));
+  if (Object.keys(rest).length) out.push(['Other fields', pretty(rest)]);
+  return out;
+}
+function rowWords(item, key) {
+  if (!isRecord(item)) return [key, typeof item === 'string' ? item : pretty(item)];
+  const entries = readable(item, key);
+  if (key === 'tools' || key === 'functions') return [text((isRecord(item.function) ? item.function : item).name), entries[0][0] ? '' : entries[0][1]];
+  const plain = entries.find(([title, value]) => !title && value.trim());
+  const calls = entries.filter(([title]) => title.startsWith('Tool call')).map(([title]) => title.split(' · ')[1]);
+  const said = plain ? plain[1] : calls.length ? `calls ${calls.join(', ')}` : entries.length ? entries[0][1] : '';
+  const id = [item.tool_call_id, item.call_id].find((value) => typeof value === 'string' && value);
+  return [text(item.role || item.type), (id && !calls.length ? `result of ${id}: ` : '') + said.trim()];
+}
+
+let body = null;
+let source = '';
+function section(title, key, masked) {
+  const items = Array.isArray(body[key]) ? body[key] : [body[key]];
+  const heading = element('h2', '', `${title} `);
+  heading.append(element('small', '', String(items.length)));
+  const list = element('div', 'rows');
+  list.dataset.kind = key;
+  items.forEach((item, index) => {
+    const row = element('details', 'row');
+    const head = element('summary');
+    const [role, said] = rowWords(item, key);
+    const path = `$.${key}${Array.isArray(body[key]) ? `[${index}]` : ''}`;
+    const hidden = masked.some((at) => at === path || at.startsWith(`${path}.`) || at.startsWith(`${path}[`));
+    head.append(element('span', 'meta', String(index + 1)), element('span', 'role', role),
+      element('span', 'what', said.slice(0, 240).split('\n', 1)[0]),
+      element('span', 'meta how', size(JSON.stringify(item).length) + (hidden ? ' · secret masked' : '')));
+    row.append(head);
+    // A row's text is drawn while it is open and dropped when it closes: the overview never repeats the request.
+    row.addEventListener('toggle', () => {
+      row.querySelectorAll('.part').forEach((part) => part.remove());
+      if (!row.open) return;
+      for (const [label, value] of readable(item, key)) {
+        const part = element('div', 'part');
+        if (label) part.append(element('span', 'meta', label));
+        part.append(element('pre', label ? '' : 'said', value));
+        row.append(part);
+      }
+    });
+    list.append(row);
+  });
+  request.append(heading, list);
+}
 function clear() {
   result.hidden = true;
-  fields.replaceChildren();
-  sources.textContent = '';
-  stored.textContent = '';
-  bodyDisclosure.open = sourceDisclosure.open = false;
+  body = null;
+  source = '';
+  for (const node of [fields, request, stored, byId('stored-note'), byId('source-versions'), byId('record-body')]) node.replaceChildren();
+  for (const node of result.querySelectorAll('details')) node.open = false;
 }
 function add(label, value) {
-  const term = document.createElement('dt');
-  term.textContent = label;
-  const definition = document.createElement('dd');
-  definition.textContent = value;
-  fields.append(term, definition);
+  if (value) fields.append(element('dt', '', label), element('dd', '', value));
+}
+const SECTIONS = [['system', 'System'], ['instructions', 'Instructions'], ['messages', 'Messages'], ['input', 'Input'],
+  ['tools', 'Tools'], ['functions', 'Functions']];
+function show(facts, name) {
+  const absent = body === null;
+  let [headline, why] = absent ? ABSENT.get(facts.body) || ['This report holds no request body', `The reader gave the reason "${text(facts.body)}".`]
+    : ['Request recorded for this attempt', 'This is the host’s historical copy, saved before sending with known secrets masked. It is not the provider’s receipt.'];
+  if (absent && facts.body === 'over_limit') {
+    const recorded = Number.isInteger(facts.recorded_bytes) ? facts.recorded_bytes : 0;
+    headline = 'The saved request is larger than this report’s limit';
+    why = `It is ${recorded ? bytes(recorded) : 'larger'}; this export allowed ${Number.isInteger(facts.max_bytes) ? bytes(facts.max_bytes) : 'less'}. `
+      + `Run the reader again with --max-bytes ${recorded || 'N'} to include it.`;
+  }
+  byId('headline').textContent = headline;
+  byId('explain').textContent = why;
+  add('Attempt', text(facts.attempt_id));
+  add('Task', text(facts.task_id));
+  add('Requested model', [facts.model, facts.provider].filter((value) => typeof value === 'string' && value).join(' via ') || 'Not recorded');
+  add('Reserved', when(facts.ts_reserved));
+  add('Dispatched', when(facts.ts_dispatched));
+  add('Finished', when(facts.ts_final));
+  add('Ledger state', (STATES.get(facts.ledger_state) || text(facts.ledger_state))
+    + (typeof facts.settle_reason === 'string' && facts.settle_reason ? ` (${facts.settle_reason})` : ''));
+  add('Transport', TRANSPORT.get(facts.transport_observation) || 'Transport receipt not confirmed');
+  add('Failure', failureWords(facts.failure));
+  byId('privacy').hidden = absent;
+  // The one whole copy of the request in this frame; a report of a gap names its gap here too.
+  stored.textContent = absent ? `Request body unavailable: ${text(facts.body)}` : source;
+  byId('stored-note').textContent = absent ? '' : `One line of ${count(source.length)} characters, exactly as recorded.`;
+  if (!absent) {
+    add('Stored request', `${Number.isInteger(facts.bytes) ? bytes(facts.bytes) : size(source.length)} of JSON`);
+    const masked = (Array.isArray(facts.host_exclusions) ? facts.host_exclusions : [])
+      .map((row) => (isRecord(row) && row.class === 'secret_redaction' && typeof row.path === 'string' ? row.path : '')).filter(Boolean);
+    for (const [key, title] of SECTIONS) if (key in body) section(title, key, masked);
+    const rest = Object.entries(body).filter(([key]) => !SECTIONS.some(([known]) => known === key));
+    if (rest.length) {
+      const other = element('dl');
+      for (const [key, value] of rest) other.append(element('dt', '', key), element('dd', '', typeof value === 'string' ? value : JSON.stringify(value)));
+      request.append(element('h2', '', 'Other request fields'), other);
+    }
+  }
+  const trace = Array.isArray(facts.file_trace) ? facts.file_trace.filter((row) => row && typeof row === 'object'
+    && typeof row.source_path === 'string' && typeof row.source_sha256 === 'string') : [];
+  byId('source-versions').textContent = trace.length ? trace.map((row) => [row.source_path, 'File SHA-256: ' + row.source_sha256,
+    'Contribution SHA-256: ' + text(row.text_sha256), 'Contribution: ' + text(row.contribution)].join('\n')).join('\n\n')
+    : 'No supported source versions were recorded. Other files and offsets remain unknown.';
+  byId('record-body').textContent = pretty(facts);
+  status.textContent = `Showing ${name}.`;
+  result.hidden = false;
+}
+let generation = 0;
+function refuse(epoch, reason) {
+  if (epoch !== generation) return;
+  status.dataset.tone = 'bad';
+  status.textContent = `Cannot read this Beautiful Context JSON report: ${reason}`;
 }
 input.addEventListener('change', async () => {
-  const epoch = ++generation;
   const file = input.files[0];
   input.value = '';
+  const epoch = ++generation;
   clear();
+  delete status.dataset.tone;
   if (!file) { status.textContent = 'No report selected.'; return; }
-  if (file.size > maxBytes) { status.textContent = 'This report exceeds the 48 MiB display limit.'; return; }
+  if (file.size > maxBytes) return refuse(epoch, 'the file is larger than the 48 MiB this view reads.');
+  if (!file.size) return refuse(epoch, 'the file is empty. A failed export leaves an empty file; run the reader again and read what it says in the terminal.');
   status.textContent = 'Reading the selected file…';
   let report;
   try {
-    report = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer()));
-    const { facts, stored_json: body } = report;
-    if (report.format !== 'ouroboros.context-report/1' || !facts || typeof facts !== 'object'
-        || typeof facts.task_id !== 'string' || typeof facts.attempt_id !== 'string'
-        || (body !== null && typeof body !== 'string')) throw new Error('Invalid context report');
-    if (body !== null) JSON.parse(body);
+    report = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
   } catch {
-    if (epoch === generation) status.textContent = 'Cannot read this Beautiful Context JSON report. Choose another file.';
-    return;
+    return refuse(epoch, 'the file is not UTF-8 text. Write it with a redirection that keeps its bytes (a POSIX shell or cmd.exe).');
+  }
+  try {
+    report = JSON.parse(report);
+  } catch {
+    return refuse(epoch, 'the file is not complete JSON. The export was cut short, or this is another kind of file.');
+  }
+  const facts = isRecord(report) ? report.facts : null;
+  if (!isRecord(report) || report.format !== 'ouroboros.context-report/1') return refuse(epoch, 'this JSON is another kind of document.');
+  let parsed = null;
+  try {
+    if (!isRecord(facts) || typeof facts.task_id !== 'string' || typeof facts.attempt_id !== 'string'
+        || (report.stored_json !== null && typeof report.stored_json !== 'string')) throw new Error('facts');
+    if (report.stored_json !== null && !isRecord(parsed = JSON.parse(report.stored_json))) throw new Error('body');
+  } catch {
+    return refuse(epoch, 'its attempt facts or its request body are damaged. Export it again.');
   }
   if (epoch !== generation) return;
-  const { facts, stored_json: body } = report;
-  add('Task', text(facts.task_id));
-  add('Attempt', text(facts.attempt_id));
-  add('Requested model', text(facts.model));
-  add('Ledger state', text(facts.ledger_state));
-  add('Transport', words.get(facts.transport_observation) || 'Transport receipt not confirmed');
-  const trace = Array.isArray(facts.file_trace) ? facts.file_trace.filter((row) => row && typeof row === 'object'
-    && typeof row.source_path === 'string' && typeof row.source_sha256 === 'string') : [];
-  sources.textContent = trace.length ? trace.map((row) => [row.source_path, 'File SHA-256: ' + row.source_sha256,
-    'Contribution SHA-256: ' + text(row.text_sha256), 'Contribution: ' + text(row.contribution)].join('\n')).join('\n\n')
-    : 'No supported source versions were recorded. Other files and offsets remain unknown.';
-  stored.textContent = body ?? ('Request body unavailable: ' + text(facts.body));
-  status.textContent = 'Showing ' + file.name + '. Redacted host record; the provider’s copy was not observed.';
-  result.hidden = false;
+  body = parsed;
+  source = report.stored_json || '';
+  show(facts, file.name);
 });
 window.addEventListener('pagehide', () => { ++generation; input.value = ''; clear(); }, { once: true });
 </script></body></html>

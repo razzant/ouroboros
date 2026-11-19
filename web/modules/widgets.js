@@ -899,6 +899,9 @@ export function initWidgets(ctx = {}) {
         frame.title = 'Beautiful Context';
         frame.setAttribute('sandbox', 'allow-scripts');
         frame.referrerPolicy = 'no-referrer';
+        // An opaque frame reads no host token: its name tells it the painted palette, and nothing else is told.
+        const theme = window.ouroTheme?.theme;
+        if (theme === 'light' || theme === 'dark') frame.name = `ouro-theme:${theme}`;
         frame.src = '/static/context-report.html';
         reportMount.append(frame);
         reportMount.hidden = false;

@@ -10,9 +10,9 @@ a reconstruction mismatch is an observability fact, not a dispatch gate.
 
 ## Local request inspection
 
-From a **separate matching source checkout** without an adoption pointer, run `python -m ouroboros.context_attempt_reader --data-root DATA TASK` to list a task's physical attempts. Do not use the serving checkout: Python imports its startup hook before even `--help`, and may finish a pending body adoption. Pass the original installation's data root explicitly. Add `--attempt ID` to print the selected redacted body to standard output and its lifecycle, exclusions and file trace to standard error. The tool uses local OS file access; it is not an HTTP or extension API. The body is private even after default redaction, so keep it out of shared terminals and logs.
+From a **separate matching source checkout** without an adoption pointer, run `python -m ouroboros.context_attempt_reader --data-root DATA TASK` to list a task's physical attempts, newest first, with their states and times. `TASK` is the task's own full ID; a Context Lens chart is named by a hash, which is not a task ID. Do not use the serving checkout: Python imports its startup hook before even `--help`, and may finish a pending body adoption. Pass the original installation's data root explicitly. Add `--attempt ID` to print the selected redacted body to standard output and its lifecycle, exclusions and file trace to standard error. The tool uses local OS file access; it is not an HTTP or extension API. The body is private even after default redaction, so keep it out of shared terminals and logs.
 
-If the selected body exceeds the 16 MiB default, the reader reports its recorded size and redacted reference without printing a partial body. `--attempt ID --max-bytes N` explicitly raises the bound for that object; integrity verification still comes before output. A recorded candidate can have been released without dispatch. The reader never replaces a missing selection with a subsequent attempt and never reads the raw blob. A file trace names the captured `prompts/SYSTEM.md` SHA-256 when the leading system message still carries its exact normalized text. Native top-level `system`/other serializers and older attempts without that witness report no trace. The digest describes the file at capture, not its present contents, and no offset in the redacted body or provider receipt is asserted.
+If the selected body exceeds the 16 MiB default, the reader reports its recorded size and redacted reference without printing a partial body. `--attempt ID --max-bytes N` explicitly raises the bound for that object; integrity verification still comes before output. A recorded candidate can have been released without dispatch. The reader never replaces a missing selection with a subsequent attempt and never reads the raw blob. A file trace names the captured `prompts/SYSTEM.md` SHA-256 when the leading system message still carries its exact normalized text. The capture's witness rides beside the send's physical context in memory and is no field of that record: the manifest's verified `file_trace` is its one durable copy, and no accounting row, receipt, capture or checkpoint carries it. Native top-level `system`/other serializers, older attempts and a send whose first message is not that prompt report no trace. The digest describes the file at capture, not its present contents, and no offset in the redacted body or provider receipt is asserted.
 
 An attempt without a ledger-bound capture reference reports `not_linked`, even if failed preparation left a manifest on disk. Inspection declines an export-marked usage store without completing its handoff. SQLite may use its ordinary sidecars and locks, and looking up a packed body can refresh the derived evidence index. Neither changes the recorded request or accounting rows. Diagnostics and the redacted body may still contain private text or paths.
 
@@ -217,12 +217,20 @@ python -m ouroboros.context_attempt_reader --data-root LOCAL_DATA TASK_ID --atte
 
 Use binary-safe stdout redirection (e.g. a POSIX shell or `cmd.exe`), a new
 private non-synced path outside Files, and discard failed exports. Reports can
-contain private text even after redaction. Open the JSON with **Beautiful Context
-→ Open local report**; the frame neither uploads nor persists its selection, and
-closing it clears the view. The report shows the retained redacted host JSON,
-recorded file versions, and what the host knows about transport. It is not a
-receipt of provider input; a gap stays a gap. The ordinary CLI without
-`--report` still writes the exact stored JSON bytes.
+contain private text even after redaction and are not meant to be forwarded
+automatically. Open the JSON with **Beautiful Context → Open local report**; the
+frame neither uploads nor persists its selection, and closing it clears the view.
+A report belongs to one attempt: it carries that attempt's IDs, ledger state and
+what the ledger recorded of its times, route and a failure's type (never its
+words), so two attempts that sent the same body stay two reports. The page lists
+the request's messages and tools as rows that open into their whole text, and
+keeps the retained redacted host JSON literal and whole beside the recorded file
+versions. It is the host's historical copy, not a receipt of provider input, and
+a ledger state is accounting, never proof of delivery. A gap stays a gap: a
+report without a body (`not_linked`, `not_recorded`, `unavailable`, `over_limit`)
+is still written, the terminal names the gap, and the page says which one it is
+instead of showing an earlier result; an empty or cut file is refused as such.
+The ordinary CLI without `--report` still writes the exact stored JSON bytes.
 
 
 - No byte claim for response objects, UI rendering, events/chat/progress

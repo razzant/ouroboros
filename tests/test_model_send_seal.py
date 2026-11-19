@@ -11,6 +11,7 @@ Reverse — the bounded reconciliation sweep joins seals and attempts both ways.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import gzip
 import json
 import os
@@ -48,10 +49,10 @@ class _Response:
         return copy.deepcopy(self._payload)
 
 
-def _scope(root: pathlib.Path, task_id: str, category: str = 'task') -> ua.UsageScope:
+def _scope(root: pathlib.Path, task_id: str) -> ua.UsageScope:
     return ua.UsageScope(
         drive_root=root, task_id=task_id, root_task_id=task_id,
-        category=category, source="test.model_send",
+        category="task", source="test.model_send",
     )
 
 
@@ -81,9 +82,10 @@ def _rows(root: pathlib.Path):
     return ledger_rows(root)
 
 
-def _dispatch(root: pathlib.Path, task_id: str, payload=None, target=None, *, category='task'):
+def _dispatch(root: pathlib.Path, task_id: str, payload=None, target=None, *, category=None):
     client = LLMClient(api_key="unused")
-    with ua.usage_scope(_scope(root, task_id, category)):
+    scope = _scope(root, task_id)  # other modules bind their own scope here (tests/test_boot_dependency_sync.py)
+    with ua.usage_scope(scope if category is None else dataclasses.replace(scope, category=category)):
         client._create_chat_completion_with_retries(
             lambda **_candidate: _Response(),
             payload if payload is not None else _payload(),
@@ -120,6 +122,10 @@ def test_local_request_reader_selects_one_sealed_attempt(data_root, capsys):
     assert report['stored_json'] == selected.out
     assert report['facts']['attempt_id'] == first['attempt_id']
     assert report['facts']['transport_observation'] == 'not_confirmed'
+    # The report dates and routes its attempt as the list does; the plain read's facts stay as they were.
+    listed, life = page['attempts'][1], ('model', 'provider', 'ts_reserved', 'ts_dispatched', 'ts_final')
+    assert all(listed[key] for key in life) and {key: report['facts'][key] for key in life} == {key: listed[key] for key in life}
+    assert not {'ts_reserved', 'transport_observation', 'failure'} & set(json.loads(selected.err))
     for flag in ('--attempt', '--after'):
         assert main([*args, flag, foreign['attempt_id']]) == 2
         assert not capsys.readouterr().out
@@ -133,6 +139,11 @@ def test_local_request_reader_selects_one_sealed_attempt(data_root, capsys):
     details = json.loads(bounded.err)
     assert not bounded.out and details['body'] == 'over_limit'
     assert details['redacted_ref'] == _manifest(last)['redacted_projection_ref']
+    # A report of that gap is still written whole, and the terminal names the gap and what admits the body.
+    assert main([*bound, '1', '--report']) == 0
+    gap = capsys.readouterr()
+    assert json.loads(gap.out)['stored_json'] is None and json.loads(gap.out)['facts']['body'] == 'over_limit'
+    assert f"over_limit; --max-bytes {details['recorded_bytes']}" in gap.err
     assert main([*bound, str(details['recorded_bytes'])]) == 0
     assert 'Different request' in capsys.readouterr().out
     # An otherwise admitted ref to truncated gzip must not print partial request bytes.
@@ -145,6 +156,34 @@ def test_local_request_reader_selects_one_sealed_attempt(data_root, capsys):
     assert main([*args, '--attempt', first['attempt_id']]) == 2
     failed = capsys.readouterr()
     assert not failed.out and 'unavailable' in failed.err
+
+
+def test_local_request_report_names_a_failure_by_type_never_by_its_words(data_root, monkeypatch):
+    """A failed send's report carries what the ledger typed about it; a provider's words stay in private evidence."""
+    from ouroboros.context_attempt_reader import list_attempts, read_attempt
+
+    client = LLMClient(api_key="unused")
+
+    class _Rejected(RuntimeError):
+        status_code = 400
+        body = {"error": {"code": "unsupported_parameter", "type": "invalid_request_error"}}
+
+    replies = [_Rejected("temperature unsupported: private words"), _Response()]
+
+    def create(**_candidate):
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(client, "_openrouter_signature_retry_kwargs", lambda *args: None)
+    with ua.usage_scope(_scope(data_root, "failed-reader-test")):
+        client._create_chat_completion_with_retries(create, {**_payload(), "temperature": 0.7}, _target())
+    answered, failed = (read_attempt(data_root, "failed-reader-test", row["attempt_id"], report_facts=True)[0]
+                        for row in list_attempts(data_root, "failed-reader-test")["attempts"])
+    assert failed["failure"] == {"stage": "raised_exception", "exception_type": "_Rejected", "provider_status_code": 400}
+    assert "private words" not in json.dumps(failed) and "evidence_ref" not in json.dumps(failed)
+    assert "failure" not in answered and answered["attempt_id"] != failed["attempt_id"]
 
 
 def test_local_request_reader_declines_export_without_store_handoff(data_root, capsys, monkeypatch):
@@ -184,6 +223,7 @@ def test_local_request_reader_logical_bound_is_not_shared_skeleton_bound(data_ro
 @pytest.mark.parametrize('claudexor_shape', [False, True])
 def test_local_request_reader_reports_selected_file_not_current_file(data_root, tmp_path, claudexor_shape):
     import hashlib
+    from dataclasses import asdict, replace
     from ouroboros.capability_evidence import CapabilityEvidence
     from ouroboros.context import build_context_fit_plan
     from ouroboros.context_attempt_reader import read_attempt
@@ -211,15 +251,35 @@ def test_local_request_reader_reports_selected_file_not_current_file(data_root, 
                          payload['tools'], {'prospective': True})
         payload['messages'] = ready['messages']
     prompt.write_bytes(b'System revision eighteen.\r\n')
+    witness = plan.core.base_prompt_source
     physical = PhysicalAttemptContext('owner_max', 'max', 'cold_estimate', '', '', None, None, False, False,
-                                      base_prompt_source=plan.core.base_prompt_source)
+                                      base_prompt_source=witness)
+    # The witness rides beside the record: a copy keeps it, and no serialized form of the record holds it.
+    assert replace(physical, prefix={'departs': 'first'}).base_prompt_source == witness
+    assert 'base_prompt_source' not in asdict(physical)
     with ua.bind_physical_attempt_context(physical):
         first = _dispatch(data_root, 'reader-test', payload=payload)
-        later = _dispatch(data_root, 'reader-test', payload=_payload())
+        later = _dispatch(data_root, 'reader-test', payload=_payload())  # the same witness over another first message
     facts, body = read_attempt(data_root, 'reader-test', first['attempt_id'])
     assert body and b'System revision seventeen.' in body and b'System revision eighteen.' not in body
-    assert facts['file_trace'][0]['source_sha256'] == hashlib.sha256(before).hexdigest()
+    assert facts['file_trace'][0]['source_sha256'] == witness[1] == hashlib.sha256(before).hexdigest()
     assert read_attempt(data_root, 'reader-test', later['attempt_id'])[0]['file_trace'] == 'not_recorded'
+
+    def holders(digest: str) -> list:
+        """Every file under the data root that holds this digest, gzip blobs opened."""
+        found = []
+        for path in sorted(item for item in data_root.rglob('*') if item.is_file()):
+            data = path.read_bytes()
+            if digest.encode() in (gzip.decompress(data) if data[:2] == b'\x1f\x8b' else data):
+                found.append(path.resolve())
+        return found
+
+    # The proven trace of the first manifest is the witness's one durable copy: the send that could not prove
+    # it stored nothing of it, and neither did an accounting row.
+    proven = pathlib.Path(first['candidate_manifest_ref']['path']).resolve()
+    for digest in (witness[1], witness[3]):
+        assert holders(digest) == [proven] and json.dumps(_manifest(first)).count(digest) == 1
+        assert digest not in json.dumps(_rows(data_root), default=str)
 
 
 def _violation_files(root: pathlib.Path):

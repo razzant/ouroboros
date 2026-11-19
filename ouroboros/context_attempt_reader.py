@@ -12,6 +12,7 @@ from ouroboros.model_send_seal import SEAL_VERSION
 
 _PAGE_SIZE = 40
 _BODY_LIMIT = 16 * 1024 * 1024
+_FAILURE_FACTS = ("stage", "exception_type", "provider_status_code", "provider_code", "transport_cause_type")
 
 
 def _transport_observation(row: dict) -> str:
@@ -40,20 +41,31 @@ def list_attempts(root: Path, task_id: str, *, after: str = "") -> dict:
     return {"attempts": rows, "next_after": rows[-1]["attempt_id"] if len(page) > _PAGE_SIZE else None}
 
 
+def _recorded_life(row: dict, lifecycle: dict) -> dict:
+    """What the ledger recorded of the attempt's life: the route, its times, how it settled and a failure's type.
+
+    Present keys only, and no free text: a failure's words stay in its private evidence."""
+    facts = {key: value for key in ("model", "provider", "ts_reserved", "ts_dispatched", "ts_final", "settle_reason")
+             if isinstance(value := lifecycle.get(key), str) and value}
+    failure = row.get("physical_failure")
+    failure = {key: value for key in _FAILURE_FACTS
+               if type(value := failure.get(key)) in (str, int) and value != ""} if isinstance(failure, dict) else {}
+    return {"transport_observation": _transport_observation(row), **facts, **({"failure": failure} if failure else {})}
+
+
 def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int = _BODY_LIMIT,
                  report_facts: bool = False) -> tuple[dict, bytes | None]:
     """Read the exact attempt's redacted host projection, not raw bytes or provider receipt."""
     with usage_store.hold(root, write=False, migrate=False, timeout_sec=1, inspect_only=True) as txn:
         row = txn.attempt(attempt_id)
+        lifecycle = txn.attempt_lifecycle(attempt_id) if report_facts else None
     if not row or row.get("task_id") != task_id:
         raise ValueError("Attempt does not belong to this task")
     state = row.get("state")
     facts = {"task_id": task_id, "attempt_id": attempt_id, "ledger_state": state,
              "provider_body": "not_observed", "file_trace": "not_recorded"}
     if report_facts:
-        facts["transport_observation"] = _transport_observation(row)
-        if isinstance(row.get("model"), str) and row["model"]:
-            facts["model"] = row["model"]
+        facts.update(_recorded_life(row, lifecycle or {}))
     ref = row.get("candidate_manifest_ref")
     if not isinstance(ref, dict) or not ref:
         return {**facts, "body": "not_linked"}, None  # a producer may fail after sealing but before linking
@@ -118,6 +130,9 @@ def main(argv: list[str] | None = None) -> int:
             document = {"format": "ouroboros.context-report/1", "facts": facts,
                         "stored_json": raw.decode("utf-8") if raw is not None else None}
             sys.stdout.buffer.write(json.dumps(document, ensure_ascii=False).encode("utf-8"))
+            if raw is None:  # a report of the gap is still a report; the terminal says which gap
+                hint = f"; --max-bytes {facts['recorded_bytes']} admits it" if facts["body"] == "over_limit" else ""
+                print(f"Report written without a request body ({facts['body']}{hint})", file=sys.stderr)
             return 0
     except (usage_store.UsageAccountingError, OSError, ValueError, EOFError, zlib.error) as exc:
         print(f"Request unavailable ({type(exc).__name__})", file=sys.stderr)

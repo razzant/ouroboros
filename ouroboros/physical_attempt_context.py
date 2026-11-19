@@ -8,7 +8,7 @@ import contextlib
 import contextvars
 import datetime
 import logging
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from typing import Any, Callable, Iterator, Literal, Optional, Tuple, TypedDict
 
 log = logging.getLogger(__name__)
@@ -45,8 +45,14 @@ class PhysicalAttemptContext:
     # (``transcript_prefix.attempt_prefix_fact``): never the provider's verdict, which is the row's measured counts.
     # None on rows written before it existed and on sends without a Main candidate.
     prefix: Optional[dict] = field(default=None, compare=False)
-    # Unverified until the physical leading system content matches the captured contribution.
-    base_prompt_source: Optional[Tuple[str, str, int, str]] = field(default=None, compare=False)
+    # The capture's prompt-file witness (``ContextCore.base_prompt_source``), unverified until the send seam matches
+    # it against the leading system content (``model_send_seal``). Carried beside the record, never in it: it is no
+    # field, so no ``asdict`` of a ledger row, receipt, capture or checkpoint holds it; ``replace`` keeps it.
+    base_prompt_source: InitVar[Optional[Tuple[str, str, int, str]]] = None
+
+    def __post_init__(self, base_prompt_source: Optional[Tuple[str, str, int, str]]) -> None:
+        if base_prompt_source is not None:
+            object.__setattr__(self, "base_prompt_source", tuple(base_prompt_source))
 
 
 OBSERVED = frozenset({"dispatched", "settled", "unresolved"})  # a send the ledger records as made
