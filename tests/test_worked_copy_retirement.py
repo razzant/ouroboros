@@ -78,7 +78,17 @@ def _ledger(handles):
 
 
 def _prune(root):
+    """One pass, the test's published queue stamped again first: a slow runner must not see it go stale."""
     from ouroboros.maintenance_retirement import prune_worked_copies
+    from ouroboros.utils import atomic_write_json
+    try:
+        document = json.loads((root / "state/queue_snapshot.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        document = None  # a missing or torn queue stays as the test left it
+    if isinstance(document, dict):
+        stamp = {"generation": document.get("generation") or "copies-test", "ts": _iso(time.time())}
+        atomic_write_json(root / "state/queue_snapshot.json", {**document, **stamp})
+        atomic_write_json(root / "state/queue.alive", stamp)
     return prune_worked_copies(root)
 
 
@@ -111,7 +121,8 @@ def test_the_window_counts_from_the_work_end_not_from_the_file(root):
     for path in copies:  # a state saved long ago still waits the whole window after the work ended
         os.utime(path, (time.time() - 30 * 86400,) * 2)
     report = _prune(root)
-    assert report["held"] == {"younger_than_retention": len(copies)} and all(path.exists() for path in copies)
+    assert report["waiting"] == len(copies) and all(path.exists() for path in copies)
+    assert report["held"] == {}, "the owner's days are the rule, not a keep (maintenance_jobs: age waits are not holds)"
     ended = time.time() - (DAYS - 1) * 86400
     assert abs(report["next_due"] - (ended + DAYS * 86400)) < 5
 
@@ -177,9 +188,10 @@ def test_a_finished_write_schedules_the_pass_at_the_end_of_the_window(root):
 
     handles = _task(root, "scheduled", ended_days_ago=0)
     _copies(handles)
-    write_task_result(root, "scheduled", "completed", completed_at=_iso(time.time()))
+    ended = time.time()
+    write_task_result(root, "scheduled", "completed", completed_at=_iso(ended))
     due = maintenance_jobs.job(root, "runtime_retirement")["next_due"]
-    assert due <= time.time() + DAYS * 86400 + 5
+    assert abs(due - (ended + DAYS * 86400)) < 5, "due when the window ends, neither now nor later"
 
 
 def test_a_queued_receiver_that_may_load_a_finished_source_keeps_it(root):
@@ -239,7 +251,8 @@ def test_keep_on_a_work_whose_only_material_left_is_its_saved_states_is_saved(ro
     copies = _copies(handles)
     answer = set_owner_keep(root, "lean", keep=True, source={"basis": "test"})
     assert answer["status"] in ("kept", "partly_retired") and answer["keep"] is True
-    assert {str(path) for path in copies} <= set(answer["retained"])
+    assert {str(path.parent) for path in copies} <= set(answer["retained"]), "the folders, never a path per file"
+    assert not {str(path) for path in copies} & set(answer["retained"])
     assert _prune(root)["held"] == {"owner_keep": len(copies)}
 
 
@@ -269,6 +282,12 @@ def test_an_unreadable_or_missing_queue_lends_everything(root):
     assert _prune(root)["held"] == {"lent_to_receiver": len(copies)}
     (root / "state/queue_snapshot.json").unlink()  # no published queue: nothing proves no receiver will load it
     assert _prune(root)["held"] == {"lent_to_receiver": len(copies)}
+    from ouroboros.maintenance_retirement import prune_worked_copies
+    from ouroboros.utils import atomic_write_json
+    old = {"generation": "copies-test", "ts": _iso(time.time() - 3600)}  # a queue that stopped publishing an hour ago
+    atomic_write_json(root / "state/queue_snapshot.json", {**old, "running": []})
+    atomic_write_json(root / "state/queue.alive", old)
+    assert prune_worked_copies(root)["held"] == {"lent_to_receiver": len(copies)}
     _queue(root)
     assert _prune(root)["removed"] == len(copies)
 
@@ -293,7 +312,7 @@ def test_a_read_of_a_retired_saved_state_names_its_record(root):
     ref = {"path": f"source_handles/context_checkpoints/{copy.name}", "size": 5,
            "sha256": SHA, "kind": "task_source", "root": "artifact_store"}
     _prune(root)
-    with pytest.raises(FileNotFoundError, match="was retired at .* after its work ended; what it held is in observability/calls/reread"):
+    with pytest.raises(FileNotFoundError, match="was retired at .* after its work ended; the work's model calls are in observability/calls/reread; its exact bytes are not kept"):
         read_retained_task_source(root, "reread", ref)
     missing = dict(ref, path=f"source_handles/context_checkpoints/owner-wait-{'c' * 32}-{SHA}.json")
     with pytest.raises(FileNotFoundError) as never:
@@ -305,23 +324,28 @@ def test_releasing_a_keep_makes_the_retirement_step_owed_now(root):
     from ouroboros import maintenance_jobs
     from ouroboros.owner_keep import set_owner_keep
 
-    handles = _task(root, "release")
+    handles = _task(root, "release", ended_days_ago=0)  # its own window ends in two days: no deadline is due yet
     _copies(handles)
+    write_task_result(root, "release", "completed", completed_at=_iso(time.time()), title="with its files")
     set_owner_keep(root, "release", keep=True, source={"basis": "test"})
+    assert maintenance_jobs.job(root, "runtime_retirement")["next_due"] > time.time() + DAYS * 86400 - 60
     before = time.time()
     set_owner_keep(root, "release", keep=False, source={"basis": "test"})
     assert maintenance_jobs.job(root, "runtime_retirement")["next_due"] <= before + 1
 
 
-def test_storage_shows_what_the_pass_released_and_what_waits_its_days(root):
+def test_storage_shows_what_the_pass_released_and_what_it_keeps_never_the_window(root):
+    from ouroboros.owner_keep import set_owner_keep
     from ouroboros.storage_removers import place_removers
 
     _copies(_task(root, "gone"))
-    waiting = _copies(_task(root, "waiting", ended_days_ago=DAYS - 1))
+    _copies(_task(root, "waiting", ended_days_ago=DAYS - 1))  # inside the owner's days: the rule, never a hold
+    _copies(_task(root, "kept"))
+    set_owner_keep(root, "kept", keep=True, source={"basis": "test"})
     _prune(root)
     line = next(fact for fact in place_removers(root, engine=False)["task_results"] if fact["id"] == "saved_states")
-    assert line["released"] == 5 and line["held"] == len(waiting)
-    assert line["holds"][0]["class"] == "younger_than_retention" and line["holds"][0]["example"] == "waiting"
+    assert line["released"] == 5 and line["held"] == 5
+    assert [(hold["class"], hold["example"]) for hold in line["holds"]] == [("owner_keep", "kept")]
 
 
 def test_a_finished_write_puts_its_row_and_the_pass_drops_it_once_nothing_is_left(root):
@@ -335,7 +359,7 @@ def test_a_finished_write_puts_its_row_and_the_pass_drops_it_once_nothing_is_lef
     _file(root / "observability" / "calls" / "rowed" / "llm-1.json", "{}")
     write_task_result(root, "rowed", "completed", completed_at=_iso(time.time() - (DAYS + 1) * 86400))
     with store.open_store(root, write=False) as txn:
-        assert txn.get_row(WORKED_COPIES, "rowed") == {}
+        assert txn.get_row(WORKED_COPIES, "rowed") is not None
     assert _prune(root)["removed"] == len(copies)
     with store.open_store(root, write=False) as txn:
         assert txn.get_row(WORKED_COPIES, "rowed") is None
@@ -360,17 +384,6 @@ def test_a_new_generation_of_the_rolling_file_gets_its_own_line(root):
     assert [line["bytes"] for line in _ledger(handles)] == [len("first"), len("second generation")]
 
 
-def test_read_files_fallback_names_the_record_of_a_retired_state(root):
-    from ouroboros.evidence_packs import materialize_path
-
-    handles = _task(root, "readfile")
-    copy = _copies(handles)[0]
-    _prune(root)
-    with pytest.raises(FileNotFoundError, match="was retired at .* after its work ended"):
-        materialize_path(copy)
-    assert materialize_path(copy.with_name(f"owner-wait-{'e' * 32}-{SHA}.json")) is None
-
-
 def test_a_queued_retry_holds_its_finished_predecessor(root):
     from ouroboros.utils import atomic_write_json
 
@@ -378,9 +391,11 @@ def test_a_queued_retry_holds_its_finished_predecessor(root):
     copies = _copies(handles)
     stamp = {"generation": "copies-test", "ts": _iso(time.time())}
     retry = {"id": "succ", "task": {"id": "succ", "timeout_retry_from": "pred", "original_task_id": "pred"}}
-    atomic_write_json(root / "state/queue_snapshot.json", {**stamp, "pending": [retry], "running": []})
+    atomic_write_json(root / "state/queue_snapshot.json", {**stamp, "pending": [], "running": [retry]})
     atomic_write_json(root / "state/queue.alive", stamp)
     assert _prune(root)["held"] == {"lent_to_receiver": len(copies)}
+    _queue(root)
+    assert _prune(root)["removed"] == len(copies)
 
 
 def test_a_creation_time_is_no_end(root):
@@ -388,8 +403,8 @@ def test_a_creation_time_is_no_end(root):
     write_task_result(root, "undated", "completed", ts=old)
     _file(root / "observability" / "calls" / "undated" / "llm-1.json", "{}")
     copies = _copies(root / "task_results" / "artifacts" / "undated" / "source_handles")
-    held = _prune(root)["held"]
-    assert held in ({"finish_time_unknown": len(copies)}, {"younger_than_retention": len(copies)})
+    report = _prune(root)
+    assert report["held"] == {"finish_time_unknown": len(copies)} or report["waiting"] == len(copies)
     assert all(path.exists() for path in copies)
 
 
@@ -430,3 +445,179 @@ def test_another_body_on_the_store_makes_the_history_walk_again(root):
     with store.open_store(root, write=True) as txn:
         txn.set_meta("last_store_body", {"sha": "0" * 40, "at": _iso(time.time())})
     assert _prune(root)["removed"] == len(copies)
+
+
+def test_a_call_folder_holding_only_a_parts_manifest_records_no_call(root):
+    handles = _task(root, "nocalls", calls=False)
+    copies = _copies(handles)
+    _file(root / "observability" / "calls" / "nocalls" / "working-a1.json", "{}")
+    assert _prune(root)["held"] == {"no_call_records": len(copies)}
+    _file(root / "observability" / "calls" / "nocalls" / "llm-1.json", "{}")
+    assert _prune(root)["removed"] == len(copies)
+
+
+def test_only_read_file_asks_for_the_record_of_a_missed_name(root):
+    from ouroboros.evidence_packs import materialize_path
+
+    copy = _copies(_task(root, "quiet"))[0]
+    _prune(root)
+    assert materialize_path(copy) is None, "other callers keep the plain miss they handle"
+    with pytest.raises(FileNotFoundError, match="was retired at .* after its work ended; the work's model calls are in"):
+        materialize_path(copy, explain=True)
+    assert materialize_path(copy.with_name(f"owner-wait-{'e' * 32}-{SHA}.json"), explain=True) is None
+
+
+def test_a_saved_state_an_earlier_pack_holds_is_the_packers_to_unlink(root, monkeypatch):
+    from ouroboros import evidence_packs, maintenance_retirement
+
+    import hashlib
+
+    def addressed(text, wait):  # a real content-addressed name: the packer verifies the digest
+        return handles / "context_checkpoints" / f"owner-wait-{wait * 32}-{hashlib.sha256(text.encode()).hexdigest()}.json"
+
+    handles = _task(root, "prepacked")
+    packed = _file(addressed("packed before", "6"), "packed before")
+    with monkeypatch.context() as older_body:  # a body before this change packed every handle
+        older_body.setattr(maintenance_retirement, "worked_copy", lambda folder, name: None)
+        evidence_packs.pack_task(root, "prepacked", keep_shas=set())
+    assert not packed.exists()
+    from ouroboros import store
+    from ouroboros.maintenance_retirement import WORKED_COPIES
+
+    _prune(root)  # the folder holds no loose saved state: its row goes
+    assert evidence_packs.materialize_handle(root, "prepacked", f"source_handles/context_checkpoints/{packed.name}")
+    with store.open_store(root, write=False) as txn:
+        assert txn.get_row(WORKED_COPIES, "prepacked") is not None, "written back: owed to its retirer again"
+    evidence_packs.pack_task(root, "prepacked", keep_shas=set())
+    assert not packed.exists(), "the packer unlinks a loose copy of a member it already holds, as before"
+    assert evidence_packs.materialize_handle(root, "prepacked", f"source_handles/context_checkpoints/{packed.name}")
+    fresh = _file(addressed("never packed", "7"), "never packed")
+    assert _prune(root)["removed"] == 2 and not packed.exists() and not fresh.exists()
+    lines = {line["name"]: line for line in _ledger(handles)}
+    assert lines[packed.name]["packed"] == ["observability/packs/prepacked.xz"] and "stay there" in lines[packed.name]["rebuild"]
+    assert "packed" not in lines[fresh.name] and "are not kept" in lines[fresh.name]["rebuild"]
+    said = maintenance_retirement.retired_message
+    assert said(root, "prepacked", packed.name).endswith("its exact bytes stay in observability/packs/prepacked.xz")
+    assert said(root, "prepacked", fresh.name).endswith("its exact bytes are not kept")
+
+
+def test_read_file_of_a_retired_saved_state_says_what_became_of_it(root):
+    from ouroboros.tools.core_file_tools import _read_file
+    from ouroboros.tools.tool_context import ToolContext
+
+    handles = _task(root, "reader")
+    copy = _copies(handles)[0]
+    _prune(root)
+    ctx = ToolContext(repo_dir=root, drive_root=root, task_id="reader", budget_drive_root=str(root))
+    answer = _read_file(ctx, f"source_handles/context_checkpoints/{copy.name}", root="artifact_store")
+    assert "NOT_FOUND" in answer and "was retired at" in answer and "observability/calls/reader" in answer
+    plain = _read_file(ctx, f"source_handles/context_checkpoints/owner-wait-{'f' * 32}-{SHA}.json", root="artifact_store")
+    assert "NOT_FOUND" in plain and "was retired at" not in plain
+    data = _read_file(ctx, f"task_results/artifacts/reader/source_handles/context_checkpoints/{copy.name}", root="runtime_data")
+    assert "was retired at" in data and "does not exist yet" not in data, "the data root's read names the record too"
+
+
+def test_a_receiver_published_during_the_pass_is_seen_before_the_next_task(root):
+    from ouroboros import maintenance_retirement
+    from ouroboros.utils import atomic_write_json
+
+    first, second = _copies(_task(root, "a-first")), _copies(_task(root, "b-second"))
+    real = maintenance_retirement._retire
+    published = []
+
+    def publish_after_first(*args, **kwargs):
+        real(*args, **kwargs)
+        if not published:  # a queue publication lands while the pass works through its rows
+            stamp = {"generation": "copies-test-2", "ts": _iso(time.time())}
+            receiver = {"id": "retry", "task": {"id": "retry", "_working_recovery": {"source_task_id": "b-second"}}}
+            atomic_write_json(root / "state/queue_snapshot.json", {**stamp, "pending": [receiver], "running": []})
+            atomic_write_json(root / "state/queue.alive", stamp)
+            published.append(True)
+
+    maintenance_retirement._retire = publish_after_first
+    try:
+        report = _prune(root)
+    finally:
+        maintenance_retirement._retire = real
+    assert not any(path.exists() for path in first) and all(path.exists() for path in second)
+    assert report["held"] == {"lent_to_receiver": len(second)}
+
+
+def test_a_row_put_again_during_the_pass_stays_owed(root):
+    from ouroboros import maintenance_retirement, store
+    from ouroboros.maintenance_retirement import WORKED_COPIES
+
+    handles = _task(root, "again")
+    _copies(handles)
+    real = maintenance_retirement._retire
+
+    def a_new_terminal_write(*args, **kwargs):
+        real(*args, **kwargs)
+        with store.open_store(root, write=True) as txn:
+            txn.put_row(WORKED_COPIES, "again", {"write_seq": 999})
+
+    maintenance_retirement._retire = a_new_terminal_write
+    try:
+        _prune(root)
+    finally:
+        maintenance_retirement._retire = real
+    with store.open_store(root, write=False) as txn:
+        assert txn.get_row(WORKED_COPIES, "again") == {"write_seq": 999}
+
+
+def test_a_write_of_an_old_finished_work_makes_no_run_of_its_own(root):
+    from ouroboros import maintenance_jobs
+
+    handles = _task(root, "old", ended_days_ago=30)
+    _sources(handles)  # its folder keeps its sources forever: nothing in it is a saved state
+    _prune(root)
+    before = maintenance_jobs.job(root, "runtime_retirement").get("next_due")
+    write_task_result(root, "old", "completed", completed_at=_iso(time.time() - 30 * 86400), title="patched later")
+    due = maintenance_jobs.job(root, "runtime_retirement").get("next_due")
+    assert due == before or due > time.time(), "a past end is the next pass's, never a run of its own"
+    from ouroboros import store
+    from ouroboros.maintenance_retirement import WORKED_COPIES
+    with store.open_store(root, write=False) as txn:
+        assert txn.get_row(WORKED_COPIES, "old") is None, "a folder of sources only owes the retirer nothing"
+    fresh = _task(root, "fresh", ended_days_ago=0)  # the same write of a work that just ended schedules its window
+    _copies(fresh)
+    write_task_result(root, "fresh", "completed", completed_at=_iso(time.time()), title="with its files")
+    assert maintenance_jobs.job(root, "runtime_retirement")["next_due"] > time.time() + DAYS * 86400 - 60
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX folder permissions")
+def test_one_unreadable_folder_is_owed_and_the_others_go_in_the_same_pass(root):
+    from ouroboros import store
+    from ouroboros.maintenance_retirement import WORKED_COPIES
+
+    readable = _copies(_task(root, "readable"))
+    locked = _task(root, "locked")
+    copies = _copies(locked)
+    os.chmod(locked / "context_checkpoints", 0)
+    try:
+        report = _prune(root)
+        assert report["removed"] == len(readable) and report["errors"] == 1
+        with store.open_store(root, write=False) as txn:
+            assert txn.get_row(WORKED_COPIES, "locked") is not None, "the unreadable folder stays owed"
+    finally:
+        os.chmod(locked / "context_checkpoints", 0o755)
+    assert _prune(root)["removed"] == len(copies)
+
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX folder permissions")
+def test_a_terminal_write_beside_an_unreadable_folder_lands_and_stays_owed(root):
+    from ouroboros import store
+    from ouroboros.maintenance_retirement import WORKED_COPIES
+    from ouroboros.task_results import load_task_result
+
+    handles = root / "task_results" / "artifacts" / "shut" / "source_handles"
+    (handles / "context_checkpoints").mkdir(parents=True)
+    os.chmod(handles, 0)  # nothing under it can be listed or even looked up
+    try:
+        write_task_result(root, "shut", "completed", completed_at=_iso(time.time()))
+        assert (load_task_result(root, "shut") or {}).get("status") == "completed", "the write itself never fails"
+        with store.open_store(root, write=False) as txn:
+            assert txn.get_row(WORKED_COPIES, "shut") is not None, "what cannot be read may hold saved states"
+    finally:
+        os.chmod(handles, 0o755)

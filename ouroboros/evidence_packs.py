@@ -896,23 +896,33 @@ def materialize_handle(root: Any, task_id: str, rel_path: str) -> Optional[pathl
     located = _locate(pathlib.Path(root), task_id=str(task_id), rel_path=rel.as_posix())
     if located is None:
         return None
-    _restore_handle(target, member_bytes(*located), located[1]["sha256"])
+    from ouroboros.maintenance_retirement import owe_written_back, worked_copy
+
+    if _restore_handle(target, member_bytes(*located), located[1]["sha256"]) and worked_copy(rel.parts[1], rel.name):
+        owe_written_back(root, task_id)  # a saved state back on disk is its retirer's again
     return target
 
 
-def materialize_path(path: pathlib.Path) -> Optional[pathlib.Path]:
-    """A missed checkpoint handle written back from its pack; a saved state retired after its work ended raises with
-    its record line instead (``maintenance_retirement.retired_message``)."""
+def materialize_path(path: pathlib.Path, *, explain: bool = False) -> Optional[pathlib.Path]:
+    """A missed checkpoint handle written back from its pack, else None; with ``explain`` (``read_file``) a saved
+    state retired after its work ended raises with its record line (``maintenance_retirement.retired_message``)."""
     parsed = _checkpoint_path(path)
     if not parsed or len(parsed[2]) != 3:
+        if explain:  # a rolling working file has no pack, only its record
+            _explain_retired(path)
         return None
     restored = materialize_handle(*parsed[:2], pathlib.PurePosixPath(*parsed[2]).as_posix())
-    if restored is None:
-        from ouroboros.maintenance_retirement import retired_message
-        note = retired_message(parsed[0], parsed[1], parsed[2][2])
-        if note:
-            raise FileNotFoundError(note)
+    if restored is None and explain:
+        _explain_retired(path)
     return restored
+
+
+def _explain_retired(path: Any) -> None:
+    from ouroboros.maintenance_retirement import SavedStateRetired, retired_note_for
+
+    note = retired_note_for(path)
+    if note:
+        raise SavedStateRetired(note)
 
 
 def materialize_tree(path: pathlib.Path) -> None:
@@ -1044,10 +1054,11 @@ def manifest_blob_refs(root: Any, task_id: str) -> List[Tuple[str, str, int]]:
     return out
 
 
-def loose_members(root: Any, task_id: str, *, missing: Optional[list] = None) -> List[Dict[str, Any]]:
+def loose_members(root: Any, task_id: str, *, missing: Optional[list] = None, saved_states: bool = False) -> List[Dict[str, Any]]:
     """The task's members whose bytes are at hand (loose checkpoint handles first, then the manifest
     blobs that are loose or already held by some pack on this root), each with its loose source path;
-    a referenced blob that is neither is appended to ``missing`` as ``(kind, sha256, size)``."""
+    a referenced blob that is neither is appended to ``missing`` as ``(kind, sha256, size)``. Saved states for
+    exact return (``maintenance_retirement.worked_copy``) are never new members; ``saved_states`` lists them alone."""
     from ouroboros.artifacts import task_artifact_dir_path
     from ouroboros.maintenance_retirement import worked_copy  # saved states wait loose for their retirer, never packed
 
@@ -1058,9 +1069,11 @@ def loose_members(root: Any, task_id: str, *, missing: Optional[list] = None) ->
         for entry in sorted(os.scandir(store_dir), key=lambda e: e.name):
             stem = entry.name.rsplit("-", 1)[-1].split(".", 1)[0]
             if entry.is_file(follow_symlinks=False) and len(stem) == 64 and not stem.strip("0123456789abcdef") \
-                    and worked_copy(CHECKPOINTS_REL.name, entry.name) is None:
+                    and (worked_copy(CHECKPOINTS_REL.name, entry.name) is not None) == saved_states:
                 members.append({"sha256": stem, "kind": CHECKPOINT, "size": entry.stat(follow_symlinks=False).st_size,
                                 "path": (CHECKPOINTS_REL / entry.name).as_posix(), "source": pathlib.Path(entry.path)})
+    if saved_states:
+        return members
     for kind, sha256, size in manifest_blob_refs(root, task_id):
         loose = root / "observability" / "blobs" / f"{sha256}.{kind}.gz"
         placement = shared_placement_path(root, sha256) if kind == "json" else loose
@@ -1256,6 +1269,8 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
     already = {_member_key(m) for s in generations for m in s["members"]}
     missing: list = []
     members = loose_members(root, task_id, missing=missing)
+    # A saved state an earlier generation holds (packed before they stayed loose) leaves as it did: unlinked once verified.
+    members += [m for m in loose_members(root, task_id, saved_states=True) if _member_key(m) in already]
     fresh = [m for m in members if _member_key(m) not in already]
     report: Dict[str, Any] = {"task_id": str(task_id), "generation": None, "members": 0, "raw": 0, "packed": 0,
                               "verified_bytes": 0, "missing": len(missing),
