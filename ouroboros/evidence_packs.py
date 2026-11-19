@@ -1245,7 +1245,9 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, rev
     census's and the row is still packable, ``task_packable``), and a failed check defers everything. The blobs
     then go under no store lock (their readers go through ``blob_bytes``), then each checkpoint handle, which a
     reader may hold by its path, under a barrier of its own that reads the phase and the row again: an export, a
-    review or a resumption that began defers the rest. A busy file is retried next pass."""
+    review or a resumption that began defers the rest. After each handle's barrier but the last the pass leaves the
+    store's write lock free as long as it held it, so a waiting writer gets in at any disk speed. A busy file is
+    retried next pass."""
     from ouroboros.evidence_packer import task_stamps
     from ouroboros.task_custody import task_custody_lock
 
@@ -1276,12 +1278,16 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, rev
                     report["kept"] += 1
                 else:
                     unlink(member)
-        for member in todo:
-            if member["kind"] == CHECKPOINT and member["source"].is_file():
-                with _unlink_phase(root) as (allowed, txn):
-                    if not allowed or (txn is not None and not task_packable(txn, task_id)):
-                        return report
-                    unlink(member)
+        handles = [m for m in todo if m["kind"] == CHECKPOINT and m["source"].is_file()]
+        for index, member in enumerate(handles):
+            with _unlink_phase(root) as (allowed, txn):
+                started = time.monotonic()
+                if not allowed or (txn is not None and not task_packable(txn, task_id)):
+                    return report
+                unlink(member)
+                held = time.monotonic() - started
+            if index + 1 < len(handles):
+                time.sleep(held)
         report["deferred"] = 0
     return report
 

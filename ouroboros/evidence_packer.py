@@ -87,6 +87,13 @@ def _stamp(root: pathlib.Path, task_id: str, row: Optional[tuple]) -> str:
     return json.dumps(stamps, sort_keys=True, separators=(",", ":"))
 
 
+def _calls_entry(root: pathlib.Path, task_id: str, stamp: str) -> Optional[list]:
+    """The task's calls folder as ``stamp`` saw it (``_stamp``): a manifest written there moves it, while the
+    packer's own unlinks (blobs, checkpoint handles) never touch that folder."""
+    key = str((root / "observability" / "calls" / task_id).relative_to(root))
+    return next((entry for entry in json.loads(stamp) if entry[0] == key), None)
+
+
 def _loose_task_ids(root: pathlib.Path, stop: Optional[Callable[[], bool]] = None) -> set:
     ids = set()
     for directory, checkpoints in ((root / "observability" / "calls", False),
@@ -306,11 +313,11 @@ def keep_rows(root: pathlib.Path) -> Dict[str, tuple]:
 
 class PackSweep:
     """The keep-set of one pass: blobs the manifests of tasks whose row is live or under an open review/council
-    (``keep_rows``) reference, read once, outside every lock and before the pass's first unlink (``collect_keep``).
-    A blob such a task shares with a packed one stays loose until the sharer's own pass. The census is never
-    refreshed: a blob a manifest names after it may leave with a task this pass packs and is then read from that
-    task's verified pack, as a terminal task resumed after the census reads its packed blobs from the pack.
-    Store-less folders are neither packed nor kept."""
+    (``keep_rows``) reference, read once, outside the deletion locks and before the pass's first unlink
+    (``collect_keep``). A blob such a task shares with a packed one stays loose until the sharer's own pass. The
+    census is never refreshed: a blob a manifest names after it may leave with a task this pass packs and is then
+    read from that task's verified pack, as a terminal task resumed after the census reads its packed blobs from
+    the pack. Store-less folders are neither packed nor kept."""
     def __init__(self, root: pathlib.Path) -> None:
         self.root = root
         self.keep: set = set()
@@ -338,7 +345,7 @@ def run_pass(root: pathlib.Path, *, sweep=None, since: Optional[int] = None, owe
     unpacker. The census is the rows written terminal after the counter stood at ``since`` and the
     ``owed`` candidates (``loose_task_ids_since``); without a position (``None``: the first run, a
     repair, a recorded position that cannot be read) every loose folder. ``unfinished`` names the
-    candidates this pass leaves owed (deferred, busy, faulted)."""
+    candidates this pass leaves owed (deferred, busy, faulted, or written a manifest after the census)."""
     root = pathlib.Path(root)
     if sweep is None:
         with pack_sweep(root) as sweep:
@@ -380,9 +387,13 @@ def run_pass(root: pathlib.Path, *, sweep=None, since: Optional[int] = None, owe
             report[key] += int(outcome.get(key) or 0)
         # A blob kept for a live sharer does not re-queue this task: the sharer's own pass unlinks it
         # once it closes (its stamp moves then); busy files and deferred candidates retry. A finished
-        # candidate is recorded as its unlinks left its directories, outside every lock.
-        if not any(outcome.get(key) for key in ("busy", "deferred")):
-            record_swept(root, task, _stamp(root, task, rows.get(task)))
+        # candidate is recorded as its unlinks left its directories, outside every lock, unless a manifest
+        # it wrote after the census (late evidence, even during its unlink) moved its calls folder: what that
+        # manifest names is not in this pass's pack, so the task stays owed to the next pass.
+        finished = not any(outcome.get(key) for key in ("busy", "deferred"))
+        stamp = _stamp(root, task, rows.get(task)) if finished else ""
+        if finished and _calls_entry(root, task, stamp) == _calls_entry(root, task, revisions[task]):
+            record_swept(root, task, stamp)
             report["swept"] += 1
         else:
             report["unfinished"].append(task)

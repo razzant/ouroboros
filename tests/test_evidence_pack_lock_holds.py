@@ -8,7 +8,8 @@ members on a busy disk: every model call's manifest gave up after 4 s and every 
 and the manifests then queued on that lock behind one another and behind the packer (issue #3745).
 A manifest is now one atomic write. After one check of the candidate its blobs go under no store
 lock, and each handle, which a reader may hold by its path, under a barrier of its own that reads
-the store's phase and the task's row again.
+the store's phase and the task's row again; between two handles the pass leaves the lock free as
+long as it held it.
 """
 from __future__ import annotations
 
@@ -16,6 +17,8 @@ import contextlib
 import os
 import pathlib
 import sqlite3
+import threading
+import time
 
 import pytest
 
@@ -41,6 +44,38 @@ class _HookedUnlinks:
     def unlink(self, path, *args, **kwargs):
         self.on_unlink(path)
         os.unlink(path, *args, **kwargs)
+
+
+class _HookedSleeps:
+    """``evidence_packs.time`` with ``on_sleep(seconds)`` run instead of each sleep; the rest is ``time``."""
+
+    def __init__(self, on_sleep):
+        self.on_sleep = on_sleep
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def sleep(self, seconds):
+        self.on_sleep(seconds)
+
+
+def _zero_wait_write(root):
+    """A store write that will not wait, made on another thread and joined: ``committed`` or ``busy``."""
+    outcome = []
+
+    def write():
+        try:
+            with store.open_store(root, write=True, wait_sec=0) as txn:
+                txn.store_task({"task_id": "unrelated", "status": "running", "_schema_version": 1,
+                                "updated_at": utc_now_iso()})
+            outcome.append("committed")
+        except store.StoreBusy:
+            outcome.append("busy")
+
+    writer = threading.Thread(target=write)
+    writer.start()
+    writer.join(60)
+    return outcome[0] if outcome else "hung"
 
 
 def _before_barrier(monkeypatch, hook):
@@ -120,6 +155,21 @@ def test_a_long_deletion_holds_no_store_lock_over_its_blobs(root, monkeypatch):
     report = packer.run_pass(root)
     assert report["faults"] == 0 and loose_at_write == [7]
     assert report["unlinked"] == 13 and not _loose(refs) and not _handle_path(root, "big", handle).exists()
+
+
+def test_each_handle_unlinks_inside_its_barrier_and_the_pass_then_yields_as_long_as_it_held_it(root, monkeypatch):
+    """A writer that will not wait is refused while a handle unlinks (its barrier holds the store's write lock) and
+    commits in the yield after it: before the next handle's barrier the pass leaves the lock free as long as it held
+    it, at any disk speed, and no yield follows the last handle."""
+    _, first = _task(root, "big", blobs=2)
+    handles = [first, *_handles(root, "big", 3)]
+    inside, yields = [], []
+    monkeypatch.setattr(packs, "os", _HookedUnlinks(
+        lambda path: inside.append(_zero_wait_write(root)) if "context_checkpoints" in str(path) else None))
+    monkeypatch.setattr(packs, "time", _HookedSleeps(lambda _seconds: yields.append(_zero_wait_write(root))))
+    report = packer.run_pass(root)
+    assert report["faults"] == 0 and report["unlinked"] == 2 + 4 and not _present(root, "big", handles)
+    assert inside == ["busy"] * 4 and yields == ["committed"] * 3
 
 
 @pytest.mark.parametrize("reader", ["review", "resumed"])

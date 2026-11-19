@@ -10,7 +10,8 @@ import pytest
 
 from ouroboros import evidence_packer as packer, evidence_packs as packs, maintenance, obligations, observability, store, usage_store
 from supervisor import terminal_delivery
-from tests.test_evidence_packs import _handle_path, _result, _task
+from tests.test_evidence_pack_lock_holds import _HookedUnlinks
+from tests.test_evidence_packs import _blob, _handle_path, _result, _task
 from tests.test_evidence_packs import root as root
 
 
@@ -247,6 +248,31 @@ def test_a_sharer_resumed_after_the_census_reads_its_shared_blob_from_the_pack(r
     _result(root, "other")
     assert packer.run_pass(root)["faults"] == 0
     assert not _handle_path(root, "other", other_handle).exists() and packs.blob_bytes(root, other[0]) == raw
+
+
+def test_a_manifest_the_candidate_writes_during_its_unlink_keeps_it_owed_until_packed(root, monkeypatch):
+    """A manifest a candidate writes after the census (late evidence, here during its unlink) names a blob its pack
+    lacks: the pass leaves the task owed instead of recording it swept, and the next pass packs that blob as the
+    task's next generation. A candidate nothing writes to is swept and left alone by the next pass."""
+    refs, _ = _task(root, "late", blobs=2)
+    _task(root, "quiet", blobs=2)
+    added = []
+
+    def late_manifest(path):
+        if not added and str(path) in {ref["path"] for ref in refs}:
+            added.append(_blob(root, b'{"late": "tool result"}'))
+            observability.write_call_manifest(root, task_id="late", call_id="late", manifest={"ref": added[0]})
+
+    with monkeypatch.context() as edits:
+        edits.setattr(packs, "os", _HookedUnlinks(late_manifest))
+        report = packer.run_pass(root)
+    assert report["faults"] == 0 and report["deferred"] == 0 and report["unfinished"] == ["late"] and added
+    following = packer.run_pass(root)
+    assert following["faults"] == 0 and (following["examined"], following["packed"]) == (1, 1)  # `late` alone
+    assert [sidecar["generation"] for sidecar in packs.published_generations(root, "late")] == [1, 2]
+    assert not pathlib.Path(added[0]["path"]).exists()
+    assert packs.blob_bytes(root, added[0]) == b'{"late": "tool result"}'
+    assert packer.run_pass(root)["examined"] == 0
 
 
 def test_a_pass_keeps_no_publication_journal_and_removes_the_one_an_older_body_left(root, monkeypatch):
