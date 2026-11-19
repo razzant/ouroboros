@@ -726,17 +726,18 @@ def test_a_verdict_on_the_blob_itself_ends_its_copies_after_one_question(tmp_pat
 def test_a_task_s_own_sidecars_are_parsed_once_per_file_state_and_only_the_task_read_last_is_kept(tmp_path, monkeypatch):
     """Reassembling one view reads hundreds of its parts from one owner, whose sidecars can hold tens of
     thousands of members: a process keeps the parsed sidecars of the task it read last, every generation of it
-    however many, each parsed once per file state; a replaced file is read again (never answered from the old
-    one), a read of another task replaces them, and a read naming a task without sidecars leaves them alone."""
+    however many, each parsed once per file state; a look-alike's (task ``a.2`` beside ``a``) keeps only whose it
+    is; a replaced file is read again (never answered from the old one), a read of another task replaces them,
+    and a read naming a task without sidecars leaves them alone."""
     import pathlib
 
     from ouroboros import evidence_packer, evidence_packs as packs
     from tests.test_evidence_packs import _blob, _result, _task
 
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
-    refs = {task: _task(tmp_path, task, blobs=3)[0] for task in ("a", "b")}
+    refs = {task: _task(tmp_path, task, blobs=3)[0] for task in ("a", "a.2", "b")}
     assert evidence_packer.run_pass(tmp_path)["faults"] == 0
-    for generation in range(2, 6):  # written terminal again with new evidence: its generations 2 to 5
+    for generation in range(2, 6):  # written terminal again with new evidence: four generations after a.2's name
         refs["a"].append(_blob(tmp_path, json.dumps({"message": {"content": f"answer {generation}"}}).encode()))
         (tmp_path / "observability" / "calls" / "a" / f"llm_{generation}9_response.json").write_text(
             json.dumps({"call_id": f"llm_{generation}9", "full_payload_ref": refs["a"][-1]}), encoding="utf-8")
@@ -747,7 +748,9 @@ def test_a_task_s_own_sidecars_are_parsed_once_per_file_state_and_only_the_task_
     first = [packs.blob_bytes(tmp_path, ref, task_id="a") for ref in refs["a"]]
     for _ in range(20):
         assert [packs.blob_bytes(tmp_path, ref, task_id="a") for ref in refs["a"]] == first
-    assert len(names) == 5 and sorted(decoded) == names  # each generation once, whatever the number of reads
+    assert len(names) == 6 and sorted(decoded) == names  # each generation once, whatever the number of reads
+    look_alike = [brief for key, brief in packs._KEPT[1].items() if pathlib.Path(key[0]).name == "a.2.members.json"]
+    assert [(brief[0], brief[2], brief[3]) for brief in look_alike] == [("a.2", {}, {})]  # whose it is, no members
     decoded.clear()
     assert packs.blob_bytes(tmp_path, refs["b"][0], task_id="nobody")  # a task without sidecars: nothing parsed
     assert [packs.blob_bytes(tmp_path, ref, task_id="a") for ref in refs["a"]] == first and decoded == []

@@ -414,7 +414,8 @@ def index_upsert(root: Any, pack_path: pathlib.Path, sidecar: Dict[str, Any]) ->
 def _own_members(path: pathlib.Path, task_id: str) -> tuple:
     """One sidecar of ``task_id`` in brief (``_brief``), parsed once per file state (size, mtime, inode: a published
     sidecar never changes, so another state is another file). A process keeps the briefs of the task it read last,
-    all its generations in every root, until it reads another task's. ``SidecarCorrupt`` as ``read_sidecar``."""
+    all its generations in every root, until it reads another task's; a look-alike's (``a.2`` beside ``a``) keeps
+    only whose it is. ``SidecarCorrupt`` as ``read_sidecar``."""
     global _KEPT
     try:
         info = path.stat()
@@ -424,7 +425,8 @@ def _own_members(path: pathlib.Path, task_id: str) -> tuple:
         _KEPT = (task_id, {})
     briefs, key = _KEPT[1], (str(path), info.st_size, info.st_mtime_ns, info.st_ino)
     if key not in briefs:
-        briefs[key] = _brief(path)
+        brief = _brief(path)
+        briefs[key] = brief if brief[0] == task_id else (brief[0], brief[1], {}, {})
     return briefs[key]
 
 
