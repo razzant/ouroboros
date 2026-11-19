@@ -738,6 +738,22 @@ def test_the_queue_is_read_once_per_publication_or_certificate(root, monkeypatch
     monkeypatch.setattr(maintenance_retirement, "_work_end", renewed_after_the_first)
     report = prune_worked_copies(root)
     assert report["held"] == {"lent_to_receiver": 5} and report["removed"] == 10, "a renewed certificate is read at once"
+    for name in ("q-d", "q-e", "q-f"):  # finished after the walk: their own terminal writes put their rows
+        _copies(_task(root, name))
+        write_task_result(root, name, "completed", completed_at=_iso(time.time() - (DAYS + 1) * 86400))
+    fresh = {"generation": "copies-test", "ts": _iso(time.time())}
+    atomic_write_json(root / "state/queue_snapshot.json", {**fresh, "running": []})
+    atomic_write_json(root / "state/queue.alive", fresh)
+    parsed.clear()
+    ends.clear()
+
+    def renewed_each_task(document):  # the publisher renews its certificate every few seconds of a busy pass
+        atomic_write_json(root / "state/queue.alive", {"generation": "copies-test", "ts": _iso(time.time())})
+        return real_end(document)
+
+    monkeypatch.setattr(maintenance_retirement, "_work_end", renewed_each_task)
+    report = prune_worked_copies(root)
+    assert report["removed"] == 15 + 5 and len(parsed) == 1, "a fresh answer stands while only the certificate moves"
 
 
 def test_a_retired_line_names_the_pack_generation_that_holds_the_bytes(root, monkeypatch):

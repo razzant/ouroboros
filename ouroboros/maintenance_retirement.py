@@ -491,9 +491,9 @@ def _lent_sources(root: pathlib.Path):
     """The tasks whose saved states a queued or running task may still load: ``working_checkpoint.load_recovery``
     reads the file of the task its handoff names (``source_task_id``, a relay's ``continued_from_task_id``), and a
     task reads its whole retry line's sources (``source_retention._source_locations``, the reader's own walk; a walk
-    that cannot finish proves nothing). ``None`` without a readable, fresh published queue: then every task holds. One
-    parse per publication or certificate (``queue.alive``): a pass asks before each task, so a receiver published or
-    a stamp renewed meanwhile is seen (liveness itself stays ``_task_proven_over``'s)."""
+    that cannot finish proves nothing). ``None`` without a readable, fresh published queue: then every task holds. A
+    pass asks before each task: one parse per publication, and a held answer is judged again on a renewed certificate
+    (``queue.alive``), so a receiver published or a stamp renewed meanwhile is seen (liveness stays ``_task_proven_over``'s)."""
     identity = []
     for name in ("queue_snapshot.json", "queue.alive"):
         try:
@@ -501,8 +501,8 @@ def _lent_sources(root: pathlib.Path):
             identity.append((info.st_ino, info.st_mtime_ns, info.st_size))
         except OSError:
             identity.append(None)  # a missing file is an identity too: it is read again once it appears
-    cached = _lent_cache.get(str(root))
-    if cached is not None and cached[0] == identity:
+    cached = _lent_cache.get(str(root))  # a fresh answer stands while the snapshot does; a held one, until either moves
+    if cached is not None and (cached[0] == identity or cached[1] is not None and cached[0][0] == identity[0]):
         return cached[1]
     lent = _published_lent(root)
     _lent_cache[str(root)] = (identity, lent)
