@@ -210,7 +210,7 @@ def test_pack_publication_obeys_index_lock_and_leaves_its_generation_free(root):
     with store.name_lock(root, packs.INDEX_LOCK_NAME, timeout_sec=0), store.acquisition_budget(0):
         with pytest.raises(store.StoreBusy):
             _publish(root, "first")
-    assert list(directory.iterdir()) == [] and packs._task_sidecar_names(root, "first") == set()
+    assert list(directory.iterdir()) == [] and list(packs._task_sidecar_names(root, "first")) == []
     path, sidecar = _publish(root, "first")
     assert sidecar["generation"] == 1 and sorted(p.name for p in directory.iterdir()) == ["first.members.json", "first.xz"]
     packs.verify_pack(path, sidecar)
