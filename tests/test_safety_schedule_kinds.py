@@ -279,3 +279,41 @@ def test_hold_restore_stamps_origin_after_resolving_relationship(world, cited):
         assert record["writer_kind"] == fired["work_kind"] == expected
         if expected == "consciousness":
             assert fired["consciousness_cause"] == ("started" if relation == "independent" else "place:p")
+
+
+@pytest.mark.parametrize("cited", [True, False], ids=["field-cited", "uncited"])
+def test_retiming_an_independent_schedule_keeps_its_form_field_basis(q, monkeypatch, cited):
+    import json
+
+    from ouroboros.answer_facts import living_card_input
+    from ouroboros.owner_words import cited_owner_basis
+    from ouroboros.tools.followup import _update_schedule
+    from supervisor.queue_schedules import _task_from_schedule
+
+    card = "card_0123456789abcdef"
+    msg_id = f"card_input:{card}:elm-dates"
+    values = {"from": "  at moonrise", "to": "sunset  "}
+    form = living_card_input({"card_press": {
+        "card_id": card, "request_id": "elm-dates", "task_id": "elm-desk",
+        "submission": {"title": "Elm dates", "label": "File dates", "values": values}}})
+    ctx = SimpleNamespace(task_id="elm-focus", task_metadata=_focus_origin(), drive_root=q.root,
+                          task_contract={}, _owner_directives=[{**form, "msg_id": msg_id}])
+    assert cited_owner_basis(ctx, "moonrise\nsunset")[0] is None
+    basis, error = cited_owner_basis(ctx, "moonrise" if cited else "")
+    assert not error
+    schedule = _register_origin(q, _focus_origin(), door="followup")["id"]
+    edit = _update_schedule(ctx, q.root, schedule, "Use the dates", {"objective": "Check the elm dates"}, owner_basis=basis)
+    assert json.loads(edit)["changed"]
+    retime = _update_schedule(ctx, q.root, schedule, "Move the same work", {"run_at": "2099-04-02T12:00:00+00:00"})
+    assert json.loads(retime)["changed"]
+    stored = _stored(q, schedule)
+    [row] = stored["task"]["metadata"]["owner_corpus"]
+    assert row["msg_id"] == msg_id and row["reply_to"]["submitted_values"] == values
+    occurrence = _task_from_schedule(stored)
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_MAX_TASKS", "0")
+    with q.queue._queue_lock:
+        refusal = q.queue._consciousness_admission_block(occurrence)
+    expected_kind = "owner" if cited else "consciousness"
+    assert (stored["writer_kind"], occurrence["metadata"]["work_kind"], refusal and refusal[0]) == (
+        expected_kind, expected_kind, None if cited else "consciousness_task_limit")
+    assert row.get("cited") == ("moonrise" if cited else None)

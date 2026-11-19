@@ -943,3 +943,34 @@ def test_a_card_returns_an_uncited_cyber_start_to_its_own_primary(host, monkeypa
     assert ctx.primary_route == {"model": B, "use_local": False, "role": "lead"}
     assert ctx.route_wait_on_primary is (action == "wait")
     assert lead_fact.primary_basis(ctx) == "mind"
+
+
+@pytest.mark.parametrize("card_kind, label", [
+    ("quiz", "Choose the violet route"), ("quiz", "  Choose the violet route  "), ("living", "  File violet dates  "),
+])
+def test_a_model_selected_on_a_card_retains_the_press_as_its_basis(host, monkeypatch, card_kind, label):
+    from ouroboros.answer_facts import living_card_input
+    from ouroboros.tools.control_runtime import _switch_model
+    from ouroboros.owner_words import answered_card_reply
+    from supervisor.events_mind_controls import handle_mind_task_control
+
+    task = queued(host)
+    _, ctx = turn(host, monkeypatch)
+    if card_kind == "living":
+        act = living_card_input({"card_press": {"task_id": "violet-desk", "card_id": "card_0123456789abcdef",
+                                "request_id": "violet-dates", "submission": {"label": label, "values": {}}}})
+    else:
+        card = {"question": "Which route?", "options": [label, "Wait"], "answered_index": 0, "quiz_id": "violet-route"}
+        act = {"source": "owner_press", "content": "1. " + label, "reply_to": answered_card_reply(card, "route-desk"),
+               "quiz_id": "violet-route"}
+    ctx._owner_directives = [act]
+    ctx.event_queue = SimpleNamespace(put_nowait=lambda event: handle_mind_task_control(
+        event, SimpleNamespace(DRIVE_ROOT=host[0], bridge=SimpleNamespace(push_log=lambda row: None))))
+    assert "requires verified owner_words" in _switch_model(ctx, B, owner_words="violet")
+    result = _switch_model(ctx, B, owner_words=label.strip())
+    assert '"ok": true' in result
+    carrier = task["metadata"]["lead"]
+    assert carrier["source"] == "owner_press" and carrier["cited"] == label
+    assert load_task_result(host[0], "work")["metadata"]["lead"] == carrier
+    assert lead_fact.project_lead(task=task, queued=True)["cited"] == {"text": label, "clipped": False}
+    assert f"«{label}»" in lead_fact.chooser_words(carrier["source"], carrier)

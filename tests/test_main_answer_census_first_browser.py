@@ -372,7 +372,7 @@ def test_main_copy_survives_census_before_ack_and_shows_recorded_answer(
         {"final": "The report will include both sources, as requested."},
     ]
     # Only the round that reads the delivered answer waits, and only in the `activity` shape.
-    round_gate = (ModelGate(lambda body: bool(body.get("tools")) and f"Owner comment (verbatim): {COMMENT}" in body_text(body),
+    round_gate = (ModelGate(lambda body: bool(body.get("tools")) and f"and wrote: {COMMENT}" in body_text(body),
                             timeout=240) if census_shape == "activity" else None)
     wire, record = {}, {"engine": live_engine, "census_shape": census_shape,
                         "delivery_order": "census before the press reply and its quiz_state frames"}
@@ -540,8 +540,9 @@ def test_main_copy_survives_census_before_ack_and_shows_recorded_answer(
                             round_gate.release.set()
                             result = wait_durable_result(oracle, task_id, timeout=90)
                         rounds = [body_text(body) for _kind, body in list(stub.calls)
-                                  if body.get("tools") and f"Owner comment (verbatim): {COMMENT}" in body_text(body)]
-                        assert rounds and f"The owner chose option 2: {WINNER}" in rounds[0], stub.kinds()
+                                  if body.get("tools") and f"and wrote: {COMMENT}" in body_text(body)]
+                        assert rounds and f"The owner pressed option 2 («{WINNER}», your text) and wrote: {COMMENT}" in rounds[0], (
+                            stub.kinds())
                         record["answer_round"] = rounds[0][rounds[0].index("[Owner quiz answer]"):][:600]
 
                         # Only the Main copy went: the exact question still opens in its Project, with the record.

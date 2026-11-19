@@ -67,7 +67,7 @@ def test_history_failure_recovers_without_client_retry_or_history_scan(runtime, 
     assert repaired["answered_at"] == original["answered_at"]
     assert repaired["answered_index"] == 1 and repaired["comment"] == " exact choice "
     [entry] = drain_owner_entries(runtime.root, runtime.task["id"], set())
-    assert entry["kind"] == "quiz_answer" and "option 2: Second" in entry["text"]
+    assert entry["kind"] == "quiz_answer" and "option 2 («Second», your text) and wrote:  exact choice " in entry["text"]
     assert acknowledge_transcript_entry(runtime.root, runtime.task["id"], entry)
     assert block(runtime)["delivery"]["state"] == "delivered"
     assert recover(runtime)["attempted"] == 0
@@ -223,7 +223,7 @@ def test_live_author_receives_an_answer_whose_card_address_is_unknown_once(runti
         return [entry for entry in drain_owner_entries(runtime.root, runtime.task["id"], set())
                 if entry["msg_id"] == "quiz_answer:task-quiz:q"]
     [entry] = mailbox()
-    assert entry["kind"] == "quiz_answer" and "option 2: Second" in entry["text"] and " exact words " in entry["text"]
+    assert entry["kind"] == "quiz_answer" and "option 2 («Second», your text) and wrote:  exact words " in entry["text"]
     debt = block(runtime)["delivery"]
     assert debt["mailbox_at"] and not debt.get("history_at") and not block(runtime).get("discharged_at")
     due(runtime)

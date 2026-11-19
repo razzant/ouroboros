@@ -704,8 +704,15 @@ def relation_text(entry: Mapping[str, Any]) -> str:
         lines.append(reference(_mapping(entry.get("reply_to"))))
     for quote in relay_quotes(entry):
         place = _mapping(quote.get("source"))
-        lines.append(f"[Owner words quoted from {_text(place.get('label')) or 'a chat'} "
-                     f"{_text(place.get('address'))}]\n{_text(quote.get('text'))}")
+        location = f"{_text(place.get('label')) or 'a chat'} {_text(place.get('address'))}"
+        text = str(quote.get("text") or "")
+        # Older quiz envelopes kept the host question frame without a separate act/words type.
+        if quote.get("input_source") == "owner_press" or (quote.get("question_frame") and not quote.get("input_source")):
+            lines.append(f"[Owner card answer from {location}]\n{quote.get('question_frame') or text}")
+        elif quote.get("input_source") == "owner_card_input":
+            lines.append(f"[Owner card input from {location}]\n{text}")
+        else:
+            lines.append(f"[Owner words quoted from {location}]\n{text}")
         if _mapping(quote.get("reply_to")):
             lines.append(reference(_mapping(quote.get("reply_to"))))
     return "".join("\n" + line for line in lines)
@@ -995,14 +1002,33 @@ def render_row_text(row: Mapping[str, Any]) -> str:
     return dialogue_text(row)
 
 
-def quote_words(row: Mapping[str, Any]) -> str:
+def quote_parts(row: Mapping[str, Any], root: Any = None) -> tuple[str, ...]:
     """The words an exact quote may take from one chat row (``chronicle_quotes``, ``memory_mark``): its
-    ``render_row_text``, except inbound place rows and reaction carriers offer only their own ``text``.
+    accepted comment for an answered quiz, plain text for inbound place rows and reactions, else ``render_row_text``.
     Connector facts and delivery details shown beside those words are the host's labels, never the speaker's."""
+    from ouroboros.answer_facts import living_card_input, word_spans
+    if carried := _mapping(row.get("corpus_answer")):
+        if carried.get("source") in ("owner_press", "owner_card_input"):
+            return ()
+        return word_spans(str(row.get("text") or ""), _mapping(carried.get("reply_to")))
+    if living := living_card_input(row, row.get("_owner_source_root") or root):
+        return word_spans(living["content"], living["reply_to"]) if living["source"] == "owner_mailbox" else ()
+    if row.get("type") == "quiz_answer" or row.get("late_answer"):
+        from ouroboros.owner_words import answered_card_source
+
+        quiz, _ = answered_card_source(row, row.get("_owner_source_root") or root)
+        quiz = _mapping(quiz)
+        return () if quiz.get("secret_request") else (str(quiz.get("comment") or ""),)
     if (row.get("direction") == "in" and row_provenance(row) == "place"
             or reaction_fact(_mapping(row.get("transport")).get("message"))):
-        return str(row.get("text") or "")
-    return render_row_text(row)
+        return (str(row.get("text") or ""),)
+    return (render_row_text(row),)
+
+
+def quote_words(row: Mapping[str, Any], root: Any = None) -> str:
+    """The row's single continuous quote source, if it has one. Forms can have several (quote_parts)."""
+    parts = quote_parts(row, root)
+    return parts[0] if len(parts) == 1 else ""
 
 
 def memory_row_header(address: Mapping[str, Any], row: Mapping[str, Any], *, author: Mapping[str, Any]) -> str:

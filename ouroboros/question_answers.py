@@ -143,7 +143,8 @@ def deliver_answer(root, asker: str, quiz_id: str, block: dict, live_reader, fal
                 # Name the owed effect BEFORE append. A crash retries that same identity.
                 _update_delivery(root, asker, quiz_id, {"recipient_task_id": recipient, "msg_id": msg_id,
                     "recipient_drive": str(drive), "state": "owed", "mailbox_at": "", "reason_code": "awaiting_recipient_read"})
-                letter = recorded_answer_frame(block)  # a secret outcome is host metadata: no owner words to route
+                # A secret outcome is host metadata: no owner words to route. A pressed label is the asker's text.
+                letter = recorded_answer_frame(block, asker=asker, reader=recipient)
                 letter += "" if secret_outcome_block(block) is not None else "\n" + MAILBOX_ROUTE_FACT
                 if not write_owner_message(drive, letter, recipient, msg_id=msg_id,
                         kind=KIND_QUIZ_ANSWER, quiz_delivery={"task_id": asker, "quiz_id": quiz_id,

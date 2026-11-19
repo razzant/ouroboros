@@ -580,7 +580,9 @@ def _line(root: pathlib.Path, task_id: str, found: Mapping[str, Any]) -> str:
     return f"{totals}\nThe full facts (places, people and their newest words, works, pages, readers): {held['reader']}."
 
 
-_HEARD = frozenset({"direct_incoming", "owner_mailbox", "owner_quiz_answer"})  # my human's words this drain carried
+# My human's inputs this drain carried: their words, and their acts typed apart from words (a press without words,
+# a card submission no longer readable), which equally owe a reply after what happened since.
+_HEARD = frozenset({"direct_incoming", "owner_mailbox", "owner_quiz_answer", "owner_press", "owner_card_input"})
 
 
 def _word_row(root: pathlib.Path, origin: Mapping[str, Any], chat: Optional[int], task_id: str = "") -> Optional[ds.Row]:

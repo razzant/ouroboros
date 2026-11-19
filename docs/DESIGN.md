@@ -2498,11 +2498,11 @@ adds one.
 server's published fact (`works[].lead`; a direct turn's from its activity row). It is the mark of its source and `Source · model`
 in a node of its own before the rest of the line, so a repaint of the line never re-creates it. Beside it, words
 say why the work is on that model when it does not simply follow Main: `this room's model`, `you chose it`,
-`you asked for it`, `Ouroboros switched to it`, or the role it follows (`follows Light`); a follower says nothing
-more there, and its popover's first line says `follows Main`. When the published fact includes the owner's words
-that chose a model, the popover's first line quotes them after `you asked for it`, including the primary's words
-while the work runs elsewhere; a primary awaiting application is identified by its pending arrow, without claiming
-the work already left it, and authored text keeps its exact case and whitespace and is never translated.
+`you asked for it`, `you pressed this option`, `Ouroboros switched to it`, or the role it follows (`follows Light`).
+A follower says nothing more there, and its popover's first line says `follows Main`. The popover quotes the
+published citation after its reason, `you asked for it` for the owner's words and `you pressed this option` for
+the label they pressed. This includes the primary's citation while the work runs elsewhere. The pending arrow
+identifies a primary awaiting application. Authored text keeps its exact case and whitespace and is never translated.
 CSS alone clips a long quotation, the shared `Show all` / `Show less` control exposes the complete published span
 by press or tap, and an excerpt marked by the server is labelled as an excerpt. When the next step will run on another route the
 fact shows both, `gpt-6-astra → glm-5.3 at the next step` (`when it starts` for a queued work), so a change of

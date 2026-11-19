@@ -114,10 +114,10 @@ GIST_RULE = (
 # this work is the citing mind's reading, shown on the card. Cited work is my human's (their allowance, not stopped
 # by the consciousness switch); uncited work from a wake is my own.
 _OWNER_WORDS_PARAM = (
-    "Optional: the exact words of your human asking for this work, copied verbatim from one message of theirs that "
-    "reached this run (their confirmed account; a forward or a colleague's line is not theirs). Verified by bytes: the "
-    "work then runs as their order; a quote not found is refused and nothing starts. Omitted in a place turn or a wake, "
-    "the work is your own; in Main the work is already your human's.")
+    "Optional. Copy your human's words verbatim from one message that reached this run, or the complete label they "
+    "pressed without adding words. The host verifies the words or press and records which one you cited. A place "
+    "message must come directly from their confirmed account. A verified choice starts their work. A missing cite "
+    "leaves work from a place turn or wake your own. In Main the work is already your human's.")
 _START_TASK_DESCRIPTION = (
     "Start a NEW, separate independent work with its own task id and card. "
     "The work reading the current request already exists and can do that request itself. "
@@ -361,7 +361,7 @@ def get_tools() -> List[ToolEntry]:
                     "review_answer": {"type": "boolean", "default": False, "description": "true when your human asks that this work's answer itself be checked: under task review Required the host reviews its whole final answer before delivery even when no file was made."},
                     "source": {"type": "string", "description": "Attach an existing folder or clone a git URL (https://... or git@host:path) server-side into the projects root; private auth failures are typed auth_required. Registers the folder with provenance + trusted_at as the Project/task workspace. Use for work on a supplied repo/folder.", "default": ""},
                     **_START_CHOICE_PARAMS,
-                    "model": {"type": "string", "description": "Model for this new work, with your human's verbatim owner_words. An uncited choice is your own only in Cyber Pro; an owner choice still binds.", "default": ""},
+                    "model": {"type": "string", "description": "Model for this new work, with owner_words citing your human's words or their pressed choice. An uncited choice is your own only in Cyber Pro; an owner choice still binds.", "default": ""},
                     "model_as_typed": {"type": "boolean", "default": False, "description": "Use the exact typed id despite similar catalog suggestions. The route is unverified; this confirms your choice, not availability."},
                     "owner_words": {"type": "string", "description": _OWNER_WORDS_PARAM, "default": ""},
                 },
@@ -528,12 +528,12 @@ def get_tools() -> List[ToolEntry]:
             "description": (
                 'Switch model or reasoning effort on the next round. No arguments lists available models. After a host '
                 "fallback, primary='return' or 'wait' returns to this turn's primary route. "
-                "A model beyond Main and Light needs your human's cited words (owner_words, scope)."
+                "A model beyond Main and Light needs your human's cited words or pressed choice (owner_words, scope)."
             ),
             "parameters": {"type": "object", "properties": {
                 "model": {"type": "string", "description": "Exact model route. Cited work/Main choices require it; cited scope room accepts empty or main to follow Main. An uncited empty work switch keeps its acting route."},
                 "model_as_typed": {"type": "boolean", "default": False, "description": "With owner_words, use the exact typed id despite similar catalog suggestions. It remains unverified; this grants no additional model authority."},
-                "owner_words": {"type": "string", "description": "Your human's verbatim words choosing the model; the host checks provenance by bytes, you read their meaning."},
+                "owner_words": {"type": "string", "description": "Copy your human's words verbatim or the complete label they pressed. The host verifies the cited source."},
                 "scope": {"type": "string", "enum": ["work", "room", "main"], "default": "work",
                           "description": "With owner_words: work sets this work's primary; room saves its room's model; main changes Main itself. Without a cite, work keeps the existing Main/Light acting switch; in Cyber Pro use the settings writer for your own room or Main changes."},
                 "project_id": {"type": "string", "description": "For scope room: existing room id; omitted uses this work's room."},

@@ -107,6 +107,74 @@ def residue_by_kind(messages: list) -> dict:
     return {kind: {"units": units_, "tokens": tokens} for kind, (units_, tokens) in sorted(residue.items())}
 
 
+def view_notes(messages: list, *, own: bool = False) -> list:
+    """The working-view notes in ``messages``, in transcript order: ``{id, written, first_line}`` for every capsule
+    except a host source view, under the unit id inspect shows and ``replace_note_ids`` takes; ``own``: only the notes
+    the mind authored (``authorship`` actor, as the round facts count its own notes), never a helper's or one whose
+    author is not recorded. ``written`` is ``context_compaction.note_written``: the note's own write time, or "not
+    recorded" for a note older than that. The one reader of notes for a fold receipt and an arrival line."""
+    from ouroboros.context_compaction import _capsule_metadata, _first_line, _unit_from_slice, note_written
+
+    notes = []
+    for index, message in enumerate(messages):
+        meta = _capsule_metadata(message)[1]
+        if meta is None or meta.get("retention") == "source_view" or own and meta.get("authorship") != "actor":
+            continue
+        unit = _unit_from_slice(messages, index, index, trace_refs_by_tool_call_id={}, capsule_meta=meta)
+        if unit is not None:
+            notes.append({"id": unit.unit_id, "written": note_written(meta), "first_line": _first_line(message)})
+    return notes
+
+
+def _body_source(messages: list, unit) -> str:
+    """What a removed unit was, as inspect names its kind; a tool unit adds each call's name and argument head."""
+    from ouroboros.context_compaction import _BODY_ARGUMENT_CHARS, unit_kind
+
+    kind = unit_kind(messages, unit)
+    if kind != "tool":
+        return kind
+    calls = []
+    for call in messages[unit.start].get("tool_calls") or ():
+        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        arguments = str(function.get("arguments") or "")
+        calls.append(f"{function.get('name') or '?'} " + (arguments if len(arguments) <= _BODY_ARGUMENT_CHARS
+                                                           else arguments[:_BODY_ARGUMENT_CHARS] + "…"))
+    return "tool " + "; ".join(call.rstrip() for call in calls)
+
+
+# What a fold receipt tells its author, beside its counts: every key a fact, none an instruction.
+FOLD_FACT_KEYS = ("replaced_notes", "notes_kept", "restore_checkpoint", "bodies_removed")
+
+
+def fold_receipt_facts(observed: list, candidate: list, receipt: dict) -> dict:
+    """An applied view's facts for the receipt its author reads, and no instruction: the notes in view after it
+    (``notes_kept``, ``view_notes``) and each unit of the observed view whose body left it (``bodies_removed``:
+    ``{source, address}``), restorable from ``restore_checkpoint`` by the address. Notes the author replaced stay
+    named by ``replaced_notes``; a body whose unit no longer matches its id and hash is not named. An unapplied
+    receipt changed nothing and has none."""
+    from ouroboros.context_compaction import _unit_from_slice
+
+    if receipt.get("status") != "applied":
+        return {}
+    facts = {"notes_kept": view_notes(candidate)} if candidate else {}
+    replaced = {note.get("unit_id") for note in (receipt.get("replaced_notes") or {}).get("notes") or ()}
+    bodies = []
+    for unit_id in receipt.get("selected_unit_ids") or ():
+        try:
+            _, start, end, _ = str(unit_id).split(":")
+            unit = _unit_from_slice(observed, int(start), int(end), trace_refs_by_tool_call_id={})
+        except (ValueError, IndexError):
+            continue
+        if unit is not None and unit.unit_id == unit_id and unit_id not in replaced:
+            bodies.append({"source": _body_source(observed, unit),
+                           "address": {"unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256}})
+    checkpoint = receipt.get("checkpoint_ref")
+    if bodies and isinstance(checkpoint, dict):
+        facts.update(restore_checkpoint={key: checkpoint[key] for key in ("kind", "root", "path", "size", "sha256")
+                                         if key in checkpoint}, bodies_removed=bodies)
+    return {key: value for key, value in facts.items() if value}
+
+
 def _ordinary_frame(observed):
     facts = observed.get("memory_facts") or {}
     room = json.dumps(facts.get("max_room"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -231,8 +299,14 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
     """A bounded inventory of the observed view: counts and sizes by kind, then one page of
     units from ``offset`` within the tool's producer page size (``tool_result_limit``), naming
     ``next_offset`` while units remain. The reader rebuilds a restore reference from the one
-    ``restore_checkpoint`` and a unit's id and hash instead of receiving it repeated per unit."""
-    from ouroboros.context_compaction import _capsule_metadata, _first_line, context_units, owner_protected_unit_ids, unit_kind
+    ``restore_checkpoint`` and a unit's id and hash instead of receiving it repeated per unit.
+    The fields every page would share come once, on page one (``offset`` 0); a later page carries
+    its units, the paging, the view revision, the ``restore_checkpoint`` of the observation it lists (a newer
+    observation has its own, so a listed unit always restores from its page) and the retained ordinary-memory
+    map (``_ordinary_memory``'s continuation read). A page holds at least one unit, so paging always advances:
+    only page one's shared fields can leave no room for it."""
+    from ouroboros.context_compaction import (_capsule_metadata, _first_line, context_units, note_written,
+                                              owner_protected_unit_ids, unit_kind)
     from ouroboros.review_history_view import attachment_transfer_options, review_note_options
     from ouroboros.tool_capabilities import tool_result_limit
 
@@ -274,8 +348,9 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
         row = {"unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256, "kind": kind,
                "tokens": unit.context_size_tokens, "eligible": unit.unit_id not in protected}
         if kind == "capsule":
-            row.update(authorship=_capsule_metadata(messages[unit.start])[1].get("authorship") or "unrecorded",
-                       first_line=_first_line(messages[unit.start]))
+            meta = _capsule_metadata(messages[unit.start])[1]
+            row.update(authorship=meta.get("authorship") or "unrecorded", first_line=_first_line(messages[unit.start]),
+                       **({} if meta.get("retention") == "source_view" else {"written": note_written(meta)}))
         if exposed is not None:
             row["exposed"] = (unit.unit_id, unit.raw_sha256) in exposed
         rows.append(row)
@@ -291,13 +366,14 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
     for row in memory_rows:
         counts[row['kind']] += 1
         tokens[row['kind']] += row['tokens']
+    start = max(0, int(offset or 0))
     measurement = observed.get('fit_measurement')
-    if measurement is None:
+    if measurement is None and not start:
         from ouroboros.loop_model_call import _measure_main_context_view
         measurement = _measure_main_context_view(plan, messages, observed['tool_schemas'],
             getattr(ctx, 'active_context_mode', '') or 'max', getattr(ctx, 'active_effort', ''), 'inspect')
-    start = max(0, int(offset or 0))
-    body = {
+    body = {"view_revision": observed["revision"], "restore_checkpoint": restore_checkpoint,
+            "ordinary_memory": _ordinary_memory(ctx, observed, continuation_page=True)} if start else {
         "fit_measurement": measurement,
         "work_room": observed.get('work_room'),
         "resident_memory": (observed.get('memory_facts') or {}).get('blocks', {}),
@@ -317,9 +393,11 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
                  "units, earlier records, your own completed replies (kind assistant) and completed prose rows (kind user; "
                  "eligibility distinguishes governing owner words); a unit with eligible=false carries protected dialogue "
                  "and stays whole. units is one page in transcript order (offset, total; next_offset while more remain: "
-                 "call inspect again with that offset). Select complete unit IDs to keep and write a local working_note; "
+                 "call inspect again with that offset; a later page repeats only view_revision, restore_checkpoint and "
+                 "ordinary_memory beside its units and the paging). Select complete unit IDs to keep and write a local working_note; "
                  "a restore_unit_refs entry is {checkpoint_ref: restore_checkpoint, unit_id, raw_sha256}. Earlier notes "
-                 "stay unless replace_note_ids names them (capsule rows show authorship and first_line). Restored "
+                 "stay unless replace_note_ids names them (capsule rows show authorship and first_line, a note's also "
+                 "when it was written). Restored "
                  "sources and host emergency records follow keep_unit_ids; keep_last_n keeps all unnamed capsules. "
                  "view_address selects listed memory forms from this snapshot; a note's restore_view_address restores it whole. Core, governing words, the assignment "
                  "and newer owner/tool messages stay whole."),
@@ -432,6 +510,8 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
         anchor = tool_units[-count].start if len(tool_units) >= count else 0
         keep_unit_ids = [unit.unit_id for unit in units if unit.unit_id not in named
                          and (unit.start >= anchor or unit_kind(observed["messages"], unit) == "capsule")]
+    from ouroboros.utils import utc_now_iso
+
     ctx._pending_compaction = {
         "observed": observed, "working_note": working_note, "review_transfers": list(review_transfers or []),
         "review_notes": list(review_notes or []),
@@ -441,6 +521,8 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
         "replace_note_ids": tuple(named),
         "restore_unit_refs": tuple(restore_unit_refs or ()),
         "schema_names": None if schema_names is None else tuple(schema_names),
+        # When the mind wrote its note: the boundary that applies it may come later (a pause keeps it queued).
+        "written_at": utc_now_iso(timespec="seconds"),
     }
     return "Working view requested. The next complete tool boundary preserves exact sources and checks the full candidate before applying it; the resulting receipt reports actual changes."
 
