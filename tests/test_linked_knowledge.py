@@ -641,10 +641,13 @@ def test_unresolvable_links_do_not_hide_the_note_or_other_backlinks(tmp_path):
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     reply = tools._knowledge_read(ctx, "broken")
     assert reply.endswith(broken.read_text(encoding="utf-8"))
-    assert '[Knowledge links] {"unavailable": "ValueError"}' in reply
+    assert _link_header(reply, "links") == {
+        "unavailable": "ValueError", "present": [{"scope": "global", "topic": "target"}],
+    }
     reply = tools._knowledge_read(ctx, "target")
     assert reply.endswith("Exact target.\n")
-    assert {"scope": "global", "topic": "valid", "state": "active"} in _link_header(reply, "backlinks (readable shelves now)")
+    assert _link_header(reply, "backlinks (readable shelves now)") == [
+        {"scope": "global", "topic": name, "state": "active"} for name in ("broken", "valid")]
     assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
 

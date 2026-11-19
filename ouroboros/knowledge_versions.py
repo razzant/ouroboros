@@ -12,12 +12,12 @@ its text is read through ``knowledge_rows`` (stored whole, or rebuilt from the c
 and returned only after it hashes to that revision. Readers write nothing. Claim changes commit
 after the note and its index land, then project the committed names under the shelf lock.
 
-The held-version store grows by one full Markdown file per shown revision the journal cannot
-rebuild, plus a 25-byte journal proof for each fallback check that succeeds. Writer-published
-revisions normally use the proof in their existing claim record. A failed journal check is
-remembered beside its body and rechecked when new history names that note. Capture and the journal writer replace a
-body with a proof after hash-verified reconstruction without the live file. Only the journal can
-retire a body, so changing claims or ending a task cannot break an issued reader.
+The held-version store keeps a shown revision's full Markdown bytes when the journal cannot rebuild it, and a
+25-byte journal proof where a fallback check succeeds. Writer-published revisions use the proof in their claim record
+or, once the note has a folder here, the writer's proof, which replaces the folder's other proofs. A failed journal
+check is remembered beside its body and rechecked when new history names that note. Capture replaces a body with a
+proof, and the next write removes the body it replaced, after hash-verified reconstruction without the live file. Only
+the journal can retire a body, so changing claims or ending a task cannot break an issued reader.
 
 The outline is the one renderer the read, the receipt and the refusal share. It prints each heading
 line as the note spells it; its character ranges are the ``start_char``/``end_char`` of
@@ -409,16 +409,24 @@ def _retained_held_version(address: Any, revision: str) -> str | None:
     return None
 
 
-def _retire_held_bodies(address: Any, history: Mapping[str, Any]) -> None:
-    stamp = _journal_stamp(address)
+def held_write(address: Any, history: Mapping[str, Any]) -> None:
+    """After a write's row lands, where this note was ever held (it has a folder here): the writer's proof of the new
+    revision stands for it, so a note no claim record proves (a head a held head links) needs no copy of it. Every
+    other proof leaves, and the replaced revision's body once this row rebuilds it: what stays is an only copy."""
+    path, old = _held_version_path(address, history["new_sha256"]), history.get("old_sha256")
+    stamp = _journal_stamp(address) if path.parent.is_dir() else b""
     if not stamp:
         return
-    for revision in dict.fromkeys((history.get("old_sha256"), history.get("new_sha256"))):
-        if revision:
-            path = _held_version_path(address, revision)
-            raw = _held_file(path)
-            if raw is not None and not raw.startswith(_HELD_PROOF) and _journal_rebuilds(address, revision):
-                _record_proof(path, stamp)
+    _record_proof(path, stamp)
+    try:
+        for other in path.parent.glob("*.md"):
+            raw = _held_file(other)
+            if other != path and raw is not None and (raw.startswith(_HELD_PROOF) or (
+                    other.stem == old and _journal_rebuilds(address, old))):
+                other.unlink()
+                other.with_suffix(".checked").unlink(missing_ok=True)
+    except OSError:
+        pass  # a file left behind is a copy the journal backs: a later write removes a proof, no write a body
 
 
 def inventory_claim_names(shelf: Path, rows: Iterator[dict[str, Any]]) -> Iterator[tuple[str, list[str]]]:
@@ -506,8 +514,6 @@ class ClaimWrite:
                 raise OSError("Claims history publication failed")
             publication = row
         _project_claim_record(self.path, publication)
-        if history:
-            _retire_held_bodies(address, history)
 
 
 def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: bool) -> ClaimWrite | None:

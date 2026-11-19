@@ -560,11 +560,11 @@ def unseen_words_section(ctx: Any, text: str, fact: str) -> str:
 def session_memory_references(ctx: Any) -> str:
     """The marks in force for the session task's room (this room's and the global ones), the knowledge outline
     (the global shelf's and its room's: every note by address and title, people's summaries kept) and the heads of
-    the notes that claim the situation names a helper of this work carries (``held_notes``, each whole, its reader
-    named unavailable; a declared task names their omission instead) as text in a session's start request: what a
-    native helper's view holds, pinned outside the canonical work order and its fingerprint, so a session task
-    scheduled before the update starts with the marks and the outline too (it carries no situation names, so no
-    heads). The marks follow the room the heads come from: a Presence starter's own once the install records a claim
+    the notes that claim the situation names a helper of this work carries and of the notes their heads link
+    (``held_notes``, each whole, its reader named unavailable; a declared task names their omission instead), as text
+    in a session's start request: what a native helper's view holds, pinned outside the canonical work order and its
+    fingerprint, so a session task scheduled before the update starts with the marks and the outline too (it carries
+    no situation names, so no heads). The marks follow the room the heads come from: a Presence starter's own once the install records a claim
     (the gate of its helpers' carried names, ``held_notes.carried_situation``); with none, Main's outside a Project.
     The stores are read once as they stand, through the memory
     view's own capture and render (``memory_view._capture_marks``, ``render_room`` over a marks-only snapshot), the
@@ -608,8 +608,8 @@ def session_memory_references(ctx: Any) -> str:
         marks_text = render_room(MemoryViewSnapshot(spec=spec, store_status={"state": "active"}, frontier={}, marks=marks))
         if task_input_sources(task) == "declared":
             if topics := held_notes.claimed_topics(root, navigation["names"], navigation.get("inventory")):
-                held = ("[Host: the heads of the knowledge notes that claim this work's room are not in this start, "
-                        "because its input is declared: " + ", ".join(topics) + ".]")
+                held = ("[Host: the heads of the knowledge notes that claim this work's room, and of the notes their "
+                        "heads link, are not in this start, because its input is declared: " + ", ".join(topics) + ".]")
         elif entries := held_notes.turn_sections(root, task, spec, navigation, ctx=SimpleNamespace(
                 held_reader_unavailable=held_notes.EXTERNAL_READER)):  # a fresh namespace, never the launcher's capture
             held = "\n\n".join([*(part.full_text for part in entries), held_notes.HELPER_NOTE])
