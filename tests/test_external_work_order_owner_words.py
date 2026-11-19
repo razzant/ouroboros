@@ -444,6 +444,65 @@ def test_a_session_start_holds_the_heads_its_names_claim_whole_and_a_declared_on
     assert "because its input is declared" not in compile_external_work_order(declared)
 
 
+def test_a_presence_roots_direct_session_reads_the_room_its_heads_come_from_once_a_claim_is_recorded(tmp_path, monkeypatch):
+    """Both directions of the marks room of a Presence root's own session start. With no recorded claim its delivery
+    is byte for byte the one the same start without the Presence fact receives: Main's marks, as before. Once the
+    install records a claim (on Main, none on the place) the marks are the place room's, the bytes a session child of
+    that root holds; with a note claiming the place the session holds the place's head and marks, and neither Main's
+    head nor Main's marks. The same start without the Presence fact, carrying the focus by value, keeps Main's
+    marks beside Main's head."""
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
+    from ouroboros.memory_view_events import CARRIED_NAMES
+    from ouroboros.subagent_work_order import session_host_references
+    from ouroboros.tools import control
+    from tests._memory_inventory_shared import MIND
+    from tests._memory_view_context import section
+    from tests.test_available_subagents_runtime import _api_row, _session_row, _settings
+
+    monkeypatch.setattr(control, "load_settings", lambda: _settings(_api_row(), _session_row()))
+    route = {"provider": "chat", "account_id": "team", "conversation_id": "nova", "thread_id": ""}
+    focus = {"place_id": "team-place", "room_chat_id": 789, "transport": route}
+    turn = _root(tmp_path, metadata={"presence": {"place_id": "team-place", "event": route}, "focus": focus})
+    carried = _root(tmp_path, metadata={"focus": focus})  # the same start without the Presence fact
+    store = ChronicleStore(tmp_path)
+    assert store.ensure_activated()["kind"] == "activation"
+    store.mark({"kind": "task", "task_id": "x"}, "Mark of the place room", MIND, room_id="789")
+    store.mark({"kind": "task", "task_id": "y"}, "Mark of Main", MIND, room_id="1")
+    head = "\n\nMEMORY DELIVERY (host instructions, separate from canonical work order)\n"
+
+    def memory(ctx):
+        return session_host_references(ctx, target_root=str(tmp_path), source_root=str(tmp_path)).split(head, 1)[1]
+
+    def marks(text):
+        return section(text, "## Marks I keep in view")
+
+    def note(topic, title, room, fact):
+        written = write_knowledge_note(resolve_knowledge_address(tmp_path, topic, "global"),
+                                       f"---\ntitle: {title}\nclaims: ['room:{room}']\n---\n{fact}\n", writer="turn")
+        assert written.ok, written.status
+
+    quiet = memory(turn)
+    assert "Mark of Main" in marks(quiet) and "Mark of the place room" not in quiet and "## Held knowledge" not in quiet
+    assert quiet == memory(carried)  # no claim: the bytes a start without the Presence fact has always received
+
+    note("main-page", "Main page", 1, "Main's working fact.")  # a claim elsewhere, none on the place
+    elsewhere = memory(turn)
+    assert "Mark of the place room" in marks(elsewhere) and "Mark of Main" not in elsewhere
+    assert "## Held knowledge" not in elsewhere and "Main's working fact." not in elsewhere
+    _event, _stored, session = _schedule(turn, subagent_id="session-builder")
+    assert session["metadata"][CARRIED_NAMES][0] == "room:789"
+    assert marks(memory(_child(tmp_path, session))) == marks(elsewhere)  # what a session child of that root holds
+
+    note("place-page", "Place page", 789, "The place's working fact.")
+    claimed = memory(turn)
+    assert "Mark of the place room" in marks(claimed) and "The place's working fact." in claimed
+    assert "Mark of Main" not in claimed and "Main's working fact." not in claimed
+    other = memory(carried)  # its heads come from Main, and so do its marks
+    assert "Mark of Main" in marks(other) and "Main's working fact." in other
+    assert "Mark of the place room" not in other and "The place's working fact." not in other
+
+
 def test_the_authority_fingerprint_does_not_move_with_the_words(tmp_path):
     from ouroboros.delegate_recovery import authority_fingerprint_from_context
 
