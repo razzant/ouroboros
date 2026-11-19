@@ -188,7 +188,7 @@ def _parking_lock():
         for member, copy_row, marker in revoked:
             revoke_exact_budget_resume(copy_row, "new_root_budget_fence")
             with q._queue_lock:
-                if member.get("_budget_pause") is marker and not member.get("_budget_pause_resume"):
+                if member.get("_budget_pause") is marker and "_budget_pause_resume" not in member:
                     for key in ("_budget_pause_resume", "_budget_pause", BUDGET_HOLD_KEY, SELECTION_KEY):
                         if key in copy_row:
                             member[key] = copy_row[key]

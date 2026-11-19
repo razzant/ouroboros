@@ -29,6 +29,7 @@ from supervisor.task_admission import (
     restore_terminalization_retry_rows,
     restored_handoff_unproven,
 )
+from supervisor.queue_transitions import sweep_orphaned_budget_fences
 from supervisor.task_lifecycle import (
     _cancel_result_fields,
     restore_queue_fences, snapshot_acceptance_roots,
@@ -912,7 +913,7 @@ def retry_pausing_envelopes(q):
             _restore_retained(retained, lineage, fenced, (roots | current, malformed or invalid, budget), unseen, prior,
                              late=True)
         if not any(retry["fences"][1:]):
-            _sweep_restored_fences(q)
+            sweep_orphaned_budget_fences(q.PENDING, q.BUDGET_ROOT_FENCES, q.DRIVE_ROOT)
         with q._queue_lock:
             from supervisor.queue_publication import mark_dirty_locked
             q.PRIOR_DIRECT_ROOTS.pop("retry_pausing_envelopes")
@@ -923,11 +924,6 @@ def retry_pausing_envelopes(q):
         return False
     finally:
         _RESTORING.pop(key, None)
-
-
-def _sweep_restored_fences(q):
-    from supervisor.queue_transitions import sweep_orphaned_budget_fences
-    sweep_orphaned_budget_fences(q.PENDING, q.BUDGET_ROOT_FENCES, q.DRIVE_ROOT)
 
 
 def _publish_restored():
@@ -942,21 +938,22 @@ def _publish_restored():
 
 
 def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -> int:
+    q = _queue()
     try:
         from ouroboros.queue_observation import load_queue_document, queue_stamp
-        snap = load_queue_document(_queue().DRIVE_ROOT, fresh=True)  # restore mutates what it reads
-        normalized = normalize_for_restore(snap, _queue().DRIVE_ROOT)
+        snap = load_queue_document(q.DRIVE_ROOT, fresh=True)  # restore mutates what it reads
+        normalized = normalize_for_restore(snap, q.DRIVE_ROOT)
         # An unreadable snapshot (its marker reads as empty) names no queue row; a direct root queue init's
         # handover names as caught still restores, over an empty, stale queue (the gate below).
         unread = bool(snap.get("_snapshot_invalid") or snap.get("_snapshot_missing"))
         ts = str(queue_stamp(snap, boot=True).get("ts") or "")
-        ts_unix = _queue().parse_iso_to_ts(ts)
+        ts_unix = q.parse_iso_to_ts(ts)
         # Timestamp validity and freshness gate ORDINARY rows only (#1196): a readable snapshot whose stamp is
         # missing or malformed is stale, so an exact pause or an acknowledged owner-wait handoff is still
         # retained under its own authority, never vanishing for Resume to answer task_not_pending.
         if ts_unix is None and not unread:
-            _queue().append_jsonl(
-                _queue().DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            q.append_jsonl(
+                q.DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {"ts": utc_now_iso(), "type": "queue_restore_snapshot_timestamp_invalid",
                  "snapshot_ts": ts[:64], "action": "treated_as_stale"},
             )
@@ -977,13 +974,13 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
         # the handover `queue.init` took over names them; both lists describe work the stop caught, and
         # one fence call gives them the one cancel-intent path custody settles — except a direct root
         # whose exact budget pause was complete on disk, parked under its own id like a paused RUNNING row (#1196).
-        direct_roots = dict(_queue().PRIOR_DIRECT_ROOTS)
+        direct_roots = dict(q.PRIOR_DIRECT_ROOTS)
         from ouroboros.delegate_recovery import boot_door
         try:
             envelopes = _saved_envelope_rows(snapshot_pending, running_rows)
         except Exception:
-            _queue().PRIOR_DIRECT_ROOTS["retry_pausing_envelopes"] = {
-                "door": boot_door(_queue().DRIVE_ROOT) or "app_stop", "fences": (set(), False, False)}
+            q.PRIOR_DIRECT_ROOTS["retry_pausing_envelopes"] = {
+                "door": boot_door(q.DRIVE_ROOT) or "app_stop", "fences": (set(), False, False)}
             log.warning("Boot will retry the saved pause envelopes before replacing the snapshot", exc_info=True)
             envelopes = []
         running_rows = running_rows + envelopes
@@ -994,7 +991,7 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
             snapshot_pending, running_rows, stale=stale, certified=ts_unix is not None, direct_caught=direct_caught,
             handoffs=(handoffs := {}))
         # This boot decided the returns; a later stop can never reuse the transaction.
-        consume_return_transaction(_queue().DRIVE_ROOT, fresh_return_transaction(_queue().DRIVE_ROOT))
+        consume_return_transaction(q.DRIVE_ROOT, fresh_return_transaction(q.DRIVE_ROOT))
         fenced_running = _fence_snapshot_running_rows(
             running_rows
             + [{"id": task_id} for task_id in direct_caught]
@@ -1006,17 +1003,17 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
         if terminalized is not None:
             terminalized.extend(fenced_running)
         snapshot_pending, pending_by_id, restored = restore_terminalization_retry_rows(
-            snapshot_pending, pending=_queue().PENDING, running=_queue().RUNNING,
-            queue_seq_counter_ref=_queue().QUEUE_SEQ_COUNTER_REF, sort_pending=_queue().sort_pending,
+            snapshot_pending, pending=q.PENDING, running=q.RUNNING,
+            queue_seq_counter_ref=q.QUEUE_SEQ_COUNTER_REF, sort_pending=q.sort_pending,
         )
         raw_fences = _release_successor_fences(raw_fences, raw_budget_fences, snapshot_pending, handoffs)
         fences = restore_queue_fences(raw_fences, raw_budget_fences)
-        if retry := _queue().PRIOR_DIRECT_ROOTS.get("retry_pausing_envelopes"):
+        if retry := q.PRIOR_DIRECT_ROOTS.get("retry_pausing_envelopes"):
             retry["fences"] = fences
         restored, changed = _restore_retained(snapshot_pending, pending_by_id, fenced_running, fences,
                                               unseen_pauses, prior_roots, restored, direct_roots.get("incomplete", False))
         if not retry and not any(fences[1:]) and (snapshot_pending or restored or not stale):
-            _sweep_restored_fences(_queue())
+            sweep_orphaned_budget_fences(q.PENDING, q.BUDGET_ROOT_FENCES, q.DRIVE_ROOT)
         if not unread:
             _RESTORED.add(key)
         if changed or normalized:
