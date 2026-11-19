@@ -400,17 +400,29 @@ def _holds_names(result: knowledge_store.KnowledgeWriteResult) -> bool:
                 and note.source is not None and note.address.topic != OVERVIEW_TOPIC)
 
 
+# Where a head yields to the physical window (``memory_floor._held_note_steps``), keyed by how the present situations
+# holding the note hold it: by its own names (True) it yields last; only by a link (False), before every claimed head.
+_YIELDS = {
+    frozenset({True}): "A held head takes its space ahead of the memory of other rooms and yields to the window last.",
+    frozenset({True, False}): ("A held head takes its space ahead of the memory of other rooms and yields to the window "
+                               "last; where only a link holds it, before every claimed head."),
+    frozenset({False}): ("A head a held head links takes its space ahead of the memory of other rooms and yields to the "
+                         "window before every claimed head."),
+}
+
+
 def _claim_lines(result: knowledge_store.KnowledgeWriteResult, situation: SituationReceipt, root: Path,
-                 holding: dict[str, dict[str, list[str]]]) -> tuple[list[str], bool]:
+                 holding: dict[str, dict[str, list[str]]]) -> tuple[list[str], frozenset[bool]]:
     """What a write says of where this note stands: on a write that sets or changes names, what became of them
     (ignored entries, names no present situation matches or whose evidence was unreadable, a removed name); on every
     write of a note that holds names (``_holds_names``) or that a held head links (``holding``,
     ``held_notes.standing``), one line naming each present situation where it stands, by its own names or carried,
     with the heads standing there and their tokens (``held_notes.standing_heads``), situations alike in both and in
-    why named together. True when one holds the head, so its size follows."""
+    why named together. Beside the lines, how each present situation holding the head holds it (``_YIELDS``): empty
+    where none does, so the head's size and where it yields are said only where one does."""
     from ouroboros.held_notes import standing_heads
 
-    claims, note, lines, heads = result.claims, result.current, [], {}
+    claims, note, lines, heads, own = result.claims, result.current, [], {}, []
     matching, unverified = situation.matching(claims.written) if claims is not None else (set(), set())
     if claims is not None and claims.report:
         if claims.ignored:
@@ -446,7 +458,7 @@ def _claim_lines(result: knowledge_store.KnowledgeWriteResult, situation: Situat
     if claims is not None and claims.report and claims.removed:
         lines.append("A removed name stops holding this head in works that start from now on; a work already running "
                      "keeps the heads it started with.")
-    return lines, bool(heads)  # a size is said only where a present situation holds the head
+    return lines, frozenset(name in own for name in heads)  # only where a present situation holds the head
 
 
 def _head_line(note: knowledge_store.KnowledgeNote) -> str:
@@ -592,7 +604,7 @@ def _knowledge_write(
         text = f"✅ Knowledge '{sanitized}' {result.reason} ({mode}).\n" + json.dumps(meta, ensure_ascii=False, sort_keys=True)
         from ouroboros.held_notes import standing
 
-        claim_lines, link_lines, sized, head = [], [], False, []
+        claim_lines, link_lines, held, head = [], [], frozenset(), []
         note = result.current  # links hold only once some claim was recorded on this shelf
         linked = (note is not None and note.address.scope == "global"
                   and knowledge_versions.claim_record_path(note.address.shelf, note.address.topic).parent.is_dir())
@@ -602,12 +614,11 @@ def _knowledge_write(
         if named or linked:
             evidence = situation or receipt_situation(ctx, root, claims_written=True)
             if named:
-                claim_lines, sized = _claim_lines(result, evidence, root, holding)
+                claim_lines, held = _claim_lines(result, evidence, root, holding)
             if linked:
                 link_lines = _link_lines(result, holding, evidence)
-        if sized:  # a size is said only where a present situation holds the head
-            head = [_head_line(note), "A held head takes its space ahead of the memory of other rooms and yields to the "
-                                      "window last."]
+        if held:  # a size and where it yields are said only where a present situation holds the head
+            head = [_head_line(note), _YIELDS[held]]
         text = _with_lines(text, situation_line, *claim_lines, *link_lines, *head)
         if isinstance(outline, str) and not isinstance(meta["knowledge_outline"], str):
             # The bare appender's only look at the note: an outline the meta cannot hold follows

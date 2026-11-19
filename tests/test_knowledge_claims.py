@@ -451,6 +451,11 @@ def test_a_yaml_only_edit_is_revision_checked_keeps_the_archive_field_and_takes_
 
 
 HELD_HEAD = "A held head takes its space ahead of the memory of other rooms and yields to the window last."
+# A head only a link holds in every present situation, or only in some of them, yields before every claimed head there.
+CARRIED_HEAD = ("A head a held head links takes its space ahead of the memory of other rooms and yields to the window "
+                "before every claimed head.")
+MIXED_HEAD = ("A held head takes its space ahead of the memory of other rooms and yields to the window last; where only "
+              "a link holds it, before every claimed head.")
 
 
 def test_a_write_of_a_held_note_says_what_its_head_costs(tmp_path):
@@ -522,7 +527,8 @@ def test_a_write_names_the_heads_a_held_head_newly_carries_or_releases_and_where
     it carries. A carried note's own write says where it stands, with those totals and by which carrier, then how
     large its head is and what that head takes. A note neither claimed nor carried hears none of it."""
     registry = _registry(tmp_path)
-    prefixes = ("Newly carried", "Released", "Linked from this head", "Present situations", "Held head", HELD_HEAD)
+    prefixes = ("Newly carried", "Released", "Linked from this head", "Present situations", "Held head", HELD_HEAD,
+                CARRIED_HEAD, MIXED_HEAD)
 
     def said(receipt):
         assert receipt.startswith("✅"), receipt
@@ -552,10 +558,11 @@ def test_a_write_names_the_heads_a_held_head_newly_carries_or_releases_and_where
     assert said(edited) == ["Present situations holding this note: room:1 holds 3 heads, 35 tokens (carried by "
                             "work/nova)",
                             f"Held head: {len(head) + 7} characters, 10 tokens, the body above the first `## ` line.",
-                            HELD_HEAD]
+                            CARRIED_HEAD]  # only a link holds it: it yields before every claimed head
     claimed = write(tools, _markdown(["room:1"], "The instruments.\n"))  # its own name and nova's link: one head
     assert said(claimed)[0] == ("Present situations holding this note: room:1 holds 3 heads, 35 tokens "
                                 "(also carried by work/nova)")
+    assert said(claimed)[-1] == HELD_HEAD  # its own name holds it where a link does too: it yields last
     assert not said(_write(registry, plain, "---\ntype: note\n---\nNeither claimed nor carried.\n"))
 
     dropped = write(nova, _markdown(["room:1"], "Nova. [Tools](../tools.md)\n"))
@@ -619,16 +626,17 @@ def test_one_present_line_names_why_a_note_stands_in_each_situation_and_the_shel
         f"Present situations holding this note: {both} each hold 4 heads, 38 tokens")
     assert write(sasha, "---\ntype: note\n---\n" + head + "More.\n\n## History\n\nOlder words.\n") == ([
         f"Present situations holding this note: {both} each hold 4 heads, 40 tokens (carried by work/aika, work/nova)",
-        "Held head: 32 characters, 10 tokens, the body above the first `## ` line.", HELD_HEAD], 1)
+        "Held head: 32 characters, 10 tokens, the body above the first `## ` line.", CARRIED_HEAD], 1)
 
-    # Its own names and a link: one head per situation, the reason once per group; a group per distinct reason.
-    tools_head = [f"Held head: 17 characters, 5 tokens: {all_head}", HELD_HEAD]
+    # Its own names and a link: one head per situation, the reason once per group; a group per distinct reason. Where
+    # its own names hold it in every present situation it yields last; where only the link holds it, first.
+    tools_head = f"Held head: 17 characters, 5 tokens: {all_head}"
     assert write(tools, _markdown(rooms, "The instruments.\n")) == ([
         f"Present situations holding this note: {both} each hold 4 heads, 40 tokens (also carried by work/nova)",
-        *tools_head], 1)
+        tools_head, HELD_HEAD], 1)
     assert write(tools, _markdown(["room:1"], "The instruments.\n")) == ([
         "Present situations holding this note: room:1 holds 4 heads, 40 tokens (also carried by work/nova); "
-        f"{rooms[1]} holds 4 heads, 40 tokens (carried by work/nova)", REMOVED, *tools_head], 1)
+        f"{rooms[1]} holds 4 heads, 40 tokens (carried by work/nova)", REMOVED, tools_head, MIXED_HEAD], 1)
 
     # A carrier whose names match no present situation: none, with its carrier named, and no size.
     assert write(lena, "---\ntype: note\n---\nLena.\n") == ([], 1)
