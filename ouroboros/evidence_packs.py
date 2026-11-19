@@ -291,9 +291,10 @@ def _index_valid(path: pathlib.Path, tier: str, *, wait_sec: float = INDEX_WAIT_
 
 
 def _index_rows(conn: sqlite3.Connection, pack_path: pathlib.Path, sidecar: Dict[str, Any]) -> None:
+    """One generation's rows, each by its key: a sidecar never changes, so indexing it again rewrites the
+    same rows (``verified_at`` refreshed, a lost member back) and scans nothing (no delete by task: the
+    members' key leads with the sha)."""
     task_id, generation = str(sidecar["task_id"]), int(sidecar["generation"])
-    conn.execute("DELETE FROM members WHERE task_id=? AND generation=?", (task_id, generation))
-    conn.execute("DELETE FROM handles WHERE task_id=? AND generation=?", (task_id, generation))
     conn.execute("INSERT OR REPLACE INTO packs VALUES (?,?,?,?,?,?,?)", (
         task_id, generation, pack_path.name, int(sidecar.get("raw_total") or 0), int(sidecar.get("packed_total") or 0),
         sidecar.get("verified_at"), len(sidecar["members"])))

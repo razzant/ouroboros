@@ -239,6 +239,35 @@ def test_index_access_checks_o1_facts_never_the_whole_file(root, monkeypatch):
     assert store.file_identity(index) == built
 
 
+def test_indexing_a_recorded_generation_again_is_keyed_and_restores_a_lost_member(root, monkeypatch):
+    """A generation is immutable, so its rows go in by their keys: indexing it again scans no table (a
+    delete by task and generation scanned every member, whose key leads with the sha), refreshes the
+    ``verified_at`` of its ``packs`` row, brings back a member row the cache lost and adds none twice."""
+    path, sidecar = _publish(root, "first")
+    packs.index_upsert(root, path, {**sidecar, "verified_at": "v1"})
+    index = packs.packs_dir(root) / packs.INDEX_NAME
+    with contextlib.closing(store.connect(index, packs.index_tier(root))) as conn:
+        with store.transaction(conn, write=True):
+            conn.execute("DELETE FROM members")
+    statements, connect = [], store.connect
+
+    def traced(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(store, "connect", traced)
+    packs.index_upsert(root, path, {**sidecar, "verified_at": "v2"})
+    packs.index_upsert(root, path, {**sidecar, "verified_at": "v2"})
+    monkeypatch.setattr(store, "connect", connect)
+    writes = [sql for sql in statements if sql.split()[0].upper() in {"INSERT", "DELETE", "UPDATE", "REPLACE"}]
+    with contextlib.closing(store.connect(index, packs.index_tier(root))) as conn:
+        plans = [row[-1] for sql in writes for row in conn.execute("EXPLAIN QUERY PLAN " + sql)]
+        assert writes and not [plan for plan in plans if plan.startswith("SCAN")], plans
+        assert [row[0] for row in conn.execute("SELECT verified_at FROM packs")] == ["v2"]
+        assert conn.execute("SELECT count(*) FROM members").fetchone()[0] == len(sidecar["members"]) == 1
+
+
 def test_valid_cache_avoids_sidecar_reads_and_advisory_open_never_rebuilds(root, monkeypatch):
     _publish(root, "first")
     assert _tasks(root) == {"first"}
